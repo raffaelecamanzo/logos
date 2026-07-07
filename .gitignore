@@ -25,4 +25,8 @@ notes/
 # machine (project instructions, private-skills lockfile, RTK filter config).
 /CLAUDE.md
 /skills-lock.json
-/.rtk/
+.rtk/
+.swe-skills
+/docs/specs
+/docs/planning
+/docs/requests
