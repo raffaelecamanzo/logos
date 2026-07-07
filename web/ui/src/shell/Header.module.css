@@ -1,0 +1,52 @@
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-6);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-2);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  text-decoration: none;
+  color: inherit;
+  border-radius: var(--radius-1);
+  /* A roomy click target for the home link without shifting the header rhythm. */
+  margin: calc(-1 * var(--space-1)) calc(-1 * var(--space-2));
+  padding: var(--space-1) var(--space-2);
+  transition: background var(--motion-fast) var(--motion-ease);
+}
+.brand:hover {
+  background: var(--surface-1);
+}
+
+/* The brand mark sits a touch above the wordmark's optical centre. */
+.brandLogo {
+  display: block;
+  flex-shrink: 0;
+}
+
+.brandMark {
+  font-weight: var(--weight-bold);
+  font-size: var(--text-lg);
+  color: var(--text-1);
+  letter-spacing: -0.01em;
+}
+
+.brandSub {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+}

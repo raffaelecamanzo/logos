@@ -1,0 +1,43 @@
+# Declarative descriptor for the JSON DATA-FORMAT artifact grammar
+# (S-063, CR-010, ADR-25, FR-CG-01/FR-CG-02).
+#
+# An *artifact* plugin (the third plugin class beside code and documentation):
+# `artifact = true` routes a matched file through the generic structural config
+# extractor (`extract::config`) into a `ConfigFile` + depth-bounded `Contains`
+# hierarchy of `ConfigSection` nodes — never the code `symbols`/`references`
+# path. It declares NO capabilities and NO `[queries]` table; the registry still
+# parses this descriptor and asserts the grammar's ABI at load (ADR-09). Pure
+# plugin data over the S-062 substrate — no core-logic change (NFR-MA-01).
+#
+# Embedded via `include_str!` (plugin::grammars::json_entry), parsed at startup
+# by the LanguageRegistry.
+
+name = "json"
+
+# JSON's single canonical extension. (OpenAPI/JSON-Schema profiles that ride
+# JSON content-sniff the parsed tree in a later story, S-067 — they add no
+# extension here.)
+extensions = ["json"]
+
+# `path#anchor` identity reusing ADR-07; `/` joins path segments.
+module_separator = "/"
+
+# ABI of the bundled `tree_sitter_json::LANGUAGE` grammar, asserted at load
+# (FR-PL-03, NFR-PC-03).
+abi_version = 14
+
+# Structural extraction — no tagging-query capabilities.
+capabilities = []
+
+# The config/artifact plugin-class selector (S-062, CR-010, ADR-25).
+artifact = true
+
+# The generic depth-bounded ConfigSection walk's declarative input (FR-CG-02): a
+# JSON `pair` (an object member `"key": value`) is one section level; its `key`
+# field's text (the JSON string node) is the section's name and `#anchor` slug
+# source. Bounded at the fixed depth of 2 (BR-30) regardless of file size — so a
+# large generated JSON yields top-level + one nested level, never a graph/FTS
+# blow-up.
+[config]
+section_kinds = ["pair"]
+key_field = "key"

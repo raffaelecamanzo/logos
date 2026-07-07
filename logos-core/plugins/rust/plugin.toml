@@ -1,0 +1,88 @@
+# Declarative descriptor for the Rust grammar (FR-PL-01, FR-PL-02, ADR-09).
+#
+# This file is embedded into the binary via `include_str!`
+# (plugin::grammars::compiled) and parsed at startup by the LanguageRegistry.
+#
+# On-disk override status (FR-PL-04, FR-PL-05): today the registry resolves
+# droppable `.scm` *query* overrides under `.logos/plugins/rust/queries/` — those
+# take effect with no rebuild (UAT-PL-03). Shadowing this *descriptor* itself on
+# disk (e.g. tuning `complexity_keywords`) is the next increment, landing with
+# its consuming complexity metric; until then the descriptor below is the
+# compiled-in source of truth.
+
+# Display + lookup name; also the override sub-directory name
+# (`.logos/plugins/<name>/`).
+name = "rust"
+
+# File extensions this grammar claims, without the leading dot. The registry
+# indexes the language by each extension for `for_extension(ext)`.
+extensions = ["rs"]
+
+# The path separator joining module segments in a fully-qualified symbol
+# (`crate::module::Item`). Surfaced by `logos languages` (FR-PL-06).
+module_separator = "::"
+
+# The tree-sitter ABI version this grammar was generated against. Informational
+# + a secondary cross-check: the authoritative ABI assertion at load compares
+# the *compiled* grammar's `Language::abi_version()` against the linked
+# tree-sitter runtime's supported range (FR-PL-03, NFR-PC-03). Kept here so the
+# descriptor documents the grammar's contract and a mismatch is greppable.
+abi_version = 15
+
+# Extraction capabilities this descriptor provides queries for. Surfaced by
+# `logos languages` (FR-PL-06) and gates which `.scm` queries the registry
+# requires. `symbols` captures declarations (S-007); `references` captures
+# call paths, method calls, and `use` imports for the resolution pass (S-011);
+# `frameworks` captures Axum/Actix route- and component-promotion anchors for
+# the framework pass (S-012, FR-FW-01..04).
+capabilities = ["symbols", "references", "frameworks"]
+
+# Keywords that increment cyclomatic complexity for this language. Declarative
+# so it becomes tunable via a descriptor override once descriptor shadowing lands
+# (NFR-MA-05, UAT-EX-03); consumed by the complexity metric (S-011+).
+complexity_keywords = ["if", "else", "match", "while", "for", "loop", "&&", "||", "?"]
+
+# Tree-sitter node kinds that introduce one block-structure nesting level
+# (CR-005, FR-EX-07): per-function max nesting depth is the deepest stack of
+# these control-flow constructs. Depth 0 is a flat body; each nested construct
+# adds one. Declarative like complexity_keywords — a new language tunes nesting
+# via its descriptor only, no core change (NFR-MA-01).
+nesting_block_kinds = ["if_expression", "match_expression", "while_expression", "loop_expression", "for_expression"]
+
+# How Rust marks a declaration exported (S-015, FR-AN-01): a
+# `visibility_modifier` child (`pub`, `pub(crate)`, …) — the dead-code root set.
+export_convention = "visibility-modifier"
+
+# How Rust marks a function as a test (S-027, FR-EX-06, ADR-18): a
+# `#[test]`-family attribute (`#[test]`, `#[tokio::test]`, …) or containment in
+# a `#[cfg(test)]` module. Feeds the unified `is_test` annotation (S-028).
+test_convention = "rust-attributes"
+
+# Rust declares the optional reachability capability (S-159, CR-043, ADR-39):
+# its binder coverage (name_matcher, FR-RS-03) is proven well enough that
+# reachability over its bound Calls/RoutesTo edges is a trustworthy dead-code
+# signal, so the annotation engine computes `is_dead` for Rust callables. A
+# language that omits this (the default) renders `is_dead = NULL` ("not
+# computed", NFR-CC-04) instead of a fabricated verdict; languages opt in as
+# their binder coverage is proven on the dogfood. The same optional-capability
+# pattern as `test_convention` — a descriptor without it still indexes normally
+# (NFR-MA-01).
+reachability = true
+
+# Canonical reference-path prefixes whose presence in a file's ledger makes the
+# file a framework candidate (FR-FW-04 ledger-gated candidacy). The ratified v1
+# Rust set (FR-FW-03, DL-02): Axum + Actix-web. Declarative since S-015 — the
+# core's framework pass reads this instead of a hardcoded crate list.
+framework_detectors = ["axum", "actix_web"]
+
+# Maps a capability to the `.scm` query file (resolved relative to this
+# descriptor's directory, embedded or on-disk override). A query that fails to
+# compile fails fast naming this file (FR-PL-02).
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"
+frameworks = "queries/frameworks.scm"
+# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence.
+# NOT listed in `capabilities` -- extraction never runs it; `test_gaps` runs it
+# on demand. Embedded + disk-shadowable like every query (FR-PL-04).
+smell = "queries/smells.scm"

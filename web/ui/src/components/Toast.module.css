@@ -1,0 +1,68 @@
+.region {
+  position: fixed;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: min(24rem, calc(100vw - 2 * var(--space-4)));
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-2);
+  color: var(--text-1);
+  border: 1px solid var(--border-subtle);
+  /* The tone-coloured left edge mirrors the callout grammar. */
+  border-left: 4px solid var(--border-strong);
+  border-radius: var(--radius-1);
+  box-shadow: var(--elevation-2);
+  font-size: var(--text-sm);
+  animation: toast-in var(--motion-base) var(--motion-ease);
+}
+
+.info {
+  border-left-color: var(--border-strong);
+}
+.success {
+  border-left-color: var(--color-pass);
+}
+.warn {
+  border-left-color: var(--color-accent-warm);
+}
+.error {
+  border-left-color: var(--color-accent);
+}
+
+.message {
+  flex: 1;
+}
+
+.dismiss {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--text-2);
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  font-size: var(--text-sm);
+}
+.dismiss:hover {
+  color: var(--text-1);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

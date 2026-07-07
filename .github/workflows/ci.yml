@@ -1,0 +1,250 @@
+# Logos CI — strict quality + supply-chain gates (ADR-17, NFR-MA-04, NFR-CR-01).
+#
+# Trust model: Logos parses source files but NEVER executes, compiles, or
+# evaluates them (NFR-SE-02). The full trusted-input boundary invariant — and
+# the review checklist that protects it — lives at:
+#   docs/security/trusted-input-boundary.md
+# Any new code path touching scanned source content must be reviewed against it.
+#
+# Gates (each fails the build independently):
+#   - cargo fmt --check          formatting divergence       (NFR-MA-04)
+#   - cargo clippy -D warnings   any lint warning             (NFR-MA-04)
+#   - cargo test --workspace     any failing test, incl. the
+#                                no-network fitness function  (NFR-SE-01)
+#   - cargo deny check           license / advisory violation (NFR-CR-01)
+
+name: CI
+
+# The `cross-link` job below builds every one of the four release targets from
+# ADR-16 (aarch64/x86_64 apple-darwin, aarch64/x86_64 unknown-linux-musl) with
+# all grammars enabled (`--all-features`). Its purpose is to verify the
+# duplicate-symbol grammar-linking hazard is resolved on every target
+# (tree-sitter #4209, NFR-PC-05, AR-04): a link failure on any target fails the
+# build. This is the structural fitness function for S-004's highest risk.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: clippy · fmt · test · deny
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable) with clippy + rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # Build the web UI SPA once, before the Rust gates, so the `web` adapter's
+      # integration tests (incl. the web/tests/spa_bundle.rs fitness functions
+      # and the offline carve-out tests) run over the REAL hashed React bundle
+      # rather than the committed placeholder (CR-049, FR-UI-22, ADR-43). `web`
+      # is a workspace member with rust-embed as a non-optional dependency, so
+      # `cargo test --workspace` (below) compiles and runs those tests over
+      # whatever `web/ui/dist/` holds at build time — the `ui` cargo feature only
+      # gates linking `web` into the `logos` binary, never the `web` test suite.
+      # `npm ci` restores the pinned lockfile tree; `npm run build` writes
+      # web/ui/dist/, which rust-embed (debug-embed) embeds at compile time. This
+      # is a build-time-only step — no Node reaches the runtime dependency tree
+      # the no-network fitness function guards (NFR-SE-01).
+      - name: Install Node.js (build-time only)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/ui/package-lock.json
+
+      - name: Build the web UI SPA (web/ui/dist)
+        working-directory: web/ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Cache cargo registry, git, bin, and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Formatting gate — fails on any divergence from rustfmt (NFR-MA-04).
+      - name: rustfmt (--check)
+        run: cargo fmt --all -- --check
+
+      # Lint gate — promotes every clippy warning to an error (NFR-MA-04).
+      - name: clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Test gate — includes the no-network fitness function that asserts the
+      # default dependency graph carries no socket/HTTP crate (NFR-SE-01).
+      - name: test (--workspace)
+        run: cargo test --workspace
+
+      # Supply-chain gate — license allowlist + RustSec advisories (NFR-CR-01).
+      # cargo-deny is version-pinned: an unpinned tool fetched at run time is
+      # itself a supply-chain/determinism hazard, and cargo-deny has changed its
+      # config format across major versions. `cargo install` is idempotent — if
+      # the pinned binary is already restored from the cargo cache (~/.cargo/bin
+      # is cached above), it detects the match and skips the rebuild.
+      - name: Install cargo-deny (pinned)
+        run: cargo install cargo-deny --locked --version 0.19.8
+
+      - name: cargo-deny check
+        run: cargo deny check
+
+  # ── Cross-target link verification (S-004, NFR-PC-05, AR-04) ───────────────
+  # Builds every release target from ADR-16 with ALL grammars enabled. The build
+  # links the static binary, so any duplicate-symbol error from the tree-sitter
+  # grammar C runtimes (#4209) fails here. `fail-fast: false` so one target's
+  # failure does not mask the others. Runs only after the gates above pass.
+  cross-link:
+    name: cross-link (${{ matrix.target }})
+    needs: ci
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable) for ${{ matrix.target }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Configures the C cross-toolchain + linker for the Linux musl targets so
+      # the tree-sitter grammar C sources (compiled by the `cc` crate) link for
+      # the target arch. A no-op for the Apple targets, which the macOS runner's
+      # universal SDK cross-compiles natively.
+      - name: Set up cross toolchain (Linux targets)
+        if: runner.os == 'Linux'
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Cache cargo registry, git, and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.target }}-cargo-
+
+      # The link step itself: --all-features enables every grammar so the build
+      # exercises the full multi-grammar link surface (#4209). A clean build on
+      # all four targets is the acceptance criterion for NFR-PC-05.
+      - name: Build (link all grammars) for ${{ matrix.target }}
+        run: cargo build --release --workspace --all-features --target ${{ matrix.target }}
+
+  # ── Cross-target correctness signal (S-025, ADR-17, NFR-RA-06, AR-03) ───────
+  # The release-gating golden fitness functions, re-derived on every natively
+  # runnable target and compared to the SAME committed golden
+  # (logos-core/tests/golden/cross_target_signal.json). Because every leg
+  # compares to one committed file, a per-target byte divergence in the signal
+  # fails that leg — this is the executable form of the cross-platform
+  # determinism contract (NFR-RA-06, AA-03) and retires the cross-target
+  # divergence risk (AR-03). `fail-fast: false` so one target's divergence never
+  # masks another's. A red leg blocks the merge to `main`, and releases are only
+  # ever cut from a green `main` — so a divergence fails the release.
+  #
+  # The matrix covers both OS families (linux/darwin) AND both arch families
+  # (x86_64/aarch64) on runners that execute the suite natively. The
+  # aarch64-linux byte-identity claim is covered structurally by the
+  # `cross-link` build above plus the content-derived (target-independent)
+  # symbol scheme; it can be promoted to native execution under emulation if
+  # ever needed (ADR-16/ADR-17).
+  #
+  # Alongside the golden, each leg runs the remaining behavior-first fitness
+  # functions in the S-025 charter so the WHOLE correctness signal is asserted
+  # cross-target: the dogfood (index Logos with Logos) loops, the agent-session
+  # protocol loop, and stdout-safety at trace level on both the CLI and the
+  # `serve --mcp` surfaces.
+  golden-signal:
+    name: golden-signal (${{ matrix.name }})
+    needs: ci
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-linux
+            os: ubuntu-latest
+          - name: aarch64-darwin
+            os: macos-latest
+          - name: x86_64-darwin
+            os: macos-13
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry, git, and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ matrix.name }}-golden-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.name }}-golden-
+
+      # The cross-target byte-identical signal + symbol-stability, cross-file
+      # rebind, and FTS-integrity fitness functions (default features, so every
+      # leg scores under the same grammar set — the comparison is apples to
+      # apples). A divergence from the committed golden fails here.
+      - name: Cross-target golden signal
+        run: cargo test -p logos-core --test golden_signal
+
+      # The dogfood end-to-end loops — index Logos's own source and run the
+      # tools / measure resolution against it (UAT-CF-02).
+      - name: Dogfood loops
+        run: |
+          cargo test -p logos-core --test navigation dogfood_runs_all_eight_tools_on_logos_own_source
+          cargo test -p logos-core --test resolution dogfood_measures_resolution_accuracy_on_logos_own_source
+
+      # The full agent-session protocol loop over the real MCP handler
+      # (UAT-CF-01).
+      - name: Agent-session loop
+        run: cargo test -p mcp --test protocol
+
+      # stdout-safety at trace level: no non-JSON-RPC byte reaches stdout on
+      # either surface (UAT-MC-02, NFR-RA-01).
+      - name: stdout-safety at trace level (CLI + serve --mcp)
+        run: |
+          cargo test -p cli --test stdout_safety
+          cargo test -p mcp --test stdout_safety

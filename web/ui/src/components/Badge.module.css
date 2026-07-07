@@ -1,0 +1,41 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  line-height: 1;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+
+/* red — white ink on signal-red (4.87:1). A small chip fill, not a content-area
+   background, so the red-as-signal rule holds. */
+.red {
+  background: var(--so-red);
+  color: var(--ink-on-red);
+}
+
+/* orange — near-black ink on warm (4.65:1). */
+.orange {
+  background: var(--so-orange);
+  color: var(--ink-on-warm);
+}
+
+/* green — near-black ink on green (5.7:1). */
+.green {
+  background: var(--so-green);
+  color: var(--ink-on-warm);
+}
+
+/* muted — outline chip for n/a / info; muted text on the page surface (≥4.5:1). */
+.muted {
+  background: transparent;
+  color: var(--text-2);
+  border-color: var(--border-strong);
+}

@@ -1,0 +1,61 @@
+# Declarative descriptor for the TypeScript grammar (S-015, FR-PL-01,
+# FR-FW-03, ADR-09): `.ts`/`.js` sources. JSX-bearing files (`.tsx`/`.jsx`)
+# parse with the sibling `tsx` plugin — a distinct tree-sitter Language from
+# the same crate/feature. Droppable `.scm` query overrides resolve under
+# `.logos/plugins/typescript/queries/` (FR-PL-04, UAT-PL-03).
+
+name = "typescript"
+extensions = ["ts", "js", "mjs", "cjs"]
+
+# Member paths join with a dot; import specifiers are quoted module paths —
+# reference extraction canonicalises both into the `::`-joined ledger form.
+module_separator = "."
+
+# tree-sitter-typescript 0.23 is generated against ABI 14; asserted at load
+# against the compiled grammar (FR-PL-03, NFR-PC-03).
+abi_version = 14
+
+capabilities = ["symbols", "references", "frameworks"]
+
+# Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
+complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "&&", "||", "?"]
+
+# Block-structure nesting node kinds for per-function max nesting depth
+# (CR-005, FR-EX-07): the TS/JS control-flow statements. Depth 0 is a flat body;
+# each nested statement adds one.
+nesting_block_kinds = ["if_statement", "for_statement", "for_in_statement", "while_statement", "do_statement", "switch_statement", "try_statement"]
+
+# TS/JS exports are structural: a declaration under an `export_statement`
+# ancestor is an exported dead-code root (FR-AN-01).
+export_convention = "export-statement"
+
+# How TS/JS marks a function as a test (S-027, FR-EX-06, ADR-18): a function
+# lexically enclosed by an `it`/`test`/`describe` call. Feeds the unified
+# `is_test` annotation (S-028).
+test_convention = "js-callback"
+
+# The ratified v1 TypeScript/JS framework set (FR-FW-03): Express + Next.js
+# (`react` rides along: a Next.js component file may import only react).
+framework_detectors = ["express", "next", "react"]
+
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"
+frameworks = "queries/frameworks.scm"
+# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence.
+# NOT listed in `capabilities` -- extraction never runs it; `test_gaps` runs it
+# on demand. Embedded + disk-shadowable like every query (FR-PL-04).
+smell = "queries/smells.scm"
+
+# Captured `@fw.route.method` text → HTTP method (S-015). Express router
+# verbs map to themselves; `all` and `use` (mounting) carry every verb.
+[framework_methods]
+get = "GET"
+post = "POST"
+put = "PUT"
+delete = "DELETE"
+patch = "PATCH"
+head = "HEAD"
+options = "OPTIONS"
+all = "ANY"
+use = "ANY"

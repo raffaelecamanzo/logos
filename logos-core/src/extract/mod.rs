@@ -1,0 +1,987 @@
+//! Pass 1 of the pipeline — the data-parallel extraction engine
+//! ([extraction-engine], S-007).
+//!
+//! [`extract`] parses one file with a single grammar, runs the plugin's tagging
+//! queries, and emits [`NodeFact`]s and [`EdgeFact`]s carrying canonical-ordinal
+//! SCIP symbol IDs ([ADR-07]), cyclomatic complexity, and per-function line
+//! counts. [`extract_files`] is the rayon driver: it parallelises the per-file
+//! parse across cores, giving **each rayon worker its own
+//! [`tree_sitter::Parser`]** (the Parser is not thread-shareable, [AR-05]) via
+//! `map_init` ([FR-IX-03], [NFR-PE-08]).
+//!
+//! # Error tolerance ([FR-IX-04])
+//!
+//! tree-sitter recovers from syntax errors and still returns a parse tree with
+//! the well-formed declarations around the break intact. A file that does not
+//! parse cleanly is *partially* extracted — its [`Facts::partial`] flag is set
+//! and a warning recorded — and the run is **never** aborted.
+//!
+//! # Determinism ([NFR-RA-06])
+//!
+//! Two facts make the output independent of how many rayon threads run:
+//! `extract_files` collects results in input order, and within a file the
+//! per-parent-scope **canonical sort** (`(start_byte, kind, name)`, [ADR-07])
+//! assigns ordinals before they are folded into symbol IDs. Emitted nodes and
+//! edges are themselves sorted, so the byte-for-byte output is fixed.
+//!
+//! [extraction-engine]: ../../../docs/specs/architecture/components/extraction-engine.md
+//! [ADR-07]: ../../../docs/specs/architecture/decisions/ADR-07.md
+//! [AR-05]: ../../../docs/specs/architecture.md
+//! [FR-IX-03]: ../../../docs/specs/requirements/FR-IX-03.md
+//! [FR-IX-04]: ../../../docs/specs/requirements/FR-IX-04.md
+//! [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
+//! [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+
+mod complexity;
+// Per-function max nesting depth (S-042, CR-005, FR-EX-07): a declarative
+// block-kind walk, the structural sibling of `complexity`.
+mod nesting;
+// Winnowed near-clone shingle fingerprints (S-042, CR-005, FR-EX-09): a
+// rename-invariant set fingerprint over the normalized token stream. `pub(crate)`
+// so the near-clone clustering pass (`annotate::clone`, S-043) reads the fixed
+// winnowing constants (K_GRAM/WINDOW) as the single source for its floor.
+pub(crate) mod shingle;
+// Structural documentation extraction (S-033, CR-003, ADR-19): a file whose
+// plugin is a *documentation* grammar is parsed into a DocFile + nested
+// DocSection tree here instead of via the code `symbols` query.
+pub mod doc;
+// Structural config & artifact extraction (S-062, CR-010, ADR-25): a file whose
+// plugin is an *artifact* grammar is parsed into a ConfigFile + depth-bounded
+// ConfigSection tree here (the third plugin class beside code and docs), instead
+// of via the code `symbols` query.
+pub mod config;
+// `pub(crate)`: the framework pass (resolve::framework, S-015) canonicalises
+// captured handler paths and unquotes captured route-path literals with the
+// same helpers extraction uses, so the two passes can never disagree on what
+// a path's segments are.
+pub(crate) mod refs;
+mod shape;
+// Extraction-time test-marker evidence (S-027, FR-EX-06): the per-function
+// `test_evidence` flag captured while the AST is in hand — the input the
+// unified `is_test` annotation (S-028, FR-AN-05) needs to catch what path
+// conventions miss.
+pub(crate) mod testmarker;
+// `pub(crate)`: the framework pass (resolve::framework, S-012) builds the
+// canonical symbols of its promoted route/component nodes with the same
+// builder extraction uses, so promoted identities follow ADR-07 like every
+// other node's.
+pub(crate) mod symbol;
+
+/// SCIP descriptor-name escaping, shared with the annotation engine's
+/// synthetic policy-node symbols (S-014, [FR-AN-03]) so layer names from
+/// `rules.toml` always assemble into a valid symbol.
+///
+/// [FR-AN-03]: ../../../docs/specs/requirements/FR-AN-03.md
+pub(crate) use symbol::escape_name;
+pub use symbol::SymbolContext;
+
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+use rayon::prelude::*;
+use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
+
+use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeKind, RefForm};
+use crate::plugin::{LanguagePlugin, LanguageRegistry};
+
+use refs::{flatten_use_tree, import_segments, macro_call_refs, split_path_text};
+use symbol::{build_symbol, descriptor_for, path_segments};
+
+/// The capture-name group prefix the `symbols` query uses (`@symbol.<kind>`).
+/// The segment after it names a [`NodeKind`] by its [`NodeKind::as_str`] form.
+const SYMBOL_CAPTURE_GROUP: &str = "symbol";
+
+/// One source file handed to the extractor.
+#[derive(Debug, Clone)]
+pub struct FileInput {
+    /// Path relative to the project root, used both as the `files.path` key and
+    /// as the leading namespace segments of every symbol from this file.
+    pub path: String,
+    /// The file's full source text.
+    pub source: String,
+}
+
+impl FileInput {
+    /// Construct a [`FileInput`] from a relative path and its source.
+    pub fn new(path: impl Into<String>, source: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            source: source.into(),
+        }
+    }
+}
+
+/// Per-function quality metrics attached to a [`NodeFact`] ([FR-EX-03],
+/// [FR-EX-04]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FunctionMetrics {
+    /// Cyclomatic complexity: `1 + decision points` (see [`complexity`]).
+    pub cyclomatic_complexity: u32,
+    /// Physical line span of the definition (`end_line - start_line + 1`).
+    pub line_count: u32,
+}
+
+/// A graph vertex produced by extraction, keyed by its canonical SCIP symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeFact {
+    /// The canonical-ordinal SCIP identity ([ADR-07]).
+    pub symbol: LogosSymbol,
+    /// The ontology kind.
+    pub kind: NodeKind,
+    /// The human-facing declared name (the FTS-indexed value).
+    pub name: String,
+    /// 1-based first line of the declaration.
+    pub start_line: u32,
+    /// 1-based last line of the declaration.
+    pub end_line: u32,
+    /// Complexity + line count, present for `Function`/`Method` nodes only.
+    pub metrics: Option<FunctionMetrics>,
+    /// `true` when the declaration carries a visibility modifier — the
+    /// exported-is-live dead-code root set (S-014, [FR-AN-01]).
+    ///
+    /// [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
+    pub exported: bool,
+    /// The normalised AST-shape fingerprint duplicate detection groups by
+    /// (S-014, [FR-AN-02]); `Function`/`Method` nodes only.
+    ///
+    /// [FR-AN-02]: ../../../docs/specs/requirements/FR-AN-02.md
+    pub fingerprint: Option<String>,
+    /// `true` when this function carries language-native test-marker evidence
+    /// captured at extraction (S-027, [FR-EX-06]) — a Rust `#[test]`/`#[cfg(test)]`
+    /// function, a Python `test_*`/`unittest` method, a TS/JS `it`/`describe`
+    /// callee, a Go `TestXxx` in `*_test.go`, a Java `@Test` method. `false` for
+    /// non-callables and for any plugin without test detection (absence ≠ error,
+    /// [NFR-MA-01]). One input to the unified `is_test` annotation (S-028,
+    /// [FR-AN-05]); never inferred from call relationships ([ADR-18]).
+    ///
+    /// [FR-EX-06]: ../../../docs/specs/requirements/FR-EX-06.md
+    /// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    /// [ADR-18]: ../../../docs/specs/architecture/decisions/ADR-18.md
+    pub test_evidence: bool,
+    /// The FTS-indexed body prose, for `DocSection` nodes only ([FR-DG-05],
+    /// S-037): the section's own content beneath its heading, excluding nested
+    /// sub-sections. `None` for code nodes, the synthetic file module, and the
+    /// `DocFile` root — those carry no searchable body.
+    ///
+    /// [FR-DG-05]: ../../../docs/specs/requirements/FR-DG-05.md
+    pub body: Option<String>,
+    /// The per-function maximum block-structure nesting depth (CR-005,
+    /// [FR-EX-07]); `Function`/`Method` nodes only, `None` otherwise. Depth 0 is
+    /// a flat body. Computed from the language's declarative `nesting_block_kinds`
+    /// (see [`nesting`]); the input to the Nesting ([FR-QM-09]) and Conciseness
+    /// ([FR-QM-10]) dimensions.
+    ///
+    /// [FR-EX-07]: ../../../docs/specs/requirements/FR-EX-07.md
+    pub max_nesting_depth: Option<u32>,
+    /// The winnowed near-clone shingle fingerprint set (CR-005, [FR-EX-09]);
+    /// `Function`/`Method` nodes only, empty otherwise and for a body below the
+    /// token floor. A rename-invariant set the near-clone clustering pass
+    /// ([FR-AN-06], S-043) reads for Jaccard similarity (see [`shingle`]).
+    /// Distinct from the exact AST-shape [`fingerprint`](Self::fingerprint).
+    ///
+    /// [FR-EX-09]: ../../../docs/specs/requirements/FR-EX-09.md
+    pub shingles: Vec<u64>,
+}
+
+/// A graph relationship produced by extraction.
+///
+/// Pass 1 emits only the bound, intra-file [`EdgeKind::Contains`] edge (lexical
+/// nesting: a scope to the declarations it encloses). Call/import edges — whose
+/// targets need cross-file resolution — are the resolution engine's concern
+/// (S-011) and are not produced here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeFact {
+    /// The enclosing scope's symbol.
+    pub source: LogosSymbol,
+    /// The enclosed declaration's symbol.
+    pub target: LogosSymbol,
+    /// The relationship kind.
+    pub kind: EdgeKind,
+}
+
+/// An *outgoing reference* produced by extraction (S-011) — a call path, a
+/// receiver-method call, or a `use` import whose target is **not** resolved
+/// here.
+///
+/// Pass 1 records what a file points at, verbatim; the pipeline persists these
+/// into the `unresolved_refs` ledger and the resolution engine (Pass 2) binds
+/// each one by the scope-hierarchy rules — or leaves it honestly unresolved
+/// ([NFR-RA-05], never fabricate).
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefFact {
+    /// The referencing declaration's symbol: the innermost enclosing captured
+    /// declaration, or the file-module symbol for file-scope references.
+    pub source: LogosSymbol,
+    /// The reference target text, interpreted per `form` (a `::`-joined path,
+    /// a method name).
+    pub target: String,
+    /// The in-scope name an import binds (`use a::b as c` → `c`); `None` for
+    /// calls and globs.
+    pub alias: Option<String>,
+    /// The reference shape ([`RefForm`]).
+    pub form: RefForm,
+    /// The edge kind a successful binding produces.
+    pub kind: EdgeKind,
+    /// 1-based source line of the reference.
+    pub line: u32,
+    /// The cross-artifact relation class (CR-011, [FR-CG-07]) when this is an
+    /// `ArtifactRef`/`ArtifactBinding` reference captured by the config extraction
+    /// walk; `None` for every code/doc/access reference. Its
+    /// [`as_str`](ArtifactRelation::as_str) token is persisted as the ledger row's
+    /// payload, labels the bound edge, and keys per-relation-class coverage.
+    ///
+    /// [FR-CG-07]: ../../../docs/specs/requirements/FR-CG-07.md
+    pub relation: Option<ArtifactRelation>,
+}
+
+/// The extraction result for a single file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Facts {
+    /// The file's project-relative path (echoes [`FileInput::path`]).
+    pub path: String,
+    /// The grammar/plugin name that parsed the file (e.g. `rust`).
+    pub language: String,
+    /// `true` when the parse tree contained a syntax error and extraction was
+    /// therefore partial ([FR-IX-04]).
+    pub partial: bool,
+    /// Extracted graph vertices, sorted by `(start_line, symbol)`.
+    pub nodes: Vec<NodeFact>,
+    /// Extracted graph relationships, sorted by `(source, target, kind)`.
+    pub edges: Vec<EdgeFact>,
+    /// Outgoing references for the resolution pass (S-011), sorted by
+    /// `(source, target, form, kind)` and deduplicated.
+    pub refs: Vec<RefFact>,
+    /// Non-fatal diagnostics (incompatible grammar, symbol-build failure, …).
+    pub warnings: Vec<String>,
+}
+
+/// One captured declaration, retained with its tree-sitter node for the metrics
+/// pass. Lives only for the duration of one [`extract_one`] call (it borrows the
+/// parse tree).
+struct Decl<'tree> {
+    node: Node<'tree>,
+    kind: NodeKind,
+    name: String,
+    start_byte: usize,
+    start_line: u32,
+    end_line: u32,
+    /// Index of the nearest enclosing captured declaration, or `None` at file
+    /// scope. Resolved in [`assign_parents`].
+    parent: Option<usize>,
+    /// Ordinal among same-`(kind, name)` siblings, in canonical sort order.
+    /// Assigned in [`assign_ordinals`].
+    ordinal: u32,
+}
+
+/// Extract one file with an explicit plugin, allocating a fresh parser.
+///
+/// This is the [extraction-engine]'s `extract(file, plugin) -> Facts` interface
+/// ([extraction-engine]). [`extract_files`] is the parallel driver that reuses a
+/// per-worker parser instead of allocating one per call.
+///
+/// [extraction-engine]: ../../../docs/specs/architecture/components/extraction-engine.md
+pub fn extract(input: &FileInput, plugin: &dyn LanguagePlugin, ctx: &SymbolContext) -> Facts {
+    let mut parser = Parser::new();
+    extract_one(&mut parser, input, plugin, ctx)
+}
+
+/// Extract many files in parallel, one [`tree_sitter::Parser`] per rayon worker.
+///
+/// Files whose extension resolves to no loaded grammar are skipped (the
+/// discovery layer, S-010, is responsible for filtering); the returned vector
+/// preserves the input order of the files that *were* extracted, so the output
+/// is deterministic regardless of the thread count ([NFR-RA-06], [NFR-PE-08]).
+pub fn extract_files(
+    inputs: &[FileInput],
+    registry: &LanguageRegistry,
+    ctx: &SymbolContext,
+) -> Vec<Facts> {
+    inputs
+        .par_iter()
+        // `map_init` runs the init closure once per rayon worker thread, so each
+        // worker owns exactly one Parser — the AR-05 mitigation — and reuses it
+        // across the files that worker handles.
+        .map_init(Parser::new, |parser, input| {
+            let plugin = plugin_for(registry, &input.path)?;
+            Some(extract_one(parser, input, plugin, ctx))
+        })
+        // `rayon`'s `collect` preserves input order even through this
+        // `Option`-flattening, so the result is deterministic (NFR-RA-06).
+        .flatten()
+        .collect()
+}
+
+/// Resolve the plugin for a file by its **extension or claimed basename**, or
+/// `None` if unsupported. Basename claiming (S-062, [CR-010], [FR-CG-01]) is what
+/// lets an extensionless artifact (`Dockerfile`, `Makefile`) reach extraction; a
+/// code/doc file still resolves by extension exactly as before.
+///
+/// [CR-010]: ../../../docs/requests/CR-010-config-artifact-graph-layer.md
+/// [FR-CG-01]: ../../../docs/specs/requirements/FR-CG-01.md
+fn plugin_for<'r>(registry: &'r LanguageRegistry, path: &str) -> Option<&'r dyn LanguagePlugin> {
+    registry.for_path(path)
+}
+
+/// The core single-file extraction, reusing the caller's parser.
+fn extract_one(
+    parser: &mut Parser,
+    input: &FileInput,
+    plugin: &dyn LanguagePlugin,
+    ctx: &SymbolContext,
+) -> Facts {
+    // A documentation grammar (S-033, CR-003) is extracted structurally into a
+    // DocFile + nested DocSection tree, not via the code `symbols` query. This
+    // is the single dispatch point; discovery/config decide *which* files reach
+    // here (S-034) — until then no `.md` file is in the default discovery globs,
+    // so this branch is exercised only by direct callers and tests.
+    if plugin.is_documentation() {
+        return doc::extract_one_doc(parser, input, plugin, ctx);
+    }
+
+    // An artifact grammar (S-062, CR-010, ADR-25) is extracted structurally into
+    // a ConfigFile + depth-bounded ConfigSection tree (+ per-format typed anchors
+    // layered on by the format stories), not via the code `symbols` query — the
+    // third plugin class beside code and documentation. Discovery/config decide
+    // *which* files reach here (the config-layer toggle + globs).
+    if plugin.is_artifact() {
+        return config::extract_one_config(parser, input, plugin, ctx);
+    }
+
+    let mut facts = Facts {
+        path: input.path.clone(),
+        language: plugin.name().to_string(),
+        partial: false,
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        refs: Vec::new(),
+        warnings: Vec::new(),
+    };
+
+    // A grammar that fails to bind (ABI skew) is skipped-and-warned, never fatal.
+    if parser.set_language(plugin.language()).is_err() {
+        facts.warnings.push(format!(
+            "grammar '{}' failed to bind; file skipped",
+            plugin.name()
+        ));
+        return facts;
+    }
+
+    let Some(tree) = parser.parse(&input.source, None) else {
+        facts
+            .warnings
+            .push("parser returned no tree; file skipped".to_string());
+        return facts;
+    };
+
+    // Error-tolerant: a syntax error localises to ERROR nodes; the well-formed
+    // declarations around it are still extracted (FR-IX-04).
+    if tree.root_node().has_error() {
+        facts.partial = true;
+        facts
+            .warnings
+            .push("syntax error(s) present; partial extraction".to_string());
+    }
+
+    let Some(query) = plugin.query("symbols") else {
+        // No symbols capability → nothing to extract, but not an error.
+        return facts;
+    };
+
+    let source = input.source.as_bytes();
+    let capture_names = query.capture_names();
+
+    // 1) Collect declarations from the query matches.
+    let mut decls: Vec<Decl<'_>> = Vec::new();
+    // Guard against a declaration node being captured more than once (a query
+    // with overlapping patterns): a duplicate would corrupt the parent map and
+    // inflate ordinals, churning the symbol ID. The current `symbols.scm` has
+    // one pattern per node kind so this never fires today, but it keeps the
+    // ID-stability invariant (ADR-07) robust against future query authors.
+    let mut seen_decls: HashSet<usize> = HashSet::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), source);
+    while let Some(m) = matches.next() {
+        for cap in m.captures {
+            let Some(kind) = kind_for_capture(capture_names[cap.index as usize]) else {
+                continue; // a capture we do not map to a NodeKind
+            };
+            // The query is expected to capture the *name* node; its parent is the
+            // declaration. If a query instead captures the declaration node, the
+            // parent walk simply starts one level higher — the contract is that
+            // a capture identifies one declaration.
+            let name_node = cap.node;
+            let decl_node = lift_to_declaration(name_node.parent().unwrap_or(name_node));
+            if !seen_decls.insert(decl_node.id()) {
+                continue; // already captured by another pattern — keep the first
+            }
+            let Ok(name) = name_node.utf8_text(source) else {
+                continue; // non-UTF-8 identifier slice — skip defensively
+            };
+            decls.push(Decl {
+                node: decl_node,
+                kind,
+                name: name.to_string(),
+                start_byte: decl_node.start_byte(),
+                start_line: decl_node.start_position().row as u32 + 1,
+                end_line: decl_node.end_position().row as u32 + 1,
+                parent: None,
+                ordinal: 0,
+            });
+        }
+    }
+
+    // 2) Resolve parent scopes and 3) assign canonical-sort ordinals.
+    assign_parents(&mut decls);
+    assign_ordinals(&mut decls);
+
+    // 4) Build a symbol per declaration; a build failure skips that node only.
+    // Empty and `.` components (a `./`-prefixed or doubled-slash path) are
+    // dropped so they cannot become junk namespace segments.
+    let path_segments: Vec<&str> = path_segments(&input.path);
+    let symbols: Vec<Option<LogosSymbol>> = (0..decls.len())
+        .map(|i| {
+            let chain = scope_chain(&decls, i);
+            match build_symbol(ctx, &path_segments, &chain) {
+                Ok(sym) => Some(sym),
+                Err(err) => {
+                    facts.warnings.push(format!(
+                        "could not build symbol for '{}' ({}): {err}",
+                        decls[i].name,
+                        decls[i].kind.as_str()
+                    ));
+                    None
+                }
+            }
+        })
+        .collect();
+
+    // 5) Synthesize the per-file Module node (S-011). It gives file-scope
+    // references a source endpoint and gives module imports a bindable target
+    // ([FR-RS-01] — "a cross-module import binds to the target module node").
+    // Deliberately built OUTSIDE the decl/ordinal machinery: it never joins a
+    // scope chain, so every pre-existing symbol ID is byte-for-byte unchanged
+    // ([ADR-07] stability).
+    //
+    // [FR-RS-01]: ../../../docs/specs/requirements/FR-RS-01.md
+    // [ADR-07]: ../../../docs/specs/architecture/decisions/ADR-07.md
+    let file_module: Option<LogosSymbol> = match build_symbol(ctx, &path_segments, &[]) {
+        Ok(sym) => {
+            facts.nodes.push(NodeFact {
+                symbol: sym.clone(),
+                kind: NodeKind::Module,
+                name: file_module_name(&path_segments),
+                start_line: 1,
+                end_line: input.source.lines().count().max(1) as u32,
+                metrics: None,
+                // The synthetic file module is bookkeeping, not a declaration:
+                // it is never a dead-code candidate nor an exported root, and
+                // carries no test-marker evidence (S-027 — evidence is per
+                // function only).
+                exported: false,
+                fingerprint: None,
+                test_evidence: false,
+                // Code/module nodes carry no FTS body — only DocSection prose is
+                // body-indexed (FR-DG-05).
+                body: None,
+                // The synthetic file module is not a function: no nesting depth,
+                // no shingles (CR-005).
+                max_nesting_depth: None,
+                shingles: Vec::new(),
+            });
+            Some(sym)
+        }
+        Err(err) => {
+            facts
+                .warnings
+                .push(format!("could not build the file-module symbol: {err}"));
+            None
+        }
+    };
+
+    // 6) Emit node facts (with per-function metrics) and Contains edges.
+    let keywords = &plugin.semantics().complexity_keywords;
+    let block_kinds = &plugin.semantics().nesting_block_kinds;
+    let export_convention = plugin.semantics().export_convention;
+    let test_convention = plugin.semantics().test_convention;
+    for (i, decl) in decls.iter().enumerate() {
+        let Some(symbol) = &symbols[i] else {
+            continue;
+        };
+        let is_callable = matches!(decl.kind, NodeKind::Function | NodeKind::Method);
+        let metrics = is_callable.then(|| FunctionMetrics {
+            cyclomatic_complexity: complexity::cyclomatic_complexity(decl.node, keywords),
+            // `end_line >= start_line` always holds for a tree-sitter node;
+            // `saturating_sub` is belt-and-braces against any future change.
+            line_count: decl.end_line.saturating_sub(decl.start_line) + 1,
+        });
+        facts.nodes.push(NodeFact {
+            symbol: symbol.clone(),
+            kind: decl.kind,
+            name: decl.name.clone(),
+            start_line: decl.start_line,
+            end_line: decl.end_line,
+            metrics,
+            // The S-014 annotation inputs, captured while the AST is in hand.
+            exported: shape::is_exported(decl.node, &decl.name, export_convention),
+            fingerprint: is_callable.then(|| shape::shape_fingerprint(decl.node, &facts.language)),
+            // S-027 / FR-EX-06: language-native test-marker evidence, captured
+            // in the same AST-in-hand pass. `test_evidence` itself gates on a
+            // callable kind, so it is `false` for every non-function node.
+            test_evidence: testmarker::test_evidence(
+                decl.node,
+                &decl.name,
+                decl.kind,
+                &input.path,
+                test_convention,
+                source,
+            ),
+            // Code declarations carry no FTS body (FR-DG-05 indexes DocSection
+            // prose only); the code itself is read on demand, not searched here.
+            body: None,
+            // CR-005 structural facts, captured in the same AST-in-hand pass and
+            // gated on a callable kind: the max block-nesting depth (FR-EX-07)
+            // and the winnowed near-clone shingle set (FR-EX-09).
+            max_nesting_depth: is_callable
+                .then(|| nesting::max_nesting_depth(decl.node, block_kinds)),
+            shingles: if is_callable {
+                shingle::shingles(decl.node)
+            } else {
+                Vec::new()
+            },
+        });
+
+        // A Contains edge links the enclosing scope to this declaration; both
+        // endpoints must have a built symbol (the current `symbol` does). A
+        // top-level declaration is contained by the file-module node (S-011).
+        if let Some(parent_idx) = decl.parent {
+            if let Some(parent_symbol) = &symbols[parent_idx] {
+                facts.edges.push(EdgeFact {
+                    source: parent_symbol.clone(),
+                    target: symbol.clone(),
+                    kind: EdgeKind::Contains,
+                });
+            }
+        } else if let Some(file_module) = &file_module {
+            facts.edges.push(EdgeFact {
+                source: file_module.clone(),
+                target: symbol.clone(),
+                kind: EdgeKind::Contains,
+            });
+        }
+    }
+
+    // 7) Collect outgoing references (S-011) — calls, method calls, imports.
+    // A grammar without the `references` capability simply produces none.
+    if let Some(ref_query) = plugin.query("references") {
+        facts.refs = collect_refs(
+            ref_query,
+            tree.root_node(),
+            source,
+            &decls,
+            &symbols,
+            file_module.as_ref(),
+        );
+    }
+
+    sort_facts(&mut facts);
+    facts
+}
+
+/// Sort a [`Facts`]'s nodes and edges into canonical order ([NFR-RA-06]): node
+/// facts by `(start_line, symbol)` and edges by `(source, target, kind)`. The
+/// symbol string is the tiebreaker so the order never depends on query-match or
+/// traversal order. Shared by the code path ([`extract_one`]) and the
+/// documentation path ([`doc::extract_one_doc`]) so the two can never disagree
+/// on the byte-stable output ordering.
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+pub(super) fn sort_facts(facts: &mut Facts) {
+    facts
+        .nodes
+        .sort_by(|a, b| (a.start_line, a.symbol.as_str()).cmp(&(b.start_line, b.symbol.as_str())));
+    facts.edges.sort_by(|a, b| {
+        (a.source.as_str(), a.target.as_str(), a.kind.as_i32()).cmp(&(
+            b.source.as_str(),
+            b.target.as_str(),
+            b.kind.as_i32(),
+        ))
+    });
+}
+
+/// Deduplicate references on the ledger's uniqueness key
+/// `(source, target, form, kind)` — the same reference on two lines is one ref,
+/// first wins — then sort into that canonical order ([NFR-RA-06]).
+///
+/// Shared by the code [`collect_refs`] and the documentation extractor
+/// ([`doc`], S-035) so both passes produce byte-identical, order-independent
+/// ledger input.
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
+    let mut seen: HashSet<(String, String, i32, i32)> = HashSet::new();
+    refs.retain(|r| {
+        seen.insert((
+            r.source.as_str().to_string(),
+            r.target.clone(),
+            r.form.as_i32(),
+            r.kind.as_i32(),
+        ))
+    });
+    refs.sort_by(|a, b| {
+        (
+            a.source.as_str(),
+            &a.target,
+            a.form.as_i32(),
+            a.kind.as_i32(),
+        )
+            .cmp(&(
+                b.source.as_str(),
+                &b.target,
+                b.form.as_i32(),
+                b.kind.as_i32(),
+            ))
+    });
+}
+
+/// The human-facing name of a file's module node: the file stem, or — for the
+/// `mod`/`lib`/`main` stems that name their *enclosing* module — the nearest
+/// preceding path segment that is not `src`, falling back to `crate`.
+///
+/// Display-only: resolution computes real module paths independently, so this
+/// name carries no binding semantics (it is what FTS search shows).
+fn file_module_name(path_segments: &[&str]) -> String {
+    let stem = path_segments
+        .last()
+        .map(|s| {
+            Path::new(s)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(s)
+                .to_string()
+        })
+        .unwrap_or_default();
+    if !stem.is_empty() && !matches!(stem.as_str(), "mod" | "lib" | "main") {
+        return stem;
+    }
+    path_segments
+        .iter()
+        .rev()
+        .skip(1)
+        .find(|s| **s != "src")
+        .map_or_else(|| "crate".to_string(), |s| (*s).to_string())
+}
+
+/// Collect the file's outgoing references from the `references` query matches.
+///
+/// Each capture is attributed to its innermost enclosing captured declaration
+/// (falling back to the file module for file-scope references), normalised via
+/// [`split_path_text`] / [`flatten_use_tree`], deduplicated, and sorted into
+/// the canonical `(source, target, form, kind)` order ([NFR-RA-06]).
+fn collect_refs(
+    query: &Query,
+    root: Node<'_>,
+    source: &[u8],
+    decls: &[Decl<'_>],
+    symbols: &[Option<LogosSymbol>],
+    file_module: Option<&LogosSymbol>,
+) -> Vec<RefFact> {
+    let id_to_idx: HashMap<usize, usize> = decls
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.node.id(), i))
+        .collect();
+    // The symbol of the innermost enclosing captured declaration, or the file
+    // module at file scope. A declaration whose own symbol failed to build
+    // defers to the next enclosing scope.
+    let enclosing_symbol = |node: Node<'_>| -> Option<LogosSymbol> {
+        let mut ancestor = node.parent();
+        while let Some(n) = ancestor {
+            if let Some(&idx) = id_to_idx.get(&n.id()) {
+                if let Some(sym) = &symbols[idx] {
+                    return Some(sym.clone());
+                }
+            }
+            ancestor = n.parent();
+        }
+        file_module.cloned()
+    };
+
+    let capture_names = query.capture_names();
+    let mut out: Vec<RefFact> = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, root, source);
+    while let Some(m) = matches.next() {
+        for cap in m.captures {
+            let node = cap.node;
+            let Some(source_symbol) = enclosing_symbol(node) else {
+                continue; // no attributable scope (file-module symbol failed)
+            };
+            let line = node.start_position().row as u32 + 1;
+            let Ok(text) = node.utf8_text(source) else {
+                continue; // non-UTF-8 slice — skip defensively
+            };
+            match capture_names[cap.index as usize] {
+                "ref.call" => {
+                    let segments = split_path_text(text);
+                    if segments.is_empty() {
+                        continue;
+                    }
+                    out.push(RefFact {
+                        source: source_symbol,
+                        target: segments.join("::"),
+                        alias: None,
+                        form: RefForm::Path,
+                        kind: EdgeKind::Calls,
+                        line,
+                        relation: None,
+                    });
+                }
+                "ref.method" => {
+                    let name = text.trim();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    out.push(RefFact {
+                        source: source_symbol,
+                        target: name.to_string(),
+                        alias: None,
+                        form: RefForm::Method,
+                        kind: EdgeKind::Calls,
+                        line,
+                        relation: None,
+                    });
+                }
+                // The language-agnostic import capture (S-015): the captured
+                // node's *text* is one import path — a Python dotted name, a
+                // Go/TS quoted module string, a Java scoped identifier. The
+                // Rust grammar keeps `ref.use` below because its use-trees
+                // (groups, renames, globs) need a structural walk no text
+                // split can express.
+                "ref.import" => {
+                    let segments = import_segments(text);
+                    if segments.is_empty() {
+                        continue;
+                    }
+                    out.push(RefFact {
+                        source: source_symbol,
+                        alias: segments.last().cloned(),
+                        target: segments.join("::"),
+                        form: RefForm::Path,
+                        kind: EdgeKind::Imports,
+                        line,
+                        relation: None,
+                    });
+                }
+                // A member-access fact (S-042, CR-005, FR-EX-08): a method body
+                // reads a field of its own class-like container (`self.x`,
+                // `this.x`). The captured node is the field-name token; the
+                // receiver-anchored capture pattern in `references.scm` already
+                // restricted it to an own-field access. Resolution binds it to an
+                // `Accesses` edge only when exactly one Field candidate matches in
+                // the enclosing container — ambiguous/unmatched stays in the
+                // ledger (NFR-RA-05). The `Method` form carries the bare-name
+                // semantics the binder's member-access path expects.
+                "ref.access" => {
+                    let name = text.trim();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    out.push(RefFact {
+                        source: source_symbol,
+                        target: name.to_string(),
+                        alias: None,
+                        form: RefForm::Method,
+                        kind: EdgeKind::Accesses,
+                        line,
+                        relation: None,
+                    });
+                }
+                // Calls nested inside a macro invocation's token tree (S-162,
+                // CR-043): tree-sitter does not parse a macro body as
+                // expressions, so the call/method-call query patterns cannot
+                // match inside it. Walk the token tree in code and emit the same
+                // `Calls` path/method RefFacts, attributed to the macro's
+                // enclosing declaration — so a callee whose only call site is a
+                // macro argument (`format!("{x}", x = activity_card(s))`,
+                // `self.state.chip_class()`) is bound, or stays honestly
+                // unresolved, exactly like any other call ([NFR-RA-05]).
+                "ref.macro" => {
+                    for call in macro_call_refs(node, source) {
+                        if call.target.is_empty() {
+                            continue;
+                        }
+                        out.push(RefFact {
+                            source: source_symbol.clone(),
+                            target: call.target,
+                            alias: None,
+                            form: call.form,
+                            kind: EdgeKind::Calls,
+                            line: call.line,
+                            relation: None,
+                        });
+                    }
+                }
+                "ref.use" => {
+                    let mut items = Vec::new();
+                    flatten_use_tree(node, source, &mut items);
+                    for item in items {
+                        let (form, alias) = if item.glob {
+                            (RefForm::Glob, None)
+                        } else {
+                            (RefForm::Path, item.alias)
+                        };
+                        out.push(RefFact {
+                            source: source_symbol.clone(),
+                            target: item.path.join("::"),
+                            alias,
+                            form,
+                            kind: EdgeKind::Imports,
+                            line,
+                            relation: None,
+                        });
+                    }
+                }
+                _ => {} // a capture this pass does not consume
+            }
+        }
+    }
+
+    // Dedup on the ledger's uniqueness key, then canonical sort (NFR-RA-06).
+    dedup_sort_refs(&mut out);
+    out
+}
+
+/// Lift a captured name's parent past any C-family *declarator* wrapper to the
+/// body-bearing declaration/definition that owns it (S-058).
+///
+/// Every grammar Logos supported before C++ puts a declaration's name as a
+/// *direct* child of the node that also holds its body (Go/Python/Java
+/// `… name: (identifier) body: …`, a TS `variable_declarator` whose value is the
+/// arrow), so `name.parent()` is already the right declaration node. The C
+/// family is the exception: `int add(int) { … }` nests the name inside a
+/// `function_declarator`, and the body is that declarator's *sibling* under the
+/// `function_definition`. Without this lift the per-function metrics
+/// (complexity/nesting/shingles, [FR-EX-03]/[FR-EX-07]/[FR-EX-09]) and reference
+/// attribution (the `this->field` access that feeds LCOM4, [FR-EX-08]) would see
+/// the bodyless declarator and silently degrade.
+///
+/// The walk climbs only through the C/C++ declarator node kinds, which no other
+/// supported grammar produces — so it is a provable no-op for every pre-C++
+/// language (`name.parent()` is never one of these kinds), keeping their decl
+/// nodes byte-identical ([NFR-RA-06]). The captured *name* is unchanged: it is
+/// still read from the original leaf node, never from the lifted declaration.
+fn lift_to_declaration(node: Node<'_>) -> Node<'_> {
+    const CFAMILY_DECLARATORS: [&str; 6] = [
+        "function_declarator",
+        "pointer_declarator",
+        "reference_declarator",
+        "array_declarator",
+        "parenthesized_declarator",
+        "init_declarator",
+    ];
+    let mut decl = node;
+    while CFAMILY_DECLARATORS.contains(&decl.kind()) {
+        match decl.parent() {
+            Some(parent) => decl = parent,
+            None => break,
+        }
+    }
+    decl
+}
+
+/// Map a `@symbol.<kind>` capture name to a [`NodeKind`], or `None` for a
+/// capture this pass does not turn into a node.
+///
+/// The kind segment is matched against [`NodeKind::as_str`], so the mapping
+/// never drifts from the ontology — adding a capture name that matches a node
+/// kind's wire name is all a new query needs.
+fn kind_for_capture(capture_name: &str) -> Option<NodeKind> {
+    let (group, kind_name) = capture_name.split_once('.')?;
+    if group != SYMBOL_CAPTURE_GROUP {
+        return None;
+    }
+    NodeKind::ALL
+        .iter()
+        .copied()
+        .find(|k| k.as_str() == kind_name)
+}
+
+/// Resolve each declaration's nearest enclosing captured declaration by walking
+/// the tree-sitter ancestry. A declaration with no captured ancestor is at file
+/// scope (`parent = None`).
+fn assign_parents(decls: &mut [Decl<'_>]) {
+    let id_to_idx: HashMap<usize, usize> = decls
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.node.id(), i))
+        .collect();
+
+    for decl in decls.iter_mut() {
+        // `node` is `Copy`, so walking the ancestry borrows nothing from `decl`.
+        let mut ancestor = decl.node.parent();
+        while let Some(node) = ancestor {
+            if let Some(&j) = id_to_idx.get(&node.id()) {
+                decl.parent = Some(j);
+                break;
+            }
+            ancestor = node.parent();
+        }
+    }
+}
+
+/// Assign each declaration its ordinal among same-`(kind, name)` siblings, in
+/// the canonical sort order `(start_byte, kind, name)` ([ADR-07]).
+fn assign_ordinals(decls: &mut [Decl<'_>]) {
+    // Group declaration indices by parent scope.
+    let mut by_parent: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+    for (i, d) in decls.iter().enumerate() {
+        by_parent.entry(d.parent).or_default().push(i);
+    }
+
+    for (_, mut siblings) in by_parent {
+        siblings.sort_by(|&a, &b| {
+            (
+                decls[a].start_byte,
+                decls[a].kind.as_i32(),
+                decls[a].name.as_str(),
+            )
+                .cmp(&(
+                    decls[b].start_byte,
+                    decls[b].kind.as_i32(),
+                    decls[b].name.as_str(),
+                ))
+        });
+        // Owned-String keys so the counter does not borrow `decls` while we
+        // write back `ordinal`.
+        let mut seen: HashMap<(i32, String), u32> = HashMap::new();
+        for idx in siblings {
+            let key = (decls[idx].kind.as_i32(), decls[idx].name.clone());
+            let ordinal = *seen.get(&key).unwrap_or(&0);
+            decls[idx].ordinal = ordinal;
+            seen.insert(key, ordinal + 1);
+        }
+    }
+}
+
+/// Build the descriptor chain (outermost scope down to the leaf) for one
+/// declaration, each rendered with its own ordinal.
+fn scope_chain(decls: &[Decl<'_>], i: usize) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut current = Some(i);
+    while let Some(idx) = current {
+        chain.push(descriptor_for(
+            decls[idx].kind,
+            &decls[idx].name,
+            decls[idx].ordinal,
+        ));
+        current = decls[idx].parent;
+    }
+    chain.reverse();
+    chain
+}
+
+#[cfg(all(test, feature = "lang-rust"))]
+mod tests;

@@ -1,0 +1,64 @@
+# Declarative descriptor for the Go grammar (S-015, FR-PL-01, FR-FW-03,
+# ADR-09). Embedded via `include_str!` and parsed at startup by the
+# LanguageRegistry. Droppable `.scm` query overrides resolve under
+# `.logos/plugins/go/queries/` (FR-PL-04, UAT-PL-03).
+
+name = "go"
+extensions = ["go"]
+
+# Go member access joins with a dot (`http.HandleFunc`); import paths are
+# slash-separated module strings — reference extraction canonicalises both
+# into the `::`-joined ledger form.
+module_separator = "."
+
+# tree-sitter-go 0.25 is generated against ABI 15.
+abi_version = 15
+
+capabilities = ["symbols", "references", "frameworks"]
+
+# Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
+# `case` covers both switch and select arms.
+complexity_keywords = ["if", "else", "for", "case", "&&", "||"]
+
+# Block-structure nesting node kinds for per-function max nesting depth
+# (CR-005, FR-EX-07): the Go control-flow statements (both switch forms and
+# select). Depth 0 is a flat body; each nested statement adds one.
+nesting_block_kinds = ["if_statement", "for_statement", "expression_switch_statement", "type_switch_statement", "select_statement"]
+
+# Go's export rule is the language's capitalisation convention: a
+# leading-uppercase name is exported (FR-AN-01).
+export_convention = "capitalized"
+
+# How Go marks a function as a test (S-027, FR-EX-06, ADR-18): a `Test`/
+# `Benchmark`/`Fuzz` function defined in a `*_test.go` file (the filename gate
+# `go test` itself uses). Feeds the unified `is_test` annotation (S-028).
+test_convention = "go-test-func"
+
+# The ratified v1 Go framework set (FR-FW-03): net/http + Gin. Canonical
+# `::`-joined prefixes of the import paths ("net/http",
+# "github.com/gin-gonic/gin").
+framework_detectors = ["net::http", "github::com::gin-gonic::gin"]
+
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"
+frameworks = "queries/frameworks.scm"
+# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence.
+# NOT listed in `capabilities` -- extraction never runs it; `test_gaps` runs it
+# on demand. Embedded + disk-shadowable like every query (FR-PL-04).
+smell = "queries/smells.scm"
+
+# Captured `@fw.route.method` text → HTTP method (S-015). Gin's router verbs
+# name themselves; net/http registrations (`HandleFunc`/`Handle`) and Gin's
+# `Any` carry no single verb.
+[framework_methods]
+GET = "GET"
+POST = "POST"
+PUT = "PUT"
+DELETE = "DELETE"
+PATCH = "PATCH"
+HEAD = "HEAD"
+OPTIONS = "OPTIONS"
+Any = "ANY"
+HandleFunc = "ANY"
+Handle = "ANY"

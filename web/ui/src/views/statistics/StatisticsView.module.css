@@ -1,0 +1,112 @@
+/*
+ * Statistics view layout (S-235, CR-058, FR-UI-27, ADR-44). Zero-runtime CSS Module
+ * extracted by Vite to an external hashed <link> — no inline <style>, no CSS-in-JS,
+ * so the self-only CSP stays byte-identical. The ECharts canvases are the picture;
+ * each is paired with a DataTable twin that carries the same figures (WCAG 2.1 AA,
+ * colour/canvas never the only channel).
+ */
+
+/* Section stack — the value Callout over each Card, evenly spaced (matches the
+   analytics/Gaps `.view`). */
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* Title row: heading + lead on the left, the window selector on the right. */
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+.title {
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+  margin: 0;
+}
+.lead {
+  margin: var(--space-1) 0 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+/* Keep the selector compact and hard against the right edge. */
+.window {
+  min-width: 12rem;
+}
+
+.surfaces {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* The ECharts mount (filled imperatively by StatChart). Width-driven; a fixed
+   min-height keeps the layout stable before the canvas paints. */
+.chart {
+  width: 100%;
+  min-height: 260px;
+  margin-bottom: var(--space-4);
+}
+
+/* Value callout body. */
+.valueLead {
+  margin: 0;
+  font-size: var(--text-base);
+  line-height: 1.5;
+}
+.valueBig {
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
+  font-variant-numeric: tabular-nums;
+}
+.valueNote {
+  margin: var(--space-2) 0 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+/* At-a-glance calls/latency strip under the estimate. */
+.glance {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-6);
+  margin: var(--space-4) 0 0;
+}
+.glance div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.glance dt {
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.glance dd {
+  margin: 0;
+  font-size: var(--text-base);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Sub-heading inside the multi-chart "Top tools & surfaces" card. */
+.subhead {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: var(--space-4) 0 var(--space-3);
+}
+.subhead:first-child {
+  margin-top: 0;
+}
+
+/* A caption / truncation note beneath a chart. */
+.capNote {
+  margin: 0 0 var(--space-3);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}

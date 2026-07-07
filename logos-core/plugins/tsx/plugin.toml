@@ -1,0 +1,55 @@
+# Declarative descriptor for the TSX grammar (S-015, FR-PL-01, FR-FW-03,
+# ADR-09): `.tsx`/`.jsx` sources. JSX changes the syntax, so tree-sitter ships
+# TSX as a distinct Language from the same crate — this plugin pairs it with
+# its own queries (identical vocabulary to the `typescript` plugin; kept as a
+# separate asset dir so each grammar's queries compile against its own
+# Language). Droppable `.scm` query overrides resolve under
+# `.logos/plugins/tsx/queries/` (FR-PL-04, UAT-PL-03).
+
+name = "tsx"
+extensions = ["tsx", "jsx"]
+
+module_separator = "."
+
+# tree-sitter-typescript 0.23 (TSX Language) is generated against ABI 14.
+abi_version = 14
+
+capabilities = ["symbols", "references", "frameworks"]
+
+complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "&&", "||", "?"]
+
+# Block-structure nesting node kinds for per-function max nesting depth
+# (CR-005, FR-EX-07): identical to the typescript plugin's set (same grammar
+# vocabulary, distinct TSX Language).
+nesting_block_kinds = ["if_statement", "for_statement", "for_in_statement", "while_statement", "do_statement", "switch_statement", "try_statement"]
+
+export_convention = "export-statement"
+
+# How TS/JS marks a function as a test (S-027, FR-EX-06, ADR-18): a function
+# lexically enclosed by an `it`/`test`/`describe` call. Feeds the unified
+# `is_test` annotation (S-028).
+test_convention = "js-callback"
+
+# The ratified v1 TypeScript/JS framework set (FR-FW-03): Express + Next.js;
+# a Next.js component file may import only react.
+framework_detectors = ["express", "next", "react"]
+
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"
+frameworks = "queries/frameworks.scm"
+# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence.
+# NOT listed in `capabilities` -- extraction never runs it; `test_gaps` runs it
+# on demand. Embedded + disk-shadowable like every query (FR-PL-04).
+smell = "queries/smells.scm"
+
+[framework_methods]
+get = "GET"
+post = "POST"
+put = "PUT"
+delete = "DELETE"
+patch = "PATCH"
+head = "HEAD"
+options = "OPTIONS"
+all = "ANY"
+use = "ANY"

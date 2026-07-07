@@ -1,0 +1,32 @@
+.card {
+  position: relative;
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  /* The non-removable 3px signal-red top accent edge (frontend-design §1.2/§5). */
+  border-top: 3px solid var(--card-accent);
+  border-radius: var(--radius-1);
+  padding: var(--space-5);
+  box-shadow: var(--elevation-1);
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--text-1);
+}
+
+.aside {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}

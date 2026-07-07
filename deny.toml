@@ -1,0 +1,95 @@
+# cargo-deny configuration — supply-chain security baseline (ADR-17, NFR-CR-01).
+#
+# Enforced in CI (.github/workflows/ci.yml) via `cargo deny check`. Two gates:
+#   1. licenses  — permissive-only allowlist; copyleft (GPL/LGPL/AGPL/SSPL) fails.
+#   2. advisories — RustSec advisory DB: vulnerabilities + unmaintained crates
+#      fail the build; yanked crates warn.
+#
+# Logos ships under MIT as public OSS (NFR-CR-01); every transitive dependency
+# in the shipped binary must be license-compatible with that posture.
+
+# Inspect the whole workspace dependency graph with default features — this is
+# the graph that actually ships in the `logos` binary (ADR-16). Matching the
+# default-feature surface keeps this aligned with the no-network fitness test
+# (logos-core/tests/no_network_deps.rs, NFR-SE-01).
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+version = 2
+# RustSec advisory database (NFR-SE-03, ADR-17). With version = 2,
+# `vulnerability` and `notice` advisories always fail the check. `unmaintained`
+# and `unsound` are scoped controls (all / workspace / transitive / none) that
+# default to `workspace` — i.e. they would only fail for direct workspace
+# members, not transitive dependencies. We widen both to `all` so the gate
+# covers the whole graph (the task requires unmaintained crates to be denied).
+# `yanked` is downgraded to a warning: a yanked-but-not-vulnerable crate should
+# not block an unrelated PR.
+yanked = "warn"
+unmaintained = "all"
+unsound = "all"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive allowlist only (NFR-CR-01). No GPL / LGPL / AGPL / SSPL.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    # `unicode-ident` (transitive via proc-macro2) is licensed
+    # `(MIT OR Apache-2.0) AND Unicode-3.0`; the Unicode-3.0 term is OSI-approved
+    # and permissive (the modern successor to Unicode-DFS-2016), so it fits the
+    # permissive-only posture (NFR-CR-01).
+    "Unicode-3.0",
+    # `foldhash` (transitive via rusqlite → hashlink → hashbrown, S-005/ADR-05)
+    # is `Zlib`-licensed. The zlib License is OSI-approved and FSF Free/Libre —
+    # a short, permissive, non-copyleft license fully compatible with shipping
+    # MIT OSS (NFR-CR-01).
+    "Zlib",
+    # `notify` (the S-022 filesystem watcher, FR-SY-04) is `CC0-1.0`-licensed —
+    # a public-domain dedication at the *most* permissive end of the spectrum
+    # (FSF Free/Libre, GPL-compatible). It imposes no attribution or copyleft
+    # obligation, so it is fully compatible with shipping MIT OSS (NFR-CR-01).
+    "CC0-1.0",
+    # `webpki-root-certs` (transitive via the ui-only agent substrate: rig-core →
+    # reqwest → rustls-platform-verifier, S-166/CR-046/ADR-41) ships the Mozilla
+    # CA root-certificate *data* bundle under `CDLA-Permissive-2.0` (Community
+    # Data License Agreement — Permissive 2.0). It is a permissive, non-copyleft
+    # license for data (no GPL/LGPL/AGPL/SSPL obligation), so it fits the
+    # permissive-only posture (NFR-CR-01). Reached only in the `ui` build (the
+    # rig/reqwest egress seam, ADR-40); absent from the default binary.
+    "CDLA-Permissive-2.0",
+]
+# A license-detection confidence below this fails the license clearly rather
+# than guessing.
+confidence-threshold = 0.8
+exceptions = []
+# The allowlist intentionally lists permissive licenses the current minimal
+# graph does not yet exercise (BSD, ISC, Unicode-DFS-2016) — they are required
+# by the supply-chain baseline and will be hit as later stories pull in
+# tree-sitter grammars and rusqlite. Don't warn about not-yet-encountered
+# allowances; an actually-unused entry is harmless, a missing one fails the gate.
+unused-allowed-license = "allow"
+
+[bans]
+# Multiple versions of the same crate are allowed (transitive reality) but
+# surfaced as a warning so dependency bloat stays visible (NFR-PC-04).
+multiple-versions = "warn"
+# External crates may not be wildcard-versioned (a supply-chain hazard), but the
+# internal workspace crates are referenced by `path = "../logos-core"` without a
+# version — that is the normal intra-workspace pattern (ADR-01), so path-based
+# wildcards are allowed.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Only crates.io is trusted; an unknown registry or git source fails the build,
+# closing a supply-chain substitution vector (ADR-17).
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

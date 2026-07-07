@@ -1,0 +1,60 @@
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-1);
+}
+
+.input {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  color: var(--text-1);
+  background: var(--surface-0);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-1);
+  padding: var(--space-2) var(--space-3);
+  transition: border-color var(--motion-fast) var(--motion-ease);
+}
+
+.input::placeholder {
+  color: var(--text-2);
+}
+
+.input:hover {
+  border-color: var(--text-2);
+}
+
+.select {
+  /* Use the native picker so the OS contrast/keyboard handling is preserved. */
+  appearance: auto;
+}
+
+.textarea {
+  min-height: 6rem;
+  resize: vertical;
+  font-family: var(--font-mono);
+  line-height: var(--leading-base);
+}
+
+/* Error state: a red edge paired with the error text below (colour never alone). */
+.invalid {
+  border-color: var(--color-accent);
+}
+
+.hint {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.error {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-1);
+}

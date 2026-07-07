@@ -1,0 +1,50 @@
+# Declarative descriptor for the markdown DOCUMENTATION grammar
+# (S-033, CR-003, ADR-19, FR-DG-01/FR-DG-02).
+#
+# Unlike the five code grammars, this is a *documentation* plugin: `documentation
+# = true` routes a matched file through the structural doc extractor
+# (`extract::doc`), which walks the block grammar's nested `section` tree into a
+# `DocFile` plus a `Contains` hierarchy of `DocSection` nodes — rather than
+# running `symbols`/`references` tagging queries. It therefore declares NO
+# capabilities and NO `[queries]` table; the registry still parses this
+# descriptor and asserts the grammar's ABI at load exactly as for the code
+# grammars (ADR-09).
+#
+# This file is embedded into the binary via `include_str!`
+# (plugin::grammars::markdown_entry) and parsed at startup by the
+# LanguageRegistry. On-disk descriptor/query overrides under
+# `.logos/plugins/markdown/` are the same future increment as for the code
+# grammars (FR-PL-04/FR-PL-05).
+
+# Display + lookup name; also the override sub-directory name
+# (`.logos/plugins/<name>/`). Surfaced by `logos languages` (FR-PL-06).
+name = "markdown"
+
+# File extensions this grammar claims, without the leading dot. CommonMark uses
+# `.md`; `.markdown` is the long form. The discovery globs that decide which of
+# these files are actually indexed (`docs/**/*.md`, top-level `*.md`, `README*`)
+# are a separate config concern (S-034, FR-DG-01).
+extensions = ["md", "markdown"]
+
+# Doc identity is a `path#heading-slug` anchor scheme (FR-DG-02), so the natural
+# separator between a file path and its nested heading slugs is `/` — the same
+# separator the doc symbol builder joins path segments with.
+module_separator = "/"
+
+# The tree-sitter ABI version the bundled markdown block grammar
+# (`tree_sitter_md::LANGUAGE`) was generated against. The authoritative check at
+# load compares the *compiled* grammar's `Language::abi_version()` against the
+# linked tree-sitter runtime's supported range (FR-PL-03, NFR-PC-03); this value
+# is the documented contract + a greppable cross-check.
+abi_version = 15
+
+# This is a documentation grammar: extraction is structural (heading sections),
+# so there are no tagging-query capabilities to declare.
+capabilities = []
+
+# Marks this as a documentation plugin (S-033, CR-003, ADR-19): the extraction
+# engine routes a matched file to `extract::doc` (DocFile/DocSection) instead of
+# the code `symbols`/`references` path. Defaults to false for every code
+# descriptor, so this single line is the only thing that distinguishes the doc
+# grammar's handling (NFR-MA-01: a new plugin class costs pure descriptor data).
+documentation = true

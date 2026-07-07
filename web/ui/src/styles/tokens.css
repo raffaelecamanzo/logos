@@ -1,0 +1,195 @@
+/*
+ * Design tokens — the single source of truth for the SPA's visual language
+ * (S-193, CR-050, FR-UI-23, ADR-44).
+ *
+ * Three layers, per ADR-44 / frontend-design §1.3:
+ *   1. PRIMITIVE palette — the authoritative SOURCESENSE brand hex values plus the
+ *      neutral steps for dark/light surfaces. Raw values live here ONLY.
+ *   2. SEMANTIC tokens (themed) — `--color-accent`, `--surface-*`, `--text-*`, … —
+ *      everything components reference. A theme is a remap of THESE, never a
+ *      component change.
+ *   3. SCALE tokens (theme-independent) — type / space / radius / elevation /
+ *      motion.
+ *
+ * THEMING. Dark is the canonical default. The default lives on `:root` so a
+ * Node-free first paint is already dark. `prefers-color-scheme: light` flips the
+ * FIRST-visit default to light (only while no explicit `data-theme` is set), so a
+ * light-OS user lands on light without JS. An explicit `:root[data-theme="…"]`
+ * (set by the persisted choice — theme-init.js / ThemeProvider) always wins,
+ * independent of the OS preference. Switching only remaps token VALUES, so there
+ * is no layout shift.
+ *
+ * `--so-red` is SIGNAL-ONLY in both themes (verdicts, active nav, threshold
+ * breaches, focus) — never a large background fill.
+ *
+ * This file is imported by main.tsx, so Vite extracts it to an external hashed
+ * stylesheet referenced by <link> — never an inline <style> (the self-only CSP
+ * forbids `unsafe-inline`; ADR-44 bans runtime CSS-in-JS).
+ */
+
+:root {
+  /* ── Layer 1: primitive palette ─────────────────────────────────────────── */
+  /* Authoritative SOURCESENSE brand values (frontend-design §1.2) — never approximate. */
+  --so-red: #da291c; /* signal — verdicts, active state, breaches, focus */
+  --so-orange: #e35205; /* warm signal — warnings, in-flight, progress */
+  --so-merlin: #3d3935; /* brand neutral / light-theme primary text */
+  --so-merlin-50: #f4f4f2; /* brand off-white — light-theme page background */
+  --so-muted: #716b5d; /* brand muted — light-theme secondary text / n/a */
+  --so-green: #16a34a; /* pass / bound / covered */
+  --so-lime: #65a30d; /* advisory BR-34 "good" quality band (S-187) */
+
+  /* Dark-surface neutral steps (the §1.3 "neutral steps for dark surfaces"). */
+  --neutral-950: #0f1216; /* dark page */
+  --neutral-900: #171b21; /* dark card */
+  --neutral-850: #1f242c; /* dark raised / hover */
+  --neutral-700: #2b313a; /* dark subtle border */
+  --neutral-600: #3a414c; /* dark strong border */
+  --neutral-300: #aab2bf; /* dark muted text */
+  --neutral-100: #e8ebf0; /* dark primary text */
+
+  /* Light-surface neutral steps. */
+  --light-border: #e4e2dd;
+  --light-border-strong: #cfccc4;
+
+  /* Badge ink (theme-independent — the signal hues are identical in both themes,
+     so the legible ink on each is too): white on red, near-black on warm/green. */
+  --ink-on-red: #ffffff;
+  --ink-on-warm: #1a1714;
+
+  /* Graph-layer palette (theme-independent signal hues, like the badge inks) — the
+     legend swatches read the SAME hues the canvas paints from `graphModel.ts`
+     (doc = --so-green, selected = --so-red reuse the brand signals; code/artifact
+     are graph-specific). Defined as tokens so the legend CSS Module stays raw-hex
+     free (ADR-44 / FR-UI-23, the `component_modules_use_tokens` rule); raw hex is
+     permitted here in the primitive-palette layer, never in a `*.module.css`. */
+  --graph-layer-code: #2563eb; /* code layer (blue) */
+  --graph-layer-artifact: #d97706; /* artifact layer (amber) */
+
+  /* ── Layer 2: semantic tokens — DARK theme (canonical default) ───────────── */
+  --surface-0: var(--neutral-950); /* page background */
+  --surface-1: var(--neutral-900); /* card / panel */
+  --surface-2: var(--neutral-850); /* raised / hover / header / sidebar */
+  --text-1: var(--neutral-100); /* primary text */
+  --text-2: var(--neutral-300); /* muted / secondary / captions / n/a */
+  --border-subtle: var(--neutral-700);
+  --border-strong: var(--neutral-600);
+
+  --color-accent: var(--so-red); /* signal-only, never a large fill */
+  --color-accent-warm: var(--so-orange);
+  --color-pass: var(--so-green);
+  --focus-ring: var(--so-red); /* 2px solid, :focus-visible only (WCAG 2.1 AA) */
+
+  /* The non-removable signal-red accent edge on cards (frontend-design §1.2/§5). */
+  --card-accent: var(--so-red);
+
+  /* Translucent hover/selection tints derived from the active text colour, so they
+     read on either surface without a per-theme value. */
+  --tint-hover: rgba(255, 255, 255, 0.06);
+  --tint-selected: rgba(218, 41, 28, 0.16); /* faint signal-red wash for active rows */
+
+  color-scheme: dark;
+
+  /* ── Layer 3: scale tokens (theme-independent) ──────────────────────────── */
+  /* Type. System stack — no web-font fetch (offline + self-only CSP); a self-hosted
+     Inter/JetBrains-Mono WOFF2 pair is a deliberate later addition (frontend-design §2). */
+  --font-sans:
+    system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas,
+    monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+  --leading-tight: 1.25;
+  --leading-base: 1.55;
+  --tracking-label: 0.07em; /* the brand's uppercase section-label voice */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Space (4px base ramp). */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  /* Radius. Cards keep the 4px brand radius. */
+  --radius-sm: 3px;
+  --radius-1: 4px;
+  --radius-2: 8px;
+  --radius-pill: 999px;
+
+  /* Elevation. In dark mode depth is carried mostly by lighter surfaces; the
+     shadow ramp is subtle. Light mode leans on the shadow. */
+  --elevation-0: none;
+  --elevation-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --elevation-2: 0 6px 20px rgba(0, 0, 0, 0.45);
+
+  /* Motion. */
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --motion-slow: 320ms;
+  --motion-ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+/*
+ * First-visit default flip: a light-OS user with NO explicit choice lands on
+ * light. Gated on `:not([data-theme])` so a persisted choice (which sets the
+ * attribute) is never overridden by the OS preference.
+ */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --surface-0: var(--so-merlin-50);
+    --surface-1: #ffffff;
+    --surface-2: #ffffff;
+    --text-1: var(--so-merlin);
+    --text-2: var(--so-muted);
+    --border-subtle: var(--light-border);
+    --border-strong: var(--light-border-strong);
+    --tint-hover: var(--so-merlin-50);
+    --tint-selected: rgba(218, 41, 28, 0.1);
+    color-scheme: light;
+  }
+}
+
+/*
+ * Explicit LIGHT theme — the first-class opt-in (frontend-design §1.2 brand
+ * values). Wins over the OS preference because the attribute is set deliberately.
+ */
+:root[data-theme="light"] {
+  --surface-0: var(--so-merlin-50);
+  --surface-1: #ffffff;
+  --surface-2: #ffffff;
+  --text-1: var(--so-merlin);
+  --text-2: var(--so-muted);
+  --border-subtle: var(--light-border);
+  --border-strong: var(--light-border-strong);
+  --tint-hover: var(--so-merlin-50);
+  --tint-selected: rgba(218, 41, 28, 0.1);
+  color-scheme: light;
+}
+
+/*
+ * Explicit DARK theme — restores the canonical defaults even when the OS prefers
+ * light (so a dark-choosing user on a light OS stays dark). Values mirror `:root`.
+ */
+:root[data-theme="dark"] {
+  --surface-0: var(--neutral-950);
+  --surface-1: var(--neutral-900);
+  --surface-2: var(--neutral-850);
+  --text-1: var(--neutral-100);
+  --text-2: var(--neutral-300);
+  --border-subtle: var(--neutral-700);
+  --border-strong: var(--neutral-600);
+  --tint-hover: rgba(255, 255, 255, 0.06);
+  --tint-selected: rgba(218, 41, 28, 0.16);
+  color-scheme: dark;
+}

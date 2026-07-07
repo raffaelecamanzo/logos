@@ -1,0 +1,80 @@
+/* Empty — centered, muted, names the producing command in mono. */
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: var(--space-6) var(--space-4);
+}
+
+.emptyText {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  max-width: 48ch;
+}
+
+.command {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  color: var(--text-1);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.05rem 0.35rem;
+}
+
+/* Loading — accessible busy indicator; spin disabled under reduced motion. */
+.loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+.spinner {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid var(--border-strong);
+  /* The single moving arc is the warm in-flight signal. */
+  border-top-color: var(--color-accent-warm);
+  border-radius: var(--radius-pill);
+  animation: spin 0.8s linear infinite;
+}
+
+.loadingLabel {
+  color: var(--text-2);
+}
+
+/* Error — the façade message shown, never papered over. */
+.error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-left: 4px solid var(--color-accent);
+  border-radius: var(--radius-1);
+  padding: var(--space-3) var(--space-4);
+}
+
+.errorLabel {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--color-accent);
+}
+
+.errorBody {
+  color: var(--text-1);
+  font-size: var(--text-base);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

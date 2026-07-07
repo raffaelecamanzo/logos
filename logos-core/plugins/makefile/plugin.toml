@@ -1,0 +1,41 @@
+# Declarative descriptor for the Makefile ARTIFACT grammar
+# (S-064, CR-010, ADR-25, FR-CG-01/FR-CG-03).
+#
+# An *artifact* plugin: a matched file routes through `extract::config` into a
+# `ConfigFile` root with one typed `MakeTarget` anchor per rule — never the code
+# path. No capabilities, no `[queries]` (structural extraction); the registry
+# asserts ABI at load like every grammar (ADR-09).
+#
+# Grammar: `tree-sitter-make` — flagged **highest-risk** by FR-CG-06 (a
+# least-maintained community grammar). Its FR-CG-06 verification preflight
+# (crate resolves, loads at the workspace ABI, fixtures parse) PASSED at ABI 14;
+# the outcome is recorded in sprint-impl-10.md. Embedded via `include_str!` in
+# `plugin::grammars::makefile_entry`.
+
+name = "makefile"
+
+# `.mk` is the extension form (included makefiles); the canonical extensionless
+# basenames are claimed below (FR-CG-01).
+extensions = ["mk"]
+
+# Basename claims: GNU Make reads `GNUmakefile`, then `makefile`, then `Makefile`
+# (FR-CG-01). The `Name.*` prefix rule also admits `Makefile.inc` etc.
+filenames = ["Makefile", "makefile", "GNUmakefile"]
+module_separator = "/"
+
+# tree-sitter-make 1.1 is generated against ABI 14 (note: not 15); asserted
+# equal to the compiled grammar at load (FR-PL-02, NFR-PC-03).
+abi_version = 14
+
+capabilities = []
+artifact = true
+
+# Typed-anchor extraction (FR-CG-03): each `rule` (a target block) becomes one
+# `MakeTarget`. No `key_field` — a `rule`'s target name lives in a child
+# `targets` node, not a tree-sitter field, so the walk's first-source-line
+# fallback names the anchor by its declaration line (`build: deps`), always
+# derivable and never fabricated (NFR-RA-05). `MakeTarget` is a config kind,
+# hence metric-neutral (FR-CG-05).
+[config]
+section_kinds = ["rule"]
+node_kind = "make_target"

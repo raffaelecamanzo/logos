@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      The per-session intent token (NFR-SE-06, ADR-31) is injected into the
+      SERVED shell by web-surface as a <meta name="logos-intent"> tag; the SPA
+      reads it once at startup and echoes it in x-logos-intent on mutating POSTs.
+      This static template carries no token (it is minted per session); S-185
+      builds the served shell that injects it.
+    -->
+    <title>Logos</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!--
+      No-flash theme bootstrap (S-193, FR-UI-23, ADR-44). An EXTERNAL same-origin
+      classic script (CSP-clean: it carries a src, so it is not an inline script)
+      that runs synchronously during <head> parse — before first paint — to apply
+      a persisted dark/light choice to <html data-theme>. With no stored choice it
+      no-ops and CSS `prefers-color-scheme` resolves the first-visit default. Vite
+      copies web/ui/public/theme-init.js to the bundle root verbatim.
+    -->
+    <script src="/theme-init.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- External module entry only — no inline script (self-only CSP). Vite
+         rewrites this to the hashed /assets/*.js bundle at build time. -->
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

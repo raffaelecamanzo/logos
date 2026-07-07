@@ -1,0 +1,349 @@
+[package]
+name        = "logos-core"
+version     = "0.3.0"
+edition     = "2021"
+description = "Logos engine — thick-core ports-and-adapters (ADR-01)"
+license.workspace = true
+# Internal workspace crate — never published to crates.io. Only the `logos`
+# binary is distributed (via brew/curl, ADR-16).
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+# `serde_json` serves two purposes introduced in this sprint:
+# (S-020, FR-GV-01) serialises the `rules_cache` parse cache (SRS §5.1
+# `parsed_json` column); (S-023, FR-IN-02) parses/rewrites `.mcp.json` for
+# host-config injection. `preserve_order` keeps the user's key order across
+# the round-trip (DL-07 non-clobber posture); the `indexmap` backend it
+# activates is already in the tree via petgraph — no new crate, no socket
+# surface (NFR-SE-01). Promoted from dev-dependencies by both S-020 and S-023
+# (parallel sessions); merged here into one entry.
+serde_json = { workspace = true, features = ["preserve_order"] }
+# SCIP symbol codec — confined to `model::convert` (ADR-06, NFR-MA-07).
+scip = { workspace = true }
+anyhow = { workspace = true }
+# `toml` parses the declarative `plugin.toml` descriptors (S-004, FR-PL-02)
+# and the human-editable checked-in policy files (S-006, ADR-15). Pure parser
+# with no socket/HTTP surface; does not weaken the no-network invariant (NFR-SE-01).
+toml = { workspace = true }
+
+# ── Plugin substrate / tree-sitter grammars (S-004, ADR-09) ──────────────────
+# `tree-sitter` provides the parser runtime and the `Language`/`Query` types and
+# is linked exactly once for the whole workspace. Each grammar crate
+# (`tree-sitter-rust`, …) is decoupled from this version because it exposes its
+# grammar as a `tree_sitter_language::LanguageFn` rather than a raw
+# `tree_sitter::Language` — this neutralises ABI skew (NFR-PC-03) and is the
+# mechanism that resolves the duplicate-symbol grammar-linking hazard
+# (tree-sitter #4209, NFR-PC-05, AR-04): the C runtime is not vendored per
+# grammar, so linking N grammars never produces N copies of its symbols.
+tree-sitter = "0.25"
+tree-sitter-language = "0.1"
+# Grammars are feature-gated so the binary links only the curated set the build
+# selected (ADR-16 size budget). The five v1 languages (FR-PL-01) are on by
+# default. Each grammar crate exposes a `LanguageFn`, so linking five grammars
+# never duplicates the C runtime's symbols (NFR-PC-05, AR-04).
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
+# One crate, two grammars: `LANGUAGE_TYPESCRIPT` (.ts/.js) and `LANGUAGE_TSX`
+# (.tsx/.jsx) — both registered under the single `lang-typescript` feature
+# (FR-FW-03: TypeScript/JS = Express + Next.js).
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-go = { version = "0.25", optional = true }
+tree-sitter-java = { version = "0.23", optional = true }
+# C language grammar (S-056, CR-009). The systems-code base case and the set's
+# **honesty fixture**: `.c` files only (`.h` headers belong to the C++ plugin),
+# flat module space, non-`static` file-scope exports. Exposes its grammar as a
+# `tree_sitter_language::LanguageFn` (`LANGUAGE`) at the workspace ABI, so it
+# rides the substrate and the load-time ABI assertion with no second tree-sitter
+# runtime (the NFR-PC-05 duplicate-symbol decoupling, ADR-09). Pure C parse
+# tables compiled by `cc`; no socket/HTTP surface (NFR-SE-01).
+tree-sitter-c = { version = "0.24", optional = true }
+# Kotlin (S-055, CR-009) — the dominant modern JVM language. The maintained
+# `tree-sitter-grammars/tree-sitter-kotlin` crate, published as
+# `tree-sitter-kotlin-ng`, exposes its grammar as a `tree_sitter_language::
+# LanguageFn` (`LANGUAGE`) at ABI 14 — exactly the decoupling the five v1
+# grammars use, so it rides the plugin substrate and the load-time ABI assertion
+# unchanged (ADR-09). It depends only on `tree-sitter-language` (its
+# `tree-sitter` dep is dev-only), so linking it pulls no second tree-sitter
+# runtime and duplicates no grammar symbols (NFR-PC-05, AR-04); pure C parse
+# tables built by `cc`, no socket/HTTP surface (NFR-SE-01). MIT-licensed.
+tree-sitter-kotlin-ng = { version = "1.1", optional = true }
+# C# grammar (S-057, CR-009). The 0.23.5 release is generated against ABI 15;
+# exposes its grammar as a `tree_sitter_language::LanguageFn`
+# (`LANGUAGE`), the ADR-09 decoupling every code grammar uses, so it rides the
+# plugin substrate and load-time ABI assertion with no second tree-sitter runtime
+# (NFR-PC-05). Pure C parse tables compiled by `cc`; no socket surface (NFR-SE-01).
+tree-sitter-c-sharp = { version = "0.23", optional = true }
+# C++ grammar (S-058, CR-009). The largest grammar of the language-breadth set
+# and its expected precision floor (preprocessor/templates depress resolution —
+# measured, never floored, per NFR-RA-05). Exposes its grammar as a
+# `tree_sitter_language::LanguageFn` (`LANGUAGE`) at ABI 14 — the same decoupling
+# every code grammar uses, so it rides the plugin substrate and the load-time
+# ABI assertion unchanged (ADR-09) and links without duplicating the C runtime's
+# symbols (NFR-PC-05). Owns `.h` headers jointly with the C plugin's `.c`-only
+# claim per the fixed `.h` → C++ ownership rule (C ⊂≈ C++ grammatically). Pure C
+# parse tables compiled by `cc`; no socket/HTTP crate enters the graph (NFR-SE-01).
+tree-sitter-cpp = { version = "0.23", optional = true }
+# Ruby (S-059, CR-009). Exposes the grammar as a `tree_sitter_language::LanguageFn`
+# (`LANGUAGE`) — the same ABI-decoupling the other code grammars use, so it rides
+# the existing plugin substrate and the load-time ABI assertion unchanged
+# (ADR-09). Pure C parse tables compiled by `cc`; no socket/HTTP crate and no
+# second tree-sitter runtime enters the graph (NFR-SE-01, NFR-PC-05). Added as
+# pure plugin data — one dep + one feature + one grammar row + one `plugins/ruby/`
+# descriptor (NFR-MA-01).
+tree-sitter-ruby = { version = "0.23", optional = true }
+# PHP code grammar (S-060, CR-009). Bound via its **full `php` grammar**
+# (`LANGUAGE_PHP`) so HTML-interleaved templates parse (`<?php … ?>` embedded in
+# markup) and their PHP symbols extract — `LANGUAGE_PHP_ONLY` would drop the HTML
+# islands and the surrounding code. Exposes the grammar as a
+# `tree_sitter_language::LanguageFn`, the same ABI-decoupling the other code
+# grammars use (ADR-09), so it rides the substrate and the load-time ABI
+# assertion (ABI 15) and links without duplicating the C runtime's symbols
+# (NFR-PC-05). Pure C parse tables built by `cc`; no socket/HTTP surface
+# (NFR-SE-01).
+tree-sitter-php = { version = "0.24", optional = true }
+# Scala (S-061, CR-009) — the highest-risk grammar of the language-breadth set,
+# explicitly gated on its verification preflight (CRA-01). `tree-sitter-scala`
+# 0.26 exposes its grammar as a `tree_sitter_language::LanguageFn` (`LANGUAGE`)
+# generated against ABI 15 — within the workspace tree-sitter 0.25 runtime's
+# [13,15] range, so it rides the ADR-09 substrate and load-time ABI assertion
+# unchanged, and the LanguageFn decoupling keeps the C runtime linked once
+# (NFR-PC-05). Pure C parse tables compiled by `cc`; no socket/HTTP surface
+# (NFR-SE-01, kept honest by the no-network fitness test). Preflight outcome
+# (crate resolves / ABI 15 / queries compile / fixture corpus parses) recorded
+# in sprint-impl-13.md per FR-PL-07.
+tree-sitter-scala = { version = "0.26", optional = true }
+# Markdown documentation grammar (S-033, CR-003, ADR-19). Exposes the block
+# grammar as a `tree_sitter_language::LanguageFn` (`LANGUAGE`), exactly the
+# decoupling the five code grammars use — so it rides the same plugin substrate
+# and load-time ABI assertion (ADR-09). `default-features = false` deliberately
+# omits the crate's `parser` feature, whose only effect is to pull a *second*
+# `tree-sitter` (0.26) for a convenience wrapper we never use; the `LanguageFn`
+# const needs only the C grammar `cc` builds at compile time, so no socket/HTTP
+# crate and no duplicate runtime enters the graph (NFR-SE-01, NFR-PC-05).
+tree-sitter-md = { version = "0.5", optional = true, default-features = false }
+# Schema-format artifact grammars (S-065, CR-010, ADR-25). Both expose their
+# grammar as a `tree_sitter_language::LanguageFn` (`LANGUAGE`) — the same ABI-
+# decoupling the code/doc grammars use — so they ride the existing plugin
+# substrate with no wrapper and pull no second `tree-sitter` (the C parse tables
+# are built by `cc` at compile time; no socket/HTTP crate enters the graph,
+# NFR-SE-01, NFR-PC-05). `tree-sitter-graphql` is the CR-010 highest-risk
+# grammar; both grammars' verification preflight (FR-CG-06) — crate resolves,
+# grammar loads at the workspace ABI 15, fixture corpus parses — is recorded in
+# sprint-impl-10.md.
+tree-sitter-proto = { version = "0.4", optional = true, default-features = false }
+tree-sitter-graphql = { version = "0.1", optional = true, default-features = false }
+
+# ── Config/artifact data-format grammars (S-063, CR-010, ADR-25) ─────────────
+# YAML/JSON/TOML — the three data formats of the config/artifact layer. Each
+# exposes its grammar as a `tree_sitter_language::LanguageFn` (`LANGUAGE`),
+# exactly the decoupling the code/markdown grammars use, so they ride the same
+# plugin substrate, the load-time ABI assertion (ADR-09), and the artifact-class
+# routing the S-062 substrate established. Added as pure plugin data — one dep +
+# one feature + one grammar row + one `plugin.toml` per format — touching no core
+# logic (NFR-MA-01). All three are pure in-process C parse tables with no
+# socket/HTTP surface (NFR-SE-01, kept honest by the no-network fitness test).
+tree-sitter-json = { version = "0.24", optional = true }
+tree-sitter-yaml = { version = "0.7", optional = true }
+# The maintained `tree-sitter-grammars/tree-sitter-toml` fork; the unmaintained
+# `tree-sitter-toml` predates the `LanguageFn` decoupling the substrate requires.
+tree-sitter-toml-ng = { version = "0.7", optional = true }
+
+# ── Build-format artifact grammars (S-064, CR-010, ADR-25) ───────────────────
+# Three artifact-class grammars (no `.scm` queries — extraction is structural via
+# `extract::config`, exactly like the markdown documentation grammar). Each
+# exposes a `tree_sitter_language::LanguageFn`, so it rides the ADR-09 substrate
+# and the load-time ABI assertion, and linking them never duplicates the C
+# runtime's symbols (NFR-PC-05). No socket/HTTP surface (NFR-SE-01).
+# `tree-sitter-make` is flagged **highest-risk** (least-maintained community
+# grammar) per FR-CG-06; a failed preflight defers only that one format.
+#
+# Dockerfile uses `arborium-dockerfile`, the modern `LanguageFn` re-binding of
+# the same underlying `tree_sitter_dockerfile` C grammar: the canonical
+# `tree-sitter-dockerfile` 0.2.0 crate ships the legacy `language() -> Language`
+# binding and pulls a *second* `tree-sitter` (0.20) runtime, which would
+# duplicate the C runtime symbols (NFR-PC-05, AR-04, tree-sitter #4209) — the
+# exact hazard the LanguageFn decoupling exists to prevent. `arborium-dockerfile`
+# depends only on `tree-sitter-language`, so it rides the substrate cleanly. Its
+# preflight outcome (crate/ABI/fixtures) is recorded in the impl notes per
+# FR-CG-06.
+arborium-dockerfile = { version = "2.18", optional = true }
+tree-sitter-make = { version = "1.1", optional = true }
+tree-sitter-bash = { version = "0.25", optional = true }
+
+# Terraform/HCL infra grammar (S-066, CR-010, ADR-25). Exposes the HCL grammar
+# as a `tree_sitter_language::LanguageFn` (`LANGUAGE`) — the same decoupling the
+# code grammars use, so it rides the plugin substrate and load-time ABI
+# assertion unchanged (ADR-09). One grammar covers both `.tf` and `.tfvars`
+# (CRA-02). Pure C parse tables compiled by `cc`; no socket/HTTP crate and no
+# duplicate tree-sitter runtime enters the graph (NFR-SE-01, NFR-PC-05).
+tree-sitter-hcl = { version = "1.1", optional = true }
+# SQL grammar (S-066, CR-010, ADR-25), flagged highest-risk. Exposes the grammar
+# as a `LanguageFn` (`LANGUAGE`). SQL extraction is conservative DDL-anchors-only
+# with skip-on-misparse, never fabricating a node for an unparsed dialect
+# construct (NFR-RA-05). Pure C parse tables; no socket surface (NFR-SE-01).
+tree-sitter-sequel = { version = "0.3", optional = true }
+
+# Canonical SQLite graph store (graph-store component, ADR-05). The `bundled`
+# feature statically compiles SQLite + FTS5 into the binary — no system SQLite,
+# single static binary (NFR-PC-01). Confined to the `graph_store` module.
+rusqlite = { workspace = true }
+
+# Configuration loading/validation (S-006, config module). `globset` compiles
+# include/exclude/layer globs; `ignore` performs the gitignore-aware,
+# symlink-contained discovery walk (FR-CF-01..04, FR-IX-02, NFR-SE-04).
+# Neither pulls a socket/HTTP crate — the no-network fitness test enforces this.
+globset = { workspace = true }
+ignore = { workspace = true }
+
+# Data-parallel extraction (S-007, FR-IX-03, NFR-PE-08) and execution-runtime
+# CPU worker pool (S-008, AQ-04). One shared rayon pool serves both. `crossbeam-
+# channel` carries the bounded write-job queue and the RO connection free-list
+# (S-008, ADR-02/03, §7.2). Neither opens a socket (NFR-SE-01).
+rayon = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+# Derived in-memory graph views for whole-graph algorithms (S-009, ADR-05,
+# graph-hydration component). Confined to the `hydrate` module — no petgraph type
+# appears in any Engine read-model. Pure data structure, no socket (NFR-SE-01).
+petgraph = { workspace = true }
+# blake3 content hashing for incremental-sync dirty detection (S-010, FR-SY-03).
+# Pure hashing, no socket surface (NFR-SE-01); confined to the `pipeline` module.
+blake3 = { workspace = true }
+# Calendar-aware HEAD-anchored history window (S-046, FR-GH-03, ADR-22); confined
+# to the `history` module, which computes the cutoff solely from the HEAD
+# committer timestamp and never calls `Utc::now` (BR-27 determinism, enforced by
+# code + golden — not by the feature graph, which may unify `chrono/now` on).
+chrono = { workspace = true }
+# Defect-history heuristic fix-commit matching (S-047, FR-GH-05); confined to the
+# `history::temporal` module. Already in the graph transitively (via `ignore`),
+# so this is a no-new-crate direct dependency. No socket surface (NFR-SE-01).
+regex = { workspace = true }
+# Cobertura XML coverage-report parsing (S-049, FR-CV-01, ADR-23); confined to
+# the `history::coverage::parse` module. Pure streaming parser, no socket surface
+# (NFR-SE-01); MIT. See the workspace manifest for the full rationale.
+quick-xml = { workspace = true }
+
+# Debounced filesystem watcher (S-022, FR-SY-04, ADR-02). The watch module owns
+# the debounce/coalesce concurrency policy (core-owned concurrency, ADR-03);
+# the mcp surface merely hosts the handle inside `serve --mcp`. Local OS
+# notifications only — no socket surface (NFR-SE-01).
+notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
+
+# The single observability emission seam (S-019, ADR-13, NFR-OO-01..05).
+# `tracing` carries the spans/events emitted at the Engine chokepoint and the
+# three pipeline passes; `tracing-subscriber` hosts the stderr fmt layer
+# (NFR-RA-01: never stdout) and the custom telemetry Layer that batches events
+# into `.logos/telemetry.db` — both owned by the `observability` module.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[features]
+# The default build links the five v1 grammars (FR-PL-01). Each language is a
+# feature line + a `plugins/<lang>/` asset dir + one gated row in
+# `plugin::grammars::compiled`, touching no other core source (NFR-MA-01).
+# `lang-all` is the broader-set umbrella artifact (ADR-09/ADR-16).
+# The markdown documentation grammar (`lang-markdown`, S-033/CR-003) ships in
+# the default set so documentation is available on every repo out of the box
+# (FR-DG-01 "on by default"); whether docs are actually *indexed* is a separate
+# config toggle (S-034). `lang-all` stays a superset of `default`, so it carries
+# the markdown grammar too.
+# The data-format artifact grammars (`lang-yaml`/`lang-json`/`lang-toml`,
+# S-063/CR-010) and the build-format artifact grammars (`lang-dockerfile`/
+# `lang-make`/`lang-shell`, S-064/CR-010) ship in the default set so the
+# config/artifact layer indexes config out of the box (the `[config_artifacts]`
+# layer defaults on, S-062), and so the OpenAPI capstone (S-067) has parsed
+# YAML/JSON trees to content-sniff. Each is the same one-line-feature +
+# grammar-row + descriptor pattern as the code grammars (NFR-MA-01). `lang-all`
+# stays a superset of `default`.
+default         = ["lang-rust", "lang-python", "lang-typescript", "lang-go", "lang-java", "lang-c", "lang-kotlin", "lang-c-sharp", "lang-cpp", "lang-ruby", "lang-php", "lang-scala", "lang-markdown", "lang-yaml", "lang-json", "lang-toml", "lang-dockerfile", "lang-make", "lang-shell"]
+lang-rust       = ["dep:tree-sitter-rust"]
+lang-python     = ["dep:tree-sitter-python"]
+lang-typescript = ["dep:tree-sitter-typescript"]
+lang-go         = ["dep:tree-sitter-go"]
+lang-java       = ["dep:tree-sitter-java"]
+# C language plugin (S-056, CR-009): one feature line + a `plugins/c/` descriptor
+# + queries + one gated row in `plugin::grammars::compiled`, plus the single
+# bounded `ExportConvention::NonStatic` variant its non-`static` export idiom
+# needs (CR-009 §4.1). On by default so the systems-code base case indexes out of
+# the box; `lang-all` stays a superset.
+lang-c          = ["dep:tree-sitter-c"]
+# Kotlin (S-055, CR-009): the dominant modern JVM language joins the default
+# build — one feature line + a `plugins/kotlin/` asset dir + one gated row in
+# `plugin::grammars::compiled` (NFR-MA-01). On by default under the ≤ 50 MB
+# size budget (NFR-PC-04); `lang-all` stays a superset.
+lang-kotlin     = ["dep:tree-sitter-kotlin-ng"]
+# C# (S-057, CR-009): one feature line + a `plugins/c-sharp/` descriptor + one
+# gated row in `plugin::grammars::compiled`. Joins the default set — the default
+# binary parses C# out of the box (CR-009 §3.2 default-build membership), under
+# the unchanged NFR-PC-04 ≤ 50 MB budget.
+lang-c-sharp    = ["dep:tree-sitter-c-sharp"]
+# C++ (S-058, CR-009): one feature line + a `plugins/cpp/` asset dir + one gated
+# row in `plugin::grammars::compiled`, touching no other core source beyond the
+# bounded export/test convention variants its idiom requires (NFR-MA-01). In the
+# default set so the shipped 12-language indexer parses C++ (and owns `.h`) out
+# of the box; the stripped default binary is measured against the NFR-PC-04
+# ≤ 50 MB budget, with the documented spill to `lang-all` only if it breaches.
+lang-cpp        = ["dep:tree-sitter-cpp"]
+# Ruby (S-059, CR-009): a feature line + a `plugins/ruby/` descriptor + one gated
+# row in `plugin::grammars::compiled`. In `default` so the shipped binary indexes
+# Ruby out of the box (CR-009 default-build membership, ≤ 50 MB budget-guarded).
+lang-ruby       = ["dep:tree-sitter-ruby"]
+lang-php        = ["dep:tree-sitter-php"]
+# Scala (S-061, CR-009) completes the JVM trio. Joins the default set like the
+# other code grammars so the default binary is the documented 12-language
+# indexer (CR-009); it is the highest-risk grammar, so its inclusion is gated on
+# the verification preflight and its contribution to the ≤50 MB default budget
+# (NFR-PC-04) is measured per release target — with the documented spill to
+# `lang-all`-only (`logos-full`) if a target breaches (ADR-16).
+lang-scala      = ["dep:tree-sitter-scala"]
+lang-markdown   = ["dep:tree-sitter-md"]
+lang-yaml       = ["dep:tree-sitter-yaml"]
+lang-json       = ["dep:tree-sitter-json"]
+lang-toml       = ["dep:tree-sitter-toml-ng"]
+# Build-format artifact grammars (S-064, CR-010): each is a feature line + a
+# `plugins/<name>/` descriptor (no queries) + one gated row in
+# `plugin::grammars::compiled`. On by default so the artifact layer (whose
+# `[config_artifacts]` toggle also defaults on, S-062) actually produces nodes
+# out of the box; `tree-sitter-make` is the FR-CG-06 highest-risk grammar.
+lang-dockerfile = ["dep:arborium-dockerfile"]
+lang-make       = ["dep:tree-sitter-make"]
+lang-shell      = ["dep:tree-sitter-bash"]
+# Schema-format artifact grammars (S-065, CR-010). Each is a feature line + a
+# `plugins/<lang>/` descriptor + one gated row in `plugin::grammars::compiled`,
+# touching no other core source (NFR-MA-01). NOT in `default`: schema-format
+# artifact grammars are opt-in via the broader-set umbrella, keeping the default
+# binary's size budget unchanged (ADR-16, NFR-PC-04).
+lang-protobuf   = ["dep:tree-sitter-proto"]
+lang-graphql    = ["dep:tree-sitter-graphql"]
+# Infra-format artifact grammars (S-066, CR-010). Each is a feature line + a
+# `plugins/<lang>/` descriptor + one gated row in `plugin::grammars::compiled`,
+# touching no other core source (NFR-MA-01). Out of logos-core's slim `default`
+# (the five code grammars + markdown) so a minimal `--no-default-features` build
+# stays small (ADR-16), but carried by `lang-all` — which is the shipped CLI's
+# default (cli/Cargo.toml `default = ["lang-all"]`), so the distributed binary
+# parses Terraform and SQL out of the box.
+lang-terraform  = ["dep:tree-sitter-hcl"]
+lang-sql        = ["dep:tree-sitter-sequel"]
+lang-all        = ["lang-rust", "lang-python", "lang-typescript", "lang-go", "lang-java", "lang-c", "lang-kotlin", "lang-c-sharp", "lang-cpp", "lang-ruby", "lang-php", "lang-scala", "lang-markdown", "lang-yaml", "lang-json", "lang-toml", "lang-dockerfile", "lang-make", "lang-shell", "lang-protobuf", "lang-graphql", "lang-terraform", "lang-sql"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Used by the plugin-registry integration test (tests/plugin_registry.rs) to
+# drive a `Parser` against a loaded grammar's `Language` and run its compiled
+# queries — exercising the substrate through its public API (UAT-PL-01/03).
+tree-sitter = "0.25"
+# Used by the graph-hydration integration test (tests/graph_hydration.rs) to run
+# `petgraph::algo::tarjan_scc` over a view hydrated through the Engine façade —
+# the S-009 acceptance criterion.
+petgraph = { workspace = true }
+# Used by the observability integration test (tests/observability.rs) to count
+# telemetry.db event rows directly — proving the store survives a logos.db wipe
+# + reindex (NFR-OO-05) without widening the public stats surface.
+rusqlite = { workspace = true }
+# Used by the performance-envelope fitness suite (tests/perf_envelope.rs) to read
+# peak process RSS via getrusage(RUSAGE_SELF) for the NFR-PE-06 ≤1GB budget.
+# Test-only: never enters the shipped binary graph (the no-network fitness test
+# scans default features, not dev-dependencies).
+libc = "0.2"

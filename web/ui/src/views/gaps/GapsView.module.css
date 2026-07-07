@@ -1,0 +1,62 @@
+/*
+ * Gaps view layout (S-189, FR-UI-23, ADR-44). Zero-runtime CSS Module → external
+ * <link> stylesheet (no inline <style>, no CSS-in-JS), so the self-only CSP stays
+ * byte-identical. Every value is a design token.
+ */
+
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.note {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  line-height: var(--leading-base);
+}
+
+.coverage {
+  margin: 0 0 var(--space-4);
+  color: var(--text-1);
+}
+
+.ratio {
+  font-family: var(--font-mono);
+}
+
+.muted {
+  color: var(--text-2);
+}
+
+/* The no-rules onboarding example contract — a readable, left-aligned code block
+   reusing the mono face; no inline style (CSP-clean). */
+.onboarding p {
+  margin: 0 0 var(--space-3);
+  line-height: var(--leading-base);
+  color: var(--text-1);
+}
+
+.example {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-base);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.truncated {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+code {
+  font-family: var(--font-mono);
+}

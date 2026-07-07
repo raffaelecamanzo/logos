@@ -1,0 +1,70 @@
+.sidebar {
+  background: var(--surface-2);
+  border-right: 1px solid var(--border-subtle);
+  padding: var(--space-4) 0;
+  overflow-y: auto;
+}
+
+.group {
+  list-style: none;
+  margin: 0;
+  padding: 0 var(--space-3) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.group:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.group + .group {
+  padding-top: var(--space-3);
+}
+
+.item {
+  margin: 1px 0;
+}
+
+.link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  /* Reserve the active 3px bar on every item so activation causes no shift. */
+  border-left: 3px solid transparent;
+  padding: var(--space-2) var(--space-3);
+  border-radius: 0 var(--radius-1) var(--radius-1) 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  text-decoration: none;
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease);
+}
+.link:hover {
+  background: var(--tint-hover);
+  color: var(--text-1);
+  text-decoration: none;
+}
+
+.icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--text-2);
+}
+
+/* Muted — an honest "awaiting data" state (empty telemetry store, NFR-CC-04): the
+   item stays reachable but reads as dimmed/inactive. Never combined with .active
+   (an active tab is being viewed, not idle). */
+.muted:not(.active) .link {
+  opacity: 0.55;
+  font-style: italic;
+}
+
+/* Active — the card accent grammar rotated: a 3px signal-red LEFT bar + semibold. */
+.active .link {
+  border-left-color: var(--color-accent);
+  background: var(--tint-selected);
+  color: var(--text-1);
+  font-weight: var(--weight-semibold);
+}
+.active .icon {
+  color: var(--color-accent);
+}

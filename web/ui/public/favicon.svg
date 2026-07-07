@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Logos">
+  <!-- Authored brand favicon (Project MIT). Brand tokens only: merlin square
+       (#3d3935) + red peak (#da291c), echoing the header lockup mark. -->
+  <rect width="32" height="32" rx="6" fill="#3d3935"/>
+  <path d="M16 6.5 L25.5 25.5 H19.6 L16 18 L12.4 25.5 H6.5 Z" fill="#da291c"/>
+</svg>

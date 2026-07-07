@@ -1,0 +1,242 @@
+/*
+ * Graph & Decisions view layout (S-186, FR-UI-23, ADR-44). Zero-runtime CSS
+ * Module compiled to an external <link> stylesheet — no inline <style>, no
+ * CSS-in-JS — so the byte-identical self-only CSP is unaffected. All values are
+ * design tokens (no hardcoded palette except the canvas, which paints to <canvas>
+ * and reads its hues from graphModel).
+ */
+
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.canvasArea {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* ── Controls toolbar ─────────────────────────────────────────────────────── */
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3) var(--space-4);
+  padding: var(--space-3);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+}
+
+.controlGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  border: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.controlLabel {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-2);
+  padding: 0;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--text-1);
+}
+
+.edgeFilters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  max-width: 32rem;
+}
+
+.notice {
+  flex-basis: 100%;
+  margin: 0;
+  min-height: 1.25rem;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+/* ── Canvas stage + overlaid legend ───────────────────────────────────────── */
+.canvasStage {
+  position: relative;
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  overflow: hidden;
+}
+
+/* The canvas mount + its positioned wrapper (CSP-clean: the height/position that
+   were inline `style={{}}` now live here, so no inline style attribute is needed —
+   ADR-44). The mount must carry an explicit height or ECharts renders into a
+   zero-height box. */
+.canvasWrap {
+  position: relative;
+}
+.canvasMount {
+  width: 100%;
+  height: min(60vh, 560px);
+}
+.canvasBusy {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--surface-1) 55%, transparent);
+}
+
+/* Legend layer swatches — a fixed enumeration, so each layer/selection is its own
+   CSS class (the canvas reads the same hues from graphModel). This keeps the swatch
+   color out of an inline `style={{}}` attribute (ADR-44 / CSP-clean), mirroring the
+   server-rendered `.legend-dot--*` pattern. */
+.legendDotCode {
+  background: var(--graph-layer-code);
+}
+.legendDotDoc {
+  background: var(--so-green);
+}
+.legendDotArtifact {
+  background: var(--graph-layer-artifact);
+}
+.legendDotSelected {
+  background: transparent;
+  border: 2px solid var(--so-red);
+}
+
+/* The Decisions-panel identity header — the selected node's name/kind/layer line. */
+.identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.capNotice {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+/* ── Legend (overlays the canvas, top-right) ──────────────────────────────── */
+.legend {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  max-width: 16rem;
+  max-height: 70%;
+  overflow: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+}
+
+.legend summary {
+  cursor: pointer;
+  font-weight: var(--weight-semibold);
+  color: var(--text-1);
+}
+
+.legendBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+.legendHeading {
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-2);
+  margin-top: var(--space-1);
+}
+
+.legendList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.legendRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-1);
+}
+
+.legendDot {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-pill);
+  flex: 0 0 auto;
+}
+
+.legendLine {
+  flex: 0 0 auto;
+}
+
+.legendNote {
+  margin: var(--space-1) 0 0;
+  color: var(--text-2);
+  line-height: var(--leading-base);
+}
+
+/* ── Query bar ────────────────────────────────────────────────────────────── */
+.query {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+/* Aligns the submit button to the baseline of the input fields. The query flex
+   container uses align-items: flex-end, and every .field carries a
+   margin-bottom: var(--space-4); matching that margin here keeps the button's
+   margin box level with the inputs' — without it the button lands ~16px lower
+   (S-197, fixed in the 0.9.3 polish batch). */
+.querySubmit {
+  align-self: flex-end;
+  margin-bottom: var(--space-4);
+}
+
+/* Ghost-style button for a query result row's name cell. Inherits the mono
+   face from the DataTable .mono cell class; resets button chrome. */
+.queryRowBtn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-link);
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+
+.queryRowBtn:hover {
+  text-decoration: underline;
+}

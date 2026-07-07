@@ -1,0 +1,43 @@
+# Declarative descriptor for the TOML DATA-FORMAT artifact grammar
+# (S-063, CR-010, ADR-25, FR-CG-01/FR-CG-02).
+#
+# An *artifact* plugin (the third plugin class beside code and documentation):
+# `artifact = true` routes a matched file through the generic structural config
+# extractor (`extract::config`) into a `ConfigFile` + depth-bounded `Contains`
+# hierarchy of `ConfigSection` nodes — never the code `symbols`/`references`
+# path. It declares NO capabilities and NO `[queries]` table; the registry still
+# parses this descriptor and asserts the grammar's ABI at load (ADR-09). Pure
+# plugin data over the S-062 substrate — no core-logic change (NFR-MA-01).
+#
+# Embedded via `include_str!` (plugin::grammars::toml_entry), parsed at startup
+# by the LanguageRegistry.
+
+name = "toml"
+
+extensions = ["toml"]
+
+# `path#anchor` identity reusing ADR-07; `/` joins path segments.
+module_separator = "/"
+
+# ABI of the bundled `tree_sitter_toml_ng::LANGUAGE` grammar, asserted at load
+# (FR-PL-03, NFR-PC-03).
+abi_version = 14
+
+# Structural extraction — no tagging-query capabilities.
+capabilities = []
+
+# The config/artifact plugin-class selector (S-062, CR-010, ADR-25).
+artifact = true
+
+# The generic depth-bounded ConfigSection walk's declarative input (FR-CG-02).
+# TOML's section-bearing nodes are `[table]` (`table`), `[[array]]`
+# (`table_array_element`), and bare `key = value` entries (`pair`). Unlike YAML
+# and JSON, the TOML grammar exposes NO field name on these nodes, so `key_field`
+# is omitted: the walk falls back to each section node's first source line, which
+# for a table is its header (`[server]`) and for a pair is `key = value` — an
+# informative, deterministic name. Tables are flat siblings in the TOML syntax
+# tree (`[server.tls]` is a dotted name, not a nested node), so a table's inner
+# `pair`s are its depth-2 children; the fixed depth bound of 2 (BR-30) still caps
+# nesting regardless of file size.
+[config]
+section_kinds = ["table", "table_array_element", "pair"]

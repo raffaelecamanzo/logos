@@ -1,0 +1,123 @@
+/*
+ * Architecture / Cycles (DSM) view layout (S-189, FR-UI-23, ADR-44). Zero-runtime
+ * CSS Module compiled to an external <link> stylesheet — no inline <style>, no
+ * CSS-in-JS — so the byte-identical self-only CSP is unaffected. Every value is a
+ * design token; the heat buckets derive their fill from the signal-red accent so a
+ * denser dependency reads hotter without leaving the brand palette.
+ */
+
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.note {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  line-height: var(--leading-base);
+}
+
+/* ── The collapsible matrix disclosure ────────────────────────────────────── */
+.disclosure summary {
+  cursor: pointer;
+  font-weight: var(--weight-semibold);
+  color: var(--text-1);
+  padding: var(--space-1) 0;
+}
+
+.disclosureBody {
+  margin-top: var(--space-3);
+}
+
+/* Horizontal scroll for a wide matrix without forcing the page wide. */
+.scroll {
+  overflow-x: auto;
+}
+
+/* ── The heat-grid matrix ─────────────────────────────────────────────────── */
+.matrix {
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.matrix th,
+.matrix td {
+  border: 1px solid var(--border-subtle);
+  text-align: center;
+  padding: var(--space-1) var(--space-2);
+}
+
+.corner {
+  background: var(--surface-2);
+}
+
+.colHead {
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-weight: var(--weight-semibold);
+  font-family: var(--font-mono);
+}
+
+.rowHead {
+  background: var(--surface-2);
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.diag {
+  background: var(--surface-2);
+}
+
+.num {
+  font-family: var(--font-mono);
+}
+
+/* Heat buckets — a faint→stronger signal-red wash. Bucket 0 is the empty cell. */
+.heat0 {
+  background: var(--surface-1);
+}
+.heat1 {
+  background: color-mix(in srgb, var(--so-red) 12%, var(--surface-1));
+}
+.heat2 {
+  background: color-mix(in srgb, var(--so-red) 26%, var(--surface-1));
+}
+.heat3 {
+  background: color-mix(in srgb, var(--so-red) 42%, var(--surface-1));
+}
+.heat4 {
+  background: color-mix(in srgb, var(--so-red) 60%, var(--surface-1));
+  color: var(--ink-on-red);
+}
+
+/* A back-edge (cycle participant): outlined + a `↺` glyph so colour is never the
+   only signal (WCAG 2.1 AA). */
+.cycle {
+  outline: 2px solid var(--so-red);
+  outline-offset: -2px;
+}
+
+.cycleGlyph {
+  margin-left: var(--space-1);
+  color: var(--so-red);
+  font-weight: var(--weight-bold);
+}
+
+/* A cycle participant rendered as a focus link into the Graph tab. */
+.focusLink {
+  font-family: var(--font-mono);
+  color: var(--color-accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.focusLink:hover {
+  text-decoration: none;
+}

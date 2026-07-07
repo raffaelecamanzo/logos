@@ -1,0 +1,39 @@
+# Declarative descriptor for the Shell ARTIFACT grammar
+# (S-064, CR-010, ADR-25, FR-CG-01/FR-CG-03/FR-CG-05).
+#
+# An *artifact* plugin: a matched file routes through `extract::config` into a
+# `ConfigFile` root with one typed `ShellFunction` anchor per function
+# definition — never the code path. No capabilities, no `[queries]`; ABI is
+# asserted at load (ADR-09).
+#
+# Shell is the layer's **deliberate metric-neutral guard** (sprint risk
+# register, FR-CG-05): a `ShellFunction` is a purely *structural* anchor. It
+# contributes NO complexity, NO signal, NO dead-code candidacy — `ShellFunction`
+# is `is_config`/`is_non_code`, so graph hydration excludes it from the code
+# subgraph and a repo full of shell scripts moves no metric. (This is why shell
+# is an artifact plugin, not a code grammar with `symbols`/complexity queries.)
+#
+# Grammar: `tree-sitter-bash` (LanguageFn). Embedded via `include_str!` in
+# `plugin::grammars::shell_entry`.
+
+name = "shell"
+
+# `.sh` and `.bash`; no basename claims — shell scripts are extension-claimed.
+extensions = ["sh", "bash"]
+module_separator = "/"
+
+# tree-sitter-bash 0.25 is generated against ABI 15; asserted equal to the
+# compiled grammar at load (FR-PL-02, NFR-PC-03).
+abi_version = 15
+
+capabilities = []
+artifact = true
+
+# Typed-anchor extraction (FR-CG-03): each `function_definition` becomes one
+# `ShellFunction`. `key_field = "name"` reads the function name (`word`), so both
+# `foo() { … }` and `function foo { … }` are named correctly. `ShellFunction` is
+# a config kind — structural only, never a metric contribution (FR-CG-05).
+[config]
+section_kinds = ["function_definition"]
+key_field = "name"
+node_kind = "shell_function"

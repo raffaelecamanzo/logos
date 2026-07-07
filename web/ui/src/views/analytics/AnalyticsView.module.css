@@ -1,0 +1,75 @@
+/*
+ * Analytics views layout (S-188, FR-UI-11/FR-UI-17, ADR-44). Zero-runtime CSS
+ * Module extracted by Vite to an external hashed <link> — no inline <style>, no
+ * CSS-in-JS, so the self-only CSP stays byte-identical. The quadrant swatch hues
+ * are a redundant channel only: the cell labels + the accessible table carry the
+ * same classification (WCAG 2.1 AA, colour never alone).
+ */
+
+/* Section stack — the verdict Callout over each Card, evenly spaced (matches the
+   Gaps tab's `.view`). Without this the bare fragment stacked sections flush. */
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* The uPlot 2×2 mount (filled imperatively by QuadrantChart). */
+.quadrantChart {
+  width: 100%;
+  min-height: 360px;
+  margin-bottom: var(--space-4);
+}
+
+/* The quadrant cell legend — four labelled swatches naming each cell's meaning. */
+.quadrantLegend {
+  list-style: none;
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.quadrantLegend li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.qSwatch {
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: var(--radius-sm);
+  flex: none;
+}
+.q_q1 {
+  background: var(--so-red);
+}
+.q_q2 {
+  background: var(--so-orange);
+}
+.q_q3 {
+  background: var(--so-muted);
+}
+.q_q4 {
+  background: var(--so-green);
+}
+
+/* Per-file coverage bar cell (a native <meter> + a percent figure), rendered
+   inside the paginated Per-file coverage DataTable's Coverage column. */
+.covFigure {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+/* The <meter> coverage bar: width from its `value` attribute (no inline style —
+   the self-only CSP forbids it). A fixed track width keeps the rows aligned. */
+.covBar {
+  width: 8rem;
+  height: 0.6rem;
+}

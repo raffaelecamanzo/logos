@@ -1,0 +1,53 @@
+# Declarative descriptor for the C grammar (S-056, CR-009, FR-PL-07, ADR-09).
+# Embedded via `include_str!` and parsed at startup by the LanguageRegistry.
+# Droppable `.scm` query overrides resolve under `.logos/plugins/c/queries/`
+# (FR-PL-04, UAT-PL-03).
+#
+# C is the set's **honesty fixture** (NFR-CC-04): it ships NO test convention
+# (test files fall back to the path-convention `is_test` heuristic), NO smell
+# query, and NO frameworks capability, and it is NOT class-applicable — its
+# symbols query emits neither `Class` nor `Struct` nodes, so the Cohesion
+# (Class) and Focus (Class ∪ Struct) dimensions both drop out as `n/a` rather
+# than fabricating a clean score on method-less C aggregates (FR-QM-11,
+# FR-CV-08 — n/a paths).
+
+name = "c"
+# `.c` only — `.h` headers belong to the C++ plugin under the fixed ownership
+# rule (S-056/S-058): C ⊂≈ C++ grammatically, so the C++ grammar parses headers
+# without losing C constructs, and a single owner avoids double extraction.
+extensions = ["c"]
+
+# C has a flat translation-unit module space (no packages/namespaces); the
+# `::` ledger separator is the canonical join, matching the engine default.
+module_separator = "::"
+
+# tree-sitter-c 0.24.2 is generated against ABI 15.
+abi_version = 15
+
+# No `frameworks` capability (C has no dominant web framework), no `smell`
+# capability listed (and no smell query shipped) — the honesty posture.
+capabilities = ["symbols", "references"]
+
+# Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03):
+# the C control-flow keywords and short-circuit/ternary operators. C has no
+# `catch` (no exceptions); `goto` is unconditional and adds no decision point.
+complexity_keywords = ["if", "else", "for", "while", "do", "case", "&&", "||", "?"]
+
+# Block-structure nesting node kinds for per-function max nesting depth
+# (CR-005, FR-EX-07): the C control-flow statements. Depth 0 is a flat body;
+# each nested statement adds one.
+nesting_block_kinds = ["if_statement", "for_statement", "while_statement", "do_statement", "switch_statement"]
+
+# C's export rule (S-056, FR-AN-01): a file-scope declaration with no `static`
+# storage-class specifier has external linkage. `static` is file-local (a
+# non-root for dead-code); `extern` and the default are exported.
+export_convention = "non-static"
+
+# No `test_convention` key: C has no dominant unit-test annotation/naming idiom
+# at extraction time, so it defaults to `TestConvention::None`. Test files are
+# still recognised by the path-convention `is_test` fallback (FR-QM-08); the
+# absence of an extraction-time marker is honest, not an error (FR-EX-06).
+
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"

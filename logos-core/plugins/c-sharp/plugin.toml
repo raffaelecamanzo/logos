@@ -1,0 +1,60 @@
+# Declarative descriptor for the C# grammar (S-057, CR-009, FR-PL-07, FR-FW-03,
+# ADR-09). Embedded via `include_str!` and parsed at startup by the
+# LanguageRegistry. Droppable `.scm` query overrides resolve under
+# `.logos/plugins/c-sharp/queries/` (FR-PL-04, UAT-PL-03).
+
+name = "c-sharp"
+extensions = ["cs"]
+
+# C# joins namespace/type/member segments with a dot — reference extraction
+# canonicalises dotted paths into the `::`-joined ledger form.
+module_separator = "."
+
+# tree-sitter-c-sharp 0.23.5 is generated against ABI 15 (asserted at load).
+abi_version = 15
+
+capabilities = ["symbols", "references", "frameworks"]
+
+# Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03):
+# the C# control-flow tokens (`foreach` and the `??` null-coalescing operator
+# extend the Java set).
+complexity_keywords = ["if", "else", "for", "foreach", "while", "do", "case", "catch", "&&", "||", "?", "??"]
+
+# Block-structure nesting node kinds for per-function max nesting depth
+# (CR-005, FR-EX-07): the C# control-flow statements. Depth 0 is a flat body;
+# each nested statement adds one.
+nesting_block_kinds = ["if_statement", "for_statement", "foreach_statement", "while_statement", "do_statement", "switch_statement", "try_statement", "using_statement", "lock_statement"]
+
+# C#'s export rule: an explicit `public` access modifier among the declaration's
+# flat `modifier` children (FR-AN-01). Types default to `internal` and members to
+# `private`, so `public` is the API root; stricter modifiers are non-roots.
+export_convention = "explicit-modifier"
+
+# How C# marks a method as a test (S-057, FR-EX-06, ADR-18): a test attribute in
+# an `attribute_list` — `[Fact]`/`[Theory]` (xUnit), `[Test]` (NUnit),
+# `[TestMethod]` (MSTest). Feeds the unified `is_test` annotation (S-028).
+test_convention = "c-sharp-attributes"
+
+# The ratified C# framework set (FR-FW-03): ASP.NET Core — the `Microsoft.AspNetCore`
+# namespace prefix gates framework candidacy (FR-FW-04).
+framework_detectors = ["Microsoft::AspNetCore"]
+
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"
+frameworks = "queries/frameworks.scm"
+# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence.
+# NOT listed in `capabilities` -- extraction never runs it; `test_gaps` runs it
+# on demand. Embedded + disk-shadowable like every query (FR-PL-04).
+smell = "queries/smells.scm"
+
+# Captured `@fw.route.method` attribute name → HTTP method (S-057). ASP.NET Core
+# verb attributes; `[Route]` declares no single verb.
+[framework_methods]
+HttpGet = "GET"
+HttpPost = "POST"
+HttpPut = "PUT"
+HttpDelete = "DELETE"
+HttpPatch = "PATCH"
+HttpHead = "HEAD"
+Route = "ANY"

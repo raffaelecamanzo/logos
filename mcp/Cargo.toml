@@ -1,0 +1,51 @@
+[package]
+name    = "mcp"
+version = "0.3.0"
+edition = "2021"
+description = "Logos MCP adapter — thin rmcp surface (S-017, ADR-01, ADR-13)"
+license.workspace = true
+# Internal workspace crate — never published to crates.io (ADR-16).
+publish = false
+
+# NOTE: the debounced watcher hosted inside `serve --mcp` (S-022, FR-SY-04)
+# lives in logos-core's `watch` module — the debounce/coalesce policy is
+# core-owned concurrency (ADR-03), so `notify`/`notify-debouncer-full` are
+# logos-core dependencies; this crate only holds the `WatchHandle` returned by
+# `Engine::watch()` for the lifetime of the serve loop (NFR-MA-02 thin surface).
+
+[features]
+# The `logos-mcp` test-harness binary carries the five v1 grammars by default,
+# matching logos-core's own default since S-015 (FR-PL-01) and the shipped
+# `logos` binary (cli crate). `lang-rust` remains for slim development builds.
+default   = ["lang-all"]
+lang-rust = ["logos-core/lang-rust"]
+lang-all  = ["logos-core/lang-all"]
+
+[dependencies]
+logos-core = { path = "../logos-core", default-features = false }
+anyhow     = { workspace = true }
+rmcp       = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+# Current-thread runtime + the spawn_blocking bridge to the synchronous core
+# (ADR-03: tokio handles MCP I/O only and never enters logos-core). `io-std`
+# backs the stdio transport; `time` backs protocol timeouts.
+tokio      = { workspace = true, features = ["rt", "macros", "time", "io-std"] }
+tracing    = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# In-process MCP client driving the server over a tokio duplex pipe — the
+# protocol-level acceptance tests (UAT-MC-01/03/04) need both roles.
+rmcp     = { workspace = true, features = ["client"] }
+tokio    = { workspace = true, features = ["rt-multi-thread", "io-util", "process", "time"] }
+tempfile = { workspace = true }
+
+# Test-harness binary for process-level acceptance tests (UAT-MC-02 stdout
+# cleanliness at trace level, UAT-MC-04 host-disconnect → clean exit). The
+# shipped user binary is `logos` (cli crate, S-016) — this one exists so the
+# mcp crate can spawn a real stdio server without depending on the cli crate
+# (which would invert the adapter dependency direction, ADR-01).
+[[bin]]
+name = "logos-mcp"
+path = "src/bin/logos-mcp.rs"

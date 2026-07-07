@@ -1,0 +1,67 @@
+[package]
+name    = "wiki-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Logos wiki-agent — ui-gated in-process wiki generation on the shared rig substrate (CR-047, ADR-42)"
+license.workspace = true
+repository.workspace = true
+# Internal workspace crate — never published to crates.io (ADR-16). It is the
+# `ui`-gated wiki-agent component (ADR-42): the single-purpose, queue-driven
+# generation loop on the shared `agent-core` substrate. Like `chat-agent`, it
+# reaches the `logos` binary ONLY through the `web` adapter, which itself links
+# in solely under the non-default `ui` cargo feature (cli/Cargo.toml). So `rig`
+# + its `reqwest` HTTP client (carried by `agent-core`) never enter the
+# default-feature dependency tree the no-network fitness function guards
+# (NFR-SE-01, ADR-40), and removing `--features ui` yields exactly today's
+# offline binary — no in-process wiki generation.
+publish = false
+
+[dependencies]
+# The shared `rig` agent substrate (S-166/S-167, agent-core component, ADR-41/
+# ADR-42). The wiki-agent builds its tool-less LLM page-synthesizer on `rig`'s
+# `Agent` (re-exported as `agent_core::rig`), drives it offline with the mock
+# `CompletionModel`, and bounds the pass with agent-core's `ToolBudget`
+# primitive. `agent-core` carries `rig` + its `reqwest` HTTP client, but it (and
+# this crate) reach the `logos` binary ONLY through the `ui`-gated `web` adapter,
+# so neither enters the default-feature tree the no-network fitness function
+# guards (NFR-SE-01, ADR-40) — exactly the carve-out agent-core itself sits behind.
+agent-core = { path = "../agent-core", default-features = false }
+# The thick-core wiki-engine: the deterministic FR-WK-13 generation queue
+# (`Engine::wiki_generate`), the FR-WK-02 `wiki write` contract
+# (`Engine::wiki_write`, write-time anchors + HEAD + built-at-revision), the
+# FR-WK-03 read/freshness (`Engine::wiki_read`), and the embedded FR-WK-08
+# `logos-wiki` skill body (`wiki::rendered_skill`) used AS the system prompt. Also
+# the S-176 `[wiki]` model resolver (`Config::effective_wiki_model` →
+# `EffectiveWikiModel`, FR-CF-07). logos-core is the default-tree root (no network
+# surface) and is already in this crate's graph via agent-core; `default-features
+# = false` keeps the grammars out of the library build.
+logos-core = { path = "../logos-core", default-features = false }
+# Ergonomic error surface for the run path (queue read / write / read tasks).
+# Already a workspace dep.
+anyhow     = { workspace = true }
+# Derive Serialize on the per-page progress events and the run outcome so the
+# S-178 web surface can move them across the SSE/JSON seam without re-mapping.
+# Derive only; already in the workspace graph via logos-core.
+serde      = { workspace = true }
+# The blocking→async bridge for the synchronous `Engine` read/write touches
+# (ADR-03): the wiki-engine calls run on `spawn_blocking` so they never park
+# rig's async reactor — the same submit-and-await discipline the chat surface
+# uses. `rt` backs spawn_blocking; `time` backs the per-page synthesis liveness
+# timeout (S-222/CR-056) that turns a hung provider call into an honest halt so a
+# connection-independent run can never wedge the single-run lock. The consuming
+# surface owns the multi-thread runtime. ui-only via this crate.
+tokio      = { workspace = true, features = ["rt", "time"] }
+
+[dev-dependencies]
+# Drive the wiki-agent's async `rig` `Agent` loop and the `spawn_blocking` engine
+# touches in the offline mock tests. tokio is already a workspace dep (the
+# web/mcp adapters own runtimes); here it is dev-only.
+tokio    = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
+# Throwaway project roots for the generation-pass fixture engine.
+tempfile = { workspace = true }
+# The generation-pass test indexes a real Rust fixture so the graph has a
+# revision > 0 and the wiki work-list yields page-worthy entities to generate.
+# Cargo feature-unifies this with the `[dependencies]` logos-core for the test
+# build only; the library build stays default-features = false. Mirrors
+# agent-core's / chat-agent's grounded-fixture test dependency.
+logos-core = { path = "../logos-core", features = ["lang-rust"] }

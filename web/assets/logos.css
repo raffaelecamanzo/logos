@@ -1,0 +1,1202 @@
+/*
+ * logos.css — the SOURCESENSE design system for the Logos web UI.
+ *
+ * Authored (Project MIT). The :root block below is the AUTHORITATIVE token set,
+ * copied verbatim from the SOURCESENSE brand source via frontend-design.md §1.2;
+ * never approximate these hex values. Every rule here is implementable as plain
+ * CSS + the vendored WOFF2 fonts — no preprocessor, no Node toolchain (ADR-27).
+ *
+ * Loaded as a 'self' stylesheet under the self-only CSP (FR-UI-02): no inline
+ * styles, no remote stylesheet imports, no CDN fonts. The whole UI is readable
+ * with this file alone; the vendored JS (htmx/uPlot/ECharts) is progressive
+ * enhancement layered on top (UAT-UI-01: valid without JS).
+ *
+ * Sections:
+ *   1. Tokens (authoritative)      6. Verdict band / callout
+ *   2. Fonts (self-hosted WOFF2)   7. Badge
+ *   3. Reset & base                8. Data table
+ *   4. Application shell           9. Empty state / error panel
+ *   5. Card                       10. Chart / graph canvas
+ *                                 11. Motion, a11y, responsive
+ */
+
+/* ── 1. Tokens — AUTHORITATIVE (frontend-design.md §1.2) ─────────────────── */
+:root {
+  /* Brand palette */
+  --so-red:        #da291c;   /* Primary accent — signal, verdicts, active states */
+  --so-orange:     #e35205;   /* Secondary accent — warnings, warm hover, progress */
+  --so-merlin:     #3d3935;   /* Neutral / primary text */
+
+  /* Derived tones */
+  --so-merlin-50:  #f4f4f2;   /* Off-white — page background */
+  --so-muted:      #716b5d;   /* Muted text — secondary labels, captions, n/a */
+
+  /* Status extensions (dashboard semantics; keep this set tight) */
+  --so-green:      #16a34a;   /* Pass / bound / covered / Excellent band */
+  --so-lime:       #65a30d;   /* BR-34 "Good" quality band (between orange & green) */
+
+  /* Graph node-layer palette (CR-030, FR-UI-08) — the canvas node fills, kept
+     separable at a glance and distinct from the edge palette. Docs reuse --so-green.
+     Mirrored as hexes in graph.js (ECharts paints to <canvas>, cannot read vars). */
+  --so-blue:       #2563eb;   /* Code layer (graph nodes) */
+  --so-amber:      #d97706;   /* Artifact layer (graph nodes) */
+
+  /* Semantic aliases */
+  --color-accent:       var(--so-red);
+  --color-accent-warm:  var(--so-orange);
+  --color-text:         var(--so-merlin);
+  --color-text-muted:   var(--so-muted);
+  --color-bg:           #ffffff;
+  --color-bg-subtle:    var(--so-merlin-50);
+
+  /* Layout scale (authored — not brand-bound) */
+  --so-logo-sm-w:   120px;
+  --shell-header-h: 56px;
+  --shell-sidebar-w: 208px;
+  --radius:         4px;
+  --radius-pill:    999px;
+  --hairline:       #e7e5e1;          /* row rules / borders on the merlin scale */
+  --space-1: 0.25rem; --space-2: 0.5rem; --space-3: 0.75rem;
+  --space-4: 1rem;    --space-5: 1.25rem; --space-6: 1.5rem; --space-8: 2rem;
+
+  /* Type families — Inter (sans, brand fallback) + JetBrains Mono (identifiers) */
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+/* ── 2. Fonts — self-hosted WOFF2 (no CDN, self-only CSP) ────────────────── */
+@font-face {
+  font-family: "Inter"; font-style: normal; font-weight: 400; font-display: swap;
+  src: url("/assets/fonts/inter-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter"; font-style: normal; font-weight: 600; font-display: swap;
+  src: url("/assets/fonts/inter-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter"; font-style: normal; font-weight: 700; font-display: swap;
+  src: url("/assets/fonts/inter-700.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono"; font-style: normal; font-weight: 400; font-display: swap;
+  src: url("/assets/fonts/jetbrains-mono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono"; font-style: normal; font-weight: 600; font-display: swap;
+  src: url("/assets/fonts/jetbrains-mono-600.woff2") format("woff2");
+}
+
+/* ── 3. Reset & base ─────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-weight: 400;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--color-text);                /* merlin on white: 10.9:1 (AAA) */
+  background: var(--color-bg-subtle);      /* off-white page (1 of ≤2 bg treatments) */
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 { font-weight: 700; line-height: 1.2; margin: 0 0 var(--space-3); color: var(--color-text); }
+h1 { font-size: 1.5rem; }
+h2 { font-size: 1.15rem; }
+h3 { font-size: 1rem; font-weight: 600; }   /* card title */
+p { margin: 0 0 var(--space-3); }
+a { color: var(--color-accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, kbd, samp, .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--color-text-muted); }   /* captions, n/a, timestamps */
+
+/* The brand's section-label voice: uppercase, tracked, semibold. */
+.label {
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em;
+  font-size: 0.72rem; color: var(--color-text-muted);
+}
+
+/* ── 4. Application shell ─────────────────────────────────────────────────── */
+.app {
+  display: grid;
+  grid-template-columns: var(--shell-sidebar-w) 1fr;
+  grid-template-rows: var(--shell-header-h) 1fr;
+  grid-template-areas: "header header" "sidebar main";
+  min-height: 100vh;
+}
+
+/* Header — white, 1px bottom rule; logo + project root (mono) + freshness chip */
+.app-header {
+  grid-area: header;
+  display: flex; align-items: center; gap: var(--space-4);
+  padding: 0 var(--space-5);
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--hairline);
+}
+.app-logo { width: var(--so-logo-sm-w); height: auto; display: block; flex: none; }
+.app-root { font-family: var(--font-mono); font-size: 0.82rem; color: var(--color-text-muted); }
+.app-header-spacer { flex: 1 1 auto; }
+
+/* Freshness chip — relative last_sync; orange while the watcher syncs */
+.freshness-chip {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--hairline); border-radius: var(--radius-pill);
+  font-size: 0.78rem; color: var(--color-text-muted); white-space: nowrap;
+  min-width: 0; max-width: 22ch;            /* never let the chip force header width */
+}
+/* The chip label truncates rather than blowing out the header on small screens;
+   the full freshness citation lives in the chip's `title` tooltip. */
+.freshness-chip-text { overflow: hidden; text-overflow: ellipsis; }
+.freshness-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--so-green); flex: none; }
+.freshness-chip.is-syncing { color: var(--so-orange); border-color: var(--so-orange); }
+.freshness-chip.is-syncing .dot { background: var(--so-orange); }
+.freshness-chip.is-stale .dot { background: var(--color-text-muted); }
+
+/* Sidebar — flat list, three navigation groups split by hairlines (CR-042,
+   superseding the CR-038 data-stage grouping). Each item carries a decorative
+   inline-SVG icon left of its label. */
+.app-sidebar {
+  grid-area: sidebar;
+  background: var(--color-bg);
+  border-right: 1px solid var(--hairline);
+  padding: var(--space-3) 0;
+  overflow-y: auto;
+}
+.nav-group { list-style: none; margin: 0; padding: 0; }
+.nav-group + .nav-group { margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--hairline); }
+.nav-item a {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-5);
+  color: var(--color-text);
+  border-left: 3px solid transparent;     /* the card accent grammar, rotated */
+  font-size: 0.9rem;
+}
+.nav-item a:hover { background: var(--color-bg-subtle); text-decoration: none; }
+/* Decorative Lucide-style line glyph left of each label (CR-042) — inline SVG,
+   currentColor (inherits the link color), ~1.1em; flex:none so it never shrinks.
+   aria-hidden in the markup, so the label text carries the meaning. */
+.nav-icon { width: 1.1em; height: 1.1em; flex: none; }
+/* Active item — 3px LEFT red bar + semibold (card accent rule rotated) */
+.nav-item.is-active a { border-left-color: var(--so-red); font-weight: 600; }
+/* Empty-store views: muted but visible + still navigable to their honest empty
+   state (NFR-CC-04) — the tooltip (title attr) explains "awaiting data". */
+.nav-item.is-empty a { color: var(--color-text-muted); }
+
+/* Main content — off-white page; breadcrumb then verdict then evidence.
+   A max content measure keeps tables, prose, and figures from stretching
+   edge-to-edge on wide displays (container-width); content stays left-aligned
+   under the sidebar. */
+.app-main { grid-area: main; padding: var(--space-6); overflow-y: auto; }
+.app-main > * { max-width: 1280px; }
+.breadcrumb { margin: 0 0 var(--space-4); }
+.breadcrumb, .breadcrumb a {
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+  font-size: 0.72rem; color: var(--so-red);
+}
+.breadcrumb .sep { color: var(--color-text-muted); margin: 0 var(--space-2); }
+.breadcrumb .current { color: var(--color-text-muted); }
+
+/* A row of cards (the default three-up evidence grid) */
+.card-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-4); }
+
+/* ── 5. Card — white bg, 3px red TOP border, 4px radius (non-removable) ───── */
+.card {
+  background: var(--color-bg);
+  border: 1px solid var(--hairline);
+  border-top: 3px solid var(--so-red);     /* the accent rule — not a preference */
+  border-radius: var(--radius);
+  padding: var(--space-5);
+}
+.card.is-subtle { background: var(--color-bg-subtle); }
+.card > h3 { margin-top: 0; }
+.card + .card { margin-top: var(--space-4); }
+
+/* ── 6. Verdict band / callout — merlin-50 bg, 4px red LEFT border ────────── */
+.callout {
+  background: var(--color-bg-subtle);
+  border-left: 4px solid var(--so-red);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: var(--space-4) var(--space-5);
+  margin: 0 0 var(--space-5);
+}
+.callout .callout-label {                  /* uppercase tracked label voice */
+  display: inline-block; margin-bottom: var(--space-1);
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em;
+  font-size: 0.72rem; color: var(--so-red);
+}
+.callout .callout-body { font-size: 1.05rem; }
+/* Verdict band — full-width verdict variant (GATE PASS/FAIL etc.) */
+.verdict { display: flex; align-items: baseline; gap: var(--space-3); }
+.verdict .verdict-state { font-weight: 700; font-size: 1.15rem; }
+.verdict.is-pass .verdict-state { color: var(--so-green); }
+.verdict.is-fail .verdict-state { color: var(--so-red); }
+/* Tone variants — left border colour follows meaning, never decoration */
+.callout.is-warn  { border-left-color: var(--so-orange); }
+.callout.is-warn  .callout-label { color: var(--so-orange); }
+.callout.is-muted { border-left-color: var(--color-text-muted); }
+.callout.is-muted .callout-label { color: var(--color-text-muted); }
+
+/* ── 7. Badge — uppercase 0.7rem semibold; colour carries meaning + text ──── */
+.badge {
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  padding: 0.1rem var(--space-2);
+  border-radius: var(--radius);
+  font-size: 0.7rem; font-weight: 600; line-height: 1.4;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  font-family: var(--font-sans);
+}
+.badge.is-red    { background: var(--so-red);    color: #fff; }   /* fail/error/stale */
+.badge.is-orange { background: var(--so-orange); color: #fff; }   /* warning/in-flight */
+.badge.is-green  { background: var(--so-green);  color: #fff; }   /* pass/covered */
+.badge.is-muted  {                                                /* n/a / info */
+  background: transparent; color: var(--color-text-muted);
+  border: 1px solid var(--hairline);
+}
+
+/* ── 8. Data table — hairline rules, mono identifiers, sticky header ──────── */
+.data-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+.data-table caption { text-align: left; margin-bottom: var(--space-2); }
+.data-table th {
+  position: sticky; top: 0; z-index: 1;
+  text-align: left; font-weight: 600; font-size: 0.72rem;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-text-muted);
+  background: var(--color-bg);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--hairline);
+}
+.data-table td { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--hairline); }
+.data-table tbody tr:hover { background: var(--color-bg-subtle); }   /* row hover tint */
+/* Identifiers/paths/numbers render mono with tabular figures */
+.data-table .mono, .data-table td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.data-table td.num { text-align: right; }
+/* Numeric column headers right-align with their numeric cells (FR-UI-11). */
+.data-table th.num { text-align: right; }
+.data-table th[aria-sort], .data-table th a { color: inherit; }
+
+/* Interactive table (FR-UI-11, CR-024): sortable header links, the active-sort
+   direction caret, and the pager — htmx swaps the #<tid> container in place and
+   degrades to the plain GET links with no JS. */
+.table-interactive { width: 100%; }
+.data-table th a { text-decoration: none; display: inline-flex; align-items: baseline; gap: 0.25em; }
+.data-table th a:hover { text-decoration: underline; }
+.data-table th.num a { flex-direction: row-reverse; }   /* caret stays leading on right-aligned heads */
+.sort-ind { font-size: 0.7em; color: var(--so-red); }
+.pager {
+  display: flex; align-items: center; justify-content: flex-end; gap: var(--space-4);
+  margin-top: var(--space-3); font-size: 0.85rem;
+}
+.pager-status { color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+.pager [aria-disabled="true"] { color: var(--color-text-muted); pointer-events: none; }
+
+/* Screen-reader-only: a caption that merely repeats its card heading stays the
+   table's accessible name while being visually hidden (FR-UI-11, WCAG 2.1 AA). */
+.sr-only {
+  position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ── 9. Empty state / error panel ────────────────────────────────────────── */
+.empty-state {                              /* centered, one muted sentence, mono cmd */
+  text-align: center; color: var(--color-text-muted);
+  padding: var(--space-8) var(--space-4);
+}
+.empty-state code { color: var(--color-text); }
+.error-panel {                              /* red-bordered ERROR callout — never papered over */
+  background: var(--color-bg-subtle);
+  border-left: 4px solid var(--so-red);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: var(--space-4) var(--space-5); margin: 0 0 var(--space-5);
+}
+.error-panel .label { color: var(--so-red); }
+.error-panel pre { margin: var(--space-2) 0 0; white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.85rem; }
+
+/* ── 10. Chart / graph canvas (vendored libs render into these) ───────────── */
+.chart { width: 100%; min-height: 220px; }
+/* Positioning context for the on-canvas legend overlay (S-115): the legend is a
+   sibling of the ECharts mount (never a child — ECharts owns the mount's DOM), so
+   the wrapper is what it absolutely-positions against. */
+.graph-canvas-wrap { position: relative; }
+/* Busy overlay (Issue 3): the genuinely-blank/blocked window of a graph fetch — the
+   network round-trip plus the server re-budgeting/re-budget compute, notably when a
+   zoom gesture crosses a semantic tier and re-fetches the whole graph — gets honest
+   feedback here. It is raised when a fetch starts and dropped the moment the new
+   series is committed to the canvas (see graph.js `rebuildSeries`), NOT held through
+   the force-layout settle: the layout animating nodes into place is itself visible
+   feedback and stays interactive, so dimming it behind a spinner would read as a hang
+   (the original `finished`-event clear did exactly that). `pointer-events: none` is
+   the belt-and-suspenders — even while shown the overlay never intercepts a pan/zoom.
+   It is a sibling of the ECharts mount inside the positioned wrap (never a child —
+   ECharts owns the mount's DOM), `aria-hidden` because the polite status text in
+   `#graph-controls-notice` carries the a11y announcement. The spinner uses the house
+   in-flight orange (`--so-orange`). */
+.graph-canvas-busy {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}
+/* Make the `hidden` attribute authoritative (S-125, CR-032). graph.js toggles
+   `el.hidden` (reference-counted over outstanding fetches) to show/hide this
+   overlay, but the UA `[hidden] { display: none }` rule is user-agent origin and
+   the `.graph-canvas-busy { display: flex }` rule above is author origin —
+   author beats UA regardless of specificity, so `display: flex` won
+   unconditionally and the attribute toggle was visually inert for three
+   releases. This author-origin `[hidden]` rule (specificity 0,2,0) outranks the
+   base rule (0,1,0), so the overlay actually hides when no fetch is in flight. */
+.graph-canvas-busy[hidden] { display: none; }
+.graph-canvas-busy::before {
+  content: "";
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--so-orange);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: graph-busy-spin 0.8s linear infinite;
+}
+@keyframes graph-busy-spin {
+  to { transform: rotate(360deg); }
+}
+/* The interactive canvas mount the ECharts graph series renders into (ADR-29,
+   HF-1). A force-directed <canvas> needs a definite height to lay out into, not
+   just a min-height — so the canvas is **square** (S-115, frontend-design §4.4):
+   a width-driven `aspect-ratio: 1 / 1` resolves the height from the card width
+   and reflows on viewport resize (graph.js calls `chart.resize()`), bounded by a
+   `max-height` so it never dominates a tall, wide viewport. A faint dotted field
+   over the off-white bg gives the graph a sense of plane (depth) without
+   competing with the layer-colored nodes; an inset hairline frames it like the
+   surrounding cards. */
+.graph-canvas {
+  width: 100%; aspect-ratio: 1 / 1; max-height: 720px;
+  position: relative; overflow: hidden;
+  background-color: var(--color-bg-subtle);
+  background-image: radial-gradient(var(--hairline) 1px, transparent 1px);
+  background-size: 22px 22px;
+  background-position: -11px -11px;
+  border: 1px solid var(--hairline); border-radius: var(--radius);
+  box-shadow: inset 0 1px 3px rgba(61, 57, 53, 0.04);
+}
+.graph-cap-notice { margin-top: var(--space-2); }   /* "N more not shown" */
+/* If the graph library failed to load, collapse the empty mount (graph.js then
+   surfaces an honest notice in .graph-cap-notice instead of a blank box). */
+.graph-canvas.graph-canvas-unavailable { display: none; }
+
+/* On-canvas legend (S-115, FR-UI-08): documents both the node-layer colors and
+   the edge-type colors so the typed, multi-layer graph (code/doc/artifact, with
+   S-113 surfacing the non-code layers) is legible. Overlays the canvas top-right
+   as a quiet card; collapsible (`<details>`) and scrollable so it never hides the
+   graph it annotates. Swatch colors are the authoritative brand tokens (§1)
+   — the same hexes graph.js mirrors onto the <canvas>. */
+.graph-legend {
+  position: absolute; top: var(--space-2); right: var(--space-2);
+  max-width: 13rem; z-index: 2;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--hairline); border-radius: var(--radius);
+  box-shadow: 0 1px 4px rgba(61, 57, 53, 0.08);
+  font-size: 0.72rem;
+}
+.graph-legend > summary {
+  list-style: none; cursor: pointer; user-select: none;
+  padding: var(--space-1) var(--space-2);
+  font-weight: 600; color: var(--color-text-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.graph-legend > summary::-webkit-details-marker { display: none; }
+.graph-legend > summary::after { content: " ▾"; color: var(--color-text-muted); }
+.graph-legend:not([open]) > summary::after { content: " ▸"; }
+.graph-legend-body {
+  max-height: 16rem; overflow: auto;
+  padding: 0 var(--space-2) var(--space-2);
+}
+.graph-legend-heading {
+  display: block; margin: var(--space-2) 0 var(--space-1);
+  font-weight: 600; color: var(--color-text-muted);
+  text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.66rem;
+}
+.graph-legend-list { list-style: none; margin: 0; padding: 0; }
+.graph-legend-list li {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: 1px 0; color: var(--color-text);
+}
+/* Node-layer swatch — a filled dot, mirroring the canvas node fills
+   (code blue / docs green / artifacts amber, CR-030). */
+.legend-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; border: 1px solid var(--color-bg); box-shadow: 0 0 0 1px rgba(61,57,53,0.12); }
+.legend-dot--code { background: var(--so-blue); }
+.legend-dot--doc { background: var(--so-green); }
+.legend-dot--artifact { background: var(--so-amber); }
+/* Selected-node swatch — a hollow dot with the red ring the canvas draws on the
+   selected/located node (the layer fill survives under the ring, CR-030). */
+.legend-dot--selected { background: var(--color-bg); border-color: var(--so-red); box-shadow: 0 0 0 2px var(--so-red); }
+/* Edge swatch — a short line that reproduces the edge's color *and* its line
+   style (the two distinguishing channels), so two edge kinds that share a hue
+   family (doc-reference/traces-to) still read apart by their dash pattern. The
+   hexes mirror graph.js's EDGE_COLOR — every type a distinct, node-avoiding hue. */
+.legend-line { width: 20px; height: 0; flex: none; }
+.legend-line--calls { border-top: 2px solid #3d3935; }
+.legend-line--imports { border-top: 2px dashed #57534e; }
+.legend-line--contains { border-top: 2px solid #78716c; }
+.legend-line--references { border-top: 2px dotted #a8a29e; }
+.legend-line--type-uses { border-top: 2px dotted #0891b2; }
+.legend-line--implements { border-top: 2px solid #7c3aed; }
+.legend-line--extends { border-top: 2px solid #c026d3; }
+.legend-line--instantiates { border-top: 2px solid #4f46e5; }
+.legend-line--accesses { border-top: 2px dashed #0e7490; }
+.legend-line--routes-to { border-top: 2px dashed #db2777; }
+.legend-line--doc-reference { border-top: 2px dotted #9333ea; }
+.legend-line--traces-to { border-top: 2px dashed #9333ea; }
+.legend-line--artifact-ref { border-top: 2px dashed #92400e; }
+.legend-line--artifact-binding { border-top: 2px dashed #be123c; }
+.legend-line--forbidden { border-top: 2px solid var(--so-red); }
+/* The legend's width/line-style note — the second-channel caption (CR-030). */
+.graph-legend-note { margin: var(--space-2) 0 0; font-size: 0.72rem; color: var(--color-text-muted); line-height: 1.4; }
+
+/* Exploration controls (S-086). Server-rendered `hidden`; graph.js reveals them
+   once the canvas boots, so no inert controls show without JavaScript. Styled as
+   a clean toolbar bar above the canvas — a subtle panel that reads as chrome, not
+   content. */
+.graph-controls {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--space-2) var(--space-4);
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--hairline); border-radius: var(--radius);
+  font-size: 0.85rem;
+}
+.graph-controls[hidden] { display: none; }
+.graph-control-group { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.graph-control-group + .graph-control-group { padding-left: var(--space-4); border-left: 1px solid var(--hairline); }
+.graph-control-group label { display: inline-flex; align-items: center; gap: var(--space-1); }
+.graph-control-label { color: var(--color-text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.72rem; }
+.graph-edge-filters { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.graph-edge-filters label { font-family: var(--font-mono); font-size: 0.78rem; }
+.graph-depth, .graph-tier-select,
+.graph-query-text, .graph-query-file, .graph-query-target, .graph-query-select {
+  padding: var(--space-1) var(--space-2); font: inherit;
+  border: 1px solid var(--hairline); border-radius: var(--radius); background: var(--color-bg);
+}
+/* The structured + relational query group (S-120): a wrapping toolbar row whose
+   ranked results list spans its full width beneath the inputs. */
+.graph-query { flex-wrap: wrap; gap: var(--space-2); }
+.graph-query-text { min-width: 12rem; }
+.graph-query-results { flex-basis: 100%; margin: 0; }
+.graph-query-hits { list-style: none; margin: var(--space-1) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+/* A ranked result row reads as an actionable item: full-width, left-aligned, with
+   a hover lift — selecting it centers + locks the node on the canvas. */
+.graph-query-hit {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  padding: var(--space-1) var(--space-2); font: inherit;
+  border: 1px solid var(--hairline); border-radius: var(--radius);
+  background: var(--color-bg); color: var(--color-text);
+}
+.graph-query-hit:hover { border-color: var(--so-muted); background: var(--color-bg-subtle); }
+.graph-query-empty { margin: var(--space-1) 0 0; }
+/* Toolbar buttons: the Query button is a quiet outline; Reset is the one warm
+   accent (it returns you to the whole graph). */
+.graph-controls button {
+  padding: var(--space-1) var(--space-3); font: inherit; cursor: pointer;
+  border: 1px solid var(--hairline); border-radius: var(--radius);
+  background: var(--color-bg); color: var(--color-text);
+}
+.graph-controls button:hover { border-color: var(--so-muted); }
+/* A disabled toolbar button (the Expand control before a node is locked) reads as
+   inert — muted, no hover lift, not-allowed cursor. */
+.graph-controls button:disabled,
+.graph-controls button:disabled:hover {
+  color: var(--color-text-muted); background: var(--color-bg-subtle);
+  border-color: var(--hairline); cursor: not-allowed;
+}
+/* The +/− zoom buttons (S-119): equal-width square taps with a centred symbol. */
+.graph-zoom {
+  min-width: 2rem; text-align: center; font-weight: 600;
+  font-family: var(--font-mono);
+}
+.graph-reset { color: var(--color-bg) !important; background: var(--so-red) !important; border-color: var(--so-red) !important; font-weight: 600; }
+.graph-reset:hover { background: var(--so-orange) !important; border-color: var(--so-orange) !important; }
+.graph-controls-notice { flex-basis: 100%; margin: 0; }   /* focus/query feedback */
+/* A click-to-focus Decisions-panel node reads as an actionable link. */
+.graph-focus-link { cursor: pointer; }
+/* The pivot-to-graph action on a governing doc reference (S-130): a compact,
+   muted secondary affordance beside the focus link — re-seeds the canvas on the
+   doc node keeping its intent edges. Smaller and nowrap so it reads as a verb
+   ("↪ graph") next to the node, not a competing node name. */
+.graph-pivot-link {
+  cursor: pointer; white-space: nowrap;
+  margin-left: var(--space-2); font-size: 0.85em; color: var(--so-blue);
+}
+/* The selected node's identity header atop the Decisions panel (S-121): names
+   the node the panel describes, above the requirements/ADRs/stories it traces to. */
+.decisions-identity {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2);
+  margin-bottom: var(--space-3); padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--hairline);
+}
+.decisions-identity .node-name { font-weight: 600; }
+
+/* ── 11. Motion, accessibility, responsiveness ───────────────────────────── */
+
+/* WCAG 2.1 AA focus ring — 2px solid red, :focus-visible only */
+:focus-visible { outline: 2px solid var(--so-red); outline-offset: 2px; }
+
+/* Visually-hidden twin (every chart ships its data-table twin) */
+.visually-hidden {
+  position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* htmx fragment swaps: 150ms opacity ease; nothing else animates on nav */
+.htmx-swapping { opacity: 0; transition: opacity 150ms ease; }
+.htmx-settling { opacity: 1; transition: opacity 150ms ease; }
+
+/* In-flight loading affordance (FR-UI-07, S-083) — injected by nav-progress.js
+   as progressive enhancement (absent with JS disabled). The thin top bar reuses
+   the sanctioned --so-orange "in-flight" token. Hidden until armed ~120ms after
+   a slow navigation or fragment request, so instant/cached pages never flash. */
+.nav-progress {
+  position: fixed; top: 0; left: 0; z-index: 1000;
+  width: 100%; height: 3px;
+  background: var(--so-orange);
+  transform: scaleX(0); transform-origin: 0 50%;
+  opacity: 0; pointer-events: none;
+}
+.nav-progress.is-active {
+  opacity: 1;
+  animation: nav-progress-fill 2s cubic-bezier(0.15, 0.7, 0.25, 1) forwards;
+}
+/* Indeterminate fill — eases toward (never reaching) full; the new document /
+   settled fragment clears it. */
+@keyframes nav-progress-fill {
+  0%   { transform: scaleX(0.04); }
+  50%  { transform: scaleX(0.6); }
+  90%  { transform: scaleX(0.9); }
+  100% { transform: scaleX(0.98); }
+}
+/* Pending nav item — orange LEFT bar, distinct from the red .is-active "current"
+   state (red = where you are; orange = where you're going). is-pending follows
+   is-active so it wins when you re-click the current view. */
+.nav-item.is-pending a { border-left-color: var(--so-orange); }
+
+/* The one orchestrated moment: first-load card reveal staggered 60ms (CSS only).
+   Up to eight steps; later cards simply appear instantly. */
+@keyframes card-reveal { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.stagger > .card { animation: card-reveal 200ms ease both; }
+.stagger > .card:nth-child(1) { animation-delay: 0ms; }
+.stagger > .card:nth-child(2) { animation-delay: 60ms; }
+.stagger > .card:nth-child(3) { animation-delay: 120ms; }
+.stagger > .card:nth-child(4) { animation-delay: 180ms; }
+.stagger > .card:nth-child(5) { animation-delay: 240ms; }
+.stagger > .card:nth-child(6) { animation-delay: 300ms; }
+.stagger > .card:nth-child(7) { animation-delay: 360ms; }
+.stagger > .card:nth-child(8) { animation-delay: 420ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, .stagger > .card { animation: none !important; transition: none !important; }
+  /* The progress bar still signals — a static full-width orange bar rather than
+     an animated fill (the global rule above disables the keyframes). */
+  .nav-progress.is-active { transform: scaleX(1); }
+}
+
+/* Tablet ≥768px: sidebar collapses to a horizontal top strip under the header */
+@media (max-width: 1023px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-areas: "header" "sidebar" "main";
+    grid-template-rows: var(--shell-header-h) auto 1fr;
+  }
+  .app-sidebar { border-right: 0; border-bottom: 1px solid var(--hairline); padding: var(--space-2) 0; }
+  .nav-group { display: flex; flex-wrap: wrap; }
+  .nav-group + .nav-group { margin-top: 0; padding-top: 0; border-top: 0; }
+  .nav-item a { border-left: 0; border-bottom: 3px solid transparent; padding: var(--space-2) var(--space-3); }
+  .nav-item.is-active a { border-left: 0; border-bottom-color: var(--so-red); }
+  /* Pending state follows the rotated accent too (orange bottom bar). */
+  .nav-item.is-pending a { border-left: 0; border-bottom-color: var(--so-orange); }
+}
+/* Below tablet: functional, not optimised — cards stack full-width */
+@media (max-width: 767px) {
+  .app-main { padding: var(--space-4); }
+  .card-row { grid-template-columns: 1fr; }
+  .app-root { display: none; }
+  /* A wide data table scrolls within its own region on small screens rather than
+     stretching the page into a horizontal scroll. */
+  .data-table { display: block; overflow-x: auto; white-space: nowrap; }
+}
+
+/* ── 12. Stage-1 views (S-074, FR-UI-04) ─────────────────────────────────── */
+
+/* Definition-list of card figures (Overview/Health): label left, figure right. */
+.stat-list { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: var(--space-2) var(--space-4); }
+.stat-list dt { color: var(--color-text-muted); font-size: 0.85rem; }
+.stat-list dd { margin: 0; text-align: right; }
+.agg { margin: 0 0 var(--space-3); }
+
+/* Labeled language list (Overview) — name + extensions, no fabricated bars. */
+.lang-list { list-style: none; margin: 0; padding: 0; }
+.lang-list li { display: flex; justify-content: space-between; gap: var(--space-4); padding: var(--space-1) 0; border-bottom: 1px solid var(--hairline); }
+.lang-list li:last-child { border-bottom: 0; }
+
+/* Search box (the Graph query bar's folded-Symbols FTS, CR-038/S-150). */
+.search-box { display: flex; gap: var(--space-2); margin: 0 0 var(--space-4); }
+.search-box input[type="search"] { flex: 1; padding: var(--space-2) var(--space-3); font: inherit; border: 1px solid var(--hairline); border-radius: var(--radius); background: var(--color-bg); }
+.search-box button { padding: var(--space-2) var(--space-4); font: inherit; font-weight: 600; color: var(--color-bg); background: var(--so-red); border: 0; border-radius: var(--radius); cursor: pointer; }
+/* Orientation hint shown before the first symbol search (no blank void). */
+.search-intro { max-width: 60ch; margin: var(--space-4) 0 0; font-size: 0.92rem; }
+
+/* Node detail panel (the Graph node-detail panel, CR-038/S-150). */
+.node-head { margin: 0 0 var(--space-3); }
+.signature { background: var(--color-bg-subtle); border-radius: var(--radius); padding: var(--space-2) var(--space-3); overflow-x: auto; font-size: 0.85rem; white-space: pre-wrap; }
+.annotations { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-2) 0; }
+
+/* Interactive graph canvas (Graph) — the ECharts graph series paints node/edge
+   colors to the <canvas> from graph.js (it cannot read CSS vars); the no-JS twin
+   below the mount is a plain .data-table. Node layer colors mirror the tokens
+   (CR-030): code = --so-blue, doc = --so-green, artifact = --so-amber; the
+   selected/located node keeps its layer fill under a --so-red ring. */
+
+/* Non-gated temporal section (Health) — visually separated, advisory. */
+.temporal { margin-top: var(--space-6); padding-top: var(--space-4); border-top: 2px dashed var(--hairline); }
+.temporal-notice { padding: var(--space-4) 0; }
+
+/* DSM heat-grid (DSM). */
+.dsm-scroll { overflow-x: auto; }
+.dsm { border-collapse: collapse; font-size: 0.8rem; }
+.dsm th, .dsm td { border: 1px solid var(--hairline); text-align: center; padding: var(--space-1); min-width: 2.2rem; height: 2.2rem; }
+.dsm th.row { text-align: left; white-space: nowrap; position: sticky; left: 0; background: var(--color-bg); z-index: 1; max-width: 18rem; overflow: hidden; text-overflow: ellipsis; }
+.dsm th.col, .dsm th.corner { position: sticky; top: 0; background: var(--color-bg); }
+.dsm td.diag { background: var(--so-merlin-50); }
+.dsm td.heat-0 { background: var(--color-bg); }
+/* Heat ramp on the merlin scale (never a red/orange fill — those stay signal). */
+.dsm td.heat-1 { background: #ecebe8; }
+.dsm td.heat-2 { background: #d9d7d1; }
+.dsm td.heat-3 { background: #c4c1b8; }
+.dsm td.heat-4 { background: #ada89c; }
+.dsm td.is-cycle { outline: 2px solid var(--so-red); outline-offset: -2px; }
+.cycle-glyph { color: var(--so-red); margin-left: 2px; }
+.cycle-list { list-style: none; margin: 0; padding: 0; }
+.cycle-list li { padding: var(--space-1) 0; }
+/* Cycles-first (S-148, §4.5): the full matrix is demoted to a collapsible
+   disclosure beneath the leading cycle list — collapsed by default past the
+   module-count threshold (the matrix is unreadable at that size). Mirrors the
+   graph-legend disclosure affordance so the caret grammar stays consistent. */
+.dsm-disclosure > summary {
+  font-weight: 600; cursor: pointer; user-select: none;
+  list-style: none; padding: var(--space-1) 0; color: var(--color-text-muted);
+}
+.dsm-disclosure > summary::-webkit-details-marker { display: none; }
+.dsm-disclosure > summary::after { content: " ▾"; color: var(--color-text-muted); }
+.dsm-disclosure:not([open]) > summary::after { content: " ▸"; }
+.dsm-disclosure-body { margin-top: var(--space-3); }
+
+/* ── Wiki view (S-076, FR-UI-06) ─────────────────────────────────────────────
+   Read-only surface over the agent-authored wiki: the grouped browse list, the
+   live FTS search box, and the page reader's provenance callout + Markdown body.
+   Red stays reserved for meaning — staleness — via the shared badge/callout. */
+.wiki-search-label { display: block; font-size: 0.8rem; color: var(--color-text-muted); margin-bottom: var(--space-2); }
+.wiki-search-input {
+  width: 100%; box-sizing: border-box;
+  padding: var(--space-2) var(--space-3);
+  font: inherit; color: var(--color-text);
+  background: var(--color-bg);
+  border: 1px solid var(--hairline); border-radius: var(--radius);
+}
+.wiki-results { margin-top: var(--space-3); }
+.wiki-search-hint { color: var(--color-text-muted); font-size: 0.88rem; }
+
+/* Grouped browse — one card per anchor entity, a flat page list inside */
+.wiki-page-list { list-style: none; margin: 0; padding: 0; }
+.wiki-page-list li {
+  display: flex; align-items: baseline; gap: var(--space-2);
+  padding: var(--space-2) 0; border-bottom: 1px solid var(--hairline);
+}
+.wiki-page-list li:last-child { border-bottom: 0; }
+.wiki-page-link { text-decoration: none; color: var(--color-text); }
+.wiki-page-link:hover { text-decoration: underline; }
+.wiki-slug { color: var(--color-text-muted); font-size: 0.8rem; }
+
+/* Provenance callout text — marker leads, mono provenance follows */
+.wiki-marker { display: block; font-weight: 600; }
+.wiki-provenance { display: block; font-size: 0.82rem; color: var(--color-text-muted); margin-top: var(--space-1); }
+
+/* The page title heading inside the content card (CR-034, CR-035/S-139, FR-UI-06) —
+   wiki pages read as first-class documentation, led by their own enlarged title
+   rendered once inside the `.card.wiki-body` box. */
+.wiki-title { margin: 0 0 var(--space-4); font-size: 1.8rem; line-height: 1.2; }
+
+/* The rendered Markdown body — generous reading measure, mono for code */
+.wiki-body { max-width: 64rem; }
+.wiki-prose { line-height: 1.65; }
+.wiki-prose h2, .wiki-prose h3, .wiki-prose h4 { margin: var(--space-4) 0 var(--space-2); }
+.wiki-prose p { margin: 0 0 var(--space-3); }
+.wiki-prose ul, .wiki-prose ol { margin: 0 0 var(--space-3) var(--space-5); }
+.wiki-prose blockquote {
+  margin: 0 0 var(--space-3); padding-left: var(--space-4);
+  border-left: 3px solid var(--hairline); color: var(--color-text-muted);
+}
+.wiki-prose code { font-family: var(--font-mono); font-size: 0.9em; }
+/* Fenced code blocks (S-151, CR-039, FR-WK-15). comrak (S-136, CR-035) emits a
+   bare `<pre><code class="language-…">`; the old hand-rolled renderer's
+   `pre.wiki-code` class is gone, so this rule keys to the comrak `<pre>` instead —
+   the selector drift is what shipped fenced code unstyled in 0.7.2. `max-width:
+   100%` + `overflow-x: auto` contain a long unbroken token (the Getting Started
+   `curl … | sh` install line): it scrolls *within* the block rather than widening
+   the content card. A ` ```mermaid ` fence is rewritten to a `.mermaid` div before
+   this could match, so diagrams keep their own chrome; inline `<code>` is untouched
+   (this targets block-level `pre` only). */
+.wiki-prose pre {
+  background: var(--color-bg-subtle); border: 1px solid var(--hairline);
+  border-radius: var(--radius); padding: var(--space-3);
+  max-width: 100%; overflow-x: auto;
+}
+.wiki-prose pre code { font-size: 0.85rem; }
+.wiki-prose hr { border: 0; border-top: 1px solid var(--hairline); margin: var(--space-4) 0; }
+
+/* ── Rendered Mermaid diagrams (S-111, CR-028, FR-WK-15 / ADR-27) ──────────────
+   The vendored offline Mermaid bundle renders every `.mermaid` block — the native
+   dependency diagram and agent-prose ` ```mermaid ` fences — into inline SVG. Two
+   subtleties drive these rules:
+   1. No-JS / pre-render fallback: until the renderer runs (or with scripting
+      disabled) the element shows its diagram SOURCE; `white-space: pre-wrap` keeps
+      it formatted and readable — never a blank (FR-WK-15, NFR-CC-04).
+   2. Theme under the self-only CSP: Mermaid injects its theme as a `<style>`
+      block, which the CSP (`style-src` falls back to 'self', no `unsafe-inline`)
+      makes inert — so the diagram's colours are supplied here, from the embedded
+      same-origin stylesheet, against Mermaid's stable SVG classes. Mermaid still
+      lays the SVG out (shapes, positions, `<text>` labels); these rules paint it. */
+.mermaid {
+  margin: var(--space-3) 0;
+  white-space: pre-wrap;
+  font-family: var(--font-mono); font-size: 0.85rem; color: var(--color-text-muted);
+  background: var(--color-bg-subtle); border: 1px solid var(--hairline);
+  border-radius: var(--radius); padding: var(--space-3); overflow-x: auto;
+}
+/* Once rendered the element holds an <svg>: drop the source-block chrome so the
+   diagram sits clean and centred on the page. */
+.mermaid[data-processed="true"] {
+  white-space: normal; background: none; border: 0; padding: var(--space-2) 0; text-align: center;
+}
+.mermaid svg { max-width: 100%; height: auto; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node ellipse,
+.mermaid .node polygon, .mermaid .node path {
+  fill: var(--color-bg); stroke: var(--so-red); stroke-width: 1px;
+}
+.mermaid .cluster rect { fill: var(--color-bg-subtle); stroke: var(--hairline); }
+.mermaid .nodeLabel, .mermaid .edgeLabel, .mermaid span.nodeLabel, .mermaid text {
+  fill: var(--color-text); color: var(--color-text);
+  font-family: var(--font-sans); font-size: 0.85rem;
+}
+/* Centre the SVG label on its node (FR-WK-15, CR-034). Mermaid normally centres a
+   label by translating its `<g class="label">` left by half the label width
+   measured with `getBBox()`; under the self-only CSP that measurement collapses to
+   ~0, so the group is never shifted and the `<tspan x="0">` (the node centre) stays
+   left-anchored — the label then starts mid-box and overflows the right border.
+   The tspans already sit at the node centre, so anchoring the text to its middle
+   (a presentation property honoured from this same-origin sheet, unlike the
+   CSP-stripped inline styles) re-centres every label within its box. Scoped to
+   `.node` labels of the flowchart `graph` diagrams the wiki emits (native
+   dependency diagram + agent prose), whose `htmlLabels:false` output puts each
+   line in a `<tspan x="0">` at the node centre; it intentionally does not touch
+   edge labels or other diagram types. It works precisely because Mermaid, with
+   its centring transform suppressed under the CSP, leaves `text-anchor` unset
+   inline — so this same-origin rule wins (verified: computed anchor = middle). */
+.mermaid .node text, .mermaid .node tspan { text-anchor: middle; }
+.mermaid .edgeLabel, .mermaid .edgeLabel rect { background: var(--color-bg); fill: var(--color-bg); }
+.mermaid .edgePath .path, .mermaid .flowchart-link, .mermaid line, .mermaid .edge path {
+  stroke: var(--color-text-muted); stroke-width: 1.5px; fill: none;
+}
+.mermaid .arrowheadPath, .mermaid marker path, .mermaid .marker, .mermaid defs path {
+  fill: var(--color-text-muted); stroke: var(--color-text-muted);
+}
+
+/* ── Two-tier wiki IA (S-104 → S-109, CR-027/CR-028, FR-WK-11/12) ─────────────
+   The tiered doc-tree menu (Guided Tour / Architecture / Modules / Reference),
+   the native (extracted) tier's structure/files/Mermaid sections, and the agent
+   (advisory) tier composed beside them. (The standalone Configuration section was
+   removed by CR-028.) Native content carries the muted "extracted
+   @revision" label; agent prose keeps the generated-content marker. */
+.wiki-menu summary { font-weight: 600; cursor: pointer; padding: var(--space-1) 0; }
+.wiki-menu summary a { text-decoration: none; color: var(--color-text); }
+.wiki-menu summary a:hover { text-decoration: underline; }
+.wiki-menu-list { list-style: none; margin: 0 0 var(--space-2) var(--space-3); padding: 0; }
+.wiki-menu-list li { padding: var(--space-1) 0; }
+.wiki-menu-list a { text-decoration: none; color: var(--color-text); }
+.wiki-menu-list a:hover { text-decoration: underline; }
+.wiki-menu-tree { border-left: 1px solid var(--hairline); padding-left: var(--space-3); }
+.wiki-menu-dir > .mono { color: var(--color-text-muted); font-size: 0.85rem; }
+.wiki-menu-empty { color: var(--color-text-muted); font-size: 0.85rem; }
+
+.wiki-section { margin-top: var(--space-5); }
+.wiki-section-title {
+  font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--so-red); margin: 0 0 var(--space-3);
+}
+.wiki-leaf { scroll-margin-top: var(--space-5); }
+
+/* Native Codebase-structure tree — names mono, kind + count muted */
+.wiki-structure-tree { list-style: none; margin: 0 0 0 var(--space-3); padding: 0; }
+.wiki-structure-tree li { padding: var(--space-1) 0; }
+.wiki-kind { color: var(--color-text-muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.wiki-node-count { color: var(--color-text-muted); font-size: 0.8rem; }
+
+/* The native provenance label — muted, distinct from the agent marker */
+.wiki-native-label { margin: 0 0 var(--space-2); }
+.wiki-native-label .wiki-marker { color: var(--color-text-muted); font-weight: 600; font-size: 0.82rem; }
+
+/* Per-file related-files list */
+.wiki-related-label { font-size: 0.8rem; color: var(--color-text-muted); margin: var(--space-2) 0 var(--space-1); }
+.wiki-related { list-style: none; margin: 0; padding: 0; }
+.wiki-related li { padding: var(--space-1) 0; font-size: 0.85rem; }
+
+/* ── Per-page wiki IA: three-column layout + TOC rail (S-109, CR-028, FR-WK-11)
+   menu (left) | focused content (centre) | "On this page" TOC (right). Each
+   wiki route renders one focused page in this grid; the menu is the shared
+   tiered doc-tree of discrete page links. */
+.wiki-layout {
+  display: grid;
+  grid-template-columns: minmax(190px, 15rem) minmax(0, 1fr) minmax(0, 13rem);
+  gap: var(--space-5);
+  align-items: start;
+}
+.wiki-nav {
+  position: sticky; top: var(--space-4); align-self: start;
+  max-height: calc(100vh - var(--space-6) * 2); overflow-y: auto;
+}
+.wiki-content { min-width: 0; }   /* let the centre column shrink so tables scroll */
+.wiki-content > * { max-width: none; }
+
+/* The shared menu — collapsible tiers + collapsible crate→module nodes */
+.wiki-menu .wiki-tier > summary { font-weight: 600; cursor: pointer; padding: var(--space-1) 0; }
+.wiki-menu .wiki-tier > summary:hover { color: var(--so-red); }
+.wiki-menu .wiki-menu-dir > details > summary { cursor: pointer; color: var(--color-text-muted); font-size: 0.85rem; }
+/* The top-level Search link — a sibling of the tiers, styled like a tier header
+   (CR-039, S-153) rather than a nested leaf. */
+.wiki-menu .wiki-top-link {
+  display: block; font-weight: 600; text-decoration: none;
+  color: var(--color-text); padding: var(--space-1) 0;
+}
+.wiki-menu .wiki-top-link:hover { color: var(--so-red); }
+/* The active page link — red accent (the nav grammar, FR-WK-11) */
+.wiki-menu a[aria-current="page"] { color: var(--so-red); font-weight: 600; }
+
+/* In-page heading targets clear the chrome when jumped to from the TOC */
+.wiki-content :is(h2, h3)[id] { scroll-margin-top: var(--space-4); }
+
+/* The "On this page" rail */
+.wiki-toc { position: sticky; top: var(--space-4); align-self: start; font-size: 0.85rem; }
+.wiki-toc h3 {
+  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--color-text-muted); margin: 0 0 var(--space-2);
+}
+.wiki-toc-list { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--hairline); }
+.wiki-toc-list li { padding: var(--space-1) 0 var(--space-1) var(--space-3); }
+.wiki-toc-list li.toc-sub { padding-left: var(--space-5); font-size: 0.95em; }
+.wiki-toc-list a { text-decoration: none; color: var(--color-text-muted); }
+.wiki-toc-list a:hover { color: var(--color-text); text-decoration: underline; }
+.wiki-toc-empty { color: var(--color-text-muted); }
+
+/* The landing intro */
+.wiki-intro { margin: 0 0 var(--space-2); }
+.wiki-intro-meta { color: var(--color-text-muted); font-size: 0.85rem; margin: 0; }
+
+/* Responsive collapse — the TOC folds away first, then the layout single-columns */
+@media (max-width: 1024px) {
+  .wiki-layout { grid-template-columns: minmax(180px, 14rem) minmax(0, 1fr); }
+  .wiki-toc { display: none; }
+}
+@media (max-width: 720px) {
+  .wiki-layout { grid-template-columns: 1fr; }
+  .wiki-nav { position: static; max-height: none; }
+}
+
+/* ── 14. Stage-2 view elements (S-075, FR-UI-05) ──────────────────────────────
+ * Bars, the non-gated temporal tier, metric dimensions, and per-file coverage
+ * rows for the Metrics / Hotspots / Commits / Coverage views. The bar is the
+ * native <meter> element: its fill is driven by the `value` ATTRIBUTE, never an
+ * inline `style`, so per-file bars stay CSP-safe under `default-src 'self'`
+ * (no `style-src 'unsafe-inline'`). `n/a` is muted labeled text, never a bar. */
+
+/* Native <meter> styled as the brand bar — green fill on a merlin-50 track
+   (frontend-design.md §4.10). The element text is the non-supporting fallback. */
+.bar {
+  width: 160px; height: 12px; vertical-align: middle;
+  -webkit-appearance: none; -moz-appearance: none; appearance: none;
+  background: var(--so-merlin-50);
+  border: 1px solid var(--hairline); border-radius: var(--radius-pill);
+}
+.bar::-webkit-meter-bar { background: var(--so-merlin-50); border: 0; border-radius: var(--radius-pill); }
+.bar::-webkit-meter-optimum-value,
+.bar::-webkit-meter-suboptimum-value,
+.bar::-webkit-meter-even-less-good-value { background: var(--so-green); border-radius: var(--radius-pill); }
+.bar::-moz-meter-bar { background: var(--so-green); border-radius: var(--radius-pill); }
+.bar-figure { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 0.85rem; }
+
+/* BR-34 advisory band tints for the Dashboard *quality* score bar only
+   (frontend-design §4.1). Coverage/test bars are never banded (raw, BR-28) — they
+   keep the green default above. red → orange → lime → green. */
+.bar.is-poor::-webkit-meter-optimum-value,
+.bar.is-poor::-webkit-meter-suboptimum-value,
+.bar.is-poor::-webkit-meter-even-less-good-value { background: var(--so-red); }
+.bar.is-poor::-moz-meter-bar { background: var(--so-red); }
+.bar.is-average::-webkit-meter-optimum-value,
+.bar.is-average::-webkit-meter-suboptimum-value,
+.bar.is-average::-webkit-meter-even-less-good-value { background: var(--so-orange); }
+.bar.is-average::-moz-meter-bar { background: var(--so-orange); }
+.bar.is-good::-webkit-meter-optimum-value,
+.bar.is-good::-webkit-meter-suboptimum-value,
+.bar.is-good::-webkit-meter-even-less-good-value { background: var(--so-lime); }
+.bar.is-good::-moz-meter-bar { background: var(--so-lime); }
+.bar.is-excellent::-webkit-meter-optimum-value,
+.bar.is-excellent::-webkit-meter-suboptimum-value,
+.bar.is-excellent::-webkit-meter-even-less-good-value { background: var(--so-green); }
+.bar.is-excellent::-moz-meter-bar { background: var(--so-green); }
+
+/* Magnitude bars (e.g. the Languages node-count list) carry no pass/fail meaning —
+   they show relative size only. A neutral merlin fill keeps green reserved for
+   genuine pass/coverage, so a raw count is never misread as a "good" score. */
+.bar.is-magnitude::-webkit-meter-optimum-value,
+.bar.is-magnitude::-webkit-meter-suboptimum-value,
+.bar.is-magnitude::-webkit-meter-even-less-good-value { background: var(--so-muted); }
+.bar.is-magnitude::-moz-meter-bar { background: var(--so-muted); }
+
+/* ── Dashboard (CR-021, S-089, frontend-design §4.1) ─────────────────────────
+   The hero row reuses .card-row (the three roll-ups). Each hero card is a flex
+   column so its detail-view link pins to the bottom and the three stay aligned. */
+.hero-card { display: flex; flex-direction: column; gap: var(--space-3); }
+.hero-figure { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-2); }
+.hero-band { font-weight: 600; font-size: 1.05rem; }
+.hero-raw { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--color-text-muted); }
+.hero-card .bar { width: 100%; }   /* the roll-up bar spans the card */
+/* A hero roll-up with no data yet shows its empty state compact and left-aligned
+   (not the centered, heavily-padded standalone treatment) so the three hero
+   cards keep one visual rhythm rather than one ballooning to fit a centered note. */
+.hero-card .empty-state { text-align: left; padding: var(--space-2) 0; }
+/* The trailing detail-view link — pinned to the card bottom, the one warm accent */
+.card-link { margin-top: auto; align-self: flex-start; font-size: 0.85rem; font-weight: 600; color: var(--so-red); text-decoration: none; }
+.card-link:hover { text-decoration: underline; }
+
+/* Project Overview widget (CR-034, S-135, FR-UI-09) — a read-only wiki snippet
+   linking into /wiki. It now LEADS the Dashboard, full width, carrying a fuller
+   snippet (CR-037); the top margin separates it from the verdict callout above. */
+.dashboard-overview { margin-top: var(--space-4); }
+.overview-snippet { margin: 0 0 var(--space-3); }
+
+/* Equal-width, equal-height widget pairs (CR-037, frontend-design §4.1): two 1fr
+   columns whose cards stretch to the taller card's height (the grid's default
+   row-stretch). Each pair sits below the one above with the standard rhythm. They
+   collapse to a single column on a narrow viewport (the max-width:767px block). */
+.dashboard-pair { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin-top: var(--space-4); align-items: stretch; }
+/* The grid `gap` already spaces the two columns, so the adjacent-sibling
+   `.card + .card` top margin (≈ line 206) must be zeroed here — otherwise it eats
+   into the second card's stretch and the pair is no longer equal-height. */
+.dashboard-pair > .card { margin-top: 0; }
+
+/* Full-width row reserved for the CR-036 advisory trust-score card (S-142 fills
+   it). While empty it takes no margin or height, so the reserved slot adds no
+   trailing gap; once a card is placed it gains the standard vertical rhythm. */
+.dashboard-trust:not(:empty) { margin-top: var(--space-4); }
+
+/* Narrow-viewport collapse for the widget pairs (CR-037 §3.2, CRA-02): each pair
+   drops to a single column so cards never crowd. This block MUST follow the base
+   `.dashboard-pair` rule above — a media query adds no specificity, so source
+   order decides the winner at equal specificity (cf. the shared mobile block at
+   ≈ line 612, which precedes the Dashboard section). Same 767px breakpoint the
+   rest of the app uses to switch to its mobile layout. */
+@media (max-width: 767px) {
+  .dashboard-pair { grid-template-columns: 1fr; }
+}
+
+/* Project-only language bars — name + node-count bar + count (no fabricated
+   magnitudes; the count is a graph fact). */
+.lang-row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-1) 0; border-bottom: 1px solid var(--hairline); }
+.lang-row:last-child { border-bottom: 0; }
+.lang-row .lang-name { flex: 0 0 5rem; font-size: 0.85rem; }
+.lang-row .bar { flex: 1 1 auto; width: auto; }
+.lang-row .lang-count { flex: 0 0 auto; font-size: 0.85rem; }
+.graph-caption { font-size: 0.82rem; margin: var(--space-2) 0 0; }
+
+/* Non-gated temporal tier — a muted-bordered region that makes the two-tier
+   (gated vs reported) posture visible (frontend-design.md §4.2/§4.9, FR-GH-07,
+   NFR-CC-04). Temporal/heuristic figures live INSIDE this band, never beside the
+   gated signal. */
+.tier-section {
+  border-left: 4px solid var(--color-text-muted);
+  background: var(--color-bg-subtle);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: var(--space-4) var(--space-5);
+  margin: 0 0 var(--space-5);
+}
+.tier-section > .label { display: block; margin-bottom: var(--space-3); }
+.tier-section .card { background: var(--color-bg); }
+.tier-section .data-table th { background: var(--color-bg-subtle); }
+
+/* Metric dimension — definition line, score meter, worst-offender table. An
+   `n/a` dimension (LCOM4 on non-OO code) renders the muted `.na` note, never a
+   zero or an empty bar (design Do/Don't). */
+.dimension + .dimension { margin-top: var(--space-5); }
+.dimension .definition { color: var(--color-text-muted); font-size: 0.88rem; margin-bottom: var(--space-2); }
+.dimension .score { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); }
+.dimension .na { color: var(--color-text-muted); }
+
+/* Metric drill-down (CR-038 §4.2, S-147): the folded Metrics-detail view — each
+   CR-005 structural dimension is an expand-on-click `<details>` worst-offender
+   card. Rendered `open`, and the disclosure is native HTML, so the no-JS path is
+   readable and interactive with no script (progressive enhancement, ADR-29). */
+.metric-details { display: flex; flex-direction: column; gap: var(--space-4); margin-top: var(--space-5); }
+.metric-detail > summary { cursor: pointer; font-weight: 600; display: flex; align-items: baseline; gap: var(--space-3); list-style: none; }
+.metric-detail > summary::-webkit-details-marker { display: none; }
+.metric-detail > summary::after { content: "▾"; color: var(--color-text-muted); margin-left: auto; }
+.metric-detail:not([open]) > summary::after { content: "▸"; }
+.metric-detail .detail-name { font-size: 1rem; }
+.metric-detail .definition { color: var(--color-text-muted); font-size: 0.88rem; margin: var(--space-2) 0; }
+.metric-detail .na { color: var(--color-text-muted); }
+
+/* Per-file coverage row: path + bar + figure, or a STALE / muted `n/a` label */
+.cov-row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-1) 0; border-bottom: 1px solid var(--hairline); }
+.cov-row .path { flex: 1 1 auto; font-family: var(--font-mono); font-size: 0.85rem; }
+.cov-row .cov-figure { display: inline-flex; align-items: center; gap: var(--space-2); }
+
+/* ── Config editor (S-099, CR-025, FR-UI-12) ──────────────────────────────────
+   The hybrid policy editor: per-file section with typed fields, the authoritative
+   raw-TOML pane, the rules confirm gate + provenance note, and the save result
+   panel. Reuses the SOURCESENSE tokens; red is reserved for meaning (errors). */
+.config-editor { display: flex; flex-direction: column; gap: var(--space-6); }
+.config-file { background: var(--color-bg); border: 1px solid var(--hairline); border-top: 3px solid var(--so-red); border-radius: var(--radius); padding: var(--space-5); }
+.config-file-head { display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-2); }
+.config-file-head h2 { margin: 0; font-size: 1.05rem; }
+.config-blurb { color: var(--color-text-muted); font-size: 0.9rem; margin-bottom: var(--space-4); }
+.config-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-4); }
+.config-table { border: 1px solid var(--hairline); border-radius: var(--radius); padding: var(--space-3) var(--space-4) var(--space-4); margin: 0 0 var(--space-4); }
+/* A fieldset that spans every column of the .config-fields grid it sits in,
+   rather than occupying a single ~220px cell. Used for [chat], whose base_url is
+   long and whose help text is verbose — it needs horizontal room. */
+.config-table-wide { grid-column: 1 / -1; }
+.config-table legend { font-family: var(--font-mono); font-size: 0.85rem; color: var(--color-text-muted); padding: 0 var(--space-2); }
+.config-field { display: flex; flex-direction: column; gap: var(--space-1); }
+.config-field label { font-weight: 600; font-size: 0.85rem; }
+.config-field input, .config-field select, .config-field textarea { font: inherit; padding: var(--space-2) var(--space-3); border: 1px solid var(--so-muted); border-radius: var(--radius); background: var(--color-bg); }
+.config-field textarea { resize: vertical; min-height: 5rem; }
+.field-help { color: var(--color-text-muted); font-size: 0.78rem; margin: 0; }
+.config-raw-label { display: block; font-weight: 600; font-size: 0.85rem; margin: var(--space-4) 0 var(--space-2); }
+/* The raw-TOML pane is the authoritative editor — give it a visible (not hairline)
+   border so the editable field reads clearly against the subtle fill. */
+.config-raw { width: 100%; box-sizing: border-box; font-size: 0.85rem; padding: var(--space-3); border: 1px solid var(--so-muted); border-radius: var(--radius); background: var(--color-bg-subtle); resize: vertical; min-height: 9rem; }
+.config-confirm { margin: var(--space-4) 0; padding: var(--space-3) var(--space-4); border-left: 3px solid var(--so-orange); background: var(--color-bg-subtle); border-radius: 0 var(--radius) var(--radius) 0; }
+.config-confirm label { font-weight: 600; }
+.config-actions { display: flex; align-items: center; gap: var(--space-3); margin-top: var(--space-4); }
+.config-save { padding: var(--space-2) var(--space-5); font: inherit; font-weight: 600; color: var(--color-bg); background: var(--so-red); border: 0; border-radius: var(--radius); cursor: pointer; }
+.config-save:disabled { opacity: 0.6; cursor: progress; }
+.config-saving { color: var(--so-orange); font-weight: 600; font-size: 0.85rem; }
+.config-result { margin-top: var(--space-3); font-size: 0.88rem; }
+.config-result:empty { display: none; }
+.config-result.is-ok { color: var(--so-green); }
+.config-result.is-error { color: var(--so-red); font-family: var(--font-mono); }
+.config-result.is-warn { color: var(--so-orange); }
+.config-apply-actions { margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px dashed var(--hairline); }
+.config-apply { padding: var(--space-2) var(--space-5); font: inherit; font-weight: 600; color: var(--so-red); background: var(--color-bg); border: 1px solid var(--so-red); border-radius: var(--radius); cursor: pointer; }
+.config-apply:disabled { opacity: 0.6; cursor: progress; }
+.config-applying { color: var(--so-orange); font-weight: 600; font-size: 0.85rem; }
+.config-apply-help { margin-top: var(--space-2); }
+
+/* ── Chat view (S-171, CR-045/CR-046, frontend-design §4.13) ──────────────
+   The agentic-chat surface: a vertical conversation log (user right, assistant
+   left in a red-top-ruled card), the planner's plan + muted subagent-activity
+   chips, the bottom composer with the FR-UI-07 in-flight affordance, and the
+   Clear-history control. Calm and muted — the orchestration is shown, not a
+   spinner. Color is redundant: every state also carries text. */
+.chat-view { display: flex; flex-direction: column; gap: var(--space-4); margin-top: var(--space-3); }
+.chat-consent .chat-provider-line { margin: var(--space-2) 0; color: var(--color-text-muted); font-size: 0.85rem; }
+.chat-consent-accept { margin-top: var(--space-2); padding: var(--space-2) var(--space-5); font: inherit; font-weight: 600; color: var(--color-bg); background: var(--so-red); border: 0; border-radius: var(--radius); cursor: pointer; }
+
+.chat-log { display: flex; flex-direction: column; gap: var(--space-3); min-height: 8rem; max-height: 60vh; overflow-y: auto; padding: var(--space-1); }
+.chat-empty { text-align: center; padding: var(--space-4) var(--space-2); }
+
+.chat-msg { max-width: 80%; padding: var(--space-3) var(--space-4); border-radius: var(--radius); }
+.chat-user { align-self: flex-end; background: var(--so-merlin); color: var(--color-bg); }
+.chat-assistant { align-self: flex-start; background: var(--color-bg); border: 1px solid var(--hairline); border-top: 3px solid var(--so-red); }
+
+.chat-plan { margin: 0 0 var(--space-2); padding-left: var(--space-4); font-size: 0.85rem; color: var(--color-text-muted); }
+.chat-plan-caption { list-style: none; margin-left: calc(-1 * var(--space-4)); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+
+.chat-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-1) 0; }
+.chat-chip { font-size: 0.75rem; padding: 2px var(--space-2); border-radius: var(--radius-pill); border: 1px solid var(--hairline); color: var(--color-text-muted); background: var(--color-bg-subtle); }
+.chat-chip.is-running { border-color: var(--so-orange); color: var(--so-orange); }
+.chat-chip.is-done { border-color: var(--so-merlin); }
+
+.chat-answer { white-space: pre-wrap; }
+.chat-final { margin: var(--space-1) 0 0; }
+/* Token-by-token answer streaming (FR-UI-19): a blinking caret trails the answer
+   while the Synthesizer streams it, removed when `final_answer` reconciles. */
+.chat-final.is-streaming::after { content: "\258C"; margin-left: 1px; color: var(--so-red); animation: chat-caret-blink 1s step-end infinite; }
+@keyframes chat-caret-blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .chat-final.is-streaming::after { animation: none; } }
+.chat-halt { margin: var(--space-1) 0 0; color: var(--so-orange); font-weight: 600; }
+.chat-error { margin: var(--space-1) 0 0; color: var(--so-red); font-weight: 600; }
+
+.chat-composer { display: flex; flex-direction: column; gap: var(--space-2); }
+.chat-input { width: 100%; box-sizing: border-box; font: inherit; padding: var(--space-3); border: 1px solid var(--so-muted); border-radius: var(--radius); background: var(--color-bg); resize: vertical; min-height: 4.5rem; }
+.chat-input:disabled { opacity: 0.6; cursor: not-allowed; }
+.chat-composer-actions { display: flex; align-items: center; gap: var(--space-3); }
+.chat-send { padding: var(--space-2) var(--space-5); font: inherit; font-weight: 600; color: var(--color-bg); background: var(--so-red); border: 0; border-radius: var(--radius); cursor: pointer; }
+.chat-send:disabled { opacity: 0.6; cursor: progress; }
+.chat-busy { color: var(--so-orange); font-weight: 600; font-size: 0.85rem; }
+
+.chat-history-actions { display: flex; align-items: center; gap: var(--space-3); }
+.chat-clear { padding: var(--space-2) var(--space-4); font: inherit; font-weight: 600; color: var(--so-red); background: var(--color-bg); border: 1px solid var(--so-red); border-radius: var(--radius); cursor: pointer; }
+.chat-clear:disabled { opacity: 0.6; cursor: progress; }
+.chat-clear-result { color: var(--color-text-muted); font-size: 0.85rem; }
+
+/* ── Quadrant view (CR-036, S-142; flipped 2×2 by CR-040/S-154, frontend-design
+   §4.12) ───────────────────────────────────────────────────────────────────
+   The reachability × runtime-coverage 2×2 grid + its server-rendered cell and
+   blast-radius legends, plus the Dashboard trust card's mini-quadrant. Gartner
+   numbering (best top-right): the palette mirrors the badges and the chart cells —
+   Q1 red (false-green, worst) and Q2 orange (dead/guarded edge) pop as the
+   disagreements; Q4 green (trust, best) and Q3 muted (true gap) stay calm. Color
+   is a redundant channel — the legend text, cell labels, badges, and table carry
+   the same classification, so nothing is color-only (a11y, frontend-design §7). */
+.quadrant-chart { width: 100%; min-height: 360px; margin: var(--space-3) 0; }
+.quadrant-noscript { margin: var(--space-2) 0 0; }
+.quadrant-axes { margin: var(--space-1) 0 0; font-size: 0.8rem; }
+
+.quadrant-legend { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); font-size: 0.85rem; color: var(--color-text-muted); }
+.quadrant-legend li { display: flex; align-items: center; gap: var(--space-2); }
+.q-swatch { width: 0.75rem; height: 0.75rem; border-radius: 2px; flex: none; }
+.q-q1 { background: var(--so-red); }
+.q-q2 { background: var(--so-orange); }
+.q-q3 { background: var(--so-muted); }
+.q-q4 { background: var(--so-green); }
+
+/* Blast-radius (point size = hotspot weight, FR-GH-06) legend: three graduated
+   merlin dots naming the size encoding so it is discoverable (CR-040). */
+.quadrant-size-legend { margin-top: var(--space-1); }
+.quadrant-size-legend .qsl-label { color: var(--color-text-muted); }
+.q-dot { display: inline-block; border-radius: 50%; background: var(--so-merlin); opacity: 0.72; flex: none; }
+.q-dot-sm { width: 0.4rem; height: 0.4rem; }
+.q-dot-md { width: 0.7rem; height: 0.7rem; }
+.q-dot-lg { width: 1rem; height: 1rem; }
+
+/* Dashboard trust card (frontend-design §4.1; rebuilt on the standard widget card
+   by CR-040/S-155): it now flows through `hero_card`, so `.hero-card` already
+   spans the bar, left-aligns the empty state, and pins the bottom-left "Open
+   quadrant" card-link — no `.dashboard-trust-card`-specific overrides needed. The
+   mini-quadrant is enlarged for legibility and gains a compact legend; the flipped
+   layout (CR-040) keeps Q4 trust top-right with the Q1/Q2 disagreement cells
+   tinted. Each cell stacks its quadrant tag over its count so the grid reads
+   without hovering (color is never the only channel — a11y). */
+.mini-quadrant { display: inline-grid; grid-template-columns: repeat(2, 4rem); grid-auto-rows: 4rem; gap: 3px; margin: var(--space-3) 0 var(--space-2); text-decoration: none; }
+.mq-cell { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--color-text); background: var(--so-merlin-50); border: 1px solid var(--hairline); border-radius: 3px; }
+.mq-tag { font-size: 0.7rem; font-weight: 600; letter-spacing: 0.02em; opacity: 0.85; }
+.mq-count { font-size: 1.1rem; font-weight: 600; line-height: 1; }
+/* The Q1/Q2 disagreement cells are tinted orange, the Q4 trust cell green, the Q3
+   true-gap cell stays muted (frontend-design §4.1, CR-040 Gartner numbering). */
+.mq-q1, .mq-q2 { background: #fce8df; border-color: var(--so-orange); color: var(--so-orange); }
+.mq-q4 { background: #e7f5ec; border-color: var(--so-green); color: var(--so-green); }
+.mq-q3 { color: var(--color-text-muted); }
+.mini-quadrant:hover .mq-cell { border-color: var(--so-merlin); }
+.mini-quadrant:focus-visible { outline: 2px solid var(--so-red); outline-offset: 2px; }
+/* The compact in-card legend under the mini-quadrant (S-155): the shared
+   `.quadrant-legend` flex list, tightened so four terse pairs fit in the card. */
+.mq-legend { margin-top: 0; font-size: 0.8rem; gap: var(--space-1) var(--space-3); }

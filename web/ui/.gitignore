@@ -1,0 +1,23 @@
+# Build-time-only toolchain artifacts (CR-049, FR-UI-22, ADR-43).
+
+# The npm dependency tree — restored by `npm ci` at build time, never committed.
+node_modules/
+
+# The Vite build output. The committed placeholder dist/index.html keeps
+# `cargo build --features ui` Node-free (rust-embed needs the folder to exist);
+# everything else under dist/ is a generated build artifact and is gitignored.
+dist/*
+!dist/index.html
+
+# TypeScript incremental build info.
+*.tsbuildinfo
+
+# `tsc -b` transpiles the node-side config project (tsconfig.node.json,
+# `composite: true`) and emits these next to vite.config.ts — generated build
+# artifacts, never committed (the source of truth is vite.config.ts).
+vite.config.js
+vite.config.d.ts
+
+# Local env / editor noise.
+.vite/
+*.local

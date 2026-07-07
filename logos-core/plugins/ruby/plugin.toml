@@ -1,0 +1,72 @@
+# Declarative descriptor for the Ruby grammar (S-059, CR-009, FR-PL-07,
+# FR-FW-03, ADR-09). Embedded via `include_str!` (plugin::grammars::compiled)
+# and parsed at startup by the LanguageRegistry. Droppable `.scm` query
+# overrides resolve under `.logos/plugins/ruby/queries/` (FR-PL-04, UAT-PL-03).
+
+name = "ruby"
+extensions = ["rb"]
+
+# Ruby joins namespace segments with `::` (`ActiveRecord::Base`). Surfaced by
+# `logos languages` (FR-PL-06); reference extraction canonicalises paths into
+# the `::`-joined ledger form.
+module_separator = "::"
+
+# tree-sitter-ruby 0.23 is generated against ABI 14; asserted at load against
+# the compiled grammar (FR-PL-03, NFR-PC-03).
+abi_version = 14
+
+capabilities = ["symbols", "references", "frameworks"]
+
+# Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
+# Anonymous-token kinds in the Ruby grammar: branching keywords, loop keywords,
+# case arms, exception arms, boolean operators, and the ternary `?`. `else` is
+# excluded — it adds no independent decision path (McCabe).
+complexity_keywords = ["if", "elsif", "unless", "while", "until", "for", "when", "rescue", "&&", "||", "and", "or", "?"]
+
+# Block-structure nesting node kinds for per-function max nesting depth (CR-005,
+# FR-EX-07): the Ruby control-flow compound nodes plus the block forms, because
+# Ruby's dominant looping construct is the iterator block (`items.each do … end`)
+# rather than a `for` statement. Depth 0 is a flat body; each nested node adds one.
+nesting_block_kinds = ["if", "unless", "while", "until", "for", "case", "case_match", "begin", "do_block", "block"]
+
+# Ruby methods are public by default; `private`/`protected` are dynamic
+# visibility calls whose effect on subsequent definitions a structural pass
+# cannot read reliably (best-effort per CR-009). `all` is the safe,
+# under-reporting direction (AR-05): every declaration is treated as exported,
+# so exported-is-live can only miss dead code, never flag a live symbol dead.
+export_convention = "all"
+
+# How Ruby marks a function as a test (S-059, FR-EX-06, ADR-18): a minitest
+# `test_*`-named method, or a method/example lexically enclosed by (or being) an
+# RSpec `it`/`describe`/`context` block call. Feeds the unified `is_test`
+# annotation (FR-AN-05).
+test_convention = "ruby-test"
+
+# The ratified v1 Ruby framework set (FR-FW-03): Rails. A file whose reference
+# ledger names a Rails constant (`Rails`, `ApplicationController`,
+# `ApplicationRecord`, `ActiveRecord`, …) becomes a framework candidate
+# (FR-FW-04 ledger-gated candidacy).
+framework_detectors = ["Rails", "ActionController", "ActiveRecord", "ApplicationController", "ApplicationRecord", "ActionMailer", "ActiveJob"]
+
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"
+frameworks = "queries/frameworks.scm"
+# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence.
+# NOT listed in `capabilities` -- extraction never runs it; `test_gaps` runs it
+# on demand. Embedded + disk-shadowable like every query (FR-PL-04).
+smell = "queries/smells.scm"
+
+# Captured `@fw.route.method` text → HTTP method (the declarative framework
+# contract, S-015). Rails routing-DSL verbs map to their HTTP verb; the RESTful
+# macros (`resources`/`resource`) and `root` carry no single path and are
+# deliberately unmapped — an unmapped method drops the match (FR-FW-04), so the
+# pass never fabricates the seven routes a `resources` macro expands to.
+[framework_methods]
+get = "GET"
+post = "POST"
+put = "PUT"
+patch = "PATCH"
+delete = "DELETE"
+head = "HEAD"
+options = "OPTIONS"

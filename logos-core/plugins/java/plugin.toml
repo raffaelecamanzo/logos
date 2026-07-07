@@ -1,0 +1,56 @@
+# Declarative descriptor for the Java grammar (S-015, FR-PL-01, FR-FW-03,
+# ADR-09). Embedded via `include_str!` and parsed at startup by the
+# LanguageRegistry. Droppable `.scm` query overrides resolve under
+# `.logos/plugins/java/queries/` (FR-PL-04, UAT-PL-03).
+
+name = "java"
+extensions = ["java"]
+
+# Java joins package/member segments with a dot — reference extraction
+# canonicalises dotted paths into the `::`-joined ledger form.
+module_separator = "."
+
+# tree-sitter-java 0.23 is generated against ABI 14.
+abi_version = 14
+
+capabilities = ["symbols", "references", "frameworks"]
+
+# Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
+complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "&&", "||", "?"]
+
+# Block-structure nesting node kinds for per-function max nesting depth
+# (CR-005, FR-EX-07): the Java control-flow statements. Depth 0 is a flat body;
+# each nested statement adds one.
+nesting_block_kinds = ["if_statement", "for_statement", "enhanced_for_statement", "while_statement", "do_statement", "switch_expression", "try_statement", "try_with_resources_statement"]
+
+# Java's export rule: a `public` token inside the declaration's `modifiers`
+# (FR-AN-01 — package-private and stricter are non-roots).
+export_convention = "public-modifier"
+
+# How Java marks a method as a test (S-027, FR-EX-06, ADR-18): a `@Test`-family
+# annotation (`@Test`, `@ParameterizedTest`, `@RepeatedTest`, …) in the method's
+# `modifiers`. Feeds the unified `is_test` annotation (S-028).
+test_convention = "java-annotations"
+
+# The ratified v1 Java framework set (FR-FW-03): Spring (MVC/Boot) — one
+# package prefix covers both.
+framework_detectors = ["org::springframework"]
+
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"
+frameworks = "queries/frameworks.scm"
+# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence.
+# NOT listed in `capabilities` -- extraction never runs it; `test_gaps` runs it
+# on demand. Embedded + disk-shadowable like every query (FR-PL-04).
+smell = "queries/smells.scm"
+
+# Captured `@fw.route.method` annotation name → HTTP method (S-015).
+# `@RequestMapping` declares no single verb.
+[framework_methods]
+GetMapping = "GET"
+PostMapping = "POST"
+PutMapping = "PUT"
+DeleteMapping = "DELETE"
+PatchMapping = "PATCH"
+RequestMapping = "ANY"

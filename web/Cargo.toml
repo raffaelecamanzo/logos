@@ -1,0 +1,132 @@
+[package]
+name    = "web"
+version = "0.3.0"
+edition = "2021"
+description = "Logos web adapter — feature-gated localhost dashboard (CR-012, ADR-27)"
+license.workspace = true
+# Internal workspace crate — never published to crates.io (ADR-16). It is the
+# third adapter (ADR-01) and links into the `logos` binary only under the
+# non-default `ui` cargo feature (cli/Cargo.toml), so its axum/hyper stack never
+# enters the default-feature dependency tree the no-network fitness function
+# guards (NFR-SE-01, ADR-27).
+publish = false
+
+[features]
+# `web` carries no grammars of its own; the cli drives the grammar set and
+# feature unification folds it into the one shared logos-core in the ui binary.
+# These forward lines exist so the cli's `lang-*` features can reach this path
+# too (cli uses `web?/lang-all`), matching the mcp crate's forwarding discipline.
+default   = []
+lang-rust = ["logos-core/lang-rust", "mcp/lang-rust"]
+lang-all  = ["logos-core/lang-all", "mcp/lang-all"]
+
+[dependencies]
+logos-core = { path = "../logos-core", default-features = false }
+# The combined `serve --mcp --ui` path runs the MCP serve loop beside the web
+# server on one runtime (FR-UI-01); `web` owns the orchestration so the cli stays
+# thin (NFR-MA-02). This is a one-directional edge — mcp never depends on web.
+mcp        = { path = "../mcp", default-features = false }
+# The ui-gated rig agent substrate (CR-046/CR-047, ADR-41/ADR-42). The chat-agent
+# surface (SSE/POST routes, S-170) lives on this web adapter, so `web` is the
+# crate that consumes the substrate. Because `web` itself links into `logos` only
+# under the non-default `ui` feature, this edge keeps `rig` + its `reqwest` HTTP
+# client out of the default-feature tree the no-network fitness function guards
+# (NFR-SE-01, ADR-40). The chat surface (S-170) on this `web` adapter consumes
+# the substrate over this carve-out edge.
+agent-core = { path = "../agent-core", default-features = false }
+# The ui-gated chat-agent component (CR-045/CR-046, ADR-40/ADR-41): owns the
+# `.logos/chat.db` conversation store (S-168) and, later, the orchestrator. The
+# chat surface (SSE/POST routes, S-170) on this `web` adapter is its only caller.
+# Because `web` itself links into `logos` only under the non-default `ui` feature,
+# this edge keeps `chat.db` (and the rest of chat-agent) out of the default-feature
+# tree the no-network fitness function guards, so removing `--features ui` yields
+# exactly today's offline binary with no `chat.db` (NFR-SE-01, ADR-40
+# reversibility). The chat surface (S-170) on this `web` adapter is its caller
+# over this component edge.
+chat-agent = { path = "../chat-agent", default-features = false }
+# The ui-gated wiki-agent component (CR-047, ADR-42, S-177): the in-process,
+# queue-driven wiki generator on the shared `agent-core` substrate. The Wiki-view
+# generation trigger + progress SSE (S-178) on this `web` adapter is its only
+# caller, driving `run_configured` via its `WikiProgress` sink — the surface holds
+# no generation logic (ADR-01). Like the chat edges above, `web` links into
+# `logos` only under the non-default `ui` feature, so this edge keeps `rig` + its
+# `reqwest` HTTP client out of the default-feature tree the no-network fitness
+# function guards (NFR-SE-01, ADR-40/ADR-42).
+wiki-agent = { path = "../wiki-agent" }
+anyhow     = { workspace = true }
+# Presentation-only DTO serialization for the read-only JSON query endpoint
+# (ADR-35). Derive only — `web` compiles solely under `--features ui`, so serde
+# never enters the default-feature tree the no-network fitness function guards
+# (NFR-SE-01), and it is already in the workspace graph via logos-core.
+serde      = { workspace = true }
+# The feature-gated HTTP server (ADR-27). Pinned; only ever compiled under
+# `--features ui`, so hyper/h2/socket2 stay out of the default tree (NFR-SE-01).
+axum       = "0.7"
+# Async runtime for HTTP I/O ONLY (ADR-03): the web surface owns a current-thread
+# runtime and bridges to the synchronous core via spawn_blocking — tokio never
+# enters logos-core. `net` backs the loopback TcpListener.
+tokio      = { workspace = true, features = ["rt", "net", "time", "macros", "sync"] }
+# Adapt the chat turn's `tokio::sync::mpsc` event channel and the wiki run's
+# `tokio::sync::broadcast` fan-out (S-178, S-222, CR-056) into the `Stream` the axum
+# SSE response body consumes (S-170, FR-UI-19). The `sync` feature enables
+# `wrappers::BroadcastStream`, which the connection-independent wiki run's
+# subscriber stream is built on. Already in the `ui` tree via axum, so it adds no
+# lock entry and stays out of the default-feature tree the no-network fitness
+# function guards (NFR-SE-01).
+tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }
+tracing    = { workspace = true }
+# OS-entropy source for the per-session intent (CSRF) token on the mutating
+# config-write/apply endpoints (NFR-SE-06, ADR-31). A thin FFI shim over the
+# platform RNG (getrandom/BCryptGenRandom/arc4random) — no socket/HTTP surface
+# (NFR-SE-01, kept honest by the no-network fitness test) and only ever compiled
+# under `--features ui`. MIT/Apache-2.0 satisfies the permissive license gate.
+getrandom  = "0.4"
+# The wiki Markdown→HTML renderer (S-136, CR-035, ADR-27 reversal): a mature
+# CommonMark+GFM engine, used so consolidated wiki pages render GFM pipe tables as
+# real `<table>`s. `default-features = false` drops comrak's `cli` bundle (clap,
+# shell-words, xdg, syntect, …) — we link only the parser/renderer library. It is
+# a pure in-process Markdown engine with no socket/HTTP surface (NFR-SE-01), and
+# only ever compiled under `--features ui`, so it stays out of the default-feature
+# tree the no-network fitness test and cargo-deny scan (ADR-27). Rendering runs
+# with `render.r#unsafe = false` (comrak's no-raw-HTML / no-dangerous-URL safety
+# boundary — the wiki's safety invariant, src/markdown.rs). BSD-2-Clause satisfies
+# the permissive-only license gate (deny.toml, NFR-CR-01).
+comrak     = { version = "0.52.0", default-features = false }
+# Directory-embedding of the Vite + React SPA bundle (CR-049, FR-UI-22, ADR-43):
+# embeds `web/ui/dist/` (the build-time-only toolchain's output) into the binary,
+# replacing a hand-maintained `include_bytes!` table for the SPA's hashed assets.
+# A committed placeholder `web/ui/dist/index.html` keeps `cargo build --features
+# ui` Node-free (the folder must exist at compile time). `debug-embed` embeds in
+# debug builds too, so the served binary reads NO file at runtime even in dev and
+# the bundle fitness test (tests/spa_bundle.rs) scans the genuinely-embedded
+# bytes. It is a pure compile-time embedder — no socket/HTTP surface (NFR-SE-01),
+# only ever compiled under `--features ui` (so it stays out of the default-feature
+# tree the no-network fitness test and cargo-deny scan guard), and MIT-licensed
+# (the permissive-only gate, deny.toml, NFR-CR-01).
+rust-embed = { version = "8", features = ["debug-embed"] }
+
+[dev-dependencies]
+# Drive the router in-process without binding a socket (`ServiceExt::oneshot`) —
+# the carve-out tests assert 405/403/CSP on real responses (UAT-UI-02).
+tower          = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+# The chat UAT scenario (tests/uat_ui_07.rs) builds mock tool-call args as JSON
+# (`MockTurn::tool_call` takes a `serde_json::Value`). Test-only: dev edges are
+# excluded from the no-network fitness scan, so it never enters the shipped tree
+# (NFR-SE-01). Already in the workspace graph via logos-core.
+serde_json     = { workspace = true }
+tempfile       = { workspace = true }
+tokio          = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
+# The read-only-view fitness test (tests/read_only_views.rs, S-082/CR-018) opens
+# logos.db / history.db read-only to assert the snapshot-row counts are unchanged
+# after repeated dashboard GETs. Test-only: never enters the shipped graph the
+# no-network fitness function scans (NFR-SE-01).
+rusqlite       = { workspace = true }
+# The wiki-generation SSE fitness test (tests/wiki_sse.rs, S-178) indexes a real
+# Rust fixture repo so the graph has a revision > 0 and the wiki work-list yields
+# page-worthy entities for the mock-provider run to generate. Cargo feature-unifies
+# this with the `[dependencies]` logos-core for the test build only; the library
+# build stays default-features = false. Mirrors the wiki-agent generation test's
+# grounded-fixture dependency. Test-only: never enters the shipped no-network tree
+# (NFR-SE-01).
+logos-core     = { path = "../logos-core", features = ["lang-rust"] }

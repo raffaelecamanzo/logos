@@ -1,0 +1,50 @@
+# Declarative descriptor for the Terraform/HCL ARTIFACT grammar
+# (S-066, CR-010, ADR-25, FR-CG-01/FR-CG-03).
+#
+# This is an *artifact* plugin (the third class beside code and documentation):
+# `artifact = true` routes a matched file through the structural config extractor
+# (`extract::config`), which builds a `ConfigFile` root and then — because this
+# is a typed-anchor format — walks the HCL `block` tree into `TfBlock` anchors
+# whose payload distinguishes the block type (resource/data/module/variable/
+# output/provider/…). It declares NO capabilities and NO `[queries]` table; the
+# registry still parses this descriptor and asserts the grammar's ABI at load
+# exactly as for the code grammars (ADR-09).
+#
+# A typed-anchor-only format ships no `[config]` table: the generic depth-bounded
+# `ConfigSection` walk is for key→value data formats (YAML/JSON/TOML, S-063); a
+# Terraform file's structure is its block hierarchy, captured by the per-format
+# `TfBlock` walk (extract::config::anchors::terraform) over the `ConfigFile` root.
+#
+# Embedded into the binary via `include_str!` (plugin::grammars::terraform_entry)
+# and parsed at startup by the LanguageRegistry.
+
+# Display + lookup name; also the per-format anchor-walk selector
+# (extract::config::anchors dispatches on this name) and the
+# `.logos/plugins/<name>/` override sub-directory. Surfaced by `logos languages`.
+name = "terraform"
+
+# File extensions this grammar claims, without the leading dot. `.tf` is a
+# Terraform configuration file; `.tfvars` is a variable-values file — the SAME
+# HCL grammar parses both (CRA-02, verified by the preflight).
+extensions = ["tf", "tfvars"]
+
+# HCL identity reuses the `path#anchor` scheme (ADR-07) the config layer shares
+# with documentation, so `/` is the natural separator between the file path and
+# its nested block slugs.
+module_separator = "/"
+
+# The tree-sitter ABI version `tree_sitter_hcl::LANGUAGE` was generated against
+# (parser.c LANGUAGE_VERSION = 15). The authoritative check at load compares the
+# *compiled* grammar's `Language::abi_version()` against the linked runtime's
+# supported range (FR-PL-03, NFR-PC-03); this value is the documented contract.
+abi_version = 15
+
+# Structural artifact grammar: extraction is the per-format `TfBlock` walk, so
+# there are no tagging-query capabilities to declare.
+capabilities = []
+
+# Marks this as an ARTIFACT plugin (S-062, CR-010, ADR-25): the extraction engine
+# routes a matched file to `extract::config` instead of the code symbols/refs
+# path. Defaults to false for every code/doc descriptor, so this single line is
+# what places Terraform in the metric-neutral non-code layer (FR-CG-05).
+artifact = true

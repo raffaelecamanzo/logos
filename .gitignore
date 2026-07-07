@@ -1,0 +1,28 @@
+.worktrees/
+notes/
+.claude/scheduled_tasks.lock
+
+# Logos self-analysis store (coordinator quality bracket snapshots on main).
+# The dev harness runs the pinned `logos` against this repo; its store/DB and
+# derived state are ephemeral and never committed. See the dogfooding plan.
+.logos/
+
+# Binary-generated, version-stamped wiki skill — materialized locally by
+# `logos wiki skill --emit` / `init -i` (FR-WK-08), regenerable, never tracked
+# (unlike the hand-authored dev-process skills in .agents/skills/).
+.agents/skills/logos-wiki/
+
+# Local-only agent/harness config — kept out of version control per
+# working-directory preference (make them local to this checkout).
+.agents/
+.claude/
+
+# Rust build artefacts
+/target/
+.playwright-mcp/
+
+# Local dev-tooling — kept out of the public release, retained on the maintainer's
+# machine (project instructions, private-skills lockfile, RTK filter config).
+/CLAUDE.md
+/skills-lock.json
+/.rtk/

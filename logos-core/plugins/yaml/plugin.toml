@@ -1,0 +1,53 @@
+# Declarative descriptor for the YAML DATA-FORMAT artifact grammar
+# (S-063, CR-010, ADR-25, FR-CG-01/FR-CG-02).
+#
+# This is an *artifact* plugin (the third plugin class beside code and
+# documentation): `artifact = true` routes a matched file through the generic
+# structural config extractor (`extract::config`), which walks the grammar's
+# mapping tree into a `ConfigFile` plus a depth-bounded `Contains` hierarchy of
+# `ConfigSection` nodes — never the code `symbols`/`references` tagging path. It
+# therefore declares NO capabilities and NO `[queries]` table; the registry
+# still parses this descriptor and asserts the grammar's ABI at load exactly as
+# for the code grammars (ADR-09). Everything here is pure plugin data over the
+# S-062 substrate — no `logos-core` core-logic change (NFR-MA-01).
+#
+# Embedded into the binary via `include_str!` (plugin::grammars::yaml_entry) and
+# parsed at startup by the LanguageRegistry.
+
+# Display + lookup name; also the override sub-directory name
+# (`.logos/plugins/<name>/`). Surfaced by `logos languages` (FR-PL-06).
+name = "yaml"
+
+# File extensions claimed, without the leading dot. Both the short (`.yml`) and
+# long (`.yaml`) forms. Whether a claimed file is actually indexed is the
+# separate `[config_artifacts]` toggle + globs concern (S-062, FR-CF-01).
+extensions = ["yml", "yaml"]
+
+# Config identity is a `path#anchor` scheme reusing ADR-07, so the natural
+# separator joining path segments is `/` — the same as the documentation layer.
+module_separator = "/"
+
+# The tree-sitter ABI version the bundled `tree_sitter_yaml::LANGUAGE` grammar
+# was generated against (verified at load by `abi::assert_abi` against the linked
+# runtime's supported range, FR-PL-03/NFR-PC-03; this is the documented contract
+# + a greppable cross-check).
+abi_version = 14
+
+# An artifact grammar: extraction is structural (config sections), so there are
+# no tagging-query capabilities to declare.
+capabilities = []
+
+# Marks this as a config/artifact plugin (S-062, CR-010, ADR-25): the extraction
+# engine routes a matched file to `extract::config` (ConfigFile/ConfigSection),
+# not the code path. The single line that selects the third plugin class
+# (NFR-MA-01: a new artifact format costs pure descriptor data).
+artifact = true
+
+# The generic depth-bounded ConfigSection walk's declarative input (FR-CG-02):
+# a YAML `block_mapping_pair` (a `key: value` mapping entry) is one section
+# level; its `key` field's text is the section's human-facing, FTS-indexed name
+# and the `#anchor` slug source. Nesting is bounded at the fixed depth of 2
+# (BR-30) regardless of file size.
+[config]
+section_kinds = ["block_mapping_pair"]
+key_field = "key"

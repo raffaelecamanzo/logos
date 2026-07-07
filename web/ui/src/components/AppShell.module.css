@@ -1,0 +1,44 @@
+.app {
+  display: grid;
+  grid-template-columns: 232px 1fr;
+  min-height: 100vh;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.content {
+  flex: 1;
+  padding: var(--space-6);
+  /* The content area never carries the focus ring on programmatic focus (skip
+     link target); a roving focus into it should be quiet. */
+  outline: none;
+}
+
+/* Skip link — hidden until focused, then a visible signal-red chip top-left. */
+.skipLink {
+  position: absolute;
+  left: var(--space-3);
+  top: -3rem;
+  z-index: 300;
+  background: var(--color-accent);
+  color: var(--ink-on-red);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-1);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  transition: top var(--motion-fast) var(--motion-ease);
+}
+.skipLink:focus {
+  top: var(--space-3);
+}
+
+/* Tablet & below: the sidebar collapses above the content (frontend-design §7). */
+@media (max-width: 1023px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+}

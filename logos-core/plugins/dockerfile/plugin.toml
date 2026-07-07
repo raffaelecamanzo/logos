@@ -1,0 +1,50 @@
+# Declarative descriptor for the Dockerfile ARTIFACT grammar
+# (S-064, CR-010, ADR-25, FR-CG-01/FR-CG-03).
+#
+# An *artifact* plugin (`artifact = true`): a matched file routes through the
+# structural config extractor (`extract::config`) into a `ConfigFile` root with
+# one typed `DockerfileStage` anchor per build stage — never the code
+# `symbols`/`references` path. Like the markdown documentation grammar it
+# declares NO capabilities and NO `[queries]`; the registry still parses this
+# descriptor and asserts the grammar's ABI at load (ADR-09).
+#
+# The grammar is `arborium-dockerfile`, the modern `tree_sitter_language::
+# LanguageFn` re-binding of the `tree_sitter_dockerfile` C grammar (the canonical
+# `tree-sitter-dockerfile` crate ships a legacy `Language` binding pulling a
+# second tree-sitter runtime — the duplicate-symbol hazard NFR-PC-05/ADR-09
+# avoid). Embedded via `include_str!` in `plugin::grammars::dockerfile_entry`.
+
+name = "dockerfile"
+
+# `.dockerfile` is the extension form (e.g. `app.dockerfile`); the canonical
+# extensionless `Dockerfile` and prefixed `Dockerfile.dev` are claimed by the
+# `filenames` basename index below (FR-CG-01).
+extensions = ["dockerfile"]
+
+# Basename claims (S-062, FR-CG-01): the registry admits a file when its
+# basename matches exactly (`Dockerfile`) or by the documented `Name.*` prefix
+# (`Dockerfile.dev`, `Dockerfile.prod`). The `module_separator` matches the
+# `path#anchor` identity scheme the config layer shares with docs.
+filenames = ["Dockerfile"]
+module_separator = "/"
+
+# arborium-dockerfile 2.18 (tree_sitter_dockerfile) is generated against ABI 15;
+# asserted equal to the compiled grammar at load (FR-PL-02, NFR-PC-03).
+abi_version = 15
+
+# Structural artifact extraction: no tagging queries.
+capabilities = []
+
+# Routes through `extract::config` as the third (artifact) plugin class.
+artifact = true
+
+# Typed-anchor extraction (FR-CG-03): each `from_instruction` (one per `FROM`,
+# i.e. one per build stage) becomes a `DockerfileStage`. `key_field = "as"` reads
+# the stage alias (`FROM rust AS builder` → `builder`); a stage with no alias
+# falls back to its `FROM …` line, so the name is always derivable, never
+# fabricated (NFR-RA-05). `DockerfileStage` is a config kind, hence metric-neutral
+# (FR-CG-05).
+[config]
+section_kinds = ["from_instruction"]
+key_field = "as"
+node_kind = "dockerfile_stage"

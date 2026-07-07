@@ -1,0 +1,78 @@
+# Declarative descriptor for the GraphQL SCHEMA grammar
+# (S-065, CR-010, ADR-25, FR-CG-01/FR-CG-03).
+#
+# An *artifact* plugin (the third plugin class beside code and documentation):
+# `artifact = true` routes a matched `.graphql`/`.gql` file through the
+# structural config extractor (`extract::config`) rather than the code path.
+# GraphQL is a typed-anchor-only format: it declares no `section_kinds` (no
+# generic `ConfigSection` walk), only `[[config.anchors]]`. Per the FR-CG-03
+# normative binding table GraphQL emits a SINGLE typed node kind — `GqlType` —
+# with a `payload` field disambiguating the six type-definition subtypes
+# (object / interface / enum / input / union / scalar), capping discriminant
+# growth. Each type definition is hung off the file's `ConfigFile` root by a
+# `Contains` edge. The layer is `Contains`-only — no reference/import edges
+# (CR-011's scope). `tree-sitter-graphql` is the CR-010 highest-risk grammar; its
+# verification preflight (FR-CG-06) is recorded in sprint-impl-10.md.
+#
+# Embedded via `include_str!` (plugin::grammars::graphql_entry); the registry
+# asserts the grammar's ABI at load like every other grammar (ADR-09). No
+# capabilities and no `[queries]` table — extraction is structural.
+
+# Display + lookup name; also the override sub-dir. Surfaced by `logos languages`.
+name = "graphql"
+
+# GraphQL SDL: `.graphql` (long form) and `.gql` (short form).
+extensions = ["graphql", "gql"]
+
+# `path#anchor` identity (ADR-07 reuse) → `/` path-segment separator.
+module_separator = "/"
+
+# ABI of the bundled `tree_sitter_graphql::LANGUAGE` grammar, verified at load
+# (FR-PL-02, NFR-PC-03) and recorded in the verification preflight (FR-CG-06).
+abi_version = 15
+
+# Structural artifact: no tagging-query capabilities.
+capabilities = []
+
+# Route `.graphql`/`.gql` through `extract::config` (S-062, CR-010, ADR-25).
+artifact = true
+
+# Typed-anchor-only: the six GraphQL type-definition node kinds each map to one
+# `gql_type` node carrying its subtype in `payload` (FR-CG-03). `name_child`
+# names the child node kind holding the type's declared name (`name` for every
+# GraphQL type definition).
+[[config.anchors]]
+node_kind = "object_type_definition"
+kind = "gql_type"
+name_child = "name"
+payload = "object"
+
+[[config.anchors]]
+node_kind = "interface_type_definition"
+kind = "gql_type"
+name_child = "name"
+payload = "interface"
+
+[[config.anchors]]
+node_kind = "enum_type_definition"
+kind = "gql_type"
+name_child = "name"
+payload = "enum"
+
+[[config.anchors]]
+node_kind = "input_object_type_definition"
+kind = "gql_type"
+name_child = "name"
+payload = "input"
+
+[[config.anchors]]
+node_kind = "union_type_definition"
+kind = "gql_type"
+name_child = "name"
+payload = "union"
+
+[[config.anchors]]
+node_kind = "scalar_type_definition"
+kind = "gql_type"
+name_child = "name"
+payload = "scalar"

@@ -1,0 +1,72 @@
+[package]
+# Package name == the distributed app name: cargo-dist derives artifact names
+# (logos-<target>.tar.xz), the Homebrew formula (logos.rb → `brew install
+# <tap>/logos`, FR-IN-05), and the installer URL from it. The directory stays
+# `cli/` (the adapter role, ADR-01); only the package identity is `logos`.
+name    = "logos"
+version = "1.0.3"
+edition = "2021"
+description = "Logos — structural code intelligence for AI-assisted development"
+license.workspace = true
+repository.workspace = true
+# The Homebrew formula's homepage field (cargo-dist publish-jobs).
+homepage = "https://github.com/raffaelecamanzo/logos"
+# Internal workspace crate — never published to crates.io. It builds the single
+# distributed `logos` binary (ADR-16).
+publish = false
+
+# cargo-dist (S-023, FR-DS-01, ADR-16): this is the one distributed package —
+# `publish = false` keeps it off crates.io, so dist needs the explicit opt-in.
+[package.metadata.dist]
+dist = true
+# Release artifacts enable the `ui` feature (CR-012, ADR-27) so the brew/curl
+# binary carries the localhost web dashboard (`serve --ui`). cargo-dist's `dist
+# build` reads feature selection here, not from CI flags; without this key it
+# would compile only the default set (`lang-all`) and ship a UI-less binary.
+# The default-feature tree (the no-network fitness test / cargo-deny scope)
+# is unchanged — this affects only the dist artifact.
+features = ["ui"]
+
+# The single `logos` binary target (ADR-16, NFR-PC-01).
+[[bin]]
+name = "logos"
+path = "src/main.rs"
+
+[features]
+# The shipped binary carries the five v1 grammars by default (FR-PL-01),
+# matching logos-core's own default since S-015. `lang-rust` remains for slim
+# development builds (`--no-default-features --features lang-rust`). Feature
+# lines forward to BOTH paths into logos-core (direct and via mcp) so the
+# grammar set unifies regardless of which seam pulls it in.
+default   = ["lang-all"]
+# The `web?/lang-*` weak-forward lines reach the web adapter's logos-core path
+# only when the `ui` feature has pulled it in, keeping the grammar set unified
+# across every seam (the mcp pattern, extended to the third adapter, CR-012).
+lang-rust = ["logos-core/lang-rust", "mcp/lang-rust", "web?/lang-rust"]
+lang-all  = ["logos-core/lang-all", "mcp/lang-all", "web?/lang-all"]
+# CR-012/ADR-27: the localhost web UI. NON-DEFAULT — enabling it links the axum
+# web surface into the binary (`serve --ui`/`--port`); the default build has no
+# `--ui` flag and no networking crate (NFR-SE-01). Release artifacts enable it.
+ui        = ["dep:web"]
+
+[dependencies]
+logos-core = { path = "../logos-core", default-features = false }
+# The rmcp stdio server behind `logos serve --mcp` (S-017 service contract:
+# the serve arm calls `mcp::serve_stdio(root)` and maps Err → exit 3). Grammar
+# features stay controlled by this crate's feature lines above.
+mcp        = { path = "../mcp", default-features = false }
+# The feature-gated web adapter (CR-012, ADR-27) — optional, behind `ui`. As an
+# optional dependency it appears in Cargo.lock, but it is not activated for the
+# default `logos` build, so it is absent from the default-feature dependency
+# tree (the scope of both cargo-deny and the no-network fitness test).
+web        = { path = "../web", default-features = false, optional = true }
+anyhow     = { workspace = true }
+clap       = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# End-to-end binary tests (tests/cli_surface.rs and the S-019 binary-level
+# stdout-safety test, NFR-RA-01): throwaway project fixtures — dev-only,
+# never enters the shipped binary graph.
+tempfile   = { workspace = true }

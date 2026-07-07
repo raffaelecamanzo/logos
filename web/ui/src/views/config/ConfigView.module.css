@@ -1,0 +1,110 @@
+/*
+ * Config editor layout (S-191, FR-UI-12, FR-UI-23, ADR-44). Zero-runtime CSS
+ * Module → external <link> stylesheet (no inline <style>, no CSS-in-JS), so the
+ * self-only CSP stays byte-identical. Every value is a design token.
+ */
+
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.fileHead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.path {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+/* A [table] field group: a labelled fieldset with the keys laid out in a grid. */
+.group {
+  margin: 0 0 var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+}
+
+.legend {
+  padding: 0 var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--space-3) var(--space-4);
+}
+
+.confirm {
+  display: block;
+  margin: var(--space-3) 0;
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  line-height: var(--leading-base);
+}
+
+.help {
+  margin: var(--space-2) 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  line-height: var(--leading-base);
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+/* The honest Save/Apply/secret result panel. Colour always pairs with text. */
+.result {
+  margin: var(--space-3) 0 0;
+  padding: var(--space-3);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius-1);
+  background: var(--surface-2);
+  font-size: var(--text-sm);
+  line-height: var(--leading-base);
+  color: var(--text-1);
+}
+
+.ok {
+  border-left-color: var(--color-pass);
+}
+
+.warn {
+  border-left-color: var(--color-accent-warm);
+}
+
+.error {
+  border-left-color: var(--color-accent);
+}
+
+code {
+  font-family: var(--font-mono);
+}
+
+/* The graph-consistency verify report (S-207, FR-UI-25) — the CONSISTENT badge
+ * / DRIFT callout body. */
+.verifyResult {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.deltaList {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-4);
+  font-size: var(--text-sm);
+  line-height: var(--leading-base);
+}

@@ -1,0 +1,74 @@
+[package]
+name    = "chat-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Logos chat-agent — ui-gated conversation persistence + orchestration (CR-045, CR-046, ADR-40, ADR-41)"
+license.workspace = true
+repository.workspace = true
+# Internal workspace crate — never published to crates.io (ADR-16). It is the
+# `ui`-gated chat-agent component (ADR-40/ADR-41): the conversation store now,
+# the planner/subagent orchestrator later. It reaches the `logos` binary ONLY
+# through the `web` adapter, which itself links in solely under the non-default
+# `ui` cargo feature (cli/Cargo.toml). So nothing here enters the default-feature
+# dependency tree the no-network fitness function guards (NFR-SE-01, ADR-40), and
+# removing `--features ui` yields exactly today's offline binary — no `chat.db`.
+publish = false
+
+[dependencies]
+# The conversation store is the fifth `.logos/*.db` SQLite file (chat.db),
+# beside logos.db/telemetry.db/history.db/wiki.db (ADR-13/ADR-40). `bundled`
+# (inherited from the workspace dep) statically links SQLite — no system lib,
+# no socket/HTTP surface, so it never trips the no-network fitness test
+# (NFR-SE-01). It is the SAME store engine logos-core already uses for the
+# default tree, so this adds no new network-capable crate either way.
+rusqlite = { workspace = true }
+# Ergonomic error surface for the store paths. Already a workspace dep.
+anyhow   = { workspace = true }
+# Derive Serialize/Deserialize on the row types so the chat surface (S-170/S-171)
+# and the multi-step memory (S-175) can move them across the SSE/JSON seam
+# without re-mapping. Derive only; already in the workspace graph via logos-core.
+serde    = { workspace = true }
+# The shared `rig` agent substrate (S-166/S-167, agent-core component, ADR-41/
+# ADR-42). The orchestrator (S-173) builds its LLM planner on `rig`'s `Agent`
+# (re-exported as `agent_core::rig`), drives it offline with the mock
+# `CompletionModel`, and composes the budget tree from agent-core's `ToolBudget`
+# primitive. `agent-core` carries `rig` + its `reqwest` HTTP client, but it (and
+# this crate) reach the `logos` binary ONLY through the `ui`-gated `web` adapter,
+# so neither enters the default-feature tree the no-network fitness function
+# guards (NFR-SE-01, ADR-40) — exactly the carve-out agent-core itself sits behind.
+agent-core = { path = "../agent-core", default-features = false }
+# The `[chat]` policy + budget-tree params (FR-CF-06): `BudgetTree` is built from
+# `ChatConfig` (`max_tool_calls`/`max_subagent_tool_calls`/`max_replans`).
+# logos-core is the default-tree root (no network surface) and is already in this
+# crate's graph via agent-core; `default-features = false` keeps grammars out.
+logos-core = { path = "../logos-core", default-features = false }
+# Parse the planner's JSON decision (plan vs. final answer) and serialize the
+# plan/step-transition events for the later SSE seam (S-170). Already a workspace
+# dep via logos-core.
+serde_json = { workspace = true }
+# Typed orchestrator/step/budget errors. Pinned to the 2.x lineage agent-core /
+# rig-core already use, so it adds no new lock entry.
+thiserror  = "2"
+# Consume rig's streaming completion (the Synthesizer's token-by-token answer,
+# FR-UI-19): `StreamExt::next` drives `CompletionModel::stream`'s
+# `StreamingCompletionResponse`. Pure async combinators — no network surface — and
+# already in the lock via agent-core/rig; ui-gated like the rest of this crate, so
+# it never enters the default-feature tree the no-network guard checks (NFR-SE-01).
+futures    = "0.3"
+
+[dev-dependencies]
+# Round-trip / restart / Clear-history tests open a real on-disk chat.db in a
+# throwaway directory to prove persistence survives a process bounce. Dev-only —
+# never enters the shipped binary graph.
+tempfile = { workspace = true }
+# Drive the planner's async `rig` `Agent` loop and the orchestrator's
+# plan→act→observe→replan run in the offline tests. tokio is already a workspace
+# dep (the web/mcp adapters own runtimes); here it is dev-only.
+tokio    = { workspace = true, features = ["rt", "macros"] }
+# The roster's compound-turn test indexes a small Rust fixture so the graph tools
+# (callers/…) resolve real symbols and the source `read` tool returns real file
+# contents — i.e. the synthesized answer is genuinely grounded, not fabricated
+# (S-174 acceptance). Cargo feature-unifies this with the `[dependencies]`
+# logos-core for the test build only; the library build stays default-features =
+# false. Mirrors agent-core's grounded-tool test dependency.
+logos-core = { path = "../logos-core", features = ["lang-rust"] }

@@ -1,0 +1,192 @@
+{
+  "schema": "logos.golden-signal/v1",
+  "aggregate_signal": 7470,
+  "metrics": [
+    {
+      "name": "modularity",
+      "raw": "0.000000",
+      "normalized": "0.333333"
+    },
+    {
+      "name": "acyclicity",
+      "raw": "0.000000",
+      "normalized": "1.000000"
+    },
+    {
+      "name": "depth",
+      "raw": "3.000000",
+      "normalized": "0.727273"
+    },
+    {
+      "name": "equality",
+      "raw": "0.000000",
+      "normalized": "1.000000"
+    },
+    {
+      "name": "redundancy",
+      "raw": "0.600000",
+      "normalized": "0.400000"
+    }
+  ],
+  "counts": {
+    "node_count": 12,
+    "edge_count": 3,
+    "function_count": 5,
+    "test_function_count": 0
+  },
+  "symbols": [
+    {
+      "symbol": "logos . . . src/`callee.rs`/",
+      "kind": "Module",
+      "name": "callee",
+      "file": "src/callee.rs",
+      "start_line": 1,
+      "end_line": 11
+    },
+    {
+      "symbol": "logos . . . src/`callee.rs`/helper().",
+      "kind": "Function",
+      "name": "helper",
+      "file": "src/callee.rs",
+      "start_line": 5,
+      "end_line": 7
+    },
+    {
+      "symbol": "logos . . . src/`callee.rs`/target().",
+      "kind": "Function",
+      "name": "target",
+      "file": "src/callee.rs",
+      "start_line": 1,
+      "end_line": 3
+    },
+    {
+      "symbol": "logos . . . src/`callee.rs`/unused().",
+      "kind": "Function",
+      "name": "unused",
+      "file": "src/callee.rs",
+      "start_line": 9,
+      "end_line": 11
+    },
+    {
+      "symbol": "logos . . . src/`caller.rs`/",
+      "kind": "Module",
+      "name": "caller",
+      "file": "src/caller.rs",
+      "start_line": 1,
+      "end_line": 5
+    },
+    {
+      "symbol": "logos . . . src/`caller.rs`/caller().",
+      "kind": "Function",
+      "name": "caller",
+      "file": "src/caller.rs",
+      "start_line": 3,
+      "end_line": 5
+    },
+    {
+      "symbol": "logos . . . src/`lib.rs`/",
+      "kind": "Module",
+      "name": "crate",
+      "file": "src/lib.rs",
+      "start_line": 1,
+      "end_line": 3
+    },
+    {
+      "symbol": "logos . . . src/`lib.rs`/callee/",
+      "kind": "Module",
+      "name": "callee",
+      "file": "src/lib.rs",
+      "start_line": 2,
+      "end_line": 2
+    },
+    {
+      "symbol": "logos . . . src/`lib.rs`/caller/",
+      "kind": "Module",
+      "name": "caller",
+      "file": "src/lib.rs",
+      "start_line": 1,
+      "end_line": 1
+    },
+    {
+      "symbol": "logos . . . src/`lib.rs`/twin/",
+      "kind": "Module",
+      "name": "twin",
+      "file": "src/lib.rs",
+      "start_line": 3,
+      "end_line": 3
+    },
+    {
+      "symbol": "logos . . . src/`twin.rs`/",
+      "kind": "Module",
+      "name": "twin",
+      "file": "src/twin.rs",
+      "start_line": 1,
+      "end_line": 3
+    },
+    {
+      "symbol": "logos . . . src/`twin.rs`/target().",
+      "kind": "Function",
+      "name": "target",
+      "file": "src/twin.rs",
+      "start_line": 1,
+      "end_line": 3
+    }
+  ],
+  "edges": [
+    {
+      "source": "logos . . . src/`callee.rs`/",
+      "target": "logos . . . src/`callee.rs`/helper().",
+      "kind": "Contains"
+    },
+    {
+      "source": "logos . . . src/`callee.rs`/",
+      "target": "logos . . . src/`callee.rs`/target().",
+      "kind": "Contains"
+    },
+    {
+      "source": "logos . . . src/`callee.rs`/",
+      "target": "logos . . . src/`callee.rs`/unused().",
+      "kind": "Contains"
+    },
+    {
+      "source": "logos . . . src/`callee.rs`/target().",
+      "target": "logos . . . src/`callee.rs`/helper().",
+      "kind": "Calls"
+    },
+    {
+      "source": "logos . . . src/`caller.rs`/",
+      "target": "logos . . . src/`callee.rs`/target().",
+      "kind": "Imports"
+    },
+    {
+      "source": "logos . . . src/`caller.rs`/",
+      "target": "logos . . . src/`caller.rs`/caller().",
+      "kind": "Contains"
+    },
+    {
+      "source": "logos . . . src/`caller.rs`/caller().",
+      "target": "logos . . . src/`callee.rs`/target().",
+      "kind": "Calls"
+    },
+    {
+      "source": "logos . . . src/`lib.rs`/",
+      "target": "logos . . . src/`lib.rs`/callee/",
+      "kind": "Contains"
+    },
+    {
+      "source": "logos . . . src/`lib.rs`/",
+      "target": "logos . . . src/`lib.rs`/caller/",
+      "kind": "Contains"
+    },
+    {
+      "source": "logos . . . src/`lib.rs`/",
+      "target": "logos . . . src/`lib.rs`/twin/",
+      "kind": "Contains"
+    },
+    {
+      "source": "logos . . . src/`twin.rs`/",
+      "target": "logos . . . src/`twin.rs`/target().",
+      "kind": "Contains"
+    }
+  ]
+}

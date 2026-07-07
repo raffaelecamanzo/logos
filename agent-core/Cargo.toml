@@ -1,0 +1,93 @@
+[package]
+name    = "agent-core"
+version = "0.1.0"
+edition = "2021"
+description = "Logos agent substrate — the ui-gated rig provider/mock seam (CR-046, CR-047, ADR-41, ADR-42)"
+license.workspace = true
+repository.workspace = true
+# Internal workspace crate — never published to crates.io (ADR-16). It is the
+# shared `rig` agent substrate (agent-core component) and reaches the `logos`
+# binary ONLY through the `web` adapter, which itself links in solely under the
+# non-default `ui` cargo feature (cli/Cargo.toml). So `rig` + its `reqwest`
+# HTTP client never enter the default-feature dependency tree the no-network
+# fitness function guards (NFR-SE-01, ADR-40); they exist only in the ui build.
+publish = false
+
+[dependencies]
+# The agent framework (ADR-41). rig provides the provider clients (native
+# Anthropic + OpenAI-compatible/Chat-Completions with a configurable base_url),
+# streaming, and the Agent/Tool primitives; Logos builds the orchestration,
+# tools, and the mock provider on top. Default features pull `reqwest` +
+# `rustls` (a pure-Rust TLS stack — no OpenSSL) + `derive`. This is the ONLY
+# HTTP client in the workspace, and it is confined to this ui-only crate — the
+# default `logos` tree links none of it (NFR-SE-01, kept honest by the
+# byte-identical logos-core/tests/no_network_deps.rs and by this crate's own
+# tests/carve_out.rs ui-vs-default boundary scan).
+rig-core   = "0.39"
+# The thick-core read-model façade the graph/governance tools wrap (S-167,
+# agent-core component). The tools call EXISTING `Engine` read-models
+# (search/context/node/… and scan/check_rules/…) — the substrate adds no new
+# core query (no new public Engine method). logos-core is already the root of
+# the default tree, so depending on it here adds nothing to the carve-out; the
+# HTTP machinery stays in rig alone.
+logos-core = { path = "../logos-core", default-features = false }
+# Serde derive for the provider config DTOs, the mock's raw-response type
+# (rig's CompletionModel requires Serialize + DeserializeOwned associated
+# types), and the tool argument/output DTOs. Already in the workspace graph via
+# logos-core; only ever compiled under the ui build here.
+serde      = { workspace = true }
+serde_json = { workspace = true }
+# Stream primitives for the mock CompletionModel's `stream` implementation
+# (rig's StreamingResult is a boxed `futures::Stream`). ui-only.
+futures    = "0.3"
+# Ergonomic error surface for provider resolution. Already a workspace dep.
+anyhow     = { workspace = true }
+# Typed tool errors. rig's `Tool::Error` must be a concrete `std::error::Error`
+# (anyhow::Error is not one), so each tool surfaces a `thiserror`-derived error.
+# Pinned to the 2.x lineage rig-core itself uses, so it adds no new lock entry.
+thiserror  = "2"
+# The blocking→async bridge for the Engine-backed tools (ADR-03): the synchronous
+# `Engine` read-models run on `spawn_blocking` so they never park rig's async
+# reactor — the same submit-and-await discipline the mcp/web surfaces use. `rt`
+# provides spawn_blocking; `time` provides the retry decorator's backoff sleep
+# (RetryingModel, CR-060/S-240). The consuming surface owns the multi-thread
+# runtime. ui-only via this crate — the no-networking default tree links no
+# tokio timer (NFR-SE-01).
+tokio      = { workspace = true, features = ["rt", "time"] }
+# Sandboxed source-tool discovery (read/grep/glob): the SAME gitignore-aware,
+# symlink-contained walker logos-core uses for indexing discovery, so the agent
+# tools honor `ignored_dirs` and never follow a symlink outside the project root
+# (NFR-SE-04). `ignore` pulls globset/walkdir/regex — all already in the graph.
+ignore     = { workspace = true }
+# Glob compilation for the `glob` tool (caller-supplied path patterns), matched
+# against repo-relative paths. Already a workspace dep (config component).
+globset    = { workspace = true }
+# Regex matching for the `grep` tool. Already a workspace dep.
+regex      = { workspace = true }
+# Well-formedness validation of the configured `base_url` in the pre-send chat
+# preflight (S-199): scheme + host parsing, so a malformed endpoint is caught
+# with an actionable message before the turn opens any connection. `url` is not
+# a networking crate (it only parses), and this crate is ui-only, so it never
+# touches the default-feature no-network tree; rig-core already locks url 2.x,
+# so this adds no new lock entry.
+url        = "2"
+
+[dev-dependencies]
+# The mock round-trip / zero-egress harness drives rig's async Agent loop and
+# the mock's async stream, so the tests need a runtime. tokio is already a
+# workspace dep (the web/mcp adapters own runtimes); here it is dev-only.
+tokio     = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
+futures   = "0.3"
+# Construct a typed `http::StatusCode` in the provider-error classification tests
+# (the structured-status path rig produces on some transports). Dev-only and
+# already in the lock via rig-core/reqwest, so it adds no package and is invisible
+# to the carve-out fitness scans (which exclude dev edges).
+http      = "1"
+# Throwaway project roots for the tool/sandbox fixture suites.
+tempfile  = { workspace = true }
+# The per-tool "grounded result" suite indexes a real Rust fixture so the graph
+# tools return actual symbols/edges (not just the empty read-model shape). Cargo
+# feature-unifies this with the `[dependencies]` logos-core for the test build,
+# so the fixture engine has the Rust language plugin available; the library
+# build itself stays default-features = false.
+logos-core = { path = "../logos-core", features = ["lang-rust"] }

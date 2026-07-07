@@ -1,0 +1,21 @@
+# Logos release version tracking.
+#
+# LOGOS_DOGFOOD_VERSION pins the known-good Logos binary used to dogfood Logos
+# on its own development cycle (see docs / the dogfooding plan). The dev harness
+# installs and references this exact version, never the in-flight `target/debug`
+# build, to avoid circular instability while Logos builds Logos.
+#
+# Install convention (version-named root keeps it from shadowing a dev build):
+#   cargo install --path cli --root "$HOME/.logos-bin/$LOGOS_DOGFOOD_VERSION" --locked --features ui
+#   -> binary at $HOME/.logos-bin/$LOGOS_DOGFOOD_VERSION/bin/logos
+#
+# `--features ui` (CR-012/ADR-27, non-default) links the localhost web dashboard
+# into the pinned binary so `serve --ui` works when dogfooding on the project
+# itself. It also links the axum/networking crate — the dogfood binary is a
+# local dev tool, not the no-network release-fitness scope. A/B treatment arms
+# still drive it via `serve --mcp` (the `--ui` capability is additive, not
+# required).
+#
+# Bump this only after tagging a new green release and re-installing the pin.
+
+LOGOS_DOGFOOD_VERSION=1.0.1

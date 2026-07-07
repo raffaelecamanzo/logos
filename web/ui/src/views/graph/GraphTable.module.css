@@ -1,0 +1,11 @@
+/*
+ * GraphTable layout (S-198, FR-UI-08) — visual separator between the nodes and
+ * edges DataTables so they read as distinct sections in the accessibility tree and
+ * on screen.
+ */
+
+.separator {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: var(--space-4) 0 0;
+}

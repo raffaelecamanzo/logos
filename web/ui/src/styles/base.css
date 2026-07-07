@@ -1,0 +1,132 @@
+/*
+ * Base / reset layer (S-193, CR-050, FR-UI-23, ADR-44). Theme-independent element
+ * defaults built on the semantic tokens in tokens.css. Imported after the tokens
+ * so the custom properties resolve. Extracted to external hashed CSS by Vite — no
+ * inline <style> (self-only CSP).
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* The token already declares color-scheme per theme; this is the inherited base. */
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--surface-0);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-base);
+  /* A theme switch is a token remap; transition the page colours so the flip reads
+     as a deliberate re-theme rather than a jump. Disabled under reduced-motion. */
+  transition:
+    background-color var(--motion-base) var(--motion-ease),
+    color var(--motion-base) var(--motion-ease);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0 0 var(--space-3);
+  line-height: var(--leading-tight);
+  font-weight: var(--weight-bold);
+  color: var(--text-1);
+}
+
+h1 {
+  font-size: var(--text-2xl);
+}
+h2 {
+  font-size: var(--text-xl);
+}
+h3 {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+
+p {
+  margin: 0 0 var(--space-4);
+}
+
+a {
+  color: var(--text-1);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+code,
+kbd,
+samp,
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+/*
+ * Global focus ring (WCAG 2.1 AA, frontend-design §1.2/§7). A 2px signal-red
+ * outline shown on keyboard focus only — never on mouse click — so it is an
+ * accessibility affordance, not chrome. Applies to every interactive element
+ * unless a component overrides it with the same token.
+ */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+/* Belt-and-suspenders: drop the legacy non-:focus-visible outline so mouse focus
+   stays quiet in browsers that support :focus-visible. */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Visually-hidden but screen-reader-available (table captions that repeat a card
+   heading, skip links, icon-only control labels) — frontend-design §7. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Cross-view text utilities (the design-system primitives every migrated view
+   reuses — S-186 and onward). `mono` renders symbol names/identifiers in the
+   monospace token; `muted` is secondary/caption text. Defined globally (not per
+   CSS Module) so a view can use them on inline spans without a module import,
+   exactly as the server-rendered views' `.mono`/`.muted` did. CSP-clean — plain
+   classes, no inline style. */
+.mono {
+  font-family: var(--font-mono);
+}
+.muted {
+  color: var(--text-2);
+}
+
+/*
+ * Reduced motion (WCAG 2.1 AA, frontend-design §6). Honour the OS setting:
+ * collapse every non-essential transition/animation to ~instant. Essential
+ * feedback still renders, just without movement.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

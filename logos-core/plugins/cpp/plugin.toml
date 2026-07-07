@@ -1,0 +1,54 @@
+# Declarative descriptor for the C++ grammar (S-058, CR-009, FR-PL-01, ADR-09).
+# Embedded via `include_str!` and parsed at startup by the LanguageRegistry.
+# Droppable `.scm` query overrides resolve under `.logos/plugins/cpp/queries/`
+# (FR-PL-04, UAT-PL-03). Pure plugin data over the existing substrate; the only
+# core change C++'s idiom required is the bounded `cpp-external-linkage` export
+# and `cpp-test-macros` test convention variants (NFR-MA-01, the S-015 pattern).
+
+name = "cpp"
+
+# The fixed `.h` → C++ ownership rule (FR-PL-07): C++ claims every C++ source and
+# header extension AND the ambiguous `.h` (the C plugin claims `.c` only). C is a
+# near-subset of C++ grammatically, so a pure-C header parsed by the C++ grammar
+# degrades to skipped constructs under never-fabricate, never wrong edges.
+extensions = ["cpp", "cc", "cxx", "hpp", "hh", "hxx", "h"]
+
+# C++ joins namespace/class/member segments with `::` — the canonical ledger
+# separator, so reference paths need no rewriting.
+module_separator = "::"
+
+# tree-sitter-cpp 0.23 is generated against ABI 14 (asserted at load).
+abi_version = 14
+
+# No `frameworks` capability: C++ has no single dominant web framework to detect
+# (FR-FW-03). `symbols` + `references` drive nodes/edges; the 4th `smell` query
+# is NOT a capability (run on demand by `test_gaps`).
+capabilities = ["symbols", "references"]
+
+# Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03) —
+# the C-family control-flow set, matching the Java/C# keyword vocabulary plus the
+# C++ `goto`.
+complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "goto", "&&", "||", "?"]
+
+# Block-structure nesting node kinds for per-function max nesting depth (CR-005,
+# FR-EX-07): the C++ control-flow statements (`for_range_loop` is the range-for).
+nesting_block_kinds = ["if_statement", "for_statement", "for_range_loop", "while_statement", "do_statement", "switch_statement", "try_statement", "catch_clause"]
+
+# C++ export rule (FR-AN-01): a declaration has external linkage — exported —
+# unless `static`-qualified or in an anonymous namespace. The bounded core
+# variant this idiom required (C++ default visibility is external, the inverse of
+# Java's default-private `public-modifier`).
+export_convention = "cpp-external-linkage"
+
+# How C++ marks a function as a test (FR-EX-06, ADR-18): a GoogleTest/Catch2
+# function-like test macro (`TEST`/`TEST_F`/`TEST_P`/`TYPED_TEST`, and the Catch2
+# `TEST_CASE`/`SCENARIO`). Feeds the unified `is_test` annotation (S-028).
+test_convention = "cpp-test-macros"
+
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"
+# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence. NOT
+# listed in `capabilities` — extraction never runs it; `test_gaps` runs it on
+# demand and post-filters @smell.test through the canonical test-marker logic.
+smell = "queries/smells.scm"

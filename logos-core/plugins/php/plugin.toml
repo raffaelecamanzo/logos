@@ -1,0 +1,70 @@
+# Declarative descriptor for the PHP grammar (S-060, CR-009, FR-PL-01,
+# FR-FW-03, ADR-09). Embedded via `include_str!` and parsed at startup by the
+# LanguageRegistry. Droppable `.scm` query overrides resolve under
+# `.logos/plugins/php/queries/` (FR-PL-04, UAT-PL-03).
+
+name = "php"
+extensions = ["php"]
+
+# PHP joins namespace segments with a backslash (`App\Services\UserStore`).
+# Reference extraction canonicalises the separator into the `::`-joined ledger
+# form the binder reads, exactly as the dotted Java/Python paths are.
+module_separator = "\\"
+
+# tree-sitter-php 0.24 is generated against ABI 15. Bound via its **full `php`
+# grammar** (`LANGUAGE_PHP`) so HTML-interleaved templates parse and their PHP
+# symbols still extract (see plugin::grammars::php_entry).
+abi_version = 15
+
+capabilities = ["symbols", "references", "frameworks"]
+
+# Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
+# `elseif` is PHP's own keyword; `?` covers the ternary and `?:`; `&&`/`||`
+# plus the word forms `and`/`or`/`xor`; `catch` for try/catch.
+complexity_keywords = ["if", "else", "elseif", "for", "foreach", "while", "do", "case", "catch", "&&", "||", "and", "or", "xor", "?"]
+
+# Block-structure nesting node kinds for per-function max nesting depth
+# (CR-005, FR-EX-07): PHP's control-flow statements. Depth 0 is a flat body;
+# each nested statement adds one.
+nesting_block_kinds = ["if_statement", "for_statement", "foreach_statement", "while_statement", "do_statement", "switch_statement", "try_statement", "match_expression"]
+
+# PHP's export rule (FR-AN-01): public-by-default — a declaration is exported
+# unless a `visibility_modifier` child carries `private`/`protected`. Top-level
+# functions and modifier-less members are public. (S-060 bounded variant — the
+# inverse of Java's `public-modifier`; see plugin::manifest::ExportConvention.)
+export_convention = "php-visibility"
+
+# How PHP marks a method as a test (S-060, FR-EX-06, ADR-18): any of the three
+# coexisting PHPUnit idioms — a `test`-prefixed name, a PHP 8 `#[Test]`
+# attribute, or a `@test` docblock tag. Feeds the unified `is_test` annotation
+# (S-028). (S-060 bounded variant — see plugin::manifest::TestConvention.)
+test_convention = "php-unit"
+
+# The ratified v1 PHP framework set (FR-FW-03): Laravel. The candidacy gate
+# (FR-FW-04) promotes a file only once its ledger names the `Illuminate`
+# canonical prefix, so a plain `Route::` static call in a non-Laravel file
+# never fabricates a route.
+framework_detectors = ["Illuminate"]
+
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"
+frameworks = "queries/frameworks.scm"
+# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence.
+# NOT listed in `capabilities` -- extraction never runs it; `test_gaps` runs it
+# on demand. Embedded + disk-shadowable like every query (FR-PL-04).
+smell = "queries/smells.scm"
+
+# Captured `@fw.route.method` text (the `Route::` facade verb) → HTTP method
+# (S-060). `Route::match`/`Route::any` declare no single verb → ANY. A captured
+# verb with no entry here is dropped — the table doubles as the
+# recognised-registration filter (FR-FW-04 best-effort).
+[framework_methods]
+get = "GET"
+post = "POST"
+put = "PUT"
+patch = "PATCH"
+delete = "DELETE"
+options = "OPTIONS"
+any = "ANY"
+match = "ANY"

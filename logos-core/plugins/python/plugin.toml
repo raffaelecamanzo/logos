@@ -1,0 +1,68 @@
+# Declarative descriptor for the Python grammar (S-015, FR-PL-01, FR-FW-03,
+# ADR-09). Embedded via `include_str!` (plugin::grammars::compiled) and parsed
+# at startup by the LanguageRegistry. Droppable `.scm` query overrides resolve
+# under `.logos/plugins/python/queries/` (FR-PL-04, UAT-PL-03).
+
+name = "python"
+extensions = ["py", "pyi"]
+
+# Python joins module segments with a dot (`django.urls`). Surfaced by
+# `logos languages` (FR-PL-06); reference extraction canonicalises dotted
+# paths into the `::`-joined ledger form.
+module_separator = "."
+
+# tree-sitter-python 0.25 is generated against ABI 15; asserted at load
+# against the compiled grammar (FR-PL-03, NFR-PC-03).
+abi_version = 15
+
+capabilities = ["symbols", "references", "frameworks"]
+
+# Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
+# Anonymous-token kinds in the Python grammar: branching keywords, loop
+# keywords, exception arms, boolean operators, and ternary/match arms.
+complexity_keywords = ["if", "elif", "else", "for", "while", "except", "and", "or", "case", "assert"]
+
+# Block-structure nesting node kinds for per-function max nesting depth
+# (CR-005, FR-EX-07): the Python compound statements. Depth 0 is a flat body;
+# each nested compound statement adds one.
+nesting_block_kinds = ["if_statement", "for_statement", "while_statement", "with_statement", "try_statement", "match_statement"]
+
+# Python has no export keyword: the underscore convention marks privacy, so
+# every name not starting with `_` is an exported dead-code root (FR-AN-01 —
+# conservative in the safe, under-reporting direction).
+export_convention = "underscore-private"
+
+# How Python marks a function as a test (S-027, FR-EX-06, ADR-18): a `test_*`
+# name (pytest) or a `test`-prefixed method of a `unittest.TestCase` subclass.
+# Feeds the unified `is_test` annotation (S-028).
+test_convention = "python-test"
+
+# The ratified v1 Python framework set (FR-FW-03): FastAPI + Django. A file
+# whose reference ledger names either becomes a framework candidate
+# (FR-FW-04 ledger-gated candidacy).
+framework_detectors = ["fastapi", "django"]
+
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"
+frameworks = "queries/frameworks.scm"
+# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence.
+# NOT listed in `capabilities` -- extraction never runs it; `test_gaps` runs it
+# on demand. Embedded + disk-shadowable like every query (FR-PL-04).
+smell = "queries/smells.scm"
+
+# Captured `@fw.route.method` text → HTTP method (the declarative framework
+# contract, S-015). FastAPI decorator names map to their verb; Django URLconf
+# registrations (`path`/`re_path`) carry no verb, so they map to ANY.
+[framework_methods]
+get = "GET"
+post = "POST"
+put = "PUT"
+delete = "DELETE"
+patch = "PATCH"
+head = "HEAD"
+options = "OPTIONS"
+trace = "TRACE"
+websocket = "ANY"
+path = "ANY"
+re_path = "ANY"

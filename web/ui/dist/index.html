@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      COMMITTED PLACEHOLDER — this is NOT a real build (CR-049, FR-UI-22, ADR-43).
+
+      Its only job is to keep the rust-embed folder non-empty (web/src/spa.rs,
+      `#[folder = "ui/dist/"]`) so a plain `cargo build --features ui` compiles
+      with no Node present. A real `npm run build` OVERWRITES this file — vite
+      regenerates dist/index.html from the web/ui/index.html source template and
+      emits the matching hashed /assets/* bundle alongside it.
+
+      DELIBERATELY references no hashed /assets/* files and no root-level assets
+      (theme-init.js, favicon.svg are gitignored build outputs, absent here). That
+      is what prevents the recurring white-page trap: an earlier revision committed
+      a real build's index.html as the "placeholder", so its frozen asset hashes
+      never matched any fresh build — embedding it produced a 200 shell whose JS
+      bundle 404'd (a blank page). A hash-free stub can never create that mismatch,
+      and web/tests/spa_shell.rs (every_shell_referenced_asset_resolves_through_the_router)
+      holds trivially over it.
+
+      The per-session intent token (NFR-SE-06, ADR-31) is injected before </head>
+      by web-surface as a <meta name="logos-intent"> tag; this static template
+      carries no token (it is minted per session).
+
+      If you are SEEING the message below in a browser, this binary was built
+      without `npm run build`: build the SPA and rebuild with --features ui.
+    -->
+    <title>Logos</title>
+  </head>
+  <body>
+    <div id="root">
+      <h1>Logos</h1>
+      <p>The web UI bundle is not built into this binary.</p>
+      <p>This is the committed placeholder shell. To get the real UI, build the SPA and rebuild the binary with the UI feature:</p>
+      <p><code>cd web/ui &amp;&amp; npm run build</code></p>
+      <p>then reinstall with <code>--features ui</code> (see docs/howto). The JSON API is available at <code>/api/v1</code>.</p>
+    </div>
+    <!-- No inline script/style — the served shell keeps the byte-identical
+         self-only CSP. A real Vite build injects the hashed module entry here. -->
+  </body>
+</html>

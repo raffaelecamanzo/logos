@@ -1,0 +1,45 @@
+# Declarative descriptor for the SQL ARTIFACT grammar — flagged HIGHEST-RISK
+# (S-066, CR-010, ADR-25, FR-CG-01/FR-CG-03, NFR-RA-05).
+#
+# This is an *artifact* plugin: `artifact = true` routes a matched file through
+# the structural config extractor (`extract::config`), which builds a `ConfigFile`
+# root and then — because this is a typed-anchor format — walks recognised DDL
+# statements into `SqlObject` anchors whose payload distinguishes the object type
+# (table/view/index/…). It declares NO capabilities and NO `[queries]` table; the
+# registry parses this descriptor and asserts the grammar's ABI at load (ADR-09).
+#
+# # The HONESTY case (NFR-RA-05, never fabricate)
+#
+# SQL dialect coverage is inherently partial: `tree-sitter-sequel` cannot parse
+# every vendor construct. The SQL anchor walk is therefore CONSERVATIVE —
+# DDL-anchors-only over a fixed portable set of `create_*` statement kinds — and
+# SKIP-ON-MISPARSE: a candidate inside or containing an ERROR subtree, or whose
+# object name cannot be cleanly read, yields NO node rather than a guessed one.
+# An unparseable dialect construct never becomes a fabricated `SqlObject`.
+#
+# Embedded into the binary via `include_str!` (plugin::grammars::sql_entry) and
+# parsed at startup by the LanguageRegistry.
+
+# Display + lookup name; also the per-format anchor-walk selector
+# (extract::config::anchors dispatches on this name). Surfaced by `logos languages`.
+name = "sql"
+
+# File extensions this grammar claims, without the leading dot.
+extensions = ["sql"]
+
+# SQL identity reuses the `path#anchor` scheme (ADR-07); `/` separates the file
+# path from its object slugs.
+module_separator = "/"
+
+# The tree-sitter ABI version `tree_sitter_sequel::LANGUAGE` was generated
+# against (parser.c LANGUAGE_VERSION = 14). Asserted against the compiled grammar
+# at load (FR-PL-03, NFR-PC-03).
+abi_version = 14
+
+# Structural artifact grammar: extraction is the conservative per-format
+# `SqlObject` walk, so there are no tagging-query capabilities to declare.
+capabilities = []
+
+# Marks this as an ARTIFACT plugin (S-062, CR-010, ADR-25): routes to
+# `extract::config`, placing SQL in the metric-neutral non-code layer (FR-CG-05).
+artifact = true

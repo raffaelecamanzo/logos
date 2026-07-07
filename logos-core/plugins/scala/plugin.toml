@@ -1,0 +1,57 @@
+# Declarative descriptor for the Scala grammar (S-061, CR-009, FR-PL-01,
+# FR-PL-07, ADR-09). Embedded via `include_str!` and parsed at startup by the
+# LanguageRegistry. Droppable `.scm` query overrides resolve under
+# `.logos/plugins/scala/queries/` (FR-PL-04, UAT-PL-03).
+#
+# Scala is the highest-risk grammar of the language-breadth set, so this story
+# is gated on a verification preflight (crate resolves / grammar loads at the
+# workspace ABI / queries compile / fixture corpus parses — CR-009 CRA-01); a
+# preflight failure defers Scala alone. `tree-sitter-scala` 0.26 is generated
+# against ABI 15, asserted at load against the tree-sitter 0.25 runtime's
+# [13,15] range (FR-PL-02, abi::assert_abi).
+
+name = "scala"
+extensions = ["scala", "sc"]
+
+# Scala joins package/member segments with a dot — reference extraction
+# canonicalises dotted paths into the `::`-joined ledger form.
+module_separator = "."
+
+# tree-sitter-scala 0.26 is generated against ABI 15.
+abi_version = 15
+
+# No `frameworks` capability: Scala ships no dominant-framework detector in this
+# increment (the Play/Akka split has no single annotation idiom analogous to
+# Spring) — an honest absence, not a stub (CR-009).
+capabilities = ["symbols", "references"]
+
+# Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
+# Each `case` (match arms, `catch` arms, partial functions) is a branch; the
+# boolean operators and the loop/conditional keywords mirror the Java set.
+complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "&&", "||"]
+
+# Block-structure nesting node kinds for per-function max nesting depth
+# (CR-005, FR-EX-07): Scala's control-flow constructs are *expressions*. Depth 0
+# is a flat body; each nested such expression adds one.
+nesting_block_kinds = ["if_expression", "for_expression", "while_expression", "do_while_expression", "match_expression", "try_expression"]
+
+# Scala's export rule: public-by-default — a declaration is exported unless a
+# `modifiers` child carries an `access_modifier` (`private`/`protected`,
+# including package-scoped `private[pkg]`). The inverse of Java's `public`-token
+# rule (FR-AN-01 — `private`/`protected` are non-roots).
+export_convention = "public-default"
+
+# How Scala marks a function as a test (S-061, FR-EX-06, ADR-18): the munit /
+# ScalaTest (`FunSuite`/`FunSpec`) idiom, where a test case is a
+# `test("name") { … }` / `it("name") { … }` *call* rather than a declaration.
+# Evidence attaches to the marker call (the smell-query shape) and to any
+# callable lexically enclosed by it. Best-effort and positive-evidence-only.
+test_convention = "scala-test"
+
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"
+# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence.
+# NOT listed in `capabilities` -- extraction never runs it; `test_gaps` runs it
+# on demand. Embedded + disk-shadowable like every query (FR-PL-04).
+smell = "queries/smells.scm"

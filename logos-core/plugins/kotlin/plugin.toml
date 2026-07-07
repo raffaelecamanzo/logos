@@ -1,0 +1,72 @@
+# Declarative descriptor for the Kotlin grammar (S-055, CR-009, FR-PL-07,
+# FR-FW-03, ADR-09). Embedded via `include_str!` and parsed at startup by the
+# LanguageRegistry. Droppable `.scm` query overrides resolve under
+# `.logos/plugins/kotlin/queries/` (FR-PL-04, UAT-PL-03).
+#
+# Kotlin is pure plugin data over the existing substrate: this descriptor + its
+# four queries + one cargo feature + one `grammars.rs` row, no extraction or
+# resolution logic change (NFR-MA-01). The one bounded exception is the
+# `kotlin-annotations` test convention — Kotlin's annotation node carries no
+# `name` field, so the Java annotation reader cannot detect `@Test`; per the
+# manifest's own "one new variant" contract it ships a `TestConvention` variant
+# (see manifest.rs / extract::testmarker). Six of CR-009's seven languages hit
+# this same wall — a sprint-review coherence item.
+
+name = "kotlin"
+extensions = ["kt", "kts"]
+
+# Kotlin joins package/member segments with a dot — reference extraction
+# canonicalises dotted paths into the `::`-joined ledger form.
+module_separator = "."
+
+# tree-sitter-kotlin-ng 1.1 is generated against ABI 14.
+abi_version = 14
+
+capabilities = ["symbols", "references", "frameworks"]
+
+# Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
+# Kotlin's anonymous control-flow/operator tokens: `when` replaces `switch`
+# (counted once per expression, the keyword-walk approximation), `?:` is the
+# Elvis operator. Matched as anonymous token-node kinds, never as source text.
+complexity_keywords = ["if", "else", "for", "while", "do", "when", "catch", "&&", "||", "?:"]
+
+# Block-structure nesting node kinds for per-function max nesting depth
+# (CR-005, FR-EX-07): Kotlin models `if`/`when`/`try` as *expressions*. Depth 0
+# is a flat body; each nested control-flow construct adds one.
+nesting_block_kinds = ["if_expression", "for_statement", "while_statement", "do_while_statement", "when_expression", "try_expression"]
+
+# Kotlin's export rule: public-by-default (FR-AN-01). Declarations are exported
+# unless an explicit `private`/`internal`/`protected` visibility modifier
+# narrows them; `All` is the safe under-reporting direction (AR-05) and the
+# documented best-effort posture (CR-009 binding table) — precise visibility
+# narrowing is deferrable future work.
+export_convention = "all"
+
+# How Kotlin marks a function as a test (S-055, FR-EX-06, ADR-18): a `@Test`-
+# family annotation (`@Test`, `@ParameterizedTest`, `@RepeatedTest`, …) covering
+# both JUnit (`org.junit.jupiter.api.Test`) and `kotlin.test.Test`. Feeds the
+# unified `is_test` annotation (S-028).
+test_convention = "kotlin-annotations"
+
+# The ratified v1 JVM framework set (FR-FW-03): Spring (MVC/Boot) — one package
+# prefix covers both, reused verbatim from the Java detector.
+framework_detectors = ["org::springframework"]
+
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"
+frameworks = "queries/frameworks.scm"
+# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence.
+# NOT listed in `capabilities` -- extraction never runs it; `test_gaps` runs it
+# on demand. Embedded + disk-shadowable like every query (FR-PL-04).
+smell = "queries/smells.scm"
+
+# Captured `@fw.route.method` annotation name → HTTP method (S-055), identical
+# to the Java Spring mapping. `@RequestMapping` declares no single verb.
+[framework_methods]
+GetMapping = "GET"
+PostMapping = "POST"
+PutMapping = "PUT"
+DeleteMapping = "DELETE"
+PatchMapping = "PATCH"
+RequestMapping = "ANY"

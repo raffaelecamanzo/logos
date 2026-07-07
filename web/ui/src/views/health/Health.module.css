@@ -1,0 +1,62 @@
+/*
+ * Health view layout (S-187, FR-UI-23, ADR-44). Zero-runtime CSS Module compiled
+ * to an external <link> stylesheet — no inline <style>, no CSS-in-JS — so the
+ * byte-identical self-only CSP is unaffected. All values are design tokens.
+ * Preserves the server-rendered Health rhythm (health.rs): the gate band, the
+ * quality grid, the folded open drill-downs, and the evolution trend.
+ */
+
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* The gate band's PASS/FAIL badge + the current-vs-baseline figure on one line. */
+.gateBody {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.aggregate {
+  margin: 0 0 var(--space-3);
+  color: var(--text-1);
+}
+
+/* ── Folded structural drill-downs (rendered open for the no-JS reader) ─────── */
+.details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.detail {
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--card-accent);
+  border-radius: var(--radius-1);
+  padding: var(--space-3) var(--space-4);
+}
+.detail > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: var(--weight-semibold);
+  color: var(--text-1);
+}
+.detailName {
+  font-weight: var(--weight-semibold);
+}
+.definition {
+  margin: var(--space-2) 0 var(--space-3);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+/* The aggregate-scope provenance reads as a subtle, secondary card. */
+.scope {
+  background: var(--surface-1);
+}

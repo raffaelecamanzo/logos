@@ -1,0 +1,57 @@
+# Declarative descriptor for the Protobuf SCHEMA grammar
+# (S-065, CR-010, ADR-25, FR-CG-01/FR-CG-03).
+#
+# This is an *artifact* plugin (the third plugin class beside code and
+# documentation): `artifact = true` routes a matched `.proto` file through the
+# structural config extractor (`extract::config`) rather than the code
+# `symbols`/`references` tagging path. Protobuf is a typed-anchor-only format —
+# it declares no `[config].section_kinds` (so no generic `ConfigSection` walk),
+# only `[[config.anchors]]`: each `message` becomes a `ProtoMessage` and each
+# `service` a `ProtoService` typed node, hung off the file's `ConfigFile` root by
+# a `Contains` edge. The layer is `Contains`-only by design — `import` statements
+# produce NO edges (the cross-artifact reference edges are CR-011's scope, out of
+# scope here). These anchors are the binding targets CR-011 will resolve against.
+#
+# Embedded into the binary via `include_str!` (plugin::grammars::protobuf_entry)
+# and parsed at startup by the LanguageRegistry, which asserts the grammar's ABI
+# at load exactly as for the code grammars (ADR-09). It declares NO capabilities
+# and NO `[queries]` table: extraction is structural, not query-driven.
+
+# Display + lookup name; also the `.logos/plugins/<name>/` override sub-dir.
+# Surfaced by `logos languages` (FR-CG-04).
+name = "protobuf"
+
+# Protocol Buffers schema files.
+extensions = ["proto"]
+
+# Artifact identity is the `path#anchor` scheme (FR-CG-02/03 reuse of ADR-07),
+# so the natural path-segment separator is `/`, matching the config/doc layers.
+module_separator = "/"
+
+# The tree-sitter ABI the bundled `tree_sitter_proto::LANGUAGE` grammar was
+# generated against (verified at load, FR-PL-02/NFR-PC-03). Recorded in the
+# verification preflight (FR-CG-06).
+abi_version = 15
+
+# Structural artifact: no tagging-query capabilities.
+capabilities = []
+
+# The third plugin class (S-062, CR-010, ADR-25): route `.proto` through
+# `extract::config`, never the code path. Mutually exclusive with documentation.
+artifact = true
+
+# Typed-anchor-only format: no `section_kinds` (Protobuf has no generic nested-
+# mapping concept), only the declarative anchor table the generic anchor walk
+# consumes (S-065). `node_kind` is the tree-sitter node introducing the anchor;
+# `kind` is the config NodeKind wire name to emit; `name_child` is the child node
+# kind whose text is the anchor's declared name. Protobuf carries no payload
+# subtypes (FR-CG-03 normative binding table).
+[[config.anchors]]
+node_kind = "message"
+kind = "proto_message"
+name_child = "message_name"
+
+[[config.anchors]]
+node_kind = "service"
+kind = "proto_service"
+name_child = "service_name"
