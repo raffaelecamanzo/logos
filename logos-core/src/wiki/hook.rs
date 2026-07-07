@@ -190,6 +190,12 @@ const QUALITY_REPORT_HOOK_SCRIPT: &str = r#"#!/bin/sh
 # enforcing pre-push gate). Logos makes no LLM or network call here (NFR-SE-01):
 # check/scan/gate are pure local reads over the graph.
 #
+# Honest degradation: at session teardown another logos process (e.g. the
+# still-alive MCP server) can briefly hold the graph-DB write lock, so `scan`
+# may fail with "database is locked". This hook CAPTURES that error instead of
+# swallowing it, and reports "graph busy — skipped" rather than mis-rendering a
+# healthy, indexed project as un-indexed with a zeroed readout.
+#
 #   off-switch: export LOGOS_QUALITY_REPORT_DISABLE=1
 #
 # Regenerate with `logos wiki hook --emit --force` (or re-run `logos init -i`).
@@ -204,9 +210,22 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 cd "$PROJECT_DIR" 2>/dev/null || exit 0
 
 # Current signal: `scan` reconciles then scores (FR-GV-09), persisting the
-# snapshot the baseline comparison below reads back.
-scan_json=$(logos scan --json 2>/dev/null)
-signal=$(printf '%s' "$scan_json" | grep -oE '"signal":[0-9]+' | head -1 | grep -oE '[0-9]+')
+# snapshot the baseline comparison below reads back. Capture stdout+stderr and
+# the exit code in one run so a failure is classified, not swallowed: on success
+# stdout is the JSON; on failure the error text shares the same capture.
+scan_out=$(logos scan --json 2>&1)
+if [ $? -ne 0 ]; then
+  # The graph could not be scored. Distinguish a TRANSIENT lock (another logos
+  # process holds the DB — the common teardown race with the MCP server) from a
+  # genuinely absent/uninitialized graph, so the readout never lies.
+  if printf '%s' "$scan_out" | grep -qi 'database is locked'; then
+    printf 'logos quality report (session end): graph busy (locked by another logos process) — skipped.\n' >&2
+  else
+    printf 'logos quality report (session end): graph unavailable (run logos index first) — skipped.\n' >&2
+  fi
+  exit 0
+fi
+signal=$(printf '%s' "$scan_out" | grep -oE '"signal":[0-9]+' | head -1 | grep -oE '[0-9]+')
 
 # Baseline signal: only `gate` exposes the blessed `baseline_signal` (FR-GV-05).
 # Reuse scan's fresh reconcile (--no-reconcile) so this adds no extra graph pass.
@@ -214,10 +233,16 @@ gate_json=$(logos gate --no-reconcile --json 2>/dev/null)
 baseline=$(printf '%s' "$gate_json" | grep -oE '"baseline_signal":[0-9]+' | head -1 | grep -oE '[0-9]+')
 
 # Rule violations: `check` (FR-GV-02). Report-only — its non-zero exit on an
-# error violation is deliberately NOT propagated (we always exit 0 below). The
-# JSON is compact (one line), so count matches with grep -o, never grep -c.
+# error violation is deliberately NOT propagated (we always exit 0 below). Only
+# trust a count when the violations array is present in the output: `check`
+# also exits non-zero with empty output when it cannot read the graph, and a
+# blind grep would then mis-report that as a truthful "0 violations".
 check_json=$(logos check --no-reconcile --json 2>/dev/null)
-violations=$(printf '%s' "$check_json" | grep -oE '"severity":"[a-z]+"' | grep -c '.')
+if printf '%s' "$check_json" | grep -q '"violations"'; then
+  violations=$(printf '%s' "$check_json" | grep -oE '"severity":"[a-z]+"' | grep -c '.')
+else
+  violations=""
+fi
 
 # --- render the readout (session context) ---------------------------------
 # A SessionEnd hook cannot inject context back into the ending session and its
@@ -225,16 +250,14 @@ violations=$(printf '%s' "$check_json" | grep -oE '"severity":"[a-z]+"' | grep -
 # readout is written to stderr (>&2).
 {
   printf 'logos quality report (session end):\n'
-  # No backticks in this default: inside the double-quoted ${:-} they would run
-  # as command substitution (an unwanted index side effect).
-  printf '  signal:   %s\n' "${signal:-n/a (run logos index first)}"
+  printf '  signal:   %s\n' "${signal:-n/a}"
   if [ -n "$baseline" ]; then
     printf '  baseline: %s\n' "$baseline"
     [ -n "$signal" ] && printf '  delta:    %s\n' "$((signal - baseline))"
   else
     printf '  baseline: n/a (none saved — bless one with `logos gate --save`)\n'
   fi
-  printf '  rule violations: %s\n' "${violations:-0}"
+  printf '  rule violations: %s\n' "${violations:-n/a (check unavailable)}"
 
   # List the violation messages (report-only detail), capped for brevity.
   if [ "${violations:-0}" -gt 0 ] 2>/dev/null; then
