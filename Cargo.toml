@@ -37,13 +37,13 @@ members = [
 ]
 
 # Shared package metadata — inherited via `license.workspace = true`. Logos
-# ships under MIT as license-clean public OSS (NFR-CR-01, ADR-16); declaring it
-# once here keeps every workspace crate consistent and satisfies the
-# cargo-deny license gate (deny.toml). `repository` feeds the cargo-dist
+# ships under Apache-2.0 as license-clean public OSS (NFR-CR-01, ADR-16);
+# declaring it once here keeps every workspace crate consistent and satisfies
+# the cargo-deny license gate (deny.toml). `repository` feeds the cargo-dist
 # release pipeline (S-023, FR-DS-01): artifact URLs, the Homebrew formula,
 # and the shell-installer download base all derive from it.
 [workspace.package]
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/raffaelecamanzo/logos"
 
 # ── Release profile (ADR-16 fitness note, NFR-PC-04) ─────────────────────────

@@ -1,4 +1,4 @@
-// Logos wiki Mermaid renderer bootstrap — Project MIT (see web/assets/VENDOR.md).
+// Logos wiki Mermaid renderer bootstrap — Project Apache-2.0 (see web/assets/VENDOR.md).
 //
 // Renders every `.mermaid` block — the native dependency diagram (FR-WK-10) and
 // any agent-prose ```mermaid fence (FR-WK-15) — into an inline SVG, fully

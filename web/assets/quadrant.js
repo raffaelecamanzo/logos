@@ -4,7 +4,7 @@
 // shaded cell regions into `#quadrant-chart`, over the same-origin `/api/quadrant`
 // payload. Flipped to the Gartner convention (best top-right, CR-040): X =
 // reachability (unreachable left → reachable right), Y = runtime execution
-// (0% bottom → executed top). Authored for Logos (Project MIT; see the repository
+// (0% bottom → executed top). Authored for Logos (Project Apache-2.0; see the repository
 // LICENSE / VENDOR.md). Names no external origin (NFR-SE-01) — every dependency is
 // the vendored uPlot bundle loaded before this script under the self-only CSP.
 //

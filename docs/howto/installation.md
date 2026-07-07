@@ -38,7 +38,7 @@ Grab the archive for your target from the
 [Releases page](https://github.com/raffaelecamanzo/logos/releases), unpack,
 and put `logos` on your `PATH`. Every archive ships the binary together with
 `THIRD-PARTY-NOTICES.md` (the aggregated third-party attributions; Logos
-itself is MIT-licensed).
+itself is Apache-2.0-licensed).
 
 ## Verify the installation
 

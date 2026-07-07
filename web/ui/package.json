@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "description": "Logos web dashboard SPA — build-time-only Vite + React toolchain (CR-049, FR-UI-22, ADR-43). Built into web/ui/dist/ and embedded into the logos binary; never run at serve time.",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",

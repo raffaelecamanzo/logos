@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-Logos is distributed under the [MIT license](LICENSE) (NFR-CR-01).
+Logos is distributed under the [Apache License 2.0](LICENSE) (NFR-CR-01).
 
 The distributed `logos` binary statically links the third-party Rust crates
 and C libraries below (NFR-CR-02). Each is used under the license indicated;

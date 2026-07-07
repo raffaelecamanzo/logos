@@ -1,7 +1,7 @@
 /*
  * logos.css — the SOURCESENSE design system for the Logos web UI.
  *
- * Authored (Project MIT). The :root block below is the AUTHORITATIVE token set,
+ * Authored (Project Apache-2.0). The :root block below is the AUTHORITATIVE token set,
  * copied verbatim from the SOURCESENSE brand source via frontend-design.md §1.2;
  * never approximate these hex values. Every rule here is implementable as plain
  * CSS + the vendored WOFF2 fonts — no preprocessor, no Node toolchain (ADR-27).

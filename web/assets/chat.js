@@ -1,6 +1,6 @@
 // Chat view client (S-171, CR-045/CR-046, FR-UI-18/19/20).
 //
-// Project MIT. Authored, same-origin, embedded — names NO external origin
+// Project Apache-2.0. Authored, same-origin, embedded — names NO external origin
 // (NFR-SE-01): the only network call is a `fetch` to the same-origin,
 // intent-guarded `POST /chat` (a turn) and `POST /chat/clear` (Clear-history).
 //

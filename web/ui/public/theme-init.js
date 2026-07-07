@@ -1,6 +1,6 @@
 /*
  * Theme bootstrap — no-flash theme application (S-193, CR-050, FR-UI-23, ADR-44).
- * Project MIT.
+ * Project Apache-2.0.
  *
  * Applies the user's PERSISTED theme choice to <html data-theme> synchronously,
  * BEFORE first paint, so a returning user whose saved choice differs from their OS

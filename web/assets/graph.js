@@ -1,7 +1,7 @@
 /*!
  * graph.js — Logos interactive whole-graph canvas + exploration controls.
  *
- * Project-authored, MIT-licensed (the Logos project license, see ../../LICENSE
+ * Project-authored, Apache-2.0-licensed (the Logos project license, see ../../LICENSE
  * and web/assets/VENDOR.md). Names no external origin: it fetches only the
  * same-origin `/api/graph` JSON elements endpoint and drives the already-vendored
  * Apache ECharts global (the slim graph-only build, ADR-29 / HF-1). Loaded

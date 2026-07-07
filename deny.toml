@@ -5,7 +5,7 @@
 #   2. advisories — RustSec advisory DB: vulnerabilities + unmaintained crates
 #      fail the build; yanked crates warn.
 #
-# Logos ships under MIT as public OSS (NFR-CR-01); every transitive dependency
+# Logos ships under Apache-2.0 as public OSS (NFR-CR-01); every transitive dependency
 # in the shipped binary must be license-compatible with that posture.
 
 # Inspect the whole workspace dependency graph with default features — this is
@@ -54,7 +54,7 @@ allow = [
     # `notify` (the S-022 filesystem watcher, FR-SY-04) is `CC0-1.0`-licensed —
     # a public-domain dedication at the *most* permissive end of the spectrum
     # (FSF Free/Libre, GPL-compatible). It imposes no attribution or copyleft
-    # obligation, so it is fully compatible with shipping MIT OSS (NFR-CR-01).
+    # obligation, so it is fully compatible with shipping Apache-2.0 OSS (NFR-CR-01).
     "CC0-1.0",
     # `webpki-root-certs` (transitive via the ui-only agent substrate: rig-core →
     # reqwest → rustls-platform-verifier, S-166/CR-046/ADR-41) ships the Mozilla

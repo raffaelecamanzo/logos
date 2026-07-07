@@ -1,7 +1,7 @@
 /*
  * nav-progress.js — in-flight navigation & fragment loading affordance.
  *
- * Authored for Logos (Project MIT). License: see the repository `LICENSE` and
+ * Authored for Logos (Project Apache-2.0). License: see the repository `LICENSE` and
  * the provenance manifest `web/assets/VENDOR.md`. This file references no
  * external origin: it is embedded into the `logos` binary (`include_bytes!` in
  * `web/src/assets.rs`) and served same-origin under the self-only CSP
