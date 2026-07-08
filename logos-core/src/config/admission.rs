@@ -179,28 +179,37 @@ impl AdmissionAuthority {
         // it; mirror that here — else this authority (and thus the `doctor`
         // FR-GV-20 tripwire and the `sync` reconcile) would flag a legitimately-
         // indexed sanctioned doc as admission drift the moment it is git-ignored.
-        // Applied AFTER include/exclude (the walk's sub-walk applies both too) and
-        // BEFORE the gitignore reject (the carve-out's whole purpose is to bypass
-        // it for the sanctioned doc subtree).
-        if self.admits_via_sanctioned_doc_symlink(rel_path) {
-            return true;
-        }
+        //
+        // The carve-out bypasses ONLY the gitignore reject below — it does NOT
+        // short-circuit the leaf-type and size checks. `discover`'s sub-walk
+        // ([`discover_followed_symlink`]) still skips a symlinked/non-regular leaf
+        // and routes an oversize doc to `skipped_oversize` (never `files`), so
+        // returning `true` here unconditionally would over-admit exactly those two
+        // — an `index`≠`sync` parity break ([FR-SY-11]). Keeping the leaf/size
+        // block in force for the carved path restores the "admit exactly what the
+        // walk yields" invariant.
+        let carved = self.admits_via_sanctioned_doc_symlink(rel_path);
 
         // Gitignore matcher — check the path and every parent so a gitignored
         // *directory* rule (`build/`) excludes its descendants, replicating the
         // walk's subtree prune without descending. Root-anchored (v1 limitation).
+        // Skipped for a carved sanctioned doc (the walk follows it past git-ignore).
         let abs = self.root.join(rel_path);
-        if self
-            .gitignore
-            .matched_path_or_any_parents(&abs, false)
-            .is_ignore()
+        if !carved
+            && self
+                .gitignore
+                .matched_path_or_any_parents(&abs, false)
+                .is_ignore()
         {
             return false;
         }
 
         // Symlink / non-regular-file / size, from a single `lstat` (the walk never
         // follows links and skips oversize files). An unreadable path is skipped,
-        // exactly as the walk's best-effort `entry.metadata()` failure.
+        // exactly as the walk's best-effort `entry.metadata()` failure. `abs`
+        // resolves intermediate symlinks (the sanctioned `docs/specs` hop) and
+        // lstats the leaf, so a carved doc that is itself a symlink or oversize is
+        // rejected here — matching the walk's sub-walk exactly.
         let Ok(meta) = fs::symlink_metadata(&abs) else {
             return false;
         };
@@ -216,21 +225,24 @@ impl AdmissionAuthority {
     }
 
     /// Whether `rel` is a documentation file reached through a **sanctioned,
-    /// contained** directory-symlink — the walk-parity twin of the [FR-IX-10]
-    /// follow-branch ([CR-071]).
+    /// contained** directory-symlink — the gitignore-bypass gate of the walk-parity
+    /// carve-out ([FR-IX-10], [CR-071]).
     ///
-    /// Two gates, both of which the walk's sub-walk applies: `rel` must be
-    /// admitted as documentation by the doc globs, and some **directory** ancestor
-    /// of `rel` must be a symlink whose canonical target is contained within the
-    /// project root or the sanctioned docs root ([`contained_dir_target`]). When
-    /// both hold, the walk yields the file (git-ignore notwithstanding), so the
-    /// authority must admit it. Documentation off ⇒ no doc globs ⇒ always `false`.
+    /// Two conditions: `rel` must be admitted as documentation by the doc globs,
+    /// and some **directory** ancestor of `rel` must be a symlink whose canonical
+    /// target is contained within the project root or the sanctioned docs root
+    /// ([`contained_dir_target`]). When both hold the walk follows the symlink past
+    /// git-ignore, so [`admits_path`](Self::admits_path) skips its gitignore reject
+    /// for this path. It does **not** admit unconditionally: the caller still
+    /// applies the leaf symlink/regular-file and size checks the walk's sub-walk
+    /// applies, so an oversize or symlinked-leaf sanctioned doc (which the walk does
+    /// not yield) is still rejected. Documentation off ⇒ no doc globs ⇒ `false`.
     ///
     /// This is a per-path predicate, so it does not replicate the walk's global
-    /// canonical-path dedup ([FR-IX-10]) — it may admit an in-tree aliasing
-    /// symlink's path the walk would dedup away. That is deliberately harmless:
-    /// only actually-indexed paths reach the [FR-GV-20] tripwire, and those are
-    /// exactly the deduped sub-walk outputs, every one of which this admits.
+    /// canonical-path dedup ([FR-IX-10]) — it may skip the gitignore reject for an
+    /// in-tree aliasing symlink's path the walk would dedup away. That is
+    /// deliberately harmless: only actually-indexed paths reach the [FR-GV-20]
+    /// tripwire, and those are exactly the deduped sub-walk outputs.
     ///
     /// [`contained_dir_target`]: super::discovery::contained_dir_target
     fn admits_via_sanctioned_doc_symlink(&self, rel: &Path) -> bool {
@@ -778,6 +790,53 @@ mod tests {
         assert!(
             !authority.admits_path(&doc),
             "with no sanction the git-ignored doc is rejected (fail-closed)"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn carve_out_rejects_an_oversize_sanctioned_doc_matching_the_walk() {
+        // Parity ([FR-SY-11]): `discover`'s sub-walk routes an oversize sanctioned
+        // doc into `skipped_oversize`, NOT `files`. The carve-out must not admit it
+        // — the leaf/size checks stay in force for the carved path.
+        let (_tmp, root, _sanctioned) = build_gitignored_doc_symlink_fixture();
+        // A big markdown doc behind the sanctioned symlink, above the cap.
+        write(&root.join("docs/specs/HUGE.md"), &"x".repeat(200));
+        let mut config = test_config();
+        config.max_file_size = 64; // below HUGE.md, above the small ADR.
+        let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+
+        let huge = root.join("docs/specs/HUGE.md");
+        let walk: BTreeSet<PathBuf> = discover(&root, &config).unwrap().files.into_iter().collect();
+        assert!(!walk.contains(&huge), "the walk skips the oversize sanctioned doc (not in files)");
+        assert!(
+            !authority.admits_path(&huge),
+            "the carve-out does not admit an oversize sanctioned doc (parity with the walk)"
+        );
+        // …and the small sanctioned doc is still admitted.
+        assert!(authority.admits_path(&root.join("docs/specs/ADR-46.md")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn carve_out_rejects_a_symlinked_leaf_doc_matching_the_walk() {
+        // Parity ([FR-SY-11]): `discover`'s sub-walk skips a symlinked (non-regular)
+        // leaf. The carve-out must reject a `.md` that is itself a symlink, even
+        // reached through the sanctioned directory-symlink.
+        use std::os::unix::fs::symlink;
+        let (_tmp, root, sanctioned) = build_gitignored_doc_symlink_fixture();
+        // A real target and a symlinked `.md` leaf next to the sanctioned docs.
+        write(&sanctioned.join("specs/REAL.md"), "# real\n");
+        symlink(sanctioned.join("specs/REAL.md"), sanctioned.join("specs/LINK.md")).unwrap();
+        let config = test_config();
+        let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+
+        let linked = root.join("docs/specs/LINK.md"); // logical path to the symlinked leaf
+        let walk: BTreeSet<PathBuf> = discover(&root, &config).unwrap().files.into_iter().collect();
+        assert!(!walk.contains(&linked), "the walk skips the symlinked-leaf doc");
+        assert!(
+            !authority.admits_path(&linked),
+            "the carve-out does not admit a symlinked-leaf doc (parity with the walk)"
         );
     }
 
