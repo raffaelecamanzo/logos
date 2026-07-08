@@ -724,11 +724,15 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
                 Want::Any
             };
             let segs = split(&r.target);
-            // A bare-path call enables the CR-068 Part B tie-break (free function
-            // over same-named associated methods); an import (`Want::Any`) does
-            // not. Scoped to this resolution, so the receiver-method branch below
-            // — which also uses `Want::Callable` — is unaffected ([FR-RS-07]).
-            ctx.bare_path_call.set(r.kind == EdgeKind::Calls);
+            // A *single-segment* bare-path call enables the CR-068 Part B tie-break
+            // (free function over same-named associated methods, [FR-RS-07]). Gated
+            // on `segs.len() == 1` so the flag is provably inert for a
+            // path-qualified call (`Type::f`, routed through `descend`) and for an
+            // import (`Want::Any`); scoped to this resolution, so the
+            // receiver-method branch below — which also uses `Want::Callable` — is
+            // unaffected.
+            ctx.bare_path_call
+                .set(r.kind == EdgeKind::Calls && segs.len() == 1);
             let resolved = ctx.resolve_path(&segs, want, MAX_ALIAS_DEPTH);
             ctx.bare_path_call.set(false);
             match resolved {
@@ -1314,9 +1318,10 @@ impl Ctx<'_> {
     }
 
     /// CR-068 Part B bare-path method exclusion, expressed as a **tie-break**
-    /// ([FR-RS-07]): for a single-segment bare-path call (`want ==
-    /// Want::Callable`), a free [`NodeKind::Function`] at a scope outranks
-    /// same-named [`NodeKind::Method`]s there. So a same-module bare call binds
+    /// ([FR-RS-07]): while resolving a single-segment bare-path call (gated on
+    /// [`bare_path_call`](Ctx::bare_path_call)), a free [`NodeKind::Function`] at a
+    /// scope outranks same-named [`NodeKind::Method`]s there. So a same-module bare
+    /// call binds
     /// the one free function even when same-named associated methods collapse to
     /// that module scope (`impl` is not a captured scope, [`is_type_like`]) — the
     /// `graph_store` `insert_node`/`insert_edge`/`upsert_symbol` cluster the graph
