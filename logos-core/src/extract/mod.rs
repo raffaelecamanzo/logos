@@ -510,7 +510,16 @@ fn extract_one(
         let Some(symbol) = &symbols[i] else {
             continue;
         };
-        let is_callable = matches!(decl.kind, NodeKind::Function | NodeKind::Method);
+        // Re-kind a Rust `impl`-nested associated function as `Method` (CR-068
+        // Part B, FR-EX-05): emission-only, so `decl.kind` — and thus every
+        // symbol ID and ordinal — is byte-identical (NFR-RA-06). Free functions
+        // and every other kind pass through unchanged.
+        let node_kind = if decl.kind == NodeKind::Function && is_rust_associated_method(decl.node) {
+            NodeKind::Method
+        } else {
+            decl.kind
+        };
+        let is_callable = matches!(node_kind, NodeKind::Function | NodeKind::Method);
         let metrics = is_callable.then(|| FunctionMetrics {
             cyclomatic_complexity: complexity::cyclomatic_complexity(decl.node, keywords),
             // `end_line >= start_line` always holds for a tree-sitter node;
@@ -519,7 +528,7 @@ fn extract_one(
         });
         facts.nodes.push(NodeFact {
             symbol: symbol.clone(),
-            kind: decl.kind,
+            kind: node_kind,
             name: decl.name.clone(),
             start_line: decl.start_line,
             end_line: decl.end_line,
@@ -529,11 +538,12 @@ fn extract_one(
             fingerprint: is_callable.then(|| shape::shape_fingerprint(decl.node, &facts.language)),
             // S-027 / FR-EX-06: language-native test-marker evidence, captured
             // in the same AST-in-hand pass. `test_evidence` itself gates on a
-            // callable kind, so it is `false` for every non-function node.
+            // callable kind (`Function`/`Method` alike), so it is `false` for
+            // every non-function node.
             test_evidence: testmarker::test_evidence(
                 decl.node,
                 &decl.name,
-                decl.kind,
+                node_kind,
                 &input.path,
                 test_convention,
                 source,
@@ -890,6 +900,42 @@ fn lift_to_declaration(node: Node<'_>) -> Node<'_> {
         }
     }
     decl
+}
+
+/// `true` for a Rust `impl`-nested associated `function_item` — the declarations
+/// re-kinded from free [`NodeKind::Function`] to [`NodeKind::Method`] at emission
+/// (CR-068 Part B, [FR-EX-05], [ADR-39]).
+///
+/// The Rust `symbols.scm` captures *every* `function_item` as `@symbol.function`
+/// — a tree-sitter query cannot express "`function_item` NOT inside an `impl`" —
+/// so [`kind_for_capture`] maps them all to `Function`. This restores the
+/// distinction structurally: an associated function is a `function_item` whose
+/// immediate parent is the `declaration_list` body of an `impl_item`. A local
+/// `fn` nested in a method body (its parent is a `block`) and a `trait_item`
+/// default method (its grandparent is a `trait_item`, not an `impl_item`) are
+/// deliberately **not** re-kinded — only `impl` associated functions are, matching
+/// the [resolution-engine]'s `Type::func` model where associated items collapse to
+/// module scope.
+///
+/// Rust-specific by construction and a proven no-op for every other grammar,
+/// mirroring [`lift_to_declaration`]: no other supported grammar produces an
+/// `impl_item`, and every other language already kinds its methods via a
+/// `@symbol.method` capture in its own query. The re-kinding is **emission-only**:
+/// `decl.kind` stays `Function` through the symbol and ordinal machinery, so
+/// `Function`/`Method` share the SCIP method-descriptor slot ([`descriptor_for`])
+/// and the `(kind, name)` ordinal grouping — every pre-existing symbol ID is
+/// byte-identical, only the emitted `nodes.kind` discriminant changes
+/// ([NFR-RA-06]).
+///
+/// [FR-EX-05]: ../../../docs/specs/requirements/FR-EX-05.md
+/// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
+/// [resolution-engine]: ../../../docs/specs/architecture/components/resolution-engine.md
+fn is_rust_associated_method(node: Node<'_>) -> bool {
+    node.kind() == "function_item"
+        && node.parent().is_some_and(|body| {
+            body.kind() == "declaration_list"
+                && body.parent().is_some_and(|owner| owner.kind() == "impl_item")
+        })
 }
 
 /// Map a `@symbol.<kind>` capture name to a [`NodeKind`], or `None` for a

@@ -850,3 +850,146 @@ fn test_evidence_does_not_perturb_symbol_ids_or_determinism() {
     let again = extract_src("src/lib.rs", "fn target() {}\n#[test]\nfn other() {}\n");
     assert_eq!(with, again, "extraction (incl. evidence) is byte-identical");
 }
+
+// ── CR-068 Part B: associated-function Method kinding (FR-EX-05) ──────────────
+
+/// The kind of the (first) node named `name`, if present.
+fn kind_of(facts: &Facts, name: &str) -> Option<NodeKind> {
+    facts.nodes.iter().find(|n| n.name == name).map(|n| n.kind)
+}
+
+#[test]
+fn impl_associated_functions_are_methods_free_functions_stay_functions() {
+    // FR-EX-05 (CR-068 Part B): a `function_item` directly inside an `impl`
+    // block is kinded `Method`; a free function stays `Function`.
+    let src = "\
+pub fn free_fn() {}
+
+pub struct Widget;
+
+impl Widget {
+    pub fn new() -> Self { Widget }
+    fn helper(&self) {}
+}
+";
+    let facts = extract_src("src/lib.rs", src);
+    assert_eq!(kind_of(&facts, "free_fn"), Some(NodeKind::Function));
+    assert_eq!(kind_of(&facts, "Widget"), Some(NodeKind::Struct));
+    assert_eq!(
+        kind_of(&facts, "new"),
+        Some(NodeKind::Method),
+        "an inherent associated fn is a Method"
+    );
+    assert_eq!(
+        kind_of(&facts, "helper"),
+        Some(NodeKind::Method),
+        "an inherent method is a Method"
+    );
+}
+
+#[test]
+fn trait_impl_methods_are_methods_but_trait_defaults_and_local_fns_are_not() {
+    // Only `impl`-nested functions are re-kinded. A trait *default* method lives
+    // in a `trait_item` (not an `impl_item`) and stays `Function`; a local `fn`
+    // nested in a method body (parent is a `block`) stays `Function` too.
+    let src = "\
+trait Greet {
+    fn hello(&self) {}          // trait default — NOT an impl method
+}
+
+struct S;
+
+impl Greet for S {
+    fn hello(&self) {           // trait-impl method — a Method
+        fn local() {}           // nested local fn — stays a Function
+        local();
+    }
+}
+";
+    let facts = extract_src("src/lib.rs", src);
+    // Two `hello` nodes exist; assert the mapping by *identity*, not set
+    // membership — the earlier-declared node is the trait default (line 2) and
+    // must stay `Function`; the later one is the trait-impl method and must be
+    // `Method`. (A set-membership check would pass even if the two were swapped.)
+    let mut hellos: Vec<&NodeFact> = facts.nodes.iter().filter(|n| n.name == "hello").collect();
+    hellos.sort_by_key(|n| n.start_line);
+    assert_eq!(hellos.len(), 2, "one trait-default + one trait-impl `hello`");
+    assert_eq!(
+        hellos[0].kind,
+        NodeKind::Function,
+        "the trait *default* `hello` (declared first) must stay a Function"
+    );
+    assert_eq!(
+        hellos[1].kind,
+        NodeKind::Method,
+        "the trait-impl `hello` (declared later) must be a Method"
+    );
+    assert_eq!(
+        kind_of(&facts, "local"),
+        Some(NodeKind::Function),
+        "a local fn nested in a method body is not an associated method"
+    );
+}
+
+#[test]
+fn method_kinding_preserves_symbol_ids_and_joint_ordinals() {
+    // NFR-RA-06 byte-identity: re-kinding is emission-only, so a free `fn` and a
+    // same-named associated fn in one module still share the SCIP method slot and
+    // the joint `(kind, name)` ordinal grouping — one gets `insert().`, the other
+    // `insert(1).`. Were the kind flipped *before* ordinal assignment, both would
+    // render `insert().` and collide.
+    let src = "\
+pub fn insert() {}
+
+pub struct Store;
+
+impl Store {
+    pub fn insert(&self) {}
+}
+";
+    let facts = extract_src("src/lib.rs", src);
+    let mut insert_syms: Vec<&str> = facts
+        .nodes
+        .iter()
+        .filter(|n| n.name == "insert")
+        .map(|n| n.symbol.as_str())
+        .collect();
+    insert_syms.sort();
+    assert_eq!(insert_syms.len(), 2, "one free fn + one associated fn");
+    assert_ne!(
+        insert_syms[0], insert_syms[1],
+        "the two `insert` symbols must be ordinal-disambiguated, not collide"
+    );
+    // Both ride the SCIP method descriptor slot (`insert().` / `insert(1).`) —
+    // the Function/Method-identical encoding that keeps IDs byte-identical.
+    assert!(
+        insert_syms.iter().any(|s| s.ends_with("insert().")),
+        "one `insert` keeps the ordinal-0 method descriptor: {insert_syms:?}"
+    );
+    assert!(
+        insert_syms.iter().any(|s| s.ends_with("insert(1).")),
+        "the other `insert` takes the ordinal-1 method disambiguator: {insert_syms:?}"
+    );
+    // Re-extraction is byte-identical (determinism holds with the re-kinding).
+    let again = extract_src("src/lib.rs", src);
+    assert_eq!(facts, again, "extraction is byte-identical across runs");
+}
+
+#[test]
+fn impl_method_carries_function_metrics_like_a_free_function() {
+    // A re-kinded `Method` is still a callable: it must carry per-function
+    // metrics (complexity/line count), exactly as it did as a `Function`.
+    let src = "\
+pub struct S;
+impl S {
+    pub fn m(&self, x: u32) -> u32 { if x > 0 { x } else { 0 } }
+}
+";
+    let facts = extract_src("src/lib.rs", src);
+    let m = facts.nodes.iter().find(|n| n.name == "m").expect("method m");
+    assert_eq!(m.kind, NodeKind::Method);
+    assert!(
+        m.metrics.is_some(),
+        "an impl method carries FunctionMetrics like a free fn"
+    );
+}

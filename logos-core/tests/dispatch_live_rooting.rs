@@ -31,8 +31,15 @@ fn snapshot(rt: &Runtime) -> Vec<AnnotationNodeRow> {
 
 fn dead_of(snap: &[AnnotationNodeRow], name: &str) -> Option<bool> {
     snap.iter()
-        .find(|n| !n.derived && n.name == name && n.kind == NodeKind::Function)
-        .unwrap_or_else(|| panic!("no Function node named {name}"))
+        .find(|n| {
+            !n.derived
+                && n.name == name
+                // The fixture's callables are `impl`/trait-impl methods, kinded
+                // `Method` since CR-068 Part B; free functions stay `Function`.
+                // The live-rooting semantics apply to any callable.
+                && matches!(n.kind, NodeKind::Function | NodeKind::Method)
+        })
+        .unwrap_or_else(|| panic!("no callable node named {name}"))
         .is_dead
 }
 
@@ -229,12 +236,15 @@ impl Sink for A {
     );
 }
 
-/// `true` if the `Function` named `name` carries a dispatch live-root marker — a
-/// `RoutesTo` self-edge (the CR-043 mechanism).
+/// `true` if the callable named `name` carries a dispatch live-root marker — a
+/// `RoutesTo` self-edge (the CR-043 mechanism). The fixture's dispatch targets
+/// are `impl`/trait-impl methods, kinded `Method` since CR-068 Part B.
 fn has_self_marker(rt: &Runtime, name: &str) -> bool {
     let Some(id) = snapshot(rt)
         .iter()
-        .find(|n| !n.derived && n.name == name && n.kind == NodeKind::Function)
+        .find(|n| {
+            !n.derived && n.name == name && matches!(n.kind, NodeKind::Function | NodeKind::Method)
+        })
         .map(|n| n.id)
     else {
         return false;

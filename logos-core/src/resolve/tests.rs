@@ -1337,3 +1337,156 @@ fn every_s071_relation_edge_is_metric_neutral() {
         );
     }
 }
+
+// ── CR-068 Part B: bare-path Method exclusion (FR-RS-07) ─────────────────────
+//
+// A separate fixture that models the pathology the change fixes: a free function
+// and same-named associated methods collapsed to one module scope (`impl` is not
+// a captured scope, so associated items live at module scope alongside free fns).
+//
+// ```text
+// module 1 (crate, src/lib.rs)
+// ├── fn ins        (2)  Function   ┐ free fn + same-named associated method
+// ├── fn ins        (3)  Method     ┘ (the graph_store insert cluster shape)
+// ├── struct Store  (4)  Struct
+// ├── fn make       (5)  Method     (Store::make, collapsed to module scope)
+// ├── fn caller     (6)  Function   (the call site)
+// ├── fn dup        (7)  Function   ┐
+// ├── fn dup        (8)  Function   ┤ two free fns + a method, all named `dup`
+// ├── fn dup        (9)  Method     ┘
+// └── fn only_m    (10)  Method     (a lone associated method, no free twin)
+// ```
+
+fn method_cluster() -> (Vec<NodeRow>, Vec<EdgeRow>) {
+    let nodes = vec![
+        node(1, "crate", NodeKind::Module, "src/lib.rs"),
+        node(2, "ins", NodeKind::Function, "src/lib.rs"),
+        node(3, "ins", NodeKind::Method, "src/lib.rs"),
+        node(4, "Store", NodeKind::Struct, "src/lib.rs"),
+        node(5, "make", NodeKind::Method, "src/lib.rs"),
+        node(6, "caller", NodeKind::Function, "src/lib.rs"),
+        node(7, "dup", NodeKind::Function, "src/lib.rs"),
+        node(8, "dup", NodeKind::Function, "src/lib.rs"),
+        node(9, "dup", NodeKind::Method, "src/lib.rs"),
+        node(10, "only_m", NodeKind::Method, "src/lib.rs"),
+    ];
+    let edges = vec![
+        contains(1, 2),
+        contains(1, 3),
+        contains(1, 4),
+        contains(1, 5),
+        contains(1, 6),
+        contains(1, 7),
+        contains(1, 8),
+        contains(1, 9),
+        contains(1, 10),
+    ];
+    (nodes, edges)
+}
+
+fn bind_cluster(r: &UnresolvedRefRow, policy: BindingPolicy) -> Outcome {
+    let (nodes, edges) = method_cluster();
+    let ix = Index::build(&nodes, &edges, std::slice::from_ref(r));
+    bind(r, &ix, policy)
+}
+
+fn method_call(id: i64, file_id: i64, source_node: i64, target: &str) -> UnresolvedRefRow {
+    make_ref(
+        id,
+        file_id,
+        source_node,
+        target,
+        None,
+        RefForm::Method,
+        EdgeKind::Calls,
+    )
+}
+
+#[test]
+fn bare_call_binds_the_free_function_over_a_same_named_method() {
+    // FR-RS-07: `ins()` in the same module as a free `fn ins` AND an associated
+    // `ins` method binds the *free function* — the exclusion breaks the tie that
+    // previously left this `Ambiguous`/unbound. Holds under every policy (it is a
+    // genuine scope-evidence bind, not a workspace fallback).
+    for policy in [
+        BindingPolicy::Strict,
+        BindingPolicy::Balanced,
+        BindingPolicy::Aggressive,
+    ] {
+        let r = call(100, LIB_RS, 6, "ins");
+        bound_to(bind_cluster(&r, policy), 6, 2, EdgeKind::Calls);
+    }
+}
+
+#[test]
+fn bare_call_ambiguous_among_two_free_functions_stays_unresolved() {
+    // Never-fabricate ([NFR-RA-05]): excluding the `dup` *method* still leaves two
+    // free `dup` functions — a real ambiguity — so the bare call stays unbound.
+    for policy in [
+        BindingPolicy::Strict,
+        BindingPolicy::Balanced,
+        BindingPolicy::Aggressive,
+    ] {
+        let r = call(100, LIB_RS, 6, "dup");
+        assert_eq!(
+            bind_cluster(&r, policy),
+            Outcome::Unbound,
+            "two free-fn candidates must never bind ({policy:?})"
+        );
+    }
+}
+
+#[test]
+fn bare_call_to_a_lone_method_still_binds_the_method_monotonic() {
+    // The exclusion is a *tie-break*, not a filter: with no free function of the
+    // name, the full callable set stands, so a bare call whose only same-scope
+    // candidate is an associated method still binds it — no previously-resolved
+    // edge is lost (monotonic, [NFR-RA-05]). This is also what keeps a language
+    // whose free callables are `Method` (e.g. a Ruby top-level `def`) unaffected.
+    for policy in [
+        BindingPolicy::Strict,
+        BindingPolicy::Balanced,
+        BindingPolicy::Aggressive,
+    ] {
+        let r = call(100, LIB_RS, 6, "only_m");
+        bound_to(bind_cluster(&r, policy), 6, 10, EdgeKind::Calls);
+    }
+}
+
+#[test]
+fn path_qualified_call_still_binds_an_associated_method() {
+    // Unchanged: `Store::make()` is a multi-segment path, so the full callable set
+    // (methods included) is used — the `Type::func` collapse binds the associated
+    // `make` method. The exclusion is strictly single-segment.
+    let r = call(100, LIB_RS, 6, "Store::make");
+    bound_to(bind_cluster(&r, BindingPolicy::Strict), 6, 5, EdgeKind::Calls);
+}
+
+#[test]
+fn receiver_method_call_still_binds_a_method() {
+    // Unchanged: a receiver-unqualified method call (`x.only_m()`, RefForm::Method)
+    // resolves through scope evidence and still admits `Method` candidates — the
+    // exclusion applies only to single-segment *bare-path* calls, not receiver
+    // calls. A uniquely-named in-scope method binds.
+    let r = method_call(100, LIB_RS, 6, "only_m");
+    bound_to(bind_cluster(&r, BindingPolicy::Strict), 6, 10, EdgeKind::Calls);
+}
+
+#[test]
+fn receiver_method_call_does_not_apply_the_free_function_tiebreak() {
+    // The load-bearing guard for the `bare_path_call` flag (vs keying the
+    // tie-break on `want`): a receiver-unqualified method call (`x.ins()`,
+    // RefForm::Method) to a name that has BOTH a free `Function` and a same-named
+    // `Method` must stay ambiguous/unresolved — the free-function tie-break must
+    // NOT fire here (the receiver type is unknown; CR-066 discipline). Contrast
+    // `bare_call_binds_the_free_function_over_a_same_named_method`, which binds the
+    // *same* name to the free fn (node 2) through the bare-path branch. If the
+    // exclusion were keyed on `want == Want::Callable` instead of the flag, this
+    // would wrongly bind and the test would fail.
+    let r = method_call(100, LIB_RS, 6, "ins");
+    assert_eq!(
+        bind_cluster(&r, BindingPolicy::Strict),
+        Outcome::Unbound,
+        "a receiver call with a free-fn + method of the same name must stay ambiguous"
+    );
+}
