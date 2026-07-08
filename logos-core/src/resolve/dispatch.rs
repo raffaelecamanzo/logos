@@ -25,8 +25,9 @@
 //! - **function-pointer handoff** (S-276, [CR-068]) — a callable handed to an
 //!   axum router/middleware builder **by value**, never at a source-visible call
 //!   site: the ratified Phase-3 set is `.fallback(h)`, `middleware::from_fn(h)`,
-//!   `from_fn_with_state(state, h)`, and a method-router handler
-//!   `route(path, get(h)|post(h)|…)`. The handler is referenced only as a
+//!   `from_fn_with_state(state, h)`, and every method-router handler inside a
+//!   `route(path, get(h)|post(h)|…)` registration, including chained setters
+//!   (`get(a).post(b)` roots both). The handler is referenced only as a
 //!   function pointer, so the binder proves no `Calls` edge and the reachability
 //!   pass mis-reports it dead — the `spa_fallback`/`intent_guard`/`method_guard`/
 //!   `host_guard`/`csp_headers` shape in `web/src/lib.rs`. Recognition resolves
@@ -120,18 +121,25 @@ const RUST_EXT: &str = "rs";
 const RUST_DISPATCH_ATTRS: [&str; 1] = ["tool"];
 
 /// The axum method-router constructor heads whose first argument is a handler
-/// handed over by value (`route(path, get(handler))`, `get(a).post(b)` chains).
-/// Mirrors the HTTP-method set the framework-promotion pass recognises
+/// handed over by value — recognised **only inside a `route(path, …)` second
+/// argument** (see [`collect_method_router_handlers`]), so a bare same-named call
+/// elsewhere (`map.get(k)`, a local `head(x)`) is never mistaken for a route
+/// handler. Mirrors the HTTP-method set the framework-promotion pass recognises
 /// ([`super::framework`]); kept as a small Rust-specific constant beside the
 /// handoff walk (S-276, [CR-068]).
 const ROUTER_METHOD_HEADS: [&str; 10] = [
     "get", "post", "put", "delete", "patch", "head", "options", "trace", "connect", "any",
 ];
 
+/// The axum `Router::route(path, method_router)` method whose second argument is
+/// a (possibly chained) method-router expression carrying the handlers (S-276,
+/// [CR-068]).
+const ROUTER_REGISTER: &str = "route";
+
 /// The axum middleware constructors that take a handler function pointer: the
 /// first argument is the handler for `from_fn`, the **second** for
 /// `from_fn_with_state` (its first argument is the shared state) (S-276,
-/// [CR-068]).
+/// [CR-068]). Distinctive names, so recognised wherever they appear.
 const MIDDLEWARE_FROM_FN: &str = "from_fn";
 const MIDDLEWARE_FROM_FN_WITH_STATE: &str = "from_fn_with_state";
 
@@ -435,9 +443,7 @@ fn scan_source(
             }
         }
         if node.kind() == "call_expression" {
-            if let Some(handler) = handoff_handler(node, src) {
-                handoffs.insert(handler);
-            }
+            collect_handoffs(node, src, &mut handoffs);
         }
         for i in (0..node.child_count()).rev() {
             if let Some(child) = node.child(i) {
@@ -455,80 +461,140 @@ fn scan_source(
     }
 }
 
-/// The handler name a `call_expression` hands to an axum router/middleware **by
-/// value**, or `None` when the call is not a recognised function-pointer handoff
-/// shape (S-276, [CR-068] §3.2).
+/// Collect the handler names a `call_expression` hands to an axum
+/// router/middleware **by value** into `out` (S-276, [CR-068] §3.2).
 ///
-/// The ratified Phase-3 shapes, and the argument slot each puts the handler in:
+/// The ratified Phase-3 shapes:
 ///
-/// - a method-router constructor `get(h)` / `axum::routing::post(h)` / … — a
-///   bare (possibly path-qualified) `identifier`/`scoped_identifier` call whose
-///   head is in [`ROUTER_METHOD_HEADS`]; handler is argument 0. A *method*-call
-///   head (`map.get(k)`, a `field_expression`) is deliberately **not** matched,
-///   so an ordinary `.get()`/`.post()` is never mistaken for a route handler;
+/// - **`.route(path, get(h)|post(h)|…)`** — a `.route(...)` method call whose
+///   second argument is a method-router; every handler in the (possibly chained)
+///   method-router expression is collected ([`collect_method_router_handlers`]),
+///   so `get(a).post(b)` yields both `a` and `b`. Method-router constructors are
+///   recognised **only inside a `route(...)` argument**, never as a bare `get(h)`
+///   anywhere, so an ordinary same-named call (a local `head(x)`, `map.get(k)`)
+///   is not mistaken for a route handler;
 /// - middleware `from_fn(h)` / `middleware::from_fn(h)` — handler is argument 0;
 /// - middleware `from_fn_with_state(state, h)` — handler is argument **1** (the
 ///   first argument is the shared state);
 /// - `Router::fallback(h)` — a `.fallback(h)` method call; handler is argument 0.
 ///
-/// The handler argument must itself be an `identifier`/`scoped_identifier`; the
-/// returned name is its last `::` segment (a closure, block, or other expression
-/// yields `None`). Resolution to a node is the caller's job and is same-file
+/// Each handler must be an `identifier`/`scoped_identifier`; the collected name
+/// is its last `::` segment (a closure, block, or other expression is skipped).
+/// Resolution to a node is the caller's job and is same-file
 /// exactly-one-or-nothing, so a name that resolves cross-file or ambiguously
 /// binds nothing ([NFR-RA-05]).
-fn handoff_handler(call: Node<'_>, src: &[u8]) -> Option<String> {
-    let function = call.child_by_field_name("function")?;
-    let args = call.child_by_field_name("arguments")?;
-
-    let handler_arg = match function.kind() {
-        // `get(h)` / `axum::routing::get(h)` / `from_fn(h)` / `from_fn_with_state(s, h)`.
-        "identifier" | "scoped_identifier" => head_handler_arg(node_text(function, src))?,
-        // `get::<T>(h)` — a turbofished router constructor.
-        "generic_function" => {
-            let inner = function.child_by_field_name("function")?;
-            if !matches!(inner.kind(), "identifier" | "scoped_identifier") {
-                return None;
-            }
-            head_handler_arg(node_text(inner, src))?
-        }
-        // `.fallback(h)` — a method call whose field names the fallback setter.
-        "field_expression" => {
-            let field = function.child_by_field_name("field")?;
-            if node_text(field, src) != ROUTER_FALLBACK {
-                return None;
-            }
-            0
-        }
-        _ => return None,
+fn collect_handoffs(call: Node<'_>, src: &[u8], out: &mut BTreeSet<String>) {
+    let Some(function) = call.child_by_field_name("function") else {
+        return;
     };
-
-    let arg = nth_named_arg(args, handler_arg)?;
-    if !matches!(arg.kind(), "identifier" | "scoped_identifier") {
-        return None;
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    match function.kind() {
+        // `from_fn(h)` / `middleware::from_fn(h)` / `from_fn_with_state(state, h)`
+        // — distinctive axum names, recognised wherever they appear.
+        "identifier" | "scoped_identifier" => {
+            let head = last_path_segment(node_text(function, src));
+            let slot = if head == MIDDLEWARE_FROM_FN {
+                0
+            } else if head == MIDDLEWARE_FROM_FN_WITH_STATE {
+                1
+            } else {
+                return;
+            };
+            if let Some(name) = ident_arg_name(args, slot, src) {
+                out.insert(name);
+            }
+        }
+        "field_expression" => {
+            let Some(field) = function.child_by_field_name("field") else {
+                return;
+            };
+            let field = node_text(field, src);
+            if field == ROUTER_FALLBACK {
+                // `.fallback(h)` — handler is argument 0.
+                if let Some(name) = ident_arg_name(args, 0, src) {
+                    out.insert(name);
+                }
+            } else if field == ROUTER_REGISTER {
+                // `.route(path, <method-router>)` — walk the second argument, the
+                // (possibly chained) method-router carrying the handlers.
+                if let Some(router) = args.named_child(1) {
+                    collect_method_router_handlers(router, src, out);
+                }
+            }
+        }
+        _ => {}
     }
-    Some(last_path_segment(node_text(arg, src)).to_string())
 }
 
-/// The handler argument slot for a recognised call head (its last `::` segment),
-/// or `None` when the head is not a handoff constructor: `0` for a method-router
-/// (`get`/`post`/…) or `from_fn`, `1` for `from_fn_with_state` (its first
-/// argument is the shared state).
-fn head_handler_arg(function_text: &str) -> Option<usize> {
-    let head = last_path_segment(function_text);
-    if ROUTER_METHOD_HEADS.contains(&head) || head == MIDDLEWARE_FROM_FN {
-        Some(0)
-    } else if head == MIDDLEWARE_FROM_FN_WITH_STATE {
-        Some(1)
-    } else {
-        None
+/// Walk a method-router expression, collecting each handler handed over by value
+/// (S-276). Recognised shapes, recursing left through the chain:
+///
+/// - `get(h)` / `axum::routing::get(h)` / `get::<T>(h)` — a method-router
+///   constructor whose head is in [`ROUTER_METHOD_HEADS`]; handler is argument 0;
+/// - `<receiver>.post(h)` — a chained setter (`get(a).post(b)`): the receiver is
+///   walked first, then this link's argument-0 handler is taken;
+/// - any other link is a no-op on itself, but its receiver is still walked so a
+///   handler left of an unrecognised link is not lost.
+///
+/// Mirrors the framework-promotion pass's `router_targets` walk, minus the
+/// method/path bookkeeping ([`super::framework`]).
+fn collect_method_router_handlers(node: Node<'_>, src: &[u8], out: &mut BTreeSet<String>) {
+    if node.kind() != "call_expression" {
+        return;
+    }
+    let Some(function) = node.child_by_field_name("function") else {
+        return;
+    };
+    let args = node.child_by_field_name("arguments");
+    match function.kind() {
+        // The chain head: `get(h)` / `axum::routing::get(h)`.
+        "identifier" | "scoped_identifier" => {
+            if ROUTER_METHOD_HEADS.contains(&last_path_segment(node_text(function, src))) {
+                if let Some(name) = args.and_then(|a| ident_arg_name(a, 0, src)) {
+                    out.insert(name);
+                }
+            }
+        }
+        // A turbofished head: `get::<T>(h)`.
+        "generic_function" => {
+            if let Some(inner) = function.child_by_field_name("function") {
+                if matches!(inner.kind(), "identifier" | "scoped_identifier")
+                    && ROUTER_METHOD_HEADS.contains(&last_path_segment(node_text(inner, src)))
+                {
+                    if let Some(name) = args.and_then(|a| ident_arg_name(a, 0, src)) {
+                        out.insert(name);
+                    }
+                }
+            }
+        }
+        // A chained link `<receiver>.method(h)`: walk the receiver, then take this
+        // link's handler when its field is a method-router setter.
+        "field_expression" => {
+            if let Some(receiver) = function.child_by_field_name("value") {
+                collect_method_router_handlers(receiver, src, out);
+            }
+            if let Some(field) = function.child_by_field_name("field") {
+                if ROUTER_METHOD_HEADS.contains(&node_text(field, src)) {
+                    if let Some(name) = args.and_then(|a| ident_arg_name(a, 0, src)) {
+                        out.insert(name);
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
-/// The `n`-th named child of an `arguments` node (0-based), if present. Indexed
-/// access (not a `TreeCursor`) so the returned node does not borrow a local
-/// cursor — the pattern the other helpers here use.
-fn nth_named_arg<'t>(args: Node<'t>, n: usize) -> Option<Node<'t>> {
-    args.named_child(n)
+/// The last `::` segment of the `n`-th named argument (0-based) when it is an
+/// `identifier`/`scoped_identifier` — a handler handed over by value; `None` for
+/// a closure, literal, or other expression. Indexed access (not a `TreeCursor`)
+/// so the returned node does not borrow a local cursor.
+fn ident_arg_name(args: Node<'_>, n: usize, src: &[u8]) -> Option<String> {
+    let arg = args.named_child(n)?;
+    matches!(arg.kind(), "identifier" | "scoped_identifier")
+        .then(|| last_path_segment(node_text(arg, src)).to_string())
 }
 
 /// The last `::`-path segment of a path text (`get` for `axum::routing::get`,

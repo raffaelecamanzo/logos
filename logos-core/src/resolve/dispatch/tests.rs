@@ -258,11 +258,34 @@ fn from_fn_with_state_hands_off_its_second_argument() {
 
 #[test]
 fn method_router_constructor_hands_off_its_handler() {
-    // `route(path, get(handler))` — the method-router constructor `get(h)` hands
-    // its handler over by value; the enclosing `.route(_, …)` needs no special
-    // casing because the nested `get(h)` call is matched directly.
+    // `route(path, get(handler))` — the method-router constructor inside the
+    // `.route(_, …)` second argument hands its handler over by value.
     let got = handoffs("fn r() { Router::new().route(\"/\", get(spa_shell)); }");
     assert_eq!(got, vec!["spa_shell".to_string()]);
+}
+
+#[test]
+fn chained_method_router_setters_hand_off_every_handler() {
+    // `route(path, get(a).post(b))` — the chained `.post(b)` setter is a method
+    // call, so the walk recurses through the chain and roots BOTH `a` and `b`
+    // (the `web/src/lib.rs` `get(spa_shell).post(chat_turn)` shape).
+    let got = handoffs("fn r() { app.route(\"/c\", get(shell).post(submit)); }");
+    assert_eq!(got, vec!["shell".to_string(), "submit".to_string()]);
+}
+
+#[test]
+fn bare_method_router_head_outside_a_route_is_not_a_handoff() {
+    // A method-router head is recognised ONLY inside a `route(...)` argument: a
+    // bare `head(local_fn)` / `get(local_fn)` elsewhere (a same-named local call)
+    // must not falsely live-root its argument (precision, no over-rooting).
+    assert!(
+        handoffs("fn r() { let x = head(local_fn); }").is_empty(),
+        "a bare method-router head outside `route(...)` is not a handoff"
+    );
+    assert!(
+        handoffs("fn r() { let y = any(other_fn); }").is_empty(),
+        "a bare `any(...)` outside `route(...)` is not a handoff"
+    );
 }
 
 #[test]

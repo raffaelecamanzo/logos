@@ -318,11 +318,13 @@ const AXUM_HANDOFFS: &str = "\
 pub fn router() -> Router {
     Router::new()
         .route(\"/\", get(spa_shell))
+        .route(\"/chat\", get(spa_shell).post(chat_turn))
         .fallback(spa_fallback)
         .layer(from_fn(method_guard))
         .layer(from_fn_with_state(app_state, intent_guard))
 }
 fn spa_shell() {}
+fn chat_turn() {}
 fn spa_fallback() {}
 fn method_guard() {}
 fn intent_guard() {}
@@ -335,10 +337,12 @@ const AXUM_HANDOFFS_NO_FALLBACK: &str = "\
 pub fn router() -> Router {
     Router::new()
         .route(\"/\", get(spa_shell))
+        .route(\"/chat\", get(spa_shell).post(chat_turn))
         .layer(from_fn(method_guard))
         .layer(from_fn_with_state(app_state, intent_guard))
 }
 fn spa_shell() {}
+fn chat_turn() {}
 fn spa_fallback() {}
 fn method_guard() {}
 fn intent_guard() {}
@@ -357,8 +361,15 @@ fn value_passed_axum_handlers_are_live_inherent_unreachable_stays_dead() {
     let snap = snapshot(rt);
 
     // Each handler is handed over by value (never called), so only the handoff
-    // live-rooting keeps it out of the dead set.
-    for handler in ["spa_shell", "spa_fallback", "method_guard", "intent_guard"] {
+    // live-rooting keeps it out of the dead set. `chat_turn` is the chained
+    // `.post(chat_turn)` setter — recognised via the method-router chain walk.
+    for handler in [
+        "spa_shell",
+        "chat_turn",
+        "spa_fallback",
+        "method_guard",
+        "intent_guard",
+    ] {
         assert_eq!(
             dead_of(&snap, handler),
             Some(false),
@@ -410,8 +421,12 @@ fn removing_a_handoff_retires_the_marker_and_flips_dead() {
         Some(true),
         "after the fallback handoff is removed the handler is no longer rooted"
     );
+    assert!(
+        !has_self_marker(rt, "spa_fallback"),
+        "the fallback handler's marker is reconciled away, not just its verdict"
+    );
     // The still-wired middleware/router handlers stay live across the edit.
-    for handler in ["spa_shell", "method_guard", "intent_guard"] {
+    for handler in ["spa_shell", "chat_turn", "method_guard", "intent_guard"] {
         assert_eq!(
             dead_of(&snapshot(rt), handler),
             Some(false),
@@ -439,6 +454,7 @@ fn handoff_synced_state_matches_a_fresh_reindex() {
 
     for name in [
         "spa_shell",
+        "chat_turn",
         "spa_fallback",
         "method_guard",
         "intent_guard",
@@ -450,6 +466,59 @@ fn handoff_synced_state_matches_a_fresh_reindex() {
             "sync and reindex agree on is_dead for {name}"
         );
     }
+}
+
+/// A handoff whose handler name is carried by **two** same-file callables must
+/// bind nothing (exactly-one-or-nothing, [NFR-RA-05]) — a regression guard for
+/// the `if let Some([only])` gate in the dispatch `run`. `dup_guard` is declared
+/// twice in the one file; `unique_guard` once. Both are handed to `from_fn`.
+const AMBIGUOUS_HANDOFF: &str = "\
+pub fn router() -> Router {
+    Router::new()
+        .layer(from_fn(dup_guard))
+        .layer(from_fn(unique_guard))
+}
+fn dup_guard() {}
+mod extra {
+    fn dup_guard() {}
+}
+fn unique_guard() {}
+";
+
+#[test]
+fn ambiguous_same_file_handler_binds_nothing_unique_one_binds() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/lib.rs", AMBIGUOUS_HANDOFF);
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let result = engine.index();
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    let rt = engine.runtime().unwrap();
+    let snap = snapshot(rt);
+
+    // The ambiguous name (two same-file `dup_guard`s) resolves to no single
+    // callable, so neither is live-rooted — both stay dead, none marked.
+    let dup_dead: Vec<Option<bool>> = snap
+        .iter()
+        .filter(|n| !n.derived && n.name == "dup_guard" && n.kind == NodeKind::Function)
+        .map(|n| n.is_dead)
+        .collect();
+    assert_eq!(
+        dup_dead,
+        vec![Some(true), Some(true)],
+        "an in-file-ambiguous handler name fabricates no marker (never-fabricate)"
+    );
+    assert!(
+        !has_self_marker(rt, "dup_guard"),
+        "no dup_guard node carries a marker"
+    );
+
+    // The unique name still binds and is live-rooted — the exactly-one path.
+    assert_eq!(
+        dead_of(&snap, "unique_guard"),
+        Some(false),
+        "the unambiguous handler is live-rooted"
+    );
+    assert!(has_self_marker(rt, "unique_guard"));
 }
 
 #[test]
