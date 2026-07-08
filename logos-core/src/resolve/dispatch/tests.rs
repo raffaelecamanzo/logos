@@ -9,15 +9,25 @@ use super::*;
 use crate::plugin::LanguageRegistry;
 
 /// Scan a Rust source snippet with the compiled-in Rust grammar, returning the
-/// 1-based start lines recognised as dispatch entries (sorted).
+/// 1-based start lines recognised as dispatch-method root entries (sorted).
 fn entries(source: &str) -> Vec<i64> {
     let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
     let plugin = registry.for_extension("rs").expect("rust plugin");
     let mut parser = Parser::new();
     scan_source(&mut parser, plugin.language(), source)
+        .roots
         .into_iter()
         .map(|e| e.start_line)
         .collect()
+}
+
+/// Scan a Rust source snippet, returning the recognised function-pointer handoff
+/// handler names (sorted, deduped) — the [`scan_source`] `handoffs` field.
+fn handoffs(source: &str) -> Vec<String> {
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    let plugin = registry.for_extension("rs").expect("rust plugin");
+    let mut parser = Parser::new();
+    scan_source(&mut parser, plugin.language(), source).handoffs
 }
 
 #[test]
@@ -213,4 +223,92 @@ impl S {
 ",
     );
     assert_eq!(dispatch_below, vec![5], "#[tool] below #[allow] is found");
+}
+
+// ── Function-pointer handoffs (S-276, CR-068) ────────────────────────────────
+
+#[test]
+fn fallback_hands_off_its_handler() {
+    // `.fallback(spa_fallback)` hands the fallback handler over by value.
+    let got = handoffs("fn r() { Router::new().fallback(spa_fallback); }");
+    assert_eq!(got, vec!["spa_fallback".to_string()]);
+}
+
+#[test]
+fn from_fn_hands_off_its_first_argument() {
+    // `from_fn(method_guard)` — the middleware handler is argument 0.
+    let got = handoffs("fn r() { app.layer(from_fn(method_guard)); }");
+    assert_eq!(got, vec!["method_guard".to_string()]);
+}
+
+#[test]
+fn pathed_from_fn_is_recognised_by_last_segment() {
+    // `middleware::from_fn(host_guard)` — the last `::` segment is `from_fn`.
+    let got = handoffs("fn r() { app.layer(middleware::from_fn(host_guard)); }");
+    assert_eq!(got, vec!["host_guard".to_string()]);
+}
+
+#[test]
+fn from_fn_with_state_hands_off_its_second_argument() {
+    // `from_fn_with_state(intent, intent_guard)` — arg 0 is the state, arg 1 is
+    // the handler. Only the handler is a handoff (the state is not a callable).
+    let got = handoffs("fn r() { app.layer(from_fn_with_state(intent, intent_guard)); }");
+    assert_eq!(got, vec!["intent_guard".to_string()]);
+}
+
+#[test]
+fn method_router_constructor_hands_off_its_handler() {
+    // `route(path, get(handler))` — the method-router constructor `get(h)` hands
+    // its handler over by value; the enclosing `.route(_, …)` needs no special
+    // casing because the nested `get(h)` call is matched directly.
+    let got = handoffs("fn r() { Router::new().route(\"/\", get(spa_shell)); }");
+    assert_eq!(got, vec!["spa_shell".to_string()]);
+}
+
+#[test]
+fn pathed_and_turbofished_router_constructors_are_recognised() {
+    // `axum::routing::post(h)` (path-qualified) and `get::<T>(h)` (turbofished).
+    let pathed = handoffs("fn r() { app.route(\"/x\", axum::routing::post(create)); }");
+    assert_eq!(pathed, vec!["create".to_string()]);
+    let turbo = handoffs("fn r() { app.route(\"/x\", get::<u8>(read)); }");
+    assert_eq!(turbo, vec!["read".to_string()]);
+}
+
+#[test]
+fn scoped_handler_takes_its_last_segment() {
+    // A cross-module handler path yields its last segment; same-file resolution
+    // in `run` then decides whether any callable of that name lives in the file.
+    let got = handoffs("fn r() { app.route(\"/\", get(api_v1::overview)); }");
+    assert_eq!(got, vec!["overview".to_string()]);
+}
+
+#[test]
+fn method_call_get_is_not_a_handoff() {
+    // `map.get(key)` is an ordinary method call (a `field_expression` head), not
+    // an axum router constructor — it must never be mistaken for a route handler.
+    let got = handoffs("fn r() { let v = map.get(key); }");
+    assert!(got.is_empty(), "a `.get()` method call is not a handoff: {got:?}");
+}
+
+#[test]
+fn closure_and_non_identifier_handlers_are_not_handoffs() {
+    // A closure or other non-path argument is not a resolvable handler name.
+    assert!(handoffs("fn r() { app.layer(from_fn(|req, next| next)); }").is_empty());
+    assert!(handoffs("fn r() { Router::new().fallback(make_service()); }").is_empty());
+}
+
+#[test]
+fn handoffs_are_deduped_and_sorted() {
+    // Two sites naming the same handler collapse to one; the list is sorted.
+    let got = handoffs(
+        "\
+fn r() {
+    Router::new()
+        .route(\"/a\", get(zebra))
+        .route(\"/b\", get(alpha))
+        .fallback(zebra);
+}
+",
+    );
+    assert_eq!(got, vec!["alpha".to_string(), "zebra".to_string()]);
 }

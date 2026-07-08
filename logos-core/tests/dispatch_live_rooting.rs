@@ -306,6 +306,152 @@ fn adding_a_tool_attribute_plants_the_marker_and_flips_live() {
     );
 }
 
+// ── Function-pointer handoffs (S-276, CR-068) ────────────────────────────────
+
+/// An axum-style wiring fixture: every handler is private (no source-visible
+/// caller) and handed to the router/middleware **by value**, so without handoff
+/// live-rooting all of `spa_shell`/`spa_fallback`/`method_guard`/`intent_guard`
+/// read dead. `truly_dead` is a plain unreachable free function (the control).
+/// The file references no axum crate, so the framework-promotion pass treats it
+/// as a non-candidate — the handoff recognition is the only thing rooting them.
+const AXUM_HANDOFFS: &str = "\
+pub fn router() -> Router {
+    Router::new()
+        .route(\"/\", get(spa_shell))
+        .fallback(spa_fallback)
+        .layer(from_fn(method_guard))
+        .layer(from_fn_with_state(app_state, intent_guard))
+}
+fn spa_shell() {}
+fn spa_fallback() {}
+fn method_guard() {}
+fn intent_guard() {}
+fn truly_dead() {}
+";
+
+/// The same fixture with the `.fallback(spa_fallback)` handoff removed, so
+/// `spa_fallback` is no longer a live root.
+const AXUM_HANDOFFS_NO_FALLBACK: &str = "\
+pub fn router() -> Router {
+    Router::new()
+        .route(\"/\", get(spa_shell))
+        .layer(from_fn(method_guard))
+        .layer(from_fn_with_state(app_state, intent_guard))
+}
+fn spa_shell() {}
+fn spa_fallback() {}
+fn method_guard() {}
+fn intent_guard() {}
+fn truly_dead() {}
+";
+
+#[test]
+fn value_passed_axum_handlers_are_live_inherent_unreachable_stays_dead() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/lib.rs", AXUM_HANDOFFS);
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let result = engine.index();
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    let rt = engine.runtime().unwrap();
+    let snap = snapshot(rt);
+
+    // Each handler is handed over by value (never called), so only the handoff
+    // live-rooting keeps it out of the dead set.
+    for handler in ["spa_shell", "spa_fallback", "method_guard", "intent_guard"] {
+        assert_eq!(
+            dead_of(&snap, handler),
+            Some(false),
+            "the value-passed handler {handler} is live-rooted"
+        );
+        assert!(
+            has_self_marker(rt, handler),
+            "{handler} carries the RoutesTo self-edge marker"
+        );
+    }
+
+    // The control: a plain unreachable free function with no handoff is still
+    // dead — the recognition does not over-root.
+    assert_eq!(
+        dead_of(&snap, "truly_dead"),
+        Some(true),
+        "an unreferenced free function is still dead (no over-rooting)"
+    );
+    assert!(!has_self_marker(rt, "truly_dead"), "the control is not marked");
+
+    // The shared-state argument of `from_fn_with_state(app_state, intent_guard)`
+    // is not a callable, so no `app_state` handler is fabricated.
+    assert!(
+        snap.iter().all(|n| n.name != "app_state"),
+        "the state argument is not a handler and is never rooted"
+    );
+}
+
+#[test]
+fn removing_a_handoff_retires_the_marker_and_flips_dead() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/lib.rs", AXUM_HANDOFFS);
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        dead_of(&snapshot(rt), "spa_fallback"),
+        Some(false),
+        "live while `.fallback(spa_fallback)` is wired"
+    );
+
+    // Drop the fallback handoff and sync only that file: the handler is no
+    // longer handed over, so its marker is reconciled away and it flips to dead.
+    write(tmp.path(), "src/lib.rs", AXUM_HANDOFFS_NO_FALLBACK);
+    let synced = engine.sync(&["src/lib.rs".into()]);
+    assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
+    assert_eq!(
+        dead_of(&snapshot(rt), "spa_fallback"),
+        Some(true),
+        "after the fallback handoff is removed the handler is no longer rooted"
+    );
+    // The still-wired middleware/router handlers stay live across the edit.
+    for handler in ["spa_shell", "method_guard", "intent_guard"] {
+        assert_eq!(
+            dead_of(&snapshot(rt), handler),
+            Some(false),
+            "{handler} stays live — its handoff is untouched"
+        );
+    }
+}
+
+#[test]
+fn handoff_synced_state_matches_a_fresh_reindex() {
+    // Incremental sync ≡ reindex for the handoff verdicts (NFR-RA-06).
+    let synced_tmp = TempDir::new().unwrap();
+    write(synced_tmp.path(), "src/lib.rs", AXUM_HANDOFFS);
+    let synced_engine = Engine::start(synced_tmp.path()).expect("engine starts");
+    synced_engine.index();
+    write(synced_tmp.path(), "src/lib.rs", AXUM_HANDOFFS_NO_FALLBACK);
+    synced_engine.sync(&["src/lib.rs".into()]);
+    let synced_snap = snapshot(synced_engine.runtime().unwrap());
+
+    let fresh_tmp = TempDir::new().unwrap();
+    write(fresh_tmp.path(), "src/lib.rs", AXUM_HANDOFFS_NO_FALLBACK);
+    let fresh_engine = Engine::start(fresh_tmp.path()).expect("engine starts");
+    fresh_engine.index();
+    let fresh_snap = snapshot(fresh_engine.runtime().unwrap());
+
+    for name in [
+        "spa_shell",
+        "spa_fallback",
+        "method_guard",
+        "intent_guard",
+        "truly_dead",
+    ] {
+        assert_eq!(
+            dead_of(&synced_snap, name),
+            dead_of(&fresh_snap, name),
+            "sync and reindex agree on is_dead for {name}"
+        );
+    }
+}
+
 #[test]
 fn transitive_helper_stays_live_and_marker_retires_on_tool_removal() {
     // After #[tool] is removed: session_end's marker is retired (gone), but
