@@ -413,11 +413,13 @@ fn dogfood_measures_resolution_accuracy_on_logos_own_source() {
 
     // Precision guard — `as_i32` has three same-named definitions (NodeKind,
     // EdgeKind, RefForm): every receiver-method call `kind.as_i32()` is
-    // ambiguous and must stay unresolved under the balanced default.
+    // ambiguous and must stay unresolved under the balanced default. Since
+    // CR-068 Part B these `impl`-associated fns are kinded `Method`, not
+    // `Function` — the receiver-call exclusion is unchanged, so the guard holds.
     let as_i32_candidates = rt
         .submit_read(|store| {
             Ok(store
-                .search("as_i32", Some(NodeKind::Function), 16)?
+                .search("as_i32", Some(NodeKind::Method), 16)?
                 .into_iter()
                 .filter(|r| r.name == "as_i32")
                 .map(|r| r.id)

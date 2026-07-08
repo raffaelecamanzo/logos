@@ -669,6 +669,7 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
         policy,
         in_glob_resolution: Cell::new(false),
         no_workspace_fallback: Cell::new(false),
+        bare_path_call: Cell::new(false),
     };
 
     // A cross-artifact reference (CR-011, FR-CG-07): bind under the same
@@ -723,7 +724,14 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
                 Want::Any
             };
             let segs = split(&r.target);
-            match ctx.resolve_path(&segs, want, MAX_ALIAS_DEPTH) {
+            // A bare-path call enables the CR-068 Part B tie-break (free function
+            // over same-named associated methods); an import (`Want::Any`) does
+            // not. Scoped to this resolution, so the receiver-method branch below
+            // — which also uses `Want::Callable` — is unaffected ([FR-RS-07]).
+            ctx.bare_path_call.set(r.kind == EdgeKind::Calls);
+            let resolved = ctx.resolve_path(&segs, want, MAX_ALIAS_DEPTH);
+            ctx.bare_path_call.set(false);
+            match resolved {
                 Res::Found(target) => bound(target),
                 _ => Outcome::Unbound,
             }
@@ -887,6 +895,19 @@ struct Ctx<'a> {
     /// [CR-066]: ../../../docs/requests/CR-066-receiver-method-overbinding.md
     /// [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
     no_workspace_fallback: Cell<bool>,
+    /// Enable the CR-068 Part B free-function/associated-method tie-break in
+    /// [`prefer_free_functions`](Ctx::prefer_free_functions) for the duration of
+    /// one resolution. Set **only** while resolving a single-segment bare-**path**
+    /// call ([`RefForm::Path`] + [`EdgeKind::Calls`]) — precisely the shape that
+    /// must bind the one free function over same-named associated methods
+    /// ([FR-RS-07]). Left `false` for a receiver-unqualified **method** call
+    /// ([`RefForm::Method`]), which also resolves through
+    /// [`resolve_name`](Ctx::resolve_name) with [`Want::Callable`] but must stay
+    /// unchanged (the receiver type is unknown; the CR-066 discipline is not
+    /// loosened) — so the tie-break cannot be keyed on `want` alone.
+    ///
+    /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
+    bare_path_call: Cell<bool>,
 }
 
 impl Ctx<'_> {
@@ -1292,13 +1313,63 @@ impl Ctx<'_> {
         }
     }
 
+    /// CR-068 Part B bare-path method exclusion, expressed as a **tie-break**
+    /// ([FR-RS-07]): for a single-segment bare-path call (`want ==
+    /// Want::Callable`), a free [`NodeKind::Function`] at a scope outranks
+    /// same-named [`NodeKind::Method`]s there. So a same-module bare call binds
+    /// the one free function even when same-named associated methods collapse to
+    /// that module scope (`impl` is not a captured scope, [`is_type_like`]) — the
+    /// `graph_store` `insert_node`/`insert_edge`/`upsert_symbol` cluster the graph
+    /// previously left [`Res::Ambiguous`].
+    ///
+    /// A **tie-break, not a filter**: methods are dropped only when a free
+    /// function is actually present. So it is strictly monotonic and
+    /// never-fabricate ([NFR-RA-05]):
+    /// - one free fn + same-named methods → binds the free fn (the recovery);
+    /// - two-or-more free fns → still ambiguous, stays unresolved;
+    /// - no free fn (a language whose free callables are `Method`, e.g. a Ruby
+    ///   top-level `def`, or a lone associated method) → the full callable set
+    ///   stands, so no previously-resolved edge is lost.
+    ///
+    /// Path-qualified (`Type::f` via [`descend`](Ctx::descend)) and typed calls
+    /// never reach this step; a receiver-unqualified method call
+    /// ([`RefForm::Method`]) does reach it but leaves [`bare_path_call`](Ctx::bare_path_call)
+    /// `false`, so it is a no-op there — receiver calls and the [CR-066]
+    /// workspace unique-name fallback are untouched.
+    ///
+    /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    /// [CR-066]: ../../../docs/requests/CR-066-receiver-method-overbinding.md
+    fn prefer_free_functions(&self, mut candidates: Vec<NodeId>) -> Vec<NodeId> {
+        if !self.bare_path_call.get() {
+            return candidates;
+        }
+        let is_free = |id: &NodeId| {
+            self.ix
+                .info
+                .get(id)
+                .is_some_and(|i| i.kind == NodeKind::Function)
+        };
+        if candidates.iter().any(is_free) {
+            candidates.retain(is_free);
+        }
+        candidates
+    }
+
     /// Resolve a bare name by the scope hierarchy (function-local outward).
+    ///
+    /// Reached only for a **single-segment** name (multi-segment paths route
+    /// through [`descend`](Ctx::descend)). Both a bare-path call and a
+    /// receiver-unqualified method call arrive here with [`Want::Callable`]; the
+    /// CR-068 Part B free-function tie-break ([`prefer_free_functions`]) fires
+    /// only for the former, gated on [`bare_path_call`](Ctx::bare_path_call).
     fn resolve_name(&self, name: &str, want: Want, depth: u8) -> Res {
         // 1) Lexical Contains chain, innermost first: nested decls of the
         //    source itself, then each enclosing scope up to the file module.
         let mut cursor = Some(self.source);
         while let Some(scope) = cursor {
-            match exactly_one(&self.ix.members_named(scope, name, want)) {
+            let members = self.prefer_free_functions(self.ix.members_named(scope, name, want));
+            match exactly_one(&members) {
                 Res::NotFound => {}
                 decided => return decided, // found — or a *known* ambiguity
             }

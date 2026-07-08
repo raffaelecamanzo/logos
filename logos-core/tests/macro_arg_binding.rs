@@ -35,8 +35,14 @@ fn snapshot(rt: &Runtime) -> Vec<AnnotationNodeRow> {
 
 fn dead_of(snap: &[AnnotationNodeRow], name: &str) -> Option<bool> {
     snap.iter()
-        .find(|n| !n.derived && n.name == name && n.kind == NodeKind::Function)
-        .unwrap_or_else(|| panic!("no Function node named {name}"))
+        .find(|n| {
+            !n.derived
+                && n.name == name
+                // Some fixture callables are `impl` methods, kinded `Method`
+                // since CR-068 Part B; free functions stay `Function`.
+                && matches!(n.kind, NodeKind::Function | NodeKind::Method)
+        })
+        .unwrap_or_else(|| panic!("no callable node named {name}"))
         .is_dead
 }
 
