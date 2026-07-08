@@ -963,6 +963,92 @@ fn absent_swe_skills_reproduces_skip_all_for_docs_symlink() {
     );
 }
 
+// ── CR-071 / S-279 / FR-IX-10+FR-IX-11: git-ignored sanctioned doc symlinks ───
+
+/// The regression [S-277]'s fixtures missed and [CR-071] closes: when the
+/// sanctioned `docs/specs` symlink is **git-ignored** (as on this project's own
+/// `main`), discovery still follows it and indexes the docs behind it — the
+/// detection pass bypasses the main walk's git-ignore filtering for exactly the
+/// sanctioned doc subtree — while a git-ignored non-sanctioned tree stays pruned.
+#[cfg(unix)]
+#[test]
+fn follows_git_ignored_sanctioned_docs_symlink_end_to_end() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempdir().unwrap();
+    let base = base.path().canonicalize().unwrap();
+    let sanctioned = base.join("logos-docs");
+    write(&sanctioned, "specs/ADR-46.md", "# ADR-46\n");
+    let sanctioned = sanctioned.canonicalize().unwrap();
+
+    let proj = base.join("project");
+    write(&proj, "src/main.rs", "fn main() {}\n");
+    write(&proj, ".swe-skills", &format!("{}\n", sanctioned.display()));
+    fs::create_dir_all(proj.join("docs")).unwrap();
+    symlink(sanctioned.join("specs"), proj.join("docs/specs")).unwrap();
+    // Git-ignore the symlink AND an ordinary source tree — as this repo does.
+    write(&proj, ".gitignore", "/docs/specs\n/generated\n");
+    write(&proj, "generated/out.rs", "pub fn g() {}\n");
+
+    let report = config::discover(&proj, &Config::default()).unwrap();
+    let rels = discovered_rels(&report, &proj);
+
+    assert!(rels.contains("src/main.rs"), "real source discovered: {rels:?}");
+    assert!(
+        rels.contains("docs/specs/ADR-46.md"),
+        "the git-ignored sanctioned doc is followed and indexed ([CR-071]): {rels:?}"
+    );
+    assert!(
+        !rels.iter().any(|r| r.starts_with("generated/")),
+        "a git-ignored non-sanctioned tree stays pruned (bypass is doc-scoped): {rels:?}"
+    );
+    // Docs index correctly ⇒ no unindexed-doc-symlink warning ([FR-IX-11]).
+    assert!(
+        report.unindexed_doc_symlinks.is_empty(),
+        "no warning when the sanctioned symlink indexes correctly: {:?}",
+        report.unindexed_doc_symlinks
+    );
+    // Idempotent re-index.
+    assert_eq!(config::discover(&proj, &Config::default()).unwrap(), report);
+}
+
+/// [FR-IX-11]: a git-ignored doc symlink with **no** sanctioned bypass (no
+/// `.swe-skills`) is skipped (unchanged) and surfaced as an unindexed drop naming
+/// the path + reason, so the silent doc-drop becomes a signal on `index`/`doctor`.
+#[cfg(unix)]
+#[test]
+fn git_ignored_doc_symlink_without_sanction_is_reported_unindexed() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempdir().unwrap();
+    let base = base.path().canonicalize().unwrap();
+    let sanctioned = base.join("logos-docs");
+    write(&sanctioned, "specs/ADR-46.md", "# ADR-46\n");
+    let sanctioned = sanctioned.canonicalize().unwrap();
+
+    let proj = base.join("project");
+    write(&proj, "src/main.rs", "fn main() {}\n");
+    fs::create_dir_all(proj.join("docs")).unwrap();
+    symlink(sanctioned.join("specs"), proj.join("docs/specs")).unwrap();
+    write(&proj, ".gitignore", "/docs/specs\n"); // git-ignored, and NO `.swe-skills`.
+
+    let report = config::discover(&proj, &Config::default()).unwrap();
+    let rels = discovered_rels(&report, &proj);
+
+    assert!(
+        !rels.iter().any(|r| r.starts_with("docs/specs")),
+        "with no sanction the git-ignored doc symlink is skipped: {rels:?}"
+    );
+    assert_eq!(report.unindexed_doc_symlinks.len(), 1, "one unindexed doc symlink reported");
+    let warning = report.unindexed_doc_symlinks[0].to_string();
+    assert!(warning.contains("docs/specs"), "warning names the dropped path: {warning}");
+    assert!(warning.contains("escapes"), "warning names the reason: {warning}");
+
+    // The `doctor`-side twin (no full index walk) computes the same drop.
+    let doctor_side = config::unindexed_doc_symlinks(&proj, &Config::default()).unwrap();
+    assert_eq!(doctor_side, report.unindexed_doc_symlinks, "doctor twin agrees with discover");
+}
+
 // ── CR-054 / S-213: `.worktrees` / `.playwright-mcp` default ignored_dirs ────
 
 /// A project with NO `.gitignore` at all still keeps `.worktrees/` and

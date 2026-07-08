@@ -629,6 +629,16 @@ pub struct DoctorReport {
     pub unadmitted_sample: Vec<String>,
     /// One line per detected fault (empty when `ok`).
     pub faults: Vec<String>,
+    /// Documentation directory-symlinks that exist under the documentation-
+    /// include set but ended up unindexed ([FR-IX-11]) — a git-ignored symlink
+    /// with no sanctioned bypass, or one whose target escapes containment. Purely
+    /// diagnostic: this does **not** affect [`ok`](Self::ok) or the exit status,
+    /// it only names the dropped path(s) and reason so a silent doc-drop is
+    /// visible ([CR-071]).
+    ///
+    /// [FR-IX-11]: ../../../docs/specs/requirements/FR-IX-11.md
+    #[serde(default)]
+    pub doc_symlink_warnings: Vec<String>,
     pub message: String,
 }
 

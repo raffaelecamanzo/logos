@@ -50,7 +50,10 @@ pub use chat::{
     ChatConfig, ChatModelOverrides, ChatProvider, ChatRole, DEFAULT_CHAT_BASE_URL,
     DEFAULT_MAX_REPLANS, DEFAULT_MAX_SUBAGENT_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS,
 };
-pub use discovery::{discover, DiscoveryReport, OversizeSkip};
+pub use discovery::{
+    discover, unindexed_doc_symlinks, DiscoveryReport, DocSymlinkDrop, OversizeSkip,
+    UnindexedDocSymlink,
+};
 pub use error::ConfigError;
 /// The validated glob compiler, shared with the annotation engine's layer
 /// matching (S-014, [FR-AN-03]) so layer globs obey the same containment

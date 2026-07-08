@@ -2573,3 +2573,37 @@ fn admission_census_faults_is_empty_and_ok_on_a_clean_census() {
     assert!(admission.is_ok());
     assert!(admission.faults().is_empty());
 }
+
+// ── CR-071 / S-279 / FR-IX-11: the unindexed-doc-symlink warning is diagnostic ─
+
+#[test]
+fn doctor_report_builder_leaves_doc_symlink_warnings_empty() {
+    // The builder is shared with `verify` (as its embedded `structural`); the
+    // FR-IX-11 doc-symlink diagnostic is populated only by the `doctor` entry
+    // point, so the builder must leave it empty and never fold it into `faults`.
+    let structural = StructuralReport {
+        node_count: 2,
+        distinct_symbol_ids: 2,
+        ..StructuralReport::default()
+    };
+    let report = doctor_report(structural, AdmissionCensus::default());
+    assert!(report.doc_symlink_warnings.is_empty(), "builder does not populate the warning");
+    assert!(report.ok, "clean census is ok");
+}
+
+#[test]
+fn doc_symlink_warning_is_diagnostic_only_and_never_flips_ok() {
+    // FR-IX-11: the unindexed-doc-symlink warning does not change the verdict —
+    // a structurally-sound, admission-clean graph stays `ok` even with a warning
+    // attached (as `doctor` attaches it), because it is not a fault.
+    let structural = StructuralReport {
+        node_count: 1,
+        distinct_symbol_ids: 1,
+        ..StructuralReport::default()
+    };
+    let mut report = doctor_report(structural, AdmissionCensus::default());
+    report.doc_symlink_warnings =
+        vec!["documentation directory-symlink docs/specs exists but is unindexed: …".to_string()];
+    assert!(report.ok, "a doc-symlink warning is diagnostic only — `ok` is unaffected");
+    assert!(report.faults.is_empty(), "the warning is not a fault");
+}
