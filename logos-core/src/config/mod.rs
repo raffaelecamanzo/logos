@@ -86,9 +86,9 @@ pub use settings::{
 };
 pub use wiki::{EffectiveWikiModel, WikiConfig};
 pub use writeback::{
-    read_documents, write_config, write_rules, write_secret, ConfigApplyOutcome, ConfigFileView,
-    ConfigReadModel, ConfigWriteOutcome, FileView, PolicyFile, RulesFileView, SecretWriteOutcome,
-    RULES_PROVENANCE_STAMP,
+    read_documents, write_config, write_rules, write_secret, ConfigApplyOutcome, ConfigDefaults,
+    ConfigFileView, ConfigReadModel, ConfigWriteOutcome, FileView, MetricThresholdDefaults,
+    PolicyFile, RulesDefaults, RulesFileView, SecretWriteOutcome, RULES_PROVENANCE_STAMP,
 };
 
 /// The conventional location of the two policy files within a project root.

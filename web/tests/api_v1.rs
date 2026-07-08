@@ -385,6 +385,40 @@ async fn config_endpoint_returns_the_masked_key_never_the_raw_secret() {
     assert!(!body.contains("supersecret"), "no fragment of the raw secret leaks: {body}");
 }
 
+// ── Acceptance: the CR-067/BR-37 `defaults` projection ────────────────────────
+
+/// `GET /api/v1/config` serializes the code-sourced `defaults` projection
+/// (CR-067, FR-UI-12, BR-37): `config.toml` defaults from `Config::default()`,
+/// `[metric_thresholds]` defaults keyed by the rules.toml key names, and
+/// `[constraints]` recommended baselines from `Constraints::recommended()`.
+#[tokio::test]
+async fn config_endpoint_serializes_the_defaults_projection() {
+    let (_tmp, engine) = scanned_engine();
+    let router = web::router(engine);
+
+    let resp = router.oneshot(get("/api/v1/config")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "config-read answers 200");
+
+    assert!(body.contains("\"defaults\""), "the defaults projection is present: {body}");
+    // config.toml default (Config::default().max_file_size == 2 MiB).
+    assert!(
+        body.contains("\"max_file_size\":2097152"),
+        "config defaults carry the real max_file_size default: {body}"
+    );
+    // [metric_thresholds] defaults, keyed by the rules.toml names, equal
+    // Thresholds::default() (FR-QM-14).
+    assert!(
+        body.contains("\"nesting_depth\":4") && body.contains("\"brain_lines\":100"),
+        "metric_thresholds defaults are keyed by rules.toml names: {body}"
+    );
+    // [constraints] recommended baseline (CR-067 CRA-01, e.g. max_fan_in -> 30).
+    assert!(
+        body.contains("\"max_fan_in\":30"),
+        "constraints carry the recommended baseline: {body}"
+    );
+}
+
 // ── Contract: required params and honest 404 ──────────────────────────────────
 
 /// `node`/`search` without their required query param are a `400`; with it, `200`.

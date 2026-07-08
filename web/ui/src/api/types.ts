@@ -918,12 +918,48 @@ export interface FileView<T> {
   parsed: T;
 }
 
-/** `GET /api/v1/config` — both policy files plus the masked chat key (mirrors
- *  `ConfigReadModel`, FR-UI-12/FR-CF-06). A pure read; loading mutates nothing. */
+/** `[metric_thresholds]` real code defaults, keyed by the **rules.toml key
+ *  names** (mirrors `MetricThresholdDefaults`, FR-QM-14, CR-067) — equal to
+ *  `Thresholds::default()` resolved through `MetricThresholds::effective()`. */
+export interface MetricThresholdDefaults {
+  nesting_depth: number;
+  brain_complexity: number;
+  brain_lines: number;
+  brain_nesting: number;
+  god_methods: number;
+  god_span: number;
+  clone_similarity: number;
+  clone_min_tokens: number;
+}
+
+/** `rules.toml`'s default / recommended-baseline projection (mirrors
+ *  `RulesDefaults`, CR-067/BR-37): real `[metric_thresholds]` defaults, and
+ *  curated `[constraints]` recommended baselines (constraints carry no code
+ *  default — omitted = not enforced). The `constraints` shape mirrors
+ *  `ParsedRules.constraints`. */
+export interface RulesDefaults {
+  metric_thresholds: MetricThresholdDefaults;
+  constraints: Record<string, number | boolean | { baseline: number; delta: number } | null>;
+}
+
+/** The server-computed `defaults` projection (mirrors `ConfigDefaults`,
+ *  CR-067/BR-37, FR-UI-12): every value traces to a Rust code default — the
+ *  editor never fabricates one (NFR-RA-05). `config` mirrors `Config::default()`
+ *  serialized whole (CRA-02); the SPA reads only the fields `ParsedConfig`
+ *  formifies. */
+export interface ConfigDefaults {
+  config: ParsedConfig;
+  rules: RulesDefaults;
+}
+
+/** `GET /api/v1/config` — both policy files, the masked chat key, and the
+ *  code-sourced `defaults` projection (mirrors `ConfigReadModel`, FR-UI-12/
+ *  FR-CF-06). A pure read; loading mutates nothing. */
 export interface ConfigReadModel {
   config: FileView<ParsedConfig>;
   rules: FileView<ParsedRules>;
   chat_key: MaskedSecret;
+  defaults: ConfigDefaults;
 }
 
 /** The outcome of a validated atomic `POST /config/save` (mirrors

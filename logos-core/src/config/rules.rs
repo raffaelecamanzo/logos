@@ -301,6 +301,41 @@ pub struct Constraints {
     pub no_god_containers: Option<bool>,
 }
 
+impl Constraints {
+    /// The curated recommended baselines ([CR-067], [BR-37]) — `[constraints]`
+    /// have no code default (an omitted key is simply "not enforced",
+    /// [FR-CF-03]), so this is the single source of truth for the "reasonable
+    /// starting point" numbers the web Config editor shows beside that honest
+    /// `unset → not enforced` state. **Advisory display only**: these values are
+    /// never written, never enforced, and never alter the gate — promoting a
+    /// project onto them is a deliberate opt-in edit like any other constraint.
+    ///
+    /// The values mirror what [configuration.md](../../../../docs/howto/configuration.md)
+    /// has long documented as its example `[constraints]` table; this function
+    /// makes that set the single curated source docs/UI both cite, rather than
+    /// two hand-kept-in-sync copies ([CR-067] risk mitigation).
+    ///
+    /// [CR-067]: ../../../../docs/requests/CR-067-config-default-surfacing.md
+    /// [BR-37]: ../../../../docs/specs/software-spec.md#326-web-ui
+    /// [FR-CF-03]: ../../../../docs/specs/requirements/FR-CF-03.md
+    pub fn recommended() -> Self {
+        Self {
+            max_cycles: Some(0),
+            max_cc: Some(15),
+            max_fn_lines: Some(80),
+            no_god_files: Some(40),
+            max_fan_in: Some(30),
+            max_fan_out: Some(30),
+            max_dead: Some(MaxDead::Absolute(0)),
+            max_duplicates: Some(0),
+            max_nesting_depth: Some(4),
+            max_brain_methods: Some(0),
+            max_clone_ratio: Some(0.0),
+            no_god_containers: Some(true),
+        }
+    }
+}
+
 /// `[metric_thresholds]` — the tunable CR-005 detection thresholds ([FR-QM-14],
 /// [BR-25], [CR-005]).
 ///
@@ -1332,5 +1367,45 @@ mod tests {
                 "the persisted-cache JSON round-trip is lossless"
             );
         }
+    }
+
+    // ── CR-067 / BR-37: curated recommended constraint baselines ──────────────
+
+    /// [`Constraints::recommended`] fills every field (never leaves one `None`,
+    /// which would silently omit it from the Config-editor affordance) with the
+    /// documented `configuration.md` example values ([CR-067] CRA-01).
+    ///
+    /// [CR-067]: ../../../../docs/requests/CR-067-config-default-surfacing.md
+    #[test]
+    fn recommended_populates_every_field_with_documented_baselines() {
+        let r = Constraints::recommended();
+        assert_eq!(r.max_cycles, Some(0));
+        assert_eq!(r.max_cc, Some(15));
+        assert_eq!(r.max_fn_lines, Some(80));
+        assert_eq!(r.no_god_files, Some(40));
+        assert_eq!(r.max_fan_in, Some(30));
+        assert_eq!(r.max_fan_out, Some(30));
+        assert_eq!(r.max_dead, Some(MaxDead::Absolute(0)));
+        assert_eq!(r.max_duplicates, Some(0));
+        assert_eq!(r.max_nesting_depth, Some(4));
+        assert_eq!(r.max_brain_methods, Some(0));
+        assert_eq!(r.max_clone_ratio, Some(0.0));
+        assert_eq!(r.no_god_containers, Some(true));
+    }
+
+    /// The recommended set is advisory-only: applying it as a `rules.toml`
+    /// `[constraints]` table validates cleanly (every value is in-range) but is
+    /// obviously not itself enforced by `recommended()` — enforcement only
+    /// happens if a user opts in by actually writing these values ([BR-37]).
+    #[test]
+    fn recommended_set_is_a_valid_constraints_table() {
+        let rules = Rules {
+            constraints: Constraints::recommended(),
+            ..Default::default()
+        };
+        assert!(
+            rules.validate().is_ok(),
+            "the curated recommended baselines must themselves pass validation"
+        );
     }
 }

@@ -476,8 +476,21 @@ validates this file on every invocation (invalid TOML, unknown keys, or
 non-compiling globs → exit 2); enforcement runs via `logos check` and
 `logos gate` — see [commands.md](commands.md#quality--governance).
 
+`[constraints]` have **no code default** — every key is optional, and an
+omitted key is simply "not enforced". The table below is not a set of
+defaults; it is the curated **recommended baseline** ([`Constraints::recommended`],
+[CR-067](../requests/CR-067-config-default-surfacing.md)) — a reasonable
+starting point if you want to opt into these budgets, not a value Logos
+assumes. The web Config editor states this distinction explicitly next to each
+field (`unset → not enforced` + the recommended number, [FR-UI-12](../specs/requirements/FR-UI-12.md)),
+because setting a constraint far outside this baseline with no visible
+reference point is exactly the footgun [CR-067] closes (e.g. `max_fan_in = 7`
+silently flags every foundational module).
+
 ```toml
 [constraints]
+# The values below are the recommended baseline (Constraints::recommended()),
+# not a code default — every key is optional and unset = not enforced.
 max_cycles        = 0      # maximum allowed dependency cycles
 max_cc            = 15     # maximum cyclomatic complexity per function
 max_fn_lines      = 80     # maximum lines per function
@@ -537,7 +550,8 @@ reason = "the public API surface must be documented"
 ```
 
 Every constraint is optional — an omitted constraint is simply not enforced.
-The **coupling budgets** (`max_fan_in`/`max_fan_out`) count a **module's**
+The table above is the recommended baseline, not a default; see the note above
+the example. The **coupling budgets** (`max_fan_in`/`max_fan_out`) count a **module's**
 distinct neighbouring modules — inbound / outbound — over the canonical
 dependency graph (every edge kind except containment and member access), rolled
 up to module grain and production-scoped (test-only modules are excluded before
@@ -645,6 +659,21 @@ A brain method (Conciseness) must trip **all three** of `brain_complexity`,
 back both the Focus dimension and the `no_god_containers` budget, so the metric
 and the gate count the same containers by construction. Every integer threshold
 must be positive — a non-positive value fails at load with exit 2.
+
+**Tuning a threshold alone never makes `logos check`/`logos gate` fail** — it
+only recalibrates the (always-computed) quality signal for that dimension. The
+gate turns on a dimension only when its **paired `[constraints]` budget** is
+also set: `nesting_depth` pairs with `max_nesting_depth`; `god_methods`/
+`god_span` pair with `no_god_containers`; `brain_complexity`/`brain_lines`/
+`brain_nesting` pair with `max_brain_methods`; `clone_similarity`/
+`clone_min_tokens` pair with `max_clone_ratio`. This is the second [CR-067]
+incident this document now heads off: setting `brain_lines = 3` alone changes
+nothing observable in `logos check`, because `brain_lines` is only one leg of
+the three-part brain-method definition and feeds the Conciseness signal / the
+(unset) `max_brain_methods` count — never a standalone gate check. Set the
+matching constraint if you want the threshold to actually fail the gate.
+
+[CR-067]: ../requests/CR-067-config-default-surfacing.md
 
 The two **near-clone** keys tune the Uniqueness dimension. `clone_similarity` is
 the Jaccard similarity at/above which two functions are grouped as near-clones;
