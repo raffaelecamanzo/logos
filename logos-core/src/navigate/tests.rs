@@ -126,6 +126,13 @@ fn is_test_path_recognises_per_language_test_conventions() {
     assert!(is_test_path("spec/models/user_spec.rb"));
     assert!(is_test_path("models/user_spec.rb"));
     assert!(is_test_path("test/user_test.rb"));
+    // CR-075: the plural Rust inline-unit-test conventions — a bare `tests.rs`
+    // file and the snake_case `*_tests.rs` suffix (the CamelCase `*Tests`
+    // plural above already matched; these were the asymmetry).
+    assert!(is_test_path("src/tests.rs"));
+    assert!(is_test_path("logos-core/src/navigate/tests.rs"));
+    assert!(is_test_path("src/annotate_tests.rs"));
+    assert!(is_test_path("pkg/resolve_tests.rs"));
 }
 
 #[test]
@@ -138,6 +145,8 @@ fn is_test_path_does_not_mark_production_files() {
     assert!(!is_test_path("app/models.py"));
     assert!(!is_test_path("src/latest.ts")); // "test" inside a word
     assert!(!is_test_path("src/protest/march.rs")); // segment must equal
+    assert!(!is_test_path("src/footests.rs")); // no underscore, no token boundary
+    assert!(!is_test_path("src/latests.rs")); // "tests" inside a word, not the stem
 }
 
 // ── FR-NV-01 search: raw query → safe FTS5 phrase ───────────────────────────
