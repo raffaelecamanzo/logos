@@ -9,6 +9,47 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+## [1.0.4] — 2026-07-08
+
+**Binding precision & discovery fidelity (CR-068 + CR-069 + CR-070).** Continues the
+measurement-precision arc into *binding & discovery* precision, with the same
+never-fabricate, monotonic, honest discipline. No schema, reconcile-contract, or
+gate-baseline change.
+
+### Added
+- **Function-pointer handoffs recognized as live roots (CR-068 Part A, FR-AN-01,
+  ADR-39).** The framework-dispatch pass now recognizes axum function-pointer
+  handoffs — `.fallback(fn)`, `middleware::from_fn(fn)` / `from_fn_with_state(_, fn)`,
+  and every method-router handler inside `route(path, get(fn)|post(fn)|…)` including
+  chained setters (`get(a).post(b)`) — as live roots via the existing `RoutesTo`
+  self-marker. A handler name is bound only to the one same-file callable of that
+  name (exactly-one-or-nothing), so nothing is fabricated (NFR-RA-05). On the Rust
+  dogfood this drops false-positive dead functions **61 → 49** (12 `web/src/lib.rs`
+  handlers/guards/fallbacks recovered) with **zero** previously-resolved `Calls`
+  edges lost and **no** live function turned dead (BR-38 monotonic); a full re-index
+  is required to observe the new liveness (an incremental `sync` over unchanged files
+  keeps the prior markers). The `name_matcher` is untouched (the CR-066 fallback is
+  not loosened).
+
+### Removed
+- **PostToolUse wiki-augmentation hook retired (CR-070, FR-WK-14).** The advisory
+  augmentation hook — which surfaced the `wiki generate` work-list to the connected
+  agent on every tool call — is deleted from the binary (`AUGMENT_SPEC`, the augment
+  script/constants, and the augment `materialize()` entry point are gone). `logos
+  init -i` and `logos wiki hook --emit [--force]` now install/emit only the SessionEnd
+  quality-report hook (FR-IN-07); `wiki hook --emit --json` consequently returns a
+  single summary object rather than a two-element array. The deterministic `wiki
+  generate` queue and the `ui`-gated in-process generator (FR-WK-18) are unchanged.
+
+### Known limitations
+- **External docs-root symlink following (CR-069, FR-IX-10) landed but is inert on
+  checkouts that git-ignore the doc symlinks.** The discovery carve-out that follows
+  a `.swe-skills`-sanctioned docs symlink is correct in isolation, but the walk's
+  git-ignore/exclude filtering runs upstream of it, so on a repo whose `docs/{specs,
+  requests}` symlinks are git-ignored the doc nodes are not indexed. Resolving whether
+  a sanctioned docs root should override its own git-ignore is a discovery-contract
+  decision deferred to a follow-up CR (amending FR-IX-10 / ADR-59 / NFR-SE-04).
+
 ## [1.0.3] — 2026-07-07
 
 **Graph measurement precision (CR-065 + CR-066).** Two core graph measurements
