@@ -394,3 +394,77 @@ fn overriding_the_doc_globs_is_honoured() {
         "docs/ is no longer in scope after the override: {sections:?}"
     );
 }
+
+// ── CR-069 / S-277 / FR-IX-10: docs behind a sanctioned external-docs symlink ─
+//
+// End-to-end through the `Engine` façade under the swe-skills external-docs
+// layout: `docs/specs` is a directory symlink into a sibling repo declared in
+// `.swe-skills`. Discovery follows the symlink and the doc nodes behind it
+// reappear in the graph (FR-DG-01, FR-DG-02), a source file behind the same
+// symlink stays out (source-code discovery still skips all symlinks), and a
+// re-sync of the unchanged doc is idempotent.
+
+#[cfg(unix)]
+#[test]
+fn docs_behind_a_sanctioned_external_symlink_are_indexed_and_source_is_not() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempfile::tempdir().unwrap();
+    let base = base.path().canonicalize().unwrap();
+
+    // The sanctioned sibling docs repo: a typed spec doc and a source file, both
+    // living under specs/ — only the doc must enter the graph.
+    let sanctioned = base.join("logos-docs");
+    write(&sanctioned, "specs/ADR-46.md", "# ADR-46\n\n## Decision\n");
+    write(&sanctioned, "specs/embedded.rs", "pub fn behind_symlink() {}\n");
+    let sanctioned = sanctioned.canonicalize().unwrap();
+
+    // The project: a real source file, `.swe-skills` → the sibling, and the
+    // `docs/specs` directory symlink swe-skills' link-docs.sh creates.
+    let root = base.join("project");
+    write(&root, "src/main.rs", "fn main() {}\n");
+    write(&root, ".swe-skills", &format!("{}\n", sanctioned.display()));
+    fs::create_dir_all(root.join("docs")).unwrap();
+    symlink(sanctioned.join("specs"), root.join("docs/specs")).unwrap();
+
+    let engine = Engine::start(&root).expect("engine starts");
+    engine.index();
+    let rt = engine.runtime().expect("runtime present");
+
+    // The doc behind the sanctioned symlink is indexed under its in-tree path.
+    let files = indexed_paths(rt);
+    assert!(
+        files.contains(&"docs/specs/ADR-46.md".to_string()),
+        "the doc behind the sanctioned symlink is indexed: {files:?}"
+    );
+    assert!(
+        files.contains(&"src/main.rs".to_string()),
+        "the real source file is indexed: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.ends_with("embedded.rs")),
+        "a source file behind the symlink is NOT indexed (source skips symlinks): {files:?}"
+    );
+
+    // The DocSection nodes reappear (FR-DG-02); `logos node ADR-46` resolves to
+    // the `ADR-46` H1 section restored through the symlink (the DocFile itself is
+    // promoted to a typed ADR node by the typed-enrichment layer — CR-062).
+    let sections = node_names(rt, NodeKind::DocSection);
+    assert!(
+        sections.contains(&"ADR-46".to_string()),
+        "`node ADR-46` resolves to the section restored through the symlink: {sections:?}"
+    );
+    assert!(
+        sections.contains(&"Decision".to_string()),
+        "a nested DocSection reappears through the symlink: {sections:?}"
+    );
+
+    // Idempotent: re-syncing the unchanged doc re-extracts nothing (FR-DG-01
+    // blake3 dirty-detection rides the followed path exactly as a real path).
+    let resync = engine.sync(&[std::path::PathBuf::from("docs/specs/ADR-46.md")]);
+    assert_eq!(
+        resync.files_modified, 0,
+        "an unchanged doc behind the symlink is not re-extracted on re-sync"
+    );
+    assert_eq!(resync.files_added, 0, "no spurious add on re-sync");
+}

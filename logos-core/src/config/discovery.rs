@@ -13,16 +13,30 @@
 //! `**` = everything), and files above `max_file_size` are skipped with a notice
 //! ([FR-CF-04]).
 //!
-//! # Containment ([NFR-SE-04])
+//! # Containment ([NFR-SE-04], amended by [FR-IX-10] / [ADR-59])
 //! The walk is rooted at the canonicalised project root with `follow_links(false)`,
-//! so it never follows a symlink out of the tree, and every yielded path is
-//! re-checked with `starts_with(root)` as defence in depth. This is the
-//! enforcement point documented in [`docs/security/trusted-input-boundary.md`].
+//! so source-code discovery never follows a symlink out of the tree, and every
+//! yielded path is re-checked with `starts_with(root)` as defence in depth. This
+//! is the enforcement point documented in [`docs/security/trusted-input-boundary.md`].
+//!
+//! The one **sanctioned carve-out** ([FR-IX-10], [ADR-59]) restores documentation
+//! indexing under the swe-skills external-docs layout, where `docs/specs`,
+//! `docs/planning`, and `docs/requests` are directory symlinks into a sibling
+//! repo. Discovery resolves a sanctioned external docs root from a project-root
+//! `.swe-skills` file and follows a **directory** symlink **iff** its canonical
+//! target is contained within the project root or that sanctioned root — and only
+//! when documentation discovery is on, yielding only documentation files. Every
+//! other symlink is still skipped; a target escaping both roots, a broken link,
+//! or an absent/misconfigured `.swe-skills` all fail closed to the skip-all
+//! posture. Source-code discovery is untouched. See [`contained_dir_target`] and
+//! [`discover_followed_symlink`].
 //!
 //! [FR-IX-02]: ../../../../docs/specs/requirements/FR-IX-02.md
+//! [FR-IX-10]: ../../../../docs/specs/requirements/FR-IX-10.md
 //! [FR-CF-02]: ../../../../docs/specs/requirements/FR-CF-02.md
 //! [FR-CF-04]: ../../../../docs/specs/requirements/FR-CF-04.md
 //! [NFR-SE-04]: ../../../../docs/specs/requirements/NFR-SE-04.md
+//! [ADR-59]: ../../../../docs/specs/architecture/decisions/ADR-59.md
 //! [`docs/security/trusted-input-boundary.md`]: ../../../../docs/security/trusted-input-boundary.md
 
 use std::collections::HashSet;
@@ -30,10 +44,11 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use ignore::{WalkBuilder, WalkState};
+use globset::GlobSet;
+use ignore::{DirEntry, WalkBuilder, WalkState};
 
 use super::error::ConfigError;
-use super::globs;
+use super::globs::{self, DocGlobs};
 use super::settings::Config;
 
 /// A file skipped during discovery because it exceeds `max_file_size` ([FR-CF-04]).
@@ -126,6 +141,19 @@ pub(crate) fn discover_with_threads(
     let ignored_dirs: HashSet<String> = config.semantics.ignored_dirs.iter().cloned().collect();
     let max_file_size = config.max_file_size;
 
+    // Sanctioned documentation-symlink carve-out ([FR-IX-10], [ADR-59]).
+    // `doc_globs` is `None` when documentation discovery is disabled — the walk
+    // then follows no symlink at all (there is no documentation-include set to
+    // scope the follow to). A resolvable `.swe-skills` widens the allowlist of
+    // canonical destinations from `{root}` to `{root, sanctioned_root}`; an
+    // absent/empty/misconfigured file leaves it at `{root}` and fails closed.
+    let doc_globs = config.documentation.compile()?;
+    let sanctioned_root = resolve_sanctioned_docs_root(&root);
+    let follow_enabled = doc_globs.is_some();
+
+    // The main walker's `filter_entry` takes ownership of the ignored-dir set; the
+    // post-pass sub-walk needs it too, so clone one for the closure.
+    let walk_ignored_dirs = ignored_dirs.clone();
     let walker = WalkBuilder::new(&root)
         // Honour ignore files even outside a git repo, so discovery is
         // deterministic on any tree (worktrees are git-backed; fixtures need not be).
@@ -138,28 +166,7 @@ pub(crate) fn discover_with_threads(
         .parents(false) // don't read ignore files above the root (containment).
         .follow_links(false) // never leave the tree via a symlink (NFR-SE-04).
         .threads(threads) // 0 = auto-size to cores (NFR-PE-08); tests pin a count.
-        .filter_entry(move |entry| {
-            // Directory pruning — never the root itself (depth 0), so a project dir
-            // named e.g. "build", or the root's own `.git`, still walks.
-            if entry.depth() > 0 && entry.file_type().is_some_and(|ft| ft.is_dir()) {
-                // Prune any nested git boundary — a linked worktree (`.git` gitlink
-                // file), a vendored repository (`.git` directory), or a submodule.
-                // Logos indexes the one root project; a nested git tree is a
-                // separate working tree the root `.gitignore` cannot reliably mask
-                // (the `ignore` crate treats it as its own repo boundary and applies
-                // *its* ignore rules), so folding it in double-counts symbols. This
-                // is what let a `.worktrees/<sprint>/…` checkout be indexed despite
-                // `.worktrees/` being gitignored.
-                if entry.path().join(".git").exists() {
-                    return false;
-                }
-                // Prune directories whose name is in `ignored_dirs`.
-                if let Some(name) = entry.file_name().to_str() {
-                    return !ignored_dirs.contains(name);
-                }
-            }
-            true
-        })
+        .filter_entry(move |entry| keep_dir(entry, &walk_ignored_dirs))
         .build_parallel();
 
     // Each walker thread owns a cloned `Sender`; admitted entries and oversize
@@ -171,6 +178,7 @@ pub(crate) fn discover_with_threads(
     let root_ref: &Path = &root;
     let include_ref = &include;
     let exclude_ref = &exclude;
+    let sanctioned_ref = sanctioned_root.as_deref();
     walker.run(|| {
         let tx = tx.clone();
         Box::new(move |result| {
@@ -185,12 +193,33 @@ pub(crate) fn discover_with_threads(
                 Some(ft) => ft,
                 None => return WalkState::Continue, // stdin — never from a path walk.
             };
-            // Skip symlinks explicitly (NFR-SE-04): with follow_links(false) a
-            // symlink is yielded as-is, never traversed. Asserting `!is_symlink()`
-            // here makes the containment guarantee local and auditable rather than
-            // implicit in the walker's type resolution — a symlinked file is never
-            // indexed.
-            if file_type.is_symlink() || !file_type.is_file() {
+            // Symlinks (NFR-SE-04): with follow_links(false) a symlink is yielded
+            // as-is, never traversed. Handling it explicitly here makes the
+            // containment guarantee local and auditable rather than implicit in
+            // the walker's type resolution.
+            //
+            // Sanctioned carve-out ([FR-IX-10], [ADR-59]): when documentation
+            // discovery is on, a *directory* symlink whose canonical target is
+            // contained within the project root or the sanctioned docs root is
+            // handed to the post-pass sub-walk (`discover_followed_symlink`) for
+            // documentation-only following. Every other symlink — a symlinked
+            // file, a directory symlink escaping both roots, a broken link, or
+            // any symlink at all when documentation is off — is skipped, so
+            // source-code discovery still follows no symlink.
+            if file_type.is_symlink() {
+                if follow_enabled {
+                    if let Some(target) =
+                        contained_dir_target(entry.path(), root_ref, sanctioned_ref)
+                    {
+                        let _ = tx.send(Found::FollowDir {
+                            link: entry.path().to_path_buf(),
+                            target,
+                        });
+                    }
+                }
+                return WalkState::Continue;
+            }
+            if !file_type.is_file() {
                 return WalkState::Continue;
             }
 
@@ -233,10 +262,59 @@ pub(crate) fn discover_with_threads(
 
     let mut files = Vec::new();
     let mut skipped_oversize = Vec::new();
+    let mut follow_dirs = Vec::new();
     for found in rx {
         match found {
             Found::File(path) => files.push(path),
             Found::Oversize(skip) => skipped_oversize.push(skip),
+            Found::FollowDir { link, target } => follow_dirs.push((link, target)),
+        }
+    }
+
+    // Follow each sanctioned directory symlink exactly once ([FR-IX-10]). Sort +
+    // dedup makes the follow set order-independent (the parallel visitor observes
+    // symlinks in an arbitrary order); each sub-walk is serial and its output is
+    // merged then globally sorted below, so the report stays thread-count-
+    // independent (NFR-RA-06).
+    if let Some(doc_globs) = doc_globs.as_ref() {
+        follow_dirs.sort();
+        follow_dirs.dedup();
+        if !follow_dirs.is_empty() {
+            let scope = DocFollow {
+                root: root_ref,
+                include: include_ref,
+                exclude: exclude_ref,
+                ignored_dirs: &ignored_dirs,
+                max_file_size,
+                doc_globs,
+            };
+            // Dedup followed files by their CANONICAL (symlink-resolved) path,
+            // against the real paths the main pass already yielded and against one
+            // another. [FR-IX-10] permits following a directory symlink whose
+            // target is within the project root, but such an in-tree symlink only
+            // aliases content the main walk already indexed under its real path —
+            // without this, an aliasing symlink (`docs/latest -> specs`, or the
+            // degenerate `docs/all -> .`) would emit duplicate doc nodes under a
+            // second root-relative key. The main pass's paths are real (the walk
+            // never follows a link), so they are their own canonical form; seeding
+            // `seen` with them makes an alias collide and drop. `follow_dirs` is
+            // sorted, so which alias wins is deterministic (NFR-RA-06).
+            let mut seen: HashSet<PathBuf> = files.iter().cloned().collect();
+            for (link, target) in &follow_dirs {
+                let (sub_files, sub_oversize) = discover_followed_symlink(&scope, link, target);
+                for f in sub_files {
+                    let canonical = f.canonicalize().unwrap_or_else(|_| f.clone());
+                    if seen.insert(canonical) {
+                        files.push(f);
+                    }
+                }
+                for o in sub_oversize {
+                    let canonical = o.path.canonicalize().unwrap_or_else(|_| o.path.clone());
+                    if seen.insert(canonical) {
+                        skipped_oversize.push(o);
+                    }
+                }
+            }
         }
     }
 
@@ -257,11 +335,216 @@ enum Found {
     File(PathBuf),
     /// A file skipped for exceeding `max_file_size` ([FR-CF-04]).
     Oversize(OversizeSkip),
+    /// A sanctioned directory symlink to sub-walk after the main pass
+    /// ([FR-IX-10]): `link` is its in-tree path (e.g. `<root>/docs/specs`),
+    /// `target` its canonical destination (already proven contained by
+    /// [`contained_dir_target`]).
+    FollowDir { link: PathBuf, target: PathBuf },
+}
+
+/// Resolve the sanctioned external docs root from a project-root `.swe-skills`
+/// file ([FR-IX-10], [ADR-59]).
+///
+/// The first non-empty, non-`#`-comment line is a path — accepted absolute,
+/// `~`-relative (home-anchored), or project-root-relative — whose resolved,
+/// canonicalised, **existing directory** target is the sanctioned root. Any
+/// fault (file absent/unreadable, no usable line, `~` with no `$HOME`, or a
+/// target that does not exist so canonicalisation fails) yields `None`:
+/// discovery then follows no symlink out of the project root, i.e. today's
+/// skip-all posture ("fail closed", matching swe-skills' own resolver).
+fn resolve_sanctioned_docs_root(root: &Path) -> Option<PathBuf> {
+    let contents = std::fs::read_to_string(root.join(".swe-skills")).ok()?;
+    let line = contents
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))?;
+
+    let expanded: PathBuf = if line == "~" {
+        PathBuf::from(std::env::var_os("HOME")?)
+    } else if let Some(rest) = line.strip_prefix("~/") {
+        PathBuf::from(std::env::var_os("HOME")?).join(rest)
+    } else {
+        let p = Path::new(line);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            root.join(p)
+        }
+    };
+
+    let canonical = expanded.canonicalize().ok()?;
+    canonical.is_dir().then_some(canonical)
+}
+
+/// If `path` is a symlink to a directory whose canonical target is contained
+/// within `root` or `sanctioned` (when present), return that canonical target;
+/// otherwise `None` ([FR-IX-10], [ADR-59]).
+///
+/// This is the sole gate on which symlinks discovery follows: `canonicalize`
+/// fully resolves the link (so a chain of links is evaluated by its final
+/// destination), a non-directory or broken target yields `None`, and a target
+/// escaping **both** roots yields `None` — the no-arbitrary-escape invariant
+/// [NFR-SE-04] preserves as amended.
+fn contained_dir_target(path: &Path, root: &Path, sanctioned: Option<&Path>) -> Option<PathBuf> {
+    let target = path.canonicalize().ok()?;
+    if !target.is_dir() {
+        return None;
+    }
+    let contained =
+        target.starts_with(root) || sanctioned.is_some_and(|s| target.starts_with(s));
+    contained.then_some(target)
+}
+
+/// The admission policy a sanctioned-symlink sub-walk applies, borrowed from the
+/// main walk so the two passes agree on what is indexable ([FR-IX-10]).
+struct DocFollow<'a> {
+    /// The canonical project root — the anchor every result relativises under.
+    root: &'a Path,
+    /// The code include globs (a file must match one), mirroring the main pass.
+    include: &'a GlobSet,
+    /// The code exclude globs (a match rejects), mirroring the main pass.
+    exclude: &'a GlobSet,
+    /// Directory names pruned anywhere in the sub-walk.
+    ignored_dirs: &'a HashSet<String>,
+    /// Files strictly larger than this (bytes) become oversize skips ([FR-CF-04]).
+    max_file_size: u64,
+    /// The documentation globs — the gate that scopes the follow to docs.
+    doc_globs: &'a DocGlobs,
+}
+
+/// Sub-walk a followed sanctioned directory symlink and return the
+/// **documentation** files beneath it, each expressed under the symlink's
+/// in-tree path so every result stays project-root-relative ([FR-IX-10],
+/// [ADR-59]).
+///
+/// `link` is the symlink's path inside the project (e.g. `<root>/docs/specs`);
+/// `target` is its canonicalised, already-proven-contained destination. The
+/// sub-walk is the same gitignore-aware, contained walk as the main pass —
+/// honouring `ignored_dirs`, nested-`.git` boundaries, the include/exclude
+/// globs, and the size cap — but rooted at `target` with `follow_links(false)`,
+/// so it cannot chain through a second symlink out of the sanctioned tree (the
+/// carve-out is exactly one hop deep). A hit is emitted **only** when it is
+/// admitted by both the code include/exclude globs (mirroring the main pass) and
+/// the documentation globs: that dual gate is what scopes following to
+/// documentation and keeps any source/config file reachable *only* through the
+/// symlink out of the graph — source-code discovery still follows no symlink.
+///
+/// Each physical path under `target` is re-expressed as `link / <rest>` before
+/// admission, because the whole pipeline keys on the project-root-relative path
+/// (`docs/specs/…`), not the physical location; a path that fails to relativise
+/// under `root` is dropped as defence in depth.
+fn discover_followed_symlink(
+    scope: &DocFollow<'_>,
+    link: &Path,
+    target: &Path,
+) -> (Vec<PathBuf>, Vec<OversizeSkip>) {
+    let mut files = Vec::new();
+    let mut oversize = Vec::new();
+
+    let pruned: HashSet<String> = scope.ignored_dirs.clone();
+    let walker = WalkBuilder::new(target)
+        .require_git(false)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(true)
+        .ignore(true)
+        .hidden(false)
+        .parents(false) // don't read ignore files above the sanctioned target.
+        .follow_links(false) // never chain out of the sanctioned tree via a nested symlink.
+        .filter_entry(move |entry| keep_dir(entry, &pruned)) // same pruning as the main pass.
+        .build();
+
+    for result in walker {
+        let Ok(entry) = result else { continue };
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        // A nested symlink or non-regular file inside the sanctioned tree is
+        // never followed or indexed.
+        if file_type.is_symlink() || !file_type.is_file() {
+            continue;
+        }
+        // Re-express the physical path under the in-tree symlink path so the
+        // result is project-root-relative — the identity every downstream
+        // consumer keys on.
+        let Ok(within) = entry.path().strip_prefix(target) else {
+            continue;
+        };
+        let logical = link.join(within);
+        let Ok(rel) = logical.strip_prefix(scope.root) else {
+            continue; // defence in depth — should always relativise under `root`.
+        };
+        // Dual gate: the code include/exclude globs (as the main pass applies) AND
+        // the documentation globs. The doc gate is what scopes the follow to
+        // documentation; a source/config file passing include/exclude but not a
+        // doc glob is dropped, so it is never indexed via the symlink.
+        if scope.exclude.is_match(rel) || !scope.include.is_match(rel) {
+            continue;
+        }
+        let rel_str = to_forward_slash(rel);
+        if !scope.doc_globs.admits(&rel_str) {
+            continue;
+        }
+        let size = match entry.metadata() {
+            Ok(meta) => meta.len(),
+            Err(_) => continue,
+        };
+        if size > scope.max_file_size {
+            oversize.push(OversizeSkip {
+                path: logical,
+                size,
+                max: scope.max_file_size,
+            });
+        } else {
+            files.push(logical);
+        }
+    }
+
+    (files, oversize)
+}
+
+/// Whether the walker should descend into (keep) `entry` — the two directory-
+/// pruning rules shared by the main pass and the sanctioned-symlink sub-walk.
+///
+/// Never prunes the walk root (depth 0), so a project dir named e.g. `build`, or
+/// the root's own `.git`, still walks. Otherwise prunes:
+/// - a **nested git boundary** — a linked worktree (`.git` gitlink file), a
+///   vendored repository (`.git` directory), or a submodule. Logos indexes the
+///   one root project; a nested git tree is a separate working tree the root
+///   `.gitignore` cannot reliably mask (the `ignore` crate treats it as its own
+///   repo boundary and applies *its* ignore rules), so folding it in
+///   double-counts symbols — this is what let a `.worktrees/<sprint>/…` checkout
+///   be indexed despite `.worktrees/` being gitignored;
+/// - any directory whose name is in `ignored_dirs`.
+///
+/// Factored out of both `filter_entry` closures so the two passes' pruning is
+/// provably identical rather than a comment asserting it ([NFR-SE-04] nested-
+/// boundary containment).
+fn keep_dir(entry: &DirEntry, ignored_dirs: &HashSet<String>) -> bool {
+    if entry.depth() > 0 && entry.file_type().is_some_and(|ft| ft.is_dir()) {
+        if entry.path().join(".git").exists() {
+            return false;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            return !ignored_dirs.contains(name);
+        }
+    }
+    true
+}
+
+/// A path's components joined with `/` — the root-relative, forward-slashed form
+/// the documentation globs match against (mirrors the pipeline's `to_forward_slash`).
+fn to_forward_slash(rel: &Path) -> String {
+    rel.components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::fs;
 
     /// The worker counts every determinism assertion sweeps: `1` is the
@@ -409,5 +692,341 @@ mod tests {
             assert!(report.files.is_empty(), "no files discovered in an empty tree ({n}w)");
             assert!(report.skipped_oversize.is_empty(), "no oversize skips in an empty tree ({n}w)");
         }
+    }
+
+    // ── Sanctioned docs-symlink carve-out ([FR-IX-10], [ADR-59]) ──────────────
+
+    #[test]
+    fn resolve_sanctioned_docs_root_relative_absolute_and_fails_closed() {
+        // A sibling directory that will be the sanctioned target.
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let sibling = base.join("logos-docs");
+        fs::create_dir_all(&sibling).unwrap();
+        let root = base.join("project");
+        fs::create_dir_all(&root).unwrap();
+
+        // Relative (repo-root-relative) form: `../logos-docs`.
+        write(&root.join(".swe-skills"), "../logos-docs\n");
+        assert_eq!(
+            resolve_sanctioned_docs_root(&root),
+            Some(sibling.clone()),
+            "a repo-root-relative path resolves and canonicalises"
+        );
+
+        // Absolute form resolves to the same canonical dir; leading comments and
+        // blank lines are skipped, the first usable line wins.
+        write(
+            &root.join(".swe-skills"),
+            &format!("# swe-skills docs root\n\n{}\n", sibling.display()),
+        );
+        assert_eq!(
+            resolve_sanctioned_docs_root(&root),
+            Some(sibling.clone()),
+            "an absolute path (after comments/blank lines) resolves"
+        );
+
+        // Fail closed: absent file → None.
+        fs::remove_file(root.join(".swe-skills")).unwrap();
+        assert_eq!(resolve_sanctioned_docs_root(&root), None, "absent .swe-skills → None");
+
+        // Fail closed: empty / comment-only file → None.
+        write(&root.join(".swe-skills"), "# only a comment\n\n");
+        assert_eq!(resolve_sanctioned_docs_root(&root), None, "no usable line → None");
+
+        // Fail closed: a target that does not exist → None (canonicalisation fails).
+        write(&root.join(".swe-skills"), "../does-not-exist\n");
+        assert_eq!(
+            resolve_sanctioned_docs_root(&root),
+            None,
+            "a missing target fails closed"
+        );
+
+        // Fail closed: a target that is a file, not a directory → None.
+        write(&sibling.join("afile"), "x");
+        write(&root.join(".swe-skills"), "../logos-docs/afile\n");
+        assert_eq!(
+            resolve_sanctioned_docs_root(&root),
+            None,
+            "a non-directory target is not a sanctioned root"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn contained_dir_target_follows_sanctioned_and_refuses_escape() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let root = base.join("project");
+        fs::create_dir_all(&root).unwrap();
+        let sanctioned = base.join("logos-docs");
+        fs::create_dir_all(sanctioned.join("specs")).unwrap();
+        let escape = base.join("elsewhere");
+        fs::create_dir_all(&escape).unwrap();
+
+        // Target inside the sanctioned root → followed.
+        let into_sanctioned = root.join("docs_specs");
+        symlink(sanctioned.join("specs"), &into_sanctioned).unwrap();
+        assert_eq!(
+            contained_dir_target(&into_sanctioned, &root, Some(&sanctioned)),
+            Some(sanctioned.join("specs").canonicalize().unwrap()),
+            "a target within the sanctioned root is followed"
+        );
+        // …but not once the sanctioned root is withdrawn (escapes both roots).
+        assert_eq!(
+            contained_dir_target(&into_sanctioned, &root, None),
+            None,
+            "without a sanctioned root the same link escapes and is refused"
+        );
+
+        // Target inside the project root → followed even with no sanctioned root.
+        fs::create_dir_all(root.join("real")).unwrap();
+        let into_project = root.join("selfref");
+        symlink(root.join("real"), &into_project).unwrap();
+        assert_eq!(
+            contained_dir_target(&into_project, &root, None),
+            Some(root.join("real").canonicalize().unwrap()),
+            "a target within the project root is followed"
+        );
+
+        // Target escaping both roots → refused.
+        let out = root.join("escape");
+        symlink(&escape, &out).unwrap();
+        assert_eq!(
+            contained_dir_target(&out, &root, Some(&sanctioned)),
+            None,
+            "a target escaping both roots is refused"
+        );
+
+        // A symlink to a *file* (not a directory) → refused (only dirs are followed).
+        write(&sanctioned.join("specs/ADR.md"), "# doc");
+        let file_link = root.join("filelink");
+        symlink(sanctioned.join("specs/ADR.md"), &file_link).unwrap();
+        assert_eq!(
+            contained_dir_target(&file_link, &root, Some(&sanctioned)),
+            None,
+            "a symlink to a file is not a directory target"
+        );
+
+        // A broken symlink → refused (canonicalisation fails).
+        let broken = root.join("broken");
+        symlink(base.join("nope"), &broken).unwrap();
+        assert_eq!(contained_dir_target(&broken, &root, Some(&sanctioned)), None);
+    }
+
+    /// Build a project whose `docs/specs` is a directory symlink into a sibling
+    /// "sanctioned" repo declared in `.swe-skills`, with a markdown doc and a
+    /// source file living behind the symlink. Returns (temp guard, canonical
+    /// project root, canonical sanctioned root).
+    #[cfg(unix)]
+    fn build_symlink_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let root = base.join("project");
+        fs::create_dir_all(root.join("docs")).unwrap();
+        // A real, in-repo source file (always discovered by the main pass).
+        write(&root.join("src/main.rs"), "fn main() {}\n");
+
+        // The sanctioned sibling repo with a doc and a source file under specs/.
+        let sanctioned = base.join("logos-docs");
+        write(&sanctioned.join("specs/ADR-46.md"), "# ADR-46\n");
+        write(&sanctioned.join("specs/deep/FR-IX-10.md"), "# FR-IX-10\n");
+        write(&sanctioned.join("specs/embedded.rs"), "pub fn x() {}\n");
+        let sanctioned = sanctioned.canonicalize().unwrap();
+
+        // `.swe-skills` points at the sibling; `docs/specs` is a symlink into it.
+        write(&root.join(".swe-skills"), &format!("{}\n", sanctioned.display()));
+        symlink(sanctioned.join("specs"), root.join("docs/specs")).unwrap();
+
+        (tmp, root, sanctioned)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn follows_sanctioned_docs_symlink_and_indexes_only_docs() {
+        let (_tmp, root, _sanctioned) = build_symlink_fixture();
+        // Default config: documentation on, default doc globs (`docs/**/*.md`).
+        let config = Config::default();
+
+        let baseline = discover_with_threads(&root, &config, 1).unwrap();
+        let rels: BTreeSet<String> = baseline
+            .files
+            .iter()
+            .map(|p| to_forward_slash(p.strip_prefix(&root).unwrap()))
+            .collect();
+
+        assert!(rels.contains("src/main.rs"), "the real source file is discovered: {rels:?}");
+        assert!(
+            rels.contains("docs/specs/ADR-46.md"),
+            "a doc behind the sanctioned symlink is discovered under its in-tree path: {rels:?}"
+        );
+        assert!(
+            rels.contains("docs/specs/deep/FR-IX-10.md"),
+            "a nested doc behind the symlink is discovered: {rels:?}"
+        );
+        assert!(
+            !rels.iter().any(|r| r.ends_with("embedded.rs")),
+            "a source file behind the symlink is NOT indexed (source skips symlinks): {rels:?}"
+        );
+
+        // Idempotent + thread-count-independent (NFR-RA-06): every worker count
+        // yields the identical report, and a re-run is byte-identical.
+        for &n in WORKER_COUNTS {
+            let report = discover_with_threads(&root, &config, n).unwrap();
+            assert_eq!(report, baseline, "worker count {n} diverged");
+        }
+        assert_eq!(
+            discover_with_threads(&root, &config, 0).unwrap(),
+            baseline,
+            "a second discovery is idempotent"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn escaping_symlink_not_followed_even_with_swe_skills() {
+        use std::os::unix::fs::symlink;
+
+        let (_tmp, root, _sanctioned) = build_symlink_fixture();
+        // A second symlink escaping BOTH roots, into an unrelated outside dir
+        // that itself contains a markdown file — it must never be followed.
+        let outside = tempfile::tempdir().unwrap();
+        let outside = outside.path().canonicalize().unwrap();
+        write(&outside.join("secret.md"), "# secret\n");
+        symlink(&outside, root.join("docs/leak")).unwrap();
+
+        let report = discover_with_threads(&root, &Config::default(), 0).unwrap();
+        let rels: BTreeSet<String> = report
+            .files
+            .iter()
+            .map(|p| to_forward_slash(p.strip_prefix(&root).unwrap()))
+            .collect();
+
+        assert!(rels.contains("docs/specs/ADR-46.md"), "the sanctioned doc is still followed");
+        assert!(
+            !rels.iter().any(|r| r.contains("secret.md")),
+            "a symlink escaping both roots is not followed: {rels:?}"
+        );
+        // Defence in depth: every discovered path stays under the project root.
+        for f in &report.files {
+            assert!(f.starts_with(&root), "{f:?} escaped {root:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn absent_swe_skills_reproduces_skip_all_symlinks() {
+        let (_tmp, root, _sanctioned) = build_symlink_fixture();
+        // Remove `.swe-skills`: no sanctioned root, so the out-of-root docs
+        // symlink escapes and is skipped — the prior skip-all behaviour.
+        fs::remove_file(root.join(".swe-skills")).unwrap();
+
+        let report = discover_with_threads(&root, &Config::default(), 0).unwrap();
+        let rels: BTreeSet<String> = report
+            .files
+            .iter()
+            .map(|p| to_forward_slash(p.strip_prefix(&root).unwrap()))
+            .collect();
+
+        assert!(rels.contains("src/main.rs"), "real source is still discovered");
+        assert!(
+            !rels.iter().any(|r| r.starts_with("docs/specs")),
+            "with no sanctioned root the out-of-root docs symlink is skipped: {rels:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn in_tree_alias_symlink_does_not_duplicate_docs() {
+        // An in-tree directory symlink (target within the project root) is
+        // followable per FR-IX-10, but its content is already indexed by the main
+        // pass under the real path — so the followed alias must NOT produce a
+        // duplicate doc node under a second key (canonical-path dedup).
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join("docs/real/guide.md"), "# Guide\n");
+        // `docs/alias -> docs/real` (target within the project root) and the
+        // degenerate `docs/all -> .` (target = the root itself).
+        symlink(root.join("docs/real"), root.join("docs/alias")).unwrap();
+        symlink(&root, root.join("docs/all")).unwrap();
+
+        let report = discover_with_threads(&root, &Config::default(), 0).unwrap();
+        let rels: Vec<String> = report
+            .files
+            .iter()
+            .map(|p| to_forward_slash(p.strip_prefix(&root).unwrap()))
+            .collect();
+
+        assert!(rels.contains(&"docs/real/guide.md".to_string()), "real doc indexed: {rels:?}");
+        // Exactly one occurrence of the physical doc — no aliased duplicates under
+        // `docs/alias/…` or `docs/all/…`.
+        assert_eq!(
+            rels.iter().filter(|r| r.ends_with("guide.md")).count(),
+            1,
+            "the aliased doc must not be indexed twice: {rels:?}"
+        );
+        assert!(
+            !rels.iter().any(|r| r.starts_with("docs/alias") || r.starts_with("docs/all")),
+            "aliased in-tree paths are deduped away: {rels:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn nested_symlink_inside_sanctioned_tree_is_not_followed() {
+        // The carve-out is exactly one hop deep: a nested symlink INSIDE the
+        // followed sanctioned tree, pointing back out, must not be chained through
+        // (NFR-SE-04 as amended — no escape via a second hop).
+        use std::os::unix::fs::symlink;
+
+        let (_tmp, root, sanctioned) = build_symlink_fixture();
+        // An escaping directory holding an admissible doc, linked from *inside*
+        // the sanctioned tree that `docs/specs` points at.
+        let outside = tempfile::tempdir().unwrap();
+        let outside = outside.path().canonicalize().unwrap();
+        write(&outside.join("secret.md"), "# secret\n");
+        symlink(&outside, sanctioned.join("specs/nested_leak")).unwrap();
+
+        let report = discover_with_threads(&root, &Config::default(), 0).unwrap();
+        let rels: BTreeSet<String> = report
+            .files
+            .iter()
+            .map(|p| to_forward_slash(p.strip_prefix(&root).unwrap()))
+            .collect();
+
+        assert!(rels.contains("docs/specs/ADR-46.md"), "the sanctioned doc is followed");
+        assert!(
+            !rels.iter().any(|r| r.contains("secret.md")),
+            "a nested symlink inside the sanctioned tree is not chained through: {rels:?}"
+        );
+        for f in &report.files {
+            assert!(f.starts_with(&root), "{f:?} escaped {root:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn documentation_disabled_follows_no_symlink() {
+        let (_tmp, root, _sanctioned) = build_symlink_fixture();
+        let mut config = Config::default();
+        config.documentation.enabled = false;
+
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        let rels: BTreeSet<String> = report
+            .files
+            .iter()
+            .map(|p| to_forward_slash(p.strip_prefix(&root).unwrap()))
+            .collect();
+
+        assert!(
+            !rels.iter().any(|r| r.starts_with("docs/specs")),
+            "with documentation off there is no include set to scope the follow to: {rels:?}"
+        );
     }
 }

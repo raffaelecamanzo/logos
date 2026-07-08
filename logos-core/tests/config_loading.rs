@@ -869,6 +869,100 @@ fn walk_does_not_follow_a_symlinked_file_out_of_the_root() {
     }
 }
 
+// ── CR-069 / S-277 / FR-IX-10: sanctioned external docs-root symlink following ─
+
+/// End-to-end over the public `config::discover`: under the swe-skills
+/// external-docs layout — a `.swe-skills` file naming a sibling docs root and a
+/// `docs/specs` directory symlink into it — discovery follows the symlink and
+/// indexes the documentation behind it (under its in-tree `docs/specs/…` path),
+/// while a source file behind the same symlink stays out (source-code discovery
+/// still skips all symlinks), and a symlink escaping both roots is refused.
+#[cfg(unix)]
+#[test]
+fn follows_sanctioned_docs_symlink_layout_indexing_only_docs() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempdir().unwrap();
+    let base = base.path().canonicalize().unwrap();
+
+    // The sanctioned sibling repo: a doc (typed spec) and a source file.
+    let sanctioned = base.join("logos-docs");
+    write(&sanctioned, "specs/ADR-46.md", "# ADR-46\n");
+    write(&sanctioned, "requests/CR-069.md", "# CR-069\n");
+    write(&sanctioned, "specs/embedded.rs", "pub fn behind_symlink() {}\n");
+    let sanctioned = sanctioned.canonicalize().unwrap();
+
+    // The project: a real source file, `.swe-skills` → sibling, and the two
+    // directory symlinks swe-skills' link-docs.sh creates.
+    let proj = base.join("project");
+    write(&proj, "src/main.rs", "fn main() {}\n");
+    write(&proj, ".swe-skills", &format!("{}\n", sanctioned.display()));
+    fs::create_dir_all(proj.join("docs")).unwrap();
+    symlink(sanctioned.join("specs"), proj.join("docs/specs")).unwrap();
+    symlink(sanctioned.join("requests"), proj.join("docs/requests")).unwrap();
+
+    // A symlink escaping BOTH roots must never be followed, even though it holds
+    // a markdown file the doc globs would otherwise admit.
+    let outside = tempdir().unwrap();
+    let outside = outside.path().canonicalize().unwrap();
+    write(&outside, "secret.md", "# secret\n");
+    symlink(&outside, proj.join("docs/leak")).unwrap();
+
+    let report = config::discover(&proj, &Config::default()).unwrap();
+    let rels = discovered_rels(&report, &proj);
+
+    assert!(rels.contains("src/main.rs"), "real source discovered: {rels:?}");
+    assert!(
+        rels.contains("docs/specs/ADR-46.md"),
+        "doc behind the sanctioned specs symlink is indexed: {rels:?}"
+    );
+    assert!(
+        rels.contains("docs/requests/CR-069.md"),
+        "doc behind the sanctioned requests symlink is indexed: {rels:?}"
+    );
+    assert!(
+        !rels.iter().any(|r| r.ends_with("embedded.rs")),
+        "a source file behind the symlink is NOT indexed: {rels:?}"
+    );
+    assert!(
+        !rels.iter().any(|r| r.contains("secret.md")),
+        "a symlink escaping both roots is not followed: {rels:?}"
+    );
+
+    // Idempotent: a second discovery yields the identical report.
+    let again = config::discover(&proj, &Config::default()).unwrap();
+    assert_eq!(again, report, "re-running discovery is idempotent for the doc nodes");
+}
+
+/// With `.swe-skills` absent, the out-of-root docs symlink escapes both roots
+/// and is skipped — the prior skip-all-symlinks behaviour ([FR-IX-10] fail-closed).
+#[cfg(unix)]
+#[test]
+fn absent_swe_skills_reproduces_skip_all_for_docs_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempdir().unwrap();
+    let base = base.path().canonicalize().unwrap();
+    let sanctioned = base.join("logos-docs");
+    write(&sanctioned, "specs/ADR-46.md", "# ADR-46\n");
+    let sanctioned = sanctioned.canonicalize().unwrap();
+
+    let proj = base.join("project");
+    write(&proj, "src/main.rs", "fn main() {}\n");
+    fs::create_dir_all(proj.join("docs")).unwrap();
+    symlink(sanctioned.join("specs"), proj.join("docs/specs")).unwrap();
+    // NB: no `.swe-skills` written.
+
+    let report = config::discover(&proj, &Config::default()).unwrap();
+    let rels = discovered_rels(&report, &proj);
+
+    assert!(rels.contains("src/main.rs"));
+    assert!(
+        !rels.iter().any(|r| r.starts_with("docs/specs")),
+        "with no sanctioned root the out-of-root docs symlink is skipped: {rels:?}"
+    );
+}
+
 // ── CR-054 / S-213: `.worktrees` / `.playwright-mcp` default ignored_dirs ────
 
 /// A project with NO `.gitignore` at all still keeps `.worktrees/` and
