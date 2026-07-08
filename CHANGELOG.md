@@ -9,6 +9,50 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+## [1.0.5] — 2026-07-08
+
+**Graph-precision & config-surfacing cleanup (CR-071 + CR-068 Part B + CR-067).**
+Three independent precision/UX fixes closing standing CRs, all additive/read-model.
+No schema, reconcile-contract, or gate-baseline change.
+
+### Added
+- **Config parameter defaults surfaced in the web Config editor (CR-067, FR-UI-12).**
+  `GET /api/v1/config` gained a read-model `defaults` projection — code-sourced and
+  computed independently of the live documents. The Config editor now renders a
+  `Default: …` hint beside every `config.toml`/`[metric_thresholds]` field and
+  `unset → not enforced · Recommended: …` beside every `[constraints]` field. The
+  save/apply/validate path is byte-identical, and the chat API key is never present
+  in the projection (NFR-SE-07).
+
+### Fixed
+- **Sanctioned external-docs symlink now followed on git-ignoring checkouts (CR-071,
+  FR-IX-10, ADR-59).** Resolves the CR-069/1.0.4 known limitation: the discovery walk
+  built its `WalkBuilder` with git-ignore filtering upstream of the `.swe-skills`
+  follow-branch, so a repo whose `docs/{specs,planning,requests}` symlinks are
+  git-ignored indexed **zero** doc nodes. A dedicated git-ignore-bypassing detection
+  pass — confined to the documentation subtree, one-hop, containment-gated, sanctioned
+  root only — now follows the symlink and indexes the docs behind it. Admission parity
+  (`admits_path`, ADR-48) mirrors the carve-out so `doctor`'s admission tripwire does
+  not flag the freshly-indexed docs as drift. Source-code symlinks are still skipped
+  wholesale; an escaping/unsanctioned target is refused, not followed.
+- **Associated-function `Method` kinding and bare-path binder tie-break (CR-068 Part B,
+  FR-EX-05, FR-RS-07, ADR-39).** Rust `impl`-nested associated functions are now kinded
+  `NodeKind::Method` (distinct from free `NodeKind::Function`) at emission — symbol IDs
+  and ordinals byte-identical (NFR-RA-06). In the binder, a single-segment bare-path
+  call now prefers a free function over same-named associated methods (a monotonic
+  tie-break, never a drop; the full callable set stands when no free function exists).
+  On the Rust dogfood this recovers the `graph_store/mod.rs` `insert_node`/`insert_edge`/
+  `upsert_symbol` cluster: resolved `Calls` edges **3694 → 3716 (+22)** with **0 lost**
+  and **0** live callable turned dead (BR-38 monotonic). Receiver-method calls and the
+  CR-066 unique-name fallback are untouched.
+
+### Added (diagnostics)
+- **`doctor --json` `doc_symlink_warnings` (CR-071, FR-IX-11).** A new advisory array
+  naming any documentation directory-symlink that exists under the doc-include set but
+  ended up unindexed (no sanctioned root, or target escapes containment). Purely
+  diagnostic — it never flips `ok` or changes the exit status. `index`/`sync` fold the
+  same drops into their warnings.
+
 ## [1.0.4] — 2026-07-08
 
 **Binding precision & discovery fidelity (CR-068 + CR-069 + CR-070).** Continues the
