@@ -7,7 +7,8 @@
 //! an external framework — and live-roots them so the dead-code reachability
 //! pass ([FR-AN-01], [annotation-engine]) no longer mis-reports them dead.
 //!
-//! Two Rust dispatch shapes are recognised (Phase 1, [CR-043] §3.2 B):
+//! Three Rust dispatch shapes are recognised (Phases 1 & 3, [CR-043] §3.2 B,
+//! [CR-068] §3.2):
 //!
 //! - **framework trait-impl dispatch** — a method declared in an
 //!   `impl Trait for Type` block. The framework (`tracing`'s `Layer`/`Visit`,
@@ -21,6 +22,22 @@
 //!   `self.run_result("x", |e| e.x())` closure delegator, and the method itself
 //!   has no source-visible caller (`session_end`/`coverage_ingest`/
 //!   `wiki_status`/`rescan` in `mcp/src/server.rs`).
+//! - **function-pointer handoff** (S-276, [CR-068]) — a callable handed to an
+//!   axum router/middleware builder **by value**, never at a source-visible call
+//!   site: the ratified Phase-3 set is `.fallback(h)`, `middleware::from_fn(h)`,
+//!   `from_fn_with_state(state, h)`, and every method-router handler inside a
+//!   `route(path, get(h)|post(h)|…)` registration, including chained setters
+//!   (`get(a).post(b)` roots both). The handler is referenced only as a
+//!   function pointer, so the binder proves no `Calls` edge and the reachability
+//!   pass mis-reports it dead — the `spa_fallback`/`intent_guard`/`method_guard`/
+//!   `host_guard`/`csp_headers` shape in `web/src/lib.rs`. Recognition resolves
+//!   the handler name to the **one same-file callable** carrying it and live-roots
+//!   *that* node. The registering file is where a wired guard/fallback lives, so a
+//!   same-file exactly-one-or-nothing bind ([NFR-RA-05]) keeps recognition
+//!   per-file pure (the wiring site and the declaration are always in the one
+//!   re-scanned file) and never fabricates: a handler that is cross-file
+//!   (`get(api_v1::overview)`) or ambiguous within the file is left to the
+//!   framework-promotion pass ([`super::framework`]) / ordinary binding.
 //!
 //! # The live-root marker — a self-[`RoutesTo`](EdgeKind::RoutesTo) edge
 //!
@@ -52,7 +69,10 @@
 //!
 //! A method's marker is a pure function of **its own file's syntax** — whether
 //! it sits in a trait impl, or carries a dispatch attribute — with no
-//! dependency on the rest of the graph. So a full index scans every `.rs` file
+//! dependency on the rest of the graph. A function-pointer handoff marker is
+//! likewise per-file pure: it is planted on the handler only from a **same-file**
+//! handoff site that resolves to it uniquely, so the wiring site and the
+//! declaration are always in the one re-scanned file. So a full index scans every `.rs` file
 //! and reconciles the whole marker set; an incremental sync scans only the
 //! changed `.rs` files and reconciles only *their* nodes' markers, and the two
 //! produce a byte-identical marker set (every untouched file's markers provably
@@ -62,6 +82,7 @@
 //! [resolution-engine]: ../../../docs/specs/architecture/components/resolution-engine.md
 //! [annotation-engine]: ../../../docs/specs/architecture/components/annotation-engine.md
 //! [CR-043]: ../../../docs/requests/CR-043-dead-code-detector-precision.md
+//! [CR-068]: ../../../docs/requests/CR-068-reachability-binding-precision.md
 //! [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
 //! [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
 //! [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
@@ -98,6 +119,33 @@ const RUST_EXT: &str = "rs";
 /// [`super::framework`] (`HTTP_METHODS`, `STATE_EXTRACTORS`); a later increment
 /// can lift it into the plugin descriptor like `framework_detectors`.
 const RUST_DISPATCH_ATTRS: [&str; 1] = ["tool"];
+
+/// The axum method-router constructor heads whose first argument is a handler
+/// handed over by value — recognised **only inside a `route(path, …)` second
+/// argument** (see [`collect_method_router_handlers`]), so a bare same-named call
+/// elsewhere (`map.get(k)`, a local `head(x)`) is never mistaken for a route
+/// handler. Mirrors the HTTP-method set the framework-promotion pass recognises
+/// ([`super::framework`]); kept as a small Rust-specific constant beside the
+/// handoff walk (S-276, [CR-068]).
+const ROUTER_METHOD_HEADS: [&str; 10] = [
+    "get", "post", "put", "delete", "patch", "head", "options", "trace", "connect", "any",
+];
+
+/// The axum `Router::route(path, method_router)` method whose second argument is
+/// a (possibly chained) method-router expression carrying the handlers (S-276,
+/// [CR-068]).
+const ROUTER_REGISTER: &str = "route";
+
+/// The axum middleware constructors that take a handler function pointer: the
+/// first argument is the handler for `from_fn`, the **second** for
+/// `from_fn_with_state` (its first argument is the shared state) (S-276,
+/// [CR-068]). Distinctive names, so recognised wherever they appear.
+const MIDDLEWARE_FROM_FN: &str = "from_fn";
+const MIDDLEWARE_FROM_FN_WITH_STATE: &str = "from_fn_with_state";
+
+/// The axum `Router::fallback(handler)` method whose sole argument is a handler
+/// handed over by value (S-276, [CR-068]).
+const ROUTER_FALLBACK: &str = "fallback";
 
 /// Run the dispatch live-rooting pass: mark every framework-dispatched method
 /// with its live-root marker edge, reconciling against the markers already in
@@ -192,6 +240,28 @@ pub fn run(
         })
         .collect();
 
+    // (file_path, callable name) → its node ids, restricted to the callable nodes
+    // in the candidate files — the universe a function-pointer handoff resolves a
+    // handler name against (same file only, exactly-one-or-nothing, [NFR-RA-05],
+    // S-276). A name shared by two callables in one file is left ambiguous and
+    // never bound.
+    let mut callable_by_name: HashMap<(&str, &str), Vec<NodeId>> = HashMap::new();
+    for n in &nodes {
+        if !matches!(n.kind, NodeKind::Function | NodeKind::Method) {
+            continue;
+        }
+        let Some(path) = n.file_path.as_deref() else {
+            continue;
+        };
+        if !candidate_set.contains(path) {
+            continue;
+        }
+        callable_by_name
+            .entry((path, n.name.as_str()))
+            .or_default()
+            .push(n.id);
+    }
+
     // Parse the candidate files on the shared worker pool, one parser per worker
     // (the extraction/framework pattern). A vanished or unparsable file simply
     // contributes no entries — best-effort.
@@ -203,25 +273,35 @@ pub fn run(
         });
     };
     let language = plugin.language();
-    let scanned: Vec<(String, Vec<DispatchEntry>)> = runtime.worker_pool().install(|| {
+    let scanned: Vec<(String, FileScan)> = runtime.worker_pool().install(|| {
         candidate_paths
             .par_iter()
             .map_init(Parser::new, |parser, rel| {
-                let entries = scan_path(parser, language, root, rel);
-                (rel.clone(), entries)
+                let scan = scan_path(parser, language, root, rel);
+                (rel.clone(), scan)
             })
             .collect()
     });
 
-    // The desired marker set: the node id of every recognised method in a
-    // candidate file (an entry whose `(file, line)` does not map to an indexed
-    // callable — a parse drift or a removed node — is silently dropped, never
-    // fabricated).
+    // The desired marker set: the node id of every recognised dispatch method or
+    // function-pointer handoff handler in a candidate file. A dispatch method
+    // whose `(file, line)` does not map to an indexed callable — a parse drift or
+    // a removed node — is silently dropped, never fabricated; a handoff handler
+    // binds only to the **one** same-file callable of that name, so a cross-file
+    // or in-file-ambiguous name is likewise dropped ([NFR-RA-05], S-276).
     let mut desired: HashSet<NodeId> = HashSet::new();
-    for (rel, entries) in &scanned {
-        for entry in entries {
+    for (rel, scan) in &scanned {
+        for entry in &scan.roots {
             if let Some(&id) = node_by_loc.get(&(rel.as_str(), entry.start_line)) {
                 desired.insert(id);
+            }
+        }
+        for handler in &scan.handoffs {
+            if let Some([only]) = callable_by_name
+                .get(&(rel.as_str(), handler.as_str()))
+                .map(Vec::as_slice)
+            {
+                desired.insert(*only);
             }
         }
     }
@@ -289,6 +369,21 @@ struct DispatchEntry {
     start_line: i64,
 }
 
+/// Everything the scanner recognised in one file (pre node-id mapping): the
+/// declaration lines of framework-dispatched methods, plus the handler names
+/// handed to an axum router/middleware by value (function-pointer handoffs,
+/// S-276). Both are pure functions of this file's syntax.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct FileScan {
+    /// Declaration start-lines of trait-impl / `#[tool]` dispatch methods,
+    /// deduplicated and sorted by line.
+    roots: Vec<DispatchEntry>,
+    /// Bare handler names handed to a router/middleware by value, deduplicated
+    /// and sorted — each resolved to the one same-file callable of that name in
+    /// [`run`] ([NFR-RA-05]).
+    handoffs: Vec<String>,
+}
+
 /// Read and scan one file for dispatch entries; a path that is absolute, not
 /// Rust, or unreadable yields none (best-effort, defence-in-depth against an
 /// absolute `rel` escaping the engine root, [NFR-SE-04]).
@@ -297,12 +392,12 @@ fn scan_path(
     language: &tree_sitter::Language,
     root: &Path,
     rel: &str,
-) -> Vec<DispatchEntry> {
+) -> FileScan {
     if Path::new(rel).is_absolute() || !is_rust(rel) {
-        return Vec::new();
+        return FileScan::default();
     }
     let Ok(source) = fs::read_to_string(root.join(rel)) else {
-        return Vec::new();
+        return FileScan::default();
     };
     scan_source(parser, language, &source)
 }
@@ -310,24 +405,26 @@ fn scan_path(
 /// Scan one Rust file's source for dispatch entries. Pure — no store, no disk —
 /// and therefore the unit-testable core of the pass.
 ///
-/// A method is an entry if it is declared in an `impl Trait for Type` block
-/// (framework trait-impl dispatch) **or** it carries a dispatch attribute
-/// ([`RUST_DISPATCH_ATTRS`]). Both signals are read from the method's own file
-/// syntax, so the result depends on nothing outside this file.
+/// A method is a **root** entry if it is declared in an `impl Trait for Type`
+/// block (framework trait-impl dispatch) **or** it carries a dispatch attribute
+/// ([`RUST_DISPATCH_ATTRS`]). A **handoff** entry is a handler name handed to an
+/// axum router/middleware by value ([`handoff_handler`]). Every signal is read
+/// from this file's own syntax, so the result depends on nothing outside it.
 fn scan_source(
     parser: &mut Parser,
     language: &tree_sitter::Language,
     source: &str,
-) -> Vec<DispatchEntry> {
+) -> FileScan {
     if parser.set_language(language).is_err() {
-        return Vec::new();
+        return FileScan::default();
     }
     let Some(tree) = parser.parse(source, None) else {
-        return Vec::new();
+        return FileScan::default();
     };
     let src = source.as_bytes();
-    // BTreeSet so the entries come out de-duplicated AND already sorted by line.
-    let mut out: BTreeSet<i64> = BTreeSet::new();
+    // BTreeSets so both lists come out de-duplicated AND already sorted.
+    let mut roots: BTreeSet<i64> = BTreeSet::new();
+    let mut handoffs: BTreeSet<String> = BTreeSet::new();
 
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
@@ -340,10 +437,13 @@ fn scan_source(
                         continue;
                     }
                     if is_trait_impl || has_dispatch_attribute(method, src) {
-                        out.insert(method.start_position().row as i64 + 1);
+                        roots.insert(method.start_position().row as i64 + 1);
                     }
                 }
             }
+        }
+        if node.kind() == "call_expression" {
+            collect_handoffs(node, src, &mut handoffs);
         }
         for i in (0..node.child_count()).rev() {
             if let Some(child) = node.child(i) {
@@ -352,9 +452,158 @@ fn scan_source(
         }
     }
 
-    out.into_iter()
-        .map(|start_line| DispatchEntry { start_line })
-        .collect()
+    FileScan {
+        roots: roots
+            .into_iter()
+            .map(|start_line| DispatchEntry { start_line })
+            .collect(),
+        handoffs: handoffs.into_iter().collect(),
+    }
+}
+
+/// Collect the handler names a `call_expression` hands to an axum
+/// router/middleware **by value** into `out` (S-276, [CR-068] §3.2).
+///
+/// The ratified Phase-3 shapes:
+///
+/// - **`.route(path, get(h)|post(h)|…)`** — a `.route(...)` method call whose
+///   second argument is a method-router; every handler in the (possibly chained)
+///   method-router expression is collected ([`collect_method_router_handlers`]),
+///   so `get(a).post(b)` yields both `a` and `b`. Method-router constructors are
+///   recognised **only inside a `route(...)` argument**, never as a bare `get(h)`
+///   anywhere, so an ordinary same-named call (a local `head(x)`, `map.get(k)`)
+///   is not mistaken for a route handler;
+/// - middleware `from_fn(h)` / `middleware::from_fn(h)` — handler is argument 0;
+/// - middleware `from_fn_with_state(state, h)` — handler is argument **1** (the
+///   first argument is the shared state);
+/// - `Router::fallback(h)` — a `.fallback(h)` method call; handler is argument 0.
+///
+/// Each handler must be an `identifier`/`scoped_identifier`; the collected name
+/// is its last `::` segment (a closure, block, or other expression is skipped).
+/// Resolution to a node is the caller's job and is same-file
+/// exactly-one-or-nothing, so a name that resolves cross-file or ambiguously
+/// binds nothing ([NFR-RA-05]).
+fn collect_handoffs(call: Node<'_>, src: &[u8], out: &mut BTreeSet<String>) {
+    let Some(function) = call.child_by_field_name("function") else {
+        return;
+    };
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    // `.fallback(h)` / `.route(path, <method-router>)` — a method call whose field
+    // names the fallback setter or a route registration.
+    if function.kind() == "field_expression" {
+        let field = function
+            .child_by_field_name("field")
+            .map(|f| node_text(f, src));
+        if field == Some(ROUTER_FALLBACK) {
+            if let Some(name) = ident_arg_name(args, 0, src) {
+                out.insert(name);
+            }
+        } else if field == Some(ROUTER_REGISTER) {
+            // The second argument is the (possibly chained) method-router.
+            if let Some(router) = args.named_child(1) {
+                collect_method_router_handlers(router, src, out);
+            }
+        }
+        return;
+    }
+    // `from_fn(h)` / `middleware::from_fn(h)` / `from_fn_with_state(state, h)` — a
+    // plain path call with a distinctive head, recognised wherever it appears.
+    // `from_fn` puts the handler at argument 0, `from_fn_with_state` at 1 (its
+    // first argument is the shared state).
+    let slot = match call_head_segment(function, src) {
+        Some(MIDDLEWARE_FROM_FN) => 0,
+        Some(MIDDLEWARE_FROM_FN_WITH_STATE) => 1,
+        _ => return,
+    };
+    if let Some(name) = ident_arg_name(args, slot, src) {
+        out.insert(name);
+    }
+}
+
+/// Walk a method-router expression, collecting each handler handed over by value
+/// (S-276). Recognised shapes, recursing left through the chain:
+///
+/// - `get(h)` / `axum::routing::get(h)` / `get::<T>(h)` — a method-router
+///   constructor whose head is in [`ROUTER_METHOD_HEADS`]; handler is argument 0;
+/// - `<receiver>.post(h)` — a chained setter (`get(a).post(b)`): the receiver is
+///   walked first, then this link's argument-0 handler is taken;
+/// - any other link is a no-op on itself, but its receiver is still walked so a
+///   handler left of an unrecognised link is not lost.
+///
+/// Mirrors the framework-promotion pass's `router_targets` walk, minus the
+/// method/path bookkeeping ([`super::framework`]).
+fn collect_method_router_handlers(node: Node<'_>, src: &[u8], out: &mut BTreeSet<String>) {
+    if node.kind() != "call_expression" {
+        return;
+    }
+    let Some(function) = node.child_by_field_name("function") else {
+        return;
+    };
+    let args = node.child_by_field_name("arguments");
+    // A chained link `<receiver>.method(h)`: walk the receiver first, then take
+    // this link's handler when its field is a method-router setter.
+    if function.kind() == "field_expression" {
+        if let Some(receiver) = function.child_by_field_name("value") {
+            collect_method_router_handlers(receiver, src, out);
+        }
+        let is_setter = function
+            .child_by_field_name("field")
+            .is_some_and(|f| ROUTER_METHOD_HEADS.contains(&node_text(f, src)));
+        if is_setter {
+            if let Some(name) = args.and_then(|a| ident_arg_name(a, 0, src)) {
+                out.insert(name);
+            }
+        }
+        return;
+    }
+    // The chain head: `get(h)` / `axum::routing::get(h)` / `get::<T>(h)`.
+    if call_head_segment(function, src).is_some_and(|h| ROUTER_METHOD_HEADS.contains(&h)) {
+        if let Some(name) = args.and_then(|a| ident_arg_name(a, 0, src)) {
+            out.insert(name);
+        }
+    }
+}
+
+/// The last `::` segment of a call's function head when it is a plain or
+/// turbofished path — `get` for `get(h)`, `axum::routing::get`, or `get::<T>(h)`;
+/// `None` for a method call (`field_expression`) or any other callee shape.
+fn call_head_segment<'s>(function: Node<'_>, src: &'s [u8]) -> Option<&'s str> {
+    let path = match function.kind() {
+        "identifier" | "scoped_identifier" => function,
+        // A turbofished head unwraps to its inner path (`get::<T>` → `get`).
+        "generic_function" => {
+            let inner = function.child_by_field_name("function")?;
+            if !matches!(inner.kind(), "identifier" | "scoped_identifier") {
+                return None;
+            }
+            inner
+        }
+        _ => return None,
+    };
+    Some(last_path_segment(node_text(path, src)))
+}
+
+/// The last `::` segment of the `n`-th named argument (0-based) when it is an
+/// `identifier`/`scoped_identifier` — a handler handed over by value; `None` for
+/// a closure, literal, or other expression. Indexed access (not a `TreeCursor`)
+/// so the returned node does not borrow a local cursor.
+fn ident_arg_name(args: Node<'_>, n: usize, src: &[u8]) -> Option<String> {
+    let arg = args.named_child(n)?;
+    matches!(arg.kind(), "identifier" | "scoped_identifier")
+        .then(|| last_path_segment(node_text(arg, src)).to_string())
+}
+
+/// The last `::`-path segment of a path text (`get` for `axum::routing::get`,
+/// `overview` for `api_v1::overview`), trimmed.
+fn last_path_segment(text: &str) -> &str {
+    text.rsplit("::").next().unwrap_or(text).trim()
+}
+
+/// The UTF-8 text of a node, or `""` on a non-UTF-8 slice.
+fn node_text<'s>(node: Node<'_>, src: &'s [u8]) -> &'s str {
+    node.utf8_text(src).unwrap_or("")
 }
 
 /// `true` if `item`'s preceding outer-attribute run carries a dispatch
