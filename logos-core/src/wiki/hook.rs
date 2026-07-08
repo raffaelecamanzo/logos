@@ -1,42 +1,33 @@
-//! The Claude Code augmentation hook and its materialization ([FR-WK-14],
-//! [ADR-33], [CR-028]).
+//! The Claude Code SessionEnd quality-report hook and its materialization
+//! ([FR-IN-07], [ADR-49], [CR-055]).
 //!
-//! This automates the *trigger* for agent-tier prose generation while keeping
-//! the binary fully offline ([NFR-SE-01]). Two artifacts are materialized into
-//! the host project:
+//! A marker-tagged hook script (`.claude/hooks/logos-quality-report.sh`) is
+//! materialized alongside a **non-clobbering merge** of a SessionEnd entry into
+//! the project's `.claude/settings.json`. The merge is idempotent: an existing
+//! managed entry is left untouched (recognized by our unique command path);
+//! `force` re-emits it; and a foreign or unparseable `.claude/settings.json` is
+//! never overwritten. Like the embedded skill ([`crate::wiki::skill`]) this is
+//! pure local filesystem I/O — **no network, no LLM call** ([NFR-SE-01]).
 //!
-//! 1. a marker-tagged **PostToolUse hook script**
-//!    (`.claude/hooks/logos-wiki-augment.sh`) that, after the connected agent
-//!    runs an index/sync, deterministically runs `wiki materialize`
-//!    ([FR-WK-20], [CR-062]) so the presented Design/Specs pages are
-//!    up to date, then runs `wiki generate` ([FR-WK-13]) and returns the
-//!    resulting queue to the agent as additional context — non-blocking (always
-//!    exits 0) and idempotent (emits nothing on an empty work-list); and
-//! 2. a **non-clobbering merge** of a PostToolUse entry into the project's
-//!    `.claude/settings.json` wiring that script in.
+//! This module once also materialized a **PostToolUse wiki-augmentation hook**
+//! ([FR-WK-14], [ADR-33]) that ran `wiki generate` after every index/sync and
+//! surfaced the queue to the connected agent. It was retired by [CR-070]: the
+//! perpetually-non-empty queue made every firing unactioned context noise, and
+//! its "writes it" complement had already been retired by [CR-047] in favour of
+//! the `ui`-gated in-process generator ([FR-WK-18]). The generic hook-spec +
+//! settings-merge engine below (`HookSpec`, `merge_settings`,
+//! `materialize_spec`) is shared machinery that survives the retirement, now
+//! exercised solely through the quality-report spec.
 //!
-//! The merge is idempotent and non-clobbering ([FR-IN-02] posture): an existing
-//! managed entry is left untouched (recognized by our unique command path —
-//! [`HOOK_MARKER`]); `force` re-emits it; and a foreign or unparseable
-//! `.claude/settings.json` is never overwritten. Like the embedded skill
-//! ([`crate::wiki::skill`]) this is pure local filesystem I/O — **no network,
-//! no LLM call** ([NFR-SE-01]): the script only ever shells out to `logos wiki
-//! materialize` (a deterministic, offline `wiki.db` write, [FR-WK-20]) and
-//! `logos wiki generate` (a pure read), and the *agent* — outside the binary —
-//! does all prose synthesis ([ADR-24], [ADR-33]).
-//!
-//! This is distinct from the git `core.hooksPath` sync hook ([`crate::hooks`]):
-//! that runs `logos sync`; this drives the coding *agent*.
-//!
+//! [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
 //! [FR-WK-14]: ../../../docs/specs/requirements/FR-WK-14.md
-//! [FR-WK-13]: ../../../docs/specs/requirements/FR-WK-13.md
-//! [FR-WK-20]: ../../../docs/specs/requirements/FR-WK-20.md
-//! [FR-IN-02]: ../../../docs/specs/requirements/FR-IN-02.md
+//! [FR-WK-18]: ../../../docs/specs/requirements/FR-WK-18.md
 //! [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
-//! [ADR-24]: ../../../docs/specs/architecture/decisions/ADR-24.md
 //! [ADR-33]: ../../../docs/specs/architecture/decisions/ADR-33.md
-//! [CR-028]: ../../../docs/requests/CR-028-wiki-per-page-ia-generation-and-diagrams.md
-//! [CR-062]: ../../../docs/requests/CR-062-wiki-present-authored-docs.md
+//! [ADR-49]: ../../../docs/specs/architecture/decisions/ADR-49.md
+//! [CR-047]: ../../../docs/requests/CR-047-internal-wiki-generation-on-agent-substrate.md
+//! [CR-055]: ../../../docs/requests/CR-055-standalone-quality-integration.md
+//! [CR-070]: ../../../docs/requests/CR-070-retire-wiki-augment-hook.md
 
 use std::fs;
 use std::path::Path;
@@ -46,110 +37,8 @@ use serde_json::{json, Value};
 
 use super::skill::EmitAction;
 
-/// The augmentation hook script, repo-relative ([FR-WK-14]).
-pub const HOOK_SCRIPT_REL: &str = ".claude/hooks/logos-wiki-augment.sh";
-
-/// The Claude Code settings file the PostToolUse entry merges into, repo-relative.
+/// The Claude Code settings file the SessionEnd entry merges into, repo-relative.
 pub const SETTINGS_REL: &str = ".claude/settings.json";
-
-/// The hook command wired into `.claude/settings.json`. Uses the
-/// `${CLAUDE_PROJECT_DIR}` placeholder Claude Code expands to the project root so
-/// the entry resolves regardless of the hook process's working directory.
-const HOOK_COMMAND: &str = "${CLAUDE_PROJECT_DIR}/.claude/hooks/logos-wiki-augment.sh";
-
-/// The idempotency / ownership marker: our unique script basename. An existing
-/// PostToolUse entry whose command contains this is ours — the only reliable
-/// marker, since unknown keys in a hook entry are not guaranteed to survive
-/// (so the command path itself is the tag).
-const HOOK_MARKER: &str = "logos-wiki-augment.sh";
-
-/// The PostToolUse matcher: the connected agent's index/sync forms — a Bash
-/// `logos index`/`logos sync` and the MCP `rescan`/`scan` tools. Claude Code
-/// treats a matcher containing non-word characters (the `__` here) as a regex,
-/// so `|` is alternation. The script re-checks the Bash command on stdin so a
-/// non-index/sync Bash call is a silent no-op.
-const MATCHER: &str = "Bash|mcp__logos__rescan|mcp__logos__scan";
-
-/// The marker-tagged hook script body ([FR-WK-14]). POSIX `sh`, best-effort by
-/// construction: it never blocks or fails the triggering tool (always exits 0)
-/// and emits nothing on an empty work-list. It makes **no** network or LLM call
-/// — it shells out to `logos wiki materialize` (a deterministic, offline
-/// `wiki.db` write presenting the Design/Specs pages ahead of the queue,
-/// [FR-WK-20], [CR-062]) and then `logos wiki generate`, a pure offline read
-/// ([NFR-SE-01]); the agent synthesizes prose outside the binary.
-const HOOK_SCRIPT: &str = r#"#!/bin/sh
-# logos:wiki-augment:managed — Claude Code PostToolUse augmentation hook (FR-WK-14, ADR-33).
-#
-# After the connected agent runs an index/sync, this surfaces the `logos wiki
-# generate` queue back to the agent as additional context so it fills stale or
-# absent wiki prose OFF the request path. Best-effort by construction: it never
-# blocks or fails the triggering tool (always exits 0) and emits NOTHING when
-# the work-list is empty. Logos makes no LLM or network call here (NFR-SE-01) —
-# only the agent, outside the binary, synthesises prose.
-#
-# Regenerate with `logos wiki hook --emit --force`.
-
-# Best-effort: a missing binary is not an error, just nothing to do.
-command -v logos >/dev/null 2>&1 || exit 0
-
-# The PostToolUse payload arrives on stdin. Only react to an index/sync: a Bash
-# `logos index`/`logos sync`, or the MCP rescan/scan tools (the matcher already
-# narrows to these tool names; the Bash branch re-checks the command).
-payload=$(cat 2>/dev/null) || exit 0
-case "$payload" in
-  *'"tool_name":"Bash"'*)
-    case "$payload" in
-      *"logos index"*|*"logos sync"*) ;;
-      *) exit 0 ;;
-    esac ;;
-  *'"tool_name":"mcp__logos__rescan"'*|*'"tool_name":"mcp__logos__scan"'*) ;;
-  *) exit 0 ;;
-esac
-
-# Deterministically (re)present the Design/Specs pages BEFORE the LLM queue is
-# computed (FR-WK-20, FR-WK-18, CR-062): in SRS mode this keeps the Summary
-# tier grounded on already-present pages; outside SRS mode it is a no-op. Pure
-# local-FS reads + a `wiki.db` write, no LLM, no network (NFR-SE-01).
-# Best-effort: a materialize failure must never suppress the independent LLM
-# queue below (no `set -e` is in force, so a non-zero exit here is harmless).
-logos wiki materialize >/dev/null 2>&1
-
-# Pure read of the work-list (no wiki.db write, no LLM, no network). An empty
-# queue serialises as `"items":[]` — emit nothing so we never nudge on no work.
-queue_json=$(logos wiki generate --json 2>/dev/null) || exit 0
-case "$queue_json" in
-  ''|*'"items":[]'*) exit 0 ;;
-esac
-
-# The human prompt block is the agent-facing rendering (a target slug + a
-# runnable `wiki write` skeleton per item).
-block=$(logos wiki generate 2>/dev/null) || exit 0
-[ -n "$block" ] || exit 0
-
-# Surface it as PostToolUse additional context (exit 0 = non-blocking). The
-# block is JSON-string-escaped char-by-char with awk so arbitrary markdown is
-# safe (this avoids awk's gsub replacement-backslash pitfalls).
-context=$(printf '%s' "$block" | awk '
-  function esc(s,   i,c,r){
-    r=""
-    for(i=1;i<=length(s);i++){
-      c=substr(s,i,1)
-      if(c=="\\")      r=r "\\\\"
-      else if(c=="\"") r=r "\\\""
-      else if(c=="\t") r=r "\\t"
-      else if(c=="\r") r=r "\\r"
-      else if(c=="\n") r=r "\\n"
-      else             r=r c
-    }
-    return r
-  }
-  { data = data (NR>1 ? "\n" : "") $0 }
-  END { printf "%s", esc(data) }
-')
-
-printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$context"
-exit 0
-"#;
 
 // ── The SessionEnd quality-report hook ([FR-IN-07], [FR-GV-05], [FR-GV-09], [ADR-49], [CR-055]) ──
 
@@ -277,18 +166,17 @@ exit 0
 "#;
 
 /// One materializable Claude Code hook: its script artifact plus the settings
-/// merge target. Captures everything that differs between the [FR-WK-14]
-/// PostToolUse augmentation hook and the [FR-IN-07] SessionEnd quality-report
-/// hook so the idempotent / non-clobbering merge machinery is written exactly
-/// once.
+/// merge target. Generalizes the marker-tagged / idempotent / non-clobbering
+/// settings-merge machinery so it is written exactly once; today only the
+/// [FR-IN-07] SessionEnd quality-report hook is materialized through it (the
+/// [FR-WK-14] PostToolUse wiki-augmentation hook this once also drove was
+/// retired by [CR-070]).
 struct HookSpec {
     /// The hook script path, repo-relative.
     script_rel: &'static str,
-    /// The settings file the entry merges into, repo-relative — both hooks
-    /// currently merge into the shared project `.claude/settings.json`.
+    /// The settings file the entry merges into, repo-relative.
     settings_rel: &'static str,
-    /// The Claude Code hook event the entry registers under (`PostToolUse` /
-    /// `SessionEnd`).
+    /// The Claude Code hook event the entry registers under (e.g. `SessionEnd`).
     event: &'static str,
     /// The matcher narrowing which events fire the hook, or `None` to match all
     /// — SessionEnd has no tool to match on, so the script self-gates.
@@ -302,22 +190,10 @@ struct HookSpec {
     script: &'static str,
 }
 
-/// The [FR-WK-14] PostToolUse augmentation hook spec.
-const AUGMENT_SPEC: HookSpec = HookSpec {
-    script_rel: HOOK_SCRIPT_REL,
-    settings_rel: SETTINGS_REL,
-    event: "PostToolUse",
-    matcher: Some(MATCHER),
-    command: HOOK_COMMAND,
-    marker: HOOK_MARKER,
-    script: HOOK_SCRIPT,
-};
-
 /// The [FR-IN-07] SessionEnd quality-report hook spec. Registers under
-/// `SessionEnd` in the **shared** `.claude/settings.json` ([FR-IN-07]). It
-/// coexists with the [FR-WK-14] PostToolUse augmentation hook in that same
-/// file: the merge touches only the `hooks.SessionEnd` array, leaving
-/// `PostToolUse` (and every foreign entry) verbatim.
+/// `SessionEnd` in the shared `.claude/settings.json` ([FR-IN-07]); the merge
+/// touches only the `hooks.SessionEnd` array, leaving every other key and
+/// event (and any foreign entry) verbatim.
 const QUALITY_REPORT_SPEC: HookSpec = HookSpec {
     script_rel: QUALITY_REPORT_HOOK_SCRIPT_REL,
     settings_rel: SETTINGS_REL,
@@ -328,8 +204,9 @@ const QUALITY_REPORT_SPEC: HookSpec = HookSpec {
     script: QUALITY_REPORT_HOOK_SCRIPT,
 };
 
-/// The outcome of materializing the augmentation hook ([FR-WK-14]) — a
-/// `Serialize` read-model the CLI renders and `init` folds into its step list.
+/// The outcome of materializing a Claude Code hook — currently only the
+/// [FR-IN-07] SessionEnd quality-report hook — a `Serialize` read-model the CLI
+/// renders and `init` folds into its step list.
 ///
 /// `action` reuses [`EmitAction`] for a uniform CLI JSON shape with the skill
 /// (`"action":"created"|"forced"|"skipped"`). A [`EmitAction::Skipped`] is
@@ -340,7 +217,7 @@ const QUALITY_REPORT_SPEC: HookSpec = HookSpec {
 pub struct HookEmitSummary {
     /// The hook script path, repo-relative.
     pub script: String,
-    /// The settings file the PostToolUse entry merges into, repo-relative.
+    /// The settings file the entry merges into, repo-relative.
     pub settings: String,
     /// What happened.
     pub action: EmitAction,
@@ -358,36 +235,20 @@ enum Merge {
     /// Write this serialized settings document; `forced` distinguishes a
     /// re-emit (entry was present) from a first install.
     Write { json: String, forced: bool },
-    /// A foreign/unparseable settings file — never overwritten ([FR-WK-14]).
+    /// A foreign/unparseable settings file — never overwritten ([FR-IN-07]).
     Foreign { reason: String },
-}
-
-/// Materialize the [FR-WK-14] PostToolUse augmentation hook under `base`.
-///
-/// Writes `<base>/.claude/hooks/logos-wiki-augment.sh` and merges a marker-tagged
-/// PostToolUse entry into `<base>/.claude/settings.json`. **Idempotent and
-/// non-clobbering:** an existing managed entry (recognized by its command path)
-/// is left untouched unless `force`; a foreign or unparseable settings file is
-/// never overwritten. Pure local filesystem I/O — no network ([NFR-SE-01]).
-///
-/// # Errors
-/// Returns an error only when a Logos-owned path cannot be created or written.
-pub fn materialize(base: &Path, force: bool) -> Result<HookEmitSummary> {
-    materialize_spec(base, force, &AUGMENT_SPEC)
 }
 
 /// Materialize the [FR-IN-07] SessionEnd quality-report hook under `base`.
 ///
 /// Writes `<base>/.claude/hooks/logos-quality-report.sh` and merges a
-/// marker-tagged SessionEnd entry into the **shared** `<base>/.claude/settings.json`
-/// ([FR-IN-07]) — the same file the augmentation hook wires its PostToolUse entry
-/// into; the merge touches only `hooks.SessionEnd`, so the two coexist. Same
-/// idempotent / non-clobbering contract as [`materialize`]: an existing managed
-/// entry is left untouched unless `force`; a foreign or unparseable settings file
-/// is never overwritten. Installing the hook performs **no** LLM call and opens
-/// **no** network connection ([NFR-SE-01]) — the hook only shells out to the
-/// pure-read `scan`/`gate`/`check` commands at session end, and always exits 0
-/// ([FR-GV-05] report tier).
+/// marker-tagged SessionEnd entry into `<base>/.claude/settings.json`.
+/// **Idempotent and non-clobbering:** an existing managed entry (recognized by
+/// its command path) is left untouched unless `force`; a foreign or unparseable
+/// settings file is never overwritten. Installing the hook performs **no** LLM
+/// call and opens **no** network connection ([NFR-SE-01]) — the hook only
+/// shells out to the pure-read `scan`/`gate`/`check` commands at session end,
+/// and always exits 0 ([FR-GV-05] report tier).
 ///
 /// # Errors
 /// Returns an error only when a Logos-owned path cannot be created or written.
@@ -395,8 +256,8 @@ pub fn materialize_quality_report(base: &Path, force: bool) -> Result<HookEmitSu
     materialize_spec(base, force, &QUALITY_REPORT_SPEC)
 }
 
-/// Materialize one hook (`spec`) under `base` — the shared engine behind the
-/// augmentation ([FR-WK-14]) and quality-report ([FR-IN-07]) hooks.
+/// Materialize one hook (`spec`) under `base` — the engine behind the
+/// [FR-IN-07] quality-report hook.
 fn materialize_spec(base: &Path, force: bool, spec: &HookSpec) -> Result<HookEmitSummary> {
     let settings_path = base.join(spec.settings_rel);
     let existing = if settings_path.exists() {
@@ -464,7 +325,7 @@ fn write_script(base: &Path, spec: &HookSpec) -> Result<()> {
     Ok(())
 }
 
-/// The settings entry this hook installs. A `PostToolUse` entry carries its
+/// The settings entry this hook installs. An entry with a matcher carries its
 /// tool matcher; a matcher-less event (SessionEnd) matches every occurrence and
 /// the script self-gates.
 fn hook_entry(spec: &HookSpec) -> Value {
@@ -496,9 +357,9 @@ fn is_ours(entry: &Value, marker: &str) -> bool {
 
 /// Resolve the settings merge purely (no I/O) so the idempotent/non-clobbering
 /// contract is unit-testable. An absent file starts from `{}`; an unparseable
-/// or structurally foreign file is refused ([FR-WK-14], [FR-IN-07]
-/// never-overwrite). The `spec.event` array (`PostToolUse` / `SessionEnd`) is
-/// the only key touched; every other key and a foreign entry survive verbatim.
+/// or structurally foreign file is refused ([FR-IN-07] never-overwrite). The
+/// `spec.event` array (e.g. `SessionEnd`) is the only key touched; every other
+/// key and a foreign entry survive verbatim.
 fn merge_settings(existing: Option<&str>, force: bool, spec: &HookSpec) -> Merge {
     let settings = spec.settings_rel;
     let mut config: Value = match existing {
@@ -569,162 +430,75 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// [FR-WK-20]/[FR-WK-18]/[CR-062]: `wiki materialize` is wired textually
-    /// BEFORE `wiki generate` in the script — the acceptance-criterion property
-    /// itself, pinned against a future edit that reorders the two calls. The
-    /// end-to-end `wiki_augment_hook_materializes_the_presented_tier_before_the_queue`
-    /// CLI test (`cli/tests/cli_surface.rs`) proves materialize actually runs as
-    /// a side effect of the hook, but cannot distinguish "runs" from "runs
-    /// first" — the SRS-mode queue already omits the Design/Specs categories
-    /// regardless of materialize (a filesystem-only gate, [FR-WK-21]), so this
-    /// script-order assertion is the only place true ordering is checked.
-    #[test]
-    fn hook_script_runs_materialize_before_generate() {
-        let materialize_at = HOOK_SCRIPT
-            .find("logos wiki materialize")
-            .expect("the script invokes wiki materialize");
-        let generate_at = HOOK_SCRIPT
-            .find("logos wiki generate")
-            .expect("the script invokes wiki generate");
-        assert!(
-            materialize_at < generate_at,
-            "wiki materialize must run before wiki generate is read"
-        );
-    }
+    // ── Generic `merge_settings` machinery, verified via the [FR-IN-07]
+    // quality-report spec ([CR-070]: the retired augment spec was previously
+    // the vehicle for this coverage) ──────────────────────────────────────────
 
-    /// A fresh project gets the script (executable on Unix) and a settings file
-    /// carrying exactly one marker-tagged PostToolUse entry.
-    #[test]
-    fn materialize_writes_script_and_merges_settings() {
-        let tmp = TempDir::new().unwrap();
-        let summary = materialize(tmp.path(), false).unwrap();
-        assert_eq!(summary.action, EmitAction::Created);
-        assert!(summary.notice.is_none());
-
-        let script = tmp.path().join(HOOK_SCRIPT_REL);
-        assert_eq!(fs::read_to_string(&script).unwrap(), HOOK_SCRIPT);
-        assert!(
-            HOOK_SCRIPT.contains("logos:wiki-augment:managed"),
-            "the script is marker-tagged"
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&script).unwrap().permissions().mode();
-            assert_eq!(mode & 0o111, 0o111, "the script is executable");
-        }
-
-        let settings: Value =
-            serde_json::from_str(&fs::read_to_string(tmp.path().join(SETTINGS_REL)).unwrap())
-                .unwrap();
-        let post = settings["hooks"]["PostToolUse"].as_array().unwrap();
-        assert_eq!(post.len(), 1, "exactly one entry");
-        assert!(
-            is_ours(&post[0], HOOK_MARKER),
-            "the entry is the marker-tagged hook"
-        );
-        assert_eq!(post[0]["matcher"], MATCHER);
-    }
-
-    /// An unforced re-emit over our own entry is idempotent: skipped, settings
-    /// byte-identical.
-    #[test]
-    fn second_materialize_is_idempotent() {
-        let tmp = TempDir::new().unwrap();
-        materialize(tmp.path(), false).unwrap();
-        let before = fs::read_to_string(tmp.path().join(SETTINGS_REL)).unwrap();
-
-        let again = materialize(tmp.path(), false).unwrap();
-        assert_eq!(again.action, EmitAction::Skipped);
-        assert!(again.notice.is_none(), "an idempotent skip carries no notice");
-        let after = fs::read_to_string(tmp.path().join(SETTINGS_REL)).unwrap();
-        assert_eq!(before, after, "the settings file is untouched");
-    }
-
-    /// `--force` re-emits without duplicating our entry.
-    #[test]
-    fn force_re_emits_without_duplicating() {
-        let tmp = TempDir::new().unwrap();
-        materialize(tmp.path(), false).unwrap();
-
-        let forced = materialize(tmp.path(), true).unwrap();
-        assert_eq!(forced.action, EmitAction::Forced);
-
-        let settings: Value =
-            serde_json::from_str(&fs::read_to_string(tmp.path().join(SETTINGS_REL)).unwrap())
-                .unwrap();
-        let ours = settings["hooks"]["PostToolUse"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|e| is_ours(e, HOOK_MARKER))
-            .count();
-        assert_eq!(ours, 1, "force re-emits exactly one managed entry, no dupes");
-    }
-
-    /// A pre-existing foreign PostToolUse entry survives our merge untouched —
+    /// A pre-existing foreign SessionEnd entry survives our merge untouched —
     /// we append alongside it, never clobber it.
     #[test]
     fn merge_preserves_a_foreign_entry() {
         let existing = r#"{
             "hooks": {
-                "PostToolUse": [
-                    { "matcher": "Write", "hooks": [ { "type": "command", "command": "my-own.sh" } ] }
+                "SessionEnd": [
+                    { "hooks": [ { "type": "command", "command": "my-own.sh" } ] }
                 ]
             },
             "permissions": { "allow": ["Bash"] }
         }"#;
-        let Merge::Write { json, forced } = merge_settings(Some(existing), false, &AUGMENT_SPEC)
+        let Merge::Write { json, forced } =
+            merge_settings(Some(existing), false, &QUALITY_REPORT_SPEC)
         else {
             panic!("expected a write");
         };
         assert!(!forced, "a first install is not a forced re-emit");
         let value: Value = serde_json::from_str(&json).unwrap();
-        let post = value["hooks"]["PostToolUse"].as_array().unwrap();
-        assert_eq!(post.len(), 2, "the foreign entry is preserved alongside ours");
-        assert!(post.iter().any(|e| e["matcher"] == "Write"));
-        assert!(post.iter().any(|e| is_ours(e, HOOK_MARKER)));
+        let end = value["hooks"]["SessionEnd"].as_array().unwrap();
+        assert_eq!(end.len(), 2, "the foreign entry is preserved alongside ours");
+        assert!(end.iter().any(|e| e["hooks"][0]["command"] == "my-own.sh"));
+        assert!(end.iter().any(|e| is_ours(e, QUALITY_REPORT_HOOK_MARKER)));
         // Unrelated keys survive verbatim.
         assert_eq!(value["permissions"]["allow"][0], "Bash");
     }
 
-    /// An unparseable settings file is foreign — never overwritten ([FR-WK-14]).
+    /// An unparseable settings file is foreign — never overwritten ([FR-IN-07]).
     #[test]
     fn unparseable_settings_is_foreign() {
-        let Merge::Foreign { reason } = merge_settings(Some("{ not json"), false, &AUGMENT_SPEC)
+        let Merge::Foreign { reason } =
+            merge_settings(Some("{ not json"), false, &QUALITY_REPORT_SPEC)
         else {
             panic!("expected a foreign refusal");
         };
         assert!(reason.contains("not valid JSON"));
         // Even with `--force`, a file we cannot parse is never overwritten.
         assert!(matches!(
-            merge_settings(Some("{ not json"), true, &AUGMENT_SPEC),
+            merge_settings(Some("{ not json"), true, &QUALITY_REPORT_SPEC),
             Merge::Foreign { .. }
         ));
     }
 
-    /// A settings file whose shape is wrong anywhere on the `hooks.PostToolUse`
+    /// A settings file whose shape is wrong anywhere on the `hooks.SessionEnd`
     /// path — including a valid-JSON-but-non-object root — is foreign and never
     /// overwritten.
     #[test]
     fn structurally_foreign_settings_is_refused() {
-        let bad = r#"{ "hooks": { "PostToolUse": "not-an-array" } }"#;
+        let bad = r#"{ "hooks": { "SessionEnd": "not-an-array" } }"#;
         assert!(matches!(
-            merge_settings(Some(bad), false, &AUGMENT_SPEC),
+            merge_settings(Some(bad), false, &QUALITY_REPORT_SPEC),
             Merge::Foreign { .. }
         ));
         let bad_hooks = r#"{ "hooks": [] }"#;
         assert!(matches!(
-            merge_settings(Some(bad_hooks), false, &AUGMENT_SPEC),
+            merge_settings(Some(bad_hooks), false, &QUALITY_REPORT_SPEC),
             Merge::Foreign { .. }
         ));
         // Valid JSON whose root is not an object (a string, an array) is foreign.
         assert!(matches!(
-            merge_settings(Some(r#""just a string""#), false, &AUGMENT_SPEC),
+            merge_settings(Some(r#""just a string""#), false, &QUALITY_REPORT_SPEC),
             Merge::Foreign { .. }
         ));
         assert!(matches!(
-            merge_settings(Some("[1, 2, 3]"), false, &AUGMENT_SPEC),
+            merge_settings(Some("[1, 2, 3]"), false, &QUALITY_REPORT_SPEC),
             Merge::Foreign { .. }
         ));
     }
@@ -732,12 +506,12 @@ mod tests {
     /// An absent or empty file starts from `{}` and installs cleanly.
     #[test]
     fn absent_or_empty_settings_installs() {
-        let Merge::Write { forced, .. } = merge_settings(None, false, &AUGMENT_SPEC) else {
+        let Merge::Write { forced, .. } = merge_settings(None, false, &QUALITY_REPORT_SPEC) else {
             panic!("expected a write for an absent file");
         };
         assert!(!forced);
         assert!(matches!(
-            merge_settings(Some("   \n"), false, &AUGMENT_SPEC),
+            merge_settings(Some("   \n"), false, &QUALITY_REPORT_SPEC),
             Merge::Write { .. }
         ));
     }
@@ -746,15 +520,15 @@ mod tests {
     /// and the wired command uses the `${CLAUDE_PROJECT_DIR}` placeholder.
     #[test]
     fn merged_document_is_well_formed() {
-        let Merge::Write { json, .. } = merge_settings(None, false, &AUGMENT_SPEC) else {
+        let Merge::Write { json, .. } = merge_settings(None, false, &QUALITY_REPORT_SPEC) else {
             panic!("expected a write");
         };
         assert!(json.ends_with('\n'), "trailing newline like .mcp.json");
         let value: Value = serde_json::from_str(&json).expect("valid JSON");
-        let cmd = value["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        let cmd = value["hooks"]["SessionEnd"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
-        assert_eq!(cmd, HOOK_COMMAND);
+        assert_eq!(cmd, QUALITY_REPORT_HOOK_COMMAND);
         assert!(cmd.contains("${CLAUDE_PROJECT_DIR}"), "uses the placeholder");
     }
 
@@ -835,17 +609,18 @@ mod tests {
         assert_eq!(ours, 1, "force never duplicates the managed entry");
     }
 
-    /// The quality-report merge preserves a foreign SessionEnd entry and the
-    /// PostToolUse augmentation entry it shares the file with, and refuses an
+    /// The quality-report merge preserves a foreign SessionEnd entry and an
+    /// unrelated PostToolUse entry it shares the file with, and refuses an
     /// unparseable `settings.json` ([FR-IN-07] never-clobber).
     #[test]
-    fn quality_report_merge_preserves_foreign_and_coexists_with_augment() {
-        // A settings.json that already carries the augmentation PostToolUse entry
-        // plus a foreign SessionEnd entry and an unrelated key.
+    fn quality_report_merge_preserves_foreign_and_coexists_with_other_events() {
+        // A settings.json that already carries an unrelated PostToolUse entry
+        // (owned by some other tool) plus a foreign SessionEnd entry and an
+        // unrelated key.
         let existing = r#"{
             "hooks": {
                 "PostToolUse": [
-                    { "matcher": "Bash", "hooks": [ { "type": "command", "command": "logos-wiki-augment.sh" } ] }
+                    { "matcher": "Bash", "hooks": [ { "type": "command", "command": "some-other-tool.sh" } ] }
                 ],
                 "SessionEnd": [
                     { "hooks": [ { "type": "command", "command": "their-cleanup.sh" } ] }
@@ -866,10 +641,10 @@ mod tests {
             .iter()
             .any(|e| e["hooks"][0]["command"] == "their-cleanup.sh"));
         assert!(end.iter().any(|e| is_ours(e, QUALITY_REPORT_HOOK_MARKER)));
-        // The PostToolUse augmentation entry is untouched — only SessionEnd moved.
+        // The unrelated PostToolUse entry is untouched — only SessionEnd moved.
         let post = value["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(post.len(), 1);
-        assert!(is_ours(&post[0], HOOK_MARKER));
+        assert_eq!(post[0]["hooks"][0]["command"], "some-other-tool.sh");
         assert_eq!(value["permissions"]["allow"][0], "Bash");
 
         let Merge::Foreign { reason } =

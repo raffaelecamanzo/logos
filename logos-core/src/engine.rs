@@ -2248,27 +2248,6 @@ impl Engine {
         })
     }
 
-    /// Materialize the Claude Code augmentation hook ([FR-WK-14], [ADR-33],
-    /// CLI-only surface): a marker-tagged PostToolUse hook script plus a
-    /// non-clobbering merge into the project's `.claude/settings.json`. The hook
-    /// runs `wiki generate` ([FR-WK-13]) after an index/sync and surfaces the
-    /// queue to the connected agent off the request path; `force` re-emits it.
-    ///
-    /// Pure local filesystem I/O behind `logos wiki hook --emit [--force]` (the
-    /// `init -i` step runs the same engine through [`crate::init`]). Installing
-    /// the hook performs **no** LLM call and opens **no** network connection
-    /// ([NFR-SE-01]); only the agent, outside the binary, synthesizes prose.
-    ///
-    /// [FR-WK-13]: ../../../docs/specs/requirements/FR-WK-13.md
-    /// [FR-WK-14]: ../../../docs/specs/requirements/FR-WK-14.md
-    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
-    /// [ADR-33]: ../../../docs/specs/architecture/decisions/ADR-33.md
-    pub fn wiki_hook_emit(&self, force: bool) -> Result<crate::wiki::HookEmitSummary> {
-        crate::observability::traced("wiki_hook_emit", || {
-            crate::wiki::materialize_hook(&self.root, force)
-        })
-    }
-
     /// Materialize the Claude Code **SessionEnd** quality-report hook
     /// ([FR-IN-07], [FR-GV-05], [FR-GV-09], [ADR-49], CLI-only surface): a
     /// marker-tagged hook script plus a non-clobbering merge into the project's
