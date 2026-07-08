@@ -963,3 +963,66 @@ fn bench_incremental_vs_full_resolve() {
         t_full.as_secs_f64() / t_incr.as_secs_f64().max(1e-9),
     );
 }
+
+// ── CR-071 / S-279 / FR-IX-11: index + doctor surface the unindexed warning ───
+
+/// End-to-end through the public `Engine`: a git-ignored documentation
+/// directory-symlink with no sanctioned bypass (no `.swe-skills`) is surfaced as
+/// a warning by BOTH `index` (via `IndexResult.warnings`) and `doctor` (via the
+/// diagnostic-only `DoctorReport.doc_symlink_warnings`), naming the path and the
+/// reason — while `doctor` stays `ok` (the unindexed symlink is not indexed, so it
+/// is no admission drift). This pins the user-facing surface of the FR-IX-11
+/// warning that the discovery-level unit tests do not exercise.
+#[cfg(unix)]
+#[test]
+fn index_and_doctor_surface_the_unindexed_doc_symlink_warning() {
+    use std::os::unix::fs::symlink;
+
+    let base = TempDir::new().expect("temp root");
+    let base = base.path().canonicalize().expect("canonicalize base");
+    // A sibling docs tree the symlink points into (escapes the project root; with
+    // no `.swe-skills` it resolves no sanctioned root and is refused).
+    let external = base.join("external-docs");
+    write(&external, "specs/ADR-46.md", "# ADR-46\n");
+
+    let proj = base.join("project");
+    write(&proj, "src/main.rs", "fn main() {}\n");
+    fs::create_dir_all(proj.join("docs")).expect("mkdir docs");
+    symlink(external.join("specs"), proj.join("docs/specs")).expect("symlink docs/specs");
+    write(&proj, ".gitignore", "/docs/specs\n"); // git-ignored, and NO `.swe-skills`.
+
+    let engine = Engine::start(&proj).expect("engine starts");
+    let result = engine.index();
+
+    // `index` surfaces the warning naming the dropped path and the reason.
+    let index_warning = result
+        .warnings
+        .iter()
+        .find(|w| w.contains("docs/specs") && w.contains("unindexed"));
+    assert!(
+        index_warning.is_some(),
+        "index warns about the unindexed doc symlink: {:?}",
+        result.warnings
+    );
+    assert!(
+        index_warning.unwrap().contains("escapes"),
+        "the index warning names the reason: {index_warning:?}"
+    );
+
+    // `doctor` surfaces the same warning and stays ok (no admission drift, since
+    // the unindexed symlink was never indexed).
+    let report = engine.doctor().expect("doctor runs");
+    assert!(
+        report.ok,
+        "doctor stays ok — the diagnostic warning does not flip the verdict: {}",
+        report.message
+    );
+    assert!(
+        report
+            .doc_symlink_warnings
+            .iter()
+            .any(|w| w.contains("docs/specs")),
+        "doctor surfaces the unindexed-doc-symlink warning: {:?}",
+        report.doc_symlink_warnings
+    );
+}
