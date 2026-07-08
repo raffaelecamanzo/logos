@@ -1565,6 +1565,44 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn file_and_broken_doc_symlinks_are_neither_followed_nor_warned() {
+        // A doc-prefix symlink that is NOT a directory — a link to a file, or a
+        // broken link — classifies as `NotDir`: it is neither followed nor reported
+        // as an unindexed drop. A regression mis-routing `NotDir` into `Escapes`
+        // would emit a spurious [FR-IX-11] warning for an innocent file-symlink.
+        use std::os::unix::fs::symlink;
+
+        let (_tmp, root, _sanctioned) = build_symlink_fixture();
+        // Under the `docs` prefix: a symlink to a regular file, and a broken link.
+        write(&root.join("docs/target.md"), "# real target\n");
+        symlink(root.join("docs/target.md"), root.join("docs/filelink")).unwrap();
+        symlink(root.join("docs/does-not-exist"), root.join("docs/broken")).unwrap();
+
+        let report = discover_with_threads(&root, &Config::default(), 0).unwrap();
+        let rels: BTreeSet<String> = report
+            .files
+            .iter()
+            .map(|p| to_forward_slash(p.strip_prefix(&root).unwrap()))
+            .collect();
+
+        // The real sanctioned doc is still followed; the non-dir symlinks are inert.
+        assert!(rels.contains("docs/specs/ADR-46.md"), "sanctioned doc still followed: {rels:?}");
+        assert!(
+            !report.unindexed_doc_symlinks.iter().any(|d| {
+                let l = d.link.as_path();
+                l == Path::new("docs/filelink") || l == Path::new("docs/broken")
+            }),
+            "a file-symlink / broken link is NotDir — never reported unindexed: {:?}",
+            report.unindexed_doc_symlinks
+        );
+        assert!(
+            !rels.iter().any(|r| r.starts_with("docs/filelink") || r.starts_with("docs/broken")),
+            "a file-symlink / broken link is never followed into files: {rels:?}"
+        );
+    }
+
+    #[test]
     fn doc_dir_prefixes_extracts_literal_directory_bases() {
         // The detection scope: only the literal directory prefix of a glob that
         // can nest files under a directory contributes; top-level file globs and
