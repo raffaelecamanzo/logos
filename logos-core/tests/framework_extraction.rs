@@ -122,7 +122,20 @@ async fn health() {}
     assert!(routes_to.contains(&(get_users, list_users)));
     assert!(routes_to.contains(&(post_users, create_user)));
     assert!(routes_to.contains(&(get_health, health)));
-    assert_eq!(routes_to.len(), 3);
+    // Those three cross-node edges are the only route→handler links…
+    let route_links: Vec<_> = routes_to.iter().filter(|(s, t)| s != t).collect();
+    assert_eq!(route_links.len(), 3, "three framework route→handler edges");
+    // …and each handler additionally carries a `RoutesTo` *self*-edge — the
+    // function-pointer handoff live-root marker (S-276): `get(list_users)` hands
+    // the handler off as a pointer, so the resolver live-roots it (a self-edge is
+    // the marker shape) to keep it from being flagged dead. Three routes → three
+    // markers, so the total RoutesTo count is 6, not 3.
+    for h in [list_users, create_user, health] {
+        assert!(
+            routes_to.contains(&(h, h)),
+            "handler {h:?} carries a handoff live-root self-edge"
+        );
+    }
 
     // Promoted nodes are scope-anchored under their file module so the
     // binder and module rollups see them like any declaration. (A `main.rs`
