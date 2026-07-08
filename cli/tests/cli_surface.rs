@@ -1177,38 +1177,13 @@ fn wiki_write_accepts_a_well_formed_body_piped_via_stdin() {
     );
 }
 
-// ── FR-WK-14 / ADR-33: the Claude Code augmentation hook ────────────────────
+// ── CR-070 / FR-WK-14 retirement: the PostToolUse augmentation hook is gone ──
 
-/// Run the materialized hook script with `payload` on stdin, with the built
-/// `logos` binary on PATH (so the script's `logos wiki generate` resolves) and
-/// `cwd = project` (where the hook runs in practice).
-fn run_hook(project: &Path, payload: &str) -> Output {
-    let bin_dir = Path::new(env!("CARGO_BIN_EXE_logos")).parent().unwrap();
-    let path = std::env::var("PATH").unwrap_or_default();
-    let mut child = Command::new("sh")
-        .arg(project.join(".claude/hooks/logos-wiki-augment.sh"))
-        .current_dir(project)
-        .env("PATH", format!("{}:{}", bin_dir.display(), path))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("the hook script runs");
-    use std::io::Write;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(payload.as_bytes())
-        .unwrap();
-    child.wait_with_output().expect("hook completes")
-}
-
-/// `logos wiki hook --emit` materializes the marker-tagged script + the
-/// PostToolUse settings entry (exit 0), is idempotent on re-run, `--force`
-/// re-emits without duplicating, and a foreign settings file is never
-/// overwritten (FR-WK-14). Run through the real binary so the offline path
-/// (NFR-SE-01) and exit codes are exactly as CI sees them.
+/// `logos wiki hook --emit` materializes only the marker-tagged SessionEnd
+/// quality-report script + settings entry (exit 0), is idempotent on re-run,
+/// `--force` re-emits without duplicating, and a foreign settings file is
+/// never overwritten (FR-IN-07). Run through the real binary so the offline
+/// path (NFR-SE-01) and exit codes are exactly as CI sees them.
 #[test]
 fn wiki_hook_emit_installs_and_is_idempotent() {
     let tmp = TempDir::new().unwrap();
@@ -1223,7 +1198,7 @@ fn wiki_hook_emit_installs_and_is_idempotent() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"action\":\"created\""));
     assert!(
         tmp.path()
-            .join(".claude/hooks/logos-wiki-augment.sh")
+            .join(".claude/hooks/logos-quality-report.sh")
             .exists(),
         "script written"
     );
@@ -1231,7 +1206,7 @@ fn wiki_hook_emit_installs_and_is_idempotent() {
         serde_json::from_slice(&fs::read(tmp.path().join(".claude/settings.json")).unwrap())
             .expect("settings JSON");
     assert_eq!(
-        settings["hooks"]["PostToolUse"].as_array().map(Vec::len),
+        settings["hooks"]["SessionEnd"].as_array().map(Vec::len),
         Some(1)
     );
 
@@ -1254,7 +1229,7 @@ fn wiki_hook_emit_installs_and_is_idempotent() {
         serde_json::from_slice(&fs::read(tmp.path().join(".claude/settings.json")).unwrap())
             .unwrap();
     assert_eq!(
-        settings["hooks"]["PostToolUse"].as_array().map(Vec::len),
+        settings["hooks"]["SessionEnd"].as_array().map(Vec::len),
         Some(1),
         "force never duplicates the managed entry"
     );
@@ -1267,176 +1242,26 @@ fn wiki_hook_requires_emit() {
     assert_eq!(exit_code(&logos(tmp.path(), &["wiki", "hook"])), 2);
 }
 
-/// The materialized hook script surfaces the `wiki generate` queue to the agent
-/// as PostToolUse additional context after an index/sync, is a silent no-op on
-/// a non-index Bash call and an empty work-list, and never blocks (exit 0) —
-/// all while opening no outbound connection (FR-WK-14, NFR-SE-01).
+/// [CR-070]: `wiki hook --emit` materializes only the SessionEnd
+/// quality-report hook — a single summary object, not an array — and
+/// produces no augmentation script or PostToolUse entry (the retired
+/// [FR-WK-14] hook).
 #[test]
-fn wiki_augment_hook_script_surfaces_the_queue_offline() {
-    // The script itself is offline by construction: it shells out only to
-    // `logos` and POSIX text tools, never a network client.
-    let tmp = fixture();
-    assert_eq!(exit_code(&logos(tmp.path(), &["--json", "wiki", "hook", "--emit"])), 0);
-    let script = fs::read_to_string(tmp.path().join(".claude/hooks/logos-wiki-augment.sh")).unwrap();
-    for net in ["curl", "wget", "nc ", "http://", "https://"] {
-        assert!(!script.contains(net), "the hook script invokes no network client ({net})");
-    }
-
-    assert_eq!(exit_code(&logos(tmp.path(), &["index", "--quiet"])), 0);
-
-    // A Bash `logos index` → the queue is surfaced as valid additionalContext.
-    let out = run_hook(
-        tmp.path(),
-        r#"{"tool_name":"Bash","tool_input":{"command":"logos index"}}"#,
-    );
-    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
-    let payload: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("the hook emits one JSON document");
-    assert_eq!(
-        payload["hookSpecificOutput"]["hookEventName"], "PostToolUse",
-        "the hook tags its event: {payload}"
-    );
-    let ctx = payload["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .expect("additionalContext string");
-    assert!(
-        ctx.contains("logos wiki write "),
-        "the surfaced context is the runnable generation queue: {ctx}"
-    );
-
-    // Each trigger form in the matcher fires: the MCP rescan and scan tools,
-    // and a Bash `logos sync` — every branch surfaces a valid-JSON queue.
-    for payload in [
-        r#"{"tool_name":"mcp__logos__rescan","tool_input":{}}"#,
-        r#"{"tool_name":"mcp__logos__scan","tool_input":{}}"#,
-        r#"{"tool_name":"Bash","tool_input":{"command":"logos sync src/core.rs"}}"#,
-    ] {
-        let out = run_hook(tmp.path(), payload);
-        assert_eq!(exit_code(&out), 0, "trigger exits 0: {payload}");
-        assert!(!out.stdout.is_empty(), "trigger surfaces the queue: {payload}");
-        serde_json::from_slice::<serde_json::Value>(&out.stdout)
-            .unwrap_or_else(|e| panic!("valid JSON for {payload}: {e}"));
-    }
-
-    // A non-index Bash call → a silent no-op, exit 0 (never nudges off-topic).
-    let noop = run_hook(tmp.path(), r#"{"tool_name":"Bash","tool_input":{"command":"ls -la"}}"#);
-    assert_eq!(exit_code(&noop), 0);
-    assert!(noop.stdout.is_empty(), "a non-index Bash call emits nothing");
-
-    // An empty work-list → silent, exit 0. A source-less project's only work is
-    // the five Overview sections; writing them empties the queue. (The synthesized
-    // overview/architecture page is retired by CR-062.)
-    let empty = TempDir::new().unwrap();
-    assert_eq!(exit_code(&logos(empty.path(), &["--json", "wiki", "hook", "--emit"])), 0);
-    assert_eq!(exit_code(&logos(empty.path(), &["index", "--quiet"])), 0);
-    for (slug, title) in [
-        ("overview/project-overview", "Project Overview"),
-        ("overview/getting-started", "Getting Started"),
-        ("overview/key-concepts", "Key concepts"),
-        ("overview/how-it-works", "How It Works"),
-        ("overview/known-issues", "Known issues"),
-    ] {
-        assert_eq!(
-            exit_code(&logos(
-                empty.path(),
-                &[
-                    "wiki", "write", slug, "--title", title, "--generator", "test",
-                    "# Page\n\nPlaceholder prose long enough to clear the write-path guard.",
-                ],
-            )),
-            0
-        );
-    }
-    let drained = run_hook(
-        empty.path(),
-        r#"{"tool_name":"Bash","tool_input":{"command":"logos index"}}"#,
-    );
-    assert_eq!(exit_code(&drained), 0);
-    assert!(
-        drained.stdout.is_empty(),
-        "an empty work-list surfaces nothing: {}",
-        String::from_utf8_lossy(&drained.stdout)
-    );
-}
-
-/// [FR-WK-20]/[FR-WK-18]/[CR-062]: the augmentation hook runs `wiki
-/// materialize` BEFORE it surfaces the LLM queue — in an SRS-mode project, the
-/// presented Architecture page exists after one trigger, even though the agent
-/// never wrote it.
-#[test]
-fn wiki_augment_hook_materializes_the_presented_tier_before_the_queue() {
-    let tmp = fixture();
-    write(
-        tmp.path(),
-        "docs/specs/architecture.md",
-        "# Architecture\n\nThe system design.\n",
-    );
-    write(
-        tmp.path(),
-        "docs/specs/requirements/FR-X-01.md",
-        "# FR-X-01\n\nA requirement.\n",
-    );
-    assert_eq!(exit_code(&logos(tmp.path(), &["--json", "wiki", "hook", "--emit"])), 0);
-    assert_eq!(exit_code(&logos(tmp.path(), &["index", "--quiet"])), 0);
-
-    // Before the trigger: nothing presented yet — a miss reads `null` (exit 0).
-    let before = logos(tmp.path(), &["--json", "wiki", "read", "overview/architecture"]);
-    assert_eq!(exit_code(&before), 0, "{}", String::from_utf8_lossy(&before.stderr));
-    assert_eq!(before.stdout, b"null\n", "no page yet — the Architecture page is not generated");
-
-    let out = run_hook(
-        tmp.path(),
-        r#"{"tool_name":"Bash","tool_input":{"command":"logos index"}}"#,
-    );
-    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
-
-    // After ONE trigger: the presented Architecture page exists, doc-present
-    // provenance, even though the queue only ever surfaces Summary work to the
-    // agent — proving materialize ran ahead of (independent of) the LLM queue.
-    let after = logos(tmp.path(), &["--json", "wiki", "read", "overview/architecture"]);
-    assert_eq!(exit_code(&after), 0, "{}", String::from_utf8_lossy(&after.stderr));
-    let page: serde_json::Value = serde_json::from_slice(&after.stdout).expect("JSON");
-    assert_eq!(page["generator"], "logos:doc-present");
-
-    // The surfaced queue itself never names the Architecture page (Case-1
-    // scope is Summary-only, FR-WK-21) — it is presented, never queued.
-    let payload: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("the hook emits one JSON document");
-    let ctx = payload["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or_default();
-    assert!(
-        !ctx.contains("overview/architecture"),
-        "the Architecture page is presented, never queued to the agent: {ctx}"
-    );
-}
-
-// ── FR-WK-16 retirement / ADR-33: the SessionEnd wiki-autogen hook is gone ───
-
-/// `wiki hook --emit` materializes BOTH remaining hooks: the PostToolUse
-/// augmentation hook and the SessionEnd quality-report hook, both merged into
-/// the shared `.claude/settings.json`. Idempotent, `--force` re-emits,
-/// offline (FR-WK-14, FR-IN-07, NFR-SE-01).
-#[test]
-fn wiki_hook_emit_installs_augment_and_quality_report() {
+fn wiki_hook_emit_installs_only_the_quality_report_hook() {
     let tmp = TempDir::new().unwrap();
 
     let out = logos(tmp.path(), &["--json", "wiki", "hook", "--emit"]);
     assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
-    // A two-element array: both summaries report `created`.
-    let summaries: serde_json::Value = serde_json::from_slice(&out.stdout).expect("array JSON");
-    assert_eq!(summaries.as_array().map(Vec::len), Some(2));
-    assert!(summaries
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|s| s["action"] == "created"));
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("object JSON");
+    assert!(summary.is_object(), "a single summary object, not an array: {summary}");
+    assert_eq!(summary["action"], "created");
+    assert_eq!(summary["settings"], ".claude/settings.json");
 
-    // The augmentation script + its shared settings.json PostToolUse entry.
-    let augment_script = tmp.path().join(".claude/hooks/logos-wiki-augment.sh");
-    assert!(augment_script.exists(), "the augmentation script is written");
-
-    // The quality-report script + its shared settings.json SessionEnd entry.
+    // No augmentation script or PostToolUse entry anywhere.
+    assert!(
+        !tmp.path().join(".claude/hooks/logos-wiki-augment.sh").exists(),
+        "the retired augmentation script is never materialized"
+    );
     let quality_script = tmp.path().join(".claude/hooks/logos-quality-report.sh");
     assert!(quality_script.exists(), "the quality-report script is written");
     assert!(
@@ -1448,12 +1273,10 @@ fn wiki_hook_emit_installs_augment_and_quality_report() {
     let shared: serde_json::Value =
         serde_json::from_slice(&fs::read(tmp.path().join(".claude/settings.json")).unwrap())
             .expect("settings.json");
-    let post = shared["hooks"]["PostToolUse"].as_array().expect("PostToolUse array");
-    assert_eq!(post.len(), 1, "exactly one PostToolUse entry");
-    assert!(post[0]["hooks"][0]["command"]
-        .as_str()
-        .unwrap()
-        .contains("logos-wiki-augment.sh"));
+    assert!(
+        shared["hooks"]["PostToolUse"].is_null(),
+        "no PostToolUse entry is installed: {shared}"
+    );
     let shared_end = shared["hooks"]["SessionEnd"]
         .as_array()
         .expect("SessionEnd array");
@@ -1463,57 +1286,19 @@ fn wiki_hook_emit_installs_augment_and_quality_report() {
         .unwrap()
         .contains("logos-quality-report.sh"));
 
-    // Neither hook writes the per-developer settings.local.json — that file
-    // was the retired autogen hook's alone (FR-WK-16 retirement).
+    // No hook writes the per-developer settings.local.json — that file was
+    // the retired autogen hook's alone (FR-WK-16 retirement).
     assert!(
         !tmp.path().join(".claude/settings.local.json").exists(),
         "no hook merges into the per-developer settings.local.json"
     );
-
-    // Idempotent: an unforced re-emit skips both, byte-identical settings.
-    let before = fs::read(tmp.path().join(".claude/settings.json")).unwrap();
-    let again = logos(tmp.path(), &["--json", "wiki", "hook", "--emit"]);
-    assert_eq!(exit_code(&again), 0);
-    let summaries: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
-    assert!(summaries
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|s| s["action"] == "skipped"));
-    assert_eq!(
-        fs::read(tmp.path().join(".claude/settings.json")).unwrap(),
-        before,
-        "an unforced re-emit is byte-identical"
-    );
-
-    // --force re-emits both, no duplicate entries.
-    let forced = logos(tmp.path(), &["--json", "wiki", "hook", "--emit", "--force"]);
-    assert_eq!(exit_code(&forced), 0);
-    let summaries: serde_json::Value = serde_json::from_slice(&forced.stdout).unwrap();
-    assert!(summaries
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|s| s["action"] == "forced"));
-    let shared: serde_json::Value =
-        serde_json::from_slice(&fs::read(tmp.path().join(".claude/settings.json")).unwrap())
-            .unwrap();
-    assert_eq!(
-        shared["hooks"]["PostToolUse"].as_array().map(Vec::len),
-        Some(1),
-        "force never duplicates the augmentation PostToolUse entry"
-    );
-    assert_eq!(
-        shared["hooks"]["SessionEnd"].as_array().map(Vec::len),
-        Some(1),
-        "force never duplicates the shared quality-report SessionEnd entry"
-    );
 }
 
-/// [CR-047] retirement regression: no artifact `wiki hook --emit` (or `init -i`,
-/// covered separately in `logos-core/tests/init.rs`) materializes references a
-/// `claude -p` invocation or the retired autogen hook script, and no
-/// `.claude/settings.local.json` is ever written (FR-WK-16, NFR-SE-01).
+/// [CR-047]/[CR-070] retirement regression: no artifact `wiki hook --emit` (or
+/// `init -i`, covered separately in `logos-core/tests/init.rs`) materializes
+/// references a `claude -p` invocation or the retired autogen hook script, no
+/// augmentation script is written, and no `.claude/settings.local.json` is
+/// ever written (FR-WK-14, FR-WK-16, NFR-SE-01).
 #[test]
 fn no_autogen_hook_or_claude_p_reference_remains() {
     let tmp = TempDir::new().unwrap();
@@ -1524,17 +1309,16 @@ fn no_autogen_hook_or_claude_p_reference_remains() {
         "the retired autogen hook script is never materialized"
     );
     assert!(
+        !tmp.path().join(".claude/hooks/logos-wiki-augment.sh").exists(),
+        "the retired augmentation hook script is never materialized"
+    );
+    assert!(
         !tmp.path().join(".claude/settings.local.json").exists(),
         "no hook ever writes the per-developer settings.local.json"
     );
-    for hook_script in [
-        ".claude/hooks/logos-wiki-augment.sh",
-        ".claude/hooks/logos-quality-report.sh",
-    ] {
-        let body = fs::read_to_string(tmp.path().join(hook_script)).unwrap();
-        assert!(
-            !body.contains("claude -p") && !body.contains("logos-wiki-autogen"),
-            "{hook_script} carries no claude -p invocation and no autogen reference"
-        );
-    }
+    let body = fs::read_to_string(tmp.path().join(".claude/hooks/logos-quality-report.sh")).unwrap();
+    assert!(
+        !body.contains("claude -p") && !body.contains("logos-wiki-autogen"),
+        "the quality-report hook carries no claude -p invocation and no autogen reference"
+    );
 }

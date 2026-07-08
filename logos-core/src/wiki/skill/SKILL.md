@@ -24,15 +24,15 @@ the code moves.
 Everything below uses the `logos wiki` CLI. Five commands have a
 payload-identical MCP twin (`wiki_write`, `wiki_read`, `wiki_search`,
 `wiki_status`, `wiki_materialize`) — use whichever your host exposes, the
-contract is the same. The local-only commands (`wiki generate`, `wiki hook
---emit`, `wiki skill --emit`, `wiki delete`) are CLI-only.
+contract is the same. The local-only commands (`wiki generate`, `wiki skill
+--emit`, `wiki delete`) are CLI-only.
 
 `wiki materialize` (CR-062, [FR-WK-20]) is the binary's own deterministic
 writer for the presented tier (below) — it never involves you and you never
-need to run it: the augmentation hook and the UI-gated generation trigger both
-run it automatically, ahead of the queue, before you ever see one. It exists on
-both surfaces mainly so a host/CI can invoke it directly; running it yourself
-is harmless (idempotent, offline) but is not part of your normal loop.
+need to run it: the UI-gated generation trigger runs it automatically, ahead
+of the queue, before you ever see one. It exists so a host/CI can invoke it
+directly; running it yourself is harmless (idempotent, offline) but is not
+part of your normal loop.
 
 ## When to use this skill
 
@@ -416,36 +416,10 @@ exact command to store it. The loop becomes: `wiki generate` → for each item,
 read the graph → fill in the body → run the skeleton → repeat until the queue is
 empty.
 
-## Automated trigger: the Claude Code augmentation hook
-
-So the loop runs off the request path without you having to remember it, Logos
-can install a **Claude Code augmentation hook** that surfaces the queue to you
-automatically — while keeping the binary fully offline:
-
-```bash
-logos wiki hook --emit          # install (or no-op if already present)
-logos wiki hook --emit --force  # re-install after a binary upgrade
-```
-
-`logos init -i` installs it **default-on** alongside the embedded skill. It
-writes a marker-tagged PostToolUse hook script and merges a hook entry into
-`.claude/settings.json` **without clobbering** existing settings (a foreign
-config is never overwritten; a re-run is idempotent; `--force` re-emits). After
-an `index`/`sync`, the hook runs `logos wiki generate` and hands the resulting
-queue to *you* (the agent) as PostToolUse `additionalContext` — the prompt to
-work the loop arrives on its own. The hook is **non-blocking** (it always exits
-0) and emits nothing when the work-list is empty.
-
-The division of labour holds: the **binary** only emits a shell script and runs
-the offline `wiki generate` read — it makes no LLM call and opens no outbound
-connection. **You**, the connected agent, generate the prose. The trigger is
-automated; the generation is not.
-
 ## Offline guarantee
 
 Generating wiki content with this skill involves an LLM (you), running in the
 agent. The Logos binary itself stays fully local: `wiki
-write/read/search/status/generate` make **zero outbound connections**, and
-installing the augmentation hook (`wiki hook --emit`, `init -i`) is pure local
-filesystem I/O. Never add a step that fetches remote content into a page without
-the user's explicit instruction.
+write/read/search/status/generate` make **zero outbound connections**. Never
+add a step that fetches remote content into a page without the user's explicit
+instruction.

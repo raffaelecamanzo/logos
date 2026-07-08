@@ -21,7 +21,7 @@ fn interactive() -> InitOptions {
         write_claude_md: true,
         install_hooks: false,
         materialize_skill: true,
-        materialize_hook: true,
+        install_quality_report_hook: true,
     }
 }
 
@@ -606,167 +606,36 @@ fn wiki_skill_emit_honours_an_explicit_dir() {
     );
 }
 
-// ── FR-WK-14 / ADR-33: the Claude Code augmentation hook, materialized ──────
+// ── CR-070 / FR-WK-14 retirement: the PostToolUse augmentation hook is gone ──
 
-/// Read the `.claude/settings.json` PostToolUse array, asserting exactly one
-/// entry wires our augmentation-hook script.
-fn assert_one_managed_hook(root: &Path) {
-    let settings: serde_json::Value =
-        serde_json::from_str(&read(root, ".claude/settings.json")).expect("settings JSON");
-    let post = settings["hooks"]["PostToolUse"]
-        .as_array()
-        .expect("PostToolUse array");
-    let ours: Vec<_> = post
-        .iter()
-        .filter(|e| {
-            e["hooks"].as_array().is_some_and(|hs| {
-                hs.iter().any(|h| {
-                    h["command"]
-                        .as_str()
-                        .is_some_and(|c| c.contains("logos-wiki-augment.sh"))
-                })
-            })
-        })
-        .collect();
-    assert_eq!(ours.len(), 1, "exactly one managed hook entry: {settings}");
-}
-
-/// `init -i` installs the augmentation hook default-on: the marker-tagged script
-/// plus a PostToolUse entry in `.claude/settings.json` (FR-WK-14, ADR-33).
+/// [CR-070] regression: `init -i` installs no PostToolUse augmentation entry
+/// and writes no `logos-wiki-augment.sh` — only the embedded skill and the
+/// [FR-IN-07] SessionEnd quality-report hook install.
 #[test]
-fn init_i_installs_the_augmentation_hook() {
-    let tmp = TempDir::new().unwrap();
-    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
-
-    let script = tmp.path().join(".claude/hooks/logos-wiki-augment.sh");
-    assert!(script.exists(), "the hook script is written");
-    assert!(
-        read(tmp.path(), ".claude/hooks/logos-wiki-augment.sh")
-            .contains("logos:wiki-augment:managed"),
-        "the script carries its managed marker"
-    );
-    assert_one_managed_hook(tmp.path());
-
-    let s = step(&result, ".claude/settings.json");
-    assert_eq!(s.action, InitAction::Created);
-}
-
-/// A second `init -i` leaves an already-present hook entry unchanged
-/// (idempotent, non-clobbering — FR-WK-14); plain `init` never installs it.
-#[test]
-fn second_init_i_leaves_the_hook_unchanged() {
+fn init_i_installs_no_augmentation_hook() {
     let tmp = TempDir::new().unwrap();
     Engine::init_with(tmp.path(), &interactive()).unwrap();
-    let before = read(tmp.path(), ".claude/settings.json");
 
-    let again = Engine::init_with(tmp.path(), &interactive()).unwrap();
-    assert_eq!(
-        step(&again, ".claude/settings.json").action,
-        InitAction::Unchanged
-    );
-    assert_eq!(
-        read(tmp.path(), ".claude/settings.json"),
-        before,
-        "the settings file is byte-identical on a re-run"
-    );
-}
-
-/// Plain `init` (no `-i`) installs no hook — it rides the `-i` integration only.
-#[test]
-fn plain_init_does_not_install_the_hook() {
-    let tmp = TempDir::new().unwrap();
-    Engine::init(tmp.path()).unwrap();
-    assert!(
-        !tmp.path().join(".claude/settings.json").exists(),
-        "no settings merge without -i"
-    );
     assert!(
         !tmp.path().join(".claude/hooks/logos-wiki-augment.sh").exists(),
-        "no hook script without -i"
+        "the retired augmentation hook script is never materialized"
     );
-}
-
-/// `init -i` merges into an existing `.claude/settings.json`, preserving the
-/// user's own hooks and unrelated keys (non-clobbering — FR-WK-14).
-#[test]
-fn init_i_merges_into_an_existing_settings_file() {
-    let tmp = TempDir::new().unwrap();
-    let settings = tmp.path().join(".claude/settings.json");
-    fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    fs::write(
-        &settings,
-        r#"{"permissions":{"allow":["Bash"]},"hooks":{"PostToolUse":[{"matcher":"Write","hooks":[{"type":"command","command":"my-own.sh"}]}]}}"#,
-    )
-    .unwrap();
-
-    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
-    assert_eq!(
-        step(&result, ".claude/settings.json").action,
-        InitAction::Updated
+    let settings: serde_json::Value =
+        serde_json::from_str(&read(tmp.path(), ".claude/settings.json")).expect("settings JSON");
+    assert!(
+        settings["hooks"]["PostToolUse"].is_null(),
+        "no PostToolUse entry is installed: {settings}"
     );
-    let merged: serde_json::Value = serde_json::from_str(&read(tmp.path(), ".claude/settings.json"))
-        .expect("settings JSON");
-    let post = merged["hooks"]["PostToolUse"].as_array().unwrap();
-    assert_eq!(post.len(), 2, "the user's hook survives alongside ours");
-    assert!(post.iter().any(|e| e["matcher"] == "Write"));
-    assert_eq!(
-        merged["permissions"]["allow"][0], "Bash",
-        "unrelated keys are preserved verbatim"
-    );
-    assert_one_managed_hook(tmp.path());
-}
-
-/// A foreign (unparseable) `.claude/settings.json` is never overwritten — the
-/// step is `Skipped` with a reason and the file is left byte-identical
-/// (FR-WK-14 never-overwrite).
-#[test]
-fn init_i_never_overwrites_a_foreign_settings_file() {
-    let tmp = TempDir::new().unwrap();
-    let settings = tmp.path().join(".claude/settings.json");
-    fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    let foreign = "{ this is not valid json";
-    fs::write(&settings, foreign).unwrap();
-
-    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
-    let s = step(&result, ".claude/settings.json");
-    assert_eq!(s.action, InitAction::Skipped);
-    assert!(s.detail.contains("not valid JSON"), "names the reason");
-    assert_eq!(
-        read(tmp.path(), ".claude/settings.json"),
-        foreign,
-        "the foreign file is untouched"
-    );
-}
-
-/// `Engine::wiki_hook_emit` is the standalone refresh path behind
-/// `logos wiki hook --emit [--force]`: unforced skips an existing managed entry;
-/// `--force` re-emits without duplicating it (FR-WK-14).
-#[test]
-fn wiki_hook_emit_skip_and_force_round_trip() {
-    let tmp = TempDir::new().unwrap();
-    let engine = Engine::open(tmp.path());
-
-    let created = engine.wiki_hook_emit(false).unwrap();
-    assert_eq!(created.action, logos_core::wiki::EmitAction::Created);
-
-    let skipped = engine.wiki_hook_emit(false).unwrap();
-    assert_eq!(skipped.action, logos_core::wiki::EmitAction::Skipped);
-    assert!(skipped.notice.is_none(), "an idempotent skip carries no notice");
-
-    let forced = engine.wiki_hook_emit(true).unwrap();
-    assert_eq!(forced.action, logos_core::wiki::EmitAction::Forced);
-    assert_one_managed_hook(tmp.path());
 }
 
 /// [CR-047] / [FR-WK-16] retirement regression: `init -i` never writes the
 /// per-developer `.claude/settings.local.json` (the file the retired SessionEnd
 /// autogen hook alone used to merge into) and no artifact anywhere under the
-/// project references a `claude -p` invocation or the retired autogen script —
-/// while the retained PostToolUse augmentation hook still installs.
+/// project references a `claude -p` invocation or the retired autogen script.
 #[test]
 fn init_i_installs_no_autogen_hook_and_no_claude_p_reference_remains() {
     let tmp = TempDir::new().unwrap();
-    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
+    Engine::init_with(tmp.path(), &interactive()).unwrap();
 
     assert!(
         !tmp.path().join(".claude/settings.local.json").exists(),
@@ -782,11 +651,6 @@ fn init_i_installs_no_autogen_hook_and_no_claude_p_reference_remains() {
         !settings.contains("claude -p") && !settings.contains("logos-wiki-autogen"),
         "no claude -p invocation and no autogen reference remain: {settings}"
     );
-
-    // The retained PostToolUse augmentation hook still installs alongside it.
-    let s = step(&result, ".claude/settings.json");
-    assert_eq!(s.action, InitAction::Created);
-    assert_one_managed_hook(tmp.path());
 }
 
 // ── FR-IN-07 / FR-GV-05 / FR-GV-09 / ADR-49: the SessionEnd quality-report hook ──
@@ -815,9 +679,8 @@ fn assert_one_managed_quality_report_hook(root: &Path) {
 }
 
 /// `init -i` installs the SessionEnd quality-report hook default-on: the
-/// marker-tagged script plus a SessionEnd entry in the **shared**
-/// `.claude/settings.json`, coexisting with the augmentation hook's PostToolUse
-/// entry in that same file (FR-IN-07, ADR-49).
+/// marker-tagged script plus a SessionEnd entry in `.claude/settings.json`
+/// (FR-IN-07, ADR-49).
 #[test]
 fn init_i_installs_the_quality_report_hook() {
     let tmp = TempDir::new().unwrap();
@@ -840,8 +703,6 @@ fn init_i_installs_the_quality_report_hook() {
     assert!(body.contains("logos scan --json") && body.contains("logos check"));
 
     assert_one_managed_quality_report_hook(tmp.path());
-    // It shares settings.json with the augmentation hook — both survive.
-    assert_one_managed_hook(tmp.path());
 }
 
 /// Two-run idempotency: a second `init -i` leaves the already-present
@@ -875,8 +736,7 @@ fn plain_init_does_not_install_the_quality_report_hook() {
 
 /// Foreign-settings preservation: `init -i` merges the quality-report SessionEnd
 /// entry into an existing `.claude/settings.json` while preserving a foreign
-/// SessionEnd entry and unrelated keys, and coexisting with the augmentation
-/// hook's PostToolUse entry (FR-IN-07 non-clobbering).
+/// SessionEnd entry and unrelated keys (FR-IN-07 non-clobbering).
 #[test]
 fn init_i_quality_report_preserves_foreign_settings_entries() {
     let tmp = TempDir::new().unwrap();
@@ -901,8 +761,6 @@ fn init_i_quality_report_preserves_foreign_settings_entries() {
         merged["permissions"]["allow"][0], "Bash",
         "unrelated keys are preserved verbatim"
     );
-    // The augmentation hook's PostToolUse entry was merged into the same file.
-    assert_one_managed_hook(tmp.path());
     assert_one_managed_quality_report_hook(tmp.path());
 }
 

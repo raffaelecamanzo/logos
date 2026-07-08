@@ -388,8 +388,8 @@ pub(crate) enum WikiCommands {
     /// into `wiki.db` with `generator = "logos:doc-present"`, then run the
     /// reconciliation sweep. A pure deterministic write — no LLM, no network
     /// (NFR-SE-01); byte-identical on re-run. Outside SRS mode (Case 2) this is
-    /// a no-op. Run automatically by the augmentation hook and the UI-gated
-    /// generation flow ahead of the LLM queue (FR-WK-18); safe to run manually.
+    /// a no-op. Run automatically by the UI-gated generation flow ahead of the
+    /// LLM queue (FR-WK-18); safe to run manually.
     Materialize,
     /// Explicitly delete a page by slug (FR-WK-07); an unknown slug exits non-zero.
     Delete {
@@ -410,20 +410,18 @@ pub(crate) enum WikiCommands {
         #[arg(long)]
         force: bool,
     },
-    /// Install the Claude Code hooks (FR-WK-14, FR-IN-07, ADR-33, ADR-49): the
-    /// marker-tagged PostToolUse augmentation hook (shared
-    /// `.claude/settings.json`) that surfaces the `wiki generate` queue to the
-    /// agent after index/sync, AND the SessionEnd quality-report hook (shared
-    /// `.claude/settings.json`) that prints a non-blocking
-    /// signal/baseline/violations readout at session end. Both merges are
-    /// non-clobbering; the binary stays offline (NFR-SE-01). Re-emit both
-    /// with `--force`. CLI-only.
+    /// Install the Claude Code SessionEnd quality-report hook (FR-IN-07,
+    /// ADR-49): a marker-tagged hook script plus a non-clobbering merge into
+    /// the shared `.claude/settings.json` that prints a non-blocking
+    /// signal/baseline/violations readout at session end. The binary stays
+    /// offline (NFR-SE-01). Re-emit with `--force`. CLI-only. (The PostToolUse
+    /// wiki-augmentation hook this once also installed was retired — CR-070.)
     Hook {
         /// Emit the hook (the only `hook` operation; required so the verb reads
         /// `wiki hook --emit`).
         #[arg(long, required = true)]
         emit: bool,
-        /// Re-emit, replacing an existing managed PostToolUse entry.
+        /// Re-emit, replacing an existing managed SessionEnd entry.
         #[arg(long)]
         force: bool,
     },
@@ -501,25 +499,21 @@ pub(crate) fn engine(root: &Path, bootstrap: bool) -> Result<Engine> {
     Engine::start(root)
 }
 
-/// Resolve which init steps run (S-023, FR-IN-02/03, FR-WK-08, FR-WK-14,
-/// FR-IN-07) — pure surface UX, the step logic itself lives in the core. `-i`
-/// enables the host-integration steps, prompting per step on a TTY; non-TTY
-/// takes the safe defaults (MCP + CLAUDE.md + the wiki skill + both
-/// Claude Code hooks — augment and quality-report — yes, that's
-/// what `-i` asks for — git hooks no: they rewire core.hooksPath, so they
-/// stay opt-in via --hooks).
+/// Resolve which init steps run (S-023, FR-IN-02/03, FR-WK-08, FR-IN-07) —
+/// pure surface UX, the step logic itself lives in the core. `-i` enables the
+/// host-integration steps, prompting per step on a TTY; non-TTY takes the safe
+/// defaults (MCP + CLAUDE.md + the wiki skill + the SessionEnd quality-report
+/// hook — yes, that's what `-i` asks for — git hooks no: they rewire
+/// core.hooksPath, so they stay opt-in via --hooks). The PostToolUse
+/// wiki-augmentation hook `-i` once also installed here was retired (CR-070).
 pub(crate) fn init_options(interactive: bool, hooks: bool) -> InitOptions {
     InitOptions {
         inject_mcp: interactive && ask("inject the logos MCP server block into .mcp.json?", true),
         write_claude_md: interactive && ask("generate the managed CLAUDE.md block?", true),
         install_hooks: hooks || (interactive && ask("install git hooks (core.hooksPath)?", false)),
         materialize_skill: interactive && ask("materialize the logos-wiki generation skill?", true),
-        materialize_hook: interactive
-            && ask(
-                "install the Claude Code hooks (PostToolUse augment \
-                 + SessionEnd quality-report)?",
-                true,
-            ),
+        install_quality_report_hook: interactive
+            && ask("install the Claude Code SessionEnd quality-report hook?", true),
     }
 }
 

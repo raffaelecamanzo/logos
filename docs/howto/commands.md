@@ -43,7 +43,7 @@ flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`wiki materialize`](#wiki-materialize) | ✅ | Deterministically present the authored `docs/specs/**` + `docs/howto/**` as wiki pages (SRS mode); no LLM/network |
 | [`wiki delete`](#wiki-delete) | ✅ | Explicitly delete a page by slug (CLI-only) |
 | [`wiki skill --emit`](#wiki-skill---emit-dir---force) | ✅ | Materialize the embedded wiki-generation skill (CLI-only) |
-| [`wiki hook --emit`](#wiki-hook---emit---force) | ✅ | Install the Claude Code augmentation hook that drives generation off-request (CLI-only) |
+| [`wiki hook --emit`](#wiki-hook---emit---force) | ✅ | Install the Claude Code SessionEnd quality-report hook (CLI-only) |
 
 ---
 
@@ -69,16 +69,13 @@ bootstrap that `logos index` performs.
 (`config.toml`, `rules.toml`), a managed `.logos/.gitignore` block, a
 `logos` entry in the project's `.mcp.json`, a managed usage block in
 `CLAUDE.md`, the embedded `logos-wiki` generation skill, and — default-on —
-**two Claude Code hooks**, both merged into the shared
-`.claude/settings.json`: the marker-tagged **PostToolUse augmentation**
-hook that surfaces the `wiki generate` queue to the agent after an
-index/sync, and the **SessionEnd quality-report** hook
-([FR-IN-07](../specs/requirements/FR-IN-07.md)) that prints a
-signal/baseline/violations readout at session end. Both merges are
-non-clobbering and the binary stays offline (no LLM call, no outbound
-connection). Each step reports its action (`Created` / `Updated` /
-`Unchanged` / `Skipped`). On non-TTY (CI, piped input): safe defaults, no
-prompts.
+the **SessionEnd quality-report** hook
+([FR-IN-07](../specs/requirements/FR-IN-07.md)), merged into the shared
+`.claude/settings.json`, which prints a signal/baseline/violations readout at
+session end. The merge is non-clobbering and the binary stays offline (no LLM
+call, no outbound connection). Each step reports its action (`Created` /
+`Updated` / `Unchanged` / `Skipped`). On non-TTY (CI, piped input): safe
+defaults, no prompts.
 Wiki prose generation itself now runs in-process (`ui` builds only) when the
 Wiki tab is opened — there is no more headless `claude -p` autogen hook.
 Non-`ui` builds regenerate manually via the materialized `logos-wiki` skill
@@ -712,10 +709,9 @@ outlives every entity it documents.
 
 Generation runs **off the request path**: an external generator works the
 `wiki status` work-list, and `wiki generate` formats that work-list into a
-ready-to-run queue (a prompt block, or `--json`). The Claude Code augmentation
-hook (`wiki hook --emit`, installed default-on by `init -i`) automates the
-trigger — it runs `wiki generate` after an `index`/`sync` and surfaces the queue
-to the connected agent — while the binary itself stays offline.
+ready-to-run queue (a prompt block, or `--json`) — a pure, offline read that the
+connected agent's own skill loop or the `ui`-gated in-process generator
+consumes; the binary itself stays offline.
 
 `write`/`read`/`search`/`status`/`materialize` have **payload-identical MCP twins**
 (`wiki_write`/`wiki_read`/`wiki_search`/`wiki_status`/`wiki_materialize`) for
@@ -866,9 +862,9 @@ any stored page outside the active-mode valid set.
 
 A **pure deterministic write** — no LLM, no network (NFR-SE-01) — and
 byte-identical on re-run. Outside SRS mode (Case 2) it is a no-op. It runs
-automatically ahead of the LLM queue in the augmentation hook and the UI-gated
-generation flow (FR-WK-18); running it manually is safe. Has a payload-identical
-MCP twin, `wiki_materialize`.
+automatically ahead of the LLM queue in the UI-gated generation flow
+(FR-WK-18); running it manually is safe. Has a payload-identical MCP twin,
+`wiki_materialize`.
 
 ### `wiki delete`
 
@@ -897,29 +893,24 @@ install is left untouched (local edits survive). CLI-only.
 ### `wiki hook --emit [--force]`
 
 ```bash
-logos wiki hook --emit          # install the Claude Code wiki hooks (no-op if present)
-logos wiki hook --emit --force  # re-emit, replacing the managed entries
+logos wiki hook --emit          # install the Claude Code quality-report hook (no-op if present)
+logos wiki hook --emit --force  # re-emit, replacing the managed entry
 ```
 
-Installs **both Claude Code hooks**, both merged into the shared
-`.claude/settings.json`:
+Installs the **SessionEnd quality-report** hook
+([FR-IN-07](../specs/requirements/FR-IN-07.md)), merged into the shared
+`.claude/settings.json` — at session end it prints the current signal, the
+blessed baseline, and any rule violations as a non-blocking readout; always
+exits 0. Set `LOGOS_QUALITY_REPORT_DISABLE=1` in the environment to silence
+the readout without uninstalling the hook.
 
-- the marker-tagged **PostToolUse augmentation** hook — after an
-  `index`/`sync` it runs `logos wiki generate` and surfaces the queue to the
-  connected agent as PostToolUse `additionalContext`; non-blocking (always
-  exits 0), emits nothing on an empty work-list;
-- the **SessionEnd quality-report** hook
-  ([FR-IN-07](../specs/requirements/FR-IN-07.md)) — at session end it prints
-  the current signal, the blessed baseline, and any rule violations as a
-  non-blocking readout; always exits 0. Set `LOGOS_QUALITY_REPORT_DISABLE=1`
-  in the environment to silence the readout without uninstalling the hook.
-
-Both merges are **non-clobbering**: an existing managed entry is left
-unchanged, a foreign/unparseable config is never overwritten, and the merge is
-idempotent (`--force` re-emits both). `logos init -i` installs both
-**default-on** alongside the embedded skill. Installing or running the hooks
-performs no LLM call and opens no outbound connection inside the binary — the
-offline boundary holds. CLI-only.
+The merge is **non-clobbering**: an existing managed entry is left unchanged,
+a foreign/unparseable config is never overwritten, and the merge is idempotent
+(`--force` re-emits it). `logos init -i` installs it **default-on** alongside
+the embedded skill. Installing or running the hook performs no LLM call and
+opens no outbound connection inside the binary — the offline boundary holds.
+CLI-only. (The PostToolUse wiki-augmentation hook this command once also
+installed was retired — [CR-070](../requests/CR-070-retire-wiki-augment-hook.md).)
 
 There is no headless SessionEnd wiki-autogen hook and no `claude -p`
 invocation anymore ([CR-047](../requests/CR-047-internal-wiki-generation-on-agent-substrate.md)):

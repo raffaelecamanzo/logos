@@ -753,8 +753,10 @@ focusing, and filtering mutate no store and contact no external origin:
   pages stay browsable — gated by a first-use consent disclosure and a dedicated
   `[wiki].model` ([CR-047](../requests/CR-047-internal-wiki-generation-on-agent-substrate.md);
   see [The Wiki tab](#the-wiki-tab) below). The headless `claude -p` SessionEnd
-  autogen hook is retired; the Claude Code augmentation hook remains as an
-  optional manual aid, and `wiki generate` is still available as the CLI queue read.
+  autogen hook is retired, as is the PostToolUse wiki-augmentation hook
+  ([CR-070](../requests/CR-070-retire-wiki-augment-hook.md)); `wiki generate`
+  is still available as the CLI queue read, and the embedded `logos-wiki`
+  skill is the manual generation path outside `ui` builds.
 
 Run it alongside the MCP server in one process with `logos serve --mcp --ui`.
 

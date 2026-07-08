@@ -77,11 +77,8 @@ pub use native::{
     native_label, render as render_native, FileEntry, FileSymbol, NativeWiki, StructureKind,
     StructureNode,
 };
-pub use hook::{
-    materialize as materialize_hook, materialize_quality_report as materialize_quality_report_hook,
-    HookEmitSummary,
-};
-pub use hook::{HOOK_SCRIPT_REL, QUALITY_REPORT_HOOK_SCRIPT_REL, SETTINGS_REL};
+pub use hook::{materialize_quality_report as materialize_quality_report_hook, HookEmitSummary};
+pub use hook::{QUALITY_REPORT_HOOK_SCRIPT_REL, SETTINGS_REL};
 pub use skill::{
     materialize as materialize_skill, rendered_skill, EmitAction, EmitSummary, LinkKind,
 };

@@ -62,10 +62,12 @@ pub struct InitOptions {
     /// (`.agents/skills/logos-wiki/` + `.claude/skills/logos-wiki`),
     /// skip-if-present (FR-IN-02 as modified by CR-008, FR-WK-08).
     pub materialize_skill: bool,
-    /// Install the Claude Code augmentation hook (FR-WK-14, ADR-33): the
-    /// marker-tagged PostToolUse hook script + a non-clobbering merge into
+    /// Install the Claude Code SessionEnd quality-report hook (FR-IN-07,
+    /// ADR-49): a marker-tagged hook script + a non-clobbering merge into
     /// `.claude/settings.json`, default-on under `-i` alongside the skill.
-    pub materialize_hook: bool,
+    /// (The PostToolUse wiki-augmentation hook this once also installed
+    /// alongside was retired — CR-070.)
+    pub install_quality_report_hook: bool,
 }
 
 // ── Generated content ──────────────────────────────────────────────────────
@@ -307,57 +309,19 @@ pub(crate) fn run(root: &Path, options: &InitOptions) -> Result<Vec<InitStep>> {
     if options.materialize_skill {
         steps.push(materialize_skill(root)?);
     }
-    if options.materialize_hook {
-        steps.push(materialize_hook(root)?);
+    if options.install_quality_report_hook {
         steps.push(materialize_quality_report_hook(root)?);
     }
     Ok(steps)
 }
 
-/// Install the Claude Code augmentation hook (FR-WK-14, [ADR-33]), default-on
-/// under `-i` alongside the skill. Delegates to the [`crate::wiki`] engine — the
-/// sole owner of the hook artifacts — and maps the
-/// [`crate::wiki::HookEmitSummary`] onto an [`InitStep`]. Non-clobbering: an
-/// already-present managed entry is `Unchanged`; a foreign `.claude/settings.json`
-/// is `Skipped` with the reason, never overwritten.
-///
-/// [ADR-33]: ../../../docs/specs/architecture/decisions/ADR-33.md
-fn materialize_hook(root: &Path) -> Result<InitStep> {
-    use crate::wiki::EmitAction;
-    // Merging into a pre-existing settings file is an Updated, not a Created —
-    // the same convention as the `.mcp.json` injection above.
-    let settings_existed = root.join(crate::wiki::SETTINGS_REL).exists();
-    // `init -i` never clobbers: unforced, so an existing managed entry skips.
-    let summary = crate::wiki::materialize_hook(root, false)?;
-    let (action, detail) = match (summary.action, &summary.notice) {
-        (EmitAction::Created, _) => (
-            if settings_existed {
-                InitAction::Updated
-            } else {
-                InitAction::Created
-            },
-            format!("PostToolUse augmentation hook → {}", summary.script),
-        ),
-        (EmitAction::Forced, _) => (InitAction::Updated, "augmentation hook re-emitted".to_string()),
-        (EmitAction::Skipped, Some(reason)) => (InitAction::Skipped, reason.clone()),
-        (EmitAction::Skipped, None) => (
-            InitAction::Unchanged,
-            "already present — never overwritten; `logos wiki hook --emit --force` refreshes"
-                .to_string(),
-        ),
-    };
-    Ok(step(&summary.settings, action, detail))
-}
-
 /// Materialize the Claude Code SessionEnd quality-report hook ([FR-IN-07],
 /// [FR-GV-05], [FR-GV-09], [ADR-49], [CR-055]), default-on under `-i` alongside
-/// the wiki hooks. Delegates to the [`crate::wiki`] engine — the sole owner of
-/// the hook artifacts — and maps the [`crate::wiki::HookEmitSummary`] onto an
-/// [`InitStep`] targeting the **shared** `.claude/settings.json` (the same file
-/// the augmentation hook wires its PostToolUse entry into; the merge touches only
-/// `hooks.SessionEnd`, so the two coexist). Non-clobbering: an already-present
-/// managed entry is `Unchanged`; a foreign settings file is `Skipped` with the
-/// reason, never overwritten.
+/// the embedded skill. Delegates to the [`crate::wiki`] engine — the sole owner
+/// of the hook artifacts — and maps the [`crate::wiki::HookEmitSummary`] onto an
+/// [`InitStep`] targeting `.claude/settings.json`. Non-clobbering: an
+/// already-present managed entry is `Unchanged`; a foreign settings file is
+/// `Skipped` with the reason, never overwritten.
 ///
 /// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
 /// [FR-GV-05]: ../../../docs/specs/requirements/FR-GV-05.md
@@ -366,9 +330,7 @@ fn materialize_hook(root: &Path) -> Result<InitStep> {
 fn materialize_quality_report_hook(root: &Path) -> Result<InitStep> {
     use crate::wiki::EmitAction;
     // Merging into a pre-existing settings file is an Updated, not a Created —
-    // the same convention as the augmentation hook above. By install order the
-    // augmentation hook has already created settings.json, so this is normally an
-    // Updated (it adds the SessionEnd array beside PostToolUse).
+    // the same convention as the `.mcp.json` injection above.
     let settings_existed = root.join(crate::wiki::SETTINGS_REL).exists();
     // `init -i` never clobbers: unforced, so an existing managed entry skips.
     let summary = crate::wiki::materialize_quality_report_hook(root, false)?;

@@ -188,16 +188,12 @@ fn wiki(command: WikiCommands, root: &Path, out: &Output) -> Result<i32> {
             out.print(&Engine::open(root).wiki_skill_emit(dir.as_deref(), force)?)?;
             Ok(0)
         }
-        // Emits BOTH Claude Code hooks (PostToolUse augment + SessionEnd quality
-        // report) into the shared .claude/settings.json, as a two-element array so
-        // each carries its own action.
+        // Emits the SessionEnd quality-report hook into the shared
+        // .claude/settings.json (CR-070: the PostToolUse augment hook this
+        // once also emitted is retired).
         WikiCommands::Hook { emit: _, force } => {
             let engine = Engine::open(root);
-            let summaries = [
-                engine.wiki_hook_emit(force)?,
-                engine.wiki_quality_report_hook_emit(force)?,
-            ];
-            out.print(&summaries)?;
+            out.print(&engine.wiki_quality_report_hook_emit(force)?)?;
             Ok(0)
         }
     }
