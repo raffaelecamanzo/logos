@@ -294,6 +294,10 @@ describe("ConfigView default / recommended-baseline affordance (CR-067, FR-UI-12
     expect(fieldHintText("max_fan_out")).toContain("Default: unset → not enforced · Recommended: 30");
     expect(fieldHintText("max_cc")).toContain("Recommended: 15");
     expect(fieldHintText("no_god_containers")).toContain("Recommended: true");
+    // max_dead is the one constraint backed by the untagged MaxDead enum
+    // (Absolute(u32) | Baseline{baseline,delta}) — its recommended baseline
+    // (Absolute(0)) must still render as a plain number, not "[object Object]".
+    expect(fieldHintText("max_dead")).toContain("Recommended: 0");
   });
 
   it("never fabricates a default when the field has none in the projection", async () => {
