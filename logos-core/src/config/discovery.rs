@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use globset::GlobSet;
-use ignore::{WalkBuilder, WalkState};
+use ignore::{DirEntry, WalkBuilder, WalkState};
 
 use super::error::ConfigError;
 use super::globs::{self, DocGlobs};
@@ -166,28 +166,7 @@ pub(crate) fn discover_with_threads(
         .parents(false) // don't read ignore files above the root (containment).
         .follow_links(false) // never leave the tree via a symlink (NFR-SE-04).
         .threads(threads) // 0 = auto-size to cores (NFR-PE-08); tests pin a count.
-        .filter_entry(move |entry| {
-            // Directory pruning — never the root itself (depth 0), so a project dir
-            // named e.g. "build", or the root's own `.git`, still walks.
-            if entry.depth() > 0 && entry.file_type().is_some_and(|ft| ft.is_dir()) {
-                // Prune any nested git boundary — a linked worktree (`.git` gitlink
-                // file), a vendored repository (`.git` directory), or a submodule.
-                // Logos indexes the one root project; a nested git tree is a
-                // separate working tree the root `.gitignore` cannot reliably mask
-                // (the `ignore` crate treats it as its own repo boundary and applies
-                // *its* ignore rules), so folding it in double-counts symbols. This
-                // is what let a `.worktrees/<sprint>/…` checkout be indexed despite
-                // `.worktrees/` being gitignored.
-                if entry.path().join(".git").exists() {
-                    return false;
-                }
-                // Prune directories whose name is in `ignored_dirs`.
-                if let Some(name) = entry.file_name().to_str() {
-                    return !walk_ignored_dirs.contains(name);
-                }
-            }
-            true
-        })
+        .filter_entry(move |entry| keep_dir(entry, &walk_ignored_dirs))
         .build_parallel();
 
     // Each walker thread owns a cloned `Sender`; admitted entries and oversize
@@ -448,19 +427,7 @@ fn discover_followed_symlink(
         .hidden(false)
         .parents(false) // don't read ignore files above the sanctioned target.
         .follow_links(false) // never chain out of the sanctioned tree via a nested symlink.
-        .filter_entry(move |entry| {
-            // Identical directory pruning to the main pass: nested `.git`
-            // boundaries and `ignored_dirs` names, never the sub-walk root itself.
-            if entry.depth() > 0 && entry.file_type().is_some_and(|ft| ft.is_dir()) {
-                if entry.path().join(".git").exists() {
-                    return false;
-                }
-                if let Some(name) = entry.file_name().to_str() {
-                    return !pruned.contains(name);
-                }
-            }
-            true
-        })
+        .filter_entry(move |entry| keep_dir(entry, &pruned)) // same pruning as the main pass.
         .build();
 
     for result in walker {
@@ -510,6 +477,35 @@ fn discover_followed_symlink(
     }
 
     (files, oversize)
+}
+
+/// Whether the walker should descend into (keep) `entry` — the two directory-
+/// pruning rules shared by the main pass and the sanctioned-symlink sub-walk.
+///
+/// Never prunes the walk root (depth 0), so a project dir named e.g. `build`, or
+/// the root's own `.git`, still walks. Otherwise prunes:
+/// - a **nested git boundary** — a linked worktree (`.git` gitlink file), a
+///   vendored repository (`.git` directory), or a submodule. Logos indexes the
+///   one root project; a nested git tree is a separate working tree the root
+///   `.gitignore` cannot reliably mask (the `ignore` crate treats it as its own
+///   repo boundary and applies *its* ignore rules), so folding it in
+///   double-counts symbols — this is what let a `.worktrees/<sprint>/…` checkout
+///   be indexed despite `.worktrees/` being gitignored;
+/// - any directory whose name is in `ignored_dirs`.
+///
+/// Factored out of both `filter_entry` closures so the two passes' pruning is
+/// provably identical rather than a comment asserting it ([NFR-SE-04] nested-
+/// boundary containment).
+fn keep_dir(entry: &DirEntry, ignored_dirs: &HashSet<String>) -> bool {
+    if entry.depth() > 0 && entry.file_type().is_some_and(|ft| ft.is_dir()) {
+        if entry.path().join(".git").exists() {
+            return false;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            return !ignored_dirs.contains(name);
+        }
+    }
+    true
 }
 
 /// A path's components joined with `/` — the root-relative, forward-slashed form
