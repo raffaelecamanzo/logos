@@ -1471,3 +1471,22 @@ fn receiver_method_call_still_binds_a_method() {
     let r = method_call(100, LIB_RS, 6, "only_m");
     bound_to(bind_cluster(&r, BindingPolicy::Strict), 6, 10, EdgeKind::Calls);
 }
+
+#[test]
+fn receiver_method_call_does_not_apply_the_free_function_tiebreak() {
+    // The load-bearing guard for the `bare_path_call` flag (vs keying the
+    // tie-break on `want`): a receiver-unqualified method call (`x.ins()`,
+    // RefForm::Method) to a name that has BOTH a free `Function` and a same-named
+    // `Method` must stay ambiguous/unresolved — the free-function tie-break must
+    // NOT fire here (the receiver type is unknown; CR-066 discipline). Contrast
+    // `bare_call_binds_the_free_function_over_a_same_named_method`, which binds the
+    // *same* name to the free fn (node 2) through the bare-path branch. If the
+    // exclusion were keyed on `want == Want::Callable` instead of the flag, this
+    // would wrongly bind and the test would fail.
+    let r = method_call(100, LIB_RS, 6, "ins");
+    assert_eq!(
+        bind_cluster(&r, BindingPolicy::Strict),
+        Outcome::Unbound,
+        "a receiver call with a free-fn + method of the same name must stay ambiguous"
+    );
+}
