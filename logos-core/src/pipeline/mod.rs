@@ -1147,6 +1147,13 @@ fn discover_candidates(
     for notice in report.notices() {
         warnings.push(notice);
     }
+    // Surface any documentation directory-symlink that exists under the doc-
+    // include set but ended up unindexed ([FR-IX-11]) — a git-ignored symlink with
+    // no sanctioned bypass, or one whose target escapes containment — so the
+    // silent doc-drop [CR-071] closes becomes a loud `index`/`sync` warning.
+    for drop in &report.unindexed_doc_symlinks {
+        warnings.push(drop.to_string());
+    }
     // `discover` walks the canonicalised root and yields paths beneath it.
     let canon_root = root
         .canonicalize()

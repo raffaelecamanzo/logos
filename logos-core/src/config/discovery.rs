@@ -77,6 +77,59 @@ impl fmt::Display for OversizeSkip {
     }
 }
 
+/// Why a documentation directory-symlink that exists under the documentation-
+/// include set ended up **unindexed** ([FR-IX-11]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocSymlinkDrop {
+    /// No sanctioned docs root is resolved (`.swe-skills` absent, empty, or
+    /// misconfigured) and the symlink's canonical target escapes the project
+    /// root — so the [FR-IX-10] follow-branch refuses it.
+    NoSanctionedRoot,
+    /// A sanctioned root *is* resolved, but the symlink's canonical target
+    /// escapes **both** the project root and that sanctioned root — the
+    /// no-arbitrary-escape invariant ([NFR-SE-04]) refuses it.
+    EscapesContainment,
+}
+
+impl DocSymlinkDrop {
+    /// The human-readable reason phrase ([FR-IX-11]: name the path *and* reason).
+    fn reason(self) -> &'static str {
+        match self {
+            DocSymlinkDrop::NoSanctionedRoot => {
+                "its canonical target escapes the project root and no sanctioned \
+                 `.swe-skills` docs root is resolved"
+            }
+            DocSymlinkDrop::EscapesContainment => {
+                "its canonical target escapes both the project root and the \
+                 sanctioned `.swe-skills` docs root"
+            }
+        }
+    }
+}
+
+/// A documentation **directory-symlink** that exists under the documentation-
+/// include set but ended up unindexed ([FR-IX-11]): the dropped in-tree path and
+/// the reason. Surfaced as an `index`/`doctor` warning so a silent doc-drop —
+/// the failure mode [CR-071] closes — becomes a visible, actionable signal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnindexedDocSymlink {
+    /// The symlink's project-root-relative in-tree path (e.g. `docs/specs`).
+    pub link: PathBuf,
+    /// Why it was not followed and therefore not indexed.
+    pub reason: DocSymlinkDrop,
+}
+
+impl fmt::Display for UnindexedDocSymlink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "documentation directory-symlink {} exists but is unindexed: {}",
+            to_forward_slash(&self.link),
+            self.reason.reason()
+        )
+    }
+}
+
 /// The result of a discovery walk.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiscoveryReport {
@@ -84,6 +137,11 @@ pub struct DiscoveryReport {
     pub files: Vec<PathBuf>,
     /// Files skipped for exceeding `max_file_size`, sorted by path ([FR-CF-04]).
     pub skipped_oversize: Vec<OversizeSkip>,
+    /// Documentation directory-symlinks that exist under the documentation-
+    /// include set but ended up unindexed, sorted by path ([FR-IX-11]). Empty
+    /// when documentation is disabled, when no doc symlink exists, or when every
+    /// doc symlink was followed and indexed.
+    pub unindexed_doc_symlinks: Vec<UnindexedDocSymlink>,
 }
 
 impl DiscoveryReport {
@@ -271,6 +329,28 @@ pub(crate) fn discover_with_threads(
         }
     }
 
+    // Git-ignore-bypassing detection pass ([FR-IX-10] amended by [CR-071],
+    // [FR-IX-11]). The main walk above runs `git_ignore(true)`/`git_exclude(true)`,
+    // so a git-ignored documentation directory-symlink (this repo's own layout:
+    // `.gitignore` lists `/docs/specs`, `/docs/planning`, `/docs/requests`) is
+    // pruned by the `ignore` crate *before* the visitor's `Found::FollowDir`
+    // branch can see it — making the follow inert on git-ignoring checkouts. This
+    // pass re-enumerates directory-symlinks under the documentation prefixes with
+    // git-ignore/exclude disabled — scoped **only** to that doc subtree, never a
+    // global relaxation of the main walk — and feeds contained targets into the
+    // same one-hop sub-walk. A doc-scoped symlink whose target escapes both roots
+    // (or resolves no sanctioned root) is recorded as an unindexed drop for the
+    // `index`/`doctor` warning ([FR-IX-11]) instead. Documentation off ⇒ no doc-
+    // include set ⇒ this whole pass is skipped.
+    let mut unindexed_doc_symlinks = Vec::new();
+    if follow_enabled {
+        let doc_prefixes = doc_dir_prefixes(&config.documentation.include);
+        let (extra_follow, dropped) =
+            classify_doc_dir_symlinks(root_ref, &doc_prefixes, &ignored_dirs, sanctioned_ref);
+        follow_dirs.extend(extra_follow);
+        unindexed_doc_symlinks = dropped;
+    }
+
     // Follow each sanctioned directory symlink exactly once ([FR-IX-10]). Sort +
     // dedup makes the follow set order-independent (the parallel visitor observes
     // symlinks in an arbitrary order); each sub-walk is serial and its output is
@@ -319,13 +399,17 @@ pub(crate) fn discover_with_threads(
     }
 
     // Deterministic ordering — the parallel walk order is not stable, so the sort
-    // is what makes the report thread-count-independent (NFR-RA-06).
+    // is what makes the report thread-count-independent (NFR-RA-06). The detection
+    // pass is serial, but sort its output too so the report is stable regardless
+    // of directory-read order.
     files.sort();
     skipped_oversize.sort_by(|a, b| a.path.cmp(&b.path));
+    unindexed_doc_symlinks.sort_by(|a, b| a.link.cmp(&b.link));
 
     Ok(DiscoveryReport {
         files,
         skipped_oversize,
+        unindexed_doc_symlinks,
     })
 }
 
@@ -352,7 +436,11 @@ enum Found {
 /// target that does not exist so canonicalisation fails) yields `None`:
 /// discovery then follows no symlink out of the project root, i.e. today's
 /// skip-all posture ("fail closed", matching swe-skills' own resolver).
-fn resolve_sanctioned_docs_root(root: &Path) -> Option<PathBuf> {
+///
+/// Shared with [`AdmissionAuthority`](super::admission::AdmissionAuthority) so
+/// the walk-parity predicate resolves the *same* sanctioned root as the walk
+/// ([FR-SY-11], [ADR-48]).
+pub(crate) fn resolve_sanctioned_docs_root(root: &Path) -> Option<PathBuf> {
     let contents = std::fs::read_to_string(root.join(".swe-skills")).ok()?;
     let line = contents
         .lines()
@@ -376,23 +464,67 @@ fn resolve_sanctioned_docs_root(root: &Path) -> Option<PathBuf> {
     canonical.is_dir().then_some(canonical)
 }
 
+/// The containment verdict for a directory symlink ([FR-IX-10], [ADR-59],
+/// [FR-IX-11]) — the shared classification the follow-branch and the unindexed-
+/// symlink warning both key on.
+pub(crate) enum DirSymlinkTarget {
+    /// A directory target contained within the project root or the sanctioned
+    /// docs root — the symlink is followed one hop.
+    Contained(PathBuf),
+    /// A directory target escaping **both** roots — refused ([NFR-SE-04]); if it
+    /// is a documentation symlink this is an [FR-IX-11] unindexed drop.
+    Escapes,
+    /// Not a directory symlink at all — a broken link or a link to a file — so it
+    /// is neither followed nor reported.
+    NotDir,
+}
+
+/// Classify a symlink's canonical target for the containment gate ([FR-IX-10]).
+///
+/// `canonicalize` fully resolves the link (so a chain of links is evaluated by
+/// its final destination); a broken or non-directory target is [`NotDir`]; a
+/// directory target is [`Contained`] iff it is within `root` or `sanctioned`
+/// (when present), else [`Escapes`] — the no-arbitrary-escape invariant
+/// [NFR-SE-04] preserves as amended.
+///
+/// [`NotDir`]: DirSymlinkTarget::NotDir
+/// [`Contained`]: DirSymlinkTarget::Contained
+/// [`Escapes`]: DirSymlinkTarget::Escapes
+pub(crate) fn classify_dir_symlink(
+    path: &Path,
+    root: &Path,
+    sanctioned: Option<&Path>,
+) -> DirSymlinkTarget {
+    let Ok(target) = path.canonicalize() else {
+        return DirSymlinkTarget::NotDir;
+    };
+    if !target.is_dir() {
+        return DirSymlinkTarget::NotDir;
+    }
+    if target.starts_with(root) || sanctioned.is_some_and(|s| target.starts_with(s)) {
+        DirSymlinkTarget::Contained(target)
+    } else {
+        DirSymlinkTarget::Escapes
+    }
+}
+
 /// If `path` is a symlink to a directory whose canonical target is contained
 /// within `root` or `sanctioned` (when present), return that canonical target;
 /// otherwise `None` ([FR-IX-10], [ADR-59]).
 ///
-/// This is the sole gate on which symlinks discovery follows: `canonicalize`
-/// fully resolves the link (so a chain of links is evaluated by its final
-/// destination), a non-directory or broken target yields `None`, and a target
-/// escaping **both** roots yields `None` — the no-arbitrary-escape invariant
-/// [NFR-SE-04] preserves as amended.
-fn contained_dir_target(path: &Path, root: &Path, sanctioned: Option<&Path>) -> Option<PathBuf> {
-    let target = path.canonicalize().ok()?;
-    if !target.is_dir() {
-        return None;
+/// The follow-branch's view of [`classify_dir_symlink`]: only a [`Contained`]
+/// target is followed.
+///
+/// [`Contained`]: DirSymlinkTarget::Contained
+pub(crate) fn contained_dir_target(
+    path: &Path,
+    root: &Path,
+    sanctioned: Option<&Path>,
+) -> Option<PathBuf> {
+    match classify_dir_symlink(path, root, sanctioned) {
+        DirSymlinkTarget::Contained(target) => Some(target),
+        DirSymlinkTarget::Escapes | DirSymlinkTarget::NotDir => None,
     }
-    let contained =
-        target.starts_with(root) || sanctioned.is_some_and(|s| target.starts_with(s));
-    contained.then_some(target)
 }
 
 /// The admission policy a sanctioned-symlink sub-walk applies, borrowed from the
@@ -534,11 +666,224 @@ fn keep_dir(entry: &DirEntry, ignored_dirs: &HashSet<String>) -> bool {
 
 /// A path's components joined with `/` — the root-relative, forward-slashed form
 /// the documentation globs match against (mirrors the pipeline's `to_forward_slash`).
-fn to_forward_slash(rel: &Path) -> String {
+///
+/// Shared with [`AdmissionAuthority`](super::admission::AdmissionAuthority) so the
+/// walk-parity predicate matches doc globs against the identical string form.
+pub(crate) fn to_forward_slash(rel: &Path) -> String {
     rel.components()
         .filter_map(|c| c.as_os_str().to_str())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// The literal directory **prefixes** of the documentation-include globs — the
+/// scope the git-ignore-bypassing detection pass is confined to ([FR-IX-11]).
+///
+/// Each include pattern contributes its leading run of wildcard-free path
+/// components: `docs/**/*.md` → `docs`, `docs/specs/**/*.md` → `docs/specs`. A
+/// pattern whose first component is a wildcard (`*.md`, `README*`) contributes
+/// nothing — a top-level file glob cannot be satisfied by a directory-symlink's
+/// subtree — and neither does a fully-literal single-file pattern. The result is
+/// the set of directory roots under which a documentation directory-symlink could
+/// live, so the detection walk never descends the whole (possibly git-ignored)
+/// tree, only that doc subtree (the scoping [CR-071] mandates).
+fn doc_dir_prefixes(include: &[String]) -> Vec<PathBuf> {
+    let mut prefixes: Vec<PathBuf> = Vec::new();
+    for pattern in include {
+        let mut base = PathBuf::new();
+        for component in pattern.split('/') {
+            if component.is_empty() || component_has_wildcard(component) {
+                break;
+            }
+            base.push(component);
+        }
+        // A usable prefix has ≥1 literal directory component AND leaves room for
+        // files to nest beneath it (the pattern continues past the base) — so a
+        // bare `*.md`/`README*` (empty base) and a fully-literal single-file
+        // pattern (`docs/guide.md`, base == pattern) both contribute nothing.
+        if base.components().next().is_some() && base.as_path() != Path::new(pattern) {
+            prefixes.push(base);
+        }
+    }
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+}
+
+/// Whether a glob path-component contains a wildcard metacharacter, marking the
+/// end of a pattern's literal directory prefix.
+fn component_has_wildcard(component: &str) -> bool {
+    component.contains(['*', '?', '[', ']', '{', '}'])
+}
+
+/// Whether `rel` lies at or beneath one of the documentation `prefixes` — the
+/// test for "is this a documentation directory-symlink?" (component-wise, so
+/// `documentation` is not under `docs`).
+fn within_doc_prefix(rel: &Path, prefixes: &[PathBuf]) -> bool {
+    prefixes.iter().any(|prefix| rel.starts_with(prefix))
+}
+
+/// Whether the detection walk should descend into directory `rel`: it must sit on
+/// a documentation lineage — an ancestor of a prefix (to reach it) or at/under a
+/// prefix (within the doc subtree).
+fn on_doc_lineage(rel: &Path, prefixes: &[PathBuf]) -> bool {
+    prefixes
+        .iter()
+        .any(|prefix| rel.starts_with(prefix) || prefix.starts_with(rel))
+}
+
+/// The detection walk's `filter_entry`: prune exactly as the main pass
+/// ([`keep_dir`]) **and** confine descent to the documentation lineage so the
+/// git-ignore-bypassing pass never walks the whole tree ([FR-IX-11], [CR-071]).
+///
+/// A real directory is descended only when it is on a doc lineage; a symlink or
+/// file is kept only when it falls under a doc prefix (a doc symlink to inspect).
+/// The root (depth 0) is always kept.
+fn keep_detection(
+    entry: &DirEntry,
+    ignored_dirs: &HashSet<String>,
+    prefixes: &[PathBuf],
+    root: &Path,
+) -> bool {
+    if !keep_dir(entry, ignored_dirs) {
+        return false;
+    }
+    if entry.depth() == 0 {
+        return true;
+    }
+    let Ok(rel) = entry.path().strip_prefix(root) else {
+        return false;
+    };
+    if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+        on_doc_lineage(rel, prefixes)
+    } else {
+        within_doc_prefix(rel, prefixes)
+    }
+}
+
+/// Enumerate documentation directory-symlinks under `doc_prefixes`, bypassing
+/// git-ignore/exclude ([FR-IX-11], [CR-071]).
+///
+/// A dedicated **serial** walk with `git_ignore(false)`/`git_exclude(false)` —
+/// the one relaxation, and it is confined to the documentation subtree by
+/// [`keep_detection`], never applied to the main walk. `follow_links(false)`
+/// keeps it from chaining through any symlink (the one-hop follow is the sub-walk
+/// [`discover_followed_symlink`]'s job). Returns the in-tree absolute paths of
+/// every directory-symlink whose root-relative path falls under a doc prefix,
+/// sorted+deduped for determinism.
+fn detect_doc_dir_symlinks(
+    root: &Path,
+    doc_prefixes: &[PathBuf],
+    ignored_dirs: &HashSet<String>,
+) -> Vec<PathBuf> {
+    if doc_prefixes.is_empty() {
+        return Vec::new();
+    }
+    let prefixes = doc_prefixes.to_vec();
+    let pruned = ignored_dirs.clone();
+    let root_owned = root.to_path_buf();
+    let walker = WalkBuilder::new(root)
+        .require_git(false)
+        .git_ignore(false) // the whole point: see git-ignored doc symlinks ([CR-071]).
+        .git_global(false)
+        .git_exclude(false)
+        .ignore(false)
+        .hidden(false)
+        .parents(false)
+        .follow_links(false) // never chain through a symlink — the follow is one hop.
+        .filter_entry(move |entry| keep_detection(entry, &pruned, &prefixes, &root_owned))
+        .build();
+
+    let mut links = Vec::new();
+    for result in walker {
+        let Ok(entry) = result else { continue };
+        if !entry.file_type().is_some_and(|ft| ft.is_symlink()) {
+            continue;
+        }
+        let Ok(rel) = entry.path().strip_prefix(root) else {
+            continue;
+        };
+        if within_doc_prefix(rel, doc_prefixes) {
+            links.push(entry.path().to_path_buf());
+        }
+    }
+    links.sort();
+    links.dedup();
+    links
+}
+
+/// Detect and classify the documentation directory-symlinks under `doc_prefixes`
+/// ([FR-IX-10] amended by [CR-071], [FR-IX-11]).
+///
+/// Returns `(follow, unindexed)`: contained doc symlinks to feed into the one-hop
+/// follow set (union-ed with the main pass's, deduped by the caller), and the
+/// doc symlinks whose target escapes containment — the [FR-IX-11] unindexed drops
+/// to warn about. A broken/non-directory link is neither. Shared with
+/// [`unindexed_doc_symlinks`] so `discover` and `doctor` classify identically.
+fn classify_doc_dir_symlinks(
+    root: &Path,
+    doc_prefixes: &[PathBuf],
+    ignored_dirs: &HashSet<String>,
+    sanctioned: Option<&Path>,
+) -> (Vec<(PathBuf, PathBuf)>, Vec<UnindexedDocSymlink>) {
+    let mut follow = Vec::new();
+    let mut unindexed = Vec::new();
+    for link in detect_doc_dir_symlinks(root, doc_prefixes, ignored_dirs) {
+        match classify_dir_symlink(&link, root, sanctioned) {
+            DirSymlinkTarget::Contained(target) => follow.push((link, target)),
+            DirSymlinkTarget::Escapes => {
+                if let Ok(rel) = link.strip_prefix(root) {
+                    let reason = if sanctioned.is_some() {
+                        DocSymlinkDrop::EscapesContainment
+                    } else {
+                        DocSymlinkDrop::NoSanctionedRoot
+                    };
+                    unindexed.push(UnindexedDocSymlink {
+                        link: rel.to_path_buf(),
+                        reason,
+                    });
+                }
+            }
+            DirSymlinkTarget::NotDir => {}
+        }
+    }
+    (follow, unindexed)
+}
+
+/// The documentation directory-symlinks that exist under the documentation-
+/// include set but end up **unindexed** ([FR-IX-11]) — the `doctor`-side twin of
+/// the drops [`discover`] folds into its report, computed without a full index
+/// walk so `doctor` stays a cheap diagnostic.
+///
+/// Returns an empty list when documentation is disabled (no doc-include set to
+/// scope the follow to, mirroring [`discover`]). Fails only on a bad root or a
+/// malformed/escaping doc glob — the same faults [`discover`] raises.
+///
+/// # Errors
+/// - [`ConfigError::InvalidRoot`] if `root` is missing or not a directory.
+/// - [`ConfigError::EscapingPattern`] / [`ConfigError::BadGlob`] on a bad doc glob.
+pub fn unindexed_doc_symlinks(
+    root: &Path,
+    config: &Config,
+) -> Result<Vec<UnindexedDocSymlink>, ConfigError> {
+    let root = root.canonicalize().map_err(|_| ConfigError::InvalidRoot {
+        path: root.to_path_buf(),
+    })?;
+    if !root.is_dir() {
+        return Err(ConfigError::InvalidRoot { path: root });
+    }
+    // Documentation off ⇒ no doc-include set ⇒ nothing to detect (parity with
+    // `discover`'s `follow_enabled` gate). `compile` also fails loud on a bad glob.
+    if config.documentation.compile()?.is_none() {
+        return Ok(Vec::new());
+    }
+    let sanctioned = resolve_sanctioned_docs_root(&root);
+    let ignored_dirs: HashSet<String> = config.semantics.ignored_dirs.iter().cloned().collect();
+    let doc_prefixes = doc_dir_prefixes(&config.documentation.include);
+    let (_follow, mut unindexed) =
+        classify_doc_dir_symlinks(&root, &doc_prefixes, &ignored_dirs, sanctioned.as_deref());
+    unindexed.sort_by(|a, b| a.link.cmp(&b.link));
+    Ok(unindexed)
 }
 
 #[cfg(test)]
@@ -1027,6 +1372,216 @@ mod tests {
         assert!(
             !rels.iter().any(|r| r.starts_with("docs/specs")),
             "with documentation off there is no include set to scope the follow to: {rels:?}"
+        );
+    }
+
+    // ── Git-ignored sanctioned doc-symlink bypass + unindexed warning ─────────
+    // ([FR-IX-10] amended by [CR-071], [FR-IX-11]).
+
+    /// [`build_symlink_fixture`] plus a `.gitignore` that ignores the `docs/specs`
+    /// symlink — the exact condition [S-277]'s fixtures missed and [CR-071] fixes:
+    /// on `main` the walk's `git_ignore(true)` prunes this symlink before the
+    /// follow-branch, so the feature was inert. Returns (guard, root, sanctioned).
+    #[cfg(unix)]
+    fn build_gitignored_symlink_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let (tmp, root, sanctioned) = build_symlink_fixture();
+        // Git-ignore the doc symlink exactly as this project's own `.gitignore`
+        // does (`/docs/specs`) — the machine-local relocation kept out of git.
+        write(&root.join(".gitignore"), "/docs/specs\n");
+        (tmp, root, sanctioned)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn follows_git_ignored_sanctioned_docs_symlink() {
+        // The core [CR-071] regression: a git-ignored sanctioned doc symlink must
+        // still be followed and its docs indexed — the detection pass bypasses the
+        // main walk's git-ignore filtering for exactly the sanctioned doc subtree.
+        let (_tmp, root, _sanctioned) = build_gitignored_symlink_fixture();
+        let config = Config::default();
+
+        let baseline = discover_with_threads(&root, &config, 1).unwrap();
+        let rels: BTreeSet<String> = baseline
+            .files
+            .iter()
+            .map(|p| to_forward_slash(p.strip_prefix(&root).unwrap()))
+            .collect();
+
+        assert!(rels.contains("src/main.rs"), "the real source file is discovered: {rels:?}");
+        assert!(
+            rels.contains("docs/specs/ADR-46.md"),
+            "a git-ignored sanctioned doc is followed and indexed ([CR-071]): {rels:?}"
+        );
+        assert!(
+            rels.contains("docs/specs/deep/FR-IX-10.md"),
+            "a nested git-ignored sanctioned doc is followed: {rels:?}"
+        );
+        assert!(
+            !rels.iter().any(|r| r.ends_with("embedded.rs")),
+            "source behind the symlink is still NOT indexed (source skips symlinks): {rels:?}"
+        );
+        // Docs indexed correctly ⇒ no unindexed-doc-symlink warning ([FR-IX-11]).
+        assert!(
+            baseline.unindexed_doc_symlinks.is_empty(),
+            "no warning when the git-ignored sanctioned symlink indexes correctly: {:?}",
+            baseline.unindexed_doc_symlinks
+        );
+
+        // Idempotent + thread-count-independent (NFR-RA-06), including the new
+        // detection pass and report field.
+        for &n in WORKER_COUNTS {
+            assert_eq!(discover_with_threads(&root, &config, n).unwrap(), baseline, "count {n}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_ignored_non_sanctioned_path_stays_skipped() {
+        // The bypass is scoped to the sanctioned DOC subtree only: a git-ignored
+        // ordinary source tree is still pruned (no global relaxation of the walk).
+        let (_tmp, root, _sanctioned) = build_gitignored_symlink_fixture();
+        write(&root.join("generated/out.rs"), "pub fn g() {}\n");
+        write(&root.join(".gitignore"), "/docs/specs\n/generated\n");
+
+        let rels: BTreeSet<String> = discover_with_threads(&root, &Config::default(), 0)
+            .unwrap()
+            .files
+            .iter()
+            .map(|p| to_forward_slash(p.strip_prefix(&root).unwrap()))
+            .collect();
+
+        assert!(rels.contains("docs/specs/ADR-46.md"), "sanctioned doc followed: {rels:?}");
+        assert!(
+            !rels.iter().any(|r| r.starts_with("generated/")),
+            "a git-ignored non-sanctioned source tree stays skipped: {rels:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn escaping_git_ignored_doc_symlink_is_reported_unindexed() {
+        // A doc-scoped directory symlink whose target escapes BOTH roots is not
+        // followed (unchanged), and — even git-ignored — is now surfaced as an
+        // unindexed drop naming the path + reason ([FR-IX-11]).
+        use std::os::unix::fs::symlink;
+
+        let (_tmp, root, _sanctioned) = build_gitignored_symlink_fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let outside = outside.path().canonicalize().unwrap();
+        write(&outside.join("secret.md"), "# secret\n");
+        symlink(&outside, root.join("docs/leak")).unwrap();
+        // Git-ignore the escaping doc symlink too — it must still be detected.
+        write(&root.join(".gitignore"), "/docs/specs\n/docs/leak\n");
+
+        let report = discover_with_threads(&root, &Config::default(), 0).unwrap();
+        let rels: BTreeSet<String> = report
+            .files
+            .iter()
+            .map(|p| to_forward_slash(p.strip_prefix(&root).unwrap()))
+            .collect();
+
+        assert!(!rels.iter().any(|r| r.contains("secret.md")), "escaping symlink not followed");
+        let dropped: Vec<&UnindexedDocSymlink> = report
+            .unindexed_doc_symlinks
+            .iter()
+            .filter(|d| d.link.as_path() == Path::new("docs/leak"))
+            .collect();
+        assert_eq!(dropped.len(), 1, "docs/leak reported unindexed: {:?}", report.unindexed_doc_symlinks);
+        assert_eq!(dropped[0].reason, DocSymlinkDrop::EscapesContainment);
+        // The rendered warning names the path and the reason ([FR-IX-11]).
+        let msg = dropped[0].to_string();
+        assert!(msg.contains("docs/leak"), "warning names the path: {msg}");
+        assert!(msg.contains("escapes"), "warning names the reason: {msg}");
+        // The sanctioned doc still indexes — the drop is scoped to the escaper.
+        assert!(rels.contains("docs/specs/ADR-46.md"), "sanctioned doc still followed: {rels:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn absent_swe_skills_reports_doc_symlink_unindexed() {
+        // With `.swe-skills` absent, an out-of-root doc symlink resolves no
+        // sanctioned root and is skipped (unchanged) — and is reported unindexed
+        // with the NoSanctionedRoot reason ([FR-IX-11]), turning the previously
+        // silent doc-drop into a signal.
+        let (_tmp, root, _sanctioned) = build_gitignored_symlink_fixture();
+        fs::remove_file(root.join(".swe-skills")).unwrap();
+
+        let report = discover_with_threads(&root, &Config::default(), 0).unwrap();
+
+        assert!(
+            !report.files.iter().any(|p| p.strip_prefix(&root).unwrap().starts_with("docs/specs")),
+            "with no sanctioned root the doc symlink is skipped"
+        );
+        let dropped: Vec<&UnindexedDocSymlink> = report
+            .unindexed_doc_symlinks
+            .iter()
+            .filter(|d| d.link.as_path() == Path::new("docs/specs"))
+            .collect();
+        assert_eq!(dropped.len(), 1, "docs/specs reported unindexed: {:?}", report.unindexed_doc_symlinks);
+        assert_eq!(dropped[0].reason, DocSymlinkDrop::NoSanctionedRoot);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn documentation_disabled_reports_no_unindexed_doc_symlinks() {
+        // Documentation off ⇒ no doc-include set ⇒ no detection and no warning,
+        // even with a git-ignored escaping doc symlink present.
+        let (_tmp, root, _sanctioned) = build_gitignored_symlink_fixture();
+        fs::remove_file(root.join(".swe-skills")).unwrap();
+        let mut config = Config::default();
+        config.documentation.enabled = false;
+
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        assert!(
+            report.unindexed_doc_symlinks.is_empty(),
+            "no doc-include set ⇒ no unindexed warning: {:?}",
+            report.unindexed_doc_symlinks
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unindexed_doc_symlinks_fn_matches_discover_for_doctor() {
+        // The `doctor`-side twin computes the same drops as `discover` folds into
+        // its report — without a full index walk.
+        let (_tmp, root, _sanctioned) = build_gitignored_symlink_fixture();
+        fs::remove_file(root.join(".swe-skills")).unwrap();
+        let config = Config::default();
+
+        let from_discover = discover_with_threads(&root, &config, 0).unwrap().unindexed_doc_symlinks;
+        let from_doctor = unindexed_doc_symlinks(&root, &config).unwrap();
+        assert_eq!(from_discover, from_doctor, "doctor twin agrees with discover");
+        assert!(
+            from_doctor.iter().any(|d| d.link.as_path() == Path::new("docs/specs")),
+            "the git-ignored, unsanctioned doc symlink is reported: {from_doctor:?}"
+        );
+
+        // When docs index correctly (`.swe-skills` present), the twin is empty.
+        write(&root.join(".swe-skills"), &format!("{}\n", _sanctioned.display()));
+        assert!(
+            unindexed_doc_symlinks(&root, &config).unwrap().is_empty(),
+            "no warning once the sanctioned symlink resolves and indexes"
+        );
+    }
+
+    #[test]
+    fn doc_dir_prefixes_extracts_literal_directory_bases() {
+        // The detection scope: only the literal directory prefix of a glob that
+        // can nest files under a directory contributes; top-level file globs and
+        // single-file literals contribute nothing.
+        assert_eq!(
+            doc_dir_prefixes(&["docs/**/*.md".into(), "*.md".into(), "README*".into()]),
+            vec![PathBuf::from("docs")],
+            "only `docs/**/*.md` yields a directory prefix"
+        );
+        assert_eq!(
+            doc_dir_prefixes(&["docs/specs/**/*.md".into(), "handbook/**/*.md".into()]),
+            vec![PathBuf::from("docs/specs"), PathBuf::from("handbook")],
+            "a deeper base and a custom doc root are both captured (sorted)"
+        );
+        assert!(
+            doc_dir_prefixes(&["*.md".into(), "README*".into(), "guide.md".into()]).is_empty(),
+            "top-level file globs and single-file literals contribute no directory prefix"
         );
     }
 }

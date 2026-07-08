@@ -70,6 +70,15 @@ pub struct AdmissionAuthority {
     /// Root-anchored gitignore matcher (`.gitignore` ∪ `.ignore` ∪
     /// `.git/info/exclude`). See the module-level v1 limitation.
     gitignore: Gitignore,
+    /// The sanctioned external docs root resolved from `.swe-skills`, or `None`
+    /// when absent/misconfigured ([FR-IX-10]). Mirrors the walk's carve-out so a
+    /// git-ignored sanctioned doc reached through a directory-symlink is admitted
+    /// exactly as [`discover`](super::discover) yields it ([CR-071]).
+    sanctioned_docs_root: Option<PathBuf>,
+    /// The compiled documentation globs, or `None` when documentation is disabled
+    /// ([FR-DG-01]). Gates the sanctioned-symlink carve-out to documentation only,
+    /// as the walk's sub-walk does.
+    doc_globs: Option<globs::DocGlobs>,
 }
 
 impl AdmissionAuthority {
@@ -97,6 +106,11 @@ impl AdmissionAuthority {
         let ignored_dirs: HashSet<String> =
             config.semantics.ignored_dirs.iter().cloned().collect();
         let gitignore = build_root_gitignore(&root);
+        // Resolve the sanctioned docs root and doc globs from the SAME config the
+        // walk uses, so the carve-out below stays in parity with `discover`
+        // ([FR-IX-10]/[CR-071], [FR-SY-11]).
+        let sanctioned_docs_root = super::discovery::resolve_sanctioned_docs_root(&root);
+        let doc_globs = config.documentation.compile()?;
 
         Ok(Self {
             root,
@@ -105,6 +119,8 @@ impl AdmissionAuthority {
             ignored_dirs,
             max_file_size: config.max_file_size,
             gitignore,
+            sanctioned_docs_root,
+            doc_globs,
         })
     }
 
@@ -157,6 +173,19 @@ impl AdmissionAuthority {
             return false;
         }
 
+        // Sanctioned documentation-symlink carve-out ([FR-IX-10] amended by
+        // [CR-071]). `discover` follows a git-ignored documentation directory-
+        // symlink whose canonical target is contained, yielding the docs beneath
+        // it; mirror that here — else this authority (and thus the `doctor`
+        // FR-GV-20 tripwire and the `sync` reconcile) would flag a legitimately-
+        // indexed sanctioned doc as admission drift the moment it is git-ignored.
+        // Applied AFTER include/exclude (the walk's sub-walk applies both too) and
+        // BEFORE the gitignore reject (the carve-out's whole purpose is to bypass
+        // it for the sanctioned doc subtree).
+        if self.admits_via_sanctioned_doc_symlink(rel_path) {
+            return true;
+        }
+
         // Gitignore matcher — check the path and every parent so a gitignored
         // *directory* rule (`build/`) excludes its descendants, replicating the
         // walk's subtree prune without descending. Root-anchored (v1 limitation).
@@ -184,6 +213,55 @@ impl AdmissionAuthority {
         }
 
         true
+    }
+
+    /// Whether `rel` is a documentation file reached through a **sanctioned,
+    /// contained** directory-symlink — the walk-parity twin of the [FR-IX-10]
+    /// follow-branch ([CR-071]).
+    ///
+    /// Two gates, both of which the walk's sub-walk applies: `rel` must be
+    /// admitted as documentation by the doc globs, and some **directory** ancestor
+    /// of `rel` must be a symlink whose canonical target is contained within the
+    /// project root or the sanctioned docs root ([`contained_dir_target`]). When
+    /// both hold, the walk yields the file (git-ignore notwithstanding), so the
+    /// authority must admit it. Documentation off ⇒ no doc globs ⇒ always `false`.
+    ///
+    /// This is a per-path predicate, so it does not replicate the walk's global
+    /// canonical-path dedup ([FR-IX-10]) — it may admit an in-tree aliasing
+    /// symlink's path the walk would dedup away. That is deliberately harmless:
+    /// only actually-indexed paths reach the [FR-GV-20] tripwire, and those are
+    /// exactly the deduped sub-walk outputs, every one of which this admits.
+    ///
+    /// [`contained_dir_target`]: super::discovery::contained_dir_target
+    fn admits_via_sanctioned_doc_symlink(&self, rel: &Path) -> bool {
+        let Some(doc_globs) = self.doc_globs.as_ref() else {
+            return false; // documentation disabled — no carve-out.
+        };
+        if !doc_globs.admits(&super::discovery::to_forward_slash(rel)) {
+            return false; // only documentation is followed through the symlink.
+        }
+        // Some directory ancestor (every component but the filename) must be the
+        // sanctioned, contained directory-symlink hop.
+        let components: Vec<&std::ffi::OsStr> =
+            rel.components().map(Component::as_os_str).collect();
+        let mut ancestor = self.root.clone();
+        for name in &components[..components.len().saturating_sub(1)] {
+            ancestor.push(name);
+            let is_symlink = fs::symlink_metadata(&ancestor)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if is_symlink
+                && super::discovery::contained_dir_target(
+                    &ancestor,
+                    &self.root,
+                    self.sanctioned_docs_root.as_deref(),
+                )
+                .is_some()
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Resolve `path` to a root-relative path of `Normal` components, or `None`
@@ -617,6 +695,89 @@ mod tests {
         assert!(
             authority.admits_path(&nested_ignored),
             "v1 limitation: the root-anchored authority admits it (nested `.gitignore` unread)",
+        );
+    }
+
+    /// Build a project whose git-ignored `docs/specs` is a directory-symlink into
+    /// a sibling sanctioned repo declared in `.swe-skills` — the [CR-071] layout.
+    /// Returns (guard, canonical root, canonical sanctioned root).
+    #[cfg(unix)]
+    fn build_gitignored_doc_symlink_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let root = base.join("project");
+        fs::create_dir_all(root.join("docs")).unwrap();
+        write(&root.join("src/main.rs"), "fn main() {}\n");
+
+        let sanctioned = base.join("logos-docs");
+        write(&sanctioned.join("specs/ADR-46.md"), "# ADR-46\n");
+        write(&sanctioned.join("specs/embedded.rs"), "pub fn x() {}\n");
+        let sanctioned = sanctioned.canonicalize().unwrap();
+
+        write(&root.join(".swe-skills"), &format!("{}\n", sanctioned.display()));
+        symlink(sanctioned.join("specs"), root.join("docs/specs")).unwrap();
+        // Git-ignore the symlink exactly as this project's own `.gitignore` does.
+        write(&root.join(".gitignore"), "/docs/specs\n");
+        (tmp, root, sanctioned)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn admits_git_ignored_sanctioned_doc_reached_via_symlink() {
+        // Parity with the [CR-071] walk: `discover` now yields a git-ignored
+        // sanctioned doc reached through the directory-symlink, so `admits_path`
+        // must admit it too — else the FR-GV-20 doctor tripwire would flag the
+        // freshly-indexed doc as admission drift.
+        let (_tmp, root, _sanctioned) = build_gitignored_doc_symlink_fixture();
+        let config = test_config();
+        let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+
+        let doc = root.join("docs/specs/ADR-46.md"); // logical in-tree path
+        // The walk yields it (logical path) despite the gitignore.
+        let walk: BTreeSet<PathBuf> = discover(&root, &config).unwrap().files.into_iter().collect();
+        assert!(walk.contains(&doc), "the CR-071 walk yields the git-ignored sanctioned doc");
+        // And the authority agrees — the parity invariant ([FR-SY-11], [ADR-48]).
+        assert!(
+            authority.admits_path(&doc),
+            "admits_path admits a git-ignored sanctioned doc reached via the symlink"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn source_behind_sanctioned_doc_symlink_is_not_admitted() {
+        // The carve-out is documentation-scoped: a source file behind the same
+        // symlink is NOT a doc, so it stays rejected (gitignored) — the walk never
+        // yields it either, so parity holds.
+        let (_tmp, root, _sanctioned) = build_gitignored_doc_symlink_fixture();
+        let config = test_config();
+        let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+
+        let src = root.join("docs/specs/embedded.rs");
+        assert!(
+            !authority.admits_path(&src),
+            "source behind the doc symlink is not admitted (doc-gated carve-out)"
+        );
+        let walk: BTreeSet<PathBuf> = discover(&root, &config).unwrap().files.into_iter().collect();
+        assert!(!walk.contains(&src), "the walk does not yield the source behind the symlink");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn admits_path_still_rejects_git_ignored_doc_without_sanction() {
+        // No `.swe-skills` ⇒ no sanctioned root ⇒ the git-ignored doc symlink is
+        // not a carve-out and the doc behind it is rejected (fail-closed), matching
+        // the walk which does not follow it.
+        let (_tmp, root, _sanctioned) = build_gitignored_doc_symlink_fixture();
+        fs::remove_file(root.join(".swe-skills")).unwrap();
+        let config = test_config();
+        let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+
+        let doc = root.join("docs/specs/ADR-46.md");
+        assert!(
+            !authority.admits_path(&doc),
+            "with no sanction the git-ignored doc is rejected (fail-closed)"
         );
     }
 

@@ -2798,7 +2798,21 @@ fn structural_check(engine: &Engine) -> Result<StructuralReport> {
 /// [NFR-RA-13]: ../../../docs/specs/requirements/NFR-RA-13.md
 /// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
 pub(crate) fn doctor(engine: &Engine) -> Result<DoctorReport> {
-    Ok(doctor_report(structural_check(engine)?, admission_tripwire(engine)?))
+    let mut report = doctor_report(structural_check(engine)?, admission_tripwire(engine)?);
+    // FR-IX-11: warn (path + reason) when a documentation directory-symlink exists
+    // under the doc-include set but ended up unindexed. Diagnostic only — it does
+    // not touch `report.ok`, so it never changes `doctor`'s exit status.
+    report.doc_symlink_warnings = doc_symlink_warnings(engine)?;
+    Ok(report)
+}
+
+/// The [FR-IX-11] unindexed-doc-symlink warnings for `doctor`, computed from the
+/// project root + on-disk config (the same source the admission tripwire reads)
+/// without a full index walk, so `doctor` stays a cheap diagnostic.
+fn doc_symlink_warnings(engine: &Engine) -> Result<Vec<String>> {
+    let (_runtime, _registry, config) = engine.pipeline_ctx()?;
+    let drops = crate::config::unindexed_doc_symlinks(engine.root(), &config)?;
+    Ok(drops.iter().map(ToString::to_string).collect())
 }
 
 /// An admission-tripwire census (S-215, [FR-GV-20], [ADR-48]): every indexed
@@ -2897,6 +2911,10 @@ fn doctor_report(report: StructuralReport, admission: AdmissionCensus) -> Doctor
         unadmitted_files: admission.unadmitted_files,
         unadmitted_sample: admission.unadmitted_sample,
         faults,
+        // Populated by `doctor` (the fast standalone check); `verify`, which reuses
+        // this builder for its embedded `structural` field, leaves it empty — the
+        // unindexed-doc-symlink diagnostic is an `index`/`doctor` surface ([FR-IX-11]).
+        doc_symlink_warnings: Vec::new(),
         message,
     }
 }
