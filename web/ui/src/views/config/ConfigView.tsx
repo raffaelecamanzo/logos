@@ -42,6 +42,7 @@ import type {
   MaskedSecret,
   ParsedConfig,
   ParsedRules,
+  RulesDefaults,
   SecretWriteOutcome,
   VerifyReport,
 } from "../../api/types.ts";
@@ -79,6 +80,12 @@ interface FieldDescriptor {
   /** Overrides the rendered/accessible label when `key` collides with another
    *  table's field (e.g. `[wiki].model` beside `[chat].model`). Defaults to `key`. */
   label?: string;
+  /** The server-computed default (or, for `[constraints]`, the honest
+   *  `unset → not enforced` state plus the recommended baseline) beside the
+   *  current value (CR-067, FR-UI-12, BR-37). Sourced only from the `defaults`
+   *  projection — never fabricated (NFR-RA-05). `undefined` when the field has
+   *  no default affordance. */
+  defaultHint?: string;
 }
 
 /** A group of typed fields rendered under an optional `[legend]`. */
@@ -129,24 +136,52 @@ function initMaxDead(v: unknown): string {
   return typeof v === "number" ? String(v) : "";
 }
 
+// ── Default / recommended-baseline formatting (CR-067, FR-UI-12, BR-37) ────────
+// Every string here is built ONLY from a value the `defaults` projection
+// carried over the wire — never a client-authored number (NFR-RA-05).
+
+/** Format a real code-default value beside a field, honestly: an empty list
+ *  reads as "(empty)" rather than nothing, so it is not mistaken for "no
+ *  default was returned". */
+function fmtDefault(v: unknown): string {
+  if (v == null) return "unset";
+  if (Array.isArray(v)) return v.length === 0 ? "(empty)" : v.join(", ");
+  if (typeof v === "boolean") return v ? "true" : "false";
+  return String(v);
+}
+
+/** `config.toml` / `[metric_thresholds]` default hint: these have a real code
+ *  default, so it is stated plainly. */
+function defaultHint(v: unknown): string {
+  return `Default: ${fmtDefault(v)}`;
+}
+
+/** `[constraints]` have no code default (an omitted key is simply "not
+ *  enforced", FR-CF-03) — state that honestly, and separately show the
+ *  curated recommended baseline from `Constraints::recommended()`. Never
+ *  blurs the two into a single fabricated "default" (BR-37). */
+function constraintHint(recommended: unknown): string {
+  return `Default: unset → not enforced · Recommended: ${fmtDefault(recommended)}`;
+}
+
 /** The `config.toml` typed fields: top-level scalars/lists + the `[chat]` group. */
-function configGroups(c: ParsedConfig): FieldGroup[] {
+function configGroups(c: ParsedConfig, d: ParsedConfig): FieldGroup[] {
   return [
     {
       fields: [
-        { table: "", key: "languages", control: "list", initial: initList(c.languages), help: "Language plugins to enable. One per line." },
-        { table: "", key: "include", control: "list", initial: initList(c.include), help: "Include globs (root-relative). One per line." },
-        { table: "", key: "exclude", control: "list", initial: initList(c.exclude), help: "Exclude globs, unioned with gitignore. One per line." },
-        { table: "", key: "max_file_size", control: "int", initial: initInt(c.max_file_size), help: "Skip files larger than this (bytes)." },
-        { table: "", key: "framework_hints", control: "list", initial: initList(c.framework_hints), help: "Framework hints biasing extraction. One per line." },
+        { table: "", key: "languages", control: "list", initial: initList(c.languages), help: "Language plugins to enable. One per line.", defaultHint: defaultHint(d.languages) },
+        { table: "", key: "include", control: "list", initial: initList(c.include), help: "Include globs (root-relative). One per line.", defaultHint: defaultHint(d.include) },
+        { table: "", key: "exclude", control: "list", initial: initList(c.exclude), help: "Exclude globs, unioned with gitignore. One per line.", defaultHint: defaultHint(d.exclude) },
+        { table: "", key: "max_file_size", control: "int", initial: initInt(c.max_file_size), help: "Skip files larger than this (bytes).", defaultHint: defaultHint(d.max_file_size) },
+        { table: "", key: "framework_hints", control: "list", initial: initList(c.framework_hints), help: "Framework hints biasing extraction. One per line.", defaultHint: defaultHint(d.framework_hints) },
       ],
     },
     {
       legend: "[chat]",
       fields: [
-        { table: "chat", key: "provider", control: "provider", initial: c.chat.provider, help: "The provider family. openai is OpenAI-compatible (base_url defaults to OpenRouter); anthropic uses the native Messages endpoint." },
-        { table: "chat", key: "model", control: "str", initial: c.chat.model ?? "", placeholder: "leave blank to unset", help: "The model the chat agent uses (a Claude id, or an OpenRouter model slug for openai). Required — until set the Chat tab stays “not yet usable”." },
-        { table: "chat", key: "base_url", control: "str", initial: c.chat.base_url, placeholder: "leave blank for the default (OpenRouter)", help: "The OpenAI-compatible endpoint for the openai provider (anthropic ignores this). Leave blank to fall back to OpenRouter." },
+        { table: "chat", key: "provider", control: "provider", initial: c.chat.provider, help: "The provider family. openai is OpenAI-compatible (base_url defaults to OpenRouter); anthropic uses the native Messages endpoint.", defaultHint: defaultHint(d.chat.provider) },
+        { table: "chat", key: "model", control: "str", initial: c.chat.model ?? "", placeholder: "leave blank to unset", help: "The model the chat agent uses (a Claude id, or an OpenRouter model slug for openai). Required — until set the Chat tab stays “not yet usable”.", defaultHint: defaultHint(d.chat.model) },
+        { table: "chat", key: "base_url", control: "str", initial: c.chat.base_url, placeholder: "leave blank for the default (OpenRouter)", help: "The OpenAI-compatible endpoint for the openai provider (anthropic ignores this). Leave blank to fall back to OpenRouter.", defaultHint: defaultHint(d.chat.base_url) },
       ],
     },
     {
@@ -163,6 +198,7 @@ function configGroups(c: ParsedConfig): FieldGroup[] {
           initial: c.wiki?.model ?? "",
           placeholder: "leave blank to inherit [chat].model",
           help: "The model used for wiki page synthesis, distinct from the chat model. Leave blank to fall back to [chat].model.",
+          defaultHint: defaultHint(d.wiki?.model),
         },
       ],
     },
@@ -171,11 +207,13 @@ function configGroups(c: ParsedConfig): FieldGroup[] {
 
 /** The `rules.toml` typed fields: the `[constraints]` and `[metric_thresholds]`
  *  tables. Repeated tables ([[layers]], …) are edited in the raw pane. */
-function rulesGroups(r: ParsedRules): FieldGroup[] {
+function rulesGroups(r: ParsedRules, d: RulesDefaults): FieldGroup[] {
   const con = r.constraints ?? {};
   const mt = r.metric_thresholds ?? {};
-  const cInt = (key: string, help: string): FieldDescriptor => ({ table: "constraints", key, control: "int", initial: initInt(con[key] as number | null | undefined), help });
-  const tInt = (key: string, help: string): FieldDescriptor => ({ table: "metric_thresholds", key, control: "int", initial: initInt(mt[key]), help });
+  const dc = d.constraints;
+  const dmt = d.metric_thresholds;
+  const cInt = (key: string, help: string): FieldDescriptor => ({ table: "constraints", key, control: "int", initial: initInt(con[key] as number | null | undefined), help, defaultHint: constraintHint(dc[key]) });
+  const tInt = (key: keyof typeof dmt, help: string): FieldDescriptor => ({ table: "metric_thresholds", key, control: "int", initial: initInt(mt[key]), help, defaultHint: defaultHint(dmt[key]) });
   return [
     {
       legend: "[constraints]",
@@ -186,12 +224,12 @@ function rulesGroups(r: ParsedRules): FieldGroup[] {
         cInt("no_god_files", "God-file line threshold."),
         cInt("max_fan_in", "Max fan-in."),
         cInt("max_fan_out", "Max fan-out."),
-        { table: "constraints", key: "max_dead", control: "int", initial: initMaxDead(con.max_dead), help: "Max dead symbols (absolute; delta form via the raw pane)." },
+        { table: "constraints", key: "max_dead", control: "int", initial: initMaxDead(con.max_dead), help: "Max dead symbols (absolute; delta form via the raw pane).", defaultHint: constraintHint(dc.max_dead) },
         cInt("max_duplicates", "Max duplicate blocks."),
         cInt("max_nesting_depth", "Max nesting depth."),
         cInt("max_brain_methods", "Max brain methods."),
-        { table: "constraints", key: "max_clone_ratio", control: "float", initial: initInt(con.max_clone_ratio as number | null | undefined), help: "Max clone ratio (0–1)." },
-        { table: "constraints", key: "no_god_containers", control: "bool", initial: initBool(con.no_god_containers), help: "Forbid god containers." },
+        { table: "constraints", key: "max_clone_ratio", control: "float", initial: initInt(con.max_clone_ratio as number | null | undefined), help: "Max clone ratio (0–1).", defaultHint: constraintHint(dc.max_clone_ratio) },
+        { table: "constraints", key: "no_god_containers", control: "bool", initial: initBool(con.no_god_containers), help: "Forbid god containers.", defaultHint: constraintHint(dc.no_god_containers) },
       ],
     },
     {
@@ -203,7 +241,7 @@ function rulesGroups(r: ParsedRules): FieldGroup[] {
         tInt("brain_nesting", "Brain-method nesting."),
         tInt("god_methods", "God-class method count."),
         tInt("god_span", "God-class line span."),
-        { table: "metric_thresholds", key: "clone_similarity", control: "float", initial: initInt(mt.clone_similarity), help: "Clone similarity (0–1)." },
+        { table: "metric_thresholds", key: "clone_similarity", control: "float", initial: initInt(mt.clone_similarity), help: "Clone similarity (0–1).", defaultHint: defaultHint(dmt.clone_similarity) },
         tInt("clone_min_tokens", "Clone minimum tokens."),
       ],
     },
@@ -299,6 +337,19 @@ function ResultPanel({ result }: { result: ResultMessage | null }) {
   );
 }
 
+/** The field's help text plus, when present, the server-sourced default /
+ *  recommended-baseline affordance rendered as a visually distinct trailing
+ *  span (CR-067, FR-UI-12, BR-37) — never fabricated, always the exact string
+ *  the `defaults` projection produced. */
+function fieldHint(d: FieldDescriptor): ReactNode {
+  if (!d.defaultHint) return d.help;
+  return (
+    <>
+      {d.help} <span className={styles.defaultHint}>{d.defaultHint}</span>
+    </>
+  );
+}
+
 /** Render one typed field control bound to its raw-patch handler. */
 function FieldControl({
   d,
@@ -312,12 +363,13 @@ function FieldControl({
   const handle = (e: ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     onChange(e.target.value);
   const label = d.label ?? d.key;
+  const hint = fieldHint(d);
   if (d.control === "list") {
-    return <TextareaField label={label} hint={d.help} rows={3} value={value} onChange={handle} className="mono" spellCheck={false} />;
+    return <TextareaField label={label} hint={hint} rows={3} value={value} onChange={handle} className="mono" spellCheck={false} />;
   }
   if (d.control === "bool") {
     return (
-      <SelectField label={label} hint={d.help} value={value} onChange={handle}>
+      <SelectField label={label} hint={hint} value={value} onChange={handle}>
         <option value="">(unset)</option>
         <option value="true">true</option>
         <option value="false">false</option>
@@ -326,7 +378,7 @@ function FieldControl({
   }
   if (d.control === "provider") {
     return (
-      <SelectField label={label} hint={d.help} value={value} onChange={handle}>
+      <SelectField label={label} hint={hint} value={value} onChange={handle}>
         <option value="openai">openai — OpenAI-compatible (OpenRouter by default)</option>
         <option value="anthropic">anthropic — native Messages API</option>
       </SelectField>
@@ -336,7 +388,7 @@ function FieldControl({
   return (
     <TextField
       label={label}
-      hint={d.help}
+      hint={hint}
       type={numeric ? "number" : "text"}
       {...(d.control === "float" ? { step: "any" } : {})}
       placeholder={d.placeholder}
@@ -684,10 +736,20 @@ function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
         re-evaluate the gate; that is the separate <em>Apply</em> step. A <code>rules.toml</code>{" "}
         save changes what the gate enforces, so it requires explicit confirmation.
       </Callout>
-      <FileEditor file="config" view={model.config} groups={configGroups(model.config.parsed)} isRules={false} />
+      <FileEditor
+        file="config"
+        view={model.config}
+        groups={configGroups(model.config.parsed, model.defaults.config)}
+        isRules={false}
+      />
       <GraphConsistencyCard />
       <SecretEditor initial={model.chat_key} />
-      <FileEditor file="rules" view={model.rules} groups={rulesGroups(model.rules.parsed)} isRules />
+      <FileEditor
+        file="rules"
+        view={model.rules}
+        groups={rulesGroups(model.rules.parsed, model.defaults.rules)}
+        isRules
+      />
     </div>
   );
 }

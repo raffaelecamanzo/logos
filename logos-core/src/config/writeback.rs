@@ -35,7 +35,7 @@ use super::error::ConfigError;
 use super::secrets::SECRETS_RELPATH;
 use super::{
     load_config_from_root, load_rules_from_root, load_secrets_from_root, parse_config, parse_rules,
-    Config, MaskedSecret, Rules, CONFIG_RELPATH, RULES_RELPATH,
+    Config, Constraints, MaskedSecret, MetricThresholds, Rules, CONFIG_RELPATH, RULES_RELPATH,
 };
 
 /// Which checked-in policy file a [`read_documents`]/write targets.
@@ -88,6 +88,136 @@ pub struct ConfigReadModel {
     /// [FR-CF-06]: ../../../docs/specs/requirements/FR-CF-06.md
     /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
     pub chat_key: MaskedSecret,
+
+    /// The server-computed default / recommended-baseline projection ([CR-067],
+    /// [FR-UI-12], [BR-37]) the Config editor renders beside each field's
+    /// current value. Sourced only from Rust code — the editor never fabricates
+    /// a default ([NFR-RA-05]).
+    ///
+    /// [CR-067]: ../../../docs/requests/CR-067-config-default-surfacing.md
+    /// [FR-UI-12]: ../../../docs/specs/requirements/FR-UI-12.md
+    /// [BR-37]: ../../../docs/specs/software-spec.md#326-web-ui
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    pub defaults: ConfigDefaults,
+}
+
+/// The `defaults` projection ([CR-067], [BR-37]): every value traces to a Rust
+/// code default, never a client-authored one ([NFR-RA-05]).
+///
+/// [CR-067]: ../../../docs/requests/CR-067-config-default-surfacing.md
+/// [BR-37]: ../../../docs/specs/software-spec.md#326-web-ui
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigDefaults {
+    /// `config.toml`'s real code defaults ([`Config::default`]), serialized
+    /// **whole** — the SPA reads only the fields it formifies ([CR-067] CRA-02),
+    /// so no field is hand-picked and none can silently go stale.
+    pub config: Config,
+    /// `rules.toml`'s default / recommended-baseline projection.
+    pub rules: RulesDefaults,
+}
+
+/// `rules.toml`'s default / recommended-baseline projection: real code
+/// defaults for `[metric_thresholds]`, and curated recommended baselines for
+/// `[constraints]` (which carry no code default — omitted = not enforced,
+/// [FR-CF-03]).
+///
+/// [FR-CF-03]: ../../../docs/specs/requirements/FR-CF-03.md
+#[derive(Debug, Clone, Serialize)]
+pub struct RulesDefaults {
+    /// `[metric_thresholds]` real defaults — [`Thresholds::default`] resolved
+    /// through [`MetricThresholds::effective`], keyed by the rules.toml key
+    /// names ([FR-QM-14]).
+    ///
+    /// [`Thresholds::default`]: crate::metrics::Thresholds
+    /// [FR-QM-14]: ../../../docs/specs/requirements/FR-QM-14.md
+    pub metric_thresholds: MetricThresholdDefaults,
+    /// `[constraints]` curated recommended baselines ([`Constraints::recommended`]).
+    /// **Advisory display only** — never written, never enforced, never moves
+    /// the gate ([BR-37]).
+    ///
+    /// [BR-37]: ../../../docs/specs/software-spec.md#326-web-ui
+    pub constraints: Constraints,
+}
+
+/// `[metric_thresholds]` real code defaults, keyed by the **rules.toml key
+/// names** — resolving the naming asymmetry with the engine's
+/// [`Thresholds`](crate::metrics::Thresholds) field names so the projection
+/// matches the editor's keys 1:1 ([FR-QM-14], [CR-067]).
+///
+/// [FR-QM-14]: ../../../docs/specs/requirements/FR-QM-14.md
+/// [CR-067]: ../../../docs/requests/CR-067-config-default-surfacing.md
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct MetricThresholdDefaults {
+    /// `nesting_depth` ↔ [`Thresholds::nest`](crate::metrics::Thresholds::nest).
+    pub nesting_depth: i64,
+    /// `brain_complexity` ↔ [`Thresholds::brain_cc`](crate::metrics::Thresholds::brain_cc).
+    pub brain_complexity: i64,
+    /// `brain_lines` ↔ [`Thresholds::brain_loc`](crate::metrics::Thresholds::brain_loc).
+    pub brain_lines: i64,
+    /// `brain_nesting` ↔ [`Thresholds::brain_nest`](crate::metrics::Thresholds::brain_nest).
+    pub brain_nesting: i64,
+    /// `god_methods` (same name on both sides).
+    pub god_methods: i64,
+    /// `god_span` (same name on both sides).
+    pub god_span: i64,
+    /// `clone_similarity` (same name on both sides).
+    pub clone_similarity: f64,
+    /// `clone_min_tokens` (same name on both sides).
+    pub clone_min_tokens: i64,
+}
+
+impl MetricThresholdDefaults {
+    /// Build the projection from the engine's
+    /// [`Thresholds`](crate::metrics::Thresholds) via an **exhaustive**
+    /// destructure (no `..`): a field added to or renamed in `Thresholds`
+    /// fails this to *compile* rather than silently shipping a
+    /// stale/incomplete projection over the wire — the [FR-QM-14] drift guard
+    /// [CR-067] calls for, enforced at build time rather than only at test
+    /// time.
+    ///
+    /// [FR-QM-14]: ../../../docs/specs/requirements/FR-QM-14.md
+    /// [CR-067]: ../../../docs/requests/CR-067-config-default-surfacing.md
+    fn from_thresholds(t: crate::metrics::Thresholds) -> Self {
+        let crate::metrics::Thresholds {
+            nest,
+            brain_cc,
+            brain_loc,
+            brain_nest,
+            god_methods,
+            god_span,
+            clone_similarity,
+            clone_min_tokens,
+        } = t;
+        Self {
+            nesting_depth: nest,
+            brain_complexity: brain_cc,
+            brain_lines: brain_loc,
+            brain_nesting: brain_nest,
+            god_methods,
+            god_span,
+            clone_similarity,
+            clone_min_tokens,
+        }
+    }
+
+    /// Reconstruct a [`Thresholds`](crate::metrics::Thresholds) from this
+    /// projection, exhaustively (no `..`) — the round-trip half of the drift
+    /// test: [`from_thresholds`](Self::from_thresholds) then this must be the
+    /// identity, and both directions fail to compile on an added/renamed field.
+    #[cfg(test)]
+    fn to_thresholds(self) -> crate::metrics::Thresholds {
+        crate::metrics::Thresholds {
+            nest: self.nesting_depth,
+            brain_cc: self.brain_complexity,
+            brain_loc: self.brain_lines,
+            brain_nest: self.brain_nesting,
+            god_methods: self.god_methods,
+            god_span: self.god_span,
+            clone_similarity: self.clone_similarity,
+            clone_min_tokens: self.clone_min_tokens,
+        }
+    }
 }
 
 /// One policy file's current state: repo-relative path, on-disk presence, raw
@@ -239,10 +369,23 @@ pub fn read_documents(root: &Path) -> Result<ConfigReadModel, ConfigError> {
     // the read-model (S-169, [NFR-SE-07]). A present-but-invalid secrets.toml
     // fails loud through the load path, like the policy files.
     let chat_key = load_secrets_from_root(root)?.chat_key_masked();
+    // The defaults projection is computed purely from Rust code — never from
+    // the just-loaded documents above — so it can never echo a user's current
+    // value back as a "default" (CR-067, NFR-RA-05).
+    let defaults = ConfigDefaults {
+        config: Config::default(),
+        rules: RulesDefaults {
+            metric_thresholds: MetricThresholdDefaults::from_thresholds(
+                MetricThresholds::default().effective(),
+            ),
+            constraints: Constraints::recommended(),
+        },
+    };
     Ok(ConfigReadModel {
         config,
         rules,
         chat_key,
+        defaults,
     })
 }
 
@@ -519,6 +662,93 @@ mod tests {
         assert!(!docs.rules.exists);
         assert!(docs.rules.content.is_empty());
         assert_eq!(docs.rules.parsed, Rules::default());
+    }
+
+    // ── CR-067 / BR-37: the `defaults` projection ─────────────────────────────
+
+    /// FR-UI-12/BR-37 acceptance: `read_documents` always returns the same
+    /// code-sourced `defaults`, independent of the on-disk documents — editing
+    /// the live config never perturbs what the editor calls "default"
+    /// ([NFR-RA-05]).
+    #[test]
+    fn defaults_projection_is_code_sourced_and_independent_of_the_live_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        // A live config that departs from every default/recommended value.
+        seed(dir.path(), "config.toml", "max_file_size = 1\n");
+        seed(
+            dir.path(),
+            "rules.toml",
+            "[constraints]\nmax_fan_in = 7\n[metric_thresholds]\nbrain_lines = 3\n",
+        );
+
+        let docs = read_documents(dir.path()).unwrap();
+
+        // config.toml defaults equal Config::default() whole (CR-067 CRA-02),
+        // not the just-loaded (departed) live document.
+        assert_eq!(docs.defaults.config, Config::default());
+        assert_ne!(
+            docs.defaults.config.max_file_size, docs.config.parsed.max_file_size,
+            "the default must not echo the live value"
+        );
+
+        // [metric_thresholds] defaults equal Thresholds::default(), keyed by the
+        // rules.toml key names (FR-QM-14).
+        let d = crate::metrics::Thresholds::default();
+        assert_eq!(docs.defaults.rules.metric_thresholds.nesting_depth, d.nest);
+        assert_eq!(
+            docs.defaults.rules.metric_thresholds.brain_complexity,
+            d.brain_cc
+        );
+        assert_eq!(docs.defaults.rules.metric_thresholds.brain_lines, d.brain_loc);
+        assert_ne!(
+            docs.defaults.rules.metric_thresholds.brain_lines,
+            docs.rules.parsed.metric_thresholds.brain_lines.unwrap(),
+            "the default must not echo the live (departed) brain_lines value"
+        );
+        assert_eq!(
+            docs.defaults.rules.metric_thresholds.brain_nesting,
+            d.brain_nest
+        );
+        assert_eq!(docs.defaults.rules.metric_thresholds.god_methods, d.god_methods);
+        assert_eq!(docs.defaults.rules.metric_thresholds.god_span, d.god_span);
+        assert_eq!(
+            docs.defaults.rules.metric_thresholds.clone_similarity,
+            d.clone_similarity
+        );
+        assert_eq!(
+            docs.defaults.rules.metric_thresholds.clone_min_tokens,
+            d.clone_min_tokens
+        );
+
+        // [constraints] carry the curated recommended baselines, never the live
+        // (departed) value.
+        assert_eq!(docs.defaults.rules.constraints, Constraints::recommended());
+        assert_ne!(
+            docs.defaults.rules.constraints.max_fan_in,
+            docs.rules.parsed.constraints.max_fan_in,
+            "the recommended baseline must not echo the live (departed) value"
+        );
+    }
+
+    /// FR-QM-14 drift guard ([CR-067] risk mitigation): reconstructing a
+    /// [`Thresholds`](crate::metrics::Thresholds) from the [`MetricThresholdDefaults`]
+    /// projection and comparing it to `Thresholds::default()` must round-trip
+    /// exactly. Because both [`MetricThresholdDefaults::from_thresholds`] and
+    /// [`MetricThresholdDefaults::to_thresholds`] destructure/construct
+    /// `Thresholds` exhaustively (no `..`), a field added to or renamed in
+    /// `Thresholds` without updating this module fails to **compile**, not just
+    /// to pass this test — the strongest form of "fails on drift".
+    ///
+    /// [CR-067]: ../../../../docs/requests/CR-067-config-default-surfacing.md
+    #[test]
+    fn metric_threshold_defaults_round_trip_thresholds_default() {
+        let want = crate::metrics::Thresholds::default();
+        let projection = MetricThresholdDefaults::from_thresholds(want);
+        assert_eq!(
+            projection.to_thresholds(),
+            want,
+            "the defaults projection must round-trip Thresholds::default() exactly"
+        );
     }
 
     #[test]

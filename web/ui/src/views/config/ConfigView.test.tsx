@@ -49,6 +49,47 @@ function model(): ConfigReadModel {
       parsed: { constraints: {}, metric_thresholds: {} },
     },
     chat_key: { present: true, last4: "9f3a" },
+    // The CR-067/BR-37 defaults projection: config.toml real defaults, plus
+    // rules.toml real [metric_thresholds] defaults / [constraints] recommended
+    // baselines — mirroring what the server's Config::default() /
+    // Thresholds::default() / Constraints::recommended() actually produce.
+    defaults: {
+      config: {
+        languages: [],
+        include: ["**"],
+        exclude: ["generated/**"],
+        max_file_size: 2097152,
+        framework_hints: [],
+        chat: { provider: "openai", model: null, base_url: "https://openrouter.ai/api/v1" },
+        wiki: {},
+      },
+      rules: {
+        metric_thresholds: {
+          nesting_depth: 4,
+          brain_complexity: 15,
+          brain_lines: 100,
+          brain_nesting: 3,
+          god_methods: 20,
+          god_span: 500,
+          clone_similarity: 0.85,
+          clone_min_tokens: 50,
+        },
+        constraints: {
+          max_cycles: 0,
+          max_cc: 15,
+          max_fn_lines: 80,
+          no_god_files: 40,
+          max_fan_in: 30,
+          max_fan_out: 30,
+          max_dead: 0,
+          max_duplicates: 0,
+          max_nesting_depth: 4,
+          max_brain_methods: 0,
+          max_clone_ratio: 0.0,
+          no_god_containers: true,
+        },
+      },
+    },
   };
 }
 
@@ -99,6 +140,17 @@ function renderView() {
 /** The config.toml raw pane (the authoritative candidate). */
 function configRaw(): HTMLTextAreaElement {
   return screen.getByLabelText(/Raw TOML — config\.toml/) as HTMLTextAreaElement;
+}
+
+/** The rendered hint text (help + default/recommended affordance) for the
+ *  field labelled `label` — resolved via `aria-describedby` so fields sharing
+ *  an identical hint string (e.g. two `[constraints]` recommended at 30) are
+ *  disambiguated by their own control. */
+function fieldHintText(label: string): string {
+  const control = screen.getByLabelText(label);
+  const describedBy = control.getAttribute("aria-describedby");
+  expect(describedBy).toBeTruthy();
+  return document.getElementById(describedBy!)!.textContent ?? "";
 }
 
 describe("ConfigView typed/raw round-trip (FR-UI-12)", () => {
@@ -206,6 +258,58 @@ describe("ConfigView [wiki] model field (S-224, FR-CF-07, FR-UI-12)", () => {
 
     expect(screen.getByText("[wiki]")).toBeInTheDocument();
     expect((screen.getByLabelText("wiki model") as HTMLInputElement).value).toBe("");
+  });
+});
+
+describe("ConfigView default / recommended-baseline affordance (CR-067, FR-UI-12, BR-37)", () => {
+  it("renders the config.toml code default beside its current value", async () => {
+    mockFetch({});
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+
+    // Config::default().max_file_size == 2 MiB — a real code default, plainly stated.
+    expect(fieldHintText("max_file_size")).toContain("Default: 2097152");
+  });
+
+  it("renders the [metric_thresholds] real code default beside its current value", async () => {
+    mockFetch({});
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+
+    // Thresholds::default() via MetricThresholds::effective(), keyed by the
+    // rules.toml name (nesting_depth), not the engine field name (nest).
+    expect(fieldHintText("nesting_depth")).toContain("Default: 4");
+    expect(fieldHintText("brain_lines")).toContain("Default: 100");
+  });
+
+  it("states [constraints] have no code default and shows the recommended baseline", async () => {
+    mockFetch({});
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+
+    // Constraints have no code default (unset = not enforced); the curated
+    // Constraints::recommended() baseline is shown alongside, never blurred
+    // into a fabricated "default" (BR-37, e.g. max_fan_in -> 30).
+    expect(fieldHintText("max_fan_in")).toContain("Default: unset → not enforced · Recommended: 30");
+    expect(fieldHintText("max_fan_out")).toContain("Default: unset → not enforced · Recommended: 30");
+    expect(fieldHintText("max_cc")).toContain("Recommended: 15");
+    expect(fieldHintText("no_god_containers")).toContain("Recommended: true");
+    // max_dead is the one constraint backed by the untagged MaxDead enum
+    // (Absolute(u32) | Baseline{baseline,delta}) — its recommended baseline
+    // (Absolute(0)) must still render as a plain number, not "[object Object]".
+    expect(fieldHintText("max_dead")).toContain("Recommended: 0");
+  });
+
+  it("never fabricates a default when the field has none in the projection", async () => {
+    mockFetch({});
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+
+    // [chat].model and [wiki].model both have no code default (the
+    // configure-first / inherit-from-[chat] states) — the hint states that
+    // honestly rather than inventing a value, for both fields.
+    expect(fieldHintText("model")).toContain("Default: unset");
+    expect(fieldHintText("wiki model")).toContain("Default: unset");
   });
 });
 

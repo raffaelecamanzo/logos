@@ -47,8 +47,37 @@ function config(opts: {
     },
     rules: { path: ".logos/rules.toml", exists: false, content: "", parsed: { constraints: {}, metric_thresholds: {} } },
     chat_key: { present: opts.keyPresent ?? true, last4: opts.keyPresent === false ? null : "9f3a" },
+    defaults: DEFAULTS_FIXTURE,
   };
 }
+
+/** A minimal but shape-complete `defaults` projection (CR-067/BR-37) — this
+ *  suite doesn't exercise default-rendering, so the values only need to match
+ *  the wire shape, not the real server-computed numbers. */
+const DEFAULTS_FIXTURE: ConfigReadModel["defaults"] = {
+  config: {
+    languages: [],
+    include: ["**"],
+    exclude: [],
+    max_file_size: 2097152,
+    framework_hints: [],
+    chat: { provider: "openai", model: null, base_url: "https://openrouter.ai/api/v1" },
+    wiki: {},
+  },
+  rules: {
+    metric_thresholds: {
+      nesting_depth: 4,
+      brain_complexity: 15,
+      brain_lines: 100,
+      brain_nesting: 3,
+      god_methods: 20,
+      god_span: 500,
+      clone_similarity: 0.85,
+      clone_min_tokens: 50,
+    },
+    constraints: {},
+  },
+};
 
 describe("applyWikiFrame — per-run reducer (S-178, FR-WK-18, NFR-CC-04)", () => {
   it("folds a full run: started → page-started → page-written → completed", () => {

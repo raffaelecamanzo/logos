@@ -59,6 +59,16 @@
   line-height: var(--leading-base);
 }
 
+/* The server-sourced default / recommended-baseline affordance beside a
+ * field's help text (CR-067, FR-UI-12, BR-37) — visually distinct (mono,
+ * block) but never a separate color-only signal. */
+.defaultHint {
+  display: block;
+  margin-top: var(--space-1);
+  font-family: var(--font-mono);
+  color: var(--text-2);
+}
+
 .actions {
   display: flex;
   gap: var(--space-3);
