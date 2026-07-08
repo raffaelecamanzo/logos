@@ -279,18 +279,42 @@ pub(crate) fn discover_with_threads(
     if let Some(doc_globs) = doc_globs.as_ref() {
         follow_dirs.sort();
         follow_dirs.dedup();
-        let scope = DocFollow {
-            root: root_ref,
-            include: include_ref,
-            exclude: exclude_ref,
-            ignored_dirs: &ignored_dirs,
-            max_file_size,
-            doc_globs,
-        };
-        for (link, target) in &follow_dirs {
-            let (sub_files, sub_oversize) = discover_followed_symlink(&scope, link, target);
-            files.extend(sub_files);
-            skipped_oversize.extend(sub_oversize);
+        if !follow_dirs.is_empty() {
+            let scope = DocFollow {
+                root: root_ref,
+                include: include_ref,
+                exclude: exclude_ref,
+                ignored_dirs: &ignored_dirs,
+                max_file_size,
+                doc_globs,
+            };
+            // Dedup followed files by their CANONICAL (symlink-resolved) path,
+            // against the real paths the main pass already yielded and against one
+            // another. [FR-IX-10] permits following a directory symlink whose
+            // target is within the project root, but such an in-tree symlink only
+            // aliases content the main walk already indexed under its real path —
+            // without this, an aliasing symlink (`docs/latest -> specs`, or the
+            // degenerate `docs/all -> .`) would emit duplicate doc nodes under a
+            // second root-relative key. The main pass's paths are real (the walk
+            // never follows a link), so they are their own canonical form; seeding
+            // `seen` with them makes an alias collide and drop. `follow_dirs` is
+            // sorted, so which alias wins is deterministic (NFR-RA-06).
+            let mut seen: HashSet<PathBuf> = files.iter().cloned().collect();
+            for (link, target) in &follow_dirs {
+                let (sub_files, sub_oversize) = discover_followed_symlink(&scope, link, target);
+                for f in sub_files {
+                    let canonical = f.canonicalize().unwrap_or_else(|_| f.clone());
+                    if seen.insert(canonical) {
+                        files.push(f);
+                    }
+                }
+                for o in sub_oversize {
+                    let canonical = o.path.canonicalize().unwrap_or_else(|_| o.path.clone());
+                    if seen.insert(canonical) {
+                        skipped_oversize.push(o);
+                    }
+                }
+            }
         }
     }
 
@@ -913,6 +937,77 @@ mod tests {
             !rels.iter().any(|r| r.starts_with("docs/specs")),
             "with no sanctioned root the out-of-root docs symlink is skipped: {rels:?}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn in_tree_alias_symlink_does_not_duplicate_docs() {
+        // An in-tree directory symlink (target within the project root) is
+        // followable per FR-IX-10, but its content is already indexed by the main
+        // pass under the real path — so the followed alias must NOT produce a
+        // duplicate doc node under a second key (canonical-path dedup).
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join("docs/real/guide.md"), "# Guide\n");
+        // `docs/alias -> docs/real` (target within the project root) and the
+        // degenerate `docs/all -> .` (target = the root itself).
+        symlink(root.join("docs/real"), root.join("docs/alias")).unwrap();
+        symlink(&root, root.join("docs/all")).unwrap();
+
+        let report = discover_with_threads(&root, &Config::default(), 0).unwrap();
+        let rels: Vec<String> = report
+            .files
+            .iter()
+            .map(|p| to_forward_slash(p.strip_prefix(&root).unwrap()))
+            .collect();
+
+        assert!(rels.contains(&"docs/real/guide.md".to_string()), "real doc indexed: {rels:?}");
+        // Exactly one occurrence of the physical doc — no aliased duplicates under
+        // `docs/alias/…` or `docs/all/…`.
+        assert_eq!(
+            rels.iter().filter(|r| r.ends_with("guide.md")).count(),
+            1,
+            "the aliased doc must not be indexed twice: {rels:?}"
+        );
+        assert!(
+            !rels.iter().any(|r| r.starts_with("docs/alias") || r.starts_with("docs/all")),
+            "aliased in-tree paths are deduped away: {rels:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn nested_symlink_inside_sanctioned_tree_is_not_followed() {
+        // The carve-out is exactly one hop deep: a nested symlink INSIDE the
+        // followed sanctioned tree, pointing back out, must not be chained through
+        // (NFR-SE-04 as amended — no escape via a second hop).
+        use std::os::unix::fs::symlink;
+
+        let (_tmp, root, sanctioned) = build_symlink_fixture();
+        // An escaping directory holding an admissible doc, linked from *inside*
+        // the sanctioned tree that `docs/specs` points at.
+        let outside = tempfile::tempdir().unwrap();
+        let outside = outside.path().canonicalize().unwrap();
+        write(&outside.join("secret.md"), "# secret\n");
+        symlink(&outside, sanctioned.join("specs/nested_leak")).unwrap();
+
+        let report = discover_with_threads(&root, &Config::default(), 0).unwrap();
+        let rels: BTreeSet<String> = report
+            .files
+            .iter()
+            .map(|p| to_forward_slash(p.strip_prefix(&root).unwrap()))
+            .collect();
+
+        assert!(rels.contains("docs/specs/ADR-46.md"), "the sanctioned doc is followed");
+        assert!(
+            !rels.iter().any(|r| r.contains("secret.md")),
+            "a nested symlink inside the sanctioned tree is not chained through: {rels:?}"
+        );
+        for f in &report.files {
+            assert!(f.starts_with(&root), "{f:?} escaped {root:?}");
+        }
     }
 
     #[test]
