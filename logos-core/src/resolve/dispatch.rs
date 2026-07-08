@@ -490,41 +490,35 @@ fn collect_handoffs(call: Node<'_>, src: &[u8], out: &mut BTreeSet<String>) {
     let Some(args) = call.child_by_field_name("arguments") else {
         return;
     };
-    match function.kind() {
-        // `from_fn(h)` / `middleware::from_fn(h)` / `from_fn_with_state(state, h)`
-        // — distinctive axum names, recognised wherever they appear.
-        "identifier" | "scoped_identifier" => {
-            let head = last_path_segment(node_text(function, src));
-            let slot = if head == MIDDLEWARE_FROM_FN {
-                0
-            } else if head == MIDDLEWARE_FROM_FN_WITH_STATE {
-                1
-            } else {
-                return;
-            };
-            if let Some(name) = ident_arg_name(args, slot, src) {
+    // `.fallback(h)` / `.route(path, <method-router>)` — a method call whose field
+    // names the fallback setter or a route registration.
+    if function.kind() == "field_expression" {
+        let field = function
+            .child_by_field_name("field")
+            .map(|f| node_text(f, src));
+        if field == Some(ROUTER_FALLBACK) {
+            if let Some(name) = ident_arg_name(args, 0, src) {
                 out.insert(name);
             }
-        }
-        "field_expression" => {
-            let Some(field) = function.child_by_field_name("field") else {
-                return;
-            };
-            let field = node_text(field, src);
-            if field == ROUTER_FALLBACK {
-                // `.fallback(h)` — handler is argument 0.
-                if let Some(name) = ident_arg_name(args, 0, src) {
-                    out.insert(name);
-                }
-            } else if field == ROUTER_REGISTER {
-                // `.route(path, <method-router>)` — walk the second argument, the
-                // (possibly chained) method-router carrying the handlers.
-                if let Some(router) = args.named_child(1) {
-                    collect_method_router_handlers(router, src, out);
-                }
+        } else if field == Some(ROUTER_REGISTER) {
+            // The second argument is the (possibly chained) method-router.
+            if let Some(router) = args.named_child(1) {
+                collect_method_router_handlers(router, src, out);
             }
         }
-        _ => {}
+        return;
+    }
+    // `from_fn(h)` / `middleware::from_fn(h)` / `from_fn_with_state(state, h)` — a
+    // plain path call with a distinctive head, recognised wherever it appears.
+    // `from_fn` puts the handler at argument 0, `from_fn_with_state` at 1 (its
+    // first argument is the shared state).
+    let slot = match call_head_segment(function, src) {
+        Some(MIDDLEWARE_FROM_FN) => 0,
+        Some(MIDDLEWARE_FROM_FN_WITH_STATE) => 1,
+        _ => return,
+    };
+    if let Some(name) = ident_arg_name(args, slot, src) {
+        out.insert(name);
     }
 }
 
@@ -548,43 +542,47 @@ fn collect_method_router_handlers(node: Node<'_>, src: &[u8], out: &mut BTreeSet
         return;
     };
     let args = node.child_by_field_name("arguments");
-    match function.kind() {
-        // The chain head: `get(h)` / `axum::routing::get(h)`.
-        "identifier" | "scoped_identifier" => {
-            if ROUTER_METHOD_HEADS.contains(&last_path_segment(node_text(function, src))) {
-                if let Some(name) = args.and_then(|a| ident_arg_name(a, 0, src)) {
-                    out.insert(name);
-                }
+    // A chained link `<receiver>.method(h)`: walk the receiver first, then take
+    // this link's handler when its field is a method-router setter.
+    if function.kind() == "field_expression" {
+        if let Some(receiver) = function.child_by_field_name("value") {
+            collect_method_router_handlers(receiver, src, out);
+        }
+        let is_setter = function
+            .child_by_field_name("field")
+            .is_some_and(|f| ROUTER_METHOD_HEADS.contains(&node_text(f, src)));
+        if is_setter {
+            if let Some(name) = args.and_then(|a| ident_arg_name(a, 0, src)) {
+                out.insert(name);
             }
         }
-        // A turbofished head: `get::<T>(h)`.
-        "generic_function" => {
-            if let Some(inner) = function.child_by_field_name("function") {
-                if matches!(inner.kind(), "identifier" | "scoped_identifier")
-                    && ROUTER_METHOD_HEADS.contains(&last_path_segment(node_text(inner, src)))
-                {
-                    if let Some(name) = args.and_then(|a| ident_arg_name(a, 0, src)) {
-                        out.insert(name);
-                    }
-                }
-            }
-        }
-        // A chained link `<receiver>.method(h)`: walk the receiver, then take this
-        // link's handler when its field is a method-router setter.
-        "field_expression" => {
-            if let Some(receiver) = function.child_by_field_name("value") {
-                collect_method_router_handlers(receiver, src, out);
-            }
-            if let Some(field) = function.child_by_field_name("field") {
-                if ROUTER_METHOD_HEADS.contains(&node_text(field, src)) {
-                    if let Some(name) = args.and_then(|a| ident_arg_name(a, 0, src)) {
-                        out.insert(name);
-                    }
-                }
-            }
-        }
-        _ => {}
+        return;
     }
+    // The chain head: `get(h)` / `axum::routing::get(h)` / `get::<T>(h)`.
+    if call_head_segment(function, src).is_some_and(|h| ROUTER_METHOD_HEADS.contains(&h)) {
+        if let Some(name) = args.and_then(|a| ident_arg_name(a, 0, src)) {
+            out.insert(name);
+        }
+    }
+}
+
+/// The last `::` segment of a call's function head when it is a plain or
+/// turbofished path — `get` for `get(h)`, `axum::routing::get`, or `get::<T>(h)`;
+/// `None` for a method call (`field_expression`) or any other callee shape.
+fn call_head_segment<'s>(function: Node<'_>, src: &'s [u8]) -> Option<&'s str> {
+    let path = match function.kind() {
+        "identifier" | "scoped_identifier" => function,
+        // A turbofished head unwraps to its inner path (`get::<T>` → `get`).
+        "generic_function" => {
+            let inner = function.child_by_field_name("function")?;
+            if !matches!(inner.kind(), "identifier" | "scoped_identifier") {
+                return None;
+            }
+            inner
+        }
+        _ => return None,
+    };
+    Some(last_path_segment(node_text(path, src)))
 }
 
 /// The last `::` segment of the `n`-th named argument (0-based) when it is an
