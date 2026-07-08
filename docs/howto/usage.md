@@ -128,7 +128,13 @@ by each relation's payload token), read live from the graph.
 >   a bare `x.map()` to a lone same-named `fn map` in another module is gated off
 >   for the method form ([CR-066](../requests/CR-066-receiver-method-overbinding.md),
 >   [FR-RS-06](../specs/requirements/FR-RS-06.md)), so these calls no longer
->   fabricate cross-module `Calls` edges — they stay in `unresolved_refs`.
+>   fabricate cross-module `Calls` edges — they stay in `unresolved_refs`. A
+>   bare-path call (`foo()`, single segment) is complementary: when a free
+>   function and same-named associated methods both exist at the call scope, the
+>   free function wins the tie ([CR-068](../requests/CR-068-reachability-binding-precision.md)
+>   Part B, [FR-RS-07](../specs/requirements/FR-RS-07.md)) — recovering the
+>   correct target instead of leaving it ambiguous — while a scope with only the
+>   method(s) still binds them (a strictly additive tie-break, never a drop).
 > - **Ambiguous doc/prose tokens.** Doc→code links bind only on *exactly one*
 >   candidate. Common words that appear in prose but match zero or many code
 >   symbols (`index`, `sync`, `node`, `context`, …) correctly bind to nothing.

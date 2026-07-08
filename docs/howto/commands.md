@@ -459,13 +459,20 @@ filesystem walk — O(files) matcher checks against the already-indexed paths),
 cheap enough to run after every `index`/`sync` as a debug-build assertion.
 Drift exits 1.
 
-`--json` adds two additive fields alongside the pre-existing structural ones
+`--json` adds three additive fields alongside the pre-existing structural ones
 (`node_count`, `distinct_symbol_ids`, `duplicate_symbol_nodes`,
 `dangling_file_refs`, `dangling_edge_endpoints`, `orphan_shingles`): the exact,
 never-truncated `unadmitted_files` count and a capped, lexically-ordered
-`unadmitted_sample` of the offending paths. A full `logos index` purges every
-unadmitted file (its inbound edges return to `unresolved_refs`), healing the
-drift.
+`unadmitted_sample` of the offending paths, plus a **diagnostic-only**
+`doc_symlink_warnings` array. Each entry names a documentation directory-symlink
+that exists under your doc-include set but ended up **unindexed** — either
+because no sanctioned docs root (`.swe-skills`) is configured, or because the
+symlink target escapes the sanctioned containment (see
+[configuration.md § Documentation](configuration.md#documentation--indexing-markdown)).
+It is advisory: a populated `doc_symlink_warnings` **never** flips `ok` to `false`
+or changes the exit status — it flags docs you likely meant to index but aren't.
+A full `logos index` purges every unadmitted file (its inbound edges return to
+`unresolved_refs`), healing the admission drift.
 
 The same verdict is folded into `health` and — critically — **hard-fails the
 quality gate**: `check` (as `check_rules`, under a distinct

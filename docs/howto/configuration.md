@@ -199,6 +199,28 @@ excluded from every quality metric and governance constraint, so adding or
 removing documentation leaves the `gate`/`session_end` signal byte-identical
 (the same way test code is excluded — see [metrics.md](metrics.md)).
 
+### External docs behind a git-ignored symlink
+
+Some repos keep their working docs *outside* the code tree and expose them
+through an in-repo directory-symlink — e.g. `docs/specs → ../logos-docs/specs`
+— while **git-ignoring** that symlink so the external docs never enter version
+control. A `.swe-skills` file at the repo root **sanctions** one such external
+docs root. Discovery follows a sanctioned, *contained* doc symlink one hop and
+indexes the markdown behind it **even when the symlink is git-ignored** — so
+your specs, planning, and request docs are graphed on the same checkout that
+keeps them out of git. Only the sanctioned root is followed (never inferred),
+only the documentation subtree is walked (source-code symlinks are still
+skipped wholesale), and a target that escapes the sanctioned containment is
+**refused, not followed**.
+
+When a doc directory-symlink under your include set ends up **unindexed** —
+because no `.swe-skills` sanction exists, or the target escapes containment —
+`index`/`sync` emit a warning naming the path and reason, and `logos doctor`
+surfaces the same list in its `doc_symlink_warnings` field
+([commands.md § doctor](commands.md#doctor)). This is purely diagnostic: it
+never fails the gate, flips `doctor`'s `ok`, or changes an exit status — it just
+flags documentation you probably meant to index but isn't.
+
 ## Configuration & artifact graph — indexing config and infra files
 
 The `[config_artifacts]` table controls a third indexing layer (beside code and
