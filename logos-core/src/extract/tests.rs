@@ -907,21 +907,22 @@ impl Greet for S {
 }
 ";
     let facts = extract_src("src/lib.rs", src);
-    // Two `hello` nodes exist (the trait default and the impl method); at least
-    // one is a Method (the impl one) and at least one is a Function (the default).
-    let hellos: Vec<NodeKind> = facts
-        .nodes
-        .iter()
-        .filter(|n| n.name == "hello")
-        .map(|n| n.kind)
-        .collect();
-    assert!(
-        hellos.contains(&NodeKind::Method),
-        "the trait-impl `hello` must be a Method, got {hellos:?}"
+    // Two `hello` nodes exist; assert the mapping by *identity*, not set
+    // membership — the earlier-declared node is the trait default (line 2) and
+    // must stay `Function`; the later one is the trait-impl method and must be
+    // `Method`. (A set-membership check would pass even if the two were swapped.)
+    let mut hellos: Vec<&NodeFact> = facts.nodes.iter().filter(|n| n.name == "hello").collect();
+    hellos.sort_by_key(|n| n.start_line);
+    assert_eq!(hellos.len(), 2, "one trait-default + one trait-impl `hello`");
+    assert_eq!(
+        hellos[0].kind,
+        NodeKind::Function,
+        "the trait *default* `hello` (declared first) must stay a Function"
     );
-    assert!(
-        hellos.contains(&NodeKind::Function),
-        "the trait *default* `hello` must stay a Function, got {hellos:?}"
+    assert_eq!(
+        hellos[1].kind,
+        NodeKind::Method,
+        "the trait-impl `hello` (declared later) must be a Method"
     );
     assert_eq!(
         kind_of(&facts, "local"),
