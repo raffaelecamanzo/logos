@@ -178,9 +178,6 @@ struct HookSpec {
     settings_rel: &'static str,
     /// The Claude Code hook event the entry registers under (e.g. `SessionEnd`).
     event: &'static str,
-    /// The matcher narrowing which events fire the hook, or `None` to match all
-    /// — SessionEnd has no tool to match on, so the script self-gates.
-    matcher: Option<&'static str>,
     /// The wired command (uses the `${CLAUDE_PROJECT_DIR}` placeholder).
     command: &'static str,
     /// The idempotency / ownership marker: our unique script basename, found in
@@ -198,7 +195,6 @@ const QUALITY_REPORT_SPEC: HookSpec = HookSpec {
     script_rel: QUALITY_REPORT_HOOK_SCRIPT_REL,
     settings_rel: SETTINGS_REL,
     event: "SessionEnd",
-    matcher: None,
     command: QUALITY_REPORT_HOOK_COMMAND,
     marker: QUALITY_REPORT_HOOK_MARKER,
     script: QUALITY_REPORT_HOOK_SCRIPT,
@@ -325,19 +321,13 @@ fn write_script(base: &Path, spec: &HookSpec) -> Result<()> {
     Ok(())
 }
 
-/// The settings entry this hook installs. An entry with a matcher carries its
-/// tool matcher; a matcher-less event (SessionEnd) matches every occurrence and
-/// the script self-gates.
+/// The settings entry this hook installs. Matcher-less — SessionEnd (the only
+/// event materialized today) has no tool to match on, so it fires on every
+/// occurrence and the script self-gates.
 fn hook_entry(spec: &HookSpec) -> Value {
-    match spec.matcher {
-        Some(matcher) => json!({
-            "matcher": matcher,
-            "hooks": [ { "type": "command", "command": spec.command } ],
-        }),
-        None => json!({
-            "hooks": [ { "type": "command", "command": spec.command } ],
-        }),
-    }
+    json!({
+        "hooks": [ { "type": "command", "command": spec.command } ],
+    })
 }
 
 /// Does this hook entry belong to us? An entry is ours when any of its `hooks`
