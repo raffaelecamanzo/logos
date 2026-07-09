@@ -190,6 +190,18 @@ fn run_eval_redundancy(
     compiled: &CompiledRules,
     function_metrics: &[FunctionMetricRow],
 ) -> (Vec<Violation>, u32) {
+    run_eval_redundancy_scoped(compiled, function_metrics, &[])
+}
+
+/// Evaluate the redundancy budgets with `test_node_ids` supplied (the
+/// [CR-074] production-scoped path).
+///
+/// [CR-074]: ../../../docs/requests/CR-074-redundancy-budget-production-scope.md
+fn run_eval_redundancy_scoped(
+    compiled: &CompiledRules,
+    function_metrics: &[FunctionMetricRow],
+    test_node_ids: &[NodeId],
+) -> (Vec<Violation>, u32) {
     evaluate(&EvalInput {
         compiled,
         nodes: &[],
@@ -197,7 +209,7 @@ fn run_eval_redundancy(
         functions: &[],
         function_metrics,
         annotations: &[],
-        test_node_ids: &[],
+        test_node_ids,
         cycles: 0,
         thresholds: crate::metrics::Thresholds::default(),
     })
@@ -730,6 +742,59 @@ fn redundancy_budgets_count_dead_and_duplicates_project_wide() {
     let (clean, checked) = run_eval_redundancy(&lenient, &metrics);
     assert!(clean.is_empty(), "counts under ceilings → no violation");
     assert_eq!(checked, 2);
+}
+
+/// [CR-074]/[FR-QM-08]: `max_dead`/`max_duplicates` are production-scoped —
+/// an `is_test` function's dead/duplicate verdict does not count toward
+/// either ceiling, exactly matching the Redundancy metric's own scope
+/// ([FR-QM-05]) so the budget and the metric agree by construction.
+///
+/// [FR-QM-05]: ../../../docs/specs/requirements/FR-QM-05.md
+/// [CR-074]: ../../../docs/requests/CR-074-redundancy-budget-production-scope.md
+#[test]
+fn redundancy_budgets_exclude_test_functions_from_both_counts() {
+    // 3 dead (#1,#2,#3), 2 duplicate (#3,#4) project-wide; #2 and #4 are test
+    // functions, so production scope leaves 2 dead (#1,#3) and 1 duplicate (#3).
+    let metrics = [
+        metric_row(1, true, false),
+        metric_row(2, true, false),
+        metric_row(3, true, true),
+        metric_row(4, false, true),
+    ];
+    let test_ids = [NodeId(2), NodeId(4)];
+
+    let compiled = constraints_only(Constraints {
+        max_dead: Some(MaxDead::Absolute(1)),
+        max_duplicates: Some(0),
+        ..Constraints::default()
+    });
+    let (violations, checked) = run_eval_redundancy_scoped(&compiled, &metrics, &test_ids);
+    assert_eq!(checked, 2, "both redundancy budgets are active");
+    let rules_hit: Vec<&str> = violations.iter().map(|v| v.rule.as_str()).collect();
+    assert_eq!(
+        rules_hit,
+        ["max_dead", "max_duplicates"],
+        "the production-scoped counts (2 dead, 1 duplicate) still exceed the tight ceilings"
+    );
+    assert!(
+        violations[0].message.contains("2 dead functions"),
+        "test functions #2 must not inflate the dead count: {}",
+        violations[0].message
+    );
+    assert!(
+        violations[1].message.contains("1 duplicate functions"),
+        "test function #4 must not inflate the duplicate count: {}",
+        violations[1].message
+    );
+
+    // Confirm the difference is attributable to the production filter alone:
+    // over the SAME rows without `test_node_ids`, the project-wide counts
+    // (3 dead, 2 duplicate) are what fire.
+    let (unscoped, _) = run_eval_redundancy(&compiled, &metrics);
+    let unscoped_rules: Vec<&str> = unscoped.iter().map(|v| v.rule.as_str()).collect();
+    assert_eq!(unscoped_rules, ["max_dead", "max_duplicates"]);
+    assert!(unscoped[0].message.contains("3 dead functions"));
+    assert!(unscoped[1].message.contains("2 duplicate functions"));
 }
 
 /// FR-GV-11 / CR-043 / ADR-39: in delta-from-blessed-baseline mode the gate fails

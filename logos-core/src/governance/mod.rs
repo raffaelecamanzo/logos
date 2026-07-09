@@ -949,25 +949,30 @@ fn module_coupling_violations(
         .collect()
 }
 
-/// Redundancy budgets (project-wide is_dead / is_duplicate, FR-GV-11).
+/// Redundancy budgets (production-scope is_dead / is_duplicate, FR-GV-11).
 ///
 /// Counted over the SAME annotation rows the Redundancy metric reads
-/// ([FR-QM-05]) — Function/Method nodes, derived excluded — so the budget and
-/// the metric agree by construction. One project-wide violation per budget (no
-/// per-symbol enumeration).
+/// ([FR-QM-05]) — Function/Method nodes, `is_test` and derived excluded
+/// ([FR-QM-08]) — so the budget and the metric agree by construction. One
+/// project-wide violation per budget (no per-symbol enumeration).
 fn check_redundancy(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
     let mut violations = Vec::new();
     let mut checked = 0u32;
     let constraints = &input.compiled.rules.constraints;
+    let test_ids: HashSet<NodeId> = input.test_node_ids.iter().copied().collect();
+    let production_fns = || {
+        input
+            .function_metrics
+            .iter()
+            .filter(|f| !test_ids.contains(&f.id))
+    };
 
     if let Some(budget) = &constraints.max_dead {
         checked += 1;
         // NULL (`is_dead = None`) is excluded for free — only `Some(true)` counts
         // ([CR-043], [ADR-39]): a language without the reachability capability
         // renders NULL and never inflates the budget.
-        let dead = input
-            .function_metrics
-            .iter()
+        let dead = production_fns()
             .filter(|f| f.is_dead == Some(true))
             .count() as u64;
         // Both modes route through the one budget seam ([FR-GV-11], [ADR-39]):
@@ -987,9 +992,7 @@ fn check_redundancy(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
     }
     if let Some(max) = constraints.max_duplicates {
         checked += 1;
-        let duplicates = input
-            .function_metrics
-            .iter()
+        let duplicates = production_fns()
             .filter(|f| f.is_duplicate == Some(true))
             .count() as u64;
         if duplicates > u64::from(max) {
