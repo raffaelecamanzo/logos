@@ -19,13 +19,14 @@ publish = false
 # `publish = false` keeps it off crates.io, so dist needs the explicit opt-in.
 [package.metadata.dist]
 dist = true
-# Release artifacts enable the `ui` feature (CR-012, ADR-27) so the brew/curl
-# binary carries the localhost web dashboard (`serve --ui`). cargo-dist's `dist
-# build` reads feature selection here, not from CI flags; without this key it
-# would compile only the default set (`lang-all`) and ship a UI-less binary.
-# The default-feature tree (the no-network fitness test / cargo-deny scope)
-# is unchanged — this affects only the dist artifact.
-features = ["ui"]
+# `ui` joined the default feature set below (S-287, CR-078/ADR-60), so the
+# `features = ["ui"]` opt-in that used to live here is redundant — a plain
+# `cargo build`/`cargo install` already ships the dashboard. Release artifacts
+# instead enable `agents`, the strict superset that additionally turns on the
+# chat + in-app wiki-generation agent surface (`rig`/`reqwest`), so the shipped
+# binary keeps both the dashboard and chat/wiki generation (FR-DS-01) exactly
+# as before CR-078 carved the egress client out of `ui`.
+features = ["agents"]
 
 # The single `logos` binary target (ADR-16, NFR-PC-01).
 [[bin]]
@@ -38,17 +39,24 @@ path = "src/main.rs"
 # development builds (`--no-default-features --features lang-rust`). Feature
 # lines forward to BOTH paths into logos-core (direct and via mcp) so the
 # grammar set unifies regardless of which seam pulls it in.
-default   = ["lang-all"]
+#
+# `ui` joined the default set (S-287, CR-078/ADR-60): the no-network fitness
+# function that used to guard the DEFAULT tree now moves to guarding the SLIM
+# tree instead (`--no-default-features --features lang-all`, S-288) — a plain
+# `cargo build`/`cargo install` ships the dashboard, and the offline-by-default
+# invariant (NFR-SE-01) is enforced over the slim build rather than this one.
+default   = ["lang-all", "ui"]
 # The `web?/lang-*` weak-forward lines reach the web adapter's logos-core path
 # only when the `ui` feature has pulled it in, keeping the grammar set unified
 # across every seam (the mcp pattern, extended to the third adapter, CR-012).
 lang-rust = ["logos-core/lang-rust", "mcp/lang-rust", "web?/lang-rust"]
 lang-all  = ["logos-core/lang-all", "mcp/lang-all", "web?/lang-all"]
-# CR-012/ADR-27: the localhost web UI. NON-DEFAULT — enabling it links the axum
-# web surface into the binary (`serve --ui`/`--port`); the default build has no
-# `--ui` flag and no networking crate (NFR-SE-01). `ui` alone is the listen-only
-# dashboard (graph/query/wiki-**view**): since CR-078/ADR-60 it carries NO agent
-# crate and NO `rig`/`reqwest` egress client — those live behind `agents`.
+# CR-012/ADR-27, re-layered by CR-078/ADR-60: the localhost web UI. Enabling it
+# links the axum web surface into the binary (`serve --ui`/`--port`); since
+# CR-078/ADR-60 it is default and egress-free — it carries NO agent crate and
+# NO `rig`/`reqwest` egress client (those live behind `agents`). The slim,
+# listener-free build stays reachable via `--no-default-features --features
+# lang-all` (no `--ui`, no axum/hyper in the dependency tree, NFR-SE-01).
 ui        = ["dep:web"]
 # CR-078/ADR-60: the consent-gated LLM egress surface. A strict SUPERSET of `ui`
 # — it turns on the dashboard AND the chat + in-app wiki-generation agent surface
@@ -65,10 +73,11 @@ logos-core = { path = "../logos-core", default-features = false }
 # the serve arm calls `mcp::serve_stdio(root)` and maps Err → exit 3). Grammar
 # features stay controlled by this crate's feature lines above.
 mcp        = { path = "../mcp", default-features = false }
-# The feature-gated web adapter (CR-012, ADR-27) — optional, behind `ui`. As an
-# optional dependency it appears in Cargo.lock, but it is not activated for the
-# default `logos` build, so it is absent from the default-feature dependency
-# tree (the scope of both cargo-deny and the no-network fitness test).
+# The feature-gated web adapter (CR-012, ADR-27) — optional, behind `ui`, which
+# is default since S-287 (CR-078/ADR-60). It is now part of the default-feature
+# dependency tree; the offline-by-default no-network fitness function moved to
+# guard the slim tree instead (`--no-default-features --features lang-all`,
+# S-288), the same scope cargo-deny's default-features graph now covers.
 web        = { path = "../web", default-features = false, optional = true }
 anyhow     = { workspace = true }
 clap       = { workspace = true }

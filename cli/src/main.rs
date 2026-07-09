@@ -301,8 +301,9 @@ pub(crate) enum Commands {
     /// Start a long-lived server: the stdio MCP surface and/or — in `ui`
     /// builds — the localhost web dashboard, over one Engine and one watcher.
     Serve {
-        /// Run the stdio MCP server. In a default build this is the only serve
-        /// mode (required); in a `ui` build it may pair with `--ui`.
+        /// Run the stdio MCP server. In the slim build (`--no-default-features
+        /// --features lang-all`) this is the only serve mode (required); in a
+        /// `ui` build (the default, S-287) it may pair with `--ui`.
         #[cfg_attr(not(feature = "ui"), arg(long, required = true))]
         #[cfg_attr(feature = "ui", arg(long, required_unless_present = "ui"))]
         mcp: bool,
