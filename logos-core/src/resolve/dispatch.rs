@@ -16,6 +16,15 @@
 //!   vtable; there is no source-visible call site, so the method falls out of
 //!   the reachable set and is reported dead (`on_event`/`record_str` in
 //!   `observability/layer.rs`).
+//! - **trait-default dispatch** (S-281, [CR-073] Part C) — a *default* method
+//!   body in a `trait T { fn f(&self) { … } }` declaration. It is reached only
+//!   through `&dyn T` dispatch when an impl does not override it, so — exactly
+//!   like a trait-impl method — it has no source-visible caller and reads dead
+//!   (the `LanguagePlugin` cluster: `is_documentation`, `is_artifact`,
+//!   `filenames`, `config_extraction`, `overridden_capabilities`,
+//!   `supports_reachability`). A bodyless signature (`fn f(&self);`) is a
+//!   `function_signature_item`, never extracted as a node, so only default
+//!   *bodies* are rooted.
 //! - **closure-argument tool dispatch** — a method carrying a dispatch
 //!   attribute ([`RUST_DISPATCH_ATTRS`], rmcp's `#[tool]`). The attribute macro
 //!   generates the router that dispatches it; the body is a
@@ -406,10 +415,12 @@ fn scan_path(
 /// and therefore the unit-testable core of the pass.
 ///
 /// A method is a **root** entry if it is declared in an `impl Trait for Type`
-/// block (framework trait-impl dispatch) **or** it carries a dispatch attribute
-/// ([`RUST_DISPATCH_ATTRS`]). A **handoff** entry is a handler name handed to an
-/// axum router/middleware by value ([`handoff_handler`]). Every signal is read
-/// from this file's own syntax, so the result depends on nothing outside it.
+/// block (framework trait-impl dispatch), it is a *default body* in a
+/// `trait_item` (trait-default dispatch, S-281 / [CR-073]), **or** it carries a
+/// dispatch attribute ([`RUST_DISPATCH_ATTRS`]). A **handoff** entry is a handler
+/// name handed to an axum router/middleware by value ([`handoff_handler`]). Every
+/// signal is read from this file's own syntax, so the result depends on nothing
+/// outside it.
 fn scan_source(
     parser: &mut Parser,
     language: &tree_sitter::Language,
@@ -437,6 +448,29 @@ fn scan_source(
                         continue;
                     }
                     if is_trait_impl || has_dispatch_attribute(method, src) {
+                        roots.insert(method.start_position().row as i64 + 1);
+                    }
+                }
+            }
+        }
+        if node.kind() == "trait_item" {
+            // A trait *default* method — a `function_item` (i.e. carrying a body,
+            // distinct from a bodyless `function_signature_item`) inside a
+            // `trait_item` — is reachable only through `&dyn T` dispatch and has no
+            // source-visible caller, so it falls out of the reachable set and is
+            // reported dead (the `LanguagePlugin` cluster: `is_documentation`,
+            // `is_artifact`, `filenames`, …). Live-root it under the same
+            // false-live-biased posture as a trait-impl method ([CR-073] §3.2,
+            // [AR-05]): a default body is a legitimate vtable target for any impl
+            // that does not override it, so rooting it recovers the dyn-dispatch
+            // false-dead without fabricating an edge between two distinct nodes.
+            // Rust models the default's outer attributes as preceding siblings, so
+            // the `function_item` start line is the declaration row, matching the
+            // extracted node exactly ([NFR-RA-06]).
+            if let Some(body) = node.child_by_field_name("body") {
+                let mut cursor = body.walk();
+                for method in body.children(&mut cursor) {
+                    if method.kind() == "function_item" {
                         roots.insert(method.start_position().row as i64 + 1);
                     }
                 }

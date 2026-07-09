@@ -241,6 +241,15 @@ pub(crate) struct Index {
     file_scopes: HashMap<i64, FileScope>,
     /// Normalised crate names present in the graph.
     crates: HashSet<String>,
+    /// `(trait node, method name)` → the concrete workspace impl method nodes of
+    /// that trait method, id-sorted and deduplicated — the fan-out universe for a
+    /// `dyn T` method call (S-281, [CR-073], [FR-RS-08]). Built from the
+    /// `Implements` reference rows (impl method → its trait), so it is available
+    /// on the very first index pass, before any `Implements` edge is committed.
+    ///
+    /// [CR-073]: ../../../docs/requests/CR-073-trait-object-dynamic-dispatch-reachability.md
+    /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+    impls_by_trait_method: HashMap<(NodeId, String), Vec<NodeId>>,
 }
 
 impl Index {
@@ -270,6 +279,8 @@ impl Index {
         let by_file_path = build_by_file_path(nodes);
         let routes_by_key = build_routes_by_key(nodes);
         let file_scopes = build_file_scopes(refs);
+        let impls_by_trait_method =
+            build_impls_by_trait_method(refs, &by_symbol, &by_name, &info);
 
         Index {
             by_symbol,
@@ -283,7 +294,37 @@ impl Index {
             routes_by_key,
             file_scopes,
             crates,
+            impls_by_trait_method,
         }
+    }
+
+    /// The one workspace [`NodeKind::Trait`] node named `name`, or `None` when
+    /// zero or several carry the name — the never-fabricate acceptance rule
+    /// ([NFR-RA-05]) applied to trait resolution: a `dyn T` call whose trait is
+    /// ambiguous or external stays an honest miss rather than guessing one.
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn trait_by_name(&self, name: &str) -> Option<NodeId> {
+        let traits: Vec<NodeId> = self
+            .by_name
+            .get(name)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|id| self.info.get(id).is_some_and(|i| i.kind == NodeKind::Trait))
+            .collect();
+        match traits.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        }
+    }
+
+    /// The concrete workspace impl method nodes of trait method `(trait, name)`,
+    /// id-sorted; empty when none are recorded.
+    fn impls_of(&self, trait_node: NodeId, name: &str) -> &[NodeId] {
+        self.impls_by_trait_method
+            .get(&(trait_node, name.to_string()))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Members of `scope` named `name`, filtered by `want`.
@@ -597,6 +638,68 @@ fn build_file_scopes(refs: &[UnresolvedRefRow]) -> HashMap<i64, FileScope> {
     file_scopes
 }
 
+/// `(trait node, method name)` → the impl method nodes of that trait method,
+/// id-sorted and deduplicated (S-281, [CR-073], [FR-RS-08]).
+///
+/// Built from the `Implements` reference rows an extraction pass emits, one per
+/// method of an `impl T for X` block (`source` = the impl method's symbol,
+/// `target` = the trait's written path). The trait is resolved by its **last
+/// path segment** to the one workspace [`NodeKind::Trait`] of that name — a
+/// non-unique or unindexed (external) trait contributes nothing, so a `dyn`
+/// call whose trait is ambiguous or external never fabricates an impl set
+/// ([NFR-RA-05]). Keyed by the method's own name (`info[source].name`) so the
+/// fan-out is a direct lookup. Deterministic: lists are id-sorted and deduped,
+/// mirroring [`build_by_name`] ([NFR-RA-06]).
+///
+/// [CR-073]: ../../../docs/requests/CR-073-trait-object-dynamic-dispatch-reachability.md
+/// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn build_impls_by_trait_method(
+    refs: &[UnresolvedRefRow],
+    by_symbol: &HashMap<String, NodeId>,
+    by_name: &HashMap<String, Vec<NodeId>>,
+    info: &HashMap<NodeId, NodeInfo>,
+) -> HashMap<(NodeId, String), Vec<NodeId>> {
+    // The one workspace Trait node named `name`, or `None` on zero/several.
+    let trait_by_name = |name: &str| -> Option<NodeId> {
+        let traits: Vec<NodeId> = by_name
+            .get(name)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|id| info.get(id).is_some_and(|i| i.kind == NodeKind::Trait))
+            .collect();
+        match traits.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        }
+    };
+
+    let mut map: HashMap<(NodeId, String), Vec<NodeId>> = HashMap::new();
+    for r in refs {
+        if r.kind != EdgeKind::Implements {
+            continue;
+        }
+        let Some(&impl_method) = by_symbol.get(&r.source_symbol) else {
+            continue; // the impl method's own node is not indexed — skip
+        };
+        let last = r.target.rsplit("::").next().unwrap_or(&r.target);
+        let Some(trait_node) = trait_by_name(last) else {
+            continue; // ambiguous / external trait — never fabricate an impl set
+        };
+        let Some(method_name) = info.get(&impl_method).map(|i| i.name.clone()) else {
+            continue;
+        };
+        map.entry((trait_node, method_name)).or_default().push(impl_method);
+    }
+    for ids in map.values_mut() {
+        ids.sort_unstable();
+        ids.dedup();
+    }
+    map
+}
+
 /// Reduce a candidate list to a [`Res`] — the single acceptance rule every
 /// scope level shares ([NFR-RA-05]: exactly one, or nothing).
 ///
@@ -694,6 +797,21 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
         };
     }
 
+    // A trait-implementation fact (S-281, CR-073, FR-RS-08): an `impl T for X`
+    // method points at its trait `T`. Bind the impl method to the one workspace
+    // Trait node named by the target's last segment — never on zero or several
+    // (an external / ambiguous trait stays an honest miss, NFR-RA-05). This edge
+    // is the structural link the `dyn T` fan-out below enumerates impls from; it
+    // is a structural fact, not a code coupling, so hydration fences it out of
+    // the dependency subgraph the gated metrics run on (mirroring `Accesses`).
+    if r.kind == EdgeKind::Implements {
+        let last = r.target.rsplit("::").next().unwrap_or(&r.target);
+        return match ix.trait_by_name(last) {
+            Some(target) => bound(target),
+            None => Outcome::Unbound,
+        };
+    }
+
     match r.form {
         // Capture-before-delete refs carry an exact canonical symbol: pure
         // lookup, no inference (ADR-10).
@@ -750,6 +868,21 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
                     Res::Found(target) => ctx.bind_doc_ref(source, target),
                     _ => Outcome::Unbound,
                 };
+            }
+            // A trait-object dynamic-dispatch call (S-281, CR-073, FR-RS-08):
+            // extraction encodes a *provable* `&dyn T` receiver on `p.f()` as a
+            // trait-qualified `T::f` target (a bare `.f()` stays a single segment
+            // and never reaches here — the CR-066 receiver-method guard,
+            // [FR-RS-06], is untouched). Fan out to the SET of that trait method's
+            // targets: the trait's own default body (a member of the trait node)
+            // ∪ every concrete workspace impl of it. Every target is a real
+            // indexed node reached through the *proven* trait `T` — never a
+            // same-named method on an unrelated type, never a free function, never
+            // a stdlib/external target ([NFR-RA-05]). A trait that is external or
+            // ambiguous, or one with neither a default body nor a workspace impl,
+            // yields no target and stays an honest miss.
+            if r.kind == EdgeKind::Calls && r.target.contains("::") {
+                return ctx.resolve_dyn_dispatch(source, &r.target);
             }
             // A receiver-unqualified method call (`x.f()` → `f`): extraction
             // records only the bare method name and discards the receiver
@@ -1035,6 +1168,57 @@ impl Ctx<'_> {
             cursor = self.ix.parent.get(&id).copied();
         }
         Res::NotFound
+    }
+
+    /// Fan out a trait-object dynamic-dispatch call `T::f` to the SET of that
+    /// trait method's targets (S-281, [CR-073], [FR-RS-08]).
+    ///
+    /// `target` is the trait-qualified form extraction emits for a *provable*
+    /// `&dyn T` receiver — the method is the last `::` segment, the trait its
+    /// predecessor. The fan-out set is the trait's own default body (a
+    /// [`Want::Callable`] member of the resolved [`NodeKind::Trait`] node) ∪ every
+    /// concrete workspace impl of that method ([`Index::impls_of`]). Union
+    /// reachability: any impl — or the default, for an impl that does not override
+    /// — is a legitimate runtime dispatch target ([FR-AN-01]).
+    ///
+    /// Never fabricate ([NFR-RA-05]): every target is a real indexed node reached
+    /// through the **proven** trait `T`, so no same-named method on an unrelated
+    /// type, free function, or external target can enter the set. A trait that is
+    /// external or ambiguously named, or one with neither a default body nor a
+    /// workspace impl of `f`, yields an empty set and stays an honest miss. The
+    /// set is id-sorted and deduped for a deterministic edge order ([NFR-RA-06]).
+    ///
+    /// [CR-073]: ../../../docs/requests/CR-073-trait-object-dynamic-dispatch-reachability.md
+    /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+    /// [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    fn resolve_dyn_dispatch(&self, source: NodeId, target: &str) -> Outcome {
+        let segs = split(target);
+        // `T::f` — the method is the last segment, the trait its predecessor. A
+        // malformed single/empty target cannot reach here (`target.contains("::")`
+        // gated the call) but is handled defensively as an honest miss.
+        let (Some(method), Some(trait_name)) =
+            (segs.last(), segs.get(segs.len().wrapping_sub(2)))
+        else {
+            return Outcome::Unbound;
+        };
+        let Some(trait_node) = self.ix.trait_by_name(trait_name) else {
+            return Outcome::Unbound; // external / ambiguous trait — honest miss
+        };
+        let mut targets = self.ix.members_named(trait_node, method, Want::Callable);
+        targets.extend_from_slice(self.ix.impls_of(trait_node, method));
+        targets.sort_unstable();
+        targets.dedup();
+        if targets.is_empty() {
+            return Outcome::Unbound;
+        }
+        Outcome::BoundMany {
+            source,
+            targets,
+            kind: EdgeKind::Calls,
+            payload: None,
+        }
     }
 
     /// Bind one cross-artifact reference under never-fabricate (CR-011,

@@ -62,6 +62,63 @@ impl<S> Handler<S> for T {
 }
 
 #[test]
+fn trait_default_method_is_a_dispatch_entry() {
+    // A trait *default* method (a `function_item` with a body inside a
+    // `trait_item`) is reachable only through `&dyn T` dispatch and has no
+    // source-visible caller — the `LanguagePlugin` cluster shape (`is_documentation`,
+    // `is_artifact`, `filenames`, …). It is live-rooted under the same
+    // false-live-biased posture as trait-impl methods ([CR-073], [AR-05]).
+    let got = entries(
+        "\
+trait Plugin {
+    fn is_documentation(&self) -> bool { false }
+}
+",
+    );
+    assert_eq!(got, vec![2], "the trait-default body on line 2 is an entry");
+}
+
+#[test]
+fn bodyless_trait_method_is_not_an_entry() {
+    // A trait method *signature* with no default body is a `function_signature_item`,
+    // not a `function_item`: it is not even extracted as a node, so it is not a
+    // dispatch entry. Only default *bodies* are rooted.
+    let got = entries(
+        "\
+trait Plugin {
+    fn required(&self) -> bool;
+}
+",
+    );
+    assert!(
+        got.is_empty(),
+        "a bodyless trait method signature is not a dispatch entry"
+    );
+}
+
+#[test]
+fn trait_default_and_impl_override_are_both_entries() {
+    // The default body AND every impl override are rooted (union reachability):
+    // the `LanguagePlugin` default plus `impl LanguagePlugin for CompiledPlugin`.
+    let got = entries(
+        "\
+trait Plugin {
+    fn is_artifact(&self) -> bool { false }
+}
+struct Compiled;
+impl Plugin for Compiled {
+    fn is_artifact(&self) -> bool { true }
+}
+",
+    );
+    assert_eq!(
+        got,
+        vec![2, 6],
+        "the trait default (line 2) and the impl override (line 6) are both entries"
+    );
+}
+
+#[test]
 fn inherent_impl_method_without_attribute_is_not_an_entry() {
     // A plain inherent-impl method is reachable by ordinary call binding, so it
     // is NOT live-rooted — preserving the detector's ability to flag it dead.

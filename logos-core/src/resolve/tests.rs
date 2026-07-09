@@ -1490,3 +1490,187 @@ fn receiver_method_call_does_not_apply_the_free_function_tiebreak() {
         "a receiver call with a free-fn + method of the same name must stay ambiguous"
     );
 }
+
+// ── Trait-object dynamic-dispatch fan-out (S-281, CR-073 Part C, FR-RS-08) ───
+//
+// A receiver-method call on a *provable* workspace trait object (`p.f()` where
+// `p: &dyn T`) resolves to the SET of concrete workspace impls of that trait
+// method, plus the trait's own default body — fan-out to exactly-the-impls,
+// never fabricated. Extraction encodes the provable-trait-object gate as a
+// trait-qualified `T::f` target on a `RefForm::Method`/`EdgeKind::Calls` ref
+// (a bare `.f()` stays a single-segment target and never fans out, so the
+// CR-066 receiver-method guard is untouched). The impl set is enumerated from
+// `EdgeKind::Implements` refs (impl method → its trait), one per impl method.
+
+/// Fixture for the dyn-dispatch fan-out tests: one trait `Plug` with a default
+/// method `run`, two workspace impls of `run` (`Alpha`, `Beta`) linked to `Plug`
+/// via Implements refs, and one same-named `run` on an UNRELATED type that
+/// implements nothing — the fan-out must reach the first three and never the
+/// unrelated one.
+fn dyn_fixture() -> (Vec<NodeRow>, Vec<EdgeRow>) {
+    let nodes = vec![
+        node(1, "crate", NodeKind::Module, "src/lib.rs"),
+        node(2, "caller", NodeKind::Function, "src/lib.rs"),
+        node(41, "Plug", NodeKind::Trait, "src/lib.rs"),
+        node(42, "run", NodeKind::Function, "src/lib.rs"), // Plug's default body
+        node(51, "run", NodeKind::Method, "src/lib.rs"),   // impl Plug for Alpha
+        node(61, "run", NodeKind::Method, "src/lib.rs"),   // impl Plug for Beta
+        node(71, "run", NodeKind::Method, "src/lib.rs"),   // unrelated type's run
+    ];
+    let edges = vec![
+        contains(1, 2),
+        contains(1, 41),
+        contains(41, 42), // the trait Contains its default method
+        contains(1, 51),  // impl methods collapse to the file module (impl is not a scope)
+        contains(1, 61),
+        contains(1, 71),
+    ];
+    (nodes, edges)
+}
+
+/// An Implements ref linking impl method `source_node` to the trait named
+/// `trait_name` (the extraction-side signal that enumerates a trait's impls).
+fn implements(id: i64, source_node: i64, trait_name: &str) -> UnresolvedRefRow {
+    make_ref(
+        id,
+        LIB_RS,
+        source_node,
+        trait_name,
+        None,
+        RefForm::Path,
+        EdgeKind::Implements,
+    )
+}
+
+/// A trait-qualified dyn-dispatch call `T::f` (the provable-trait-object shape
+/// extraction emits for `p.f()` when `p: &dyn T`).
+fn dyn_call(id: i64, source_node: i64, target: &str) -> UnresolvedRefRow {
+    make_ref(
+        id,
+        LIB_RS,
+        source_node,
+        target,
+        None,
+        RefForm::Method,
+        EdgeKind::Calls,
+    )
+}
+
+/// Bind `r` against the dyn fixture plus the given scope refs (Implements rows).
+fn bind_dyn(refs: &[UnresolvedRefRow], r: &UnresolvedRefRow, policy: BindingPolicy) -> Outcome {
+    let (nodes, edges) = dyn_fixture();
+    let mut all = refs.to_vec();
+    all.push(r.clone());
+    let ix = Index::build(&nodes, &edges, &all);
+    bind(r, &ix, policy)
+}
+
+/// Assert a `BoundMany` fan-out to exactly `targets` (order-independent).
+fn bound_many_to(outcome: Outcome, source: i64, mut targets: Vec<i64>, kind: EdgeKind) {
+    targets.sort_unstable();
+    match outcome {
+        Outcome::BoundMany {
+            source: got_source,
+            targets: got_targets,
+            kind: got_kind,
+            payload,
+        } => {
+            let mut got: Vec<i64> = got_targets.iter().map(|t| t.0).collect();
+            got.sort_unstable();
+            assert_eq!(got_source, NodeId(source), "fan-out source");
+            assert_eq!(got, targets, "fan-out target set");
+            assert_eq!(got_kind, kind, "fan-out edge kind");
+            assert_eq!(payload, None, "code fan-out carries no payload");
+        }
+        other => panic!("expected BoundMany, got {other:?}"),
+    }
+}
+
+#[test]
+fn dyn_trait_method_call_fans_out_to_trait_default_and_impls() {
+    // `p.run()` with `p: &dyn Plug` (target `Plug::run`) binds to the trait's own
+    // default body (42) AND every workspace impl of `run` (51, 61) — one edge
+    // per target, the union-reachability model for dynamic dispatch (FR-RS-08).
+    let scope = [implements(200, 51, "Plug"), implements(201, 61, "Plug")];
+    let r = dyn_call(300, 2, "Plug::run");
+    bound_many_to(
+        bind_dyn(&scope, &r, BindingPolicy::Strict),
+        2,
+        vec![42, 51, 61],
+        EdgeKind::Calls,
+    );
+}
+
+#[test]
+fn dyn_fanout_binds_exactly_the_workspace_impls_never_an_unrelated_type() {
+    // Node 71 is a same-named `run` on a type that implements nothing (no
+    // Implements ref). It must NEVER be a fan-out target — "exactly the impls,
+    // never a same-named method on an unrelated type" (NFR-RA-05, the AC guard).
+    let scope = [implements(200, 51, "Plug"), implements(201, 61, "Plug")];
+    let r = dyn_call(300, 2, "Plug::run");
+    let out = bind_dyn(&scope, &r, BindingPolicy::Strict);
+    if let Outcome::BoundMany { targets, .. } = &out {
+        assert!(
+            !targets.contains(&NodeId(71)),
+            "the unrelated same-named `run` (71) must not be bound: {targets:?}"
+        );
+    } else {
+        panic!("expected BoundMany, got {out:?}");
+    }
+}
+
+#[test]
+fn dyn_call_with_a_default_but_no_impls_binds_the_default_only() {
+    // A trait method with a default body and ZERO overriding workspace impls
+    // binds to the default alone (FR-RS-08: "a default with zero overriding impls
+    // binds to the default"). No Implements refs → only the trait default (42).
+    let r = dyn_call(300, 2, "Plug::run");
+    bound_many_to(
+        bind_dyn(&[], &r, BindingPolicy::Strict),
+        2,
+        vec![42],
+        EdgeKind::Calls,
+    );
+}
+
+#[test]
+fn dyn_call_to_an_external_trait_stays_unresolved() {
+    // `q.f()` where `q: &dyn External` and `External` is not a workspace trait:
+    // no workspace Trait node named `External`, no impls → honest miss, the ref
+    // stays in the ledger (never fabricated to a same-named local, NFR-RA-05).
+    let r = dyn_call(300, 2, "External::run");
+    assert_eq!(
+        bind_dyn(&[], &r, BindingPolicy::Aggressive),
+        Outcome::Unbound,
+        "a dyn call to a non-workspace trait must stay unresolved"
+    );
+}
+
+#[test]
+fn bare_receiver_method_call_never_fans_out() {
+    // A bare `.run()` (single-segment `run`, no `::`) is NOT a provable trait
+    // object: it must take the ordinary receiver-method path and never fan out —
+    // the CR-066 guard (FR-RS-06) is not loosened. Here `run` is ambiguous at
+    // module scope (three candidates), so it stays unresolved, and crucially the
+    // outcome is never a BoundMany.
+    let r = make_ref(300, LIB_RS, 2, "run", None, RefForm::Method, EdgeKind::Calls);
+    let out = bind_dyn(&[implements(200, 51, "Plug")], &r, BindingPolicy::Aggressive);
+    assert!(
+        !matches!(out, Outcome::BoundMany { .. }),
+        "a bare receiver-method call must never fan out: {out:?}"
+    );
+}
+
+#[test]
+fn implements_ref_binds_impl_method_to_its_trait() {
+    // The Implements ref (impl method 51 → trait `Plug`) binds to an Implements
+    // edge 51 --Implements--> 41 (the trait node). This is the structural link
+    // the fan-out enumerates impls from.
+    let r = implements(200, 51, "Plug");
+    bound_to(
+        bind_dyn(&[], &r, BindingPolicy::Strict),
+        51,
+        41,
+        EdgeKind::Implements,
+    );
+}
