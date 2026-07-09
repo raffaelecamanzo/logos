@@ -9,6 +9,47 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+## [1.0.6] — 2026-07-09
+
+**Reachability & metric-scope precision (CR-073 + CR-074 + CR-075 + CR-076).**
+Four independent graph-precision fixes closing standing CRs, all monotonic and
+never-fabricate. No schema or reconcile-contract change; the signal-vs-baseline
+gate shifts by design (recovered coupling + production-scoped metric values) and is
+re-blessed at release via `logos gate --save`.
+
+### Added
+- **Optional production-scope filter for the hotspot surface (CR-076, FR-GH-06,
+  FR-CV-07).** `logos hotspots --production-scope` (and the MCP `hotspots` tool's
+  `production_scope` arg + the web Files & Risk view's "Production files only"
+  toggle) drops whole test files (`tests.rs`/`*_tests.rs`/`tests/`) from the
+  candidate set *before* ranking, so the `--untested` board surfaces production
+  files instead of test files. Opt-in and gate-immune (BR-26): the default board is
+  byte-identical and toggling never moves a gated signal. CLI/MCP/web return
+  identical rankings for the same state (NFR-CC-01).
+
+### Fixed
+- **Trait-object dynamic-dispatch reachability (CR-073 / CR-068 Part C, FR-RS-08,
+  ADR-39).** A `&dyn Trait` receiver-method call now fans out to the trait's default
+  body ∪ its concrete workspace impls via real `Calls` edges when the receiver is a
+  *provable* trait object (explicit `&dyn T`/`Box<dyn T>`/`Arc<dyn T + …>` binding),
+  and the dispatch live-rooting pass now roots trait-default bodies. The six
+  `LanguagePlugin` trait methods reached only through `dyn` dispatch stop reading as
+  dead (dead-callable census down); the CR-066 receiver-method guard (FR-RS-06) is
+  not loosened and never-fabricate (NFR-RA-05) is preserved — a non-provable receiver
+  is an honest miss, not a guess. A new (previously-unemitted) `Implements` edge is
+  fenced out of every metric subgraph, so only the intended dead-code recovery moves.
+- **Redundancy budgets production-scoped (CR-074, FR-QM-08).** `check_redundancy`'s
+  `max_dead`/`max_duplicates` budgets now exclude `is_test` functions via the shared
+  `test_node_ids` set, matching the Redundancy metric (FR-QM-05) and the sibling
+  fan/structural budgets. `max_dead` is behaviour-preserved; `max_duplicates` drops
+  by the excluded test-duplicate count.
+- **Plural Rust test-file conventions recognized in `is_test` detection (CR-075,
+  FR-AN-05).** The shared `is_test_path` helper now matches bare `tests.rs` and the
+  snake_case `*_tests.rs` suffix (it already matched CamelCase `*Tests`). Non-`#[test]`
+  helpers in those files are now correctly `is_test=true`, removing test-code
+  contamination from every production-scoped metric via the single shared column; all
+  consumers correct in lock-step with no per-consumer edits.
+
 ## [1.0.5] — 2026-07-08
 
 **Graph-precision & config-surfacing cleanup (CR-071 + CR-068 Part B + CR-067).**
