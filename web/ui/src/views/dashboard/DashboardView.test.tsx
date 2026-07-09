@@ -49,7 +49,7 @@ const OVERVIEW: OverviewModel = {
     totals: { q1: 1, q2: 0, q3: 1, q4: 3, na_runtime: 0, total: 5 },
     notice: null,
   },
-  hotspots: { tier: "advisory", defect_label: "heuristic", head_sha: "abc1234", config_hash: "cfg", limit: null, degraded: null, untested: false, coverage_basis: "coverage", coverage_label: null, ranked_files: 2, files: [{ path: "a.rs", score: 3, churn_rank: 1, churn_commits: 5, complexity_rank: 1, complexity: 12, co_change_count: 0, defect_commits: 0, coverage: { state: "n/a", coverage_bp: null } }, { path: "b.rs", score: 1, churn_rank: 2, churn_commits: 2, complexity_rank: 2, complexity: 6, co_change_count: 0, defect_commits: 0, coverage: { state: "n/a", coverage_bp: null } }], notice: null },
+  hotspots: { tier: "advisory", defect_label: "heuristic", head_sha: "abc1234", config_hash: "cfg", limit: null, degraded: null, untested: false, production_scope: false, coverage_basis: "coverage", coverage_label: null, ranked_files: 2, files: [{ path: "a.rs", score: 3, churn_rank: 1, churn_commits: 5, complexity_rank: 1, complexity: 12, co_change_count: 0, defect_commits: 0, coverage: { state: "n/a", coverage_bp: null } }, { path: "b.rs", score: 1, churn_rank: 2, churn_commits: 2, complexity_rank: 2, complexity: 6, co_change_count: 0, defect_commits: 0, coverage: { state: "n/a", coverage_bp: null } }], notice: null },
 };
 
 /** Deep-clone the canned model so a test can null out a field without bleeding. */

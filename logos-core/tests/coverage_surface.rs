@@ -268,7 +268,7 @@ fn untested_filter_ranks_uncovered_hotspots_first_and_excludes_covered() {
     );
 
     // The coverage column rides every hotspot row (FR-CV-05/07).
-    let all = engine.hotspots(None, false).expect("hotspots");
+    let all = engine.hotspots(None, false, false).expect("hotspots");
     assert_eq!(all.coverage_basis, "coverage", "a snapshot exists");
     assert_eq!(
         all.coverage_label, None,
@@ -286,7 +286,7 @@ fn untested_filter_ranks_uncovered_hotspots_first_and_excludes_covered() {
 
     // --untested: tested.rs (fresh-covered) is excluded; the uncovered hottest
     // file ranks first (FR-CV-07).
-    let untested = engine.hotspots(None, true).expect("hotspots --untested");
+    let untested = engine.hotspots(None, true, false).expect("hotspots --untested");
     assert!(untested.untested);
     let paths: Vec<&str> = untested.files.iter().map(|h| h.path.as_str()).collect();
     assert_eq!(
@@ -308,7 +308,7 @@ fn untested_filter_ranks_uncovered_hotspots_first_and_excludes_covered() {
         format!("{}// edited\n", branchy("tested", 6)),
     )
     .unwrap();
-    let after_edit = engine.hotspots(None, true).expect("hotspots --untested");
+    let after_edit = engine.hotspots(None, true, false).expect("hotspots --untested");
     let stale = after_edit
         .files
         .iter()
@@ -341,7 +341,7 @@ fn untested_without_coverage_carries_the_static_reachability_fallback_label() {
     engine.index();
 
     // No coverage ingested → the fallback basis + label, and every column n/a.
-    let report = engine.hotspots(None, true).expect("hotspots --untested");
+    let report = engine.hotspots(None, true, false).expect("hotspots --untested");
     assert_eq!(report.coverage_basis, "static-reachability");
     assert_eq!(
         report.coverage_label,

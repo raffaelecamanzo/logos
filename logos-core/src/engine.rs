@@ -889,7 +889,7 @@ impl Engine {
     fn blast_radius_weights(&self) -> Option<std::collections::HashMap<String, i64>> {
         // `limit = None` → the full ranked board, so every gap's containing file
         // can be weighted (a truncated board would silently zero-weight the tail).
-        let report = self.latest_hotspots(None, false).ok()?;
+        let report = self.latest_hotspots(None, false, false).ok()?;
         if report.degraded.is_some() || report.files.is_empty() {
             return None;
         }
@@ -1216,6 +1216,12 @@ impl Engine {
     /// gate/sync/navigation paths ([BR-26]); a degraded repository rides inside
     /// the report as `n/a` + notice, never an error ([FR-GH-08], [NFR-RA-05]).
     ///
+    /// `production_scope = true` applies the optional production-scope filter
+    /// ([CR-076]): whole test files (`is_test`-only, [FR-AN-05]) are dropped
+    /// from the candidate set before ranking. `false` (the default) is
+    /// byte-identical to the pre-[CR-076] whole-repo board — the filter is
+    /// opt-in and never moves the gate ([BR-26]).
+    ///
     /// # Errors
     /// Returns an error only on an unexpected git/store failure, an invalid
     /// `rules.toml`, or a non-compiling `[history] defect_patterns`.
@@ -1226,15 +1232,17 @@ impl Engine {
     /// [BR-26]: ../../../docs/specs/software-spec.md#322-git-history-analytics
     /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    /// [CR-076]: ../../../docs/requests/CR-076-hotspots-production-scope-filter.md
     pub fn hotspots(
         &self,
         limit: Option<usize>,
         untested: bool,
+        production_scope: bool,
     ) -> Result<crate::history::HotspotReport> {
         crate::observability::traced("hotspots", || {
             // Churn axis: the temporal tier (mines lazily, computes per file).
             let temporal = self.temporal_report()?;
-            self.rank_hotspots(temporal, limit, untested)
+            self.rank_hotspots(temporal, limit, untested, production_scope)
         })
     }
 
@@ -1245,23 +1253,43 @@ impl Engine {
     /// (which mines first) and [`latest_hotspots`](Self::latest_hotspots) (which
     /// reads the last-mined facts). Never an `ATTACH` across the two stores
     /// ([ADR-22], [BR-26], [BR-28]).
+    ///
+    /// `production_scope` gates the optional whole-test-file exclusion
+    /// ([CR-076](../../../docs/requests/CR-076-hotspots-production-scope-filter.md)):
+    /// the `is_test` verdict ([FR-AN-05]) is read from the same `nodes`/
+    /// `functions` rows already fetched for the complexity axis, so enabling
+    /// the filter costs one extra point query (`test_node_ids`), never a new
+    /// store read shape.
     fn rank_hotspots(
         &self,
         temporal: crate::history::TemporalReport,
         limit: Option<usize>,
         untested: bool,
+        production_scope: bool,
     ) -> Result<crate::history::HotspotReport> {
         // Complexity axis: per-file Σ cyclomatic_complexity from logos.db,
         // read in Rust — joined here, never via a cross-DB ATTACH (BR-26).
         // A transient engine with no graph runtime contributes no
-        // complexity, so every file is honestly excluded (NFR-RA-05).
-        let complexity = match self.runtime() {
+        // complexity, so every file is honestly excluded (NFR-RA-05). The
+        // same rows feed the production-scope candidate-set filter (CR-076).
+        let (complexity, test_only_files) = match self.runtime() {
             Some(rt) => {
-                let (nodes, functions) =
-                    rt.submit_read(|store| Ok((store.all_nodes()?, store.function_metrics()?)))?;
-                crate::history::aggregate_complexity(&nodes, &functions)
+                let (nodes, functions, test_node_ids) = rt.submit_read(|store| {
+                    Ok((
+                        store.all_nodes()?,
+                        store.function_metrics()?,
+                        store.test_node_ids()?,
+                    ))
+                })?;
+                let complexity = crate::history::aggregate_complexity(&nodes, &functions);
+                let test_ids: std::collections::HashSet<_> = test_node_ids.into_iter().collect();
+                let test_only_files = crate::history::test_only_files(&nodes, &functions, &test_ids);
+                (complexity, test_only_files)
             }
-            None => std::collections::BTreeMap::new(),
+            None => (
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::new(),
+            ),
         };
         // Coverage axis ([FR-CV-07]): the latest snapshot, freshness-resolved
         // against the current tree. `None` = no coverage ingested → the
@@ -1287,6 +1315,8 @@ impl Engine {
             coverage.as_ref(),
             limit,
             untested,
+            production_scope,
+            &test_only_files,
         ))
     }
 
@@ -1363,19 +1393,23 @@ impl Engine {
     /// last-mined temporal facts (via [`latest_temporal_report`](Self::latest_temporal_report))
     /// against the complexity and coverage axes, **without** mining or appending
     /// a snapshot ([ADR-28], [CR-018]). Backs the dashboard's Hotspots view (and
-    /// the Coverage view's untested-hotspots join) so a GET never writes.
+    /// the Coverage view's untested-hotspots join) so a GET never writes. Shares
+    /// the optional `production_scope` filter ([CR-076]) with [`hotspots`](Self::hotspots).
     ///
     /// # Errors
     /// Returns an error only on an unexpected git/store failure or a
     /// non-compiling `[history] defect_patterns`.
+    ///
+    /// [CR-076]: ../../../docs/requests/CR-076-hotspots-production-scope-filter.md
     pub fn latest_hotspots(
         &self,
         limit: Option<usize>,
         untested: bool,
+        production_scope: bool,
     ) -> Result<crate::history::HotspotReport> {
         crate::observability::traced("latest_hotspots", || {
             let temporal = self.latest_temporal_report()?;
-            self.rank_hotspots(temporal, limit, untested)
+            self.rank_hotspots(temporal, limit, untested, production_scope)
         })
     }
 

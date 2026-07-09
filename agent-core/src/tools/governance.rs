@@ -188,7 +188,10 @@ impl Tool for Hotspots {
 
     async fn call(&self, args: HotspotsArgs) -> Result<HotspotReport, ToolCallError> {
         let untested = args.untested.unwrap_or(false);
-        run_engine_result(self.engine.clone(), move |e| e.hotspots(args.limit, untested)).await
+        run_engine_result(self.engine.clone(), move |e| {
+            e.hotspots(args.limit, untested, false)
+        })
+        .await
     }
 }
 

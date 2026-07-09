@@ -265,6 +265,9 @@ pub struct HotspotsParams {
     /// the labeled static-reachability signal when no coverage is ingested
     /// (default false, FR-CV-07).
     pub untested: Option<bool>,
+    /// Drop whole test files (`is_test`-only) from the candidate set before
+    /// ranking (default false — whole-repo board unchanged, CR-076).
+    pub production_scope: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -474,15 +477,18 @@ impl LogosMcp {
     //   the temporal tier never moves the gate (BR-26). —
 
     #[tool(
-        description = "Hotspot ranking (FR-GH-06): indexed files ranked by churn-rank × structural-complexity-rank — a Rust-side join of git-history churn and per-file cyclomatic complexity, with a per-file coverage column (fresh/stale/n-a). The NON-GATED temporal+coverage tier (BR-26/BR-28); the defect-history column is a labeled heuristic. `untested:true` ranks only files with no fresh coverage (labeled static-reachability fallback when none is ingested). Non-git/shallow repos return n/a + a notice."
+        description = "Hotspot ranking (FR-GH-06): indexed files ranked by churn-rank × structural-complexity-rank — a Rust-side join of git-history churn and per-file cyclomatic complexity, with a per-file coverage column (fresh/stale/n-a). The NON-GATED temporal+coverage tier (BR-26/BR-28); the defect-history column is a labeled heuristic. `untested:true` ranks only files with no fresh coverage (labeled static-reachability fallback when none is ingested). `production_scope:true` drops whole test files (is_test-only) from the candidate set before ranking (default false, CR-076). Non-git/shallow repos return n/a + a notice."
     )]
     async fn hotspots(
         &self,
         Parameters(p): Parameters<HotspotsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let untested = p.untested.unwrap_or(false);
-        self.run_result("hotspots", move |e| e.hotspots(p.limit, untested))
-            .await
+        let production_scope = p.production_scope.unwrap_or(false);
+        self.run_result("hotspots", move |e| {
+            e.hotspots(p.limit, untested, production_scope)
+        })
+        .await
     }
 
     // — Coverage evidence tier (2): the non-gated coverage surface (CR-007,

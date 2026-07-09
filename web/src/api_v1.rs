@@ -153,7 +153,7 @@ pub(crate) async fn overview(State(engine): State<Arc<Engine>>) -> Response {
             cross: e.coverage_cross()?,
             // A hotspot read needs git history; the view treats it as optional
             // (`.ok()`), so the trust card can still degrade to an unweighted share.
-            hotspots: e.latest_hotspots(None, false).ok(),
+            hotspots: e.latest_hotspots(None, false, false).ok(),
         })
     })
     .await;
@@ -267,18 +267,23 @@ pub(crate) struct FilesModel {
     temporal: TemporalReport,
 }
 
-/// `GET /api/v1/files[?untested]` — the Files & Risk data ([FR-UI-21]). The
-/// `?untested` toggle scopes the board to files lacking fresh positive coverage,
-/// exactly as the server-rendered view's filter does.
+/// `GET /api/v1/files[?untested][?production_scope]` — the Files & Risk data
+/// ([FR-UI-21]). The `?untested` toggle scopes the board to files lacking fresh
+/// positive coverage, exactly as the server-rendered view's filter does; the
+/// `?production_scope` toggle drops whole test files from the candidate set
+/// before ranking ([FR-UI-05], [CR-076]) — the same optional filter the CLI
+/// `--production-scope` flag and MCP `production_scope` argument expose,
+/// reached through the same [`Engine::latest_hotspots`] call.
 pub(crate) async fn files(
     State(engine): State<Arc<Engine>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let untested = wants_untested(&params);
+    let untested = wants_flag(&params, "untested");
+    let production_scope = wants_flag(&params, "production_scope");
     let model = bridge(engine, "api_v1_files", move |e| -> anyhow::Result<FilesModel> {
         Ok(FilesModel {
             status: e.status(),
-            hotspots: e.latest_hotspots(Some(50), untested)?,
+            hotspots: e.latest_hotspots(Some(50), untested, production_scope)?,
             temporal: e.latest_temporal_report()?,
         })
     })
@@ -286,10 +291,11 @@ pub(crate) async fn files(
     respond(model)
 }
 
-/// `true` when the query requests the `--untested` hotspot filter (`?untested` or
-/// `?untested=1`) — the same extraction the server-rendered Files view uses.
-fn wants_untested(params: &HashMap<String, String>) -> bool {
-    params.get("untested").is_some_and(|v| v.is_empty() || v != "0")
+/// `true` when the query requests a boolean toggle (bare `?key` or `?key=1`) —
+/// the same extraction the server-rendered Files view uses for `?untested`, now
+/// shared with `?production_scope` ([CR-076]).
+fn wants_flag(params: &HashMap<String, String>, key: &str) -> bool {
+    params.get(key).is_some_and(|v| v.is_empty() || v != "0")
 }
 
 // ── Coverage (mirrors `crate::analytics::coverage`, [FR-UI-05]) ───────────────
@@ -309,7 +315,7 @@ pub(crate) async fn coverage(State(engine): State<Arc<Engine>>) -> Response {
         Ok(CoverageModel {
             status: e.status(),
             coverage: e.coverage_status()?,
-            untested: e.latest_hotspots(Some(20), true)?,
+            untested: e.latest_hotspots(Some(20), true, false)?,
         })
     })
     .await;
@@ -338,7 +344,7 @@ pub(crate) async fn quadrant(State(engine): State<Arc<Engine>>) -> Response {
         Ok(QuadrantModel {
             status: e.status(),
             cross: e.coverage_cross()?,
-            hotspots: e.latest_hotspots(None, false).ok(),
+            hotspots: e.latest_hotspots(None, false, false).ok(),
         })
     })
     .await;
@@ -892,15 +898,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wants_untested_reads_presence_and_explicit_off() {
+    fn wants_flag_reads_presence_and_explicit_off() {
         let on = HashMap::from([("untested".to_string(), String::new())]);
         let one = HashMap::from([("untested".to_string(), "1".to_string())]);
         let off = HashMap::from([("untested".to_string(), "0".to_string())]);
         let absent: HashMap<String, String> = HashMap::new();
-        assert!(wants_untested(&on), "bare ?untested is on");
-        assert!(wants_untested(&one), "?untested=1 is on");
-        assert!(!wants_untested(&off), "?untested=0 is off");
-        assert!(!wants_untested(&absent), "absent is off");
+        assert!(wants_flag(&on, "untested"), "bare ?untested is on");
+        assert!(wants_flag(&one, "untested"), "?untested=1 is on");
+        assert!(!wants_flag(&off, "untested"), "?untested=0 is off");
+        assert!(!wants_flag(&absent, "untested"), "absent is off");
+    }
+
+    #[test]
+    fn wants_flag_is_shared_by_production_scope() {
+        let on = HashMap::from([("production_scope".to_string(), String::new())]);
+        let off = HashMap::from([("production_scope".to_string(), "0".to_string())]);
+        assert!(wants_flag(&on, "production_scope"), "bare ?production_scope is on");
+        assert!(!wants_flag(&off, "production_scope"), "?production_scope=0 is off");
     }
 
     #[test]

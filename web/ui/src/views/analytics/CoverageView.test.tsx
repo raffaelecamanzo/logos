@@ -19,6 +19,7 @@ const UNTESTED_REPORT = {
   degraded: null,
   notice: null,
   untested: true,
+  production_scope: false,
   coverage_basis: "coverage",
   coverage_label: null,
 };

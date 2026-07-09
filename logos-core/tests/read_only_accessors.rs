@@ -128,7 +128,7 @@ fn never_scanned_store_reads_empty_and_writes_nothing() {
     assert!(temporal.head_sha.is_none(), "never-mined → headless n/a report");
     assert!(temporal.files.is_empty(), "no in-window facts → no files, never fabricated");
     assert!(
-        engine.latest_hotspots(Some(50), false).unwrap().files.is_empty(),
+        engine.latest_hotspots(Some(50), false, false).unwrap().files.is_empty(),
         "never-mined → empty hotspot board"
     );
 
@@ -269,7 +269,7 @@ fn latest_temporal_reads_never_append_a_snapshot() {
 
     // Prime the mine the way the CLI does — this is allowed to persist.
     engine
-        .hotspots(None, false)
+        .hotspots(None, false, false)
         .expect("hotspots mines + appends one temporal snapshot");
     let primed = temporal_snapshot_count(tmp.path());
     assert!(primed >= 1, "the CLI hotspots read appended a temporal snapshot");
@@ -292,8 +292,8 @@ fn latest_temporal_reads_never_append_a_snapshot() {
     // … and repeated read-only temporal/hotspot reads append nothing.
     for _ in 0..3 {
         engine.latest_temporal_report().unwrap();
-        engine.latest_hotspots(Some(50), false).unwrap();
-        engine.latest_hotspots(Some(20), true).unwrap();
+        engine.latest_hotspots(Some(50), false, false).unwrap();
+        engine.latest_hotspots(Some(20), true, false).unwrap();
     }
     assert_eq!(
         temporal_snapshot_count(tmp.path()),
@@ -309,8 +309,8 @@ fn latest_hotspots_matches_the_persisting_board() {
     let tmp = indexed_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let persisting = engine.hotspots(Some(50), false).unwrap();
-    let read_only = engine.latest_hotspots(Some(50), false).unwrap();
+    let persisting = engine.hotspots(Some(50), false, false).unwrap();
+    let read_only = engine.latest_hotspots(Some(50), false, false).unwrap();
     assert_eq!(
         serde_json::to_string(&persisting.files).unwrap(),
         serde_json::to_string(&read_only.files).unwrap(),
@@ -468,7 +468,7 @@ fn test_gaps_orders_by_blast_radius_only_after_history_is_mined() {
 
     // (2) Mine the temporal tier (this WRITE is the explicit mining call, not the
     // test_gaps read). hot.rs must rank first.
-    let board = engine.hotspots(None, false).expect("hotspots mines history.db");
+    let board = engine.hotspots(None, false, false).expect("hotspots mines history.db");
     assert!(board.degraded.is_none(), "a real git repo is not degraded");
     assert_eq!(
         board.files.first().map(|h| h.path.as_str()),
@@ -498,7 +498,7 @@ fn test_gaps_ranking_is_write_free_and_deterministic() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     // Mine once so the ranking is actually active (history.db now exists).
-    engine.hotspots(None, false).expect("hotspots mines history.db");
+    engine.hotspots(None, false, false).expect("hotspots mines history.db");
     let metrics_before = metric_snapshot_count(tmp.path());
     let temporal_before = temporal_snapshot_count(tmp.path());
     let logos_before = logos_db_bytes(tmp.path());
@@ -537,7 +537,7 @@ fn test_gaps_ranking_is_write_free_and_deterministic() {
 fn test_gaps_limit_truncates_after_ranking_preserving_order() {
     let tmp = blast_radius_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.hotspots(None, false).expect("hotspots mines history.db");
+    engine.hotspots(None, false, false).expect("hotspots mines history.db");
 
     // `TestGap` is not `PartialEq`/`Clone`, so compare the ranked name sequence.
     let names = |limit: Option<u32>| -> Vec<String> {

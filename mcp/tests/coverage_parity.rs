@@ -156,12 +156,12 @@ async fn cli_and_mcp_untested_hotspots_payloads_are_identical() {
     // Warm the lazy mine so neither compared call carries the first-mine notice.
     Engine::start(root)
         .expect("engine")
-        .hotspots(None, true)
+        .hotspots(None, true, false)
         .expect("warm-up");
 
     let cli = {
         let engine = Engine::start(root).expect("engine");
-        serde_json::to_value(engine.hotspots(None, true).expect("hotspots")).unwrap()
+        serde_json::to_value(engine.hotspots(None, true, false).expect("hotspots")).unwrap()
     };
 
     let (client, server) = boot(root).await;

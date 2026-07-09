@@ -271,6 +271,10 @@ pub(crate) enum Commands {
         /// to the labeled static-reachability signal when no coverage is ingested.
         #[arg(long)]
         untested: bool,
+        /// Drop whole test files (`is_test`-only) from the candidate set before
+        /// ranking (CR-076); default off — the whole-repo board is unchanged.
+        #[arg(long)]
+        production_scope: bool,
     },
     /// Coverage evidence tier: ingest external reports and read freshness-checked
     /// status (the non-gated coverage tier — never moves the gate, BR-28).

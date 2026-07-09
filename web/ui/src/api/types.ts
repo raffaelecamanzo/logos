@@ -519,6 +519,9 @@ export interface HotspotReport {
   notice: string | null;
   /** Whether the `--untested` filter was applied. */
   untested: boolean;
+  /** Whether the optional production-scope filter was applied (CR-076):
+   *  whole test files are dropped from the candidate set before ranking. */
+  production_scope: boolean;
   /** Coverage-column basis (`"coverage"` or the labeled `"static-reachability"`). */
   coverage_basis: string;
   /** The static-reachability caveat, present only on the fallback basis. */

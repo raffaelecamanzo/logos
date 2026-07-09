@@ -93,6 +93,7 @@ const REPRESENTATIVE: &[&[&str]] = &[
     &["dsm"],
     &["test-gaps"],
     &["hotspots", "--untested"],
+    &["hotspots", "--production-scope"],
     &["coverage", "status"],
     &["coverage", "ingest", "coverage.lcov", "--format", "lcov"],
     &["coverage", "refresh"],
@@ -375,6 +376,7 @@ fn non_stub_subcommands_emit_valid_json_with_json_flag() {
         &["test-gaps", "--json"],
         &["hotspots", "--json"],
         &["hotspots", "--untested", "--json"],
+        &["hotspots", "--production-scope", "--json"],
         &["coverage", "status", "--json"],
     ] {
         let out = logos(tmp.path(), args);
@@ -483,6 +485,84 @@ fn hotspots_degrades_to_na_when_git_is_absent() {
     assert!(
         json["notice"].as_str().is_some_and(|n| !n.is_empty()),
         "a one-line notice explains the git-absent degrade"
+    );
+}
+
+// ── FR-GH-06 / CR-076: `--production-scope` end-to-end through the binary ───
+
+/// Commit `rel` with `contents` at HEAD — a small git-history fixture builder
+/// local to this file (the other integration-test crates have their own).
+fn git_commit(cwd: &Path, rel: &str, contents: &str, msg: &str) {
+    write(cwd, rel, contents);
+    sh_git(cwd, &["add", rel]);
+    sh_git(cwd, &["commit", "-q", "-m", msg]);
+}
+
+/// `logos hotspots --production-scope` drops a whole test file (`src/tests.rs`,
+/// the bare-name convention) from the candidate set before ranking, while the
+/// default (flag omitted) board is unchanged ([CR-076], [FR-GH-06]).
+#[test]
+fn hotspots_production_scope_flag_excludes_whole_test_files() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    sh_git(repo, &["init", "-q", "-b", "main"]);
+
+    let branchy = |ifs: usize| -> String {
+        let body: String = (0..ifs)
+            .map(|i| format!("    if x == {i} {{ return {i}; }}\n"))
+            .collect();
+        format!("pub fn f(x: i64) -> i64 {{\n{body}    x\n}}\n")
+    };
+
+    // tests.rs: the hottest file overall, but a whole test file by path.
+    for n in 0..4 {
+        git_commit(
+            repo,
+            "src/tests.rs",
+            &format!("{}// rev {n}\n", branchy(8)),
+            &format!("tests v{n}"),
+        );
+    }
+    // hot.rs: the hottest production file.
+    for n in 0..2 {
+        git_commit(
+            repo,
+            "src/hot.rs",
+            &format!("{}// rev {n}\n", branchy(4)),
+            &format!("hot v{n}"),
+        );
+    }
+
+    assert_eq!(exit_code(&logos(repo, &["index", "--quiet"])), 0);
+
+    let off = logos(repo, &["hotspots", "--json"]);
+    assert_eq!(exit_code(&off), 0);
+    let off_json: serde_json::Value = serde_json::from_slice(&off.stdout).expect("valid JSON");
+    assert_eq!(off_json["production_scope"], false);
+    assert_eq!(
+        off_json["files"][0]["path"].as_str(),
+        Some("src/tests.rs"),
+        "filter off: the whole-repo board is unchanged: {off_json}"
+    );
+
+    let on = logos(repo, &["hotspots", "--production-scope", "--json"]);
+    assert_eq!(exit_code(&on), 0);
+    let on_json: serde_json::Value = serde_json::from_slice(&on.stdout).expect("valid JSON");
+    assert_eq!(on_json["production_scope"], true);
+    let paths: Vec<&str> = on_json["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        !paths.contains(&"src/tests.rs"),
+        "--production-scope drops the whole test file: {paths:?}"
+    );
+    assert_eq!(
+        paths,
+        ["src/hot.rs"],
+        "only the production file remains: {paths:?}"
     );
 }
 
