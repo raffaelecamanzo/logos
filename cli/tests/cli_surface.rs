@@ -201,6 +201,48 @@ fn usage_errors_exit_two() {
     }
 }
 
+// ── FR-DS-03 / ADR-60: `ui` is the default feature, `--no-default-features`
+// stays the slim, listener-free build ─────────────────────────────────────
+
+/// True if a `--ui` *option line* (not just a prose mention — the `--mcp`
+/// flag's own description text references `` `--ui` `` even when the flag
+/// doesn't exist) is present in `serve --help` output.
+fn help_lists_ui_flag(stdout: &str) -> bool {
+    stdout.lines().any(|l| l.trim_start().starts_with("--ui"))
+}
+
+/// Guards the S-287 feature-graph flip itself: since `default = ["lang-all",
+/// "ui"]`, a plain (default-features) build must expose `--ui`. Without this
+/// assertion, an accidental revert of the `default` line would only be
+/// caught by a human re-running the manual verification from the impl notes.
+#[test]
+#[cfg(feature = "ui")]
+fn default_build_serve_help_lists_ui() {
+    let tmp = TempDir::new().unwrap();
+    let out = logos(tmp.path(), &["serve", "--help"]);
+    assert_eq!(exit_code(&out), 0);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        help_lists_ui_flag(&stdout),
+        "serve --help should list --ui under the default (ui-enabled) feature set: {stdout}"
+    );
+}
+
+/// The mirror image: the slim `--no-default-features --features lang-all`
+/// build must stay listener-free — `--ui` must not exist as a flag.
+#[test]
+#[cfg(not(feature = "ui"))]
+fn slim_build_serve_help_has_no_ui() {
+    let tmp = TempDir::new().unwrap();
+    let out = logos(tmp.path(), &["serve", "--help"]);
+    assert_eq!(exit_code(&out), 0);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !help_lists_ui_flag(&stdout),
+        "the slim build must not expose --ui: {stdout}"
+    );
+}
+
 #[test]
 fn a_malformed_config_makes_index_fail_loud_with_exit_two() {
     // FR-CF-03 / configuration.md: a typo in config.toml must fail loud with
