@@ -11,9 +11,13 @@
 //! - **Loopback only.** The listener binds [`BIND_ADDR`] (`127.0.0.1`), a
 //!   compile-time constant: no flag, env var, or config key can change it
 //!   (a revisable v1 posture, ADR-27). [`bind`] is the single bind site.
-//! - **No egress.** The surface only ever *listens and answers* — it never
-//!   dials. No network client crate is in this crate's graph; the only socket
-//!   is the loopback listener.
+//! - **No egress in the listen-only build.** Under `--features ui` alone the
+//!   surface only ever *listens and answers* — it never dials, and no network
+//!   client crate is in its graph (the only socket is the loopback listener).
+//!   The chat / wiki-**generation** egress client (`rig`/`reqwest`) is compiled
+//!   in only under the additional `agents` feature (CR-078, ADR-60); even then
+//!   egress stays user-initiated and consent-gated to a user-configured endpoint
+//!   (ADR-40) — the loopback/CSP/CSRF postures below are unchanged either way.
 //! - **GET-only, except the enumerated config-write/apply routes.** Every
 //!   non-GET request is answered `405` ([`method_guard`]) before any handler
 //!   runs, **except** a `POST` to one of the enumerated [`CONFIG_POST_ROUTES`]
