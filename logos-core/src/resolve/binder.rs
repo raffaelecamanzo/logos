@@ -305,18 +305,7 @@ impl Index {
     ///
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     fn trait_by_name(&self, name: &str) -> Option<NodeId> {
-        let traits: Vec<NodeId> = self
-            .by_name
-            .get(name)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|id| self.info.get(id).is_some_and(|i| i.kind == NodeKind::Trait))
-            .collect();
-        match traits.as_slice() {
-            [only] => Some(*only),
-            _ => None,
-        }
+        unique_trait(&self.by_name, &self.info, name)
     }
 
     /// The concrete workspace impl method nodes of trait method `(trait, name)`,
@@ -661,21 +650,6 @@ fn build_impls_by_trait_method(
     by_name: &HashMap<String, Vec<NodeId>>,
     info: &HashMap<NodeId, NodeInfo>,
 ) -> HashMap<(NodeId, String), Vec<NodeId>> {
-    // The one workspace Trait node named `name`, or `None` on zero/several.
-    let trait_by_name = |name: &str| -> Option<NodeId> {
-        let traits: Vec<NodeId> = by_name
-            .get(name)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|id| info.get(id).is_some_and(|i| i.kind == NodeKind::Trait))
-            .collect();
-        match traits.as_slice() {
-            [only] => Some(*only),
-            _ => None,
-        }
-    };
-
     let mut map: HashMap<(NodeId, String), Vec<NodeId>> = HashMap::new();
     for r in refs {
         if r.kind != EdgeKind::Implements {
@@ -685,8 +659,12 @@ fn build_impls_by_trait_method(
             continue; // the impl method's own node is not indexed — skip
         };
         let last = r.target.rsplit("::").next().unwrap_or(&r.target);
-        let Some(trait_node) = trait_by_name(last) else {
-            continue; // ambiguous / external trait — never fabricate an impl set
+        // Resolve the trait by the same unique-name rule the query-time fan-out
+        // uses ([`Index::trait_by_name`]) so index-build and bind agree; an
+        // ambiguous / external trait contributes nothing (never fabricate an impl
+        // set, [NFR-RA-05]).
+        let Some(trait_node) = unique_trait(by_name, info, last) else {
+            continue;
         };
         let Some(method_name) = info.get(&impl_method).map(|i| i.name.clone()) else {
             continue;
@@ -698,6 +676,31 @@ fn build_impls_by_trait_method(
         ids.dedup();
     }
     map
+}
+
+/// The one workspace [`NodeKind::Trait`] node named `name`, or `None` when zero
+/// or several carry it — the single source of truth for the never-fabricate
+/// trait-resolution rule ([NFR-RA-05]) shared by [`Index::trait_by_name`] (query
+/// time) and [`build_impls_by_trait_method`] (index-build time), so the two can
+/// never drift.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn unique_trait(
+    by_name: &HashMap<String, Vec<NodeId>>,
+    info: &HashMap<NodeId, NodeInfo>,
+    name: &str,
+) -> Option<NodeId> {
+    let traits: Vec<NodeId> = by_name
+        .get(name)
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|id| info.get(id).is_some_and(|i| i.kind == NodeKind::Trait))
+        .collect();
+    match traits.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
 }
 
 /// Reduce a candidate list to a [`Res`] — the single acceptance rule every
@@ -1194,13 +1197,12 @@ impl Ctx<'_> {
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     fn resolve_dyn_dispatch(&self, source: NodeId, target: &str) -> Outcome {
-        let segs = split(target);
-        // `T::f` — the method is the last segment, the trait its predecessor. A
-        // malformed single/empty target cannot reach here (`target.contains("::")`
-        // gated the call) but is handled defensively as an honest miss.
-        let (Some(method), Some(trait_name)) =
-            (segs.last(), segs.get(segs.len().wrapping_sub(2)))
-        else {
+        // `T::f` — the method is the last `::` segment, the trait its predecessor.
+        // A malformed target (`::f`, `T::`, a single segment) cannot reach here
+        // (`target.contains("::")` gated the call) but a missing predecessor is
+        // handled defensively as an honest miss.
+        let mut segs = target.rsplit("::");
+        let (Some(method), Some(trait_name)) = (segs.next(), segs.next()) else {
             return Outcome::Unbound;
         };
         let Some(trait_node) = self.ix.trait_by_name(trait_name) else {
