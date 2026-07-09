@@ -1039,7 +1039,12 @@ fn dyn_trait_of_type(ty: Node<'_>, source: &[u8]) -> Option<String> {
                 cur = (0..args.named_child_count())
                     .filter_map(|i| args.named_child(i))
                     .find(|c| {
-                        matches!(c.kind(), "dynamic_type" | "reference_type" | "generic_type")
+                        // `bounded_type` covers `Arc<dyn T + Send>`, symmetric with
+                        // the reference path that already peels `&dyn T + Send`.
+                        matches!(
+                            c.kind(),
+                            "dynamic_type" | "reference_type" | "generic_type" | "bounded_type"
+                        )
                     })?;
             }
             _ => return None,
@@ -1112,53 +1117,51 @@ fn rust_dyn_receiver_trait(field_ident: Node<'_>, source: &[u8]) -> Option<Strin
 /// A nested `function_item` is not descended (its bindings belong to its own
 /// scope), so a shadowing inner binding cannot mis-type an outer receiver.
 fn function_dyn_binding(fn_node: Node<'_>, recv_name: &str, source: &[u8]) -> Option<String> {
-    // 1) An explicit `&dyn T` parameter binds the receiver unambiguously.
+    // Collect EVERY binding of `recv_name` in this function's own scope — each
+    // parameter and each body `let` (not descending into a nested fn/closure,
+    // which owns its own scope) whose pattern is exactly the receiver name — as
+    // its optional type-annotation node.
+    //
+    // The proof must be a *single* per-file type: a name bound more than once is
+    // shadowed, and this walk is scope-blind (it cannot tell which binding is live
+    // at the call site), so guessing one would fabricate a dispatch edge — e.g. a
+    // `c: &Concrete` parameter shadowed by a later `let c: &dyn T` would wrongly
+    // qualify the *first* `c.method()` as `T::method`. Bail on anything but exactly
+    // one binding, and require that binding to be annotated: an unambiguous,
+    // annotated `&dyn T` binding qualifies; zero, several, or an un-annotated
+    // binding is an honest miss ([NFR-RA-05]).
+    let name_of = |n: Node<'_>| {
+        n.child_by_field_name("pattern")
+            .and_then(|p| p.utf8_text(source).ok())
+    };
+    let mut bindings: Vec<Option<Node<'_>>> = Vec::new();
     if let Some(params) = fn_node.child_by_field_name("parameters") {
         let mut cursor = params.walk();
         for p in params.named_children(&mut cursor) {
-            if p.kind() != "parameter" {
-                continue;
-            }
-            if p.child_by_field_name("pattern")
-                .and_then(|n| n.utf8_text(source).ok())
-                != Some(recv_name)
-            {
-                continue;
-            }
-            if let Some(t) = p
-                .child_by_field_name("type")
-                .and_then(|ty| dyn_trait_of_type(ty, source))
-            {
-                return Some(t);
+            if p.kind() == "parameter" && name_of(p) == Some(recv_name) {
+                bindings.push(p.child_by_field_name("type"));
             }
         }
     }
-    // 2) A `let recv: &dyn T = …;` binding anywhere in the function body.
-    let body = fn_node.child_by_field_name("body")?;
-    let mut stack = vec![body];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "let_declaration"
-            && n.child_by_field_name("pattern")
-                .and_then(|x| x.utf8_text(source).ok())
-                == Some(recv_name)
-        {
-            if let Some(t) = n
-                .child_by_field_name("type")
-                .and_then(|ty| dyn_trait_of_type(ty, source))
-            {
-                return Some(t);
+    if let Some(body) = fn_node.child_by_field_name("body") {
+        let mut stack = vec![body];
+        while let Some(n) = stack.pop() {
+            if n.kind() == "let_declaration" && name_of(n) == Some(recv_name) {
+                bindings.push(n.child_by_field_name("type"));
             }
-        }
-        for i in 0..n.child_count() {
-            if let Some(ch) = n.child(i) {
-                // A nested fn/closure owns its own `let` scope — do not descend.
-                if !matches!(ch.kind(), "function_item" | "closure_expression") {
-                    stack.push(ch);
+            for i in 0..n.child_count() {
+                if let Some(ch) = n.child(i) {
+                    if !matches!(ch.kind(), "function_item" | "closure_expression") {
+                        stack.push(ch);
+                    }
                 }
             }
         }
     }
-    None
+    match bindings.as_slice() {
+        [Some(ty)] => dyn_trait_of_type(*ty, source),
+        _ => None, // zero, several (shadowed), or an un-annotated single binding
+    }
 }
 
 /// Map a `@symbol.<kind>` capture name to a [`NodeKind`], or `None` for a

@@ -1147,3 +1147,37 @@ impl<S> Handler<S> for T {
     assert_eq!(impls.len(), 1, "one Implements ref, got {impls:?}");
     assert_eq!(impls[0].1, "Handler", "generic trait impl → base trait name");
 }
+
+#[test]
+fn shadowed_receiver_name_is_not_provable_and_stays_bare() {
+    // A receiver name bound more than once (a concrete parameter shadowed by a
+    // later `&dyn` let) is NOT a per-file-provable single type. The scope-blind
+    // walk must bail rather than guess which binding is live at a given call site,
+    // else the FIRST `c.draw()` (on the concrete `c`) would be fabricated as a
+    // `Draw::draw` dispatch edge (NFR-RA-05). Both calls stay bare.
+    let src = "\
+fn render(c: &Canvas) {
+    c.draw();
+    let c: &dyn Draw = pick();
+    c.draw();
+}
+";
+    let facts = extract_src("src/lib.rs", src);
+    assert!(
+        !method_call_targets(&facts).iter().any(|t| t.contains("::")),
+        "a shadowed receiver name must not qualify to a trait, got {:?}",
+        method_call_targets(&facts)
+    );
+}
+
+#[test]
+fn smart_pointer_dyn_with_trait_bounds_is_trait_qualified() {
+    // `Arc<dyn Plug + Send>` peels the `bounded_type` inside the generic argument,
+    // symmetric with the reference path that already handles `&dyn Plug + Send`.
+    let facts = extract_src("src/lib.rs", "fn f(p: Arc<dyn Plug + Send>) { p.run(); }");
+    assert!(
+        method_call_targets(&facts).contains(&"Plug::run"),
+        "Arc<dyn Plug + Send> receiver → Plug::run, got {:?}",
+        method_call_targets(&facts)
+    );
+}
