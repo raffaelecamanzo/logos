@@ -581,7 +581,11 @@ the rollup, matching every other metric). A shared helper called from many
 symbols in one module counts that module once, not once per call site — so the
 budget flags genuine cross-module coupling, not name popularity (CR-065). The
 **redundancy budgets** (`max_dead`/`max_duplicates`)
-cap the project-wide count of dead / duplicate functions. The **structural
+cap the count of dead / duplicate functions. Both budgets are **production-scoped**:
+functions Logos classifies as test code (`is_test`) are excluded from the count,
+so the budgets agree by construction with the Redundancy metric they mirror and
+with the sibling structural budgets (a dead or duplicated *test* never counts
+against them). The **structural
 
 > **`max_dead` — absolute or delta-from-baseline.** `max_dead` accepts two
 > shapes. The absolute integer above (`max_dead = 0`) caps the total dead count.

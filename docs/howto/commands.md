@@ -600,6 +600,7 @@ in this section can move the 0–10000 signal (see
 logos hotspots                     # all ranked files
 logos hotspots --limit 20          # top 20 by score
 logos hotspots --untested          # only files with no fresh positive coverage
+logos hotspots --untested --production-scope   # exclude whole test files from the board
 ```
 
 Ranks files high in **both** git churn (change frequency over a HEAD-anchored
@@ -619,6 +620,18 @@ by score. When **no** coverage has been ingested, `--untested` falls back to a
 labeled static-reachability signal: the report carries
 `coverage_basis = "static-reachability"` and an explicit `coverage_label`
 caveat, so the fallback is never silently conflated with execution coverage.
+
+`--production-scope` (optional, off by default) narrows the board to production
+files: a file is dropped from the candidate set **before** ranking when *every*
+one of its complexity-contributing functions is `is_test` (a whole test file —
+`tests.rs`, `*_tests.rs`, `tests/`), so the `--untested` view surfaces the
+production code the surface exists to highlight instead of test files that have
+high churn and no coverage of themselves. A production file with an in-file
+`#[cfg(test)] mod tests` keeps its production functions and stays on the board.
+The flag composes with `--limit`/`--untested`, is opt-in and **gate-immune** (the
+hotspot tier is non-gated; toggling it never moves a gated signal), and returns
+identical rankings across the CLI, the MCP `hotspots` tool (`production_scope`),
+and the web Files & Risk view.
 
 Determinism: the window cutoff is computed from the **HEAD committer
 timestamp**, never the wall clock — same HEAD in, byte-identical ranking out.

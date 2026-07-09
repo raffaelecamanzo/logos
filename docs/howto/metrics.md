@@ -113,7 +113,12 @@ re-tuning either re-baselines the gate like any other threshold.
 All ten metrics are computed over the **production subgraph only**. Every
 function Logos classifies as test code (`is_test`, the single annotation that
 `test-gaps` and the dead-code roots also read — see
-[commands.md](commands.md#test-gaps---limit-n)) is dropped before scoring:
+[commands.md](commands.md#test-gaps---limit-n)) is dropped before scoring. A
+function is `is_test` from extraction evidence (a `#[test]`/`#[cfg(test)]`
+marker) **or** from its file: Logos recognizes the common Rust test-file
+conventions — a `tests/` integration directory, a bare `tests.rs`, the
+snake_case `*_tests.rs` suffix, and the CamelCase `*Tests` form. The exclusion
+then applies as:
 
 - **Modularity, Acyclicity, Depth** drop each `is_test` vertex and its incident
   edges, so the graph they measure is the production code's shape alone. The
