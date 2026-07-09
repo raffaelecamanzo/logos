@@ -9,6 +9,30 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+## [1.0.7] — 2026-07-09
+
+**Sub-second `serve` cold start (CR-077).** The `serve --mcp` filesystem watcher
+no longer pre-walks build-output trees at registration time, restoring the
+NFR-PE-05 cold-start budget. No schema, reconcile-contract, or public-interface
+change; the quality signal is unchanged (delta 0).
+
+### Fixed
+- **Watcher registration prunes ignored directories (CR-077, S-285, NFR-PE-05,
+  FR-SY-04, FR-SY-11, ADR-48).** `notify-debouncer-full`'s file-ID cache used to
+  seed itself by walking the *entire physical tree* on `.watch()` — `target/`
+  included (measured ~1.2M entries) — before the server could answer its first MCP
+  request, a ~58–93 s stall on every `serve` boot. A custom `PrunedFileIdCache` now
+  routes that registration-time seed walk through the same `AdmissionAuthority`
+  predicate the full `index` walk and event-time `classify` already share, so it
+  visits only admitted source directories. Cold start returns to sub-second
+  (measured ~1.7 s cold / ~0.5 s warm on the ~221k-LOC dogfood repo, was ~58–93 s).
+  Directory descent is name-pruned (`target`, `node_modules`, `dist`, `build`,
+  `vendor`, `.git`, the feedback-loop set, and `[semantics].ignored_dirs`); leaf
+  files are gated through the admission authority for full-walk parity; the walk
+  degrades to a name-only prune when no authority is available. Rename tracking for
+  admitted source paths and event-time `classify` are unchanged — the watcher stays
+  best-effort and non-load-bearing for correctness (FR-SY-06, ADR-11).
+
 ## [1.0.6] — 2026-07-09
 
 **Reachability & metric-scope precision (CR-073 + CR-074 + CR-075 + CR-076).**
