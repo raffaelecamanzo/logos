@@ -560,3 +560,79 @@ fn transitive_helper_stays_live_and_marker_retires_on_tool_removal() {
     // asserted here. The observable outcome (marker gone, helper still live) holds.
     let _ = &synced.dispatch;
 }
+
+/// Fixture for the trait-object dynamic-dispatch recovery (S-281, CR-073): a
+/// trait with a DEFAULT method reached only through `&dyn Plug`, plus one impl
+/// override, plus the `&dyn Plug` call site. Without S-281 the trait default
+/// `is_doc` (a `trait_item` body, not an `impl_item`) reads dead.
+const DYN_DISPATCH_FIXTURE: &str = "\
+pub trait Plug {
+    fn is_doc(&self) -> bool { false }
+}
+struct Compiled;
+impl Plug for Compiled {
+    fn is_doc(&self) -> bool { true }
+}
+fn use_plugin(p: &dyn Plug) -> bool {
+    p.is_doc()
+}
+";
+
+#[test]
+fn dyn_dispatch_trait_default_is_live_and_call_fans_out_to_impls() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/lib.rs", DYN_DISPATCH_FIXTURE);
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let result = engine.index();
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    let rt = engine.runtime().unwrap();
+    let snap = snapshot(rt);
+
+    // Both the trait DEFAULT `is_doc` and the impl override are is_dead=false —
+    // the default via trait-default live-rooting (S-281 Mechanism 2), neither
+    // reading dead despite having no source-visible caller.
+    let is_doc_dead: Vec<Option<bool>> = snap
+        .iter()
+        .filter(|n| !n.derived && n.name == "is_doc")
+        .map(|n| n.is_dead)
+        .collect();
+    assert_eq!(is_doc_dead.len(), 2, "trait default + impl override both exist");
+    assert!(
+        is_doc_dead.iter().all(|d| *d == Some(false)),
+        "both `is_doc` nodes are live, got {is_doc_dead:?}"
+    );
+
+    let nodes = rt.submit_read(|s| s.all_nodes()).unwrap();
+    let edges = rt.submit_read(|s| s.all_edges()).unwrap();
+    let use_plugin_id = nodes
+        .iter()
+        .find(|n| n.name == "use_plugin")
+        .expect("use_plugin node")
+        .id;
+    let is_doc_ids: std::collections::HashSet<_> =
+        nodes.iter().filter(|n| n.name == "is_doc").map(|n| n.id).collect();
+
+    // The `&dyn Plug` call `p.is_doc()` fans out to BOTH `is_doc` nodes via Calls
+    // edges from `use_plugin` — one reference, the SET of concrete targets
+    // (the trait default and the impl override), never fabricated (FR-RS-08).
+    let fanout = edges
+        .iter()
+        .filter(|e| {
+            e.kind == EdgeKind::Calls && e.source == use_plugin_id && is_doc_ids.contains(&e.target)
+        })
+        .count();
+    assert_eq!(fanout, 2, "the dyn call fans out to both is_doc targets");
+
+    // The impl method carries an `Implements` edge to the `Plug` trait node —
+    // the structural link the fan-out enumerated the impls from.
+    let plug_trait_id = nodes
+        .iter()
+        .find(|n| n.name == "Plug" && n.kind == NodeKind::Trait)
+        .expect("Plug trait node")
+        .id;
+    let implements = edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Implements && e.target == plug_trait_id)
+        .count();
+    assert!(implements >= 1, "the impl method implements Plug (got {implements})");
+}

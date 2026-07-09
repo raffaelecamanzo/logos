@@ -993,3 +993,191 @@ impl S {
         "an impl method carries FunctionMetrics like a free fn"
     );
 }
+
+// ── Trait-object dyn-dispatch refs (S-281, CR-073, FR-RS-08) ─────────────────
+
+/// The `(source, target)` pairs of every `Implements` reference (impl → trait).
+fn implements_refs(facts: &Facts) -> Vec<(&str, &str)> {
+    facts
+        .refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::Implements)
+        .map(|r| (r.source.as_str(), r.target.as_str()))
+        .collect()
+}
+
+/// The `Method`/`Calls` reference targets (the receiver-method calls).
+fn method_call_targets(facts: &Facts) -> Vec<&str> {
+    facts
+        .refs
+        .iter()
+        .filter(|r| r.form == RefForm::Method && r.kind == EdgeKind::Calls)
+        .map(|r| r.target.as_str())
+        .collect()
+}
+
+#[test]
+fn dyn_param_receiver_method_call_is_trait_qualified() {
+    // A receiver typed `&dyn LanguagePlugin` by an explicit parameter qualifies
+    // the call as `LanguagePlugin::is_documentation` so the binder fans out.
+    let src = "\
+fn extract_one(plugin: &dyn LanguagePlugin) {
+    if plugin.is_documentation() {}
+}
+";
+    let facts = extract_src("src/lib.rs", src);
+    assert!(
+        method_call_targets(&facts).contains(&"LanguagePlugin::is_documentation"),
+        "expected a trait-qualified target, got {:?}",
+        method_call_targets(&facts)
+    );
+}
+
+#[test]
+fn box_and_mut_dyn_receivers_are_trait_qualified() {
+    let boxed = extract_src("src/lib.rs", "fn f(p: Box<dyn Plug>) { p.run(); }");
+    assert!(
+        method_call_targets(&boxed).contains(&"Plug::run"),
+        "Box<dyn Plug> receiver → Plug::run, got {:?}",
+        method_call_targets(&boxed)
+    );
+    let mutref = extract_src("src/lib.rs", "fn f(p: &mut dyn Plug) { p.run(); }");
+    assert!(
+        method_call_targets(&mutref).contains(&"Plug::run"),
+        "&mut dyn Plug receiver → Plug::run, got {:?}",
+        method_call_targets(&mutref)
+    );
+}
+
+#[test]
+fn let_bound_dyn_receiver_is_trait_qualified() {
+    let src = "fn f() { let p: &dyn Foo = pick(); p.bar(); }";
+    let facts = extract_src("src/lib.rs", src);
+    assert!(
+        method_call_targets(&facts).contains(&"Foo::bar"),
+        "let-bound &dyn Foo receiver → Foo::bar, got {:?}",
+        method_call_targets(&facts)
+    );
+}
+
+#[test]
+fn scoped_dyn_trait_takes_its_last_segment() {
+    // `&dyn a::b::Multi` → the trait's simple name `Multi`.
+    let src = "fn f(p: &dyn a::b::Multi) { p.go(); }";
+    let facts = extract_src("src/lib.rs", src);
+    assert!(
+        method_call_targets(&facts).contains(&"Multi::go"),
+        "scoped dyn trait → Multi::go, got {:?}",
+        method_call_targets(&facts)
+    );
+}
+
+#[test]
+fn non_dyn_receiver_method_call_stays_a_bare_name() {
+    // A concrete-typed receiver is NOT a provable trait object: the call stays a
+    // bare `run` and never fans out (the CR-066 guard, FR-RS-06). An inferred
+    // closure/unknown receiver likewise stays bare.
+    let concrete = extract_src("src/lib.rs", "fn f(p: &CompiledPlugin) { p.run(); }");
+    assert!(
+        method_call_targets(&concrete).contains(&"run")
+            && !method_call_targets(&concrete)
+                .iter()
+                .any(|t| t.contains("::")),
+        "a concrete receiver stays bare, got {:?}",
+        method_call_targets(&concrete)
+    );
+    let inferred = extract_src("src/lib.rs", "fn f(xs: X) { xs.iter().map(|p| p.run()); }");
+    assert!(
+        !method_call_targets(&inferred)
+            .iter()
+            .any(|t| *t == "X::run" || t.ends_with("::run")),
+        "an inferred closure receiver is not provable, got {:?}",
+        method_call_targets(&inferred)
+    );
+}
+
+#[test]
+fn trait_impl_method_emits_an_implements_ref() {
+    // `impl Plug for Compiled { fn run() }` emits `Compiled::run --Implements--> Plug`.
+    let src = "\
+struct Compiled;
+impl Plug for Compiled {
+    fn run(&self) {}
+}
+";
+    let facts = extract_src("src/lib.rs", src);
+    let impls = implements_refs(&facts);
+    assert_eq!(impls.len(), 1, "one Implements ref, got {impls:?}");
+    let (source, target) = impls[0];
+    assert_eq!(target, "Plug", "the impl method points at its trait");
+    assert!(
+        source.contains("run"),
+        "the Implements source is the impl method `run`: {source}"
+    );
+}
+
+#[test]
+fn inherent_impl_method_emits_no_implements_ref() {
+    // `impl X { fn helper() }` carries no trait — no Implements ref.
+    let src = "\
+struct X;
+impl X {
+    fn helper(&self) {}
+}
+";
+    let facts = extract_src("src/lib.rs", src);
+    assert!(
+        implements_refs(&facts).is_empty(),
+        "an inherent impl method emits no Implements ref, got {:?}",
+        implements_refs(&facts)
+    );
+}
+
+#[test]
+fn generic_trait_impl_emits_an_implements_ref_to_the_base_trait() {
+    // `impl<S> Handler<S> for T { fn on(&self) }` → Implements to the base `Handler`.
+    let src = "\
+struct T;
+impl<S> Handler<S> for T {
+    fn on(&self, _s: S) {}
+}
+";
+    let facts = extract_src("src/lib.rs", src);
+    let impls = implements_refs(&facts);
+    assert_eq!(impls.len(), 1, "one Implements ref, got {impls:?}");
+    assert_eq!(impls[0].1, "Handler", "generic trait impl → base trait name");
+}
+
+#[test]
+fn shadowed_receiver_name_is_not_provable_and_stays_bare() {
+    // A receiver name bound more than once (a concrete parameter shadowed by a
+    // later `&dyn` let) is NOT a per-file-provable single type. The scope-blind
+    // walk must bail rather than guess which binding is live at a given call site,
+    // else the FIRST `c.draw()` (on the concrete `c`) would be fabricated as a
+    // `Draw::draw` dispatch edge (NFR-RA-05). Both calls stay bare.
+    let src = "\
+fn render(c: &Canvas) {
+    c.draw();
+    let c: &dyn Draw = pick();
+    c.draw();
+}
+";
+    let facts = extract_src("src/lib.rs", src);
+    assert!(
+        !method_call_targets(&facts).iter().any(|t| t.contains("::")),
+        "a shadowed receiver name must not qualify to a trait, got {:?}",
+        method_call_targets(&facts)
+    );
+}
+
+#[test]
+fn smart_pointer_dyn_with_trait_bounds_is_trait_qualified() {
+    // `Arc<dyn Plug + Send>` peels the `bounded_type` inside the generic argument,
+    // symmetric with the reference path that already handles `&dyn Plug + Send`.
+    let facts = extract_src("src/lib.rs", "fn f(p: Arc<dyn Plug + Send>) { p.run(); }");
+    assert!(
+        method_call_targets(&facts).contains(&"Plug::run"),
+        "Arc<dyn Plug + Send> receiver → Plug::run, got {:?}",
+        method_call_targets(&facts)
+    );
+}

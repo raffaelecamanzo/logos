@@ -506,6 +506,11 @@ fn extract_one(
     let block_kinds = &plugin.semantics().nesting_block_kinds;
     let export_convention = plugin.semantics().export_convention;
     let test_convention = plugin.semantics().test_convention;
+    // Trait-implementation reference rows (S-281, CR-073, FR-RS-08): one per
+    // `impl T for X` method, linking the impl method to its trait so the binder
+    // can enumerate a trait method's impls for `dyn T` fan-out. Collected here
+    // (the AST is in hand) and appended to the reference set after the query walk.
+    let mut impl_refs: Vec<RefFact> = Vec::new();
     for (i, decl) in decls.iter().enumerate() {
         let Some(symbol) = &symbols[i] else {
             continue;
@@ -514,11 +519,29 @@ fn extract_one(
         // Part B, FR-EX-05): emission-only, so `decl.kind` — and thus every
         // symbol ID and ordinal — is byte-identical (NFR-RA-06). Free functions
         // and every other kind pass through unchanged.
-        let node_kind = if decl.kind == NodeKind::Function && is_rust_associated_method(decl.node) {
+        let is_rust_method = decl.kind == NodeKind::Function && is_rust_associated_method(decl.node);
+        let node_kind = if is_rust_method {
             NodeKind::Method
         } else {
             decl.kind
         };
+        // An `impl T for X` (trait-impl) method emits an Implements ref to its
+        // trait `T`; an inherent `impl X` method carries no trait and emits none
+        // (S-281, CR-073). Never fabricated — resolution binds it only to the one
+        // workspace Trait of that name, or leaves it an honest miss (NFR-RA-05).
+        if is_rust_method {
+            if let Some(trait_name) = rust_impl_trait_name(decl.node, source) {
+                impl_refs.push(RefFact {
+                    source: symbol.clone(),
+                    target: trait_name,
+                    alias: None,
+                    form: RefForm::Path,
+                    kind: EdgeKind::Implements,
+                    line: decl.start_line,
+                    relation: None,
+                });
+            }
+        }
         let is_callable = matches!(node_kind, NodeKind::Function | NodeKind::Method);
         let metrics = is_callable.then(|| FunctionMetrics {
             cyclomatic_complexity: complexity::cyclomatic_complexity(decl.node, keywords),
@@ -594,6 +617,15 @@ fn extract_one(
             &symbols,
             file_module.as_ref(),
         );
+    }
+
+    // Fold in the trait-implementation refs (S-281) collected above, then restore
+    // the canonical `(source, target, form, kind)` ledger order and dedup — the
+    // same key `collect_refs` sorts on, so the merged set stays byte-identical
+    // regardless of collection order ([NFR-RA-06]).
+    if !impl_refs.is_empty() {
+        facts.refs.append(&mut impl_refs);
+        dedup_sort_refs(&mut facts.refs);
     }
 
     sort_facts(&mut facts);
@@ -754,9 +786,20 @@ fn collect_refs(
                     if name.is_empty() {
                         continue;
                     }
+                    // Trait-object dynamic dispatch (S-281, CR-073, FR-RS-08): when
+                    // the receiver is a *provable* `&dyn T` (an explicit parameter
+                    // or `let` type in the enclosing fn), qualify the target as
+                    // `T::f` so the binder fans out to the trait method's impls. A
+                    // receiver of unknown type stays the bare `f`, taking the
+                    // ordinary receiver-method path — the CR-066 guard (FR-RS-06)
+                    // is not loosened.
+                    let target = match rust_dyn_receiver_trait(node, source) {
+                        Some(trait_name) => format!("{trait_name}::{name}"),
+                        None => name.to_string(),
+                    };
                     out.push(RefFact {
                         source: source_symbol,
-                        target: name.to_string(),
+                        target,
                         alias: None,
                         form: RefForm::Method,
                         kind: EdgeKind::Calls,
@@ -936,6 +979,189 @@ fn is_rust_associated_method(node: Node<'_>) -> bool {
             body.kind() == "declaration_list"
                 && body.parent().is_some_and(|owner| owner.kind() == "impl_item")
         })
+}
+
+/// The last `::`-path segment of a type path text (`LanguagePlugin` for
+/// `crate::plugin::LanguagePlugin`), trimmed.
+fn last_type_segment(text: &str) -> &str {
+    text.rsplit("::").next().unwrap_or(text).trim()
+}
+
+/// The simple (last-segment) name of a trait bound node — a `type_identifier`
+/// (`T`), a `scoped_type_identifier` (`a::b::T` → `T`), or a generic trait
+/// (`Iterator<Item=X>` → `Iterator`, its base head). `None` for any other shape.
+fn trait_simple_name(trait_node: Node<'_>, source: &[u8]) -> Option<String> {
+    let named = match trait_node.kind() {
+        "type_identifier" | "scoped_type_identifier" => trait_node,
+        "generic_type" => trait_node.child_by_field_name("type")?,
+        _ => return None,
+    };
+    let name = last_type_segment(named.utf8_text(source).ok()?);
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The trait name of a **trait-object** type `ty`, or `None` when `ty` is not a
+/// `dyn T` (S-281, [CR-073], [FR-RS-08]). Peels the transparent layers a `dyn T`
+/// can wear — `&dyn`/`&mut dyn` (`reference_type`), a `T + Send` bound list
+/// (`bounded_type`), and the smart pointers `Box`/`Rc`/`Arc<dyn T>`
+/// (`generic_type`) — down to the `dynamic_type`, then reads its principal
+/// `trait:`. Depth-bounded (4 covers `Arc<Box<dyn T>>` and beyond); anything
+/// that is not a trait object yields `None`, so the receiver stays a bare
+/// method name and never fans out (the CR-066 guard, [FR-RS-06]).
+///
+/// [CR-073]: ../../../docs/requests/CR-073-trait-object-dynamic-dispatch-reachability.md
+/// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+/// [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
+fn dyn_trait_of_type(ty: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cur = ty;
+    for _ in 0..4 {
+        match cur.kind() {
+            "dynamic_type" => {
+                return trait_simple_name(cur.child_by_field_name("trait")?, source);
+            }
+            "reference_type" => cur = cur.child_by_field_name("type")?,
+            // `dyn A + Send`: the object trait sits in the reference/dynamic part.
+            "bounded_type" => {
+                cur = (0..cur.named_child_count())
+                    .filter_map(|i| cur.named_child(i))
+                    .find(|c| {
+                        matches!(c.kind(), "reference_type" | "dynamic_type" | "generic_type")
+                    })?;
+            }
+            // Only the transparent smart-pointer wrappers carry a `dyn T` object;
+            // `Vec<dyn T>` and the like are not trait-object receivers.
+            "generic_type" => {
+                let head = cur.child_by_field_name("type")?;
+                if !matches!(last_type_segment(head.utf8_text(source).ok()?), "Box" | "Rc" | "Arc") {
+                    return None;
+                }
+                let args = cur.child_by_field_name("type_arguments")?;
+                cur = (0..args.named_child_count())
+                    .filter_map(|i| args.named_child(i))
+                    .find(|c| {
+                        // `bounded_type` covers `Arc<dyn T + Send>`, symmetric with
+                        // the reference path that already peels `&dyn T + Send`.
+                        matches!(
+                            c.kind(),
+                            "dynamic_type" | "reference_type" | "generic_type" | "bounded_type"
+                        )
+                    })?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The trait name of the enclosing `impl T for X` block of a Rust impl method
+/// (S-281, [CR-073]) — the enabling link the binder enumerates a trait method's
+/// impls from ([FR-RS-08]). `method` is an impl-nested `function_item`
+/// (`is_rust_associated_method` holds): `function_item → declaration_list →
+/// impl_item`. A **trait** impl carries a `trait:` field; an inherent
+/// `impl X { … }` does not, so it yields `None` and emits no Implements ref.
+///
+/// [CR-073]: ../../../docs/requests/CR-073-trait-object-dynamic-dispatch-reachability.md
+/// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+fn rust_impl_trait_name(method: Node<'_>, source: &[u8]) -> Option<String> {
+    let impl_item = method.parent()?.parent()?;
+    if impl_item.kind() != "impl_item" {
+        return None;
+    }
+    trait_simple_name(impl_item.child_by_field_name("trait")?, source)
+}
+
+/// The trait name when a receiver-method call's receiver is a **provable**
+/// workspace trait object (S-281, [CR-073], [FR-RS-08]).
+///
+/// `field_ident` is the `@ref.method` capture — the method-name `field_identifier`
+/// of a `field_expression`. The receiver must be a plain named `identifier` whose
+/// `&dyn T` type is provable **from this file's own syntax**: an explicit
+/// parameter type on the enclosing `function_item`, or a `let recv: &dyn T`
+/// binding in its body. This is a superset-free, per-file-pure gate — a receiver
+/// whose type comes from inference (a closure parameter, a method-chain result)
+/// is *not* provable and stays a bare method name, so the fan-out never fires on
+/// an unknown receiver ([FR-RS-06], the CR-066 guard is not loosened) and the
+/// failure mode is a missed edge (false-live), never a fabricated one
+/// ([NFR-RA-05]). Rust-specific by construction — the node kinds it matches
+/// (`field_expression`, `function_item`, `dynamic_type`, …) exist only in the
+/// Rust grammar, so it is a proven no-op for every other language.
+///
+/// [CR-073]: ../../../docs/requests/CR-073-trait-object-dynamic-dispatch-reachability.md
+/// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+/// [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn rust_dyn_receiver_trait(field_ident: Node<'_>, source: &[u8]) -> Option<String> {
+    let field_expr = field_ident.parent()?;
+    if field_expr.kind() != "field_expression" {
+        return None;
+    }
+    let receiver = field_expr.child_by_field_name("value")?;
+    if receiver.kind() != "identifier" {
+        return None; // only a simple named receiver is provable per-file
+    }
+    let recv_name = receiver.utf8_text(source).ok()?;
+    // Climb to the enclosing function; its parameters and `let` bindings are the
+    // only per-file-provable sources of a receiver's `&dyn T` type.
+    let mut anc = field_expr.parent();
+    while let Some(n) = anc {
+        if n.kind() == "function_item" {
+            return function_dyn_binding(n, recv_name, source);
+        }
+        anc = n.parent();
+    }
+    None
+}
+
+/// The `&dyn T` trait bound of a name `recv` inside `fn_node` — an explicit
+/// parameter type (preferred), else a `let recv: &dyn T` binding in the body.
+/// A nested `function_item` is not descended (its bindings belong to its own
+/// scope), so a shadowing inner binding cannot mis-type an outer receiver.
+fn function_dyn_binding(fn_node: Node<'_>, recv_name: &str, source: &[u8]) -> Option<String> {
+    // Collect EVERY binding of `recv_name` in this function's own scope — each
+    // parameter and each body `let` (not descending into a nested fn/closure,
+    // which owns its own scope) whose pattern is exactly the receiver name — as
+    // its optional type-annotation node.
+    //
+    // The proof must be a *single* per-file type: a name bound more than once is
+    // shadowed, and this walk is scope-blind (it cannot tell which binding is live
+    // at the call site), so guessing one would fabricate a dispatch edge — e.g. a
+    // `c: &Concrete` parameter shadowed by a later `let c: &dyn T` would wrongly
+    // qualify the *first* `c.method()` as `T::method`. Bail on anything but exactly
+    // one binding, and require that binding to be annotated: an unambiguous,
+    // annotated `&dyn T` binding qualifies; zero, several, or an un-annotated
+    // binding is an honest miss ([NFR-RA-05]).
+    let name_of = |n: Node<'_>| {
+        n.child_by_field_name("pattern")
+            .and_then(|p| p.utf8_text(source).ok())
+    };
+    let mut bindings: Vec<Option<Node<'_>>> = Vec::new();
+    if let Some(params) = fn_node.child_by_field_name("parameters") {
+        let mut cursor = params.walk();
+        for p in params.named_children(&mut cursor) {
+            if p.kind() == "parameter" && name_of(p) == Some(recv_name) {
+                bindings.push(p.child_by_field_name("type"));
+            }
+        }
+    }
+    if let Some(body) = fn_node.child_by_field_name("body") {
+        let mut stack = vec![body];
+        while let Some(n) = stack.pop() {
+            if n.kind() == "let_declaration" && name_of(n) == Some(recv_name) {
+                bindings.push(n.child_by_field_name("type"));
+            }
+            for i in 0..n.child_count() {
+                if let Some(ch) = n.child(i) {
+                    if !matches!(ch.kind(), "function_item" | "closure_expression") {
+                        stack.push(ch);
+                    }
+                }
+            }
+        }
+    }
+    match bindings.as_slice() {
+        [Some(ty)] => dyn_trait_of_type(*ty, source),
+        _ => None, // zero, several (shadowed), or an un-annotated single binding
+    }
 }
 
 /// Map a `@symbol.<kind>` capture name to a [`NodeKind`], or `None` for a

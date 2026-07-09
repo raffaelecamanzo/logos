@@ -318,6 +318,17 @@ fn build_symbol_level(
         if !scope.include_contains && edge.kind == EdgeKind::Accesses {
             continue;
         }
+        // The S-281 `Implements` edge (an impl method → the trait it implements,
+        // CR-073) is a structural type-relation fact, not a code-coupling
+        // dependency — excluded from the dependency view the five original metrics
+        // run on (FR-RS-08, ADR-21), exactly as `Accesses` is, and kept in the
+        // full symbol view where it is navigable. So admitting it leaves
+        // aggregate_signal, cycles, DSM, and dead-code byte-identical: the
+        // dyn-dispatch dead-code recovery rides entirely on the fan-out `Calls`
+        // edges, never on these structural edges (metric-neutrality).
+        if !scope.include_contains && edge.kind == EdgeKind::Implements {
+            continue;
+        }
         if !scope.admit_non_code && edge.kind.is_documentation() {
             continue; // doc-kind edge — excluded from the code subgraph (FR-DG-06);
                       // the visualization view keeps it as a cross-layer edge.
@@ -428,12 +439,14 @@ fn build_rollup(
     for edge in edges {
         if edge.kind == EdgeKind::Contains
             || edge.kind == EdgeKind::Accesses
+            || edge.kind == EdgeKind::Implements
             || edge.kind.is_documentation()
             || edge.kind.is_config_reference()
         {
-            continue; // lexical, member-access, doc-kind, or cross-artifact edge —
-                      // none is a code coupling (FR-CG-05, ADR-26, the rollup twin
-                      // of the symbol-level artifact fence above)
+            continue; // lexical, member-access, trait-implements (S-281, a
+                      // structural type-relation), doc-kind, or cross-artifact
+                      // edge — none is a code coupling (FR-CG-05, ADR-26, FR-RS-08,
+                      // the rollup twin of the symbol-level fences above)
         }
         // A doc endpoint was never given a rollup vertex above, so its incident
         // edges fall away here, keeping the rollup a pure code subgraph (FR-DG-06).
