@@ -1346,9 +1346,13 @@ pub(crate) fn affected(
 /// Whether a project-relative path is test-marked by naming convention
 /// ([FR-CL-04] `--tests-only`): a `tests`/`test`/`__tests__`/`spec` path
 /// segment, or a filename matching the per-language test idioms (`*_test.*`,
-/// `test_*.py`, `*.test.*`/`*.spec.*`, `*Test(s).java`, Ruby RSpec `*_spec.rb`).
+/// `test_*.py`, `*.test.*`/`*.spec.*`, `*Test(s).java`, Ruby RSpec `*_spec.rb`,
+/// a bare Rust `tests.rs`, or the snake_case Rust `*_tests.rs` suffix —
+/// [CR-075], the plural counterpart to `*Test(s).java`'s CamelCase plural).
 /// Deterministic and language-blind; the native test annotation (test-gap
 /// analysis story) will supersede it.
+///
+/// [CR-075]: ../../../docs/requests/CR-075-is-test-plural-test-file-conventions.md
 pub(crate) fn is_test_path(path: &str) -> bool {
     let p = Path::new(path);
     if p.components().any(|c| {
@@ -1361,7 +1365,9 @@ pub(crate) fn is_test_path(path: &str) -> bool {
         return false;
     };
     let stem = name.split('.').next().unwrap_or(name);
-    stem.ends_with("_test")
+    stem == "tests"
+        || stem.ends_with("_test")
+        || stem.ends_with("_tests")
         || stem.ends_with("_spec")
         || stem.ends_with("Test")
         || stem.ends_with("Tests")
