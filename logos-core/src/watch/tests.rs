@@ -632,6 +632,87 @@ fn registration_prewalk_degrades_to_name_prune_without_authority() {
     );
 }
 
+/// Admission parity ([FR-SY-11], the sprint's Testing & Verification): over a
+/// mixed fixture exercising every gate at once, the set of *files* the pruned
+/// registration seed walk caches equals exactly the set a fresh full-walk `index`
+/// ([`discover`]) admits. This is the cross-check the CR names — the seed walk
+/// must admit exactly what `index` would, not merely "some subset."
+#[test]
+fn registration_prewalk_seed_file_set_matches_the_full_walk_index() {
+    use crate::config::discover;
+    use std::collections::BTreeSet;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+
+    // Admitted source.
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+    // `target/` name prune.
+    std::fs::create_dir_all(root.join("target/debug")).unwrap();
+    std::fs::write(root.join("target/debug/x.rlib"), "x").unwrap();
+    // Root-level gitignore: a file pattern and a directory pattern.
+    std::fs::write(root.join(".gitignore"), "secret.rs\ngenerated/\n").unwrap();
+    std::fs::write(root.join("secret.rs"), "fn s() {}\n").unwrap();
+    std::fs::create_dir_all(root.join("generated")).unwrap();
+    std::fs::write(root.join("generated/out.rs"), "fn o() {}\n").unwrap();
+    // Nested-`.git` boundary under a NON-ignored name (only the boundary rule cuts it).
+    std::fs::create_dir_all(root.join("nested")).unwrap();
+    std::fs::write(root.join("nested/.git"), "gitdir: /elsewhere\n").unwrap();
+    std::fs::write(root.join("nested/copy.rs"), "fn c() {}\n").unwrap();
+    // An exclude-glob-rejected path and an oversize file.
+    std::fs::create_dir_all(root.join("docs/planning")).unwrap();
+    std::fs::write(root.join("docs/planning/notes.rs"), "fn n() {}\n").unwrap();
+    std::fs::write(root.join("big.rs"), "x".repeat(100)).unwrap();
+    std::fs::write(root.join("small.rs"), "y\n").unwrap();
+
+    // A config exercising include(**), an exclude glob, the size cap, and a
+    // trimmed `ignored_dirs` (root-level ignore sources only — the v1 authority
+    // limitation excludes nested `.gitignore`, so the fixture uses none).
+    let mut config = crate::config::Config {
+        exclude: vec!["docs/planning/**".to_string()],
+        max_file_size: 50, // above the small source files (~14 B), below big.rs (100 B)
+        ..crate::config::Config::default()
+    };
+    config.semantics.ignored_dirs = vec!["target".to_string(), ".git".to_string()];
+
+    let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+    // The watcher's name set is the SAME union `spawn` builds (internal ∪ config).
+    let ignored_dirs: HashSet<String> = [".logos", ".git", "target"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+
+    let mut cache =
+        PrunedFileIdCache::new(root.clone(), Arc::new(ignored_dirs), Arc::new(Some(authority)));
+    cache.add_path(&root, RecursiveMode::Recursive);
+
+    // The full-walk `index` verdict over the same fixture/config.
+    let index_files: BTreeSet<PathBuf> = discover(&root, &config).unwrap().files.into_iter().collect();
+
+    // The seed walk caches directory nodes too (for rename tracking); restrict to
+    // regular files to compare against `discover`'s file set.
+    let seed_files: BTreeSet<PathBuf> = cache
+        .cached_paths()
+        .into_iter()
+        .filter(|p| p.is_file())
+        .collect();
+
+    assert_eq!(
+        seed_files, index_files,
+        "the registration seed walk must admit exactly the files a fresh `index` admits"
+    );
+    // Sanity: the fixture actually bit — source admitted, every excluded class out.
+    assert!(index_files.contains(&root.join("src/main.rs")));
+    assert!(!index_files.contains(&root.join("target/debug/x.rlib")));
+    assert!(!index_files.contains(&root.join("secret.rs")));
+    assert!(!index_files.contains(&root.join("generated/out.rs")));
+    assert!(!index_files.contains(&root.join("nested/copy.rs")));
+    assert!(!index_files.contains(&root.join("docs/planning/notes.rs")));
+    assert!(!index_files.contains(&root.join("big.rs")));
+}
+
 /// The name prune is skipped for the watched ROOT itself: a project whose own
 /// directory name collides with an ignored name (a repo checked out into
 /// `…/build`, `…/target`, …) must still be seeded end-to-end — only descendant
