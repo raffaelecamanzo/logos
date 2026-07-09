@@ -739,7 +739,7 @@ fn is_ignored(root: &Path, path: &Path, ignored_dirs: &HashSet<String>) -> bool 
         return true;
     };
     relative.components().any(|component| match component {
-        Component::Normal(name) => name.to_str().is_some_and(|name| ignored_dirs.contains(name)),
+        Component::Normal(name) => is_pruned_dir_name(name, ignored_dirs),
         _ => false,
     })
 }
@@ -783,6 +783,16 @@ fn is_pruned_dir_name(name: &OsStr, ignored_dirs: &HashSet<String>) -> bool {
 ///    failed) the walk degrades to the name prune only, mirroring how [`classify`]
 ///    degrades — the watcher is never a correctness dependency ([FR-SY-06],
 ///    [ADR-11]).
+///
+/// Descent is pruned **by name only** (per [CR-077] §3.2): a directory the
+/// authority would reject wholesale but whose name is *not* in `ignored_dirs` —
+/// e.g. a gitignored `datasets/` or an in-tree nested-`.git` boundary under an
+/// ordinary name — is still descended, and its leaf *files* are rejected one by
+/// one. The seeded **file** set therefore matches the full walk, but the
+/// registration walk may still `stat` such a subtree's directory skeleton. The
+/// headline `target/`-class cost is name-pruned, so this residual is bounded;
+/// pruning gitignored-directory descent wholesale (a directory-level authority
+/// predicate) is a tracked follow-up, not this CR's scope.
 ///
 /// Symlinks are not followed (the seed walk classifies via `read_dir`'s
 /// non-following `file_type`), matching the full walk's `follow_links(false)` and
