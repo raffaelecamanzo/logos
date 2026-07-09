@@ -294,6 +294,65 @@ fn production_scope_composes_with_limit_and_untested() {
     );
 }
 
+/// All three filters composed TOGETHER in a single call — `--limit`,
+/// `--untested`, and `production_scope` — not just each independently
+/// (CR-076 AC: "composes with --limit and --untested"). No coverage is
+/// ingested, so `--untested` retains every remaining (n/a) file; the
+/// narrowed-then-limited board must still lead with the hottest production
+/// file.
+#[test]
+fn production_scope_composes_with_limit_and_untested_simultaneously() {
+    let tmp = production_scope_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let combined = engine
+        .hotspots(Some(1), true, true)
+        .expect("hotspots --untested --production-scope --limit 1");
+    assert!(combined.production_scope);
+    assert!(combined.untested);
+    assert_eq!(
+        combined.ranked_files, 2,
+        "production_scope narrows to {{prod.rs, calm.rs}}; --untested retains both \
+         (no coverage ingested): {combined:?}"
+    );
+    assert_eq!(combined.files.len(), 1, "--limit caps the combined board");
+    assert_eq!(
+        combined.files[0].path, "src/prod.rs",
+        "the hottest production file leads under all three filters combined"
+    );
+}
+
+/// CR-076 AC: "enabling or disabling the filter never changes any gated
+/// signal" ([BR-26]). Mirrors [`gate_is_byte_identical_as_the_temporal_tier_advances`]
+/// for the new `production_scope` parameter specifically.
+#[test]
+fn production_scope_toggle_never_moves_the_gate() {
+    let tmp = production_scope_repo();
+    let repo = tmp.path();
+    let engine = Engine::start(repo).expect("engine starts");
+
+    engine.gate(None, true, true).expect("gate --save");
+    let baseline = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+
+    engine
+        .hotspots(None, false, false)
+        .expect("hotspots with the filter off");
+    let after_off = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    assert_eq!(
+        baseline, after_off,
+        "production_scope=false never moves the gate"
+    );
+
+    engine
+        .hotspots(None, false, true)
+        .expect("hotspots with the filter on");
+    let after_on = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    assert_eq!(
+        baseline, after_on,
+        "production_scope=true never moves the gate (BR-26)"
+    );
+}
+
 // ── FR-GH-07 / UAT-GH-02 / BR-26: gate immunity — the two-tier rule ──────────
 
 /// The gated verdict, stripped of provenance (freshness HEAD/sha, the snapshot
