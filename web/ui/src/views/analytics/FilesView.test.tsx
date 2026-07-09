@@ -24,6 +24,7 @@ function model(over: Partial<FilesModel["hotspots"]> = {}): FilesModel {
       degraded: null,
       notice: null,
       untested: false,
+      production_scope: false,
       coverage_basis: "coverage",
       coverage_label: null,
       ...over,
@@ -103,6 +104,22 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     await screen.findByRole("table", { name: "Files ranked by risk" });
     await user.click(screen.getByRole("button", { name: "Untested only" }));
     await waitFor(() => expect(urls.some((u) => u.includes("untested=true"))).toBe(true));
+  });
+
+  it("the production-scope toggle re-fetches the board with ?production_scope (CR-076)", async () => {
+    const user = userEvent.setup();
+    const urls: string[] = [];
+    stubFetch((url) => {
+      urls.push(url);
+      return url.includes("production_scope") ? model({ production_scope: true }) : model();
+    });
+    render(<FilesView />);
+    await screen.findByRole("table", { name: "Files ranked by risk" });
+    await user.click(screen.getByRole("button", { name: "Production files only" }));
+    await waitFor(() =>
+      expect(urls.some((u) => u.includes("production_scope=true"))).toBe(true),
+    );
+    expect(await screen.findByText(/production files only/)).toBeInTheDocument();
   });
 
   it("exposes the data as an accessible <table> (keyboard/screen-reader affordance)", async () => {

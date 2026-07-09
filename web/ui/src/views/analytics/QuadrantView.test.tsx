@@ -52,6 +52,7 @@ function populated(): QuadrantModel {
       degraded: null,
       notice: null,
       untested: false,
+      production_scope: false,
       coverage_basis: "coverage",
       coverage_label: null,
     },

@@ -144,11 +144,14 @@ export function fetchHealth(): Promise<HealthModel> {
 // already-registered `/api/v1` handler (web/src/api_v1.rs) — no new Rust handler:
 // the foundation suite (S-183) shipped these endpoints behind the legacy UI.
 
-/** `GET /api/v1/files[?untested]` — the Files & Risk bundle (FR-UI-11). The
- *  `untested` toggle scopes the board to files lacking fresh positive coverage,
- *  exactly as the server-rendered view's filter does. */
-export function fetchFiles(untested = false): Promise<FilesModel> {
-  return apiFetch<FilesModel>("files", { untested });
+/** `GET /api/v1/files[?untested][?production_scope]` — the Files & Risk bundle
+ *  (FR-UI-11). The `untested` toggle scopes the board to files lacking fresh
+ *  positive coverage, exactly as the server-rendered view's filter does; the
+ *  `productionScope` toggle drops whole test files from the candidate set
+ *  before ranking (CR-076), matching the CLI `--production-scope` flag / MCP
+ *  `production_scope` argument. */
+export function fetchFiles(untested = false, productionScope = false): Promise<FilesModel> {
+  return apiFetch<FilesModel>("files", { untested, production_scope: productionScope });
 }
 
 /** `GET /api/v1/coverage` — the Coverage bundle (FR-UI-11). */

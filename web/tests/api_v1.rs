@@ -73,7 +73,7 @@ fn scanned_engine() -> (TempDir, Arc<Engine>) {
     let engine = Arc::new(Engine::start(repo).expect("engine starts"));
     engine.index();
     engine.scan(false).expect("scan persists a metric snapshot");
-    engine.hotspots(None, false).expect("hotspots mines a temporal snapshot");
+    engine.hotspots(None, false, false).expect("hotspots mines a temporal snapshot");
     (tmp, engine)
 }
 
@@ -466,6 +466,30 @@ async fn files_untested_query_param_serves_the_untested_board() {
     assert_json_self_only_csp(&headers, "/api/v1/files?untested");
     for key in ["\"status\"", "\"hotspots\"", "\"temporal\""] {
         assert!(body.contains(key), "files?untested carries {key}: {body}");
+    }
+}
+
+/// `/api/v1/files?production_scope` exercises the optional production-scope
+/// board branch (CR-076: `wants_flag(.., "production_scope")` ⇒
+/// `latest_hotspots(.., production_scope=true)`), reached through the same
+/// [`Engine::latest_hotspots`] call as the bare `/files` board and the CLI
+/// `--production-scope` flag / MCP `production_scope` argument ([FR-UI-05]).
+#[tokio::test]
+async fn files_production_scope_query_param_serves_the_filtered_board() {
+    let (_tmp, engine) = scanned_engine();
+    let router = web::router(engine);
+    let resp = router
+        .oneshot(get("/api/v1/files?production_scope"))
+        .await
+        .unwrap();
+    let (status, body, headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "files?production_scope answers 200");
+    assert_json_self_only_csp(&headers, "/api/v1/files?production_scope");
+    for key in ["\"status\"", "\"hotspots\"", "\"temporal\"", "\"production_scope\":true"] {
+        assert!(
+            body.contains(key),
+            "files?production_scope carries {key}: {body}"
+        );
     }
 }
 

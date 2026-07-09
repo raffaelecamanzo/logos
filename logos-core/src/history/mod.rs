@@ -47,8 +47,9 @@ pub use coverage::{
     IngestSummary, Quadrant, FRESHNESS_FRESH, FRESHNESS_NA, FRESHNESS_STALE,
 };
 pub use hotspot::{
-    aggregate_complexity, rank, CoverageCell, FileCoverage, Hotspot, HotspotReport, COVERAGE_BASIS,
-    DEFECT_LABEL, FIRST_MINE_NOTICE, STATIC_BASIS, STATIC_FALLBACK_LABEL, TIER_LABEL,
+    aggregate_complexity, rank, test_only_files, CoverageCell, FileCoverage, Hotspot,
+    HotspotReport, COVERAGE_BASIS, DEFECT_LABEL, FIRST_MINE_NOTICE, STATIC_BASIS,
+    STATIC_FALLBACK_LABEL, TIER_LABEL,
 };
 pub use miner::{DegradedReason, MineOutcome};
 pub use temporal::{FileTemporal, TemporalReport};

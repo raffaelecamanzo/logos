@@ -112,7 +112,11 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
         Commands::DocGaps { limit, no_reconcile } => {
             out.try_query(root, |e| e.doc_gaps(limit, !no_reconcile))
         }
-        Commands::Hotspots { limit, untested } => out.try_query(root, |e| e.hotspots(limit, untested)),
+        Commands::Hotspots {
+            limit,
+            untested,
+            production_scope,
+        } => out.try_query(root, |e| e.hotspots(limit, untested, production_scope)),
         // The coverage evidence tier (CR-007): each sub-subcommand is one `Engine`
         // call shared with its MCP twin.
         Commands::Coverage { command } => match command {

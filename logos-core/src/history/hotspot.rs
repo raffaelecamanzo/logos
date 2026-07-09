@@ -36,13 +36,14 @@
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 //! [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::Serialize;
 
 use super::miner::DegradedReason;
 use super::temporal::TemporalReport;
 use crate::graph_store::{FunctionMetricRow, NodeRow};
+use crate::model::NodeId;
 
 /// The non-gated tier label — makes the two-tier boundary explicit on every
 /// surface that renders temporal data ([NFR-CC-04], [BR-26]).
@@ -121,6 +122,13 @@ pub struct HotspotReport {
     /// Whether the `--untested` filter was applied ([FR-CV-07]): when `true`,
     /// `files` is restricted to untested hotspots (no fresh positive coverage).
     pub untested: bool,
+    /// Whether the optional production-scope filter was applied ([FR-GH-06],
+    /// [CR-076]): when `true`, whole test files are dropped from the candidate
+    /// set before ranking. `false` (the default) is byte-identical to the
+    /// whole-repo board.
+    ///
+    /// [CR-076]: ../../../docs/requests/CR-076-hotspots-production-scope-filter.md
+    pub production_scope: bool,
     /// The coverage column / untested-filter basis: [`COVERAGE_BASIS`] when a
     /// coverage snapshot exists, else [`STATIC_BASIS`] (the labeled fallback).
     pub coverage_basis: &'static str,
@@ -184,6 +192,48 @@ pub fn aggregate_complexity(
     by_file
 }
 
+/// The optional production-scope candidate-set filter ([FR-GH-06], [CR-076]):
+/// the set of file paths that are **whole test files** — every
+/// complexity-contributing function in the file (the same functions
+/// [`aggregate_complexity`] sums) is `is_test` ([FR-AN-05]). A production file
+/// carrying an in-file `#[cfg(test)] mod tests` keeps at least one non-test
+/// contributing function, so it is never a member here — only its test
+/// functions are `is_test`, and the file's production functions keep it on the
+/// board ([CR-076] AC). A file with no complexity-contributing functions at
+/// all is never a member either (it is already absent from
+/// [`aggregate_complexity`]'s map, so [`rank`] excludes it regardless).
+///
+/// [CR-076]: ../../../docs/requests/CR-076-hotspots-production-scope-filter.md
+/// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
+pub fn test_only_files(
+    nodes: &[NodeRow],
+    functions: &[FunctionMetricRow],
+    test_ids: &HashSet<NodeId>,
+) -> BTreeSet<String> {
+    let file_of: BTreeMap<_, &str> = nodes
+        .iter()
+        .filter_map(|n| n.file_path.as_deref().map(|p| (n.id, p)))
+        .collect();
+
+    // path → has this file seen a non-test complexity-contributing function?
+    let mut has_production_function: BTreeMap<String, bool> = BTreeMap::new();
+    for f in functions {
+        let (Some(_), Some(path)) = (f.cyclomatic_complexity, file_of.get(&f.id)) else {
+            continue;
+        };
+        let entry = has_production_function
+            .entry((*path).to_string())
+            .or_insert(false);
+        *entry |= !test_ids.contains(&f.id);
+    }
+
+    has_production_function
+        .into_iter()
+        .filter(|(_, has_production)| !has_production)
+        .map(|(path, _)| path)
+        .collect()
+}
+
 /// Rank the files present in **both** the temporal report and the per-file
 /// complexity map, joining the coverage column and producing the
 /// [`HotspotReport`] ([FR-GH-06], [FR-CV-07]).
@@ -201,12 +251,24 @@ pub fn aggregate_complexity(
 /// tier yields an empty, `n/a` report carrying the degraded notice
 /// ([FR-GH-08]); a first-mine evaluation carries the first-mine notice
 /// ([FR-GH-02]).
+///
+/// `production_scope = true` drops every path in `test_only_files` ([CR-076])
+/// from the candidate set **before** the churn/complexity competition ranks
+/// are computed, so the ranks reflect the narrowed production-only set, not
+/// the whole-repo set with test rows subtracted after the fact. `false` (the
+/// default) ignores `test_only_files` entirely and is byte-identical to the
+/// pre-[CR-076] whole-repo board.
+///
+/// [CR-076]: ../../../docs/requests/CR-076-hotspots-production-scope-filter.md
+#[allow(clippy::too_many_arguments)]
 pub fn rank(
     temporal: TemporalReport,
     complexity_by_path: &BTreeMap<String, i64>,
     coverage: Option<&BTreeMap<String, FileCoverage>>,
     limit: Option<usize>,
     untested: bool,
+    production_scope: bool,
+    test_only_files: &BTreeSet<String>,
 ) -> HotspotReport {
     // The coverage column basis is independent of the temporal tier's health: it
     // reflects only whether a coverage snapshot exists ([FR-CV-07]).
@@ -230,6 +292,7 @@ pub fn rank(
             degraded: Some(reason),
             notice: Some(reason.message().to_string()),
             untested,
+            production_scope,
             coverage_basis,
             coverage_label,
         };
@@ -266,6 +329,12 @@ pub fn rank(
         .files
         .iter()
         .filter_map(|f| {
+            // Production-scope exclusion happens BEFORE the competition ranks
+            // below are computed, so an enabled filter narrows the ranking
+            // population itself, not just the rendered rows (CR-076).
+            if production_scope && test_only_files.contains(&f.path) {
+                return None;
+            }
             complexity_by_path
                 .get(&f.path)
                 .map(|&complexity| Candidate {
@@ -337,6 +406,7 @@ pub fn rank(
         degraded: None,
         notice,
         untested,
+        production_scope,
         coverage_basis,
         coverage_label,
     }
@@ -426,7 +496,7 @@ mod tests {
             ("churny.rs".to_string(), 2),
             ("complex.rs".to_string(), 38),
         ]);
-        let r = rank(temporal, &complexity, None, None, false);
+        let r = rank(temporal, &complexity, None, None, false, false, &BTreeSet::new());
         assert_eq!(r.files[0].path, "hot.rs");
         assert_eq!(r.files[0].churn_rank, 3);
         assert_eq!(r.files[0].complexity_rank, 3);
@@ -450,7 +520,7 @@ mod tests {
             ("both.rs".to_string(), 10),
             ("complexity_only.rs".to_string(), 99),
         ]);
-        let r = rank(temporal, &complexity, None, None, false);
+        let r = rank(temporal, &complexity, None, None, false, false, &BTreeSet::new());
         assert_eq!(r.ranked_files, 1, "only the intersection is ranked");
         assert_eq!(r.files[0].path, "both.rs");
     }
@@ -460,7 +530,7 @@ mod tests {
         // Two files identical on both axes → identical score; path breaks the tie.
         let temporal = report(vec![ft("z.rs", 3, 0, 0), ft("a.rs", 3, 0, 0)]);
         let complexity = BTreeMap::from([("z.rs".to_string(), 5), ("a.rs".to_string(), 5)]);
-        let r = rank(temporal, &complexity, None, Some(1), false);
+        let r = rank(temporal, &complexity, None, Some(1), false, false, &BTreeSet::new());
         assert_eq!(r.ranked_files, 2);
         assert_eq!(r.files.len(), 1, "--limit truncates");
         assert_eq!(r.files[0].path, "a.rs", "tie breaks by path asc");
@@ -479,7 +549,15 @@ mod tests {
         ] {
             let mut temporal = report(vec![ft("x.rs", 1, 0, 0)]);
             temporal.degraded = Some(reason);
-            let r = rank(temporal, &BTreeMap::new(), None, None, false);
+            let r = rank(
+                temporal,
+                &BTreeMap::new(),
+                None,
+                None,
+                false,
+                false,
+                &BTreeSet::new(),
+            );
             assert!(r.files.is_empty(), "{reason:?}: no fabricated board");
             assert_eq!(r.degraded, Some(reason));
             assert_eq!(r.notice.as_deref(), Some(reason.message()));
@@ -492,7 +570,7 @@ mod tests {
         let mut temporal = report(vec![ft("a.rs", 1, 0, 0)]);
         temporal.first_mine = true;
         let complexity = BTreeMap::from([("a.rs".to_string(), 3)]);
-        let r = rank(temporal, &complexity, None, None, false);
+        let r = rank(temporal, &complexity, None, None, false, false, &BTreeSet::new());
         assert_eq!(r.notice.as_deref(), Some(FIRST_MINE_NOTICE));
     }
 
@@ -527,7 +605,15 @@ mod tests {
                 },
             ),
         ]);
-        let r = rank(temporal, &complexity, Some(&coverage), None, false);
+        let r = rank(
+            temporal,
+            &complexity,
+            Some(&coverage),
+            None,
+            false,
+            false,
+            &BTreeSet::new(),
+        );
         assert_eq!(r.coverage_basis, COVERAGE_BASIS);
         assert_eq!(
             r.coverage_label, None,
@@ -595,7 +681,15 @@ mod tests {
                 },
             ),
         ]);
-        let r = rank(temporal, &complexity, Some(&coverage), None, true);
+        let r = rank(
+            temporal,
+            &complexity,
+            Some(&coverage),
+            None,
+            true,
+            false,
+            &BTreeSet::new(),
+        );
         let paths: Vec<&str> = r.files.iter().map(|h| h.path.as_str()).collect();
         assert!(
             !paths.contains(&"covered.rs"),
@@ -617,7 +711,7 @@ mod tests {
     fn untested_without_coverage_uses_the_labeled_static_fallback() {
         let temporal = report(vec![ft("a.rs", 3, 0, 0), ft("b.rs", 2, 0, 0)]);
         let complexity = BTreeMap::from([("a.rs".to_string(), 5), ("b.rs".to_string(), 3)]);
-        let r = rank(temporal, &complexity, None, None, true);
+        let r = rank(temporal, &complexity, None, None, true, false, &BTreeSet::new());
         assert_eq!(r.coverage_basis, STATIC_BASIS);
         assert_eq!(r.coverage_label, Some(STATIC_FALLBACK_LABEL));
         assert_eq!(
@@ -626,5 +720,146 @@ mod tests {
             "every file is untested (n/a) under fallback"
         );
         assert!(r.files.iter().all(|h| h.coverage.state == "n/a"));
+    }
+
+    // ── CR-076: optional production-scope filter ─────────────────────────────
+
+    #[test]
+    fn test_only_files_marks_whole_test_files_and_spares_mixed_files() {
+        // a.rs: every complexity-contributing function is is_test → a whole
+        // test file. b.rs: mixed (one test fn, one production fn) — mirrors a
+        // production file carrying an in-file `#[cfg(test)] mod tests`, which
+        // must NOT be excluded ([CR-076] AC). c.rs: no is_test functions.
+        let nodes = vec![
+            node(1, "a.rs"),
+            node(2, "a.rs"),
+            node(3, "b.rs"),
+            node(4, "b.rs"),
+            node(5, "c.rs"),
+        ];
+        let functions = vec![
+            func(1, Some(3)),
+            func(2, Some(2)),
+            func(3, Some(4)),
+            func(4, Some(1)),
+            func(5, Some(6)),
+        ];
+        let test_ids: HashSet<NodeId> = [NodeId(1), NodeId(2), NodeId(3)].into_iter().collect();
+        let excluded = test_only_files(&nodes, &functions, &test_ids);
+        assert!(excluded.contains("a.rs"), "a.rs: all contributing fns are is_test");
+        assert!(
+            !excluded.contains("b.rs"),
+            "b.rs keeps a non-test contributing function (fn 4)"
+        );
+        assert!(!excluded.contains("c.rs"), "c.rs has no is_test functions at all");
+    }
+
+    #[test]
+    fn test_only_files_never_marks_a_file_with_no_contributing_function() {
+        // d.rs has a function but its complexity is NULL → absent from
+        // aggregate_complexity's own map; the filter must not invent a verdict
+        // for a file `rank` would already exclude for a different reason.
+        let nodes = vec![node(1, "d.rs")];
+        let functions = vec![func(1, None)];
+        let test_ids: HashSet<NodeId> = [NodeId(1)].into_iter().collect();
+        let excluded = test_only_files(&nodes, &functions, &test_ids);
+        assert!(!excluded.contains("d.rs"));
+    }
+
+    /// `production_scope = true` drops a whole test file from the candidate set
+    /// BEFORE the competition ranks are computed, so the remaining files' ranks
+    /// reflect the narrowed production-only set — not the whole-repo set with
+    /// one row subtracted after the fact. `false` stays byte-identical to the
+    /// whole-repo board ([CR-076] AC).
+    #[test]
+    fn production_scope_drops_whole_test_files_before_ranking() {
+        // tests.rs is hottest on both axes but is a whole test file.
+        let temporal = report(vec![
+            ft("tests.rs", 10, 0, 0),
+            ft("prod.rs", 5, 0, 0),
+            ft("calm.rs", 1, 0, 0),
+        ]);
+        let complexity = BTreeMap::from([
+            ("tests.rs".to_string(), 50),
+            ("prod.rs".to_string(), 20),
+            ("calm.rs".to_string(), 5),
+        ]);
+        let test_only = BTreeSet::from(["tests.rs".to_string()]);
+
+        // Disabled: byte-identical to today's whole-repo board.
+        let off = rank(
+            temporal.clone(),
+            &complexity,
+            None,
+            None,
+            false,
+            false,
+            &test_only,
+        );
+        assert_eq!(
+            off.files[0].path, "tests.rs",
+            "filter off: whole-repo board unchanged"
+        );
+        assert_eq!(off.ranked_files, 3);
+        assert!(!off.production_scope);
+
+        // Enabled: tests.rs is gone, and prod.rs's ranks are relative to the
+        // narrowed 2-file production set (rank 2 of 2 on both axes), not the
+        // original 3-file set.
+        let on = rank(temporal, &complexity, None, None, false, true, &test_only);
+        let paths: Vec<&str> = on.files.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["prod.rs", "calm.rs"],
+            "tests.rs excluded from the candidate set: {paths:?}"
+        );
+        assert_eq!(on.ranked_files, 2, "ranked_files reflects the narrowed set");
+        assert_eq!(
+            on.files[0].churn_rank, 2,
+            "rank is computed over the 2-file production set, not the whole repo"
+        );
+        assert!(on.production_scope);
+    }
+
+    /// `production_scope` composes with `--untested`: the two filters combine
+    /// (test files dropped first, then the untested retention rule applied).
+    #[test]
+    fn production_scope_composes_with_untested() {
+        let temporal = report(vec![
+            ft("tests.rs", 10, 0, 0),
+            ft("covered.rs", 8, 0, 0),
+            ft("prod.rs", 5, 0, 0),
+        ]);
+        let complexity = BTreeMap::from([
+            ("tests.rs".to_string(), 50),
+            ("covered.rs".to_string(), 30),
+            ("prod.rs".to_string(), 20),
+        ]);
+        let coverage = BTreeMap::from([(
+            "covered.rs".to_string(),
+            FileCoverage {
+                fresh: true,
+                coverage_bp: 9000,
+            },
+        )]);
+        let test_only = BTreeSet::from(["tests.rs".to_string()]);
+
+        let r = rank(
+            temporal,
+            &complexity,
+            Some(&coverage),
+            None,
+            true,
+            true,
+            &test_only,
+        );
+        let paths: Vec<&str> = r.files.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["prod.rs"],
+            "tests.rs dropped by production scope, covered.rs dropped by --untested: {paths:?}"
+        );
+        assert!(r.untested);
+        assert!(r.production_scope);
     }
 }

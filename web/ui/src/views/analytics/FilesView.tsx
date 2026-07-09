@@ -113,11 +113,23 @@ const OWNERSHIP_COLUMNS: Column<FileTemporal>[] = [
 
 export function FilesView() {
   const [untested, setUntested] = useState(false);
-  const files = useApiResource<FilesModel>(() => fetchFiles(untested), [untested]);
+  const [productionScope, setProductionScope] = useState(false);
+  const files = useApiResource<FilesModel>(
+    () => fetchFiles(untested, productionScope),
+    [untested, productionScope],
+  );
 
   return (
     <AsyncResource resource={files} loadingLabel="Loading files & risk…">
-      {(model) => <FilesContent model={model} untested={untested} onToggle={setUntested} />}
+      {(model) => (
+        <FilesContent
+          model={model}
+          untested={untested}
+          onToggle={setUntested}
+          productionScope={productionScope}
+          onToggleProductionScope={setProductionScope}
+        />
+      )}
     </AsyncResource>
   );
 }
@@ -126,10 +138,14 @@ function FilesContent({
   model,
   untested,
   onToggle,
+  productionScope,
+  onToggleProductionScope,
 }: {
   model: FilesModel;
   untested: boolean;
   onToggle: (v: boolean) => void;
+  productionScope: boolean;
+  onToggleProductionScope: (v: boolean) => void;
 }) {
   const { hotspots, temporal } = model;
   const top = hotspots.files[0];
@@ -176,6 +192,23 @@ function FilesContent({
                 Untested only
               </Button>
             </>
+          )}
+          {" · "}
+          {productionScope ? (
+            <>
+              <span className="muted">production files only</span>{" "}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => onToggleProductionScope(false)}
+              >
+                Show test files too
+              </Button>
+            </>
+          ) : (
+            <Button variant="ghost" size="sm" onClick={() => onToggleProductionScope(true)}>
+              Production files only
+            </Button>
           )}
         </p>
         <DataTable

@@ -81,6 +81,48 @@ fn fixture() -> tempfile::TempDir {
     tmp
 }
 
+/// A second fixture, isolated from [`fixture`] so its extra hottest-of-all
+/// whole test file never perturbs the existing ordering assertions: `hot.rs`
+/// tops both axes among PRODUCTION files, but `tests.rs` — a whole test file
+/// by path (bare-name convention, S-283) — is engineered even hotter, so the
+/// optional production-scope filter (CR-076) has something real to drop.
+fn fixture_with_test_file() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path();
+    sh_git(repo, &["init", "-q", "-b", "main"]);
+
+    let branchy = |name: &str, ifs: usize| -> String {
+        let body: String = (0..ifs)
+            .map(|i| format!("    if x == {i} {{ return {i}; }}\n"))
+            .collect();
+        format!("pub fn {name}(x: i64) -> i64 {{\n{body}    x\n}}\n")
+    };
+
+    // tests.rs: the hottest file overall, but a whole test file by path.
+    for n in 0..5 {
+        commit(
+            repo,
+            "src/tests.rs",
+            &format!("{}// rev {n}\n", branchy("helper", 9)),
+            &format!("tests v{n}"),
+        );
+    }
+    // hot.rs: the hottest PRODUCTION file — leads once tests.rs is filtered out.
+    for n in 0..3 {
+        commit(
+            repo,
+            "src/hot.rs",
+            &format!("{}// rev {n}\n", branchy("hot", 6)),
+            &format!("hot v{n}"),
+        );
+    }
+    // calm.rs: low on both axes.
+    commit(repo, "src/calm.rs", "pub fn calm() -> i64 { 0 }\n", "calm");
+
+    Engine::start(repo).expect("engine starts").index();
+    tmp
+}
+
 type Client = RunningService<RoleClient, ()>;
 
 async fn boot(root: &Path) -> (Client, tokio::task::JoinHandle<()>) {
@@ -95,23 +137,29 @@ async fn boot(root: &Path) -> (Client, tokio::task::JoinHandle<()>) {
     (client, server)
 }
 
-/// The CLI payload for `logos hotspots [--limit N] --json` — exactly what
-/// `Output::print` serializes (a fresh engine, dropped before the server boots
-/// so the store has one writer at a time).
-fn cli_payload(root: &Path, limit: Option<usize>) -> Value {
+/// The CLI payload for `logos hotspots [--limit N] [--production-scope]
+/// --json` — exactly what `Output::print` serializes (a fresh engine, dropped
+/// before the server boots so the store has one writer at a time).
+fn cli_payload(root: &Path, limit: Option<usize>, production_scope: bool) -> Value {
     let engine = Engine::start(root).expect("engine");
-    let report = engine.hotspots(limit, false).expect("hotspots");
+    let report = engine
+        .hotspots(limit, false, production_scope)
+        .expect("hotspots");
     serde_json::to_value(&report).expect("serialize")
 }
 
 /// The MCP `hotspots` tool payload for the same args.
-async fn mcp_payload(client: &Client, limit: Option<usize>) -> Value {
+async fn mcp_payload(client: &Client, limit: Option<usize>, production_scope: bool) -> Value {
     let mut params = CallToolRequestParams::new("hotspots");
+    let mut args = serde_json::Map::new();
     if let Some(n) = limit {
-        params = params.with_arguments(serde_json::Map::from_iter([(
-            "limit".into(),
-            Value::from(n),
-        )]));
+        args.insert("limit".into(), Value::from(n));
+    }
+    if production_scope {
+        args.insert("production_scope".into(), Value::from(true));
+    }
+    if !args.is_empty() {
+        params = params.with_arguments(args);
     }
     let result = client.call_tool(params).await.expect("hotspots tool call");
     assert_ne!(result.is_error, Some(true), "hotspots must succeed");
@@ -128,7 +176,7 @@ async fn cli_and_mcp_hotspot_payloads_are_identical_with_limit_and_tie_break() {
     // first-mine notice (the surfaces still match — this isolates state drift).
     Engine::start(root)
         .expect("engine")
-        .hotspots(None, false)
+        .hotspots(None, false, false)
         .expect("warm-up");
 
     let (client, server) = boot(root).await;
@@ -136,8 +184,8 @@ async fn cli_and_mcp_hotspot_payloads_are_identical_with_limit_and_tie_break() {
     // (1) Unlimited: full ordering must be byte-identical, and the engineered
     // tie (tie_a / tie_b, equal on both axes) must resolve by path ascending —
     // proving the tie-break survives the CLI/MCP serialization round-trip.
-    let cli_full = cli_payload(root, None);
-    let mcp_full = mcp_payload(&client, None).await;
+    let cli_full = cli_payload(root, None, false);
+    let mcp_full = mcp_payload(&client, None, false).await;
     assert_eq!(
         cli_full, mcp_full,
         "CLI and MCP full payloads must be byte-identical (FR-GH-06)"
@@ -161,8 +209,8 @@ async fn cli_and_mcp_hotspot_payloads_are_identical_with_limit_and_tie_break() {
 
     // (2) Limited: `--limit 2` must truncate the four-file board identically on
     // both surfaces, while `ranked_files` preserves the true total.
-    let cli_lim = cli_payload(root, Some(2));
-    let mcp_lim = mcp_payload(&client, Some(2)).await;
+    let cli_lim = cli_payload(root, Some(2), false);
+    let mcp_lim = mcp_payload(&client, Some(2), false).await;
     assert_eq!(cli_lim, mcp_lim, "limited payloads must be byte-identical");
     assert_eq!(
         mcp_lim["files"].as_array().unwrap().len(),
@@ -173,6 +221,63 @@ async fn cli_and_mcp_hotspot_payloads_are_identical_with_limit_and_tie_break() {
         mcp_lim["ranked_files"].as_u64(),
         Some(4),
         "ranked_files preserves the pre-limit total ({mcp_lim})"
+    );
+
+    client.cancel().await.ok();
+    server.abort();
+}
+
+/// CR-076: CLI and MCP agree on the optional production-scope filter — both
+/// off (byte-identical to the whole-repo board) and on (the whole test file
+/// is excluded on both surfaces identically).
+#[tokio::test]
+async fn cli_and_mcp_hotspot_payloads_are_identical_with_production_scope() {
+    let tmp = fixture_with_test_file();
+    let root = tmp.path();
+
+    Engine::start(root)
+        .expect("engine")
+        .hotspots(None, false, false)
+        .expect("warm-up");
+
+    let (client, server) = boot(root).await;
+
+    // Filter off: byte-identical on both surfaces, tests.rs still leads.
+    let cli_off = cli_payload(root, None, false);
+    let mcp_off = mcp_payload(&client, None, false).await;
+    assert_eq!(
+        cli_off, mcp_off,
+        "production_scope=false payloads must be byte-identical"
+    );
+    assert_eq!(
+        cli_off["files"][0]["path"].as_str(),
+        Some("src/tests.rs"),
+        "filter off: the whole-repo board is unchanged"
+    );
+    assert_eq!(cli_off["production_scope"].as_bool(), Some(false));
+
+    // Filter on: byte-identical on both surfaces, tests.rs is gone, hot.rs leads.
+    let cli_on = cli_payload(root, None, true);
+    let mcp_on = mcp_payload(&client, None, true).await;
+    assert_eq!(
+        cli_on, mcp_on,
+        "production_scope=true payloads must be byte-identical"
+    );
+    assert_eq!(cli_on["production_scope"].as_bool(), Some(true));
+    let paths: Vec<&str> = cli_on["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        !paths.contains(&"src/tests.rs"),
+        "the whole test file is excluded on both surfaces: {paths:?}"
+    );
+    assert_eq!(
+        paths.first(),
+        Some(&"src/hot.rs"),
+        "the hottest PRODUCTION file leads the narrowed board: {paths:?}"
     );
 
     client.cancel().await.ok();
