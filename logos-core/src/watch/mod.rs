@@ -59,7 +59,9 @@
 //! [NFR-PE-01]: ../../../docs/specs/requirements/NFR-PE-01.md
 //! [filesystem-watcher]: ../../../docs/specs/architecture/integrations/filesystem-watcher.md
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -69,7 +71,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TrySendError};
 use notify::RecursiveMode;
-use notify_debouncer_full::{new_debouncer, DebounceEventResult};
+use notify_debouncer_full::file_id::{get_file_id, FileId};
+use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, FileIdCache};
 
 use crate::config::AdmissionAuthority;
 use crate::engine::Engine;
@@ -175,11 +178,13 @@ impl Counters {
 /// [NFR-RA-12]: ../../../docs/specs/requirements/NFR-RA-12.md
 pub struct WatchHandle {
     /// `Some` until [`Drop`] takes it to stop event delivery first.
+    ///
+    /// The cache is the pruning [`PrunedFileIdCache`] (not the crate's
+    /// `RecommendedCache`): its registration-time seed walk skips ignored
+    /// directories so `serve` cold start never pays the `target/`-class pre-walk
+    /// ([CR-077], [NFR-PE-05]).
     debouncer: Option<
-        notify_debouncer_full::Debouncer<
-            notify::RecommendedWatcher,
-            notify_debouncer_full::RecommendedCache,
-        >,
+        notify_debouncer_full::Debouncer<notify::RecommendedWatcher, PrunedFileIdCache>,
     >,
     /// `Some` until [`Drop`] takes it to close the wake channel.
     wake_tx: Option<Sender<()>>,
@@ -352,10 +357,27 @@ pub fn spawn(engine: Arc<Engine>) -> Result<WatchHandle> {
         }
     };
 
+    // CR-077 / NFR-PE-05: the pruning file-ID cache. `notify-debouncer-full`'s
+    // default `RecommendedCache` seeds itself on `.watch()` by walking the ENTIRE
+    // watched subtree with `walkdir` — on the repo root that is the whole physical
+    // tree, `target/` included (measured ~1.2M entries), stalling the first MCP
+    // request ~58–93 s. [`PrunedFileIdCache`] routes that registration-time seed
+    // walk through the same `ignored_dirs` name-prune and `Arc<AdmissionAuthority>`
+    // the event-time `classify` and the full `index` walk already use, so the
+    // pre-walk visits only admitted source directories and cold start returns to
+    // sub-second — while preserving full rename tracking for admitted paths.
+    let cache = PrunedFileIdCache::new(Arc::clone(&ignored_dirs), Arc::clone(&authority));
+
     // `None` tick rate lets the debouncer pick a sensible poll cadence for
     // the window; events are delivered on the debouncer's own thread.
-    let mut debouncer = new_debouncer(debounce, None, callback)
-        .context("creating the debounced filesystem watcher")?;
+    let mut debouncer = new_debouncer_opt::<_, notify::RecommendedWatcher, PrunedFileIdCache>(
+        debounce,
+        None,
+        callback,
+        cache,
+        notify::Config::default(),
+    )
+    .context("creating the debounced filesystem watcher")?;
     debouncer
         .watch(&root, RecursiveMode::Recursive)
         .with_context(|| format!("watching the project root {}", root.display()))?;
@@ -719,4 +741,203 @@ fn is_ignored(root: &Path, path: &Path, ignored_dirs: &HashSet<String>) -> bool 
         Component::Normal(name) => name.to_str().is_some_and(|name| ignored_dirs.contains(name)),
         _ => false,
     })
+}
+
+/// `true` if a directory whose last component is `name` must never be descended
+/// into during the registration-time seed walk — the cheap, name-based prune
+/// that captures the whole `target/`-class cost ([CR-077]). `ignored_dirs` is the
+/// same union [`spawn`] builds: the feedback-loop internal dirs (`.logos`,
+/// `.git`) ∪ the indexer's configured `ignored_dirs` (`target`, `node_modules`,
+/// `dist`, `build`, `vendor`, …).
+fn is_pruned_dir_name(name: &OsStr, ignored_dirs: &HashSet<String>) -> bool {
+    name.to_str().is_some_and(|name| ignored_dirs.contains(name))
+}
+
+/// A [`notify_debouncer_full::FileIdCache`] whose registration-time seed walk is
+/// pruned through the watcher's admission machinery ([CR-077], [NFR-PE-05]).
+///
+/// # Why it exists
+/// `notify-debouncer-full` keeps a path→[`FileId`] map so it can stitch rename
+/// `from`/`to` pairs back together when the OS back-end drops rename cookies. The
+/// stock `RecommendedCache` seeds that map on `.watch()` by walking the **entire**
+/// watched subtree ([`file_id::get_file_id`] per entry). Registered on the repo
+/// root, that walk traverses the whole physical tree — `target/` and all — before
+/// `.watch()` returns, so `serve_stdio` cannot answer the MCP `initialize`
+/// handshake until it finishes (measured ~1.2M entries, ~58–93 s: an
+/// [NFR-PE-05] violation by ~116×).
+///
+/// # What it prunes
+/// The seed walk here (`add_path` in [`Recursive`](RecursiveMode::Recursive) mode)
+/// applies the same two gates the event-time [`classify`] and the full `index`
+/// walk apply, so the registration-time file-ID set matches admission
+/// ([FR-SY-11], [ADR-48]):
+///
+/// 1. **Directory-name prune (always).** A directory whose name is in
+///    `ignored_dirs` is never descended into — this captures the entire
+///    `target/`-class cost cheaply, with no `stat`.
+/// 2. **Leaf admission (best-effort).** When an [`AdmissionAuthority`] is
+///    available, a leaf *file* the authority would reject (a gitignored path, a
+///    nested-`.git`-boundary path) is not cached — matching full-walk parity for
+///    the leaves the name prune alone would miss. With no authority (construction
+///    failed) the walk degrades to the name prune only, mirroring how [`classify`]
+///    degrades — the watcher is never a correctness dependency ([FR-SY-06],
+///    [ADR-11]).
+///
+/// Symlinks are not followed (the seed walk classifies via `read_dir`'s
+/// non-following `file_type`), matching the full walk's `follow_links(false)` and
+/// keeping the walk cycle-safe.
+///
+/// # Rename tracking is preserved for admitted paths
+/// [`cached_file_id`](FileIdCache::cached_file_id) and
+/// [`remove_path`](FileIdCache::remove_path) behave exactly as the stock
+/// `FileIdMap` — and every admitted source path is seeded with its real
+/// [`FileId`] — so rename stitching is unchanged for the only paths a rename event
+/// is ever acted upon ([CR-077] CRA-02). A rename into/out of a pruned directory
+/// is already dropped by event-time `classify` and healed by reconcile
+/// ([FR-SY-06]).
+///
+/// [CR-077]: ../../../docs/requests/CR-077-watcher-registration-prewalk-prune.md
+/// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+/// [FR-SY-06]: ../../../docs/specs/requirements/FR-SY-06.md
+/// [FR-SY-11]: ../../../docs/specs/requirements/FR-SY-11.md
+/// [ADR-11]: ../../../docs/specs/architecture/decisions/ADR-11.md
+/// [ADR-48]: ../../../docs/specs/architecture/decisions/ADR-48.md
+#[derive(Debug)]
+pub struct PrunedFileIdCache {
+    /// path → file ID, the rename-stitching map (same role as `FileIdMap`).
+    paths: HashMap<PathBuf, FileId>,
+    /// The feedback-loop ∪ indexer-ignored directory-name set: directories whose
+    /// name is in here are never descended into during the seed walk.
+    ignored_dirs: Arc<HashSet<String>>,
+    /// The best-effort walk-level admission pre-filter (CR-054 / FR-SY-11),
+    /// shared with the event-time [`classify`] path; `None` when it could not be
+    /// built at watcher start, in which case the seed walk degrades to the
+    /// name-prune only.
+    authority: Arc<Option<AdmissionAuthority>>,
+}
+
+impl PrunedFileIdCache {
+    /// Construct the cache over the shared `ignored_dirs` name set and the shared
+    /// best-effort admission `authority` (both already `Arc`-built in [`spawn`]).
+    fn new(ignored_dirs: Arc<HashSet<String>>, authority: Arc<Option<AdmissionAuthority>>) -> Self {
+        Self {
+            paths: HashMap::new(),
+            ignored_dirs,
+            authority,
+        }
+    }
+
+    /// Whether a leaf *file* should be cached: admitted by the authority when one
+    /// is available, else unconditionally (the degradation path).
+    fn leaf_admitted(&self, path: &Path) -> bool {
+        match self.authority.as_ref() {
+            Some(authority) => authority.admits_path(path),
+            None => true,
+        }
+    }
+
+    /// Seed `path`'s file ID and (in [`Recursive`](RecursiveMode::Recursive) mode)
+    /// those of its descendants, pruning ignored-directory descent by name and
+    /// dropping authority-rejected leaves. `max_depth` mirrors `walkdir`'s
+    /// semantics: depth 0 is `path` itself, depth 1 its immediate children.
+    fn seed(&mut self, path: &Path, max_depth: usize) {
+        let Ok(meta) = fs::symlink_metadata(path) else {
+            return; // gone/unreadable — nothing to seed (parity with the walk).
+        };
+        let file_type = meta.file_type();
+        if file_type.is_dir() {
+            // An ignored directory (by name) is never seeded or descended.
+            if is_pruned_dir_name(path.file_name().unwrap_or_default(), &self.ignored_dirs) {
+                return;
+            }
+            self.insert_id(path);
+            if max_depth >= 1 {
+                self.seed_children(path, max_depth);
+            }
+        } else if file_type.is_file() {
+            // A file start (e.g. a Create event for a single file): apply the leaf
+            // admission gate, then cache it.
+            if self.leaf_admitted(path) {
+                self.insert_id(path);
+            }
+        }
+        // Symlinks / other non-regular entries are skipped (parity, cycle-safe).
+    }
+
+    /// Walk `root`'s subtree up to `max_depth`, seeding admitted entries and
+    /// pruning ignored-directory descent by name. Iterative (an explicit stack)
+    /// so a deep tree cannot overflow the call stack.
+    fn seed_children(&mut self, root: &Path, max_depth: usize) {
+        let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 1)];
+        while let Some((dir, depth)) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue; // unreadable dir — best-effort, skip it.
+            };
+            for entry in entries.flatten() {
+                // `read_dir`'s `file_type` does not follow symlinks, so a
+                // symlinked directory is classified as a symlink (neither dir nor
+                // file below) and skipped — matching the full walk.
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let child = entry.path();
+                if file_type.is_dir() {
+                    if is_pruned_dir_name(&entry.file_name(), &self.ignored_dirs) {
+                        continue; // never descend into an ignored dir (the cost).
+                    }
+                    self.insert_id(&child);
+                    if depth < max_depth {
+                        stack.push((child, depth + 1));
+                    }
+                } else if file_type.is_file() && self.leaf_admitted(&child) {
+                    self.insert_id(&child);
+                }
+            }
+        }
+    }
+
+    /// Read `path`'s real [`FileId`] and record it. A path whose ID cannot be read
+    /// is skipped (best-effort — a missing ID only degrades rename stitching for
+    /// that one path, never correctness).
+    fn insert_id(&mut self, path: &Path) {
+        if let Ok(file_id) = get_file_id(path) {
+            self.paths.insert(path.to_path_buf(), file_id);
+        }
+    }
+
+    /// The number of seeded file-ID entries — the deterministic, wall-clock- and
+    /// machine-independent observable the CR-077 regression test asserts against.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    /// The set of seeded paths (test-only), for asserting exactly which entries
+    /// the pruned seed walk visited.
+    #[cfg(test)]
+    fn cached_paths(&self) -> HashSet<PathBuf> {
+        self.paths.keys().cloned().collect()
+    }
+}
+
+impl FileIdCache for PrunedFileIdCache {
+    fn cached_file_id(&self, path: &Path) -> Option<&FileId> {
+        self.paths.get(path)
+    }
+
+    fn add_path(&mut self, path: &Path, recursive_mode: RecursiveMode) {
+        // Mirror `walkdir`'s depth semantics: recursive = the whole subtree,
+        // non-recursive = the path plus its immediate children.
+        let max_depth = if recursive_mode == RecursiveMode::Recursive {
+            usize::MAX
+        } else {
+            1
+        };
+        self.seed(path, max_depth);
+    }
+
+    fn remove_path(&mut self, path: &Path) {
+        // Same subtree removal as the stock `FileIdMap`.
+        self.paths.retain(|p, _| !p.starts_with(path));
+    }
 }
