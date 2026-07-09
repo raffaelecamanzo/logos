@@ -1,3 +1,8 @@
+// CR-078/ADR-60: the chat surface is the LLM egress carve-out, so these route
+// fitness tests exercise the `agents`-gated mock-provider surface and compile
+// only under `--features agents`. A listen-only `--features ui` build has no chat
+// routes/handlers, so the whole test crate is empty there.
+#![cfg(feature = "agents")]
 //! Chat SSE route fitness tests (S-170, [FR-UI-19], [NFR-SE-06], [NFR-CC-04],
 //! [UAT-UI-07]).
 //!

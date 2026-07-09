@@ -1,3 +1,9 @@
+// CR-078/ADR-60: the in-process wiki generation increment is the LLM egress
+// carve-out, so this end-to-end acceptance scenario (mock-provider) compiles only
+// under `--features agents`. A listen-only `--features ui` build serves the
+// wiki-view but mounts no generation surface, so the whole test crate is empty
+// there.
+#![cfg(feature = "agents")]
 //! [UAT-WK-06] acceptance scenario — the in-process wiki generation increment
 //! end-to-end over the assembled Wiki-tab trigger (S-180, [CR-047], [FR-WK-18],
 //! [FR-CF-07], [NFR-SE-01], [NFR-SE-07]).

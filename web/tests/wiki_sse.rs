@@ -1,3 +1,9 @@
+// CR-078/ADR-60: the wiki-**generation** trigger is the LLM egress carve-out, so
+// these route fitness tests exercise the `agents`-gated mock-provider surface and
+// compile only under `--features agents`. A listen-only `--features ui` build
+// serves the wiki-**view** but mounts no generation route, so the whole test
+// crate is empty there.
+#![cfg(feature = "agents")]
 //! Wiki-generation trigger + SSE route fitness tests (S-178, [FR-WK-18],
 //! [FR-UI-19], [NFR-SE-06], [NFR-CC-04]).
 //!

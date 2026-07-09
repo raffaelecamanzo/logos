@@ -34,32 +34,45 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
+// The SSE keep-alive interval is used only by the agent handlers (chat turn /
+// wiki-generation trigger), so it is `agents`-only — a plain `--features ui`
+// build serves the listen-only dashboard and never streams (CR-078, ADR-60).
+#[cfg(feature = "agents")]
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::{
     extract::{Form, FromRef, Request, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     middleware::{from_fn, from_fn_with_state, Next},
-    response::{
-        sse::{KeepAlive, Sse},
-        Html, IntoResponse, Response,
-    },
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+// The Server-Sent Events response types back the chat/wiki streaming handlers
+// only, so they compile solely under `agents` (CR-078, ADR-60).
+#[cfg(feature = "agents")]
+use axum::response::sse::{KeepAlive, Sse};
 use logos_core::config::{ConfigError, PolicyFile};
 use logos_core::model::EdgeKind;
 use logos_core::models::navigation::{GraphGranularity, GraphLayer};
 use logos_core::Engine;
 
 mod api_v1;
+// The chat and wiki-**generation** surfaces are the LLM egress carve-out
+// (CR-078, ADR-60): they hold the only edges to chat-agent / wiki-agent /
+// agent-core (and, through them, `rig` + `reqwest`), so they compile only under
+// `agents`. The wiki-**view** (`mod wiki` below) and every read-model stay in the
+// listen-only dashboard, present under `--features ui` alone.
+#[cfg(feature = "agents")]
 pub mod chat;
 pub mod components;
 mod markdown;
 mod query;
 pub mod spa;
 mod wiki;
+#[cfg(feature = "agents")]
 pub mod wikigen;
 
 /// The loopback bind address — a **compile-time constant** (ADR-27). The
@@ -307,18 +320,24 @@ pub(crate) struct WebState {
     intent: IntentToken,
     /// The chat seam (S-170): production resolves the configured provider; the
     /// carve-out tests inject a mock-provider service. Behind an [`Arc`] so the
-    /// composite state stays cheap to clone.
+    /// composite state stays cheap to clone. `agents`-only — the listen-only
+    /// dashboard carries no chat surface (CR-078, ADR-60).
+    #[cfg(feature = "agents")]
     chat: Arc<dyn chat::ChatService>,
     /// The wiki-generation seam (S-178): production resolves the configured wiki
     /// model and drives [`run_configured`](wiki_agent::run_configured); the
     /// carve-out tests inject a mock-provider service. Behind an [`Arc`] so the
-    /// composite state stays cheap to clone.
+    /// composite state stays cheap to clone. `agents`-only — the listen-only
+    /// dashboard serves the wiki-**view** but holds no generation trigger
+    /// (CR-078, ADR-60).
+    #[cfg(feature = "agents")]
     wiki: Arc<dyn wikigen::WikiRunService>,
     /// The single-run lock **and** connection-independent run registry (S-178,
     /// S-222, [FR-WK-18], [CR-056]): gates the Wiki-tab trigger so a (re-)open while
     /// a pass is in flight starts no second run, and owns the in-flight run's
     /// lifetime in application state so a dropped SSE body no longer aborts it — the
-    /// run completes server-side. Cheap to clone (an `Arc<Mutex<…>>`).
+    /// run completes server-side. Cheap to clone (an `Arc<Mutex<…>>`). `agents`-only.
+    #[cfg(feature = "agents")]
     wiki_state: wikigen::WikiRunState,
 }
 
@@ -334,18 +353,21 @@ impl FromRef<WebState> for IntentToken {
     }
 }
 
+#[cfg(feature = "agents")]
 impl FromRef<WebState> for Arc<dyn chat::ChatService> {
     fn from_ref(state: &WebState) -> Self {
         Arc::clone(&state.chat)
     }
 }
 
+#[cfg(feature = "agents")]
 impl FromRef<WebState> for Arc<dyn wikigen::WikiRunService> {
     fn from_ref(state: &WebState) -> Self {
         Arc::clone(&state.wiki)
     }
 }
 
+#[cfg(feature = "agents")]
 impl FromRef<WebState> for wikigen::WikiRunState {
     fn from_ref(state: &WebState) -> Self {
         state.wiki_state.clone()
@@ -368,11 +390,26 @@ pub fn router(engine: Arc<Engine>) -> Router {
 /// the enumerated config `POST`s) → [`intent_guard`] (403 on a forged/cross-origin
 /// mutating `POST`) → routes.
 pub fn router_with_intent(engine: Arc<Engine>, intent: IntentToken) -> Router {
-    let chat: Arc<dyn chat::ChatService> =
-        Arc::new(chat::ConfiguredChatService::new(Arc::clone(&engine)));
-    let wiki: Arc<dyn wikigen::WikiRunService> =
-        Arc::new(wikigen::ConfiguredWikiRunService::new(Arc::clone(&engine)));
-    router_full(engine, intent, chat, wiki)
+    // Under `agents` the state carries the config-resolved chat + wiki-generation
+    // seams; under a plain `--features ui` build it is just the engine + intent
+    // token, and the chat/wiki routes are never mounted (CR-078, ADR-60).
+    #[cfg(feature = "agents")]
+    let state = {
+        let chat: Arc<dyn chat::ChatService> =
+            Arc::new(chat::ConfiguredChatService::new(Arc::clone(&engine)));
+        let wiki: Arc<dyn wikigen::WikiRunService> =
+            Arc::new(wikigen::ConfiguredWikiRunService::new(Arc::clone(&engine)));
+        WebState {
+            engine,
+            intent,
+            chat,
+            wiki,
+            wiki_state: wikigen::WikiRunState::new(),
+        }
+    };
+    #[cfg(not(feature = "agents"))]
+    let state = WebState { engine, intent };
+    build_router(state)
 }
 
 /// Build the router over an explicit [`IntentToken`] **and** chat service — the
@@ -384,6 +421,10 @@ pub fn router_with_intent(engine: Arc<Engine>, intent: IntentToken) -> Router {
 /// config-resolved services.
 ///
 /// [UAT-UI-07]: ../../../docs/specs/requirements/UAT-UI-07.md
+///
+/// `agents`-only: the mock-provider chat surface exists solely in the egress build
+/// (CR-078, ADR-60).
+#[cfg(feature = "agents")]
 pub fn router_with_chat(
     engine: Arc<Engine>,
     intent: IntentToken,
@@ -391,7 +432,13 @@ pub fn router_with_chat(
 ) -> Router {
     let wiki: Arc<dyn wikigen::WikiRunService> =
         Arc::new(wikigen::ConfiguredWikiRunService::new(Arc::clone(&engine)));
-    router_full(engine, intent, chat, wiki)
+    build_router(WebState {
+        engine,
+        intent,
+        chat,
+        wiki,
+        wiki_state: wikigen::WikiRunState::new(),
+    })
 }
 
 /// Build the router over an explicit [`IntentToken`] **and** wiki-generation service
@@ -401,6 +448,10 @@ pub fn router_with_chat(
 /// teardown, zero real egress) without a live provider ([FR-WK-18]). The chat seam
 /// gets the config-resolved production service. Production uses
 /// [`router`]/[`router_with_intent`].
+///
+/// `agents`-only: the mock-provider wiki-generation surface exists solely in the
+/// egress build (CR-078, ADR-60).
+#[cfg(feature = "agents")]
 pub fn router_with_wiki(
     engine: Arc<Engine>,
     intent: IntentToken,
@@ -408,18 +459,28 @@ pub fn router_with_wiki(
 ) -> Router {
     let chat: Arc<dyn chat::ChatService> =
         Arc::new(chat::ConfiguredChatService::new(Arc::clone(&engine)));
-    router_full(engine, intent, chat, wiki)
+    build_router(WebState {
+        engine,
+        intent,
+        chat,
+        wiki,
+        wiki_state: wikigen::WikiRunState::new(),
+    })
 }
 
-/// Build the router over explicit chat **and** wiki-generation services — the
-/// shared skeleton both single-seam test entry points and production delegate to.
-fn router_full(
-    engine: Arc<Engine>,
-    intent: IntentToken,
-    chat: Arc<dyn chat::ChatService>,
-    wiki: Arc<dyn wikigen::WikiRunService>,
-) -> Router {
-    Router::new()
+/// Build the router over a fully-constructed [`WebState`] — the shared skeleton
+/// every entry point (production and the single-seam test seams) delegates to.
+///
+/// The read-only dashboard route table and the enumerated config-write/apply seam
+/// are always mounted; the chat and wiki-generation routes are added **only under
+/// `agents`** (CR-078, ADR-60). A plain `--features ui` build therefore serves the
+/// listen-only dashboard (graph/query/wiki-**view**) with no dialing seam, and
+/// [`method_guard`] keeps the (unmounted) chat/wiki paths GET-only.
+fn build_router(state: WebState) -> Router {
+    // The intent-guard layer needs its own clone of the token; the rest lives in
+    // `state`, moved into `.with_state` below.
+    let intent = state.intent.clone();
+    let router = Router::new()
         // ── The embedded client-side SPA shell (CR-049, FR-UI-22, ADR-43) ─────
         // `/` is the SPA front door: the embedded Vite + React `index.html` with
         // the per-session intent token injected as a `<meta name="logos-intent">`
@@ -476,13 +537,20 @@ fn router_full(
         // `intent_guard` enforces on every POST; the handler runs the shadow reindex
         // off the serve loop via the `bridge`. Kept in lock-step with
         // `VERIFY_POST_ROUTE`, which `method_guard` consults.
-        .route(VERIFY_POST_ROUTE, post(api_v1::verify))
+        .route(VERIFY_POST_ROUTE, post(api_v1::verify));
+
+    // ── The chat + wiki-generation surface: the LLM egress carve-out, mounted
+    // only under `agents` (CR-078, ADR-60). A plain `--features ui` build omits
+    // these routes; `method_guard` then keeps their paths GET-only (a POST is
+    // `405`), so the listen-only dashboard exposes no dialing seam.
+    #[cfg(feature = "agents")]
+    let router = router
         // ── The chat turn (S-170, FR-UI-18/19, ADR-40): the one non-config
         // intent-guarded POST. With `Accept: text/event-stream` it streams the
-        // orchestrator\'s plan / subagent-activity / token events as SSE under the
+        // orchestrator's plan / subagent-activity / token events as SSE under the
         // unchanged self-only CSP (no WebSocket); otherwise it renders the buffered
         // answer. Kept in lock-step with `CHAT_POST_ROUTE`, which `method_guard`
-        // consults. A GET to `/chat` is a browser navigation to the SPA\'s Chat
+        // consults. A GET to `/chat` is a browser navigation to the SPA's Chat
         // client route, so it serves the SPA shell (the POST carries the turn).
         .route(CHAT_POST_ROUTE, get(spa_shell).post(chat_turn))
         // S-171 / FR-UI-20: Clear-history wipes the conversation AND its
@@ -497,7 +565,9 @@ fn router_full(
         // otherwise it renders the buffered summary (the FR-UI-19 fallback). Kept in
         // lock-step with `WIKI_GENERATE_ROUTE`, which `method_guard` consults. A GET
         // to `/wiki/generate` is a browser navigation, so it serves the SPA shell.
-        .route(WIKI_GENERATE_ROUTE, get(spa_shell).post(wiki_generate))
+        .route(WIKI_GENERATE_ROUTE, get(spa_shell).post(wiki_generate));
+
+    router
         // ── The only non-GET surface (ADR-31, NFR-SE-06): enumerated, bounded
         // config-write/apply routes that bridge to the mutating façade seam. Kept
         // in lock-step with `CONFIG_POST_ROUTES`, which `method_guard` consults.
@@ -511,13 +581,7 @@ fn router_full(
         // bundle; any other unmatched GET stays an honest `404`. Non-GET never
         // reaches here (`method_guard` answers `405` before routing).
         .fallback(spa_fallback)
-        .with_state(WebState {
-            engine,
-            intent: intent.clone(),
-            chat,
-            wiki,
-            wiki_state: wikigen::WikiRunState::new(),
-        })
+        .with_state(state)
         // Innermost custom layer → runs just before routing, after `method_guard`
         // has already filtered to GET + the enumerated config/chat POSTs.
         .layer(from_fn_with_state(intent, intent_guard))
@@ -549,6 +613,7 @@ fn router_full(
 /// [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
 /// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[cfg(feature = "agents")]
 async fn chat_turn(
     State(chat): State<Arc<dyn chat::ChatService>>,
     headers: HeaderMap,
@@ -628,6 +693,7 @@ async fn chat_turn(
 /// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [`wiki-agent`]: ../../../docs/specs/architecture/components/wiki-agent.md
+#[cfg(feature = "agents")]
 async fn wiki_generate(
     State(wiki): State<Arc<dyn wikigen::WikiRunService>>,
     State(run_state): State<wikigen::WikiRunState>,
@@ -673,6 +739,7 @@ async fn wiki_generate(
 /// client that does not request SSE, [FR-UI-19]).
 ///
 /// [FR-UI-19]: ../../../docs/specs/requirements/FR-UI-19.md
+#[cfg(feature = "agents")]
 fn wants_event_stream(headers: &HeaderMap) -> bool {
     headers
         .get(header::ACCEPT)
@@ -720,13 +787,7 @@ async fn host_guard(req: Request, next: Next) -> Response {
 async fn method_guard(req: Request, next: Next) -> Response {
     let method = req.method();
     let path = req.uri().path();
-    let allowed = method == Method::GET
-        || (method == Method::POST
-            && (CONFIG_POST_ROUTES.contains(&path)
-                || path == CHAT_POST_ROUTE
-                || path == CHAT_CLEAR_ROUTE
-                || path == WIKI_GENERATE_ROUTE
-                || path == VERIFY_POST_ROUTE));
+    let allowed = method == Method::GET || (method == Method::POST && post_route_admitted(path));
     if !allowed {
         return (
             StatusCode::METHOD_NOT_ALLOWED,
@@ -735,6 +796,23 @@ async fn method_guard(req: Request, next: Next) -> Response {
             .into_response();
     }
     next.run(req).await
+}
+
+/// Is a `POST` to `path` admitted past [`method_guard`] (every other method/path
+/// is `405`)? The config-write/apply seam ([`CONFIG_POST_ROUTES`]) and the
+/// deep-`verify` route ([`VERIFY_POST_ROUTE`]) are always admitted; the chat and
+/// wiki-generation routes are admitted **only under `agents`** (CR-078, ADR-60).
+/// In a listen-only `--features ui` build those routes are never mounted, so a
+/// `POST` to them stays GET-only (`405`) rather than reaching a handler.
+fn post_route_admitted(path: &str) -> bool {
+    if CONFIG_POST_ROUTES.contains(&path) || path == VERIFY_POST_ROUTE {
+        return true;
+    }
+    #[cfg(feature = "agents")]
+    if path == CHAT_POST_ROUTE || path == CHAT_CLEAR_ROUTE || path == WIKI_GENERATE_ROUTE {
+        return true;
+    }
+    false
 }
 
 /// Same-origin + per-session intent (CSRF) guard for the mutating surface
@@ -1074,6 +1152,7 @@ async fn config_save_secret(
 /// Already proven same-origin + intentional by the guards. The blocking SQLite
 /// work runs on the pool ([ADR-03]); a store fault is an honest `500`, never a
 /// silent success ([NFR-CC-04]). Returns the number of threads removed.
+#[cfg(feature = "agents")]
 async fn chat_clear(State(engine): State<Arc<Engine>>) -> Response {
     let root = engine.root().to_path_buf();
     let result = tokio::task::spawn_blocking(move || {

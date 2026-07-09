@@ -1,3 +1,8 @@
+// CR-078/ADR-60: the agentic chat increment is the LLM egress carve-out, so this
+// end-to-end acceptance scenario (mock-provider, zero-real-egress) compiles only
+// under `--features agents`. A listen-only `--features ui` build has no chat
+// surface, so the whole test crate is empty there.
+#![cfg(feature = "agents")]
 //! [UAT-UI-07] acceptance scenario — the agentic chat increment end-to-end over
 //! the assembled `serve --ui` surface (S-172, [CR-045], [CR-046], [FR-UI-18],
 //! [FR-UI-19], [FR-UI-20], [FR-CF-06], [NFR-SE-01], [NFR-SE-04], [NFR-SE-06],
