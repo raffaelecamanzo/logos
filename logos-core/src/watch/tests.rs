@@ -487,6 +487,318 @@ fn the_watch_module_spawns_no_subprocess() {
     );
 }
 
+// ── PrunedFileIdCache: registration-time seed-walk prune (CR-077, NFR-PE-05) ──
+
+/// The CI gate ([CR-077] acceptance): the registration-time seed walk visits
+/// only admitted directories and NEVER descends into `target/` (or the other
+/// ignored dirs), asserted by the exact seeded file-ID set — independent of
+/// wall-clock and machine. A fixture with a large `target/` (200 build-output
+/// files) proves the prune: an unpruned walk would seed 200+ entries, the pruned
+/// walk seeds only the handful of admitted paths.
+#[test]
+fn registration_prewalk_visits_only_admitted_dirs_by_cache_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+
+    // Admitted source (kept).
+    std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+
+    // A large `target/` (the ~1.2M-entry cost in miniature) plus the other
+    // ignored dirs — every entry here MUST be pruned, none seeded.
+    std::fs::create_dir_all(root.join("target/debug/deps")).unwrap();
+    for i in 0..200 {
+        std::fs::write(root.join(format!("target/debug/deps/dep{i}.rlib")), "x").unwrap();
+    }
+    std::fs::create_dir_all(root.join("node_modules/react")).unwrap();
+    std::fs::write(root.join("node_modules/react/index.js"), "x").unwrap();
+    std::fs::create_dir_all(root.join(".git/refs")).unwrap();
+    std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::create_dir_all(root.join("dist")).unwrap();
+    std::fs::write(root.join("dist/bundle.js"), "x").unwrap();
+
+    // Degradation path: no authority → the cheap directory-name prune alone.
+    let mut cache = PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(None));
+    cache.add_path(&root, RecursiveMode::Recursive);
+
+    // The seed set is EXACTLY the admitted directories + admitted files (plus the
+    // root itself, which the seed walk always records) — nothing under any
+    // ignored dir. This is the deterministic, machine-independent gate.
+    let expected: HashSet<PathBuf> = [
+        root.clone(),
+        root.join("Cargo.toml"),
+        root.join("src"),
+        root.join("src/main.rs"),
+        root.join("src/lib.rs"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        cache.cached_paths(),
+        expected,
+        "the seed walk must visit only admitted dirs/files, never descend into ignored dirs"
+    );
+    // And the same fact as a pure count, the CR's named observable: 5 admitted
+    // entries, not the 200+ a full pre-walk would seed.
+    assert_eq!(cache.len(), 5, "seeded entry count is the admitted-only count");
+
+    // Belt-and-suspenders: no seeded path lives under any ignored directory.
+    let ig = ignored_set();
+    for path in cache.cached_paths() {
+        assert!(
+            !is_ignored(&root, &path, &ig),
+            "no seeded path may be under an ignored dir, but {path:?} is"
+        );
+    }
+}
+
+/// With an [`AdmissionAuthority`] available, the seed walk honors `.gitignore`
+/// and the nested-`.git` boundary for LEAF entries — matching full-walk parity
+/// ([FR-SY-11], [ADR-48]) for the leaves the name prune alone would miss.
+#[test]
+fn registration_prewalk_honors_authority_leaf_admission() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+
+    // A gitignored file at the root (not under an ignored-NAME dir, so only the
+    // authority's gitignore gate can exclude it), an admitted source file, and a
+    // nested-`.git` boundary under a name that is NOT in `ignored_dirs`.
+    std::fs::write(root.join(".gitignore"), "secret.rs\n").unwrap();
+    std::fs::write(root.join("secret.rs"), "fn s() {}\n").unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::create_dir_all(root.join("nested")).unwrap();
+    std::fs::write(root.join("nested/.git"), "gitdir: /elsewhere\n").unwrap();
+    std::fs::write(root.join("nested/copy.rs"), "fn c() {}\n").unwrap();
+
+    let config = crate::config::Config {
+        exclude: vec![],
+        ..crate::config::Config::default()
+    };
+    let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+    let mut cache =
+        PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(Some(authority)));
+    cache.add_path(&root, RecursiveMode::Recursive);
+
+    let cached = cache.cached_paths();
+    assert!(
+        cached.contains(&root.join("src/main.rs")),
+        "an admitted source leaf is seeded"
+    );
+    assert!(
+        !cached.contains(&root.join("secret.rs")),
+        "a gitignored leaf is dropped by the authority (full-walk parity)"
+    );
+    assert!(
+        !cached.contains(&root.join("nested/copy.rs")),
+        "a nested-`.git`-boundary leaf is dropped by the authority (full-walk parity)"
+    );
+}
+
+/// The degradation path: with NO authority, the same gitignored/boundary leaves
+/// are seeded (the walk falls back to the cheap directory-name prune only) — the
+/// contrast that proves the authority, not some other gate, drops them above.
+#[test]
+fn registration_prewalk_degrades_to_name_prune_without_authority() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+
+    std::fs::write(root.join(".gitignore"), "secret.rs\n").unwrap();
+    std::fs::write(root.join("secret.rs"), "fn s() {}\n").unwrap();
+    std::fs::create_dir_all(root.join("nested")).unwrap();
+    std::fs::write(root.join("nested/.git"), "gitdir: /elsewhere\n").unwrap();
+    std::fs::write(root.join("nested/copy.rs"), "fn c() {}\n").unwrap();
+    // But a `target/` is STILL pruned — the name prune is authority-independent.
+    std::fs::create_dir_all(root.join("target/debug")).unwrap();
+    std::fs::write(root.join("target/debug/x.rlib"), "x").unwrap();
+
+    let mut cache = PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(None));
+    cache.add_path(&root, RecursiveMode::Recursive);
+
+    let cached = cache.cached_paths();
+    assert!(
+        cached.contains(&root.join("secret.rs")),
+        "no authority → the gitignored leaf is seeded (name prune only)"
+    );
+    assert!(
+        cached.contains(&root.join("nested/copy.rs")),
+        "no authority → the boundary leaf is seeded (name prune only)"
+    );
+    assert!(
+        !cached.contains(&root.join("target/debug/x.rlib")),
+        "the directory-name prune still skips `target/` with no authority"
+    );
+}
+
+/// Admission parity ([FR-SY-11], the sprint's Testing & Verification): over a
+/// mixed fixture exercising every gate at once, the set of *files* the pruned
+/// registration seed walk caches equals exactly the set a fresh full-walk `index`
+/// ([`discover`]) admits. This is the cross-check the CR names — the seed walk
+/// must admit exactly what `index` would, not merely "some subset."
+#[test]
+fn registration_prewalk_seed_file_set_matches_the_full_walk_index() {
+    use crate::config::discover;
+    use std::collections::BTreeSet;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+
+    // Admitted source.
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+    // `target/` name prune.
+    std::fs::create_dir_all(root.join("target/debug")).unwrap();
+    std::fs::write(root.join("target/debug/x.rlib"), "x").unwrap();
+    // Root-level gitignore: a file pattern and a directory pattern.
+    std::fs::write(root.join(".gitignore"), "secret.rs\ngenerated/\n").unwrap();
+    std::fs::write(root.join("secret.rs"), "fn s() {}\n").unwrap();
+    std::fs::create_dir_all(root.join("generated")).unwrap();
+    std::fs::write(root.join("generated/out.rs"), "fn o() {}\n").unwrap();
+    // Nested-`.git` boundary under a NON-ignored name (only the boundary rule cuts it).
+    std::fs::create_dir_all(root.join("nested")).unwrap();
+    std::fs::write(root.join("nested/.git"), "gitdir: /elsewhere\n").unwrap();
+    std::fs::write(root.join("nested/copy.rs"), "fn c() {}\n").unwrap();
+    // An exclude-glob-rejected path and an oversize file.
+    std::fs::create_dir_all(root.join("docs/planning")).unwrap();
+    std::fs::write(root.join("docs/planning/notes.rs"), "fn n() {}\n").unwrap();
+    std::fs::write(root.join("big.rs"), "x".repeat(100)).unwrap();
+    std::fs::write(root.join("small.rs"), "y\n").unwrap();
+
+    // A config exercising include(**), an exclude glob, the size cap, and a
+    // trimmed `ignored_dirs` (root-level ignore sources only — the v1 authority
+    // limitation excludes nested `.gitignore`, so the fixture uses none).
+    let mut config = crate::config::Config {
+        exclude: vec!["docs/planning/**".to_string()],
+        max_file_size: 50, // above the small source files (~14 B), below big.rs (100 B)
+        ..crate::config::Config::default()
+    };
+    config.semantics.ignored_dirs = vec!["target".to_string(), ".git".to_string()];
+
+    let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+    // The watcher's name set is the SAME union `spawn` builds (internal ∪ config).
+    let ignored_dirs: HashSet<String> = [".logos", ".git", "target"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+
+    let mut cache =
+        PrunedFileIdCache::new(root.clone(), Arc::new(ignored_dirs), Arc::new(Some(authority)));
+    cache.add_path(&root, RecursiveMode::Recursive);
+
+    // The full-walk `index` verdict over the same fixture/config.
+    let index_files: BTreeSet<PathBuf> = discover(&root, &config).unwrap().files.into_iter().collect();
+
+    // The seed walk caches directory nodes too (for rename tracking); restrict to
+    // regular files to compare against `discover`'s file set.
+    let seed_files: BTreeSet<PathBuf> = cache
+        .cached_paths()
+        .into_iter()
+        .filter(|p| p.is_file())
+        .collect();
+
+    assert_eq!(
+        seed_files, index_files,
+        "the registration seed walk must admit exactly the files a fresh `index` admits"
+    );
+    // Sanity: the fixture actually bit — source admitted, every excluded class out.
+    assert!(index_files.contains(&root.join("src/main.rs")));
+    assert!(!index_files.contains(&root.join("target/debug/x.rlib")));
+    assert!(!index_files.contains(&root.join("secret.rs")));
+    assert!(!index_files.contains(&root.join("generated/out.rs")));
+    assert!(!index_files.contains(&root.join("nested/copy.rs")));
+    assert!(!index_files.contains(&root.join("docs/planning/notes.rs")));
+    assert!(!index_files.contains(&root.join("big.rs")));
+}
+
+/// The name prune is skipped for the watched ROOT itself: a project whose own
+/// directory name collides with an ignored name (a repo checked out into
+/// `…/build`, `…/target`, …) must still be seeded end-to-end — only descendant
+/// and event-time-created directories are name-pruned. Regression guard for the
+/// start-path prune ([CR-077] review fix).
+#[test]
+fn registration_prewalk_seeds_a_root_whose_name_is_an_ignored_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    // The watched root's own basename is `build` — an entry in `ignored_set()`.
+    let root = tmp.path().join("build");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let root = root.canonicalize().unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+
+    let mut cache = PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(None));
+    cache.add_path(&root, RecursiveMode::Recursive);
+
+    let cached = cache.cached_paths();
+    assert!(
+        cached.contains(&root.join("src/main.rs")),
+        "a project rooted at a `build`-named dir is still seeded (root name prune skipped)"
+    );
+    assert!(cached.contains(&root.join("Cargo.toml")));
+    // But a `build/` NESTED under the root is still pruned (name prune on descent).
+    std::fs::create_dir_all(root.join("nested_build")).unwrap();
+    std::fs::create_dir_all(root.join("src/build")).unwrap();
+    std::fs::write(root.join("src/build/artifact.o"), "x").unwrap();
+    let mut cache2 = PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(None));
+    cache2.add_path(&root, RecursiveMode::Recursive);
+    assert!(
+        !cache2.cached_paths().contains(&root.join("src/build/artifact.o")),
+        "a nested `build/` under the root is still name-pruned"
+    );
+}
+
+/// Rename tracking is preserved for admitted paths: a seeded path exposes its
+/// real [`FileId`] via [`cached_file_id`], and [`remove_path`] evicts a whole
+/// subtree — the two operations `notify-debouncer-full` uses to stitch renames
+/// ([CR-077] CRA-02).
+#[test]
+fn pruned_cache_preserves_rename_tracking_for_admitted_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let mut cache = PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(None));
+    cache.add_path(&root, RecursiveMode::Recursive);
+
+    let main = root.join("src/main.rs");
+    assert!(
+        cache.cached_file_id(&main).is_some(),
+        "an admitted source path is seeded with its file ID for rename stitching"
+    );
+    // `remove_path` evicts the path and its subtree (the `from` side of a rename).
+    cache.remove_path(&root.join("src"));
+    assert!(
+        cache.cached_file_id(&main).is_none(),
+        "remove_path evicts the whole subtree"
+    );
+}
+
+/// `add_path` honors `walkdir`'s depth semantics: non-recursive seeds only the
+/// path and its immediate children, never grandchildren — so an event-time
+/// `add_path` for a non-recursively watched path behaves as the stock cache.
+#[test]
+fn pruned_cache_non_recursive_seeds_only_immediate_children() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub/b.rs"), "fn b() {}\n").unwrap();
+
+    let mut cache = PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(None));
+    cache.add_path(&root, RecursiveMode::NonRecursive);
+
+    let cached = cache.cached_paths();
+    assert!(cached.contains(&root.join("a.rs")), "immediate child file seeded");
+    assert!(cached.contains(&root.join("sub")), "immediate child dir seeded");
+    assert!(
+        !cached.contains(&root.join("sub/b.rs")),
+        "a grandchild is NOT seeded in non-recursive mode"
+    );
+}
+
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 /// The built-in coverage-artifact matcher (conventions only, no configured glob).
