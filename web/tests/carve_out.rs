@@ -422,6 +422,34 @@ async fn post_to_non_config_route_is_405() {
     }
 }
 
+/// Under a listen-only `--features ui` build (no `agents`), the chat and
+/// wiki-**generation** POST routes are never mounted and `method_guard` never
+/// admits them, so a **well-formed** mutating POST (valid same-origin + intent
+/// token, to rule out a mere CSRF `403`) is answered `405` — the dialing seam is
+/// genuinely absent, not merely guarded (CR-078, ADR-60, S-286). This is the
+/// complementary listen-only assertion to the `agents`-side positive coverage in
+/// `chat_sse.rs` / `wiki_sse.rs`, and it locks the core runtime consequence of
+/// the S-286 carve-out. Compiled only without `agents` (under `agents` these
+/// routes are admitted, so a 405 assertion would be wrong).
+#[cfg(not(feature = "agents"))]
+#[tokio::test]
+async fn chat_and_wiki_generation_posts_are_405_without_agents() {
+    for path in [web::CHAT_POST_ROUTE, web::CHAT_CLEAR_ROUTE, web::WIKI_GENERATE_ROUTE] {
+        let (_dir, router, intent) = mutating_router();
+        // A fully valid mutating POST — same-origin + intent token — so the only
+        // possible rejection is `method_guard`'s 405 (an unmounted, unadmitted
+        // route), never `intent_guard`'s 403.
+        let req = config_post(path, Some(intent.as_str()), Some("http://127.0.0.1:4983"), "q=hi");
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "POST {path} must be 405 in a listen-only (no-`agents`) build — the \
+             chat/wiki-generation dialing seam is carved out (CR-078, ADR-60)",
+        );
+    }
+}
+
 /// An invalid candidate is rejected `422` with the typed validation message and
 /// **no partial write** — the engine validates before the atomic swap (S-096,
 /// NFR-RA-07); the file stays absent here.

@@ -19,6 +19,15 @@ publish = false
 default   = []
 lang-rust = ["logos-core/lang-rust", "mcp/lang-rust"]
 lang-all  = ["logos-core/lang-all", "mcp/lang-all"]
+# CR-078/ADR-60: the LLM egress carve-out. `agents` links the chat-agent,
+# wiki-agent, and agent-core components — and, through them, `rig` + its
+# `reqwest` HTTP client (the sole outbound seam). WITHOUT it, the crate compiles
+# the listen-only dashboard (graph/query/wiki-**view**) with NO agent crate and
+# NO egress client in the dependency tree, so `cargo tree` under a plain `ui`
+# build is `rig`/`reqwest`-free (NFR-SE-01, ADR-40). The Chat routes/view and the
+# in-app wiki-generation trigger are `#[cfg(feature = "agents")]` in src/lib.rs;
+# the cli re-exposes this as its own `agents` feature (requiring `ui`).
+agents = ["dep:agent-core", "dep:chat-agent", "dep:wiki-agent"]
 
 [dependencies]
 logos-core = { path = "../logos-core", default-features = false }
@@ -32,8 +41,11 @@ mcp        = { path = "../mcp", default-features = false }
 # under the non-default `ui` feature, this edge keeps `rig` + its `reqwest` HTTP
 # client out of the default-feature tree the no-network fitness function guards
 # (NFR-SE-01, ADR-40). The chat surface (S-170) on this `web` adapter consumes
-# the substrate over this carve-out edge.
-agent-core = { path = "../agent-core", default-features = false }
+# the substrate over this carve-out edge. Optional and behind the `agents`
+# feature (CR-078/ADR-60): a plain `--features ui` build does not activate it, so
+# `rig` + `reqwest` stay out of the listen-only dashboard's tree, not merely the
+# default tree.
+agent-core = { path = "../agent-core", default-features = false, optional = true }
 # The ui-gated chat-agent component (CR-045/CR-046, ADR-40/ADR-41): owns the
 # `.logos/chat.db` conversation store (S-168) and, later, the orchestrator. The
 # chat surface (SSE/POST routes, S-170) on this `web` adapter is its only caller.
@@ -42,8 +54,10 @@ agent-core = { path = "../agent-core", default-features = false }
 # tree the no-network fitness function guards, so removing `--features ui` yields
 # exactly today's offline binary with no `chat.db` (NFR-SE-01, ADR-40
 # reversibility). The chat surface (S-170) on this `web` adapter is its caller
-# over this component edge.
-chat-agent = { path = "../chat-agent", default-features = false }
+# over this component edge. Optional and behind the `agents` feature
+# (CR-078/ADR-60): a plain `--features ui` build does not activate it, so there is
+# no `chat.db` and no egress client in the listen-only dashboard's tree.
+chat-agent = { path = "../chat-agent", default-features = false, optional = true }
 # The ui-gated wiki-agent component (CR-047, ADR-42, S-177): the in-process,
 # queue-driven wiki generator on the shared `agent-core` substrate. The Wiki-view
 # generation trigger + progress SSE (S-178) on this `web` adapter is its only
@@ -51,8 +65,11 @@ chat-agent = { path = "../chat-agent", default-features = false }
 # no generation logic (ADR-01). Like the chat edges above, `web` links into
 # `logos` only under the non-default `ui` feature, so this edge keeps `rig` + its
 # `reqwest` HTTP client out of the default-feature tree the no-network fitness
-# function guards (NFR-SE-01, ADR-40/ADR-42).
-wiki-agent = { path = "../wiki-agent" }
+# function guards (NFR-SE-01, ADR-40/ADR-42). Optional and behind the `agents`
+# feature (CR-078/ADR-60): a plain `--features ui` build does not activate it, so
+# the in-process wiki generator (and its egress client) is absent from the
+# listen-only dashboard's tree — the wiki-**view** remains fully served.
+wiki-agent = { path = "../wiki-agent", optional = true }
 anyhow     = { workspace = true }
 # Presentation-only DTO serialization for the read-only JSON query endpoint
 # (ADR-35). Derive only — `web` compiles solely under `--features ui`, so serde

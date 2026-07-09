@@ -1,20 +1,30 @@
-//! Offline carve-out boundary fitness test for the wiki-agent (S-177,
-//! [NFR-SE-01], [ADR-40], [ADR-42]).
+//! Offline carve-out boundary fitness test for the wiki-agent (S-177, S-286,
+//! [NFR-SE-01], [ADR-40], [ADR-42], [ADR-60]).
 //!
 //! The byte-identical no-networking-crate scan over the **default** `logos` tree
 //! lives in `logos-core/tests/no_network_deps.rs` and is unchanged by this story.
 //! This test asserts the wiki-agent side of the same carve-out — the boundary
-//! itself, mirroring `agent-core/tests/carve_out.rs`:
+//! itself, mirroring `agent-core/tests/carve_out.rs`.
+//!
+//! CR-078/ADR-60 split *listening* from *dialing*: the egress client is no longer
+//! gated by `ui` but by a separate `agents` feature (requiring `ui`). So the
+//! invariant is now three-valued:
 //!
 //! - the **default**-feature `logos` tree links **no** HTTP client (`reqwest`,
 //!   `hyper`) and not `rig-core` — the substrate the wiki-agent builds on is
 //!   absent;
-//! - the **`ui`**-feature `logos` tree **does** link `rig-core` and `reqwest` —
-//!   the egress seam exists, but only there.
+//! - the **`ui`**-feature `logos` tree (listen-only dashboard, wiki-**view**
+//!   included) links **no** `rig-core` and **no** `reqwest` — the wiki generator's
+//!   egress client is carved out of the dashboard ([ADR-60]);
+//! - the **`agents`**-feature `logos` tree **does** link `rig-core` and `reqwest`
+//!   — the egress seam exists, but only there.
 //!
-//! A regression that pulled the wiki-agent's `rig`/`reqwest` into the default tree
-//! (e.g. a non-`ui` edge from the cli/core to `wiki-agent`) fails here at `cargo
-//! test` time rather than being discovered later.
+//! A regression that pulled the wiki-agent's `rig`/`reqwest` into the default or
+//! the listen-only `ui` tree (e.g. a non-`agents` edge from the cli/core to
+//! `wiki-agent`) fails here at `cargo test` time rather than being discovered
+//! later.
+//!
+//! [ADR-60]: ../../docs/specs/architecture/decisions/ADR-60.md
 
 use std::process::Command;
 
@@ -89,19 +99,51 @@ fn default_logos_tree_excludes_rig_and_http_client() {
     }
 }
 
-/// The `ui` build: `rig-core` and `reqwest` are present — the egress seam exists,
-/// confined to this feature. If this fails, the substrate has been severed from
-/// the ui binary (or `rig`'s HTTP backend changed).
+/// The listen-only `ui` build (CR-078, ADR-60): the dashboard (wiki-**view**
+/// included) is present but the wiki generator's egress client is **not** —
+/// neither `rig-core` nor `reqwest` is linked. This is the S-286 carve-out that
+/// lets `ui` become the shipped default (S-287) without the outbound HTTP client.
+/// If this fails, the egress client has leaked back into the listen-only surface.
 #[test]
-fn ui_logos_tree_links_rig_and_its_http_client() {
+fn ui_logos_tree_excludes_rig_and_its_http_client() {
     let crates = logos_tree_crates(Some("ui"));
+    // Positive anchor first, so this exclusion test can never pass **vacuously**:
+    // if a regression severed `ui = ["dep:web"]` (or otherwise stopped pulling the
+    // web surface), the `ui` tree would trivially lack `rig-core`/`reqwest` and the
+    // denials below would pass on a broken, dashboard-less build. `hyper` is the
+    // sharpest anchor — the default-tree test above explicitly *denies* it, so
+    // asserting its presence here documents the listen(`hyper`)/dial(`reqwest`)
+    // split ADR-60 draws.
+    assert!(
+        contains(&crates, "hyper"),
+        "the `ui`-feature `logos` tree must link `hyper` (the loopback dashboard \
+         server) — otherwise this exclusion test would pass vacuously on a build \
+         that severed the listen-only `ui` web surface (ADR-27, ADR-60)",
+    );
+    for denied in ["rig-core", "reqwest"] {
+        assert!(
+            !contains(&crates, denied),
+            "the `ui`-feature (listen-only dashboard) `logos` tree must not link \
+             `{denied}` — the wiki-agent's rig substrate and its HTTP client are \
+             `agents`-only since CR-078 (NFR-SE-01, ADR-60, ADR-42)",
+        );
+    }
+}
+
+/// The `agents` build: `rig-core` and `reqwest` are present — the egress seam
+/// exists, confined to this feature (a superset of `ui`). If this fails, the
+/// substrate has been severed from the `agents` binary (or `rig`'s HTTP backend
+/// changed).
+#[test]
+fn agents_logos_tree_links_rig_and_its_http_client() {
+    let crates = logos_tree_crates(Some("agents"));
     assert!(
         contains(&crates, "rig-core"),
-        "the `ui`-feature `logos` tree must link `rig-core` (the agent substrate)",
+        "the `agents`-feature `logos` tree must link `rig-core` (the agent substrate)",
     );
     assert!(
         contains(&crates, "reqwest"),
-        "the `ui`-feature `logos` tree links `reqwest` (rig's HTTP client) — the sole, \
-         ui-gated outbound seam (NFR-SE-07, ADR-40)",
+        "the `agents`-feature `logos` tree links `reqwest` (rig's HTTP client) — the sole, \
+         `agents`-gated outbound seam (NFR-SE-07, ADR-40, ADR-60)",
     );
 }

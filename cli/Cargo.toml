@@ -46,8 +46,18 @@ lang-rust = ["logos-core/lang-rust", "mcp/lang-rust", "web?/lang-rust"]
 lang-all  = ["logos-core/lang-all", "mcp/lang-all", "web?/lang-all"]
 # CR-012/ADR-27: the localhost web UI. NON-DEFAULT — enabling it links the axum
 # web surface into the binary (`serve --ui`/`--port`); the default build has no
-# `--ui` flag and no networking crate (NFR-SE-01). Release artifacts enable it.
+# `--ui` flag and no networking crate (NFR-SE-01). `ui` alone is the listen-only
+# dashboard (graph/query/wiki-**view**): since CR-078/ADR-60 it carries NO agent
+# crate and NO `rig`/`reqwest` egress client — those live behind `agents`.
 ui        = ["dep:web"]
+# CR-078/ADR-60: the consent-gated LLM egress surface. A strict SUPERSET of `ui`
+# — it turns on the dashboard AND the chat + in-app wiki-generation agent surface
+# (and, through `web/agents`, `rig` + its `reqwest` HTTP client). `--features ui`
+# alone stays egress-free; `--features agents` restores today's full dashboard.
+# Release artifacts enable `agents` via the cargo-dist metadata (S-287) so the
+# shipped binary keeps chat/wiki generation. Egress remains user-initiated and
+# consent-gated at runtime (ADR-40) — this feature only gates compilation.
+agents    = ["ui", "web/agents"]
 
 [dependencies]
 logos-core = { path = "../logos-core", default-features = false }
