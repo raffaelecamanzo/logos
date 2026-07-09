@@ -1674,3 +1674,23 @@ fn implements_ref_binds_impl_method_to_its_trait() {
         EdgeKind::Implements,
     );
 }
+
+#[test]
+fn dyn_call_to_an_ambiguously_named_trait_stays_unresolved() {
+    // Two workspace traits share the name `Plug`, so `trait_by_name` returns None
+    // (never guesses one of several) and the dyn call is an honest miss — the
+    // "several" branch of the never-fabricate rule (NFR-RA-05), distinct from the
+    // "zero" (external) branch.
+    let (mut nodes, edges) = dyn_fixture();
+    nodes.push(node(80, "Plug", NodeKind::Trait, "other/src/lib.rs")); // a second `Plug`
+    let scope = [implements(200, 51, "Plug"), implements(201, 61, "Plug")];
+    let r = dyn_call(300, 2, "Plug::run");
+    let mut all = scope.to_vec();
+    all.push(r.clone());
+    let ix = Index::build(&nodes, &edges, &all);
+    assert_eq!(
+        bind(&r, &ix, BindingPolicy::Aggressive),
+        Outcome::Unbound,
+        "a dyn call to an ambiguously-named trait must stay unresolved"
+    );
+}
