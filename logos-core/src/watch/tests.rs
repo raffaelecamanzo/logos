@@ -520,7 +520,7 @@ fn registration_prewalk_visits_only_admitted_dirs_by_cache_count() {
     std::fs::write(root.join("dist/bundle.js"), "x").unwrap();
 
     // Degradation path: no authority → the cheap directory-name prune alone.
-    let mut cache = PrunedFileIdCache::new(Arc::new(ignored_set()), Arc::new(None));
+    let mut cache = PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(None));
     cache.add_path(&root, RecursiveMode::Recursive);
 
     // The seed set is EXACTLY the admitted directories + admitted files (plus the
@@ -578,7 +578,8 @@ fn registration_prewalk_honors_authority_leaf_admission() {
         ..crate::config::Config::default()
     };
     let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
-    let mut cache = PrunedFileIdCache::new(Arc::new(ignored_set()), Arc::new(Some(authority)));
+    let mut cache =
+        PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(Some(authority)));
     cache.add_path(&root, RecursiveMode::Recursive);
 
     let cached = cache.cached_paths();
@@ -613,7 +614,7 @@ fn registration_prewalk_degrades_to_name_prune_without_authority() {
     std::fs::create_dir_all(root.join("target/debug")).unwrap();
     std::fs::write(root.join("target/debug/x.rlib"), "x").unwrap();
 
-    let mut cache = PrunedFileIdCache::new(Arc::new(ignored_set()), Arc::new(None));
+    let mut cache = PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(None));
     cache.add_path(&root, RecursiveMode::Recursive);
 
     let cached = cache.cached_paths();
@@ -631,6 +632,42 @@ fn registration_prewalk_degrades_to_name_prune_without_authority() {
     );
 }
 
+/// The name prune is skipped for the watched ROOT itself: a project whose own
+/// directory name collides with an ignored name (a repo checked out into
+/// `…/build`, `…/target`, …) must still be seeded end-to-end — only descendant
+/// and event-time-created directories are name-pruned. Regression guard for the
+/// start-path prune ([CR-077] review fix).
+#[test]
+fn registration_prewalk_seeds_a_root_whose_name_is_an_ignored_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    // The watched root's own basename is `build` — an entry in `ignored_set()`.
+    let root = tmp.path().join("build");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let root = root.canonicalize().unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+
+    let mut cache = PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(None));
+    cache.add_path(&root, RecursiveMode::Recursive);
+
+    let cached = cache.cached_paths();
+    assert!(
+        cached.contains(&root.join("src/main.rs")),
+        "a project rooted at a `build`-named dir is still seeded (root name prune skipped)"
+    );
+    assert!(cached.contains(&root.join("Cargo.toml")));
+    // But a `build/` NESTED under the root is still pruned (name prune on descent).
+    std::fs::create_dir_all(root.join("nested_build")).unwrap();
+    std::fs::create_dir_all(root.join("src/build")).unwrap();
+    std::fs::write(root.join("src/build/artifact.o"), "x").unwrap();
+    let mut cache2 = PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(None));
+    cache2.add_path(&root, RecursiveMode::Recursive);
+    assert!(
+        !cache2.cached_paths().contains(&root.join("src/build/artifact.o")),
+        "a nested `build/` under the root is still name-pruned"
+    );
+}
+
 /// Rename tracking is preserved for admitted paths: a seeded path exposes its
 /// real [`FileId`] via [`cached_file_id`], and [`remove_path`] evicts a whole
 /// subtree — the two operations `notify-debouncer-full` uses to stitch renames
@@ -642,7 +679,7 @@ fn pruned_cache_preserves_rename_tracking_for_admitted_paths() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
 
-    let mut cache = PrunedFileIdCache::new(Arc::new(ignored_set()), Arc::new(None));
+    let mut cache = PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(None));
     cache.add_path(&root, RecursiveMode::Recursive);
 
     let main = root.join("src/main.rs");
@@ -669,7 +706,7 @@ fn pruned_cache_non_recursive_seeds_only_immediate_children() {
     std::fs::create_dir_all(root.join("sub")).unwrap();
     std::fs::write(root.join("sub/b.rs"), "fn b() {}\n").unwrap();
 
-    let mut cache = PrunedFileIdCache::new(Arc::new(ignored_set()), Arc::new(None));
+    let mut cache = PrunedFileIdCache::new(root.clone(), Arc::new(ignored_set()), Arc::new(None));
     cache.add_path(&root, RecursiveMode::NonRecursive);
 
     let cached = cache.cached_paths();

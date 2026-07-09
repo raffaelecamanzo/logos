@@ -366,7 +366,8 @@ pub fn spawn(engine: Arc<Engine>) -> Result<WatchHandle> {
     // the event-time `classify` and the full `index` walk already use, so the
     // pre-walk visits only admitted source directories and cold start returns to
     // sub-second — while preserving full rename tracking for admitted paths.
-    let cache = PrunedFileIdCache::new(Arc::clone(&ignored_dirs), Arc::clone(&authority));
+    let cache =
+        PrunedFileIdCache::new(root.clone(), Arc::clone(&ignored_dirs), Arc::clone(&authority));
 
     // `None` tick rate lets the debouncer pick a sensible poll cadence for
     // the window; events are delivered on the debouncer's own thread.
@@ -806,6 +807,12 @@ fn is_pruned_dir_name(name: &OsStr, ignored_dirs: &HashSet<String>) -> bool {
 pub struct PrunedFileIdCache {
     /// path → file ID, the rename-stitching map (same role as `FileIdMap`).
     paths: HashMap<PathBuf, FileId>,
+    /// The canonicalised watched root. The name prune below is skipped for the
+    /// root itself so a project whose own directory name happens to be an ignored
+    /// name (a repo checked out into `…/build`, `…/target`, `…/out`, …) is still
+    /// seeded — only *descendant* and event-time-created directories are pruned by
+    /// name.
+    root: PathBuf,
     /// The feedback-loop ∪ indexer-ignored directory-name set: directories whose
     /// name is in here are never descended into during the seed walk.
     ignored_dirs: Arc<HashSet<String>>,
@@ -817,11 +824,17 @@ pub struct PrunedFileIdCache {
 }
 
 impl PrunedFileIdCache {
-    /// Construct the cache over the shared `ignored_dirs` name set and the shared
-    /// best-effort admission `authority` (both already `Arc`-built in [`spawn`]).
-    fn new(ignored_dirs: Arc<HashSet<String>>, authority: Arc<Option<AdmissionAuthority>>) -> Self {
+    /// Construct the cache over the canonicalised watched `root`, the shared
+    /// `ignored_dirs` name set, and the shared best-effort admission `authority`
+    /// (the latter two already `Arc`-built in [`spawn`]).
+    fn new(
+        root: PathBuf,
+        ignored_dirs: Arc<HashSet<String>>,
+        authority: Arc<Option<AdmissionAuthority>>,
+    ) -> Self {
         Self {
             paths: HashMap::new(),
+            root,
             ignored_dirs,
             authority,
         }
@@ -846,8 +859,14 @@ impl PrunedFileIdCache {
         };
         let file_type = meta.file_type();
         if file_type.is_dir() {
-            // An ignored directory (by name) is never seeded or descended.
-            if is_pruned_dir_name(path.file_name().unwrap_or_default(), &self.ignored_dirs) {
+            // A *non-root* ignored directory (by name) is never seeded or
+            // descended — this is the event-time guard against a Create of a
+            // `target/` dir. The watched root itself is always descended, even if
+            // its own name collides with an ignored name (a repo checked out into
+            // `…/build`), so registration seeds the whole project.
+            if path != self.root
+                && is_pruned_dir_name(path.file_name().unwrap_or_default(), &self.ignored_dirs)
+            {
                 return;
             }
             self.insert_id(path);
