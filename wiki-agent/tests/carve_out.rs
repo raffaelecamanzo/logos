@@ -107,6 +107,19 @@ fn default_logos_tree_excludes_rig_and_http_client() {
 #[test]
 fn ui_logos_tree_excludes_rig_and_its_http_client() {
     let crates = logos_tree_crates(Some("ui"));
+    // Positive anchor first, so this exclusion test can never pass **vacuously**:
+    // if a regression severed `ui = ["dep:web"]` (or otherwise stopped pulling the
+    // web surface), the `ui` tree would trivially lack `rig-core`/`reqwest` and the
+    // denials below would pass on a broken, dashboard-less build. `hyper` is the
+    // sharpest anchor — the default-tree test above explicitly *denies* it, so
+    // asserting its presence here documents the listen(`hyper`)/dial(`reqwest`)
+    // split ADR-60 draws.
+    assert!(
+        contains(&crates, "hyper"),
+        "the `ui`-feature `logos` tree must link `hyper` (the loopback dashboard \
+         server) — otherwise this exclusion test would pass vacuously on a build \
+         that severed the listen-only `ui` web surface (ADR-27, ADR-60)",
+    );
     for denied in ["rig-core", "reqwest"] {
         assert!(
             !contains(&crates, denied),
