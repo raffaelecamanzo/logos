@@ -4,8 +4,8 @@
 # (FR-PL-04, UAT-PL-03).
 #
 # C is the set's **honesty fixture** (NFR-CC-04): it ships NO test convention
-# (test files fall back to the path-convention `is_test` heuristic), NO smell
-# query, and NO frameworks capability, and it is NOT class-applicable — its
+# (test files fall back to the path-convention `is_test` heuristic) and NO
+# frameworks capability, and it is NOT class-applicable — its
 # symbols query emits neither `Class` nor `Struct` nodes, so the Cohesion
 # (Class) and Focus (Class ∪ Struct) dimensions both drop out as `n/a` rather
 # than fabricating a clean score on method-less C aggregates (FR-QM-11,
@@ -24,8 +24,8 @@ module_separator = "::"
 # tree-sitter-c 0.24.2 is generated against ABI 15.
 abi_version = 15
 
-# No `frameworks` capability (C has no dominant web framework), no `smell`
-# capability listed (and no smell query shipped) — the honesty posture.
+# No `frameworks` capability (C has no dominant web framework) — the honesty
+# posture.
 capabilities = ["symbols", "references"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03):

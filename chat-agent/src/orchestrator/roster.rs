@@ -8,8 +8,8 @@
 //!
 //! - **Graph-Navigator** — the 8 graph tools (`search`/`context`/`node`/
 //!   `callers`/`callees`/`impact`/`explore`/`affected`);
-//! - **Governance-Analyst** — the 9 governance tools (`scan`/`check_rules`/
-//!   `hotspots`/`test_gaps`/`dsm`/`gate`/`evolution`/`doc_gaps`/`health`);
+//! - **Governance-Analyst** — the 8 governance tools (`scan`/`check_rules`/
+//!   `hotspots`/`dsm`/`gate`/`evolution`/`doc_gaps`/`health`);
 //! - **Source-Reader** — the 3 sandboxed source tools (`read`/`grep`/`glob`),
 //!   project-root-confined ([NFR-SE-04]);
 //! - **Synthesizer** — **tool-less**; composes the final grounded answer from the
@@ -102,7 +102,7 @@ pub const GOVERNANCE_ANALYST_PREAMBLE: &str = "\
 You are the Governance-Analyst subagent of Logos, a structural code-intelligence \
 tool. You answer one step of a larger plan by running THIS codebase's \
 governance/quality read-models with your tools: scan, check_rules, hotspots, \
-test_gaps, dsm, gate, evolution, doc_gaps, health. Call the tools you need, then \
+dsm, gate, evolution, doc_gaps, health. Call the tools you need, then \
 reply with a concise plain-text summary of the grounded signal. Never fabricate a \
 metric or a verdict.";
 

@@ -75,7 +75,7 @@ async fn each_domain_exposes_exactly_its_subset() {
 #[test]
 fn the_three_domains_are_disjoint_and_cover_the_expected_counts() {
     assert_eq!(ToolDomain::Graph.tool_names().len(), 8);
-    assert_eq!(ToolDomain::Governance.tool_names().len(), 9);
+    assert_eq!(ToolDomain::Governance.tool_names().len(), 8);
     assert_eq!(ToolDomain::Source.tool_names().len(), 3);
 
     // Pairwise disjoint.

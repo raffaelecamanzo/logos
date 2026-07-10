@@ -1,6 +1,6 @@
 /*
  * StatChart (S-235, FR-UI-27) — the imperative-ECharts-in-a-React-component mount,
- * the spa-frontend pattern the Graph/Quadrant canvases use. React owns the
+ * the spa-frontend pattern the Graph canvas uses. React owns the
  * surrounding layout; this component owns the ECharts instance behind a ref,
  * re-applies the option when it changes, resizes with the container, and disposes
  * on unmount.

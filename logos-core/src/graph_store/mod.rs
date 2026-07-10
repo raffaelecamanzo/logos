@@ -1230,14 +1230,14 @@ pub trait GraphStore {
     /// The ids of every node the annotation pass marked `is_test = 1`, ordered
     /// by `id` ([FR-AN-05]).
     ///
-    /// The single source of truth `test_gaps` ([FR-GV-08]) reads to seed its
-    /// reachability BFS — by reading the persisted column rather than
-    /// re-deriving test status, `test_gaps` and the annotation can never
-    /// disagree about what a test is (CR-001 CRA-01). The `id` ordering keeps
+    /// The single source of truth the `[[require_tested]]` contract ([FR-GV-13])
+    /// reads to seed its reachability BFS — by reading the persisted column
+    /// rather than re-deriving test status, the contract and the annotation can
+    /// never disagree about what a test is (CR-001 CRA-01). The `id` ordering keeps
     /// the consumer deterministic ([NFR-RA-06]).
     ///
     /// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
-    /// [FR-GV-08]: ../../../docs/specs/requirements/FR-GV-08.md
+    /// [FR-GV-13]: ../../../docs/specs/requirements/FR-GV-13.md
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     fn test_node_ids(&self) -> Result<Vec<NodeId>>;
 
@@ -2185,9 +2185,9 @@ impl GraphStore for SqliteGraphStore {
     }
 
     fn test_node_ids(&self) -> Result<Vec<NodeId>> {
-        // ORDER BY id keeps the consumer (test_gaps BFS) deterministic
+        // ORDER BY id keeps the consumer (require_tested BFS) deterministic
         // (NFR-RA-06). Reading the persisted verdict — not re-deriving it —
-        // is what guarantees test_gaps ≡ the annotation (CR-001 CRA-01).
+        // is what guarantees reachability ≡ the annotation (CR-001 CRA-01).
         let mut stmt = self
             .conn
             .prepare_cached("SELECT id FROM nodes WHERE is_test = 1 ORDER BY id")?;

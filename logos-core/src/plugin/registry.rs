@@ -32,7 +32,6 @@ use super::grammars::{self, GrammarEntry};
 use super::manifest::PluginManifest;
 use super::plugin::{CompiledPlugin, LanguagePlugin};
 use super::queries;
-use super::SMELL_QUERY;
 
 /// The in-memory registry of loaded language grammars.
 #[derive(Debug)]
@@ -246,8 +245,7 @@ impl LanguageRegistry {
     }
 }
 
-/// Resolve and compile every capability's query for one grammar, plus the
-/// optional [`SMELL_QUERY`] fourth query when the descriptor declares one.
+/// Resolve and compile every capability's query for one grammar.
 ///
 /// Returns the capability → compiled query map and the list of query keys whose
 /// source was an on-disk override.
@@ -261,21 +259,12 @@ fn compile_capabilities(
     let mut overridden = Vec::new();
 
     // Each declared capability has a required, fail-fast query (`validate`
-    // guarantees the `[queries]` entry exists). The optional smell-evidence
-    // query (CR-007, FR-CV-08) rides the SAME resolve-then-compile path so it
-    // is embedded + disk-shadowable like every query — it is simply not a
-    // declared capability, so extraction never runs it (it is computed on
-    // demand by `test_gaps`).
-    let query_keys = manifest.capabilities.iter().map(String::as_str).chain(
-        manifest
-            .queries
-            .contains_key(SMELL_QUERY)
-            .then_some(SMELL_QUERY),
-    );
+    // guarantees the `[queries]` entry exists).
+    let query_keys = manifest.capabilities.iter().map(String::as_str);
 
     for key in query_keys {
-        // For a capability `validate` guarantees the key exists; for the smell
-        // key the `contains_key` guard above does. Either way the index is safe.
+        // `validate` guarantees the capability's `[queries]` entry exists, so
+        // the index is safe.
         let relative_path = &manifest.queries[key];
         let embedded = entry
             .embedded_queries

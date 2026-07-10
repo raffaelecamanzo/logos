@@ -5,9 +5,9 @@
 //! - **graph** — `search` / `context` / `node` / `callers` / `callees` /
 //!   `impact` / `explore` / `affected`, each wrapping an existing
 //!   [`Engine`](logos_core::Engine) navigation read-model;
-//! - **governance** — `scan` / `check_rules` / `hotspots` / `test_gaps` /
-//!   `dsm` / `gate` / `evolution` / `doc_gaps` / `health`, each wrapping an
-//!   existing governance/quality read-model;
+//! - **governance** — `scan` / `check_rules` / `hotspots` / `dsm` / `gate` /
+//!   `evolution` / `doc_gaps` / `health`, each wrapping an existing
+//!   governance/quality read-model;
 //! - **source** — net-new, path-sandboxed `read` / `grep` / `glob` confined to
 //!   the project root and honoring `ignored_dirs` ([NFR-SE-04]).
 //!
@@ -143,7 +143,6 @@ impl ToolDomain {
                 governance::Scan::NAME,
                 governance::CheckRules::NAME,
                 governance::Hotspots::NAME,
-                governance::TestGaps::NAME,
                 governance::Dsm::NAME,
                 governance::Gate::NAME,
                 governance::Evolution::NAME,
@@ -183,7 +182,6 @@ pub fn governance_toolset(engine: Arc<Engine>) -> ToolSet {
         .static_tool(governance::Scan::new(engine.clone()))
         .static_tool(governance::CheckRules::new(engine.clone()))
         .static_tool(governance::Hotspots::new(engine.clone()))
-        .static_tool(governance::TestGaps::new(engine.clone()))
         .static_tool(governance::Dsm::new(engine.clone()))
         .static_tool(governance::Gate::new(engine.clone()))
         .static_tool(governance::Evolution::new(engine.clone()))

@@ -37,7 +37,6 @@ the project allowlist (MIT / BSD / 0BSD / Apache-2.0 / OFL-1.1).
 | `logos.css` | All styling; the §1.2 tokens are its `:root` | authored | — | MIT (project) | [`LICENSE`](../../LICENSE) |
 | `nav-progress.js` | In-flight navigation/fragment loading affordance (FR-UI-07); progressive enhancement, references no external origin | authored | — | MIT (project) | [`LICENSE`](../../LICENSE) |
 | `graph.js` | Interactive whole-graph canvas bootstrap (instantiates the ECharts graph series over `/api/graph`, FR-UI-08/ADR-29) | authored | — | MIT (project) | [`LICENSE`](../../LICENSE) |
-| `quadrant.js` | Quadrant scatter bootstrap — renders the reachability×coverage scatter (uPlot points mode) over `/api/quadrant` same-origin (FR-UI-17, S-142/CR-036) | authored | — | MIT (project) | [`LICENSE`](../../LICENSE) |
 | `mermaid-init.js` | Wiki Mermaid bootstrap — initializes the vendored bundle and renders every `.mermaid` block same-origin (FR-WK-15/S-111); references no external origin | authored | — | MIT (project) | [`LICENSE`](../../LICENSE) |
 | `../../assets/logo/logos-lockup.png` | Header brand lockup (icon + wordmark, 252×64) | user-provided Logos brand asset (repo-root `assets/logo/`) | — | MIT (project) | [`LICENSE`](../../LICENSE) |
 

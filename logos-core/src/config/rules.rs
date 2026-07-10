@@ -703,7 +703,7 @@ pub struct ForbiddenImport {
 ///
 /// Every `exported` Function/Method whose defining file matches any `paths`
 /// glob must be reachable by transitive `calls` BFS from an `is_test` node
-/// ([FR-AN-05]) — the SAME static reachability `test_gaps` reports ([FR-GV-08]).
+/// ([FR-AN-05]) — the SAME static reachability `test_reachable_set` computes.
 /// An unreached exported symbol is a `severity='error'` violation carrying
 /// `reason`; **non-exported symbols are exempt** — the contract enforces a
 /// *public-API* test path, not total coverage. Like a [`ForbiddenImport`],

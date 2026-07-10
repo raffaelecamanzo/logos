@@ -27,7 +27,6 @@ import { HealthView } from "./health/HealthView.tsx";
 import { StatisticsView } from "./statistics/StatisticsView.tsx";
 import { CoverageView } from "./analytics/CoverageView.tsx";
 import { FilesView } from "./analytics/FilesView.tsx";
-import { QuadrantView } from "./analytics/QuadrantView.tsx";
 import { WikiView } from "./wiki/WikiView.tsx";
 
 /** A view is a plain, prop-less component mounted in the shell content slot. */
@@ -41,11 +40,10 @@ export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   "/graph": GraphView,
   // S-190 — the Chat tab: a React SSE client over the intent-guarded `POST /chat`.
   "/chat": ChatView,
-  // S-188 — the Files & Risk, Coverage, and Quadrant read-only display tabs.
+  // S-188 — the Files & Risk and Coverage read-only display tabs.
   "/files": FilesView,
   "/coverage": CoverageView,
-  "/quadrant": QuadrantView,
-  // S-189 — the Architecture/Cycles, Gaps, and Wiki tabs.
+  // S-189 — the Architecture/Cycles, Rule-findings, and Wiki tabs.
   "/architecture": ArchitectureView,
   "/gaps": GapsView,
   // The Wiki tab owns its own client sub-routes — `/wiki`, `/wiki/search`, and the

@@ -34,9 +34,9 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "architecture", label: "Architecture / Cycles", path: "/architecture", group: "A" },
   // Group B — risk & coverage surfaces.
   { id: "files", label: "Files & Risk", path: "/files", group: "B" },
-  { id: "gaps", label: "Gaps", path: "/gaps", group: "B" },
+  // CR-079: the "Gaps" tab is now "Rule findings" (test-gaps roll-up removed).
+  { id: "gaps", label: "Rule findings", path: "/gaps", group: "B" },
   { id: "coverage", label: "Coverage", path: "/coverage", group: "B" },
-  { id: "quadrant", label: "Quadrant", path: "/quadrant", group: "B" },
   // Group C — the isolated policy editor (the only mutating surface), with the
   // read-only Statistics view directly above it (S-235, CR-058, FR-UI-27).
   { id: "statistics", label: "Statistics", path: "/statistics", group: "C" },

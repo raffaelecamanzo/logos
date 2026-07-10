@@ -116,7 +116,7 @@ async fn loading_every_view_repeatedly_writes_no_snapshot() {
     // The CR-049 decommission (S-192) removed the server-rendered views; the SPA
     // now reads every dashboard through the `/api/v1/*` read-models, which compose
     // the SAME read-only accessors the views used (`latest_gate`/`latest_scan`/
-    // `coverage_status`/`test_gaps`/`latest_hotspots`/`coverage_cross`/`search`/
+    // `coverage_status`/`check_rules`/`latest_hotspots`/`search`/
     // `node`/`impact`/`graph_elements`/`config_read`/`wiki_read`). The CR-018/ADR-28
     // write-free-on-read guard follows them to the surviving routes: the static SPA
     // host (`/`, which touches no store) plus the full `/api/v1/*` read suite —
@@ -125,7 +125,7 @@ async fn loading_every_view_repeatedly_writes_no_snapshot() {
     // metric/temporal snapshot row on read ([ADR-28], [FR-UI-03]).
     for path in [
         "/", "/api/v1/overview", "/api/v1/health", "/api/v1/architecture", "/api/v1/files",
-        "/api/v1/coverage", "/api/v1/quadrant", "/api/v1/config", "/api/v1/graph",
+        "/api/v1/coverage", "/api/v1/config", "/api/v1/graph",
         "/api/v1/search?q=f", "/api/v1/node?symbol=f", "/api/v1/impact?seed=f",
     ] {
         for _ in 0..2 {

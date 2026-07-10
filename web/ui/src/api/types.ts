@@ -353,13 +353,12 @@ export interface OverviewModel {
   languages: LanguagesInfo;
   gate: GateResult;
   coverage: CoverageStatus;
-  gaps: TestGapsReport;
+  /** The architecture-rules report — drives the Dashboard's Rule-findings widget
+   *  (CR-079). Replaces the retired `gaps`/`cross`/`hotspots` roll-ups. */
+  rules: RulesReport;
   stats: StatsInfo;
   /** The Project-Overview wiki page, or `null` when none is written yet (honest absence). */
   overview_page: WikiPage | null;
-  cross: CoverageCrossReport;
-  /** The hotspot board, or `null` when the temporal tier is unavailable. */
-  hotspots: HotspotReport | null;
 }
 
 /** A normalized + raw metric pair (mirrors `MetricValue`). */
@@ -447,13 +446,12 @@ export interface HealthModel {
   evolution: EvolutionReport;
 }
 
-// ── Files & Risk / Coverage / Quadrant read-models (S-188, FR-UI-11, FR-UI-17) ──
-// Typed mirrors of the Rust read-model structs the `/api/v1/files`,
-// `/api/v1/coverage`, and `/api/v1/quadrant` bundles serialize (web/src/api_v1.rs):
+// ── Files & Risk / Coverage read-models (S-188, FR-UI-11) ─────────────────────
+// Typed mirrors of the Rust read-model structs the `/api/v1/files` and
+// `/api/v1/coverage` bundles serialize (web/src/api_v1.rs):
 //   - `HotspotReport`/`Hotspot`/`CoverageCell` (logos-core/src/history/hotspot.rs)
 //   - `TemporalReport`/`FileTemporal` (logos-core/src/history/temporal.rs)
 //   - `CoverageStatus`/`CoverageFileStatus` (logos-core/src/history/coverage/mod.rs)
-//   - `CoverageCrossReport`/`CrossSymbol`/`CrossTotals` (…/coverage/cross.rs)
 //   - `StatusInfo` (logos-core/src/models/navigation.rs)
 // Integers carrying basis points (0–10000) are named `*_bp`. `Option<T>` is
 // `T | null`; an absent figure is rendered `n/a`, never a fabricated `0`
@@ -466,10 +464,6 @@ export type DegradedReason = "NotGit" | "GitAbsent" | "Shallow";
 /** Coverage freshness wire token (mirrors `FRESHNESS_*`): a fresh value, a
  *  stale-label-only file, or never-covered `n/a`. */
 export type Freshness = "fresh" | "stale" | "n/a";
-
-/** A quadrant tag (mirrors `Quadrant`, `rename_all = "lowercase"`); `null` for a
- *  symbol with no runtime axis (the `n/a` rule — it cannot be placed). */
-export type QuadrantTag = "q1" | "q2" | "q3" | "q4";
 
 /** One hotspot/coverage cell (mirrors `CoverageCell`): a fresh value, a stale
  *  label, or `n/a` — never a guessed `0` ([FR-CV-05]). */
@@ -597,53 +591,6 @@ export interface CoverageStatus {
   staleness_prompt: string | null;
 }
 
-/** One symbol's place in the reachability × runtime-coverage cross (mirrors
- *  `CrossSymbol`, [FR-UI-17]). */
-export interface CrossSymbol {
-  symbol: string;
-  name: string;
-  file: string;
-  start_line: number | null;
-  end_line: number | null;
-  /** The static-reachability axis (Y): a test transitively calls it. */
-  reachable_from_test: boolean;
-  /** The runtime-execution axis (X) in basis points; `null` is `n/a` — an
-   *  unresolvable span / non-fresh-covered file / no instrumented line, never `0`. */
-  runtime_exec_bp: number | null;
-  /** The quadrant, or `null` exactly when `runtime_exec_bp` is `n/a`. */
-  quadrant: QuadrantTag | null;
-}
-
-/** Quadrant tallies over the resolved symbols (mirrors `CrossTotals`). */
-export interface CrossTotals {
-  /** Not-reachable + executed — false-green (worst). */
-  q1: number;
-  /** Reachable + 0% executed — dead / guarded test edge. */
-  q2: number;
-  /** Not-reachable + 0% executed — true gap. */
-  q3: number;
-  /** Reachable + executed — trust (best). */
-  q4: number;
-  /** Symbols with no runtime axis (`n/a`). */
-  na_runtime: number;
-  /** Every non-test function/method considered. */
-  total: number;
-}
-
-/** The reachability × runtime-coverage cross read-model (mirrors
- *  `CoverageCrossReport`, [FR-UI-17]). */
-export interface CoverageCrossReport {
-  head_sha: string | null;
-  config_hash: string | null;
-  /** `true` when the latest snapshot has at least one fresh covered file. */
-  has_fresh_coverage: boolean;
-  /** One row per non-test function/method, in canonical order. */
-  symbols: CrossSymbol[];
-  totals: CrossTotals;
-  /** The `n/a` empty-state notice when no coverage was ever ingested; else `null`. */
-  notice: string | null;
-}
-
 /** `GET /api/v1/files` bundle (mirrors `FilesModel`): the ranked hotspot board
  *  joined with the per-file temporal facts. */
 export interface FilesModel {
@@ -658,15 +605,6 @@ export interface CoverageModel {
   status: StatusInfo;
   coverage: CoverageStatus;
   untested: HotspotReport;
-}
-
-/** `GET /api/v1/quadrant` bundle (mirrors `QuadrantModel`): the cross read-model
- *  plus the hotspot board supplying urgency/blast-radius weight (`null` on a read
- *  fault — the view degrades to an unweighted urgency). */
-export interface QuadrantModel {
-  status: StatusInfo;
-  cross: CoverageCrossReport;
-  hotspots: HotspotReport | null;
 }
 
 // ── Architecture / Cycles (mirrors `ArchitectureModel` / `DsmReport`, S-189) ──────
@@ -697,50 +635,7 @@ export interface ArchitectureModel {
   dsm: DsmReport;
 }
 
-// ── Gaps (mirrors `GapsModel` / `TestGapsReport` / `RulesReport`, S-189) ──────────
-
-/** One untested public function (mirrors `TestGap`). */
-export interface TestGap {
-  name: string;
-  file: string;
-  /** 1-based declaration line, when recorded. */
-  line: number | null;
-}
-
-/** A test-smell kind wire token (mirrors `TestSmellKind`, kebab-case). */
-export type TestSmellKind = "assertion-free" | "empty-body" | "sleeping";
-
-/** One flagged test smell (mirrors `TestSmell`). */
-export interface TestSmell {
-  file: string;
-  line: number | null;
-  name: string;
-  kind: TestSmellKind;
-}
-
-/** The test-smell appendix (mirrors `TestSmellAppendix`). */
-export interface TestSmellAppendix {
-  label: string;
-  findings: TestSmell[];
-  not_analyzed: string[];
-}
-
-/** The blast-radius-ranked test-gaps read-model (mirrors `TestGapsReport`). The
- *  `untested` order is the worklist ranking — the view renders it verbatim. */
-export interface TestGapsReport {
-  untested: TestGap[];
-  total_functions: number;
-  covered_functions: number;
-  /** Coverage ratio out of 10000, or `null` when not computed (the `n/a` rule). */
-  coverage_ratio: number | null;
-  limit: number;
-  truncated: boolean;
-  /** The mandatory static-coverage caveat (BR-16) — rendered verbatim. */
-  caveat: string;
-  freshness: string;
-  warnings: string[];
-  smells: TestSmellAppendix;
-}
+// ── Rule findings (mirrors `GapsModel` / `RulesReport`, S-189, CR-079) ────────────
 
 /** One architecture-rule violation (mirrors `Violation`). */
 export interface Violation {
@@ -764,10 +659,10 @@ export interface RulesReport {
   warnings: string[];
 }
 
-/** The Gaps bundle (mirrors `GapsModel`). */
+/** The Rule-findings bundle (mirrors `GapsModel`, CR-079): the index status and the
+ *  architecture-rules report. The retired test-gaps roll-up is gone. */
 export interface GapsModel {
   status: StatusInfo;
-  test_gaps: TestGapsReport;
   rules: RulesReport;
 }
 

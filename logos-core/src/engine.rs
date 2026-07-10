@@ -35,7 +35,7 @@ use crate::models::{
     quality::{
         DocGapsReport, DoctorReport, DsmReport, EvolutionReport, GateResult, HealthInfo,
         LanguageDescriptor, LanguagesInfo, MetricSnapshot, RulesReport, ScanResult, SessionInfo,
-        SkippedLanguage, StatsInfo, TestGapsReport, VerifyReport,
+        SkippedLanguage, StatsInfo, VerifyReport,
     },
 };
 use crate::runtime::Runtime;
@@ -846,67 +846,9 @@ impl Engine {
         })
     }
 
-    /// Test-gap analysis (FR-GV-08, BR-16): non-test, non-entry-point
-    /// functions unreachable from any test node over `calls` BFS, capped at
-    /// `limit` (default 50), always carrying the static-coverage caveat.
-    ///
-    /// Ordered by **blast radius** ([FR-GV-17]): caller fan-in × the containing
-    /// file's hotspot score, most-urgent first. The hotspot ranking is computed
-    /// **here at the façade** (read-only, from the already-mined facts — see
-    /// [`blast_radius_weights`](Self::blast_radius_weights)) and supplied to the
-    /// governance computation, so the governance engine never links history
-    /// ([CR-038], [ADR-28]). The single shared accessor behind the web Gaps
-    /// view, the MCP `test_gaps` tool, and the CLI — so all three return the
-    /// identical ordering. With no history/hotspot store the ranking degrades to
-    /// the FR-GV-08 file/name order, the caveat still emitted, never a fabricated
-    /// ranking ([NFR-CC-04]); the ranking never feeds `gate`/`scan` ([BR-28]).
-    ///
-    /// # Errors
-    /// Returns an error on a structural failure.
-    ///
-    /// [FR-GV-17]: ../../../docs/specs/requirements/FR-GV-17.md
-    /// [CR-038]: ../../../docs/requests/CR-038-web-ui-information-architecture-restructure.md
-    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    pub fn test_gaps(&self, limit: Option<u32>, reconcile: bool) -> Result<TestGapsReport> {
-        crate::observability::traced("test_gaps", || {
-            let ranks = self.blast_radius_weights();
-            crate::governance::test_gaps(self, limit, reconcile, ranks.as_ref())
-        })
-    }
-
-    /// The read-only file → hotspot-score map that weights the blast-radius
-    /// ranking of [`test_gaps`](Self::test_gaps) ([FR-GV-17]). Reads the
-    /// **already-mined** temporal facts via [`latest_hotspots`](Self::latest_hotspots)
-    /// — it never mines and never appends a snapshot, so computing the ranking on
-    /// a read leaves every store unchanged ([ADR-28]).
-    ///
-    /// `None` whenever no usable hotspot signal exists — a degraded/empty
-    /// temporal tier, or any history-read failure — so the caller degrades to the
-    /// FR-GV-08 file/name order and never fabricates a ranking ([NFR-CC-04]). A
-    /// history error is swallowed to `None` on purpose: a missing temporal tier
-    /// must not turn the always-available `test_gaps` into a failure.
-    fn blast_radius_weights(&self) -> Option<std::collections::HashMap<String, i64>> {
-        // `limit = None` → the full ranked board, so every gap's containing file
-        // can be weighted (a truncated board would silently zero-weight the tail).
-        let report = self.latest_hotspots(None, false, false).ok()?;
-        if report.degraded.is_some() || report.files.is_empty() {
-            return None;
-        }
-        Some(
-            report
-                .files
-                .iter()
-                .map(|h| (h.path.clone(), h.score))
-                .collect(),
-        )
-    }
-
     /// Documentation-gap analysis (FR-GV-14): exported functions/methods
     /// referenced by no `DocSection` over `DocReference` edges, capped at
-    /// `limit` (default 50) — the read-only analog of
-    /// [`test_gaps`](Self::test_gaps), always carrying the reference-presence
-    /// caveat.
+    /// `limit` (default 50), always carrying the reference-presence caveat.
     ///
     /// # Errors
     /// Returns an error on a structural failure.
@@ -1688,90 +1630,6 @@ impl Engine {
     pub fn coverage_status(&self) -> Result<crate::history::CoverageStatus> {
         crate::observability::traced("coverage_status", || {
             crate::history::coverage::status(&self.root)
-        })
-    }
-
-    /// The symbol-level **reachability x runtime-coverage cross** read-model
-    /// ([FR-UI-17], [CR-036]): per non-test function/method, the pair
-    /// `(reachable_from_test, runtime_exec_fraction)` and a Q1-Q4 classification --
-    /// the engine-side backing of the `/quadrant` view and the Dashboard
-    /// trust-score card so the web stays presentation-only ([FR-UI-03], [ADR-28]).
-    ///
-    /// The two axes are joined **here at the `api` layer**, mirroring
-    /// [`coverage_ingest`](Self::coverage_ingest)'s `indexed_paths`: the symbol
-    /// spans come from a `logos.db` graph read and reachability from the
-    /// governance `test_gaps` BFS ([FR-GV-08]), both handed to the history-engine
-    /// as plain data so it never links the governance-engine -- the
-    /// history -> governance boundary stays one-directional ([UAT-GH-02]). The
-    /// reachability set is the SAME `test_reachable_set` core `test_gaps` uses, so
-    /// the two surfaces can never disagree about what a test reaches.
-    ///
-    /// Read-side only: it reads `history.db` (+ graph spans) and persists nothing
-    /// ([ADR-28]); the gated metric path never calls it, so `gate`/`scan` are
-    /// byte-identical with or without it ([BR-28]). A symbol with an unresolvable
-    /// span or no fresh coverage is `n/a` on the runtime axis -- never a guessed
-    /// fraction ([NFR-RA-05]). Deterministic at a fixed HEAD + store state
-    /// ([NFR-RA-06]). A transient engine (no graph runtime) yields an empty symbol
-    /// set, honestly.
-    ///
-    /// # Errors
-    /// Returns an error only on an unexpected graph- or `history.db`-read failure.
-    ///
-    /// [FR-UI-17]: ../../../docs/specs/requirements/FR-UI-17.md
-    /// [FR-GV-08]: ../../../docs/specs/requirements/FR-GV-08.md
-    /// [FR-UI-03]: ../../../docs/specs/requirements/FR-UI-03.md
-    /// [CR-036]: ../../../docs/requests/CR-036-automatic-coverage-ingest-and-coverage-cross-quadrant.md
-    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-    /// [BR-28]: ../../../docs/specs/software-spec.md#323-coverage-test-evidence
-    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    /// [UAT-GH-02]: ../../../docs/specs/requirements/UAT-GH-02.md
-    pub fn coverage_cross(&self) -> Result<crate::history::CoverageCrossReport> {
-        crate::observability::traced("coverage_cross", || {
-            // Graph read at the api layer (the `indexed_paths` precedent): nodes
-            // + spans, `Calls` edges, and the persisted `is_test` set. A transient
-            // engine has no runtime -> an empty graph, so the cross is honestly
-            // empty rather than fabricated ([NFR-RA-05]).
-            let (nodes, edges, test_node_ids) = match self.runtime() {
-                Some(rt) => rt.submit_read(|store| {
-                    Ok((
-                        store.all_nodes()?,
-                        store.all_edges()?,
-                        store.test_node_ids()?,
-                    ))
-                })?,
-                None => (Vec::new(), Vec::new(), Vec::new()),
-            };
-            let test_ids: std::collections::HashSet<_> = test_node_ids.into_iter().collect();
-            // Reachability over `Calls` from every test node -- the SAME core
-            // `test_gaps` uses ([FR-GV-08]). Computed here and supplied to the
-            // history-engine as a per-symbol boolean ([UAT-GH-02]).
-            let reachable = crate::governance::test_reachable_set(&edges, &test_ids);
-
-            // Every non-test function/method (entry points included -- an executed
-            // entry point unreached by a test is a meaningful Q3 finding). The
-            // runtime axis + classification is the history-engine's job.
-            //
-            // `test_reachable_set` seeds the BFS from the test nodes, so `reachable`
-            // contains the test-node ids themselves; the `!test_ids.contains` filter
-            // below drops every test node from the symbol set first, so a test node
-            // can never reach the `reachable.contains(&n.id)` check and be emitted as
-            // a (spurious) Q1/Q3 symbol. The two filters are load-bearing together.
-            let symbols: Vec<crate::history::CrossSymbolInput> = nodes
-                .iter()
-                .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
-                .filter(|n| !test_ids.contains(&n.id))
-                .map(|n| crate::history::CrossSymbolInput {
-                    symbol: n.symbol.to_scip_string(),
-                    name: n.name.clone(),
-                    file: n.file_path.clone().unwrap_or_default(),
-                    start_line: n.start_line,
-                    end_line: n.end_line,
-                    reachable_from_test: reachable.contains(&n.id),
-                })
-                .collect();
-
-            crate::history::coverage_cross(&self.root, symbols)
         })
     }
 
@@ -2780,13 +2638,12 @@ mod tests {
         assert_serialize::<SyncResult>();
         assert_serialize::<InitResult>();
 
-        // Quality / governance (11)
+        // Quality / governance (10)
         assert_serialize::<ScanResult>();
         assert_serialize::<GateResult>();
         assert_serialize::<RulesReport>();
         assert_serialize::<EvolutionReport>();
         assert_serialize::<DsmReport>();
-        assert_serialize::<TestGapsReport>();
         assert_serialize::<DocGapsReport>();
         assert_serialize::<HealthInfo>();
         assert_serialize::<SessionInfo>();

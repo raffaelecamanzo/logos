@@ -8,7 +8,7 @@
 //! (the [ADR-03] `spawn_blocking` hop). The handlers **select, project, and join**
 //! existing read-models and nothing more: no new `Engine` core query, no figure
 //! the read-models do not already carry ([ADR-01], [NFR-MA-02], [NFR-RA-05]). The
-//! pre-existing `/api/*` endpoints (graph-elements, graph query, impact, quadrant)
+//! pre-existing `/api/*` endpoints (graph-elements, graph query, impact)
 //! were **subsumed** into this surface and removed at the S-192 decommission:
 //! their `/api/v1` twins reuse the very same readers, and this `/api/v1/*` suite
 //! is now the sole data seam the embedded SPA consumes ([ADR-43]).
@@ -61,14 +61,14 @@ use axum::{
 use serde::Serialize;
 
 use logos_core::config::ConfigReadModel;
-use logos_core::history::{CoverageCrossReport, CoverageStatus, HotspotReport, TemporalReport};
+use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
 use logos_core::models::navigation::{
     GraphElements, ImpactResult, LanguageComposition, NodeInfo, SearchResult, StatusInfo,
 };
 use logos_core::models::quality::{
     DsmReport, EvolutionReport, GateResult, LanguagesInfo, RulesReport, ScanResult, StatsInfo,
-    TestGapsReport, VerifyReport,
+    VerifyReport,
 };
 use logos_core::wiki::{AnchorProvenance, DocCategory, WikiHit, WikiPage, WikiStatus};
 use logos_core::Engine;
@@ -115,9 +115,9 @@ fn respond<T: Serialize>(model: anyhow::Result<T>) -> Response {
 /// The Dashboard bundle ([FR-UI-09]): every read-model the verdict-rich landing
 /// composes, each field traceable to its `Engine` read-model. Built over the
 /// **read-only** accessors so the load is write-free ([ADR-28]). The
-/// `composition` defaults on a read fault and `hotspots` is `Option` — mirroring
-/// the view's own per-widget degradation ([NFR-CC-04]); a genuinely-required read
-/// failing aborts the whole bundle to a `500`.
+/// `composition` defaults on a read fault — mirroring the view's own per-widget
+/// degradation ([NFR-CC-04]); a genuinely-required read failing aborts the whole
+/// bundle to a `500`.
 #[derive(Debug, Serialize)]
 pub(crate) struct OverviewModel {
     status: StatusInfo,
@@ -125,15 +125,14 @@ pub(crate) struct OverviewModel {
     languages: LanguagesInfo,
     gate: GateResult,
     coverage: CoverageStatus,
-    gaps: TestGapsReport,
+    /// The architecture-rules report ([FR-GV-02]) backing the Dashboard's
+    /// Rule-findings widget: green when `passed`, red on violations, muted
+    /// onboarding when no `rules.toml` (`rules_present == false`).
+    rules: RulesReport,
     stats: StatsInfo,
     /// The agent Project-Overview wiki page, or `null` when none is written yet
     /// (an honest absence, not an error — [NFR-CC-04]).
     overview_page: Option<WikiPage>,
-    cross: CoverageCrossReport,
-    /// The advisory hotspot board supplying the trust card's architectural weight;
-    /// `null` when the temporal tier is unavailable (the view's `.ok()` degrade).
-    hotspots: Option<HotspotReport>,
 }
 
 /// `GET /api/v1/overview` — the Dashboard data ([FR-UI-09], [FR-UI-21]).
@@ -147,13 +146,9 @@ pub(crate) async fn overview(State(engine): State<Arc<Engine>>) -> Response {
             languages: e.languages(),
             gate: e.latest_gate()?,
             coverage: e.coverage_status()?,
-            gaps: e.test_gaps(None, false)?,
+            rules: e.check_rules(None, false)?,
             stats: e.stats(None),
             overview_page: e.wiki_read(crate::wiki::PROJECT_OVERVIEW_SLUG)?,
-            cross: e.coverage_cross()?,
-            // A hotspot read needs git history; the view treats it as optional
-            // (`.ok()`), so the trust card can still degrade to an unweighted share.
-            hotspots: e.latest_hotspots(None, false, false).ok(),
         })
     })
     .await;
@@ -233,21 +228,19 @@ pub(crate) async fn architecture(State(engine): State<Arc<Engine>>) -> Response 
 
 // ── Gaps (mirrors `crate::gaps`, [FR-UI-04]) ──────────────────────────────────
 
-/// The Gaps bundle ([FR-UI-04]): the blast-radius-ranked test-gaps read-model and
-/// the architecture-rules report. Both are read-only.
+/// The Rule-findings bundle ([FR-UI-04]): the architecture-rules report
+/// ([FR-GV-02]). Read-only.
 #[derive(Debug, Serialize)]
 pub(crate) struct GapsModel {
     status: StatusInfo,
-    test_gaps: TestGapsReport,
     rules: RulesReport,
 }
 
-/// `GET /api/v1/gaps` — the Gaps data ([FR-UI-21]).
+/// `GET /api/v1/gaps` — the Rule-findings data ([FR-UI-21]).
 pub(crate) async fn gaps(State(engine): State<Arc<Engine>>) -> Response {
     let model = bridge(engine, "api_v1_gaps", |e| -> anyhow::Result<GapsModel> {
         Ok(GapsModel {
             status: e.status(),
-            test_gaps: e.test_gaps(None, false)?,
             rules: e.check_rules(None, false)?,
         })
     })
@@ -316,35 +309,6 @@ pub(crate) async fn coverage(State(engine): State<Arc<Engine>>) -> Response {
             status: e.status(),
             coverage: e.coverage_status()?,
             untested: e.latest_hotspots(Some(20), true, false)?,
-        })
-    })
-    .await;
-    respond(model)
-}
-
-// ── Quadrant (mirrors `crate::quadrant`, [FR-UI-17]) ──────────────────────────
-
-/// The Quadrant bundle ([FR-UI-17], CR-036): the reachability×coverage cross
-/// read-model plus the hotspot board supplying urgency weight. The `hotspots`
-/// field is `Option` — the view degrades to an unweighted urgency on a read fault
-/// rather than blanking the page ([NFR-CC-04]).
-#[derive(Debug, Serialize)]
-pub(crate) struct QuadrantModel {
-    status: StatusInfo,
-    cross: CoverageCrossReport,
-    hotspots: Option<HotspotReport>,
-}
-
-/// `GET /api/v1/quadrant` — the Quadrant cross read-model ([FR-UI-21]). The SPA
-/// computes the scatter points client-side from this cross; the legacy
-/// `/api/quadrant` (presentation-shaped scatter points) stays wired for the
-/// server-rendered view's `quadrant.js`.
-pub(crate) async fn quadrant(State(engine): State<Arc<Engine>>) -> Response {
-    let model = bridge(engine, "api_v1_quadrant", |e| -> anyhow::Result<QuadrantModel> {
-        Ok(QuadrantModel {
-            status: e.status(),
-            cross: e.coverage_cross()?,
-            hotspots: e.latest_hotspots(None, false, false).ok(),
         })
     })
     .await;

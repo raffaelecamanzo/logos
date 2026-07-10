@@ -34,7 +34,7 @@ The subagent roles are:\n\
 - graph_navigator: navigates the code graph (search, context, node, callers, \
 callees, impact, explore).\n\
 - governance_analyst: runs governance/quality read-models (scan, check_rules, \
-hotspots, test_gaps, dsm, gate, evolution, health).\n\
+hotspots, dsm, gate, evolution, health).\n\
 - source_reader: reads source files within the project (read, grep, glob).\n\
 - synthesizer: composes the final grounded answer from the gathered observations \
 (no tools).\n\n\

@@ -32,8 +32,8 @@ Wrap every editing session in the quality gate:
 4. Call `check_rules` before declaring any task "done" — it verifies the
    architecture rules (`rules.toml`) still hold.
 
-`scan` / `rescan` give the full quality report on demand; `dsm`, `evolution`,
-and `test_gaps` are deeper diagnostic views.
+`scan` / `rescan` give the full quality report on demand; `dsm` and `evolution`
+are deeper diagnostic views.
 
 ## `status` vs `health` — not the same thing
 

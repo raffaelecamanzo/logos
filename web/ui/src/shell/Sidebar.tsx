@@ -20,7 +20,6 @@ import {
   IconGaps,
   IconGraph,
   IconHealth,
-  IconQuadrant,
   IconStatistics,
   IconWiki,
 } from "../components/icons.tsx";
@@ -40,7 +39,6 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   files: IconFiles,
   gaps: IconGaps,
   coverage: IconCoverage,
-  quadrant: IconQuadrant,
   statistics: IconStatistics,
   config: IconConfig,
 };

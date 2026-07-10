@@ -23,9 +23,10 @@ const NAV_TOOLS: [&str; 8] = [
     "search", "context", "explore", "node", "callers", "callees", "impact", "status",
 ];
 
-/// The 11 quality tools wired to the governance engine (S-020, FR-MC-01;
-/// `doctor` added by S-204/CR-052, `verify` by S-205/CR-052, FR-GV-18/FR-GV-19).
-const QUALITY_TOOLS: [&str; 11] = [
+/// The 10 quality tools wired to the governance engine (S-020, FR-MC-01;
+/// `doctor` added by S-204/CR-052, `verify` by S-205/CR-052, FR-GV-18/FR-GV-19;
+/// the static test-gap tool removed by S-289/CR-079).
+const QUALITY_TOOLS: [&str; 10] = [
     "scan",
     "health",
     "doctor",
@@ -36,7 +37,6 @@ const QUALITY_TOOLS: [&str; 11] = [
     "check_rules",
     "evolution",
     "dsm",
-    "test_gaps",
 ];
 
 /// The 1 temporal tool wired to the history engine (S-048, CR-006, FR-GH-06).
@@ -112,7 +112,7 @@ fn mcp_error(result: Result<Value, ServiceError>, tool: &str) -> rmcp::model::Er
 // ── FR-MC-01 / FR-MC-05 / UAT-MC-01: registration and namespacing ─────────
 
 #[tokio::test]
-async fn all_twenty_eight_tools_register_with_bare_names() {
+async fn all_twenty_seven_tools_register_with_bare_names() {
     let (client, _server, _dir) = connect().await;
 
     let tools = client.list_all_tools().await.expect("tools/list");
@@ -130,7 +130,7 @@ async fn all_twenty_eight_tools_register_with_bare_names() {
     expected.sort_unstable();
     assert_eq!(
         names, expected,
-        "exactly the 8 navigation + 11 quality + 1 temporal + 3 coverage + 5 wiki tools must register (FR-MC-01)"
+        "exactly the 8 navigation + 10 quality + 1 temporal + 3 coverage + 5 wiki tools must register (FR-MC-01)"
     );
 
     // Namespacing is the HOST's job, derived from the server identity: names
@@ -246,13 +246,12 @@ async fn quality_tools_return_live_read_models() {
     // navigation sweep, the expected field is UNIQUE per read-model so a
     // dispatch swap fails loudly (FR-MC-02). `scan`/`rescan` share the
     // ScanResult shape by design (rescan replays the last scan).
-    let calls: [(&'static str, Value, &str); 9] = [
+    let calls: [(&'static str, Value, &str); 8] = [
         ("scan", json!({}), "metrics"),
         ("rescan", Value::Null, "violations"),
         ("check_rules", json!({}), "checked_rules"),
         ("evolution", json!({"limit": 5}), "snapshots"),
         ("dsm", json!({"granularity": "file"}), "matrix"),
-        ("test_gaps", json!({"limit": 10}), "caveat"),
         ("health", Value::Null, "schema_version"),
         ("session_start", Value::Null, "session_id"),
         ("session_end", Value::Null, "epsilon"),
@@ -265,7 +264,7 @@ async fn quality_tools_return_live_read_models() {
         );
     }
 
-    // The server survived all nine live evaluations (NFR-RA-12).
+    // The server survived all eight live evaluations (NFR-RA-12).
     call(&client, "status", Value::Null)
         .await
         .expect("server still alive");

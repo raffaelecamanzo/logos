@@ -1044,13 +1044,13 @@ fn metric_regressions_report_real_drops_and_ignore_noise() {
     assert!(regressions[0].delta < 0.0, "delta is signed (negative)");
 }
 
-// FR-GV-08 test marking is no longer derived here: `test_gaps` reads the
+// Test marking is not derived here: the `[[require_tested]]` contract reads the
 // persisted `is_test` annotation column ([FR-AN-05], CR-001), the single
 // source of truth the annotation pass computes. The marking predicate
 // (evidence ∨ path convention ∨ `[semantics].test_markers` affix) and its
 // negatives are unit-tested at its new home in `crate::annotate`
-// (`is_test_marked_*` tests); the end-to-end `test_gaps` ⇒ `is_test` parity is
-// covered by the store-backed integration test in `tests/governance.rs`.
+// (`is_test_marked_*` tests); the end-to-end `is_test` parity is covered by the
+// store-backed integration test in `tests/governance.rs`.
 
 // ── FR-GV-06: evolution deltas ──────────────────────────────────────────────
 
@@ -2487,95 +2487,6 @@ fn evaluate_concatenates_sections_in_canonical_order() {
     // ordering, the one forbidden_import, the one require_tested, the one
     // require_documented.
     assert_eq!(checked, 8, "every active rule counted exactly once");
-}
-
-// ── FR-GV-17: blast-radius ranking of the test-gap set ───────────────────────
-
-/// One untested gap in `file`, named `name`.
-fn gap(name: &str, file: &str) -> TestGap {
-    TestGap {
-        name: name.to_string(),
-        file: file.to_string(),
-        line: Some(1),
-    }
-}
-
-/// A hotspot ranking map: each `(file, score)` pair is the file's hotspot score
-/// the façade supplies as the blast-radius weight ([FR-GV-17]).
-fn ranks(pairs: &[(&str, i64)]) -> HashMap<String, i64> {
-    pairs.iter().map(|(f, s)| ((*f).to_string(), *s)).collect()
-}
-
-#[test]
-fn blast_radius_is_fan_in_times_the_files_hotspot_score() {
-    let r = ranks(&[("hot.rs", 30), ("cool.rs", 2)]);
-    // 4 callers into a function in the hottest file dominates 9 callers into a
-    // cool file: 4×30 = 120 > 9×2 = 18 (FR-GV-17 — fan-in × containing-file
-    // hotspot rank, not fan-in alone).
-    assert_eq!(blast_radius(4, "hot.rs", Some(&r)), 120);
-    assert_eq!(blast_radius(9, "cool.rs", Some(&r)), 18);
-}
-
-#[test]
-fn blast_radius_of_an_unranked_file_is_zero_never_fabricated() {
-    let r = ranks(&[("hot.rs", 30)]);
-    // A file with no hotspot signal contributes weight 0 — honest absence, not a
-    // fabricated rank (NFR-CC-04). Same when no ranking was supplied at all.
-    assert_eq!(blast_radius(7, "unranked.rs", Some(&r)), 0);
-    assert_eq!(blast_radius(7, "hot.rs", None), 0);
-}
-
-#[test]
-fn blast_radius_saturates_instead_of_overflowing() {
-    let r = ranks(&[("f.rs", i64::MAX)]);
-    // A pathological fan-in × max weight saturates rather than wrapping.
-    assert_eq!(blast_radius(u64::MAX, "f.rs", Some(&r)), i64::MAX);
-}
-
-#[test]
-fn ranked_order_is_blast_radius_descending_hand_computed() {
-    // Hand-computed expectation (FR-GV-17 AC1): blast = fan-in × file hotspot.
-    //   a (fan 4, hot=30)  → 120   ← most urgent
-    //   b (fan 9, cool=2)  →  18
-    //   c (fan 1, hot=30)  →  30
-    //   d (fan 0, hot=30)  →   0   ← no callers, no blast
-    let r = ranks(&[("hot.rs", 30), ("cool.rs", 2)]);
-    let scored = vec![
-        ScoredGap { blast: blast_radius(9, "cool.rs", Some(&r)), gap: gap("b", "cool.rs") },
-        ScoredGap { blast: blast_radius(0, "hot.rs", Some(&r)), gap: gap("d", "hot.rs") },
-        ScoredGap { blast: blast_radius(4, "hot.rs", Some(&r)), gap: gap("a", "hot.rs") },
-        ScoredGap { blast: blast_radius(1, "hot.rs", Some(&r)), gap: gap("c", "hot.rs") },
-    ];
-    let ordered: Vec<String> = order_untested(scored, true).into_iter().map(|g| g.name).collect();
-    assert_eq!(ordered, ["a", "c", "b", "d"], "120 > 30 > 18 > 0");
-}
-
-#[test]
-fn ranked_order_ties_break_on_file_then_name() {
-    // Two gaps with identical blast radius fall back to file then name, so the
-    // order stays deterministic (NFR-RA-06).
-    let r = ranks(&[("a.rs", 10), ("b.rs", 10)]);
-    let scored = vec![
-        ScoredGap { blast: blast_radius(1, "b.rs", Some(&r)), gap: gap("zeta", "b.rs") },
-        ScoredGap { blast: blast_radius(1, "a.rs", Some(&r)), gap: gap("beta", "a.rs") },
-        ScoredGap { blast: blast_radius(1, "a.rs", Some(&r)), gap: gap("alpha", "a.rs") },
-    ];
-    let ordered: Vec<String> = order_untested(scored, true).into_iter().map(|g| g.name).collect();
-    assert_eq!(ordered, ["alpha", "beta", "zeta"], "tie → file asc, then name asc");
-}
-
-#[test]
-fn degraded_order_is_the_fr_gv_08_file_name_order() {
-    // `ranked = false` (no history/hotspot store): the FR-GV-08 file/name order
-    // is authoritative and byte-identical to the pre-CR-038 behaviour — every
-    // blast score is ignored (here deliberately set misleadingly high).
-    let scored = vec![
-        ScoredGap { blast: 999, gap: gap("zeta", "b.rs") },
-        ScoredGap { blast: 1, gap: gap("beta", "a.rs") },
-        ScoredGap { blast: 500, gap: gap("alpha", "a.rs") },
-    ];
-    let ordered: Vec<String> = order_untested(scored, false).into_iter().map(|g| g.name).collect();
-    assert_eq!(ordered, ["alpha", "beta", "zeta"], "file asc then name asc, blast ignored");
 }
 
 // ── S-215 / FR-GV-20 / ADR-48: the admission-tripwire doctor-report merge ───

@@ -67,7 +67,7 @@ pub const COVERAGE_BASIS: &str = "coverage";
 /// [NFR-CC-04]).
 pub const STATIC_BASIS: &str = "static-reachability";
 /// The mandatory label on the static-reachability fallback — the canonical
-/// `test_gaps` caveat ([FR-GV-08], [BR-16]): reachability is not execution
+/// reachability caveat ([BR-16]): reachability is not execution
 /// coverage. Rendered whenever `--untested` runs with no coverage ingested.
 pub const STATIC_FALLBACK_LABEL: &str = "static reachability, not execution coverage";
 

@@ -470,8 +470,9 @@ CREATE TABLE rules_cache (
 /// - `nodes.is_test` — the Pass-3 verdict ([FR-AN-05]): `test_evidence` ∨ test
 ///   path conventions ∨ a `[semantics].test_markers` match. Positive evidence
 ///   only, never call-graph inference ([ADR-18]). The single source of truth
-///   the metrics scope filter ([FR-QM-08]), `test_gaps` ([FR-GV-08]), and the
-///   dead-code live roots ([FR-AN-01]) all consume — no detector re-derives it.
+///   the metrics scope filter ([FR-QM-08]), the `[[require_tested]]` contract
+///   ([FR-GV-13]), and the dead-code live roots ([FR-AN-01]) all consume — no
+///   detector re-derives it.
 ///
 /// Unlike `is_dead`/`is_duplicate` (tri-state `NULL` = "not computed"),
 /// `is_test` is `NOT NULL DEFAULT 0`: test classification is positive-evidence,

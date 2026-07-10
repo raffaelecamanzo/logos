@@ -25,7 +25,7 @@
 //! S-023 300→330 for the interactive-init UX; S-020+S-023 assembly 330→340
 //! for the quality-command flag declarations; S-037+S-038 assembly 340→360 for
 //! the traceability subcommands `implements`/`referencing-docs` (FR-NV-10) and
-//! the `doc-gaps` quality command (FR-GV-14, read-only sibling of `test-gaps`)
+//! the `doc-gaps` quality command (FR-GV-14, a read-only static-gap analysis)
 //! — each a one-Engine-call delegation, no logic in the adapter); S-048
 //! 360→370 for the `hotspots` temporal-tier subcommand (FR-GH-06, one
 //! `Engine::hotspots` call shared with the MCP twin); S-051 370→395 for the

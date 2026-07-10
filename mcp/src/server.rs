@@ -249,15 +249,6 @@ pub struct DsmParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
-pub struct TestGapsParams {
-    /// Cap on listed gaps (default 50, FR-GV-08).
-    pub limit: Option<u32>,
-    /// Skip the pre-evaluation reconcile (FR-RC-04).
-    pub no_reconcile: Option<bool>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-#[schemars(crate = "rmcp::schemars")]
 pub struct HotspotsParams {
     /// Cap the ranked files returned (default: all, FR-GH-06).
     pub limit: Option<usize>,
@@ -456,18 +447,6 @@ impl LogosMcp {
         let granularity = parse_granularity(p.granularity.as_deref())?;
         let reconcile = !p.no_reconcile.unwrap_or(false);
         self.run_result("dsm", move |e| e.dsm(granularity, reconcile))
-            .await
-    }
-
-    #[tool(
-        description = "Test-gap analysis (FR-GV-08): non-test functions unreachable from any test node via calls BFS — static reachability, not execution coverage."
-    )]
-    async fn test_gaps(
-        &self,
-        Parameters(p): Parameters<TestGapsParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let reconcile = !p.no_reconcile.unwrap_or(false);
-        self.run_result("test_gaps", move |e| e.test_gaps(p.limit, reconcile))
             .await
     }
 

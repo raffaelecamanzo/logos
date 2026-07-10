@@ -106,9 +106,6 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             granularity,
             no_reconcile,
         } => out.try_query(root, |e| e.dsm(granularity, !no_reconcile)),
-        Commands::TestGaps { limit, no_reconcile } => {
-            out.try_query(root, |e| e.test_gaps(limit, !no_reconcile))
-        }
         Commands::DocGaps { limit, no_reconcile } => {
             out.try_query(root, |e| e.doc_gaps(limit, !no_reconcile))
         }

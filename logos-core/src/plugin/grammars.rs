@@ -295,11 +295,6 @@ fn python_entry() -> GrammarEntry {
                 label: "python/queries/frameworks.scm",
                 source: include_str!("../../plugins/python/queries/frameworks.scm"),
             },
-            EmbeddedQuery {
-                relative_path: "queries/smells.scm",
-                label: "python/queries/smells.scm",
-                source: include_str!("../../plugins/python/queries/smells.scm"),
-            },
         ],
     }
 }
@@ -326,11 +321,6 @@ fn typescript_entry() -> GrammarEntry {
                 relative_path: "queries/frameworks.scm",
                 label: "typescript/queries/frameworks.scm",
                 source: include_str!("../../plugins/typescript/queries/frameworks.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/smells.scm",
-                label: "typescript/queries/smells.scm",
-                source: include_str!("../../plugins/typescript/queries/smells.scm"),
             },
         ],
     }
@@ -361,11 +351,6 @@ fn tsx_entry() -> GrammarEntry {
                 label: "tsx/queries/frameworks.scm",
                 source: include_str!("../../plugins/tsx/queries/frameworks.scm"),
             },
-            EmbeddedQuery {
-                relative_path: "queries/smells.scm",
-                label: "tsx/queries/smells.scm",
-                source: include_str!("../../plugins/tsx/queries/smells.scm"),
-            },
         ],
     }
 }
@@ -392,11 +377,6 @@ fn go_entry() -> GrammarEntry {
                 relative_path: "queries/frameworks.scm",
                 label: "go/queries/frameworks.scm",
                 source: include_str!("../../plugins/go/queries/frameworks.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/smells.scm",
-                label: "go/queries/smells.scm",
-                source: include_str!("../../plugins/go/queries/smells.scm"),
             },
         ],
     }
@@ -425,11 +405,6 @@ fn java_entry() -> GrammarEntry {
                 label: "java/queries/frameworks.scm",
                 source: include_str!("../../plugins/java/queries/frameworks.scm"),
             },
-            EmbeddedQuery {
-                relative_path: "queries/smells.scm",
-                label: "java/queries/smells.scm",
-                source: include_str!("../../plugins/java/queries/smells.scm"),
-            },
         ],
     }
 }
@@ -440,7 +415,7 @@ fn java_entry() -> GrammarEntry {
 /// (`LANGUAGE`) at the workspace ABI, so it rides the substrate and the
 /// load-time ABI assertion with no second tree-sitter runtime ([ADR-09],
 /// [NFR-PC-05]). Ships only `symbols` + `references` queries — no `frameworks`
-/// and no `smell` query (the honesty posture, [NFR-CC-04]).
+/// (the honesty posture, [NFR-CC-04]).
 ///
 /// [CR-009]: ../../../docs/requests/CR-009-seven-language-plugins.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
@@ -470,7 +445,7 @@ fn c_entry() -> GrammarEntry {
 /// Uses `tree_sitter_kotlin_ng::LANGUAGE` — the maintained
 /// `tree-sitter-grammars/tree-sitter-kotlin` crate exposed as a `LanguageFn` at
 /// ABI 14, the same decoupling the five v1 code grammars use ([ADR-09]). Ships
-/// the full four-query code-grammar set (symbols/references/frameworks/smells),
+/// the full three-query code-grammar set (symbols/references/frameworks),
 /// exactly like [`java_entry`].
 ///
 /// [CR-009]: ../../../docs/requests/CR-009-seven-language-plugins.md
@@ -496,11 +471,6 @@ fn kotlin_entry() -> GrammarEntry {
                 label: "kotlin/queries/frameworks.scm",
                 source: include_str!("../../plugins/kotlin/queries/frameworks.scm"),
             },
-            EmbeddedQuery {
-                relative_path: "queries/smells.scm",
-                label: "kotlin/queries/smells.scm",
-                source: include_str!("../../plugins/kotlin/queries/smells.scm"),
-            },
         ],
     }
 }
@@ -509,8 +479,8 @@ fn kotlin_entry() -> GrammarEntry {
 ///
 /// `tree_sitter_c_sharp::LANGUAGE` is a `LanguageFn` at ABI 15, so it rides the
 /// substrate and load-time ABI assertion with no second tree-sitter runtime
-/// ([ADR-09], [NFR-PC-05]). Ships the full four-query set
-/// (symbols/references/frameworks/smell) like the other code grammars.
+/// ([ADR-09], [NFR-PC-05]). Ships the full three-query set
+/// (symbols/references/frameworks) like the other code grammars.
 ///
 /// [CR-009]: ../../../docs/requests/CR-009-seven-language-plugins.md
 #[cfg(feature = "lang-c-sharp")]
@@ -535,11 +505,6 @@ fn c_sharp_entry() -> GrammarEntry {
                 label: "c-sharp/queries/frameworks.scm",
                 source: include_str!("../../plugins/c-sharp/queries/frameworks.scm"),
             },
-            EmbeddedQuery {
-                relative_path: "queries/smells.scm",
-                label: "c-sharp/queries/smells.scm",
-                source: include_str!("../../plugins/c-sharp/queries/smells.scm"),
-            },
         ],
     }
 }
@@ -552,7 +517,7 @@ fn c_sharp_entry() -> GrammarEntry {
 /// Owns `.h` headers (the fixed `.h` → C++ ownership rule) jointly with the C
 /// plugin's `.c`-only claim. Uses `tree_sitter_cpp::LANGUAGE` (a `LanguageFn` at
 /// ABI 14), so it rides the substrate and load-time ABI assertion unchanged
-/// ([ADR-09]). Ships `symbols`/`references`/`smells` queries; no `frameworks`
+/// ([ADR-09]). Ships `symbols`/`references` queries; no `frameworks`
 /// (C++ has no single dominant web framework to detect, [FR-FW-03]).
 ///
 /// [CR-009]: ../../../docs/requests/CR-009-seven-language-plugins.md
@@ -573,11 +538,6 @@ fn cpp_entry() -> GrammarEntry {
                 relative_path: "queries/references.scm",
                 label: "cpp/queries/references.scm",
                 source: include_str!("../../plugins/cpp/queries/references.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/smells.scm",
-                label: "cpp/queries/smells.scm",
-                source: include_str!("../../plugins/cpp/queries/smells.scm"),
             },
         ],
     }
@@ -605,11 +565,6 @@ fn ruby_entry() -> GrammarEntry {
                 relative_path: "queries/frameworks.scm",
                 label: "ruby/queries/frameworks.scm",
                 source: include_str!("../../plugins/ruby/queries/frameworks.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/smells.scm",
-                label: "ruby/queries/smells.scm",
-                source: include_str!("../../plugins/ruby/queries/smells.scm"),
             },
         ],
     }
@@ -648,11 +603,6 @@ fn php_entry() -> GrammarEntry {
                 label: "php/queries/frameworks.scm",
                 source: include_str!("../../plugins/php/queries/frameworks.scm"),
             },
-            EmbeddedQuery {
-                relative_path: "queries/smells.scm",
-                label: "php/queries/smells.scm",
-                source: include_str!("../../plugins/php/queries/smells.scm"),
-            },
         ],
     }
 }
@@ -665,7 +615,7 @@ fn php_entry() -> GrammarEntry {
 /// — within the workspace tree-sitter 0.25 runtime's range, so it rides the
 /// ADR-09 substrate and load-time ABI assertion unchanged, and the LanguageFn
 /// decoupling keeps the C runtime linked once ([NFR-PC-05]). Ships the
-/// `symbols`/`references`/`smell` queries (no `frameworks`: Scala has no
+/// `symbols`/`references` queries (no `frameworks`: Scala has no
 /// dominant-framework detector in this increment — an honest absence).
 #[cfg(feature = "lang-scala")]
 fn scala_entry() -> GrammarEntry {
@@ -683,11 +633,6 @@ fn scala_entry() -> GrammarEntry {
                 relative_path: "queries/references.scm",
                 label: "scala/queries/references.scm",
                 source: include_str!("../../plugins/scala/queries/references.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/smells.scm",
-                label: "scala/queries/smells.scm",
-                source: include_str!("../../plugins/scala/queries/smells.scm"),
             },
         ],
     }
@@ -826,11 +771,6 @@ fn rust_entry() -> GrammarEntry {
                 relative_path: "queries/frameworks.scm",
                 label: "rust/queries/frameworks.scm",
                 source: include_str!("../../plugins/rust/queries/frameworks.scm"),
-            },
-            EmbeddedQuery {
-                relative_path: "queries/smells.scm",
-                label: "rust/queries/smells.scm",
-                source: include_str!("../../plugins/rust/queries/smells.scm"),
             },
         ],
     }
