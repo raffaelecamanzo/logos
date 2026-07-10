@@ -202,8 +202,8 @@ fn stdout_carries_only_jsonrpc_even_at_trace_level() {
     );
     assert_eq!(
         tool_count(&responses[&json!(2)]),
-        28,
-        "all 28 logos tools register (FR-MC-01)"
+        27,
+        "all 27 logos tools register (FR-MC-01)"
     );
     assert_ne!(
         responses[&json!(3)]["result"]["isError"],
@@ -220,7 +220,7 @@ fn stdout_carries_only_jsonrpc_even_at_trace_level() {
     // …and the server survived it to answer the next request (FR-MC-06).
     assert_eq!(
         tool_count(&responses[&json!(4)]),
-        28,
+        27,
         "server alive after malformed input"
     );
 
