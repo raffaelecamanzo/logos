@@ -77,6 +77,32 @@ pub fn resolve_root(hint: &Path) -> PathBuf {
     }
 }
 
+/// Is `path` itself the **top level** of a git working tree — not merely a
+/// directory *inside* one ([FR-WS-01])?
+///
+/// Unlike [`resolve_root`] (which silently returns its hint outside git, so it
+/// cannot tell "is a repo root" from "is not in a repo"), this answers the
+/// distinct question federation member discovery needs: *is this exact
+/// directory a repository root?* It is `true` only when `git rev-parse
+/// --show-toplevel` succeeds **and** resolves back to `path` — a subdirectory
+/// of a repo (toplevel is an ancestor), a non-repo directory, and a missing
+/// `git` binary all return `false`. Paths are compared symlink-resolved
+/// (`--show-toplevel` output is canonical; the hint may not be).
+///
+/// [FR-WS-01]: ../../docs/specs/requirements/FR-WS-01.md
+pub fn is_git_root(path: &Path) -> bool {
+    match git(path, &["rev-parse", "--show-toplevel"]) {
+        Ok(top) if !top.is_empty() => {
+            let top = PathBuf::from(top);
+            match (top.canonicalize(), path.canonicalize()) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => top == path,
+            }
+        }
+        _ => false,
+    }
+}
+
 /// Was this [`git`] error a failure to *spawn* the binary (git absent from
 /// PATH), as opposed to git running and exiting non-zero?
 fn git_is_missing(err: &anyhow::Error) -> bool {
@@ -314,6 +340,32 @@ mod tests {
         // A nonexistent hint degrades the same way (git fails, hint wins).
         let ghost = tmp.path().join("ghost");
         assert_eq!(resolve_root(&ghost), ghost);
+    }
+
+    // ── is_git_root (FR-WS-01) ────────────────────────────────────────────
+
+    /// A repository's top-level directory is a git root; a subdirectory of it
+    /// is not (its toplevel is an ancestor), and neither is a plain non-repo
+    /// directory or a nonexistent path.
+    #[test]
+    fn is_git_root_distinguishes_a_repo_root_from_everything_else() {
+        let (_tmp, main) = repo_fixture();
+        fs::create_dir_all(main.join("src")).unwrap();
+        assert!(is_git_root(&main), "the repo toplevel is a git root");
+        assert!(
+            !is_git_root(&main.join("src")),
+            "a subdir of a repo is not itself a root"
+        );
+
+        let plain = TempDir::new().unwrap();
+        assert!(
+            !is_git_root(plain.path()),
+            "a directory outside any repo is not a git root"
+        );
+        assert!(
+            !is_git_root(&plain.path().join("ghost")),
+            "a nonexistent path is not a git root"
+        );
     }
 
     /// Inside a repo, any subdirectory resolves to the repo's toplevel.
