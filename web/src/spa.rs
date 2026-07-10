@@ -176,6 +176,32 @@ pub fn missing_shell_assets() -> Vec<String> {
     }
 }
 
+/// Pure core of [`is_placeholder_shell`]: a shell that names **no** hashed
+/// `/assets/*.{js,css}` entrypoint is a dead shell. A real Vite `npm run build`
+/// always emits a shell that references at least one hashed JS entrypoint, so zero
+/// references is the unambiguous signature of the committed Node-free placeholder.
+fn shell_is_dead(html: &str) -> bool {
+    shell_asset_refs(html).is_empty()
+}
+
+/// Whether the embedded shell is the **committed placeholder** rather than a real
+/// Vite build — i.e. it references no hashed `/assets/*` entrypoint (see
+/// [`shell_is_dead`]). Distinct from [`missing_shell_assets`], which catches a
+/// *mismatched* real build (shell references assets the binary lacks): the
+/// placeholder references nothing, so it is internally "consistent" and that guard
+/// never fires on it.
+///
+/// The placeholder serves its own in-browser "not built" message, but that is only
+/// seen once someone opens the dashboard — which let a release binary ship the
+/// placeholder unnoticed. [`crate::serve_web`] calls this at startup to turn a
+/// silently-dead UI into a loud stderr warning the operator cannot miss.
+pub fn is_placeholder_shell() -> bool {
+    match index_html() {
+        Some(bytes) => shell_is_dead(&String::from_utf8_lossy(&bytes)),
+        None => true,
+    }
+}
+
 /// A CSP-clean diagnostic document served in place of a white page when the
 /// embedded bundle is inconsistent ([`missing_shell_assets`] non-empty). It names
 /// the missing assets and the exact rebuild recipe. No inline `<script>`/`<style>`
@@ -323,6 +349,19 @@ mod tests {
         // No inline <script>/<style> — the self-only CSP stays byte-identical.
         assert!(!page.contains("<script"), "no inline script in the diagnostic page");
         assert!(!page.contains("<style"), "no inline style in the diagnostic page");
+    }
+
+    #[test]
+    fn shell_is_dead_flags_a_shell_with_no_hashed_assets() {
+        // The placeholder-shaped shell references no /assets/*.{js,css} — the
+        // dead-shell signature the startup guard fires on.
+        assert!(shell_is_dead(
+            "<html><head><title>Logos placeholder</title></head><body>build the SPA</body></html>"
+        ));
+        // A real Vite shell names at least one hashed entrypoint → not dead.
+        assert!(!shell_is_dead(
+            "<script type=\"module\" src=\"/assets/index-ABC123.js\"></script>"
+        ));
     }
 
     #[test]

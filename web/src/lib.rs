@@ -153,6 +153,21 @@ async fn serve_web(engine: Arc<Engine>, port: u16) -> Result<()> {
     // The carve-out invariant, asserted at the one bind site (ADR-27).
     debug_assert!(addr.ip().is_loopback(), "web surface bound a non-loopback address");
     tracing::info!(target: "logos::web", %addr, "web surface listening (loopback only)");
+    // Fail loud on a placeholder UI: a binary compiled without a matching
+    // `npm run build` embeds the Node-free placeholder shell, which serves an
+    // in-browser "not built" page but is otherwise silent — that is how a release
+    // binary once shipped a dead dashboard unnoticed. The consistency guard in
+    // `render_shell` cannot catch it (the placeholder references no assets, so it is
+    // internally consistent), so warn at startup the moment `--ui` binds.
+    if spa::is_placeholder_shell() {
+        tracing::warn!(
+            target: "logos::web",
+            "the web UI is the PLACEHOLDER shell, not a real build — http://{addr}/ will show a \
+             'bundle not built' page and the dashboard will not function. Rebuild with \
+             `cd web/ui && npm run build` then reinstall the binary with `--features ui` (or \
+             `agents`). The JSON API at /api/v1 works regardless."
+        );
+    }
     listener
         .set_nonblocking(true)
         .context("switching the web listener to non-blocking")?;
