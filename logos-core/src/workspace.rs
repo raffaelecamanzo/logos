@@ -92,14 +92,22 @@ pub fn resolve_root(hint: &Path) -> PathBuf {
 /// [FR-WS-01]: ../../docs/specs/requirements/FR-WS-01.md
 pub fn is_git_root(path: &Path) -> bool {
     match git(path, &["rev-parse", "--show-toplevel"]) {
-        Ok(top) if !top.is_empty() => {
-            let top = PathBuf::from(top);
-            match (top.canonicalize(), path.canonicalize()) {
-                (Ok(a), Ok(b)) => a == b,
-                _ => top == path,
-            }
-        }
+        Ok(top) if !top.is_empty() => paths_equal(&PathBuf::from(top), path),
         _ => false,
+    }
+}
+
+/// Are `a` and `b` the same working tree, compared symlink-resolved?
+///
+/// `canonicalize` resolves symlinks and `.`/`..`, so two spellings of one real
+/// directory compare equal — the property [`is_git_root`] and [`primary_root`]
+/// both need when matching a symlink-resolved `git` output path against a hint
+/// that may not be. If either path cannot be canonicalised (it does not exist,
+/// or is inaccessible), the comparison falls back to literal path equality.
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
 
@@ -156,11 +164,7 @@ pub fn primary_root(root: &Path) -> Option<PathBuf> {
     // The primary checkout has no distinct primary to point at. Compare real
     // paths — `--git-common-dir` output is symlink-resolved, the hint may not
     // be.
-    let same_tree = match (root.canonicalize(), primary_root.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => root == primary_root,
-    };
-    if same_tree {
+    if paths_equal(root, &primary_root) {
         return None;
     }
     Some(primary_root)
