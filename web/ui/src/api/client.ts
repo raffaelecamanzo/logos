@@ -27,7 +27,6 @@ import type {
   ImpactResult,
   NodeInfo,
   OverviewModel,
-  QuadrantModel,
   QueryResponse,
   WikiHit,
   WikiNav,
@@ -139,7 +138,7 @@ export function fetchHealth(): Promise<HealthModel> {
   return apiFetch<HealthModel>("health");
 }
 
-// ── Files & Risk / Coverage / Quadrant (S-188, FR-UI-11, FR-UI-17) ──
+// ── Files & Risk / Coverage (S-188, FR-UI-11) ──
 // Read-only twins of the server-rendered analytics views, each over the
 // already-registered `/api/v1` handler (web/src/api_v1.rs) — no new Rust handler:
 // the foundation suite (S-183) shipped these endpoints behind the legacy UI.
@@ -159,12 +158,6 @@ export function fetchCoverage(): Promise<CoverageModel> {
   return apiFetch<CoverageModel>("coverage");
 }
 
-/** `GET /api/v1/quadrant` — the reachability×coverage cross bundle (FR-UI-17). The
- *  SPA computes the scatter points client-side from this cross. */
-export function fetchQuadrant(): Promise<QuadrantModel> {
-  return apiFetch<QuadrantModel>("quadrant");
-}
-
 // ── Display-tab read-models (S-189: Architecture / Gaps / Wiki) ────────────────
 
 /** `GET /api/v1/architecture` — the Architecture / Cycles (DSM) bundle (FR-UI-21). */
@@ -172,7 +165,7 @@ export function fetchArchitecture(): Promise<ArchitectureModel> {
   return apiFetch<ArchitectureModel>("architecture");
 }
 
-/** `GET /api/v1/gaps` — the test-gaps + rules Gaps bundle (FR-UI-21). */
+/** `GET /api/v1/gaps` — the Rule-findings bundle (status + rules, CR-079). */
 export function fetchGaps(): Promise<GapsModel> {
   return apiFetch<GapsModel>("gaps");
 }

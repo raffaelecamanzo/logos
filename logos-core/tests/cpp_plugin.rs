@@ -8,8 +8,6 @@
 //!   C/C++ fixture ([FR-PL-07](../../docs/specs/requirements/FR-PL-07.md),
 //!   [UAT-PL-04](../../docs/specs/requirements/UAT-PL-04.md));
 //! - `TEST`/`TEST_F` macro test evidence ([FR-EX-06](../../docs/specs/requirements/FR-EX-06.md));
-//! - the three test-quality smells over the GoogleTest population
-//!   ([FR-CV-08](../../docs/specs/requirements/FR-CV-08.md));
 //! - class-bearing applicability — a class whose method reads its own field
 //!   yields the Method→Field `Accesses` edge LCOM4 consumes
 //!   ([FR-QM-11](../../docs/specs/requirements/FR-QM-11.md),
@@ -27,7 +25,6 @@ use std::path::Path;
 
 use logos_core::extract::{extract, Facts, FileInput, SymbolContext};
 use logos_core::model::{EdgeKind, NodeId, NodeKind};
-use logos_core::models::quality::TestSmellKind;
 use logos_core::plugin::LanguageRegistry;
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
@@ -301,57 +298,6 @@ public:
     assert!(
         accesses.contains(&(read, value)),
         "read() Accesses its own field value_ (the bound LCOM4 input): {accesses:?}"
-    );
-}
-
-// ── FR-CV-08: the three test-quality smells over the GoogleTest population ────
-
-#[test]
-fn cpp_smells_flag_exactly_the_seeded_gtests() {
-    let tmp = TempDir::new().unwrap();
-    // Four GoogleTest cases: healthy, assertion-free, empty-body, sleeping.
-    write(
-        tmp.path(),
-        "test/smells_test.cc",
-        "\
-TEST(S, Healthy) { EXPECT_EQ(1, 1); }
-
-TEST(S, AssertionFree) { int x = 1 + 1; (void)x; }
-
-TEST(S, EmptyBody) {}
-
-TEST(S, Sleeping) {
-  std::this_thread::sleep_for(d);
-  EXPECT_EQ(1, 1);
-}
-",
-    );
-    let engine = Engine::start(tmp.path()).expect("engine starts");
-    let report = engine.test_gaps(None, true).expect("test_gaps runs");
-    assert!(
-        report.smells.label.contains("advisory"),
-        "advisory label present"
-    );
-    assert!(
-        report.smells.not_analyzed.is_empty(),
-        "C++ ships the smell query: {:?}",
-        report.smells.not_analyzed
-    );
-
-    // The macro keyword is the captured name (the GoogleTest precision floor), so
-    // assert on the multiset of detected smell kinds, not on distinct names.
-    let mut kinds: Vec<TestSmellKind> = report.smells.findings.iter().map(|s| s.kind).collect();
-    kinds.sort();
-    let mut expected = vec![
-        TestSmellKind::AssertionFree,
-        TestSmellKind::EmptyBody,
-        TestSmellKind::Sleeping,
-    ];
-    expected.sort();
-    assert_eq!(
-        kinds, expected,
-        "exactly the three seeded smells flag, never the healthy test: {:?}",
-        report.smells.findings
     );
 }
 

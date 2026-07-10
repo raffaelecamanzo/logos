@@ -1,7 +1,7 @@
 //! Quality read-models — results from the governance and quality tools.
 //!
-//! Covers the ten quality/pipeline Engine methods (ADR-01):
-//! `scan`, `gate`, `check_rules`, `evolution`, `dsm`, `test_gaps`,
+//! Covers the quality/pipeline Engine methods (ADR-01):
+//! `scan`, `gate`, `check_rules`, `evolution`, `dsm`, `doc_gaps`,
 //! `health`, `session_start`, `session_end`, `rescan`
 
 use std::collections::BTreeMap;
@@ -31,7 +31,7 @@ pub struct ScanResult {
     /// dimensions (FR-QM-09..13, CR-005): the top-N offending functions/containers
     /// per dimension, deterministically ordered and capped. Empty lists when a
     /// dimension has no offenders (or dropped out); the review-phase visibility
-    /// the `scan` surface gains (the FR-GV-08 test-gaps reporting pattern).
+    /// the `scan` surface gains.
     pub worst_offenders: WorstOffenders,
     /// The **non-gated temporal tier** (CR-006, [FR-GH-07], [BR-26]): per-file
     /// churn / co-change / defect-heuristic columns, explicitly labeled as
@@ -90,7 +90,7 @@ pub struct TemporalTier {
 ///
 /// The lists explain *which* code drives a low dimension score, so a reviewer can
 /// act on the signal; they never enter the aggregate or the gate (report detail
-/// only, exactly as `test_gaps`/`doc_gaps` are advisory).
+/// only, exactly as `doc_gaps` is advisory).
 ///
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 #[derive(Debug, Default, Serialize)]
@@ -391,117 +391,7 @@ pub struct DsmRow {
     pub layer: Option<String>,
 }
 
-/// Test-gap analysis result (FR-GV-08, BR-16).
-#[derive(Debug, Default, Serialize)]
-pub struct TestGapsReport {
-    /// Non-test, non-entry-point functions unreachable from any test node,
-    /// sorted by file then name, truncated to `limit`.
-    pub untested: Vec<TestGap>,
-    /// Function/method nodes considered (non-test, non-entry-point).
-    pub total_functions: u64,
-    /// Of those, the count reachable from a test node over `calls` BFS.
-    pub covered_functions: u64,
-    /// Rounded 0–10000 coverage signal (ADR-08 integer posture, AR-03);
-    /// `None` when there are no functions to cover ("n/a", NFR-CC-04).
-    pub coverage_ratio: Option<u32>,
-    /// The cap applied to `untested` (default 50).
-    pub limit: u32,
-    /// `true` when more gaps existed than `limit` allowed to list.
-    pub truncated: bool,
-    /// The mandatory honesty caveat (BR-16) — always emitted.
-    pub caveat: String,
-    /// The FR-RC-03 freshness line.
-    pub freshness: String,
-    /// Degradations — never an error.
-    pub warnings: Vec<String>,
-    /// The advisory test-quality-smells appendix ([FR-CV-08], [CR-007]):
-    /// assertion-free, empty-body, and sleeping tests detected on demand from
-    /// the current tree via the plugins' optional smell-evidence query. Purely
-    /// advisory — it never affects `gate` ([BR-28]).
-    ///
-    /// [FR-CV-08]: ../../../docs/specs/requirements/FR-CV-08.md
-    pub smells: TestSmellAppendix,
-}
-
-/// One untested function (FR-GV-08).
-#[derive(Debug, Default, Serialize)]
-pub struct TestGap {
-    pub name: String,
-    pub file: String,
-    /// 1-based declaration start line, when recorded.
-    pub line: Option<i64>,
-}
-
-/// The three test-quality smells detected over test functions ([FR-CV-08]).
-///
-/// True AST matching (a `.scm` query) over substring heuristics: a covered line
-/// proves execution, not verification — these smells close that gap. Serialized
-/// in kebab-case so the wire form is stable and human-legible.
-///
-/// [FR-CV-08]: ../../../docs/specs/requirements/FR-CV-08.md
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TestSmellKind {
-    /// A test with statements but no assertion — it exercises code without
-    /// verifying anything.
-    AssertionFree,
-    /// A test whose body is empty (or only a placeholder: `pass`, `...`, a lone
-    /// docstring, comments) — it asserts nothing and exercises nothing.
-    EmptyBody,
-    /// A test that calls a real-time delay (`thread::sleep`, `time.sleep`,
-    /// `Thread.sleep`, `setTimeout`, …) — a flakiness and slowness smell.
-    Sleeping,
-}
-
-impl TestSmellKind {
-    /// The stable kebab-case wire label, matching the serde rename.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::AssertionFree => "assertion-free",
-            Self::EmptyBody => "empty-body",
-            Self::Sleeping => "sleeping",
-        }
-    }
-}
-
-/// One detected test-quality smell ([FR-CV-08]) — a specific smell at a specific
-/// test function. Ordered deterministically by `(file, line, name, kind)` so a
-/// given tree + queries always yields a byte-identical appendix ([NFR-RA-06]).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub struct TestSmell {
-    /// The defining file's path (repo-relative), the primary sort key.
-    pub file: String,
-    /// 1-based start line of the smelly test, when recorded.
-    pub line: Option<i64>,
-    /// The test's name (function name, or the `it`/`test` description for JS/TS).
-    pub name: String,
-    /// Which smell this is.
-    pub kind: TestSmellKind,
-}
-
-/// The labeled, advisory test-quality-smells appendix appended to the
-/// `test_gaps` report ([FR-CV-08], [FR-GV-08] as modified by [CR-007]).
-///
-/// Computed on demand from the **current tree** via the plugins' optional fourth
-/// `.scm` query — never persisted, never part of the canonical store, and
-/// architecturally forbidden from moving the `gate` ([BR-28]). A language whose
-/// plugin ships no smell query is reported in [`not_analyzed`](Self::not_analyzed)
-/// as `n/a` — never silently treated as "clean" ([NFR-RA-05]).
-#[derive(Debug, Default, Serialize)]
-pub struct TestSmellAppendix {
-    /// The advisory label carried by the section (always present) so a reader
-    /// never mistakes an advisory finding for a gate signal ([BR-28]).
-    pub label: String,
-    /// The detected smells, deterministically ordered.
-    pub findings: Vec<TestSmell>,
-    /// Plugin/language names that have a test population but ship no smell-
-    /// evidence query — reported `n/a`, never "clean" ([FR-CV-08],
-    /// [NFR-RA-05]). Sorted for determinism.
-    pub not_analyzed: Vec<String>,
-}
-
-/// Documentation-gap analysis result (FR-GV-14) — the read-only analog of
-/// [`TestGapsReport`].
+/// Documentation-gap analysis result (FR-GV-14).
 ///
 /// The scope is the *public API*: only `exported` Function/Method symbols are
 /// considered. A symbol is "documented" if any [`DocSection`](crate::model::NodeKind::DocSection)

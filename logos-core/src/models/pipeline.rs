@@ -121,8 +121,8 @@ pub struct AnnotationStats {
     /// clone-pair graph (FR-AN-06).
     pub clone_groups: u64,
     /// Nodes classified `is_test = true` — the unified test annotation
-    /// (FR-AN-05, CR-001), the single detection source for `test_gaps`,
-    /// dead-code roots, and the metrics scope filter.
+    /// (FR-AN-05, CR-001), the single detection source for the
+    /// `[[require_tested]]` contract, dead-code roots, and the metrics scope filter.
     pub tests: u64,
     /// `layer` policy nodes materialised from `rules.toml` (FR-AN-03).
     pub layer_nodes: u64,

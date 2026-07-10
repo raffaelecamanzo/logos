@@ -81,7 +81,7 @@ impl CoveredFile {
 
 /// The latest coverage snapshot's metadata plus its covered-file rows with
 /// freshness resolved against the current tree — the shared preamble of
-/// [`read_latest`] and [`read_latest_line_hits`]. Opening the store migrates it
+/// [`read_latest`]. Opening the store migrates it
 /// on the `history.db` track; `logos.db` is never touched ([BR-28]).
 struct LatestSnapshot {
     /// The open `history.db` connection (the callers read more from it).
@@ -217,85 +217,6 @@ pub(crate) fn read_latest(root: &Path) -> Result<Option<CoverageView>> {
         formats,
         report_count: report_count as usize,
         files,
-    }))
-}
-
-/// The latest snapshot's per-line hits, fresh files only — the attribution
-/// source for the symbol-level coverage cross ([FR-UI-17], [ADR-23] symbol-level
-/// attribution). Where [`CoverageView`] derives file-level aggregates, this view
-/// keeps the raw `line_no -> hits` map so a caller can intersect it with a
-/// symbol's line span.
-///
-/// Stale files carry **no** line data ([FR-CV-05], [NFR-RA-05]) -- old line
-/// numbers are never applied to a shifted tree -- so they are absent from
-/// [`fresh_files`](Self::fresh_files) entirely. `None` from
-/// [`read_latest_line_hits`] means no coverage was ever ingested.
-pub(crate) struct LineHitsView {
-    /// The ingest-time HEAD SHA the snapshot is anchored to ([FR-CV-02]).
-    pub(crate) head_sha: String,
-    /// The effective `[coverage]` config hash recorded at ingest ([FR-CV-09]).
-    pub(crate) config_hash: String,
-    /// Per **fresh** file, the deduped `line_no -> hits` map in ascending order,
-    /// keyed by repo-relative indexed path ([FR-CV-03]). Stale files are omitted.
-    pub(crate) fresh_files:
-        std::collections::BTreeMap<String, std::collections::BTreeMap<i64, i64>>,
-}
-
-/// Read the most-recent coverage snapshot under `root` and return the per-line
-/// hits of every **fresh** covered file, keyed by path ([FR-UI-17]).
-///
-/// The symbol-level coverage cross intersects each file's `line_no -> hits` map
-/// with a symbol's `[start_line, end_line]` span. Freshness is resolved exactly
-/// as in [`read_latest`] (hash of the current file vs the anchored
-/// [`coverage_files.content_hash`], [FR-CV-05]); a stale file is dropped, never
-/// attributed (its line numbers no longer describe the current tree,
-/// [NFR-RA-05]). Returns `Ok(None)` when no coverage has ever been ingested.
-///
-/// Reads only `history.db` -- never an `ATTACH` to `logos.db` ([BR-28]). Rows are
-/// read in `(path, line_no)` order so the map is byte-identical across runs
-/// ([NFR-RA-06]).
-///
-/// # Errors
-/// Returns an error only on an unexpected store failure.
-///
-/// [FR-UI-17]: ../../../../docs/specs/requirements/FR-UI-17.md
-/// [BR-28]: ../../../../docs/specs/software-spec.md#323-coverage-test-evidence
-pub(crate) fn read_latest_line_hits(root: &Path) -> Result<Option<LineHitsView>> {
-    use std::collections::BTreeMap;
-
-    let Some(LatestSnapshot {
-        conn,
-        head_sha,
-        config_hash,
-        files: file_rows,
-        ..
-    }) = latest_snapshot(root)?
-    else {
-        return Ok(None);
-    };
-
-    let mut fresh_files: BTreeMap<String, BTreeMap<i64, i64>> = BTreeMap::new();
-    let mut line_stmt = conn
-        .prepare("SELECT line_no, hits FROM coverage_lines WHERE file_id = ?1 ORDER BY line_no")
-        .context("preparing the coverage line read for the cross")?;
-    for (file_id, path, fresh) in file_rows {
-        // A stale file carries no line data ([FR-CV-05]) so it is dropped from the
-        // attribution source.
-        if !fresh {
-            continue;
-        }
-        let lines: BTreeMap<i64, i64> = line_stmt
-            .query_map([file_id], |row| Ok((row.get(0)?, row.get(1)?)))
-            .context("reading coverage lines for the cross")?
-            .collect::<rusqlite::Result<_>>()
-            .context("collecting coverage lines for the cross")?;
-        fresh_files.insert(path, lines);
-    }
-
-    Ok(Some(LineHitsView {
-        head_sha,
-        config_hash,
-        fresh_files,
     }))
 }
 

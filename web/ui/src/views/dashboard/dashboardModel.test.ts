@@ -1,15 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import type { CrossSymbol, HotspotReport, StatusInfo } from "../../api/types.ts";
+import type { StatusInfo } from "../../api/types.ts";
 import {
   bandOf,
-  fileWeights,
   freshnessStatement,
   humanizeAge,
   pctBp,
   snippetOf,
-  trustScoreBp,
-  weightOf,
 } from "./dashboardModel.ts";
 
 /** A minimal StatusInfo for the freshness tests. */
@@ -32,10 +29,6 @@ function status(over: Partial<StatusInfo>): StatusInfo {
     warnings: [],
     ...over,
   };
-}
-
-function sym(file: string, quadrant: CrossSymbol["quadrant"]): CrossSymbol {
-  return { symbol: file, name: file, file, start_line: null, end_line: null, reachable_from_test: false, runtime_exec_bp: null, quadrant };
 }
 
 describe("bandOf — BR-34 advisory quality bands", () => {
@@ -86,36 +79,6 @@ describe("freshnessStatement", () => {
   it("treats a non-numeric timestamp field as absent", () => {
     const s = status({ last_full_index_at: "not-a-number" });
     expect(freshnessStatement(s, 1000)).toBe(`Index present — ${CAVEAT}`);
-  });
-});
-
-describe("trust-score weighting (shared with /quadrant)", () => {
-  it("floors an unranked file's weight at 1 and reads a ranked score", () => {
-    const w = fileWeights({ ranked_files: 1, files: [{ path: "a.rs", score: 3 }], notice: null } as HotspotReport);
-    expect(weightOf(w, "a.rs")).toBe(3);
-    expect(weightOf(w, "missing.rs")).toBe(1);
-  });
-  it("degrades to an unweighted map when the board is absent", () => {
-    expect(fileWeights(null).size).toBe(0);
-  });
-  it("computes the architecturally-weighted Q4 share in basis points", () => {
-    const weights = fileWeights({
-      ranked_files: 2,
-      files: [
-        { path: "a.rs", score: 3 },
-        { path: "b.rs", score: 1 },
-      ],
-      notice: null,
-    } as HotspotReport);
-    // Q4 weight 3 over a placed denominator of 3+1 = 4 → 7500 bp.
-    expect(trustScoreBp([sym("a.rs", "q4"), sym("b.rs", "q3")], weights)).toBe(7500);
-  });
-  it("returns null when no symbol is placed (honest empty, never a fabricated 0%)", () => {
-    expect(trustScoreBp([sym("a.rs", null), sym("b.rs", null)], new Map())).toBeNull();
-  });
-  it("excludes unplaced (null-quadrant) symbols from the denominator", () => {
-    // Only the q4 symbol is placed → a full 10000 bp trust share.
-    expect(trustScoreBp([sym("a.rs", "q4"), sym("b.rs", null)], new Map())).toBe(10_000);
   });
 });
 

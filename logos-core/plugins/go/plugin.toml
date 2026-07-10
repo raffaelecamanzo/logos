@@ -43,11 +43,6 @@ framework_detectors = ["net::http", "github::com::gin-gonic::gin"]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"
 frameworks = "queries/frameworks.scm"
-# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence.
-# NOT listed in `capabilities` -- extraction never runs it; `test_gaps` runs it
-# on demand. Embedded + disk-shadowable like every query (FR-PL-04).
-smell = "queries/smells.scm"
-
 # Captured `@fw.route.method` text → HTTP method (S-015). Gin's router verbs
 # name themselves; net/http registrations (`HandleFunc`/`Handle`) and Gin's
 # `Any` carry no single verb.

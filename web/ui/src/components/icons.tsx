@@ -95,13 +95,6 @@ export const IconCoverage = (p: IconProps) => (
   </Svg>
 );
 
-export const IconQuadrant = (p: IconProps) => (
-  <Svg {...p}>
-    <rect x="3" y="3" width="18" height="18" rx="1" />
-    <path d="M12 3v18M3 12h18" />
-  </Svg>
-);
-
 export const IconConfig = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="12" cy="12" r="3" />

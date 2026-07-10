@@ -1340,8 +1340,8 @@ fn unreferenced_test_is_a_live_root_never_dead() {
 
 /// Direct coverage of the `is_test_marked` predicate ([FR-AN-05]): each
 /// positive disjunct fires independently, marker matching is affix-not-
-/// substring, and a plain production function matches none. Replaces the
-/// former `test_gaps` marking unit test now that the predicate lives here.
+/// substring, and a plain production function matches none. The predicate is
+/// the single source of truth for the persisted `is_test` column.
 #[test]
 fn is_test_marked_covers_evidence_path_and_affix_with_negatives() {
     fn r(name: &str, path: Option<&str>, evidence: bool) -> AnnotationNodeRow {

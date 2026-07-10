@@ -241,16 +241,6 @@ pub(crate) enum Commands {
         #[arg(long, alias = "assume-fresh")]
         no_reconcile: bool,
     },
-    /// Untested functions (static test-gap analysis).
-    #[command(name = "test-gaps", alias = "test_gaps")]
-    TestGaps {
-        /// Cap on listed gaps (default 50).
-        #[arg(long)]
-        limit: Option<u32>,
-        /// Skip the pre-evaluation reconcile (FR-RC-04).
-        #[arg(long, alias = "assume-fresh")]
-        no_reconcile: bool,
-    },
     /// Undocumented exported functions (static doc-gap analysis, FR-GV-14).
     #[command(name = "doc-gaps", alias = "doc_gaps")]
     DocGaps {

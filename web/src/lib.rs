@@ -515,7 +515,7 @@ fn build_router(state: WebState) -> Router {
         // of read-models), composed in `api_v1`. No new core query — thin-adapter
         // discipline (ADR-01). All GET, so the `method_guard`/`host_guard`/
         // `csp_headers` stack already covers them. The legacy `/api/*` (non-v1)
-        // graph/impact/query/quadrant twins the server-rendered canvas consumed
+        // graph/impact/query twins the server-rendered canvas consumed
         // were removed at the S-192 decommission; the SPA consumes only this suite.
         .route("/api/v1/overview", get(api_v1::overview))
         .route("/api/v1/health", get(api_v1::health))
@@ -523,7 +523,6 @@ fn build_router(state: WebState) -> Router {
         .route("/api/v1/gaps", get(api_v1::gaps))
         .route("/api/v1/files", get(api_v1::files))
         .route("/api/v1/coverage", get(api_v1::coverage))
-        .route("/api/v1/quadrant", get(api_v1::quadrant))
         .route("/api/v1/graph", get(api_v1::graph))
         .route("/api/v1/query", get(api_v1::search_query))
         // Read-only Decisions-panel impact read-model (FR-NV-10, FR-DG-02): the

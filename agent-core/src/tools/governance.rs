@@ -1,8 +1,9 @@
-//! The **governance** tool domain (S-167): nine `rig` tools, each wrapping one
-//! existing [`Engine`] governance/quality read-model (FR-GV-02..08/14,
+//! The **governance** tool domain (S-167): eight `rig` tools, each wrapping one
+//! existing [`Engine`] governance/quality read-model (FR-GV-02..07/14,
 //! FR-GH-06) — the Governance-Analyst subagent's least-privilege set (S-174).
+//! (The static test-gap tool was removed full-stack by S-289/CR-079.)
 //!
-//! None of the nine mutates source or policy files, and none writes outside
+//! None of the eight mutates source or policy files, and none writes outside
 //! `.logos/` ([NFR-SE-04]). Two carry the engine's normal index bookkeeping:
 //! `scan` persists a metric snapshot + the violation set, and `check_rules`
 //! replaces the cached violations — both inside `.logos/logos.db`, byte-for-byte
@@ -25,7 +26,6 @@ use logos_core::governance::DsmGranularity;
 use logos_core::history::HotspotReport;
 use logos_core::models::{
     DocGapsReport, DsmReport, EvolutionReport, GateResult, HealthInfo, RulesReport, ScanResult,
-    TestGapsReport,
 };
 use logos_core::Engine;
 use rig_core::completion::ToolDefinition;
@@ -195,9 +195,9 @@ impl Tool for Hotspots {
     }
 }
 
-// ── test_gaps ───────────────────────────────────────────────────────────────
+// ── gaps (shared) ─────────────────────────────────────────────────────────
 
-/// `test_gaps` arguments (FR-GV-08).
+/// Shared arguments for the gap-analysis tools (`doc_gaps`), FR-GV-14.
 #[derive(Debug, Default, Deserialize)]
 pub struct GapsArgs {
     /// Cap on listed gaps (default 50).
@@ -216,42 +216,6 @@ fn gaps_parameters(noun: &str) -> serde_json::Value {
             "no_reconcile": { "type": "boolean", "description": "Skip the pre-evaluation reconcile (default false)." }
         }
     })
-}
-
-/// Test-gap analysis: functions unreachable from any test node.
-#[derive(Clone)]
-pub struct TestGaps {
-    engine: Arc<Engine>,
-}
-
-impl TestGaps {
-    /// Wrap a shared engine.
-    pub fn new(engine: Arc<Engine>) -> Self {
-        Self { engine }
-    }
-}
-
-impl Tool for TestGaps {
-    const NAME: &'static str = "test_gaps";
-    type Error = ToolCallError;
-    type Args = GapsArgs;
-    type Output = TestGapsReport;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Test-gap analysis: non-test functions unreachable from any \
-                 test node via calls BFS — static reachability, not execution \
-                 coverage (carries the heuristic caveat). Ranked by blast radius."
-                .to_string(),
-            parameters: gaps_parameters("gaps"),
-        }
-    }
-
-    async fn call(&self, args: GapsArgs) -> Result<TestGapsReport, ToolCallError> {
-        let reconcile = reconcile(args.no_reconcile);
-        run_engine_result(self.engine.clone(), move |e| e.test_gaps(args.limit, reconcile)).await
-    }
 }
 
 // ── dsm ─────────────────────────────────────────────────────────────────────

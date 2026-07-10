@@ -7,35 +7,28 @@
  * It preserves the server-rendered Dashboard's verdict-first layout
  * (web/src/views/overview.rs, frontend-design §4.1): a freshness statement leads,
  * then the full-width Project Overview, then three equal-width pairs (Quality |
- * Languages, Graph | Activity, Test coverage | Code coverage), then the full-width
- * trust-score card — and its honest empty states (an un-indexed root is one card
- * naming `logos index`; every figure traces to a read-model field, none fabricated;
- * NFR-RA-05, NFR-CC-04). Every read is GET-only — loading the view mutates no store
- * (ADR-28).
+ * Languages, Graph | Activity, Rule findings | Code coverage) — and its honest empty
+ * states (an un-indexed root is one card naming `logos index`; every figure traces
+ * to a read-model field, none fabricated; NFR-RA-05, NFR-CC-04). CR-079 retired the
+ * Coverage-trust card and the reachability roll-up, promoting the architecture
+ * Rule findings into that former slot. Every read is GET-only — loading the view
+ * mutates no store (ADR-28).
  */
 
 import { AsyncResource, fetchOverview, useApiResource } from "../../api/index.ts";
 import type {
   CoverageStatus,
-  CrossTotals,
   GateResult,
   LanguageComposition,
   LanguagesInfo,
   OverviewModel,
+  RulesReport,
   StatsInfo,
   StatusInfo,
-  TestGapsReport,
   WikiPage,
 } from "../../api/types.ts";
 import { Badge, Callout, Card, EmptyState, ScoreBar } from "../../components/index.ts";
-import {
-  bandOf,
-  fileWeights,
-  freshnessStatement,
-  pctBp,
-  snippetOf,
-  trustScoreBp,
-} from "./dashboardModel.ts";
+import { bandOf, freshnessStatement, pctBp, snippetOf } from "./dashboardModel.ts";
 import styles from "./Dashboard.module.css";
 
 /** Current wall-clock as unix seconds — the reference the freshness line humanises
@@ -77,10 +70,9 @@ function Dashboard({ data }: { data: OverviewModel }) {
         <ActivityCard stats={data.stats} />
       </div>
       <div className={styles.pair}>
-        <TestCoverageCard gaps={data.gaps} />
+        <RuleFindingsCard rules={data.rules} />
         <CodeCoverageCard coverage={data.coverage} />
       </div>
-      <TrustCard data={data} />
     </div>
   );
 }
@@ -136,24 +128,50 @@ function CodeCoverageCard({ coverage }: { coverage: CoverageStatus }) {
   );
 }
 
-/** *Test coverage* — the test-reachability ratio as a green (never banded) bar,
- *  with the descriptor that it is reachability, not line coverage. */
-function TestCoverageCard({ gaps }: { gaps: TestGapsReport }) {
-  const ratio = gaps.coverage_ratio;
+/** *Rule findings* — the architecture-rules verdict projected from `overview.rules`
+ *  (CR-079), in the former test-coverage slot. Three honest states (NFR-CC-04):
+ *  a muted onboarding prompt when no `.logos/rules.toml` is authored yet
+ *  (`rules_present === false`); a red FAIL naming the violation count when there
+ *  are findings; a green PASS otherwise. Never a fabricated figure. */
+function RuleFindingsCard({ rules }: { rules: RulesReport }) {
+  const violations = rules.violations.length;
+  let body;
+  if (!rules.rules_present) {
+    // Onboarding: no rules authored yet — prompt to write them, never an empty PASS.
+    body = (
+      <EmptyState
+        message="No architecture rules yet — author them in .logos/rules.toml, then run"
+        command="logos check"
+      />
+    );
+  } else if (violations > 0) {
+    body = (
+      <>
+        <div className={styles.heroFigure}>
+          <span className={`${styles.heroRaw} num`}>{violations}</span>
+          <Badge tone="red">FAIL</Badge>
+        </div>
+        <p className="muted">
+          {violations} rule finding(s) across {rules.checked_rules} checked rule(s)
+        </p>
+      </>
+    );
+  } else {
+    body = (
+      <>
+        <div className={styles.heroFigure}>
+          <Badge tone="green">PASS</Badge>
+        </div>
+        <p className="muted">
+          No findings — {rules.checked_rules} rule(s) checked
+        </p>
+      </>
+    );
+  }
   return (
-    <Card title="Test coverage">
-      {ratio === null ? (
-        <p className="muted">n/a — no functions to cover.</p>
-      ) : (
-        <>
-          <div className={styles.heroFigure}>
-            <span className={`${styles.heroRaw} num`}>{pctBp(ratio)}</span>
-          </div>
-          <ScoreBar value={ratio} max={10_000} label={pctBp(ratio)} />
-          <p className="muted">reachable from a test</p>
-        </>
-      )}
-      <DetailLink href="/gaps" label="Gaps" />
+    <Card title="Rule findings">
+      {body}
+      <DetailLink href="/gaps" label="Rule findings" />
     </Card>
   );
 }
@@ -262,87 +280,3 @@ function ProjectOverviewCard({ page }: { page: WikiPage | null }) {
   );
 }
 
-/** *Coverage trust* — the architecturally-weighted Q4 trust share + mini-quadrant,
- *  advisory and never gated. Degrades to the honest ingest/refresh empty states. */
-function TrustCard({ data }: { data: OverviewModel }) {
-  const { cross, hotspots } = data;
-  let body;
-  if (!cross.has_fresh_coverage) {
-    body =
-      cross.notice !== null ? (
-        <EmptyState
-          message="No coverage ingested — run"
-          command="logos coverage ingest <report> or logos coverage refresh"
-        />
-      ) : (
-        <EmptyState message="Coverage is stale — run" command="logos coverage refresh" />
-      );
-  } else {
-    const bp = trustScoreBp(cross.symbols, fileWeights(hotspots));
-    body =
-      bp === null ? (
-        <EmptyState
-          message="Coverage ingested, but no symbol spans could be placed — refresh with"
-          command="logos coverage refresh"
-        />
-      ) : (
-        <>
-          <div className={styles.heroFigure}>
-            <span className={`${styles.heroRaw} num`}>{pctBp(bp)}</span>
-          </div>
-          <ScoreBar value={bp} max={10_000} label={pctBp(bp)} />
-          <p className="muted">
-            architecturally-weighted Q4 (reachable &amp; executed) share — advisory, never gated
-          </p>
-          <MiniQuadrant totals={cross.totals} />
-        </>
-      );
-  }
-  return (
-    <Card title="Coverage trust" className={styles.trust}>
-      {body}
-      <DetailLink href="/quadrant" label="Open quadrant" />
-    </Card>
-  );
-}
-
-/** The mini 2×2 quadrant (CR-040 flipped layout: executed on top, reachable to the
- *  right, so Q4 trust sits top-right). Each cell carries its tag AND count so the
- *  grid reads without hover, and an always-visible compact legend names each cell's
- *  meaning (mirroring the server-rendered `mini_legend`) — colour is never the only
- *  channel and the semantics are not hidden behind a hover tooltip (WCAG 2.1 AA, §7). */
-function MiniQuadrant({ totals }: { totals: CrossTotals }) {
-  const cells: { cls: string; tag: string; title: string; count: number }[] = [
-    { cls: styles.mqQ1, tag: "Q1", title: "Q1 — unreachable, executed (false-green)", count: totals.q1 },
-    { cls: styles.mqQ4, tag: "Q4", title: "Q4 — reachable, executed (trust)", count: totals.q4 },
-    { cls: styles.mqQ3, tag: "Q3", title: "Q3 — unreachable, unexecuted (true gap)", count: totals.q3 },
-    { cls: styles.mqQ2, tag: "Q2", title: "Q2 — reachable, unexecuted (dead edge)", count: totals.q2 },
-  ];
-  // The compact legend, ordered worst → best (Q1 → Q4) to match the full Quadrant
-  // view's legend and the urgency-table lead.
-  const legend: { tag: string; meaning: string }[] = [
-    { tag: "Q1", meaning: "false-green" },
-    { tag: "Q2", meaning: "dead edge" },
-    { tag: "Q3", meaning: "true gap" },
-    { tag: "Q4", meaning: "trust" },
-  ];
-  return (
-    <div className={styles.miniQuadrantWrap}>
-      <a className={styles.miniQuadrant} href="/quadrant" aria-label="Coverage quadrant — open the full view">
-        {cells.map((c) => (
-          <span className={`${styles.mqCell} ${c.cls}`} key={c.tag} title={c.title}>
-            <span className={styles.mqTag}>{c.tag}</span>
-            <span className={`${styles.mqCount} num`}>{c.count}</span>
-          </span>
-        ))}
-      </a>
-      <ul className={styles.mqLegend}>
-        {legend.map((l) => (
-          <li key={l.tag}>
-            <span className={styles.mqTag}>{l.tag}</span> — {l.meaning}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}

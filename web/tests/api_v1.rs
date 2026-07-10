@@ -112,7 +112,6 @@ const V1_ENDPOINTS: &[&str] = &[
     "/api/v1/gaps",
     "/api/v1/files",
     "/api/v1/coverage",
-    "/api/v1/quadrant",
     "/api/v1/graph",
     "/api/v1/query?q=f",
     "/api/v1/impact?seed=f",
@@ -185,13 +184,12 @@ async fn composite_bundles_serialize_their_read_model_fields() {
     let router = web::router(engine);
 
     let cases: &[(&str, &[&str])] = &[
-        ("/api/v1/overview", &["\"status\"", "\"gate\"", "\"coverage\"", "\"cross\"", "\"hotspots\""]),
+        ("/api/v1/overview", &["\"status\"", "\"gate\"", "\"coverage\"", "\"rules\""]),
         ("/api/v1/health", &["\"status\"", "\"gate\"", "\"scan\"", "\"evolution\""]),
         ("/api/v1/architecture", &["\"status\"", "\"dsm\""]),
-        ("/api/v1/gaps", &["\"status\"", "\"test_gaps\"", "\"rules\""]),
+        ("/api/v1/gaps", &["\"status\"", "\"rules\""]),
         ("/api/v1/files", &["\"status\"", "\"hotspots\"", "\"temporal\""]),
         ("/api/v1/coverage", &["\"status\"", "\"coverage\"", "\"untested\""]),
-        ("/api/v1/quadrant", &["\"status\"", "\"cross\"", "\"hotspots\""]),
         ("/api/v1/graph", &["\"nodes\"", "\"edges\"", "\"total_nodes\""]),
     ];
     for (path, keys) in cases {

@@ -2,7 +2,7 @@
 //! [FR-GV-01]..[FR-GV-09], [FR-RC-01]..[FR-RC-04], [ADR-11], [ADR-14]).
 //!
 //! Evaluates the `rules.toml` architecture contract, runs the session/CI
-//! gate, and serves `evolution`, `dsm`, and `test_gaps` — every aggregate
+//! gate, and serves `evolution` and `dsm` — every aggregate
 //! run wrapped in **reconcile-then-score** ([ADR-11]): the working tree is
 //! reconciled into the graph (O(changed), via
 //! [`pipeline::reconcile`](crate::pipeline::reconcile)) *before* anything is
@@ -69,12 +69,9 @@ use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{
     DocGap, DocGapsReport, DoctorReport, DsmReport, DsmRow, EvolutionPoint, EvolutionReport,
     GateResult, HealthInfo, MetricDelta, MetricRegression, MetricSnapshot, MetricValue,
-    RulesReport, ScanResult, SessionInfo, TemporalTier, TestGap, TestGapsReport, VerifyCensus,
-    VerifyReport, Violation,
+    RulesReport, ScanResult, SessionInfo, TemporalTier, VerifyCensus, VerifyReport, Violation,
 };
 use crate::runtime::Runtime;
-
-mod smells;
 
 #[cfg(test)]
 mod tests;
@@ -100,25 +97,13 @@ const SCOPE_PROJECT: &str = "project";
 /// [FR-GV-06]: ../../../docs/specs/requirements/FR-GV-06.md
 const DEFAULT_EVOLUTION_LIMIT: u32 = 30;
 
-/// The default `test_gaps` listing cap ([FR-GV-08]).
-///
-/// [FR-GV-08]: ../../../docs/specs/requirements/FR-GV-08.md
-const DEFAULT_TEST_GAPS_LIMIT: u32 = 50;
-
-/// The default `doc_gaps` listing cap ([FR-GV-14]) — the documentation analog
-/// of [`DEFAULT_TEST_GAPS_LIMIT`].
+/// The default `doc_gaps` listing cap ([FR-GV-14]).
 ///
 /// [FR-GV-14]: ../../../docs/specs/requirements/FR-GV-14.md
 const DEFAULT_DOC_GAPS_LIMIT: u32 = 50;
 
-/// The mandatory `test_gaps` honesty caveat (BR-16) — always emitted.
-const TEST_GAPS_CAVEAT: &str =
-    "static reachability, not execution coverage: a function is 'covered' if any \
-     test node transitively calls it in the code graph; no test was executed";
-
-/// The mandatory `doc_gaps` honesty caveat ([FR-GV-14]) — always emitted. The
-/// documentation analog of [`TEST_GAPS_CAVEAT`]: presence of a resolved
-/// reference, not documentation quality or completeness.
+/// The mandatory `doc_gaps` honesty caveat ([FR-GV-14]) — always emitted:
+/// presence of a resolved reference, not documentation quality or completeness.
 const DOC_GAPS_CAVEAT: &str =
     "reference presence, not documentation quality: a symbol is 'documented' if any \
      doc section resolves a reference to it in the documentation graph; the prose's \
@@ -607,8 +592,8 @@ pub(crate) struct EvalInput<'a> {
     /// [FR-GV-13]: ../../../docs/specs/requirements/FR-GV-13.md
     pub annotations: &'a [AnnotationNodeRow],
     /// The `is_test = 1` node ids ([FR-AN-05]) seeding the [FR-GV-13]
-    /// reachability BFS — the SAME `test_node_ids` seam `test_gaps` uses
-    /// ([FR-GV-08]), so the coverage contract and `test_gaps` can never
+    /// reachability BFS — the SAME `test_node_ids` seam `test_reachable_set`
+    /// uses, so the coverage contract and the reachability core can never
     /// disagree about what a test reaches (CR-001 CRA-01).
     ///
     /// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
@@ -1368,10 +1353,10 @@ fn check_forbidden_imports(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
 ///
 /// A coverage gate over the PUBLIC API: every exported Function/Method whose
 /// defining file matches a `paths` glob must be reachable by transitive `calls`
-/// BFS from an `is_test` node. It reuses `test_gaps`'s reachability ([FR-GV-08],
-/// `test_reachable_set`) seeded from the SAME persisted `is_test` column
-/// ([FR-AN-05], `test_node_ids`), so the contract and `test_gaps` can never
-/// disagree. Non-exported symbols are exempt (a public-API test path, not total
+/// BFS from an `is_test` node. It reuses the shared `test_reachable_set`
+/// reachability seeded from the SAME persisted `is_test` column
+/// ([FR-AN-05], `test_node_ids`), so the contract and the reachability core can
+/// never disagree. Non-exported symbols are exempt (a public-API test path, not total
 /// coverage); an unbound symbol carries no path to glob-match. Orthogonal to the
 /// metrics gate ([CR-002]) and — reading node reachability rather than edges — it
 /// materialises no derived edge and needs no migration.
@@ -1442,7 +1427,7 @@ fn check_require_tested(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
 /// by some `DocSection` over a `DocReference` edge. It reuses the SAME
 /// `documented_set` core `doc_gaps` builds ([FR-GV-14]), so the contract and
 /// `doc_gaps` can never disagree about what is documented — exactly as
-/// `[[require_tested]]` and `test_gaps` share `test_reachable_set`. Non-exported
+/// `[[require_tested]]` shares `test_reachable_set`. Non-exported
 /// symbols are exempt (a public-API documentation gate, not total documentation);
 /// an unbound symbol carries no path to glob-match. Orthogonal to the metrics
 /// gate ([CR-002]/[CR-003]) and — reading direct references rather than the code
@@ -1506,8 +1491,8 @@ fn check_require_documented(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
 }
 
 /// The set of nodes reachable from any test node over `Calls` edges — the
-/// shared static-reachability core of `test_gaps` ([FR-GV-08], BR-16) and the
-/// `[[require_tested]]` coverage contract ([FR-GV-13]). The seed `test_ids` are
+/// shared static-reachability core of the `[[require_tested]]` coverage
+/// contract ([FR-GV-13], BR-16). The seed `test_ids` are
 /// themselves included in the returned set (a test is trivially "reached").
 ///
 /// Pure and order-independent: the result is a *set*, so the internal
@@ -1623,8 +1608,8 @@ fn materialise_and_evaluate(
                 // The annotation rows carry the `exported` flag the FR-GV-13
                 // [[require_tested]] contract needs (NodeRow omits visibility).
                 store.annotation_nodes()?,
-                // The persisted is_test set: shared with test_gaps (FR-AN-05 /
-                // FR-GV-08) and used for production-scope metric filtering
+                // The persisted is_test set: shared with the [[require_tested]]
+                // contract (FR-AN-05 / FR-GV-13) and used for production-scope metric filtering
                 // (FR-QM-08) — the gate, coverage contract, and Acyclicity rule
                 // can never disagree about the same SCC set.
                 store.test_node_ids()?,
@@ -2504,189 +2489,8 @@ fn dsm_key_path(key: &str, granularity: DsmGranularity) -> Option<&str> {
     }
 }
 
-/// `test_gaps` — static test coverage over `calls` BFS from test nodes
-/// ([FR-GV-08], BR-16), with the mandatory honesty caveat.
-///
-/// When `hotspot_ranks` is supplied by the façade — a read-only file → hotspot
-/// score map — the untested set is ordered by **blast radius** ([FR-GV-17]):
-/// caller fan-in ([FR-NV-02]) × the containing file's hotspot score
-/// ([FR-GH-06]), most-urgent first. The ranking is *supplied* here, never linked
-/// — the governance engine contributes only the graph-native fan-in and never
-/// reads history ([CR-038], [ADR-28]). `None` (no history/hotspot store) degrades
-/// to the FR-GV-08 file/name order, the caveat still emitted, never a fabricated
-/// ranking ([NFR-CC-04]).
-///
-/// [FR-GV-08]: ../../../docs/specs/requirements/FR-GV-08.md
-/// [FR-GV-17]: ../../../docs/specs/requirements/FR-GV-17.md
-/// [FR-NV-02]: ../../../docs/specs/requirements/FR-NV-02.md
-/// [FR-GH-06]: ../../../docs/specs/requirements/FR-GH-06.md
-/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-pub(crate) fn test_gaps(
-    engine: &Engine,
-    limit: Option<u32>,
-    reconcile: bool,
-    hotspot_ranks: Option<&HashMap<String, i64>>,
-) -> Result<TestGapsReport> {
-    let fresh = reconcile_step(engine, reconcile)?;
-    let (runtime, registry, config) = engine.pipeline_ctx()?;
-    let limit = limit.unwrap_or(DEFAULT_TEST_GAPS_LIMIT).max(1);
-
-    let (nodes, edges, test_node_ids) = runtime.submit_read(|store| {
-        Ok((
-            store.all_nodes()?,
-            store.all_edges()?,
-            store.test_node_ids()?,
-        ))
-    })?;
-    let entry_points: HashSet<&str> = config
-        .semantics
-        .entry_points
-        .iter()
-        .map(String::as_str)
-        .collect();
-
-    // Test nodes are read from the persisted `is_test` annotation ([FR-AN-05],
-    // CR-001) — the single source of truth the annotation pass computed
-    // (`test_evidence` ∨ path convention ∨ `[semantics].test_markers`). Reading
-    // the column rather than re-deriving it is what guarantees `test_gaps` and
-    // the annotation classify the identical set (CR-001 CRA-01).
-    let test_ids: HashSet<_> = test_node_ids.into_iter().collect();
-
-    // The advisory test-quality-smells appendix ([FR-CV-08], CR-007): the
-    // current tree's source files re-parsed on demand via the plugins' optional
-    // smell query. Computed entirely off the gate path — `test_gaps` itself
-    // never feeds the gate, so this appendix cannot move it ([BR-28]) — and each
-    // flagged candidate is re-confirmed against the canonical test-marker logic
-    // ([FR-AN-05]) inside the detector.
-    let smells = smells::detect_test_smells(engine.root(), registry, &config);
-
-    // BFS over `calls` from every test node (BR-16) — the shared reachability
-    // core the `[[require_tested]]` contract reuses ([FR-GV-13]).
-    let reachable = test_reachable_set(&edges, &test_ids);
-
-    // Caller fan-in ([FR-NV-02]): inbound `calls` edges per node — the
-    // graph-native blast-radius axis ([FR-GV-17]). Computed only when the façade
-    // supplied a hotspot ranking to weight it by; the degraded path keeps the
-    // FR-GV-08 file/name order, so fan-in is never needed there.
-    let fan_in: HashMap<NodeId, u64> = if hotspot_ranks.is_some() {
-        let mut counts: HashMap<NodeId, u64> = HashMap::new();
-        for edge in &edges {
-            if edge.kind == EdgeKind::Calls {
-                *counts.entry(edge.target).or_default() += 1;
-            }
-        }
-        counts
-    } else {
-        HashMap::new()
-    };
-
-    // Gaps = non-test, non-entry-point functions not reachable from any test
-    // node (BR-16), each scored by blast radius for ordering ([FR-GV-17]).
-    let mut total = 0u64;
-    let mut scored: Vec<ScoredGap> = Vec::new();
-    for node in &nodes {
-        if !matches!(node.kind, NodeKind::Function | NodeKind::Method)
-            || test_ids.contains(&node.id)
-            || entry_points.contains(node.name.as_str())
-        {
-            continue;
-        }
-        total += 1;
-        if !reachable.contains(&node.id) {
-            let file = node.file_path.clone().unwrap_or_default();
-            let fan = fan_in.get(&node.id).copied().unwrap_or(0);
-            let blast = blast_radius(fan, &file, hotspot_ranks);
-            scored.push(ScoredGap {
-                blast,
-                gap: TestGap {
-                    name: node.name.clone(),
-                    file,
-                    line: node.start_line,
-                },
-            });
-        }
-    }
-
-    // Order by blast radius when a ranking was supplied ([FR-GV-17]), else the
-    // FR-GV-08 file/name order; both deterministic ([NFR-RA-06]). Ordering
-    // precedes truncation so raising `limit` reveals more gaps in the SAME
-    // ranked order.
-    let gap_count = scored.len();
-    let mut gaps = order_untested(scored, hotspot_ranks.is_some());
-
-    let covered = total - gap_count as u64;
-    let truncated = gap_count > limit as usize;
-    gaps.truncate(limit as usize);
-
-    Ok(TestGapsReport {
-        untested: gaps,
-        total_functions: total,
-        covered_functions: covered,
-        // Integer signal posture (ADR-08/AR-03); n/a when nothing to cover.
-        coverage_ratio: (total > 0)
-            .then(|| ((covered as f64 / total as f64) * 10_000.0).round() as u32),
-        limit,
-        truncated,
-        caveat: TEST_GAPS_CAVEAT.to_string(),
-        freshness: fresh.line(),
-        warnings: fresh.warnings,
-        smells,
-    })
-}
-
-/// One untested function paired with its blast-radius score ([FR-GV-17]) for
-/// ordering. The score is an ordering key only — it is never serialized; the
-/// wire form stays the FR-GV-08 [`TestGap`].
-struct ScoredGap {
-    /// Caller fan-in × the containing file's hotspot score; `0` when no ranking
-    /// was supplied or the file carries no hotspot signal.
-    blast: i64,
-    gap: TestGap,
-}
-
-/// The blast-radius score of one gap ([FR-GV-17]): caller fan-in × the
-/// containing file's hotspot score. A file absent from `hotspot_ranks` (or no
-/// ranking supplied at all) contributes weight `0` — honest absence, never a
-/// fabricated number ([NFR-CC-04]); such gaps sink to the file/name-ordered
-/// tail. Saturating so a pathological graph can never overflow the product.
-fn blast_radius(fan_in: u64, file: &str, hotspot_ranks: Option<&HashMap<String, i64>>) -> i64 {
-    let weight = hotspot_ranks
-        .and_then(|ranks| ranks.get(file))
-        .copied()
-        .unwrap_or(0);
-    i64::try_from(fan_in)
-        .unwrap_or(i64::MAX)
-        .saturating_mul(weight)
-}
-
-/// Order the untested set: by blast radius descending (most-urgent first) when a
-/// hotspot ranking was supplied by the façade (`ranked`, [FR-GV-17]), else by the
-/// FR-GV-08 file/name order. Both paths tie-break on file then name, so the order
-/// is deterministic ([NFR-RA-06]) and the degraded path is byte-identical to the
-/// historical file/name order. When `ranked` is false every `blast` is `0`, so
-/// the file/name order is authoritative.
-fn order_untested(mut scored: Vec<ScoredGap>, ranked: bool) -> Vec<TestGap> {
-    if ranked {
-        scored.sort_by(|a, b| {
-            b.blast
-                .cmp(&a.blast)
-                .then_with(|| a.gap.file.cmp(&b.gap.file))
-                .then_with(|| a.gap.name.cmp(&b.gap.name))
-        });
-    } else {
-        scored.sort_by(|a, b| {
-            a.gap
-                .file
-                .cmp(&b.gap.file)
-                .then_with(|| a.gap.name.cmp(&b.gap.name))
-        });
-    }
-    scored.into_iter().map(|s| s.gap).collect()
-}
-
-/// `doc_gaps` — the read-only analog of `test_gaps` ([FR-GV-14]): exported
-/// Function/Method symbols referenced by no `DocSection` over `DocReference`
-/// edges, with the mandatory honesty caveat.
+/// `doc_gaps` ([FR-GV-14]): exported Function/Method symbols referenced by no
+/// `DocSection` over `DocReference` edges, with the mandatory honesty caveat.
 ///
 /// The scope is the public API — the `exported` flag is read from the persisted
 /// annotation rows ([FR-AN-05], the SAME source `[[require_tested]]` reads), and
@@ -2925,7 +2729,7 @@ fn doctor_report(report: StructuralReport, admission: AdmissionCensus) -> Doctor
 /// The lexical cap on the leaked/orphaned symbol samples a [`VerifyReport`]
 /// lists ([FR-GV-19], [NFR-RA-06]): the `*_total` counts stay exact; only the
 /// listed sample is bounded so the CLI/MCP/web read-model is a fixed size even on
-/// a badly drifted graph. Matches the `test_gaps`/`doc_gaps` default cap.
+/// a badly drifted graph. Matches the `doc_gaps` default cap.
 ///
 /// [FR-GV-19]: ../../../docs/specs/requirements/FR-GV-19.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md

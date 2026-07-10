@@ -19,7 +19,6 @@ export {
   fetchImpact,
   fetchNode,
   fetchOverview,
-  fetchQuadrant,
   fetchWikiNav,
   fetchWikiPage,
   fetchWikiStatus,

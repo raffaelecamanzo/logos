@@ -59,16 +59,3 @@ pub use manifest::{
 };
 pub use plugin::{CompiledPlugin, LanguagePlugin, Semantics};
 pub use registry::LanguageRegistry;
-
-/// The `[queries]` key of the optional fourth, per-plugin smell-evidence query
-/// ([FR-CV-08], [CR-007]). Unlike the three extraction capabilities
-/// (`symbols`/`references`/`frameworks`) it is **not** a declared capability —
-/// extraction never runs it. It is embedded + disk-shadowable like every query
-/// and resolved through the registry's normal compile path so
-/// [`LanguagePlugin::query`]`("smell")` returns it (or `None` for a plugin that
-/// ships none — the `n/a` posture, [NFR-RA-05]). It is consumed on demand by
-/// `test_gaps` to build the advisory smell appendix.
-///
-/// [FR-CV-08]: ../../../docs/specs/requirements/FR-CV-08.md
-/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-pub const SMELL_QUERY: &str = "smell";

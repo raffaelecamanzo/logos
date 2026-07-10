@@ -7,22 +7,17 @@
 //! registry here *is* the preflight: `LanguageRegistry::load` asserts the ABI of
 //! every compiled grammar and compiles every `.scm` query, so any test below
 //! that obtains the Scala plugin has already proved the grammar binds at ABI 15
-//! and its three queries compile against the built grammar.
+//! and its queries compile against the built grammar.
 //!
 //! Gated on `lang-scala`, so a `--no-default-features` build that excludes Scala
 //! excludes this whole file.
 #![cfg(feature = "lang-scala")]
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::Path;
 
 use logos_core::extract::{extract, Facts, FileInput, SymbolContext};
 use logos_core::model::{EdgeKind, NodeKind};
-use logos_core::models::quality::{TestSmell, TestSmellKind};
 use logos_core::plugin::{ExportConvention, LanguageRegistry, TestConvention};
-use logos_core::Engine;
-use tempfile::TempDir;
 
 /// Load the registry with the embedded grammars, no on-disk overrides. The call
 /// itself exercises the Scala preflight (ABI assertion + query compilation).
@@ -231,62 +226,5 @@ class MathSuite extends munit.FunSuite {
         evidence.get("prod"),
         Some(&false),
         "a production def carries none (no proximity false positive)"
-    );
-}
-
-// ── Smell evidence (FR-CV-08): the three smells over the test population ──────
-
-/// Write `contents` at `root/rel`, creating parents.
-fn write(root: &Path, rel: &str, contents: &str) {
-    let path = root.join(rel);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, contents).unwrap();
-}
-
-/// Index `tmp`, run `test_gaps`, and return the sorted smell `(name, kind)`
-/// pairs.
-fn smell_pairs(tmp: &TempDir) -> Vec<(String, TestSmellKind)> {
-    let engine = Engine::start(tmp.path()).expect("engine starts");
-    let report = engine.test_gaps(None, true).expect("test_gaps runs");
-    let mut pairs: Vec<(String, TestSmellKind)> = report
-        .smells
-        .findings
-        .iter()
-        .map(|s: &TestSmell| (s.name.clone(), s.kind))
-        .collect();
-    pairs.sort();
-    pairs
-}
-
-#[test]
-fn scala_smells_flag_exactly_the_seeded_tests() {
-    let tmp = TempDir::new().unwrap();
-    write(
-        tmp.path(),
-        "src/test/scala/CalcSuite.scala",
-        "\
-class CalcSuite extends munit.FunSuite {
-  test(\"healthy\") {
-    assertEquals(1 + 1, 2)
-  }
-  test(\"assertion_free\") {
-    val x = compute()
-  }
-  test(\"empty_body\") {}
-  test(\"sleeping\") {
-    Thread.sleep(1)
-    assert(true)
-  }
-}
-",
-    );
-    assert_eq!(
-        smell_pairs(&tmp),
-        vec![
-            ("assertion_free".to_string(), TestSmellKind::AssertionFree),
-            ("empty_body".to_string(), TestSmellKind::EmptyBody),
-            ("sleeping".to_string(), TestSmellKind::Sleeping),
-        ],
-        "exactly the three smelly tests are flagged, never the healthy one"
     );
 }

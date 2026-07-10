@@ -34,54 +34,29 @@ const INDEXED = {
   warnings: [],
 };
 
-const EMPTY_SMELLS = { label: "", findings: [], not_analyzed: [] };
-
 function model(over: Partial<GapsModel>): GapsModel {
   return {
     status: INDEXED,
-    test_gaps: {
-      untested: [],
-      total_functions: 10,
-      covered_functions: 4,
-      coverage_ratio: 4000,
-      limit: 25,
-      truncated: false,
-      caveat: "static reachability — not a runtime coverage guarantee",
-      freshness: "fresh",
-      warnings: [],
-      smells: EMPTY_SMELLS,
-    },
     rules: { passed: true, checked_rules: 3, rules_present: true, violations: [], freshness: "fresh", warnings: [] },
     ...over,
   };
 }
 
-describe("GapsView over mocked /api/v1 (S-189, FR-UI-06)", () => {
+describe("GapsView → Rule findings over mocked /api/v1 (S-189, FR-UI-06; CR-079)", () => {
   it("renders the honest empty state when the graph is not indexed", async () => {
     stub(model({ status: { ...INDEXED, indexed: false } }));
     render(<GapsView />);
     expect(await screen.findByText(/No index yet/i)).toBeInTheDocument();
   });
 
-  it("renders gaps in the read-model order verbatim (FR-GV-17, never re-sorted)", async () => {
-    stub(
-      model({
-        test_gaps: {
-          ...model({}).test_gaps,
-          untested: [
-            { name: "zzz_hot", file: "src/z.rs", line: 1 },
-            { name: "aaa_cold", file: "src/a.rs", line: 2 },
-          ],
-        },
-      }),
-    );
+  it("leads with the rule-findings count and no longer shows a test-gaps table", async () => {
+    stub(model({}));
     render(<GapsView />);
-    const table = await screen.findByRole("table", { name: "Test gaps" });
-    const text = within(table).getAllByRole("cell").map((c) => c.textContent);
-    // The hot (high blast-radius) gap precedes the cold one, as the read-model ranked them.
-    expect(text.indexOf("zzz_hot")).toBeLessThan(text.indexOf("aaa_cold"));
-    // The mandatory static-coverage caveat rides above the table (BR-16).
-    expect(screen.getByText(/static reachability/i)).toBeInTheDocument();
+    expect(await screen.findByText(/0 rule finding\(s\)/i)).toBeInTheDocument();
+    // The retired test-gaps table is gone.
+    expect(screen.queryByRole("table", { name: "Test gaps" })).not.toBeInTheDocument();
+    // Clean state (rules present, no violations).
+    expect(screen.getByText("No rule findings.")).toBeInTheDocument();
   });
 
   it("shows the no-rules onboarding empty state, not an always-empty table", async () => {
@@ -113,36 +88,7 @@ describe("GapsView over mocked /api/v1 (S-189, FR-UI-06)", () => {
     expect(within(table).getByText("error")).toBeInTheDocument();
     expect(within(table).getByText("warning")).toBeInTheDocument();
     expect(within(table).getByText("max_cc")).toBeInTheDocument();
-  });
-
-  it("shows the `n/a` coverage badge when the ratio is null", async () => {
-    stub(model({ test_gaps: { ...model({}).test_gaps, coverage_ratio: null } }));
-    render(<GapsView />);
-    expect(await screen.findByText("n/a")).toBeInTheDocument();
-  });
-
-  it("paginates the test-gap table at 20 rows/page, keeping the read-model order (S-195, FR-UI-11)", async () => {
-    // 25 gaps → the previously-unbounded table now pages at the shared 20, never
-    // rendering more than one page, and page 1 holds the read-model order verbatim.
-    stub(
-      model({
-        test_gaps: {
-          ...model({}).test_gaps,
-          untested: Array.from({ length: 25 }, (_, i) => ({
-            name: `fn_${String(i).padStart(2, "0")}`,
-            file: "src/m.rs",
-            line: i + 1,
-          })),
-        },
-      }),
-    );
-    render(<GapsView />);
-    const table = await screen.findByRole("table", { name: "Test gaps" });
-    // 20 body rows + the header row — no page renders more than 20 rows.
-    expect(within(table).getAllByRole("row").length).toBe(20 + 1);
-    expect(screen.getByText(/Showing 1–20 of 25/)).toBeInTheDocument();
-    // Page 1 is the first 20 in read-model order (the worklist ranking, not re-sorted).
-    expect(within(table).getByText("fn_00")).toBeInTheDocument();
-    expect(within(table).queryByText("fn_20")).not.toBeInTheDocument();
+    // The verdict line reflects the finding count.
+    expect(screen.getByText(/2 rule finding\(s\)/i)).toBeInTheDocument();
   });
 });

@@ -472,7 +472,7 @@ pub fn god_containers(
 /// agrees with the dimension it explains, [FR-QM-08]), ordered by offending
 /// severity then node id, and capped at `cap` ([NFR-RA-06] determinism, bounded
 /// output). The lists are report detail only — they never enter the aggregate or
-/// the gate (exactly as `test_gaps`/`doc_gaps` are advisory). `functions` carries
+/// the gate (exactly as `doc_gaps` is advisory). `functions` carries
 /// the per-function facts; `nodes` supplies the name/file/line each offender
 /// reports (the metric rows omit them).
 ///

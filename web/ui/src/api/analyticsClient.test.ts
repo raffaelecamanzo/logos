@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchCoverage, fetchFiles, fetchQuadrant } from "./client.ts";
+import { fetchCoverage, fetchFiles } from "./client.ts";
 
-// The Files/Coverage/Quadrant typed helpers (S-188) build the right same-origin
+// The Files/Coverage typed helpers (S-188) build the right same-origin
 // `/api/v1` URL over a stubbed fetch — the `untested` toggle is omitted when off
 // (byte-identical to the no-filter request) and present when on.
 describe("analytics endpoint helpers (over a stubbed same-origin fetch)", () => {
@@ -50,10 +50,9 @@ describe("analytics endpoint helpers (over a stubbed same-origin fetch)", () => 
     expect(calls()[0]).toBe("/api/v1/files?untested=true&production_scope=true");
   });
 
-  it("fetchCoverage and fetchQuadrant hit their bare endpoints (GET-only reads)", async () => {
+  it("fetchCoverage hits its bare endpoint (GET-only read)", async () => {
     const calls = stubFetch();
     await fetchCoverage();
-    await fetchQuadrant();
-    expect(calls()).toEqual(["/api/v1/coverage", "/api/v1/quadrant"]);
+    expect(calls()).toEqual(["/api/v1/coverage"]);
   });
 });

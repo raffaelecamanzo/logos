@@ -37,7 +37,6 @@
 //! [S-051]: ../../../../docs/planning/journal.md#s-051-coverage-surfaces-and-untested-hotspots
 
 mod artifact;
-mod cross;
 mod parse;
 mod pathmap;
 mod read;
@@ -56,15 +55,12 @@ use crate::config::{EffectiveCoverage, EffectiveCoverageIngest};
 /// The basis-point scale (`/10000`) every coverage ratio rounds to -- the same
 /// integer resolution the gated 0--10000 signal and the temporal `bp` metrics
 /// use ([ADR-08]), so cross-target arithmetic is byte-identical ([NFR-RA-06]).
-/// Shared by the file-level [`read`] aggregates and the symbol-level [`cross`].
+/// Shared by the file-level [`read`] aggregates.
 ///
 /// [ADR-08]: ../../../../docs/specs/architecture/decisions/ADR-08.md
 /// [NFR-RA-06]: ../../../../docs/specs/requirements/NFR-RA-06.md
 pub(super) const BP_SCALE: i64 = 10_000;
 
-pub use cross::{
-    coverage_cross, CoverageCrossReport, CrossSymbol, CrossSymbolInput, CrossTotals, Quadrant,
-};
 pub use parse::CoverageFormat;
 
 pub(crate) use artifact::{discover as discover_artifact, ArtifactMatcher};

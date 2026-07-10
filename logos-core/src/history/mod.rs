@@ -42,9 +42,8 @@ use anyhow::{Context, Result};
 use crate::config::EffectiveHistory;
 
 pub use coverage::{
-    coverage_cross, CoverageCrossReport, CoverageFileStatus, CoverageFormat,
-    CoverageRefreshSummary, CoverageStatus, CrossSymbol, CrossSymbolInput, CrossTotals,
-    IngestSummary, Quadrant, FRESHNESS_FRESH, FRESHNESS_NA, FRESHNESS_STALE,
+    CoverageFileStatus, CoverageFormat, CoverageRefreshSummary, CoverageStatus, IngestSummary,
+    FRESHNESS_FRESH, FRESHNESS_NA, FRESHNESS_STALE,
 };
 pub use hotspot::{
     aggregate_complexity, rank, test_only_files, CoverageCell, FileCoverage, Hotspot,

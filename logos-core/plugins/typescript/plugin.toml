@@ -42,11 +42,6 @@ framework_detectors = ["express", "next", "react"]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"
 frameworks = "queries/frameworks.scm"
-# The optional fourth query (CR-007, FR-CV-08): test-quality smell evidence.
-# NOT listed in `capabilities` -- extraction never runs it; `test_gaps` runs it
-# on demand. Embedded + disk-shadowable like every query (FR-PL-04).
-smell = "queries/smells.scm"
-
 # Captured `@fw.route.method` text → HTTP method (S-015). Express router
 # verbs map to themselves; `all` and `use` (mounting) carry every verb.
 [framework_methods]

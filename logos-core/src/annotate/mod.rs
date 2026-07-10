@@ -11,8 +11,8 @@
 //!    `*.spec.*`, …), or a `[semantics].test_markers` match. Computed first
 //!    because it feeds the dead-code live-root set below, and persisted as the
 //!    single source of truth every other test-aware detector reads — metrics
-//!    scope ([FR-QM-08]), `test_gaps` ([FR-GV-08]), dead-code roots
-//!    ([FR-AN-01]).
+//!    scope ([FR-QM-08]), the `[[require_tested]]` contract ([FR-GV-13]),
+//!    dead-code roots ([FR-AN-01]).
 //! 1. **Dead-code** ([FR-AN-01]) — reachability over `calls` (+ `routes_to`)
 //!    from the live root set: every *exported* declaration (exported-is-live),
 //!    every framework `route` node, every `[semantics].entry_points` name, and
@@ -523,11 +523,12 @@ fn reachability_capable(file_path: Option<&str>, reachable_exts: &HashSet<String
 ///    segments, `*_test.*`, `test_*.py`, `*.spec.*`/`*.test.*`).
 /// 3. **`[semantics].test_markers` match** — the node name equals a marker or
 ///    carries it as a `<marker>_` / `_<marker>` affix (the ratified
-///    2026-06-06 surface, shared with the former `test_gaps` marking).
+///    2026-06-06 surface, shared with the `[[require_tested]]` marking).
 ///
 /// This is the single computation behind the persisted `is_test` column, so
-/// `test_gaps` ([FR-GV-08]) and the metrics scope filter ([FR-QM-08]) — which
-/// read that column — can never disagree with the annotation (CR-001 CRA-01).
+/// the `[[require_tested]]` contract ([FR-GV-13]) and the metrics scope filter
+/// ([FR-QM-08]) — which read that column — can never disagree with the
+/// annotation (CR-001 CRA-01).
 ///
 /// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
 /// [FR-EX-06]: ../../../docs/specs/requirements/FR-EX-06.md

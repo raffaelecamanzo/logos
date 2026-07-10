@@ -19,8 +19,7 @@
 //!   number (NFR-RA-11, ADR-11);
 //! - every scan/gate appends a `metric_snapshots` row (FR-GV-09) and
 //!   `evolution` windows them with deltas (FR-GV-06, UAT-GV-05);
-//! - `dsm` returns a square layer-ordered matrix and `test_gaps` lists the
-//!   untested function with the mandatory caveat (FR-GV-07/08, UAT-GV-05);
+//! - `dsm` returns a square layer-ordered matrix (FR-GV-07);
 //! - an unchanged `rules.toml` hits the persisted rules cache (FR-GV-01).
 
 #![cfg(feature = "lang-rust")]
@@ -1356,63 +1355,15 @@ fn dsm_returns_a_square_layer_ordered_matrix() {
     assert_eq!(default.granularity, "module");
 }
 
-// ── FR-GV-08 / UAT-GV-05: test gaps ─────────────────────────────────────────
+// ── require-tested parity (CR-001 CRA-01): the `[[require_tested]]` contract
+// and the `is_test` annotation classify the identical function set ────────────
 
 #[test]
-fn test_gaps_lists_the_untested_function_with_the_caveat() {
-    let tmp = TempDir::new().unwrap();
-    write(
-        tmp.path(),
-        "src/lib.rs",
-        "\
-pub fn covered() {}
-pub fn uncovered() {}
-",
-    );
-    write(
-        tmp.path(),
-        "tests/api.rs",
-        "\
-pub fn test_covered() {
-    covered();
-}
-fn covered() {}
-",
-    );
-    // NOTE: the tests/ file carries its own local `covered` because the
-    // fixture's cross-crate test→lib resolution is not the point here — the
-    // BFS over whatever `calls` edges resolve is.
-    let engine = Engine::start(tmp.path()).expect("engine starts");
-
-    let report = engine.test_gaps(None, true).expect("test_gaps runs");
-    assert_eq!(report.limit, 50, "default cap (FR-GV-08)");
-    assert!(
-        report.caveat.contains("static reachability"),
-        "the honesty caveat is always emitted (BR-16): {}",
-        report.caveat
-    );
-    assert!(
-        report.untested.iter().any(|g| g.name == "uncovered"),
-        "the untested fn is listed: {:?}",
-        report.untested
-    );
-    assert!(
-        !report.untested.iter().any(|g| g.name == "test_covered"),
-        "test nodes are never gaps"
-    );
-    assert!(report.coverage_ratio.is_some(), "functions exist → a ratio");
-    assert_eq!(
-        report.total_functions,
-        report.covered_functions + report.untested.len() as u64,
-        "the arithmetic is consistent (untruncated case)"
-    );
-}
-
-#[test]
-fn test_gaps_and_is_test_annotation_classify_the_identical_function_set() {
-    // CR-001 CRA-01: `test_gaps` reads the persisted `is_test` column, so it
-    // can never disagree with the annotation about what a test is. No `main`
-    // entry point, to keep the test/non-test partition unconfounded.
+fn require_tested_and_is_test_annotation_classify_the_identical_function_set() {
+    // CR-001 CRA-01: the coverage contract reads the persisted `is_test` column
+    // via `test_reachable_set`, so it can never disagree with the annotation
+    // about what a test is. No `main` entry point, to keep the test/non-test
+    // partition unconfounded.
     let tmp = TempDir::new().unwrap();
     write(
         tmp.path(),
@@ -1446,24 +1397,6 @@ mod tests {
     assert!(
         annot_tests.contains("covers_it") && annot_tests.contains("exercise"),
         "the evidence (#[cfg(test)]) and path (tests/) fns are is_test: {annot_tests:?}"
-    );
-
-    // No is_test function is ever reported as a gap.
-    let report = engine.test_gaps(None, true).expect("test_gaps runs");
-    for gap in &report.untested {
-        assert!(
-            !annot_tests.contains(&gap.name),
-            "a test fn must never be a gap (CRA-01 parity): {}",
-            gap.name
-        );
-    }
-    // `total_functions` counts only the non-test functions, so the set
-    // `test_gaps` excludes is exactly the annotation's is_test set (CRA-01).
-    let all_fns = fn_nodes().count();
-    assert_eq!(
-        report.total_functions as usize + annot_tests.len(),
-        all_fns,
-        "test_gaps and the annotation partition the functions identically (CRA-01)"
     );
 }
 
@@ -1831,7 +1764,7 @@ fn an_invalid_forbidden_import_glob_fails_to_load() {
 /// an in-file `#[cfg(test)]` test, one exported fn no test reaches, and a
 /// non-exported helper. Resolution binds the test→fn `calls` edge intra-file,
 /// so the BFS seeded from the persisted `is_test` column (FR-AN-05) reaches the
-/// covered fn (the same seam `test_gaps` uses, FR-GV-08).
+/// covered fn (the shared `test_reachable_set` seam, FR-GV-13).
 fn require_tested_project() -> TempDir {
     let tmp = TempDir::new().unwrap();
     write(

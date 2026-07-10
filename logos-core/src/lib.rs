@@ -36,7 +36,7 @@ pub mod error;
 pub mod extract;
 /// The governance engine (S-020): `rules.toml` evaluation (constraints,
 /// layer ordering, boundaries — unassigned files exempt), the session/CI
-/// gate with baseline + epsilon regression check, evolution/dsm/test_gaps,
+/// gate with baseline + epsilon regression check, evolution/dsm/doc_gaps,
 /// and the reconcile-then-score freshness contract wrapping every aggregate
 /// run (ADR-11, FR-GV-01..09, FR-RC-01..04).
 pub mod governance;

@@ -2,13 +2,12 @@
  * Pure Dashboard model (S-187, FR-UI-09) — the presentation logic ported from the
  * server-rendered Dashboard (web/src/views/overview.rs) into framework-free,
  * unit-testable functions: the BR-34 advisory quality bands, the freshness
- * statement, the basis-point → percent reprojection, the architecturally-weighted
- * Q4 trust share (shared verbatim with the `/quadrant` view so the two surfaces can
- * never disagree), and the Project-Overview prose snippet. No DOM, no React — every
- * figure is a projection of a read-model field, inventing nothing (NFR-RA-05).
+ * statement, the basis-point → percent reprojection, and the Project-Overview prose
+ * snippet. No DOM, no React — every figure is a projection of a read-model field,
+ * inventing nothing (NFR-RA-05).
  */
 
-import type { CrossSymbol, HotspotReport, StatusInfo } from "../../api/types.ts";
+import type { StatusInfo } from "../../api/types.ts";
 import type { ScoreBarTone } from "../../components/index.ts";
 
 // ── BR-34 advisory quality bands (frontend-design §4.1) ──────────────────────
@@ -81,48 +80,6 @@ export function freshnessStatement(status: StatusInfo, nowUnix: number): string 
     phrase = "Index present";
   }
   return `${phrase} — ${caveat}`;
-}
-
-// ── Coverage-trust model (shared with the /quadrant view, CR-040) ────────────
-
-/**
- * The per-file architectural weight map (hotspot score by repo-relative path,
- * FR-GH-06). An absent/degraded board yields an empty map — the weighting then
- * floors every symbol at 1 ({@link weightOf}) so the trust score degrades to an
- * *unweighted* Q4 share rather than vanishing.
- */
-export function fileWeights(hotspots: HotspotReport | null): Map<string, number> {
-  const weights = new Map<string, number>();
-  if (hotspots) {
-    for (const file of hotspots.files) weights.set(file.path, file.score);
-  }
-  return weights;
-}
-
-/** A symbol's architectural weight: its file's hotspot score, floored at 1. */
-export function weightOf(weights: Map<string, number>, file: string): number {
-  return Math.max(1, weights.get(file) ?? 0);
-}
-
-/**
- * The architecturally-weighted **Q4 trust share** in basis points (0–10000) over
- * the *placed* symbols — the headline trust score (CR-040; Q4 = reachable +
- * executed). A symbol with no runtime axis (`quadrant === null`) cannot be placed
- * and is excluded from the denominator. `null` when no symbol is placed (no fresh
- * coverage) — the honest empty state, never a fabricated 0% (NFR-RA-05). Ported
- * verbatim from `quadrant.rs::trust_score_bp`.
- */
-export function trustScoreBp(symbols: CrossSymbol[], weights: Map<string, number>): number | null {
-  let denominator = 0;
-  let trust = 0;
-  for (const symbol of symbols) {
-    if (symbol.quadrant === null) continue;
-    const weight = weightOf(weights, symbol.file);
-    denominator += weight;
-    if (symbol.quadrant === "q4") trust += weight;
-  }
-  if (denominator === 0) return null;
-  return Math.floor((trust * 10_000) / denominator);
 }
 
 // ── Project-Overview prose snippet (overview.rs::snippet_of) ──────────────────

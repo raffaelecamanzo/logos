@@ -3,8 +3,7 @@
  * compiled to an external <link> stylesheet — no inline <style>, no CSS-in-JS — so
  * the byte-identical self-only CSP is unaffected. All values are design tokens.
  * Preserves the server-rendered Dashboard's verdict-first rhythm (overview.rs):
- * the freshness band, the full-width Project Overview, three equal-width pairs, and
- * the full-width trust row.
+ * the freshness band, the full-width Project Overview, and three equal-width pairs.
  */
 
 .view {
@@ -24,11 +23,6 @@
   .pair {
     grid-template-columns: 1fr;
   }
-}
-
-/* The trust card spans the full width below the pairs. */
-.trust {
-  width: 100%;
 }
 
 /* Every card is a flex column so its detail link pins to the bottom-left. */
@@ -99,72 +93,4 @@
   margin: 0;
   text-align: right;
   color: var(--text-1);
-}
-
-/* ── Mini-quadrant (CR-040 flipped 2×2: Q4 trust top-right) ────────────────── */
-.miniQuadrant {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-1);
-  max-width: 16rem;
-}
-.miniQuadrant:hover {
-  text-decoration: none;
-}
-.mqCell {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-  padding: var(--space-2);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-1);
-  background: var(--surface-2);
-}
-.mqTag {
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--tracking-label);
-  color: var(--text-2);
-}
-.mqCount {
-  font-size: var(--text-lg);
-  color: var(--text-1);
-}
-/* Q1/Q2 are the surprising-disagreement cells (tinted); Q4 trust reads green.
-   Colour is never the only channel — the Qn tag repeats the classification. */
-.mqQ1 {
-  border-color: var(--color-accent);
-}
-.mqQ2 {
-  border-color: var(--color-accent-warm);
-}
-.mqQ4 {
-  border-color: var(--color-pass);
-}
-
-/* The mini-quadrant + its always-visible compact legend (the semantic labels are
-   not hidden behind hover tooltips — WCAG 2.1 AA, §7). */
-.miniQuadrantWrap {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: var(--space-3) var(--space-4);
-  margin-top: var(--space-3);
-}
-.mqLegend {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  font-size: var(--text-xs);
-  color: var(--text-2);
-}
-.mqLegend li {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-1);
 }
