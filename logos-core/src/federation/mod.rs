@@ -4,13 +4,15 @@
 //!
 //! Federation is an **overlay, never a union** ([ADR-52]): each member keeps its
 //! own `.logos/logos.db` and its single-root behaviour byte-for-byte unchanged.
-//! This module is the foundation the rest of the overlay is built on — later
-//! stories add the `root → Engine` registry ([FR-WS-03]) and the in-memory
-//! contract bridge ([FR-WS-04]) beside it. Here we own only:
+//! This module is the foundation the rest of the overlay is built on — a later
+//! story adds the in-memory contract bridge ([FR-WS-04]) beside it. Here we own:
 //!
 //! - the manifest schema + parse ([`manifest`]);
 //! - [`discover`] — the up-tree walk that locates the manifest, resolves and
-//!   validates each member, and returns the [`Federation`] member set.
+//!   validates each member, and returns the [`Federation`] member set;
+//! - the [`registry`] — the `root → Engine` registry over the member set, with
+//!   the repo-qualified fan-out helper and the `Backing::Single | Federated`
+//!   serve-layer choice ([FR-WS-03], [NFR-PE-10]).
 //!
 //! # Single-root invariant
 //! When **no** manifest is found anywhere up-tree, [`discover`] returns
@@ -27,9 +29,11 @@
 //! [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
 //! [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
 //! [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
+//! [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
 pub mod manifest;
+pub mod registry;
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +43,7 @@ use crate::config::ConfigError;
 use crate::workspace::{is_git_root, resolve_root};
 
 pub use manifest::{Link, MANIFEST_FILENAME};
+pub use registry::{Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode};
 
 /// One resolved, validated member repository of a [`Federation`] ([FR-WS-01]).
 ///
