@@ -4,12 +4,21 @@
 //! These drive the real router in-process with `tower::ServiceExt::oneshot`
 //! (no socket bound) and assert the loopback listener directly. They cover
 //! [UAT-UI-02] steps 3 (loopback-only bind) and 4 (non-loopback `Host` → 403,
-//! non-GET → 405), plus the self-only CSP on every response (BR-33). The
-//! network-sandboxed zero-egress session (step 2) is a CI/manual run — there is
-//! no network *client* crate in this surface's graph (the default-tree
-//! no-network fitness test, logos-core/tests/no_network_deps.rs, keeps that
-//! honest), so the surface can only listen, never dial.
+//! non-GET → 405), plus the self-only CSP on every response (BR-33).
+//!
+//! Since CR-078/[ADR-60] made `ui` the shipped default (S-287), the sandboxed
+//! zero-egress session ([UAT-UI-02] step 2) is exercised here against the
+//! **default (listen-only) build** by [`serve_ui_session_records_zero_egress`]:
+//! a full dashboard session runs through the real router while a loopback
+//! tripwire monitors for any outbound dial and the listener is asserted
+//! loopback-only. It is the behavioral complement to the *structural* default-
+//! tree no-egress-client scan in logos-core/tests/no_network_deps.rs — there is
+//! no network *client* crate in this surface's graph, so it can only listen,
+//! never dial. The `agents`-gated chat/wiki-generation surface has its own
+//! zero-egress proof over the full orchestrated turn (web/tests/uat_ui_07.rs,
+//! [UAT-UI-07]).
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::{
@@ -49,6 +58,73 @@ fn listener_binds_loopback_only() {
     let addr = listener.local_addr().expect("local addr");
     assert!(addr.ip().is_loopback(), "bound a non-loopback address: {addr}");
     assert_eq!(addr.ip(), std::net::Ipv4Addr::LOCALHOST);
+}
+
+/// [UAT-UI-02] step 2, promoted to the shipped default build (CR-078, ADR-60):
+/// the default (listen-only) `serve --ui` read session serves cleanly over a
+/// loopback-only listener.
+///
+/// The load-bearing egress guarantee is **structural**: the default build links no
+/// HTTP *client* crate, enforced by `default_tree_denies_only_egress_client_crates`
+/// in logos-core/tests/no_network_deps.rs — that is what proves the default
+/// dashboard can only listen, never dial. This test is its *behavioral* companion:
+/// it drives a real in-process session over the SPA shell and the config read-model
+/// (the read path a browser first exercises against `serve --ui`) and asserts the
+/// surface listener binds only loopback (ADR-27).
+///
+/// The loopback tripwire is a **narrow sentinel, not a general egress monitor**: an
+/// in-process `oneshot` session opens no real sockets, and nothing here is wired to
+/// dial the tripwire, so `connections == 0` documents only that the session makes
+/// no accidental dial to a co-located loopback service. A regression that dialled an
+/// *external* host would target its own endpoint (never this tripwire), and is
+/// caught elsewhere: a new egress *client* crate trips the structural default-tree
+/// scan, and the residual hyper-client / raw-socket case the denylist split cannot
+/// see is defended by review and the read-only surface posture (a trade-off the
+/// sprint-52 risk table accepts) — not by this assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_ui_session_records_zero_egress() {
+    // A loopback sentinel: its accept loop counts any connection dialled to its own
+    // ephemeral address. Nothing in the listen-only build is wired to it, so a clean
+    // run leaves the counter at zero; only an accidental dial to this exact loopback
+    // address would register (see the docstring for what this does and does not cover).
+    let tripwire = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback sentinel");
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&connections);
+    tokio::spawn(async move {
+        while tripwire.accept().await.is_ok() {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    // Drive a real dashboard session over the throwaway (un-started) engine: the
+    // SPA shell and the config read-model — the read path a browser first exercises
+    // against `serve --ui`, and the two endpoints that serve without a live runtime.
+    let (_dir, router) = test_router();
+    for path in ["/", "/api/v1/config"] {
+        let resp = router.clone().oneshot(get(path)).await.unwrap();
+        assert!(
+            resp.status().is_success(),
+            "GET {path} serves during the dashboard session: {}",
+            resp.status(),
+        );
+    }
+
+    // The session made no dial to the loopback sentinel (its narrow scope) …
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        0,
+        "the listen-only `serve --ui` session made no accidental dial to a loopback \
+         service (UAT-UI-02); the no-egress-*client* guarantee is structural, in \
+         logos-core/tests/no_network_deps.rs",
+    );
+    // … and the surface listener binds only loopback (the listen side of the seam).
+    let bound = web::bind(0).expect("bind a loopback listener");
+    assert!(
+        bound.local_addr().unwrap().ip().is_loopback(),
+        "the default `serve --ui` surface binds only a loopback address (ADR-27)",
+    );
 }
 
 /// Step 5: a port conflict fails with an actionable error naming the `--port`

@@ -403,14 +403,38 @@ see below). It is a single embedded **React single-page application (SPA)** —
 served at `/`, client-side routed, reading its data from a same-origin JSON API
 under `/api/v1/*` ([CR-049](../requests/CR-049-decouple-web-ui-into-embedded-spa.md),
 [FR-UI-22](../specs/requirements/FR-UI-22.md),
-[ADR-43](../specs/architecture/decisions/ADR-43.md)). It ships **only** in a
-build compiled with the non-default `ui` feature (the default binary has no web
-surface and no networking crate):
+[ADR-43](../specs/architecture/decisions/ADR-43.md)). Since
+[CR-078](../requests/CR-078-ui-default-egress-carve-out.md)/[ADR-60](../specs/architecture/decisions/ADR-60.md)
+the dashboard ships **by default** — a plain `cargo build`/`cargo install` carries
+it — while the outbound LLM egress client stays opt-in behind a separate `agents`
+feature:
 
 ```bash
-cargo build -p logos --release --features ui
-logos serve --ui --port 4983        # then open http://127.0.0.1:4983
+# Default: the dashboard, egress-free. Listens on loopback, links no HTTP client.
+cargo install --path cli                 # or: cargo build -p logos --release
+logos serve --ui --port 4983             # then open http://127.0.0.1:4983
 ```
+
+### Build matrix — dashboard, chat/wiki generation, or slim headless
+
+CR-078/ADR-60 separates *listening* (the read-only dashboard) from *dialing* (the
+LLM egress client). Three build modes result:
+
+| Build | Command | Dashboard (`serve --ui`) | Chat + in-app wiki generation | Outbound HTTP client |
+|-------|---------|--------------------------|-------------------------------|----------------------|
+| **Default** | `cargo install --path cli` (no explicit features) | ✅ served | ❌ absent | ❌ **none** — links the loopback *server* only, never a client |
+| **Agents** | `cargo install --path cli --features agents` | ✅ served | ✅ Chat tab + Wiki-tab generation | ✅ `rig`/`reqwest`, **opt-in**, user-initiated and consent-gated at runtime ([ADR-40](../specs/architecture/decisions/ADR-40.md)) |
+| **Slim headless** | `cargo build -p logos --no-default-features --features lang-all` | ❌ no `--ui`, no listener | ❌ absent | ❌ **none** — the absolute-offline binary; no socket stack at all |
+
+The default and agents builds are the shipped shapes: cargo-dist release artifacts
+enable `agents`, so downloaded binaries carry both the dashboard and chat/wiki
+generation. The slim `--no-default-features` build is the headless CLI/MCP binary
+with no web surface. Two structural fitness checks
+(`logos-core/tests/no_network_deps.rs`) keep the postures honest: the **default**
+tree may link the loopback HTTP *server* but is denied every egress *client* crate
+(it can never phone home), and the **slim** tree is denied the entire socket stack
+(it links nothing that can open or accept a connection) —
+[NFR-SE-01](../specs/requirements/NFR-SE-01.md), ADR-60.
 
 The surface binds **`127.0.0.1` only** (a compile-time constant — no flag or
 env var moves it), rejects non-loopback `Host` headers with `403`, and stamps a
@@ -758,8 +782,8 @@ focusing, and filtering mutate no store and contact no external origin:
   `revision_pending` predicate against the same persisted graph revision, so a page
   can never read "regeneration pending" on its page view and "fresh" in search.
   Every read endpoint is read-only (GET-only; non-GET → 405) and same-origin.
-  Regeneration of the agent tier now runs **in-process** (`--features ui` builds
-  only): opening the Wiki tab checks the work-list and, if pages have drifted,
+  Regeneration of the agent tier now runs **in-process** (`--features agents`
+  builds only): opening the Wiki tab checks the work-list and, if pages have drifted,
   launches a background generation pass on the in-process wiki-agent under a
   single-run lock, streaming each page in over SSE as it completes while existing
   pages stay browsable — gated by a first-use consent disclosure and a dedicated
@@ -768,7 +792,7 @@ focusing, and filtering mutate no store and contact no external origin:
   autogen hook is retired, as is the PostToolUse wiki-augmentation hook
   ([CR-070](../requests/CR-070-retire-wiki-augment-hook.md)); `wiki generate`
   is still available as the CLI queue read, and the embedded `logos-wiki`
-  skill is the manual generation path outside `ui` builds.
+  skill is the manual generation path outside `agents` builds.
 
 Run it alongside the MCP server in one process with `logos serve --mcp --ui`.
 
@@ -793,9 +817,10 @@ back a synthesized answer:
 - **Source-Reader** — sandboxed read/grep/glob over the project source.
 - **Synthesizer** — a tool-less subagent that writes the final answer from what the others found.
 
-Chat exists **only** in the `--features ui` web surface. The default `logos`
-binary has no chat and no networking — there is no outbound call anywhere in the
-offline build. The conversation and its per-turn memory persist in
+Chat exists **only** in an `--features agents` build. The default `logos` binary
+ships the dashboard but no chat and no networking client — there is no outbound
+call anywhere short of the opt-in `agents` feature (CR-078/ADR-60). The
+conversation and its per-turn memory persist in
 `.logos/chat.db` (created on the first turn, gitignored, never in the default
 binary).
 
@@ -945,9 +970,10 @@ wiki reads as a product rather than a page dump:
   code-level pages. Existing Overview pages pick up the improved prose the next time the
   connected agent re-runs generation.
 
-Like Chat, generation exists **only** in the `--features ui` web surface — the
-default `logos` binary parses `[wiki]` as policy but makes no outbound call and links
-no HTTP client (the offline invariant is byte-identical). `wiki materialize`,
+Like Chat, generation exists **only** in an `--features agents` build — the
+default `logos` binary serves the wiki **view** and parses `[wiki]` as policy but
+makes no outbound call and links no HTTP client (the offline invariant holds).
+`wiki materialize`,
 however, is a **deterministic** presentation step that the default binary *does*
 perform (still no LLM/network). Generated and presented pages persist in
 `.logos/wiki.db` via the unchanged `wiki write` contract.
@@ -1038,6 +1064,7 @@ still clickable. Because telemetry is repo-global and durable (see
 [commands.md § `stats`](commands.md)), the figures include usage recorded from
 linked worktrees that have since been removed.
 
-Like the Chat and Wiki tabs, the Statistics view exists **only** in a
-`--features ui` build — the default binary has no web surface, so the tab is
-simply absent there.
+The Statistics view is part of the dashboard, so it is present in the default
+build (`ui` is the shipped default, CR-078/ADR-60). Only the slim
+`--no-default-features` build has no web surface, so the tab is simply absent
+there.
