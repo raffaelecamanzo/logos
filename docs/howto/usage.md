@@ -71,7 +71,7 @@ logos implements FR-DG-06
 # Which docs reference a symbol — what to update when it changes (code → doc)
 logos referencing-docs aggregate_signal
 
-# Exported symbols with no documentation (the doc analog of test-gaps)
+# Exported symbols with no documentation
 logos doc-gaps --limit 50
 ```
 
@@ -197,7 +197,6 @@ logos doctor                     # fast structural-integrity check — exit 1 on
 logos verify                     # deep shadow-reindex consistency check — exit 1 on drift
 logos evolution                  # signal trend over snapshots
 logos dsm                        # dependency-structure-matrix coupling clusters
-logos test-gaps --limit 50       # public symbols with no test-coverage path
 ```
 
 `doctor` is the cheap always-on guard — structural integrity **and** an
@@ -341,11 +340,11 @@ For manual wiring:
 claude mcp add logos -- /path/to/logos --project /path/to/project serve --mcp
 ```
 
-The host then sees **25 `logos:*` tools**, all live:
+The host then sees **27 `logos:*` tools**, all live:
 
-| Navigation (8) | Quality & Governance (9) | Evidence tiers (4) | Source wiki (4) |
+| Navigation (8) | Quality & Governance (10) | Evidence tiers (4) | Source wiki (5) |
 |---|---|---|---|
-| `search`, `node`, `callers`, `callees`, `impact`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `health`, `evolution`, `dsm`, `test_gaps`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh` | `wiki_read`, `wiki_search`, `wiki_status`, `wiki_write` |
+| `search`, `node`, `callers`, `callees`, `impact`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh` | `wiki_read`, `wiki_search`, `wiki_status`, `wiki_write`, `wiki_materialize` |
 
 Each MCP tool is a thin twin of the CLI command of the same name and returns a
 byte-identical payload. The four evidence-tier tools are **non-gated** — like
@@ -468,7 +467,7 @@ Each read view's figures trace to a read-model, and an empty store renders an
 honest empty state naming the producing command:
 
 - **Group A — read & navigate:** Dashboard `/`, Health `/health`, Graph `/graph`, Chat `/chat`, Wiki `/wiki`, Architecture / Cycles `/architecture`.
-- **Group B — analyse:** Files & Risk `/files`, Gaps `/gaps`, Coverage `/coverage`, Quadrant `/quadrant`.
+- **Group B — analyse:** Files & Risk `/files`, Rule findings `/gaps`, Coverage `/coverage`.
 - **Group C — configure:** Statistics `/statistics`, Config `/config`.
 
 The **Files & Risk** view (`/files`) is the merge of the former Hotspots and
@@ -487,23 +486,16 @@ its cycle participants deep-link into `/graph?seed=<module>`.
 The root `/` view is the **Dashboard**: a verdict-rich roll-up that leads with
 the gate `PASS`/`FAIL` verdict, then a hero row of at-a-glance figures — a banded
 *Quality index* (the 0–10000 signal), *Code coverage* (the overall line-%
-aggregate), *Test coverage* (the tested-export fraction), and the per-project
-**language composition** — each fed by a read-only accessor, never a fabricated
-number. The body is recomposed (CR-037) into **equal-size paired widget rows**
-plus a **full-width Project Overview**: the `overview/project-overview` wiki page
-snippet with a link into `/wiki` (CR-034); when that page has not been generated
-yet it shows an honest "not yet generated" empty state rather than a fabricated
-overview. A reserved **full-width trust-score row** (CR-037) holds a **Test-trust
-card** (CR-036) summarising the reachability × coverage signal. The card is
-built on the standard widget-card structure (CR-040): a 0–10000 trust-score bar,
-a legible enlarged **mini-quadrant** that mirrors the `/quadrant` flipped
-orientation (Q4 trust top-right) with a compact in-card legend, and an **"Open
-quadrant" link pinned bottom-left** like every other dashboard widget. The
-headline figure is the architecturally-weighted **Q4** (trust) share.
-When no fresh coverage has been ingested the card renders an honest
-**no-coverage** state (naming `coverage ingest` / `coverage refresh`), and when
-the latest coverage is stale relative to the index it renders a **stale-coverage**
-state — never a fabricated score. Loading the Dashboard writes nothing to any
+aggregate), and the per-project **language composition** — each fed by a
+read-only accessor, never a fabricated number. The body is recomposed (CR-037)
+into **equal-size paired widget rows** plus a **full-width Project Overview**:
+the `overview/project-overview` wiki page snippet with a link into `/wiki`
+(CR-034); when that page has not been generated yet it shows an honest "not yet
+generated" empty state rather than a fabricated overview. One widget slot holds
+the **Rule findings** card projecting `check_rules` (FR-GV-02): it reads **green**
+when there are zero rule violations, **red** when there are findings, and a muted
+**onboarding** state when no `.logos/rules.toml` exists — with a link into the
+Rule findings view (`/gaps`). Loading the Dashboard writes nothing to any
 store.
 
 **The `/api/v1/*` data API.** The SPA reads every view's data from a same-origin
@@ -516,7 +508,7 @@ read mutates no store and leaves every metric/cycle/DSM/dead-code scope
 byte-identical. The endpoints are: `/api/v1/overview`, `/api/v1/health`,
 `/api/v1/graph`, `/api/v1/query`, `/api/v1/impact`, `/api/v1/node`,
 `/api/v1/search`, `/api/v1/architecture`, `/api/v1/gaps`, `/api/v1/files`,
-`/api/v1/coverage`, `/api/v1/quadrant`, `/api/v1/wiki`, `/api/v1/wiki/nav`,
+`/api/v1/coverage`, `/api/v1/wiki`, `/api/v1/wiki/nav`,
 `/api/v1/wiki/search`, `/api/v1/wiki/page/*slug`, `/api/v1/wiki/asset/*path`
 (same-origin, read-only, path-sandboxed doc-image serving — CR-064), and
 `/api/v1/config`.
@@ -670,7 +662,7 @@ focusing, and filtering mutate no store and contact no external origin:
     divides the nodes table from the edges table. Every row traces to a real
     graph-element field — none fabricated ([FR-UI-08](../specs/requirements/FR-UI-08.md),
     [NFR-RA-05](../specs/requirements/NFR-RA-05.md)).
-- **Interactive tables.** Every data table (Gaps, Architecture / Cycles, Health,
+- **Interactive tables.** Every data table (Rule findings, Architecture / Cycles, Health,
   Files & Risk, Coverage, Wiki search/anchors, Graph Decisions & docs, and the
   Graph nodes/edges accessible tables) has sortable column headers — click to sort
   the **full dataset** first, then the page is sliced — and consistent pagination.
@@ -679,7 +671,7 @@ focusing, and filtering mutate no store and contact no external origin:
   deliberate exception at **15**, [FR-UI-11](../specs/requirements/FR-UI-11.md),
   [FR-UI-14](../specs/requirements/FR-UI-14.md)). Sort/page state is carried in the
   client route's URL (bookmarkable) and namespaced per table (`<tid>_sort` / `_dir`
-  / `_page`), so two tables on one view (e.g. Gaps) never collide. Numeric columns
+  / `_page`), so two tables on one view (e.g. Architecture / Cycles) never collide. Numeric columns
   right-align with their headers. The React view re-renders just the table in place.
 - **Editing config (`/config`) — the one mutating view.** The Config view is a
   React hybrid editor over the two policy files: typed form fields for the
@@ -707,30 +699,6 @@ focusing, and filtering mutate no store and contact no external origin:
   symbols. On a read fault it shows an honest error panel — never a fabricated
   `CONSISTENT` ([FR-UI-25](../specs/requirements/FR-UI-25.md),
   [NFR-RA-05](../specs/requirements/NFR-RA-05.md)).
-- **Reachability × Coverage Quadrant (`/quadrant`).** A true **2×2 grid** (CR-036,
-  redesigned CR-040) of four shaded cell regions, flipped to the **Gartner
-  convention — best top-right**. Each symbol is placed on two axes: **reachable
-  from a test** (static reachability, supplied at the api-facade layer, the binary
-  X column) × **runtime execution fraction** (from ingested coverage, the Y band,
-  with in-band height tracking the fraction). The four cells are **Q4**
-  reachable+executed (*trust*, top-right, best), **Q1** unreachable+executed
-  (*false-green*, top-left, worst), **Q2** reachable+unexecuted (*dead edge*,
-  bottom-right), **Q3** unreachable+unexecuted (*true gap*, bottom-left). Point
-  **area encodes blast radius** (hotspot weight, FR-GH-06) with an explicit
-  size legend, and a cell-meaning legend orders the cells worst→best
-  (Q1→Q2→Q3→Q4). Below the grid an **urgency table** orders the symbols by
-  `architectural weight × severity` (severity Q1 > Q2 > Q3 > Q4, most-dangerous
-  first), and a verdict line reports the **trust score** — the
-  architecturally-weighted **Q4** share over *placed* symbols (symbols with `n/a`
-  runtime are excluded from the denominator; zero placed renders an honest empty
-  state, never a fabricated 0%) — alongside the `Q1 + Q2` disagreement count. The
-  same `trust_score_bp` / `mini_quadrant` accessors back both this verdict and the
-  Dashboard's Test-trust card, so the two surfaces cannot disagree. The SPA
-  computes the scatter points client-side from the `GET /api/v1/quadrant` JSON
-  cross. When no fresh coverage exists it shows the honest no-coverage state; when
-  coverage is stale, the stale-coverage state. The trust score is advisory — it
-  never reaches the gate (BR-28). Like every read endpoint `/api/v1/quadrant` is
-  GET-only, loopback-only, and write-free.
 - **Per-page Wiki (`/wiki`).** The Wiki is a navigable per-page documentation
   site, not one scroll. `/wiki` is a **Start-here landing** that leads with a
   Summary callout and an "N pages · all fresh" freshness badge (derived from

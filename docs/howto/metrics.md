@@ -2,7 +2,7 @@
 
 Logos scores code quality with **ten orthogonal metrics** combined into a
 single deterministic **0–10000 integer signal**. The commands that surface
-it — `scan`, `check`, `gate`, `evolution`, `dsm`, `test-gaps` — are all live;
+it — `scan`, `check`, `gate`, `evolution`, `dsm` — are all live;
 see [commands.md](commands.md#quality--governance) for flags and exit codes.
 This page explains what the numbers mean so your `rules.toml` thresholds can
 be chosen deliberately.
@@ -112,8 +112,8 @@ re-tuning either re-baselines the gate like any other threshold.
 
 All ten metrics are computed over the **production subgraph only**. Every
 function Logos classifies as test code (`is_test`, the single annotation that
-`test-gaps` and the dead-code roots also read — see
-[commands.md](commands.md#test-gaps---limit-n)) is dropped before scoring. A
+the `[[require_tested]]` rule and the dead-code roots also read) is dropped
+before scoring. A
 function is `is_test` from extraction evidence (a `#[test]`/`#[cfg(test)]`
 marker) **or** from its file: Logos recognizes the common Rust test-file
 conventions — a `tests/` integration directory, a bare `tests.rs`, the
@@ -280,21 +280,20 @@ dropped dimension into an actionable to-do list.
 
 ## The non-gated evidence tiers
 
-Three surfaces sit **outside** the 0–10000 signal entirely and never feed it:
+Two surfaces sit **outside** the 0–10000 signal entirely and never feed it:
 
 - **Hotspots** (`logos hotspots`) — the git-history churn × complexity ranking.
 - **Coverage** (`logos coverage ingest` / `status`) — ingested LCOV/Cobertura
   evidence and per-file freshness.
-- **Test-quality smells** — the advisory appendix on `logos test-gaps`.
 
-All three are **advisory** and live in a separate store (`.logos/history.db`)
+Both are **advisory** and live in a separate store (`.logos/history.db`)
 that the quality `gate` never opens. This is enforced **structurally**, not by
 convention: the engine holds no `history.db` connection on the gate path, so the
 gate physically cannot read evidence data. The guarantee that follows is the
 property these tiers need to be safe to run in CI alongside the gate:
 
 > The `gate` / `session_end` signal is **byte-identical** before and after
-> `hotspots`, `coverage ingest`, or a `test-gaps` smell scan — and identical
+> `hotspots` or `coverage ingest` — and identical
 > again after `.logos/history.db` is deleted. Coverage state (fresh, stale,
 > absent) never enters the gated computation.
 

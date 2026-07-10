@@ -1,6 +1,6 @@
 # Command Reference
 
-All 28 subcommands of the `logos` binary. Every command accepts the global
+All 27 subcommands of the `logos` binary. Every command accepts the global
 flags `--project <PATH>`, `--json`, and `--quiet`; see
 [usage.md](usage.md#global-flags-and-exit-codes) for those and for the
 `0/1/2/3` exit-code contract.
@@ -30,7 +30,6 @@ flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`gate`](#gate) | ✅ | CI quality gate on the signal |
 | [`evolution`](#evolution) | ✅ | Signal evolution over snapshots |
 | [`dsm`](#dsm) | ✅ | Dependency-structure-matrix clusters |
-| [`test-gaps`](#test-gaps) | ✅ | Untested public symbols (+ test-quality smell appendix) |
 | [`doc-gaps`](#doc-gaps) | ✅ | Undocumented exported symbols |
 | [`hotspots`](#hotspots) | ✅ | Churn × complexity ranking — the non-gated temporal tier |
 | [`coverage ingest`](#coverage-ingest-report---format-fmt) | ✅ | Ingest an LCOV/Cobertura report into the evidence store |
@@ -535,38 +534,6 @@ Dependency-structure-matrix view: a square coupling matrix between directories
 order (from `rules.toml`); unassigned files appear last. High off-diagonal
 values identify coupling hotspots and layering violations.
 
-### `test-gaps [--limit <N>]`
-
-```bash
-logos test-gaps                    # all gaps
-logos test-gaps --limit 50         # top 50
-```
-
-Public symbols with no static test-coverage path — a **blast-radius-ranked**
-gap list (FR-GV-17): once git history has been mined, the `untested` symbols are
-ordered by caller fan-in × the containing file's hotspot rank, so the
-highest-leverage gaps surface first. Before any history exists the ranking
-degrades gracefully to the stable FR-GV-08 file/name order. The Gaps web view
-(`/gaps`) renders this order verbatim — it never re-sorts the worklist.
-Coverage is inferred by reachability from **test nodes**, which `test-gaps`
-reads from the single persisted `is_test` annotation — the same source the
-quality metrics and dead-code roots use, so they can never disagree about what
-a test is. A node is `is_test` when it carries language-native test-marker
-evidence (e.g. a Rust `#[test]`/`#[cfg(test)]` module, a JS/TS `describe`/`it`
-callback), sits under a test path convention (`tests/`, `*_test.*`, `*.spec.*`,
-…), or matches a `test_markers` name affix (configurable in `config.toml`;
-defaults: `["test", "tests", "spec"]`). This is **static-reachability
-coverage**, not execution coverage — a symbol called only from test code is
-considered covered.
-
-The `--json` response also carries a `smells` appendix: per-language
-**test-quality smells** detected by the optional fourth per-plugin query
-(`queries/smells.scm`) — assertion-free tests, over-mocking, and similar
-patterns. The appendix is purely advisory and **in-memory only** (nothing is
-persisted, no table or column is added); a language with no smell query reports
-`n/a` for that language, never a fabricated "clean". The smell appendix never
-moves the quality signal — `logos gate` is byte-identical with or without it.
-
 ### `doc-gaps [--limit <N>]`
 
 ```bash
@@ -575,9 +542,8 @@ logos doc-gaps --limit 50          # top 50
 logos doc-gaps --no-reconcile      # score the last committed state
 ```
 
-The documentation analog of [`test-gaps`](#test-gaps): exported symbols with no
-referencing `DocSection` — a prioritised list of the public surface that
-documentation does not yet cover. Only doc-less **exported** symbols are
+Exported symbols with no referencing `DocSection` — a prioritised list of the
+public surface that documentation does not yet cover. Only doc-less **exported** symbols are
 reported; doc nodes themselves never appear in the list. Use the
 `[[require_documented]]` contract in
 [configuration.md](configuration.md#rulestoml--the-architecture-contract) to

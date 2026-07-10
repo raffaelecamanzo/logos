@@ -639,7 +639,8 @@ load with exit 2.
 `[[require_tested]]` turns "the public API must have a test" into an enforceable
 gate: every **exported** Function or Method whose file matches a `paths` glob
 must be reachable by transitive `calls` from some test node (the same `is_test`
-definition and reachability `test-gaps` uses — see [commands.md](commands.md#test-gaps---limit-n)).
+definition and static call-graph reachability the quality metrics use).
+Violations surface through `logos check` / the Rule findings surface.
 An exported symbol that no test transitively calls is reported with its `reason`.
 **Non-exported symbols are exempt** (only the public surface is contracted), as
 are non-callables. Each violation states the honest caveat — this is *static*
@@ -769,14 +770,10 @@ extraction, framework detection) are embedded in the binary but can be
 .logos/plugins/<language>/queries/symbols.scm
 .logos/plugins/<language>/queries/references.scm
 .logos/plugins/<language>/queries/frameworks.scm
-.logos/plugins/<language>/queries/smells.scm
 ```
 
 A file present at one of these paths replaces the embedded query for that
 capability at startup (a non-compiling query fails fast and names the file).
-`smells.scm` is the optional fourth query — the test-quality smell patterns
-surfaced in the `logos test-gaps` appendix; a language without one simply
-reports `n/a` for smells.
 This is the escape hatch for teaching Logos project-specific conventions
 without rebuilding. The embedded queries under `logos-core/plugins/` serve as
 reference starting points — each header documents the captures and the known
