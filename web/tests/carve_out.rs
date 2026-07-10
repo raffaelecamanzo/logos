@@ -61,27 +61,35 @@ fn listener_binds_loopback_only() {
 }
 
 /// [UAT-UI-02] step 2, promoted to the shipped default build (CR-078, ADR-60):
-/// a full `serve --ui` dashboard session opens **zero outbound connections**.
+/// the default (listen-only) `serve --ui` read session serves cleanly over a
+/// loopback-only listener.
 ///
-/// Since `ui` is the default feature (S-287) and the listen-only surface links no
-/// HTTP *client* crate (kept honest by the default-tree no-egress-client scan in
-/// logos-core/tests/no_network_deps.rs), the default dashboard can only listen,
-/// never dial. This is the *behavioral* half of that guarantee: we stand up a
-/// loopback tripwire that counts any connection its accept loop sees, drive a real
-/// multi-view dashboard session through the router in-process (exactly the read
-/// path `serve --ui` serves), and assert the tripwire recorded nothing — and that
-/// the surface listener binds only loopback. Nothing in this build is wired to
-/// dial the tripwire, so it is a belt-and-suspenders regression monitor: a future
-/// change that added an outbound seam to the listen-only surface (a metrics push,
-/// a telemetry beacon) would have to open a socket this session would then flag.
+/// The load-bearing egress guarantee is **structural**: the default build links no
+/// HTTP *client* crate, enforced by `default_tree_denies_only_egress_client_crates`
+/// in logos-core/tests/no_network_deps.rs — that is what proves the default
+/// dashboard can only listen, never dial. This test is its *behavioral* companion:
+/// it drives a real in-process session over the SPA shell and the config read-model
+/// (the read path a browser first exercises against `serve --ui`) and asserts the
+/// surface listener binds only loopback (ADR-27).
+///
+/// The loopback tripwire is a **narrow sentinel, not a general egress monitor**: an
+/// in-process `oneshot` session opens no real sockets, and nothing here is wired to
+/// dial the tripwire, so `connections == 0` documents only that the session makes
+/// no accidental dial to a co-located loopback service. A regression that dialled an
+/// *external* host would target its own endpoint (never this tripwire), and is
+/// caught elsewhere: a new egress *client* crate trips the structural default-tree
+/// scan, and the residual hyper-client / raw-socket case the denylist split cannot
+/// see is defended by review and the read-only surface posture (a trade-off the
+/// sprint-52 risk table accepts) — not by this assertion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_ui_session_records_zero_egress() {
-    // A loopback tripwire: its accept loop counts any inbound connection. The
-    // listen-only surface has no client to point at it, so a clean run leaves the
-    // counter at zero; an accidental outbound dial to it would be recorded.
+    // A loopback sentinel: its accept loop counts any connection dialled to its own
+    // ephemeral address. Nothing in the listen-only build is wired to it, so a clean
+    // run leaves the counter at zero; only an accidental dial to this exact loopback
+    // address would register (see the docstring for what this does and does not cover).
     let tripwire = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind loopback tripwire");
+        .expect("bind loopback sentinel");
     let connections = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&connections);
     tokio::spawn(async move {
@@ -103,11 +111,13 @@ async fn serve_ui_session_records_zero_egress() {
         );
     }
 
-    // The session opened no outbound connection …
+    // The session made no dial to the loopback sentinel (its narrow scope) …
     assert_eq!(
         connections.load(Ordering::SeqCst),
         0,
-        "the listen-only `serve --ui` session opened zero outbound connections (UAT-UI-02)",
+        "the listen-only `serve --ui` session made no accidental dial to a loopback \
+         service (UAT-UI-02); the no-egress-*client* guarantee is structural, in \
+         logos-core/tests/no_network_deps.rs",
     );
     // … and the surface listener binds only loopback (the listen side of the seam).
     let bound = web::bind(0).expect("bind a loopback listener");
