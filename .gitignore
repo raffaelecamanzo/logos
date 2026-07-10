@@ -31,3 +31,6 @@ notes/
 /docs/planning
 /docs/requests
 /.swe-skills
+
+# Cobertura coverage reports
+cobertura.xml
