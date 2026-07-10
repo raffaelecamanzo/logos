@@ -304,7 +304,7 @@ pub struct WikiSearchParams {
     pub list: Option<bool>,
 }
 
-// ── The 28 tools (FR-MC-01) ────────────────────────────────────────────────
+// ── The 27 tools (FR-MC-01) ────────────────────────────────────────────────
 
 #[tool_router]
 impl LogosMcp {

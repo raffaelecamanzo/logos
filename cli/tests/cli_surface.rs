@@ -848,8 +848,8 @@ fn serve_mcp_speaks_jsonrpc_on_stdout_and_exits_cleanly_on_disconnect() {
             .as_array()
             .expect("tools array")
             .len(),
-        28,
-        "all 28 tools register through the shipped binary (FR-MC-01)"
+        27,
+        "all 27 tools register through the shipped binary (FR-MC-01)"
     );
 
     // Host disconnect → the process winds down by itself with exit 0.
