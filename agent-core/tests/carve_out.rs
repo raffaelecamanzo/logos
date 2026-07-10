@@ -1,16 +1,20 @@
 //! Offline carve-out boundary fitness test (S-166, S-286, [NFR-SE-01],
 //! [NFR-SE-07], ADR-40, ADR-41, [ADR-60]).
 //!
-//! The byte-identical no-networking-crate scan over the **default** `logos`
-//! tree lives in `logos-core/tests/no_network_deps.rs` and is unchanged. This
-//! test asserts the *other side* of the carve-out — the boundary itself.
+//! The structural no-networking-crate scans over the **default** and **slim**
+//! `logos` trees live in `logos-core/tests/no_network_deps.rs` (split along the
+//! listen/dial seam by CR-078/[ADR-60], S-288). This test asserts the *other
+//! side* of the carve-out — the `rig`/`reqwest` substrate boundary itself.
 //!
 //! CR-078/ADR-60 split *listening* from *dialing*: the egress client is no longer
 //! gated by `ui` but by a separate `agents` feature (requiring `ui`). So the
 //! invariant this test locks is now three-valued:
 //!
-//! - the **default**-feature `logos` tree links **no** HTTP client (`reqwest`,
-//!   `hyper`) and not `rig-core` — the substrate is absent;
+//! - the **slim** (`--no-default-features --features lang-all`) `logos` tree links
+//!   **no** HTTP client (`reqwest`), **no** server stack (`hyper`), and not
+//!   `rig-core` — the absolute-offline build carries no network surface at all.
+//!   (Since S-287 made `ui` default, this is the *slim* tree, not the default one:
+//!   the true default (`lang-all` + `ui`) legitimately links the loopback server.)
 //! - the **`ui`**-feature `logos` tree (listen-only dashboard) links **no**
 //!   `rig-core` and **no** `reqwest` — the egress client is carved out of the
 //!   dashboard, not merely the default tree ([ADR-60]);
@@ -51,8 +55,11 @@ fn logos_tree_crates(features: Option<&str>) -> Vec<String> {
         args.push("--features");
         args.push(features);
     } else {
-        // The default-feature tree: no extra features, but make the intent
-        // explicit so a future default-feature change is a deliberate edit.
+        // The slim tree (`--no-default-features --features lang-all`): the
+        // headless build with no dashboard/listener. Since S-287 made `ui`
+        // default this is NOT the default-feature tree — the true default
+        // (`lang-all` + `ui`) links the loopback server; that boundary is owned
+        // by the `ui` case below and by no_network_deps.rs's default-tree anchor.
         args.push("--no-default-features");
         args.push("--features");
         args.push("lang-all");
@@ -83,16 +90,20 @@ fn contains(crates: &[String], name: &str) -> bool {
     crates.iter().any(|c| c == name)
 }
 
-/// The default build: no HTTP client, no `rig` — the substrate is fully carved
-/// out (the same scope the byte-identical no-networking-crate scan guards).
+/// The slim build (`--no-default-features --features lang-all`): no HTTP client,
+/// no server stack, no `rig` — the absolute-offline binary carries no network
+/// surface (the same scope no_network_deps.rs's slim-tree anchor guards). Since
+/// S-287 made `ui` default this is the SLIM tree, **not** the default one: the
+/// true default links the loopback `hyper` server (asserted in the `ui` case).
 #[test]
-fn default_logos_tree_excludes_rig_and_http_client() {
+fn slim_logos_tree_excludes_rig_http_client_and_server() {
     let crates = logos_tree_crates(None);
     for denied in ["rig-core", "reqwest", "hyper"] {
         assert!(
             !contains(&crates, denied),
-            "the DEFAULT-feature `logos` tree must not link `{denied}` — the rig \
-             substrate and its HTTP client are ui-only (NFR-SE-01, ADR-40)",
+            "the SLIM (`--no-default-features --features lang-all`) `logos` tree \
+             must not link `{denied}` — it is the absolute-offline build with no \
+             dashboard, no listener, and no egress client (NFR-SE-01, ADR-40, ADR-60)",
         );
     }
 }
