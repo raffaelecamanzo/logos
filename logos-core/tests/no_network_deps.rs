@@ -169,7 +169,22 @@ fn logos_tree_crates(no_default: bool, extra_features: Option<&str>) -> Vec<Stri
 /// fire on such a tree.
 #[test]
 fn default_tree_denies_only_egress_client_crates() {
-    let offenders: Vec<String> = logos_tree_crates(false, None)
+    let crates = logos_tree_crates(false, None);
+
+    // Non-vacuity anchor: the default tree must actually resolve non-empty, or the
+    // offender filter below would pass trivially (e.g. a `cargo tree` format/parse
+    // breakage returning nothing). The loopback dashboard server legitimately links
+    // `hyper` in the default build (CR-078, ADR-60) — asserting its presence proves
+    // this check is scanning a real tree, not a silently-empty one.
+    assert!(
+        crates.iter().any(|c| c == "hyper"),
+        "the DEFAULT tree must resolve non-empty and link the loopback dashboard \
+         server `hyper`; an empty resolution would make the egress-client check pass \
+         vacuously (the check must scan a real tree). Resolved {} crate(s).",
+        crates.len(),
+    );
+
+    let offenders: Vec<String> = crates
         .into_iter()
         .filter(|name| is_egress_client(name))
         .collect();
