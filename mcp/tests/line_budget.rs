@@ -24,7 +24,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
     total
 }
 
-/// Budget: ≤ 690 non-blank lines of Rust across the whole MCP adapter
+/// Budget: ≤ 693 non-blank lines of Rust across the whole MCP adapter
 /// (NFR-MA-02 thick-core/thin-surface invariant).
 ///
 /// Derivation (combined S-020, S-022, S-048, S-051, S-053 re-base): 28 `#[tool]`
@@ -42,15 +42,18 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// S-204/S-205/CR-052 raised 675→680 for the `doctor` and `verify` quality twins,
 /// each a single `Engine::doctor`/`Engine::verify` delegation; S-263/CR-062 raised
 /// 680→690 for the `wiki_materialize` twin, a single `Engine::wiki_materialize`
-/// delegation — logic lives in logos-core governance/wiki, not the surface.)
+/// delegation — logic lives in logos-core governance/wiki, not the surface.
+/// S-284/CR-076 raised 690→693 for a genuine surface addition; that +3 was
+/// reviewed at the Sprint 52 human review and blessed as a deliberate governance
+/// decision — an honest, delegation-only addition, not leaked logic to trim.)
 #[test]
 fn mcp_surface_line_budget() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 690,
-        "mcp adapter exceeds the 690 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 693,
+        "mcp adapter exceeds the 693 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

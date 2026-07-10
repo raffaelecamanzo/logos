@@ -422,7 +422,7 @@ LLM egress client). Three build modes result:
 
 | Build | Command | Dashboard (`serve --ui`) | Chat + in-app wiki generation | Outbound HTTP client |
 |-------|---------|--------------------------|-------------------------------|----------------------|
-| **Default** | `cargo install --path cli` (no explicit features) | ✅ served | ❌ absent | ❌ **none** — links the loopback *server* only, never a client |
+| **Default** | `cargo install --path cli` (no explicit features) | ✅ served | ⚠️ **tab visible but inert** — the SPA still renders the Chat tab, but a turn fails `405` (no agent backend); wiki generation likewise absent | ❌ **none** — links the loopback *server* only, never a client |
 | **Agents** | `cargo install --path cli --features agents` | ✅ served | ✅ Chat tab + Wiki-tab generation | ✅ `rig`/`reqwest`, **opt-in**, user-initiated and consent-gated at runtime ([ADR-40](../specs/architecture/decisions/ADR-40.md)) |
 | **Slim headless** | `cargo build -p logos --no-default-features --features lang-all` | ❌ no `--ui`, no listener | ❌ absent | ❌ **none** — the absolute-offline binary; no socket stack at all |
 
@@ -817,12 +817,15 @@ back a synthesized answer:
 - **Source-Reader** — sandboxed read/grep/glob over the project source.
 - **Synthesizer** — a tool-less subagent that writes the final answer from what the others found.
 
-Chat exists **only** in an `--features agents` build. The default `logos` binary
-ships the dashboard but no chat and no networking client — there is no outbound
-call anywhere short of the opt-in `agents` feature (CR-078/ADR-60). The
-conversation and its per-turn memory persist in
-`.logos/chat.db` (created on the first turn, gitignored, never in the default
-binary).
+A working Chat exists **only** in an `--features agents` build. The default
+`logos` binary ships the dashboard and no networking client — there is no
+outbound call anywhere short of the opt-in `agents` feature (CR-078/ADR-60).
+Note that the default build still **renders the Chat tab** in the SPA (the web
+bundle is feature-agnostic), but a chat turn fails with `405` because the
+`POST /chat` route carries no agent backend without `agents`; the affordance is
+a known, harmless cosmetic gap (the server never gains an egress client). The
+conversation and its per-turn memory persist in `.logos/chat.db` (created on the
+first turn, gitignored, never in the default binary).
 
 **Workflow:**
 
