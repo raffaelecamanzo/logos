@@ -77,6 +77,40 @@ pub fn resolve_root(hint: &Path) -> PathBuf {
     }
 }
 
+/// Is `path` itself the **top level** of a git working tree — not merely a
+/// directory *inside* one ([FR-WS-01])?
+///
+/// Unlike [`resolve_root`] (which silently returns its hint outside git, so it
+/// cannot tell "is a repo root" from "is not in a repo"), this answers the
+/// distinct question federation member discovery needs: *is this exact
+/// directory a repository root?* It is `true` only when `git rev-parse
+/// --show-toplevel` succeeds **and** resolves back to `path` — a subdirectory
+/// of a repo (toplevel is an ancestor), a non-repo directory, and a missing
+/// `git` binary all return `false`. Paths are compared symlink-resolved
+/// (`--show-toplevel` output is canonical; the hint may not be).
+///
+/// [FR-WS-01]: ../../docs/specs/requirements/FR-WS-01.md
+pub fn is_git_root(path: &Path) -> bool {
+    match git(path, &["rev-parse", "--show-toplevel"]) {
+        Ok(top) if !top.is_empty() => paths_equal(&PathBuf::from(top), path),
+        _ => false,
+    }
+}
+
+/// Are `a` and `b` the same working tree, compared symlink-resolved?
+///
+/// `canonicalize` resolves symlinks and `.`/`..`, so two spellings of one real
+/// directory compare equal — the property [`is_git_root`] and [`primary_root`]
+/// both need when matching a symlink-resolved `git` output path against a hint
+/// that may not be. If either path cannot be canonicalised (it does not exist,
+/// or is inaccessible), the comparison falls back to literal path equality.
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// Was this [`git`] error a failure to *spawn* the binary (git absent from
 /// PATH), as opposed to git running and exiting non-zero?
 fn git_is_missing(err: &anyhow::Error) -> bool {
@@ -130,11 +164,7 @@ pub fn primary_root(root: &Path) -> Option<PathBuf> {
     // The primary checkout has no distinct primary to point at. Compare real
     // paths — `--git-common-dir` output is symlink-resolved, the hint may not
     // be.
-    let same_tree = match (root.canonicalize(), primary_root.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => root == primary_root,
-    };
-    if same_tree {
+    if paths_equal(root, &primary_root) {
         return None;
     }
     Some(primary_root)
@@ -314,6 +344,32 @@ mod tests {
         // A nonexistent hint degrades the same way (git fails, hint wins).
         let ghost = tmp.path().join("ghost");
         assert_eq!(resolve_root(&ghost), ghost);
+    }
+
+    // ── is_git_root (FR-WS-01) ────────────────────────────────────────────
+
+    /// A repository's top-level directory is a git root; a subdirectory of it
+    /// is not (its toplevel is an ancestor), and neither is a plain non-repo
+    /// directory or a nonexistent path.
+    #[test]
+    fn is_git_root_distinguishes_a_repo_root_from_everything_else() {
+        let (_tmp, main) = repo_fixture();
+        fs::create_dir_all(main.join("src")).unwrap();
+        assert!(is_git_root(&main), "the repo toplevel is a git root");
+        assert!(
+            !is_git_root(&main.join("src")),
+            "a subdir of a repo is not itself a root"
+        );
+
+        let plain = TempDir::new().unwrap();
+        assert!(
+            !is_git_root(plain.path()),
+            "a directory outside any repo is not a git root"
+        );
+        assert!(
+            !is_git_root(&plain.path().join("ghost")),
+            "a nonexistent path is not a git root"
+        );
     }
 
     /// Inside a repo, any subdirectory resolves to the repo's toplevel.

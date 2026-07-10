@@ -4,8 +4,10 @@
 //! to **exit code 2** (`DV-05`/`DV-07`,
 //! [FR-CF-01](../../../../docs/specs/requirements/FR-CF-01.md),
 //! [FR-CF-03](../../../../docs/specs/requirements/FR-CF-03.md)): an invalid
-//! `config.toml`/`rules.toml`, an unknown key, a non-compiling glob, or a glob
-//! that would escape the project root
+//! `config.toml`/`rules.toml` (or a `logos.workspace.toml` workspace manifest,
+//! which reuses this error via the [`federation`](../../federation) module,
+//! [FR-WS-01](../../../../docs/specs/requirements/FR-WS-01.md)), an unknown key,
+//! a non-compiling glob, or a glob that would escape the project root
 //! ([NFR-SE-04](../../../../docs/specs/requirements/NFR-SE-04.md)). Messages are
 //! actionable — they name the offending path or pattern
 //! ([NFR-UX-02](../../../../docs/specs/requirements/NFR-UX-02.md)).
@@ -18,7 +20,8 @@
 use std::fmt;
 use std::path::PathBuf;
 
-/// A configuration load/validation failure (`config.toml` or `rules.toml`).
+/// A configuration load/validation failure (`config.toml`, `rules.toml`, or the
+/// `logos.workspace.toml` workspace manifest, which reuses this error).
 ///
 /// All variants are usage faults the adapters surface as [`ConfigError::EXIT_CODE`].
 #[derive(Debug)]

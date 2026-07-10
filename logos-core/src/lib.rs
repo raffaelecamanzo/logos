@@ -34,6 +34,12 @@ pub mod error;
 /// SCIP IDs, cyclomatic complexity, and per-function line counts (ADR-07,
 /// ADR-08). One `tree_sitter::Parser` per rayon worker (AR-05).
 pub mod extract;
+/// Workspace **federation** (S-243, CR-061, ADR-52): the in-memory overlay that
+/// turns a parent folder of sibling repositories into one queryable workspace —
+/// `logos.workspace.toml` manifest parse + the up-tree `discover` walk that
+/// resolves and validates the member set (FR-WS-01). No manifest → single-root,
+/// byte-for-byte unchanged. Never a graph union, never persisted (ADR-52).
+pub mod federation;
 /// The governance engine (S-020): `rules.toml` evaluation (constraints,
 /// layer ordering, boundaries — unassigned files exempt), the session/CI
 /// gate with baseline + epsilon regression check, evolution/dsm/doc_gaps,
