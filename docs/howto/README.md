@@ -42,7 +42,7 @@ paraphrased; and a *generated* tier of LLM prose. When the project ships an SRS
 User Guide pages are presented and the connected agent generates only the
 Summary/Overview tier; otherwise the agent infers the full set from the code
 graph. Generated prose is written **in-process** when the Wiki tab is opened
-(`--features ui` builds), on the same `rig` agent substrate as Chat and honoring a
+(`--features agents` builds — the egress tier carved out of `ui` by CR-078), on the same `rig` agent substrate as Chat and honoring a
 dedicated `[wiki].model`. The CLI surface is
 `logos wiki write|read|search|status|generate|materialize|delete` plus `logos wiki
 skill --emit` and `logos wiki hook --emit`; `write`/`read`/`search`/`status`/`materialize`
