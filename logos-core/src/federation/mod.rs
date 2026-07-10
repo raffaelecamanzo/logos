@@ -123,6 +123,16 @@ pub fn discover(hint: &Path) -> Result<Option<Federation>, ConfigError> {
 
     let manifest = manifest::parse(&manifest_path)?;
 
+    // Surface the adopted manifest so an *unexpected* federation is visible
+    // rather than silent: the walk deliberately climbs above the resolved git
+    // root (the manifest lives at the parent folder, outside any member repo),
+    // so a stray `logos.workspace.toml` in an ancestor would otherwise flip
+    // single-root to federated with no trace ([FR-WS-01]).
+    tracing::info!(
+        manifest = %manifest_path.display(),
+        "workspace manifest adopted — operating in federated mode"
+    );
+
     // The workspace root is the manifest's directory — the containment boundary
     // for every member. Canonicalise so escape checks compare like-for-like.
     let root_raw = manifest_path
@@ -134,11 +144,16 @@ pub fn discover(hint: &Path) -> Result<Option<Federation>, ConfigError> {
     let members = resolve_members(&root, &manifest.workspace);
 
     // Keep `default` only when it names a member that survived resolution, so
-    // downstream can trust it points at a real member.
-    let default = manifest.workspace.default.filter(|d| {
-        let d = d.trim_end_matches('/');
-        members.iter().any(|m| m.name == d)
-    });
+    // downstream can trust it points at a real member. Match by the SAME
+    // normalisation used to derive member names (resolve → canonicalise →
+    // relativise), so a `default` written non-canonically (`"api/"`, `"./api"`)
+    // still binds its member, and the stored value is the canonical member name.
+    let default = manifest
+        .workspace
+        .default
+        .as_deref()
+        .and_then(|spec| member_name(&root, &root.join(spec)))
+        .filter(|name| members.iter().any(|m| &m.name == name));
 
     Ok(Some(Federation {
         name: manifest.workspace.name,
@@ -217,15 +232,16 @@ fn autodiscover_children(root: &Path) -> Vec<Member> {
     dirs.sort();
 
     dirs.into_iter()
-        .filter(|dir| is_git_root(dir) || dir.join(".logos").join("logos.db").is_file())
         .filter_map(|dir| {
+            // Compute `is_git_root` once — it spawns a `git` subprocess, so the
+            // admission test and the resolution branch must share the result.
+            let is_root = is_git_root(&dir);
+            if !is_root && !dir.join(".logos").join("logos.db").is_file() {
+                return None;
+            }
             // A git-root child resolves through the same primitive; a DB-only
             // (non-git) child is its own root.
-            let resolved = if is_git_root(&dir) {
-                resolve_root(&dir)
-            } else {
-                dir
-            };
+            let resolved = if is_root { resolve_root(&dir) } else { dir };
             validate_member(root, &resolved)
         })
         .collect()
@@ -236,17 +252,27 @@ fn autodiscover_children(root: &Path) -> Vec<Member> {
 /// itself. A member that escapes the parent — via `..` or a symlink — is dropped
 /// ([FR-WS-01], [NFR-SE-04]).
 fn validate_member(workspace_root: &Path, resolved: &Path) -> Option<Member> {
-    let resolved = resolved.canonicalize().ok()?;
-    let rel = resolved.strip_prefix(workspace_root).ok()?;
-    // `strip_prefix` succeeding with an empty remainder means `resolved` *is* the
-    // workspace root — the parent folder is not one of its own members.
+    let name = member_name(workspace_root, resolved)?;
+    // `member_name` already proved `resolved` canonicalises, so this succeeds.
+    let root = resolved.canonicalize().ok()?;
+    Some(Member { name, root })
+}
+
+/// The canonical member name for a path resolved within the workspace: its
+/// symlink-canonical form relativised to `workspace_root`, with `/` separators.
+/// Returns `None` when the path cannot be canonicalised, escapes the workspace,
+/// or *is* the workspace root (the parent folder is not one of its own members).
+///
+/// This is the single normalisation both member resolution ([`validate_member`])
+/// and `default` matching ([`discover`]) share, so a `default` written
+/// non-canonically still binds the member it names ([FR-WS-01], [NFR-SE-04]).
+fn member_name(workspace_root: &Path, path: &Path) -> Option<String> {
+    let canon = path.canonicalize().ok()?;
+    let rel = canon.strip_prefix(workspace_root).ok()?;
     if rel.as_os_str().is_empty() {
         return None;
     }
-    Some(Member {
-        name: rel.to_string_lossy().replace('\\', "/"),
-        root: resolved,
-    })
+    Some(rel.to_string_lossy().replace('\\', "/"))
 }
 
 #[cfg(test)]
@@ -450,6 +476,64 @@ mod tests {
         let fed = discover(root).unwrap().unwrap();
         assert_eq!(fed.links.len(), 1);
         assert_eq!(fed.links[0].relation, "http_call");
+    }
+
+    /// A manifest whose every declared member is dropped still yields a
+    /// workspace (`Some` with an empty member set) — NOT single-root `None`.
+    /// This distinction is load-bearing: an empty-but-present workspace must not
+    /// be silently downgraded to the no-manifest path.
+    #[test]
+    fn an_all_dropped_member_set_stays_some_not_single_root() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("plain")).unwrap(); // not a git root
+        write_manifest(
+            root,
+            "[workspace]\nname = \"empty\"\nmembers = [\"plain\"]\ndefault = \"plain\"\n",
+        );
+
+        let fed = discover(root)
+            .unwrap()
+            .expect("a present manifest yields Some, even with no valid members");
+        assert_eq!(fed.name, "empty");
+        assert!(fed.members.is_empty(), "the non-git member was dropped");
+        assert_eq!(fed.default, None, "a default naming a dropped member is nulled");
+    }
+
+    /// A multi-segment member (a git root at `services/web`) resolves to a
+    /// nested, `/`-separated name — exercising the relative-path derivation.
+    #[test]
+    fn discovers_a_nested_member_name() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(&root.join("services").join("web"));
+        write_manifest(
+            root,
+            "[workspace]\nname = \"w\"\nmembers = [\"services/web\"]\n",
+        );
+        let fed = discover(root).unwrap().unwrap();
+        assert_eq!(names(&fed), ["services/web"]);
+    }
+
+    /// `default` binds its member even when written non-canonically (a trailing
+    /// slash, a leading `./`), and the stored value is the canonical member name.
+    #[test]
+    fn default_matches_a_non_canonical_spec() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(&root.join("api"));
+        for spec in ["api/", "./api"] {
+            write_manifest(
+                root,
+                &format!("[workspace]\nname = \"w\"\nmembers = [\"api\"]\ndefault = \"{spec}\"\n"),
+            );
+            let fed = discover(root).unwrap().unwrap();
+            assert_eq!(
+                fed.default.as_deref(),
+                Some("api"),
+                "default {spec:?} binds member \"api\" as its canonical name"
+            );
+        }
     }
 
     // ── the single-root invariant (FR-WS-01) ──────────────────────────────
