@@ -368,9 +368,8 @@ fn kotlin_annotation_simple_name<'s>(annotation: Node<'_>, source: &'s [u8]) -> 
 /// `TYPED_TEST` siblings parse as return-type-less `function_definition`s whose
 /// `function_declarator` identifier is the macro keyword itself, so the captured
 /// symbol name *is* `TEST`/`TEST_F`/… — a name match is the single signal
-/// available identically at extraction time (the captured declarator) and in the
-/// on-demand smell pass (the `@smell.test`/`@smell.name` capture), keeping the
-/// two classifications in lockstep ([FR-AN-05]).
+/// available at extraction time (the captured declarator), keeping the test
+/// classification stable ([FR-AN-05]).
 ///
 /// Positive-evidence-only ([ADR-18]): the recognised set is the exact macro
 /// keywords, never a prefix, so a production function is not swept in. The Catch2
@@ -471,8 +470,8 @@ const RSPEC_MARKERS: [&str; 13] = [
 /// The dual idiom mirrors two existing conventions at once: the `test_*` naming
 /// is the [`python_test`] posture, and the block-callback enclosure is the
 /// [`js_callback`] posture (a helper declared inside `describe` is test scope).
-/// A captured RSpec example *is* such a call (the smell harness captures the
-/// `it` node itself), so the node is checked before its ancestry.
+/// A captured RSpec example *is* such a call (the `it` node itself), so the
+/// node is checked before its ancestry.
 fn ruby_test(node: Node<'_>, name: &str, source: &[u8]) -> bool {
     // minitest: a `test_*`-named method (the dominant convention). Positive
     // evidence on the name alone, the same posture as Python's `test_*`.
@@ -596,14 +595,14 @@ fn comment_has_test_tag(text: &str) -> bool {
 
 /// The munit / ScalaTest (`FunSuite`/`FunSpec`) marker-call names. A test case
 /// in these frameworks is a `test("name") { … }` / `it("name") { … }` *call*,
-/// not a declaration — so evidence attaches to the call itself (the shape the
-/// smell query captures) and to any callable lexically enclosed by it.
+/// not a declaration — so evidence attaches to the call itself and to any
+/// callable lexically enclosed by it.
 const SCALA_TEST_MARKERS: [&str; 2] = ["test", "it"];
 
 /// Scala: a node that **is**, or is lexically enclosed by, a `test(…)`/`it(…)`
 /// marker call (S-061, [FR-EX-06]). Walking the node itself plus its ancestors
-/// covers both contracts: the smell harness passes the marker call directly,
-/// while the extraction pass passes a `def` that may sit inside a test block.
+/// covers both shapes: a marker call passed directly, and a `def` that may sit
+/// inside a test block.
 /// Positive-evidence-only ([ADR-18]): only the `test`/`it` names match, so a
 /// production call enclosing a helper is never a false positive.
 fn scala_test(node: Node<'_>, source: &[u8]) -> bool {
