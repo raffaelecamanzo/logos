@@ -200,6 +200,28 @@ async fn composite_bundles_serialize_their_read_model_fields() {
             assert!(body.contains(key), "{path} body carries {key}: {body}");
         }
     }
+
+    // Contract-narrowing guard (CR-079): the Quadrant/test-gaps keys are GONE.
+    // A regression re-adding them to the composed bundles must be caught here, not
+    // just left uncovered by the presence-only checks above.
+    let overview = router.clone().oneshot(get("/api/v1/overview")).await.unwrap();
+    let (_s, overview_body, _h) = body_string(overview).await;
+    for gone in ["\"cross\"", "\"hotspots\"", "\"gaps\""] {
+        assert!(!overview_body.contains(gone), "overview no longer carries {gone}: {overview_body}");
+    }
+    let gaps = router.clone().oneshot(get("/api/v1/gaps")).await.unwrap();
+    let (_s, gaps_body, _h) = body_string(gaps).await;
+    assert!(!gaps_body.contains("\"test_gaps\""), "gaps no longer carries test_gaps: {gaps_body}");
+}
+
+/// CR-079: the `/api/v1/quadrant` route is unrouted — a GET resolves to `404`,
+/// never a `200` bundle. Guards against the route being silently re-added.
+#[tokio::test]
+async fn quadrant_endpoint_is_unrouted() {
+    let (_tmp, engine) = scanned_engine();
+    let router = web::router(engine);
+    let resp = router.oneshot(get("/api/v1/quadrant")).await.expect("route responds");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "/api/v1/quadrant is unrouted (CR-079)");
 }
 
 /// The single-read endpoints serialize their read-model's own fields, not just an
