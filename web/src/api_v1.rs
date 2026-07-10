@@ -8,7 +8,7 @@
 //! (the [ADR-03] `spawn_blocking` hop). The handlers **select, project, and join**
 //! existing read-models and nothing more: no new `Engine` core query, no figure
 //! the read-models do not already carry ([ADR-01], [NFR-MA-02], [NFR-RA-05]). The
-//! pre-existing `/api/*` endpoints (graph-elements, graph query, impact, quadrant)
+//! pre-existing `/api/*` endpoints (graph-elements, graph query, impact)
 //! were **subsumed** into this surface and removed at the S-192 decommission:
 //! their `/api/v1` twins reuse the very same readers, and this `/api/v1/*` suite
 //! is now the sole data seam the embedded SPA consumes ([ADR-43]).
