@@ -1355,15 +1355,20 @@ fn dsm_returns_a_square_layer_ordered_matrix() {
     assert_eq!(default.granularity, "module");
 }
 
-// ── require-tested parity (CR-001 CRA-01): the `[[require_tested]]` contract
-// and the `is_test` annotation classify the identical function set ────────────
+// ── FR-AN-05 (integration): the indexed graph persists `is_test` for both the
+// evidence (#[cfg(test)]) and path (tests/) conventions — the column the
+// `[[require_tested]]` contract seeds `test_reachable_set` from (CR-001 CRA-01).
+// The require_tested↔is_test seam itself is exercised end-to-end by
+// `check_rules_flags_an_uncovered_exported_symbol_with_its_reason_and_caveat`. ──
 
 #[test]
-fn require_tested_and_is_test_annotation_classify_the_identical_function_set() {
-    // CR-001 CRA-01: the coverage contract reads the persisted `is_test` column
-    // via `test_reachable_set`, so it can never disagree with the annotation
-    // about what a test is. No `main` entry point, to keep the test/non-test
-    // partition unconfounded.
+fn indexed_graph_persists_is_test_for_evidence_and_path_test_functions() {
+    // CR-001 CRA-01: the persisted `is_test` column is the single source of truth
+    // the `[[require_tested]]` contract seeds `test_reachable_set` from, so what
+    // the annotation marks a test is exactly what the contract treats as one. This
+    // pins the annotation half — a full index persists `is_test` for both the
+    // evidence and path conventions. No `main` entry point, to keep the test/
+    // non-test partition unconfounded.
     let tmp = TempDir::new().unwrap();
     write(
         tmp.path(),
