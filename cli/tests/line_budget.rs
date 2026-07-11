@@ -50,10 +50,16 @@
 // so the thin-surface invariant (NFR-MA-02) covers the whole crate, not just the
 // entry point. When a new `cli/src/*.rs` module is added, `include_str!` it here
 // and add it to `adapter_lines` below. Current modules: `main.rs` (parse + setup
-// + output/exit-code helpers) and `dispatch.rs` (per-domain subcommand routing,
-// extracted from `run` to keep each function under the max_cc/max_fn_lines gates).
+// + output/exit-code helpers), `dispatch.rs` (per-domain subcommand routing,
+// extracted from `run` to keep each function under the max_cc/max_fn_lines gates),
+// `workspace_init.rs` (the `logos init --workspace` enablement flow, S-244), and
+// `xservice.rs` (the S-248 cross-service query routing). The latter two were
+// added without being registered here (a guard blind spot); S-248 wires them in
+// so the whole crate is measured, per the invariant above.
 const CLI_MAIN: &str = include_str!("../src/main.rs");
 const CLI_DISPATCH: &str = include_str!("../src/dispatch.rs");
+const CLI_WORKSPACE_INIT: &str = include_str!("../src/workspace_init.rs");
+const CLI_XSERVICE: &str = include_str!("../src/xservice.rs");
 
 /// Non-blank, non-comment production lines in one source file — everything
 /// before the first top-level `#[cfg(test)]` marker.
@@ -70,10 +76,13 @@ fn file_lines(source: &str) -> usize {
 
 /// Total adapter production lines across every `cli/src/*.rs` module.
 fn adapter_lines() -> usize {
-    file_lines(CLI_MAIN) + file_lines(CLI_DISPATCH)
+    file_lines(CLI_MAIN)
+        + file_lines(CLI_DISPATCH)
+        + file_lines(CLI_WORKSPACE_INIT)
+        + file_lines(CLI_XSERVICE)
 }
 
-/// Budget: ≤ 540 production lines of Rust in the CLI adapter (NFR-MA-02).
+/// Budget: ≤ 555 production lines of Rust in the CLI adapter (NFR-MA-02).
 ///
 /// S-072 500→520 for the CR-012 `ui` serve wiring: the `--ui`/`--port` flags on
 /// `serve` (cfg-gated behind the non-default `ui` feature) and the combined
@@ -92,12 +101,29 @@ fn adapter_lines() -> usize {
 /// net; the summed adapter actually shrank (533→530) but sits just over the old
 /// cap, so the budget is raised to fit with headroom. If this fires, move logic
 /// to logos-core/web — do not raise the number without a story-level justification.
+///
+/// S-248/CR-061 540→745 for the FR-WS-05 cross-service surface AND a guard
+/// integrity fix. The two new top-level commands (`xservice
+/// <route-providers|callers|impact|search>` and `workspace status`) add their
+/// `Commands` variant declarations in `main.rs` + two one-line dispatch arms in
+/// `dispatch.rs` (~+12), with the subcommand enums and the
+/// discover→registry→`query::*` routing in the new `cli/src/xservice.rs`
+/// delegation module (~108 lines, one-`query::*`-call routing, no business logic
+/// — all logic is in `logos_core::federation::query`, verified by `logos
+/// check`). The bulk of the raise, however, is honesty, not growth: `adapter_lines`
+/// previously summed only `main.rs` + `dispatch.rs`, so `workspace_init.rs`
+/// (~70, S-244) and now `xservice.rs` (~108) escaped the whole-crate invariant
+/// this guard documents. S-248 registers both modules above, so the measured
+/// total jumps from 549 to ~727 (a one-time correction of the blind spot, not
+/// new surface), and the budget is set to 745 to fit with headroom. Future
+/// logic-creep in ANY `cli/src/*.rs` now counts. Flagged for the Sprint 55 human
+/// review. Do not raise the number without a story-level justification.
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 540,
-        "cli adapter exceeds the 540 production-LOC budget (NFR-MA-02): \
+        lines <= 745,
+        "cli adapter exceeds the 745 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

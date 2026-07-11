@@ -23,6 +23,9 @@ use logos_core::{
 
 mod dispatch;
 mod workspace_init;
+mod xservice;
+
+use xservice::{WorkspaceCommands, XserviceCommands};
 
 // ── Exit codes (FR-CL-03 / BR-09) ──────────────────────────────────────────
 
@@ -295,6 +298,18 @@ pub(crate) enum Commands {
     Wiki {
         #[command(subcommand)]
         command: WikiCommands,
+    },
+    /// Cross-service workspace queries (federation, FR-WS-05): route-providers,
+    /// callers, impact, search — each with an optional `--repo` member filter.
+    Xservice {
+        #[command(subcommand)]
+        command: XserviceCommands,
+    },
+    /// Workspace-level commands (federation, FR-WS-05): `status` reports
+    /// per-member freshness + the 3-state cross-service coverage summary.
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommands,
     },
     /// Aggregated usage/performance statistics.
     Stats {
@@ -648,7 +663,7 @@ const fn violation_code(passed: bool) -> i32 {
 
 /// Parse a `--kind` filter against the canonical ontology's wire names; an
 /// unknown kind is a clap value error → usage exit 2 (FR-CL-03).
-fn parse_kind(s: &str) -> Result<NodeKind, String> {
+pub(crate) fn parse_kind(s: &str) -> Result<NodeKind, String> {
     NodeKind::ALL
         .into_iter()
         .find(|k| k.as_str() == s)

@@ -134,6 +134,11 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             CoverageCommands::Refresh => out.try_query(root, |e| e.coverage_refresh()),
         },
         Commands::Wiki { command } => wiki(command, root, out),
+        // The cross-service query surface (FR-WS-05): each discovers the
+        // workspace and serialises one `query::*` read-model over the member
+        // registry (logic lives in logos-core, per NFR-MA-02).
+        Commands::Xservice { command } => crate::xservice::run_xservice(command, root, out),
+        Commands::Workspace { command } => crate::xservice::run_workspace(command, root, out),
         // Reads telemetry.db / the store without a built graph, so `Engine::open`
         // (like the MCP twins), not the index-guarded helper (NFR-OO-05).
         Commands::Stats { window } => {
