@@ -23,12 +23,33 @@
  * No React, no ECharts, no fetch — every function here is pure (NFR-RA-06).
  */
 
-import type { BridgeEdge } from "../../api/types.ts";
+import type { BridgeEdge, WorkspaceStatus } from "../../api/types.ts";
 import type { LoadedSet } from "../graph/graphModel.ts";
-import type { WorkspaceMember } from "../../workspace/WorkspaceContext.tsx";
+
+/** One service as the map knows it — read from the workspace status fan-out, which
+ *  is the only source that knows whether a member actually has an index. */
+export interface ServiceMember {
+  /** The repo-qualified member name. */
+  name: string;
+  /** `false` when the member has no index yet. */
+  indexed: boolean;
+  /** The per-member degradation the fan-out reported, when it reported one — an
+   *  engine that FAILED is not the same thing as one that is merely un-indexed, and
+   *  the map must not say it is (NFR-CC-04). */
+  error: string | null;
+}
+
+/** Project the workspace status fan-out onto the service roster the map draws. */
+export function serviceMembers(status: WorkspaceStatus): ServiceMember[] {
+  return status.members.map((m) => ({
+    name: m.member,
+    indexed: m.result?.indexed ?? false,
+    error: m.error ?? null,
+  }));
+}
 
 /** The canvas-id namespace for a service node — never collides with a SCIP symbol. */
-export const SERVICE_ID_PREFIX = "service:";
+const SERVICE_ID_PREFIX = "service:";
 
 /** The canvas node id for a member. */
 export function serviceId(member: string): string {
@@ -61,6 +82,9 @@ export interface ServiceMap {
   links: ServiceLink[];
   /** Members with no index yet — rendered muted, never as "no couplings". */
   awaitingIndex: string[];
+  /** Members whose engine could not be read — stated as *unavailable*, never folded
+   *  in with the merely un-indexed ones. */
+  degraded: string[];
 }
 
 /** The dedup key for a service coupling. */
@@ -79,7 +103,7 @@ function linkKey(l: Pick<ServiceLink, "from" | "to" | "relation">): string {
  * (from, to, relation), so two runs over the same workspace render identically.
  */
 export function buildServiceMap(
-  members: readonly WorkspaceMember[],
+  members: readonly ServiceMember[],
   bindings: readonly BridgeEdge[],
 ): ServiceMap {
   const nodes: LoadedSet["nodes"] = {};
@@ -90,9 +114,10 @@ export function buildServiceMap(
       // The canvas renders `kind` in its tooltip; "service" is the honest kind of
       // an app-level node (it is not a symbol).
       kind: "service",
-      // A member awaiting an index is drawn in the muted `doc` hue rather than the
-      // code hue, so "no data yet" never reads as "indexed, but uncoupled".
-      layer: m.indexed ? "code" : "doc",
+      // A member awaiting an index (or one whose engine could not be read) is drawn
+      // in the muted `doc` hue rather than the code hue, so "no data yet" never reads
+      // as "indexed, but uncoupled".
+      layer: m.indexed && !m.error ? "code" : "doc",
     };
   }
 
@@ -128,6 +153,10 @@ export function buildServiceMap(
       })),
     },
     links,
-    awaitingIndex: members.filter((m) => !m.indexed).map((m) => m.name),
+    // Un-indexed and degraded are DIFFERENT facts: "no index yet" is a state the user
+    // can fix by indexing; "could not be read" is a fault. Reporting the second as
+    // the first would send them to the wrong remedy.
+    awaitingIndex: members.filter((m) => !m.indexed && !m.error).map((m) => m.name),
+    degraded: members.filter((m) => m.error !== null).map((m) => m.name),
   };
 }

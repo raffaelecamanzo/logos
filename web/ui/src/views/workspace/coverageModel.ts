@@ -16,12 +16,7 @@
  * rendering a 100%-bound score bar over nothing.
  */
 
-import type {
-  CoverageBucket,
-  CrossServiceCoverage,
-  ReferenceCoverage,
-  UnboundReason,
-} from "../../api/types.ts";
+import type { CrossServiceCoverage, UnboundReason } from "../../api/types.ts";
 
 /** The human label for each unbound reason (the wire tokens are kebab-case). */
 export const REASON_LABEL: Record<UnboundReason, string> = {
@@ -46,20 +41,45 @@ export function armLabel(relation: string): string {
   return ARM_LABEL[relation] ?? relation;
 }
 
+/** The display name of an unbound reason. Like {@link armLabel}, an unrecognised
+ *  token (a reason a later arm adds server-side) is shown VERBATIM rather than
+ *  rendering as an empty label beside a count — a count with no explanation is the
+ *  very thing the reason buckets exist to prevent (NFR-CC-04). The wire payload is
+ *  not runtime-validated, so this is reachable without a version skew being a bug. */
+export function reasonLabel(reason: string): string {
+  return REASON_LABEL[reason as UnboundReason] ?? reason;
+}
+
 /** One unbound reason and how many references carry it. */
 export interface ReasonCount {
   reason: UnboundReason;
   count: number;
 }
 
-/** Coverage for one relation arm — the dashboard's per-arm row (FR-UI-29 AC3). */
+/** The wire reason that is bucketed out of the ratio's denominator (ADR-53) — a
+ *  reference to a service outside this workspace is not a *broken* binding. */
+const NO_PROVIDER: UnboundReason = "no-provider-in-workspace";
+
+/** Coverage for one relation arm — the dashboard's per-arm row (FR-UI-29 AC3).
+ *
+ * The four count fields partition the arm's references exactly as the server's own
+ * summary counters partition the workspace's: `bound + ambiguous + unbound +
+ * noProvider === total`, and each column SUMS ACROSS ARMS to its summary
+ * counterpart. That reconciliation is the point — the arm board and the headline
+ * sit on the same screen, so a row that folded `no-provider-in-workspace` into
+ * `unbound` (the wire `bucket` does; the server's `unbound` counter does not) would
+ * state a different figure for the same quantity, inches apart. */
 export interface ArmCoverage {
   /** The relation arm (`route`, `grpc-call`, `broker-topic`, …). */
   relation: string;
   bound: number;
   ambiguous: number;
-  /** Unbound for any reason *other* than ambiguity (which is its own bucket). */
+  /** Unbound for a reason other than ambiguity or no-provider — each of which is
+   *  its own bucket, exactly as in the server's summary (ADR-53). */
   unbound: number;
+  /** No provider anywhere in this workspace — reported apart, and excluded from the
+   *  bound ratio's denominator (ADR-53). */
+  noProvider: number;
   /** Every reason present on this arm's non-bound references, commonest first. */
   reasons: ReasonCount[];
   /** Every reference on this arm — the denominator the row's counts sum to. */
@@ -83,13 +103,6 @@ export interface CoverageDashboard {
   isEmpty: boolean;
 }
 
-/** The bucket a reference falls in — read from the server's own `bucket` field, so
- *  the view can never disagree with the classification (`ambiguous` is its own
- *  bucket, never folded into `unbound`). */
-function bucketOf(ref: ReferenceCoverage): CoverageBucket {
-  return ref.bucket;
-}
-
 /** Group a coverage read-model into the per-arm, per-reason dashboard model. */
 export function buildCoverageDashboard(coverage: CrossServiceCoverage): CoverageDashboard {
   const byArm = new Map<string, ArmCoverage>();
@@ -98,14 +111,26 @@ export function buildCoverageDashboard(coverage: CrossServiceCoverage): Coverage
   for (const ref of coverage.references) {
     let arm = byArm.get(ref.relation);
     if (!arm) {
-      arm = { relation: ref.relation, bound: 0, ambiguous: 0, unbound: 0, reasons: [], total: 0 };
+      arm = {
+        relation: ref.relation,
+        bound: 0,
+        ambiguous: 0,
+        unbound: 0,
+        noProvider: 0,
+        reasons: [],
+        total: 0,
+      };
       byArm.set(ref.relation, arm);
       reasonsByArm.set(ref.relation, new Map());
     }
     arm.total += 1;
-    const bucket = bucketOf(ref);
-    if (bucket === "bound") arm.bound += 1;
-    else if (bucket === "ambiguous") arm.ambiguous += 1;
+    // The wire `bucket` is the server's own 3-state classification, read verbatim —
+    // except that `no-provider-in-workspace` arrives inside the `unbound` bucket
+    // while the server's `unbound` COUNTER excludes it (ADR-53). Split it back out
+    // here so each column reconciles with its summary counterpart.
+    if (ref.bucket === "bound") arm.bound += 1;
+    else if (ref.bucket === "ambiguous") arm.ambiguous += 1;
+    else if (ref.reason === NO_PROVIDER) arm.noProvider += 1;
     else arm.unbound += 1;
 
     if (ref.reason) {

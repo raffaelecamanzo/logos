@@ -21,6 +21,7 @@ use axum::{
 use http_body_util::BodyExt;
 use logos_core::federation::{discover, Backing, EngineRegistry};
 use logos_core::Engine;
+use web::{IntentToken, INTENT_HEADER};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -126,6 +127,7 @@ fn assert_self_only_csp(headers: &axum::http::HeaderMap, path: &str) {
 
 /// The full workspace read endpoint set the SPA fetches.
 const WORKSPACE_ENDPOINTS: &[&str] = &[
+    "/api/v1/workspace/roster",
     "/api/v1/workspace/status",
     "/api/v1/workspace/route-providers",
     "/api/v1/workspace/search?q=user",
@@ -137,6 +139,53 @@ fn ws_router(tmp: &TempDir) -> axum::Router {
     let federation = discover(tmp.path()).expect("discovery succeeds").expect("a workspace");
     let registry = EngineRegistry::<Engine>::new_serve_default(federation);
     web::workspace_router(registry).expect("the workspace router builds")
+}
+
+/// A workspace router plus the session's intent token — the seam the write-scope tests
+/// need, since `intent_guard` (correctly) rejects a `POST` that does not echo the token
+/// and [`web::workspace_router`] mints one the test cannot see.
+fn ws_router_with_intent(tmp: &TempDir) -> (axum::Router, IntentToken) {
+    let federation = discover(tmp.path()).expect("discovery succeeds").expect("a workspace");
+    let registry = EngineRegistry::<Engine>::new_serve_default(federation);
+    let intent = IntentToken::generate();
+    let router = web::workspace_router_with_intent(registry, intent.clone())
+        .expect("the workspace router builds");
+    (router, intent)
+}
+
+/// Every file under `root` (for a failure message that shows where a write landed).
+fn walk(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.file_name().is_some_and(|n| n == ".git") {
+                continue;
+            }
+            if p.is_dir() {
+                stack.push(p);
+            } else if let Ok(rel) = p.strip_prefix(root) {
+                out.push(rel.display().to_string());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// An intent-guarded, same-origin form `POST` — the shape the Config tab sends.
+fn post_form(path: &str, body: &'static str, intent: &IntentToken) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header(header::HOST, "127.0.0.1:4983")
+        .header(header::ORIGIN, "http://127.0.0.1:4983")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(INTENT_HEADER, intent.as_str())
+        .body(Body::from(body))
+        .unwrap()
 }
 
 // ── AC1: workspace mode serves the fan-out; plain repo is unchanged ──────────
@@ -433,4 +482,97 @@ async fn single_root_ignores_the_repo_param() {
     let plain = health_db_path(&router, "/api/v1/health").await;
     let scoped = health_db_path(&router, "/api/v1/health?repo=anything").await;
     assert_eq!(plain, scoped, "a single-root serve answers the same engine, `?repo=` or not");
+}
+
+// ── S-250: the shell's boot probe, and the member scope on the WRITE seam ─────
+
+/// `workspace roster` carries the manifest — name, default member, member names — and
+/// is the endpoint the SPA shell probes on **every** page load ([FR-UI-29]).
+#[tokio::test]
+async fn workspace_roster_carries_the_manifest_name_default_and_members() {
+    let tmp = workspace();
+    let router = ws_router(&tmp);
+    let resp = router.oneshot(get("/api/v1/workspace/roster")).await.unwrap();
+    let (status, body, headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_self_only_csp(&headers, "/api/v1/workspace/roster");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["workspace"], "shop");
+    // The default member is named, so the SPA opens on the member an UNSCOPED request
+    // answers from, rather than guessing at the roster's first entry.
+    assert_eq!(v["default"], "api");
+    let members: Vec<&str> = v["members"].as_array().unwrap().iter().map(|m| m.as_str().unwrap()).collect();
+    assert_eq!(members, ["api", "web"], "every member, in manifest order: {body}");
+}
+
+/// The roster starts **no** member engine ([NFR-PE-10]). The shell probes it on every
+/// page load, so if it fanned out like `workspace status` does, merely opening the
+/// dashboard would construct and watch every member's engine — undoing the
+/// warm-only-the-default policy the federated serve exists to keep.
+#[tokio::test]
+async fn the_roster_probe_warms_no_member() {
+    let tmp = workspace();
+    let federation = discover(tmp.path()).expect("discovery").expect("a workspace");
+    let registry = EngineRegistry::<Engine>::new_serve_default(federation);
+    assert_eq!(registry.resident_members(), ["api"], "only the default member is warm at startup");
+
+    // Read the roster straight off the registry the router would serve it from.
+    let roster = logos_core::federation::query::workspace_roster(&registry);
+    assert_eq!(roster.workspace, "shop");
+    assert_eq!(roster.default.as_deref(), Some("api"));
+    assert_eq!(roster.members, ["api", "web"]);
+    // The decisive assertion: reading it warmed nothing new.
+    assert_eq!(
+        registry.resident_members(),
+        ["api"],
+        "the roster read must not construct any member engine (NFR-PE-10)"
+    );
+}
+
+/// A **write** carries the member scope too ([FR-UI-29]). This is the load-bearing half:
+/// the Config tab READS the selected member's policy, so its Save must write back to
+/// THAT member — never over the workspace default's file.
+#[tokio::test]
+async fn a_scoped_config_write_targets_that_member_not_the_default() {
+    let tmp = workspace();
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let resp = router
+        .clone()
+        .oneshot(post_form("/config/save?repo=web", "file=rules&content=%23%20workspace%20policy%0A", &intent))
+        .await
+        .expect("route responds");
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "the scoped write is accepted: {body}");
+
+    // The policy landed in the `web` member's store — and the default member (`api`) is
+    // untouched. This is the whole point: the Config tab reads the SELECTED member, so a
+    // save that drifted to the default would silently overwrite another repo's policy.
+    let listing = walk(tmp.path());
+    assert!(
+        tmp.path().join("web/.logos/rules.toml").exists(),
+        "the write targeted the scoped member; tree was: {listing:?}"
+    );
+    assert!(
+        !tmp.path().join("api/.logos/rules.toml").exists(),
+        "the default member's policy was NOT overwritten; tree was: {listing:?}"
+    );
+}
+
+/// An unknown member on a **write** is a `404` — never a silent write to the default
+/// member's policy file ([NFR-RA-05]).
+#[tokio::test]
+async fn an_unknown_repo_404s_a_write_rather_than_writing_the_default() {
+    let tmp = workspace();
+    let (router, intent) = ws_router_with_intent(&tmp);
+
+    let resp = router
+        .clone()
+        .oneshot(post_form("/config/save?repo=nope", "file=rules&content=%23%20workspace%20policy%0A", &intent))
+        .await
+        .expect("route responds");
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "an unknown member is refused: {body}");
+    assert!(body.contains("no workspace member `nope`"), "{body}");
+    assert!(!tmp.path().join("api/.logos/rules.toml").exists(), "nothing was written anywhere");
+    assert!(!tmp.path().join("web/.logos/rules.toml").exists(), "nothing was written anywhere");
 }

@@ -17,6 +17,7 @@
 
 import { apiFetch } from "./client.ts";
 import { apiMutate } from "../intent.ts";
+import { withMemberScope } from "../workspace/scope.ts";
 import type { ConfigReadModel } from "./types.ts";
 
 /** The intent-guarded wiki-generation trigger route (mirrors `web::WIKI_GENERATE_ROUTE`). */
@@ -43,7 +44,7 @@ export function fetchWikiConfig(): Promise<ConfigReadModel> {
  * The trigger carries no body — the runner checks the work-list server-side.
  */
 export function streamWikiGeneration(signal?: AbortSignal): Promise<Response> {
-  return apiMutate(WIKI_GENERATE_ROUTE, {
+  return apiMutate(withMemberScope(WIKI_GENERATE_ROUTE), {
     headers: { Accept: "text/event-stream" },
     signal,
   });

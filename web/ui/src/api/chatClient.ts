@@ -16,6 +16,7 @@
 
 import { apiFetch } from "./client.ts";
 import { apiMutate } from "../intent.ts";
+import { withMemberScope } from "../workspace/scope.ts";
 import type { ChatConfigReadModel } from "../views/chat/chatModel.ts";
 
 /** The intent-guarded chat-turn route (mirrors `web::CHAT_POST_ROUTE`). */
@@ -40,7 +41,7 @@ export function fetchChatConfig(): Promise<ChatConfigReadModel> {
  * form-encoded user message, byte-identical to the no-JS POST.
  */
 export function streamChatTurn(question: string, signal?: AbortSignal): Promise<Response> {
-  return apiMutate(CHAT_ROUTE, {
+  return apiMutate(withMemberScope(CHAT_ROUTE), {
     headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "text/event-stream" },
     body: `q=${encodeURIComponent(question)}`,
     signal,
@@ -52,5 +53,5 @@ export function streamChatTurn(question: string, signal?: AbortSignal): Promise<
  * Intent-guarded like the turn.
  */
 export function clearChatHistory(): Promise<Response> {
-  return apiMutate(CHAT_CLEAR_ROUTE, {});
+  return apiMutate(withMemberScope(CHAT_CLEAR_ROUTE), {});
 }

@@ -8,9 +8,12 @@
  *
  * Selecting a member re-scopes the transport and re-keys every view (see
  * `WorkspaceContext`), so a switch re-fetches rather than showing one member's
- * figures under another member's name. A member with no index yet is labelled
- * "awaiting index" in the option itself — visible and selectable, but never
- * presented as if it had data (NFR-CC-04).
+ * figures under another member's name.
+ *
+ * It lists names and nothing else. The shell's roster probe is deliberately
+ * engine-free (NFR-PE-10), so it does NOT know which members are indexed — and a
+ * selector that guessed at that would be fabricating (NFR-CC-04). Per-member index
+ * state is shown where it is actually read: the Workspace tab's service map.
  */
 
 import { Badge } from "../components/index.ts";
@@ -40,9 +43,9 @@ export function MemberSelector() {
         value={member ?? ""}
         onChange={(e) => selectMember(e.target.value)}
       >
-        {members.map((m) => (
-          <option key={m.name} value={m.name}>
-            {m.indexed ? m.name : `${m.name} (awaiting index)`}
+        {members.map((name) => (
+          <option key={name} value={name}>
+            {name}
           </option>
         ))}
       </select>

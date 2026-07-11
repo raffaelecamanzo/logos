@@ -67,3 +67,15 @@ export const NAV_GROUPS: readonly NavGroup[] = ["A", "B", "C"];
 export function navItemsFor(isWorkspace: boolean): readonly NavItem[] {
   return isWorkspace ? [...NAV_ITEMS, ...WORKSPACE_NAV_ITEMS] : NAV_ITEMS;
 }
+
+/**
+ * Is this route **app-level** — a view of the whole workspace rather than of one
+ * member? Such a view reads the unscoped `workspace/*` fan-out, so its data does not
+ * change when the member does, and the shell must NOT remount it on a member switch
+ * (`App.tsx`). Today that is exactly the Workspace tab.
+ */
+export function isAppLevelPath(pathname: string): boolean {
+  return WORKSPACE_NAV_ITEMS.some(
+    (item) => pathname === item.path || pathname.startsWith(`${item.path}/`),
+  );
+}

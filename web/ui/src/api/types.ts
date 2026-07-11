@@ -1027,8 +1027,21 @@ export interface CrossServiceCoverage {
   bound_ratio: number;
 }
 
+/** `GET /api/v1/workspace/roster` — the manifest-only roster the shell probes on
+ *  every page load: workspace name, default member, member names. Engine-free by
+ *  construction, so the probe warms no member (NFR-PE-10) — unlike
+ *  {@link WorkspaceStatus}, which fans out over all of them. */
+export interface WorkspaceRoster {
+  workspace: string;
+  /** The member an unscoped request answers from (the manifest `default`), when the
+   *  manifest named one. The shell opens on it rather than guessing. */
+  default?: string;
+  /** Every member's repo-qualified name, in manifest order. */
+  members: string[];
+}
+
 /** `GET /api/v1/workspace/status` — per-member index freshness + the coverage
- *  summary. The member list backing the shell selector (FR-WS-06). */
+ *  summary. Fetched by the Workspace tab (it fans out over every member). */
 export interface WorkspaceStatus {
   /** The workspace name from the manifest. */
   workspace: string;

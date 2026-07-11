@@ -23,7 +23,7 @@
  * onto a SPA surface ([NFR-SE-07]).
  */
 
-import { apiFetch } from "./client.ts";
+import { apiFetch, apiUrl } from "./client.ts";
 import { apiMutate } from "../intent.ts";
 import { withMemberScope } from "../workspace/scope.ts";
 import type {
@@ -152,7 +152,7 @@ export async function saveSecret(apiKey: string): Promise<SecretWriteOutcome | n
  * fabricated `CONSISTENT` ([NFR-RA-05]).
  */
 export async function verifyGraph(): Promise<VerifyReport> {
-  const res = await apiMutate(withMemberScope("/api/v1/verify"), { credentials: "same-origin" });
+  const res = await apiMutate(apiUrl("verify"), { credentials: "same-origin" });
   if (!res.ok) throw new ConfigMutateError(res.status, await detailOf(res));
   return (await res.json()) as VerifyReport;
 }

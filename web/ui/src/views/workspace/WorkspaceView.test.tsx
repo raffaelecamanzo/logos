@@ -5,11 +5,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BridgeEdge, CrossServiceCoverage } from "../../api/types.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { scopedMember, setScopedMember } from "../../workspace/scope.ts";
+import { stubApi } from "../../workspace/testFixtures.ts";
 import { WorkspaceView } from "./WorkspaceView.tsx";
 
 // The service map mounts the real ECharts canvas, which needs a layout engine jsdom
-// does not have. Stub the canvas down to what the view actually contracts with: the
-// node set it was handed, and the click that focuses a member.
+// does not have. Stub it down to what the view actually contracts with: the node set
+// it was handed, and the click that focuses a member.
 vi.mock("../graph/GraphCanvas.tsx", () => ({
   GraphCanvas: ({
     loaded,
@@ -29,7 +30,9 @@ vi.mock("../graph/GraphCanvas.tsx", () => ({
   ),
 }));
 
-const COVERAGE_WITH_REFS: CrossServiceCoverage = {
+/** 1 bound · 1 ambiguous · 1 unbound · 2 with no provider in this workspace. The
+ *  server's ratio excludes the no-provider pair from its denominator: 1/3 = 33.3%. */
+const COVERAGE: CrossServiceCoverage = {
   references: [
     { relation: "route", from: { member: "api", symbol: "a" }, bucket: "bound", state: "bound" },
     {
@@ -40,8 +43,22 @@ const COVERAGE_WITH_REFS: CrossServiceCoverage = {
       reason: "path-not-composed",
     },
     {
-      relation: "grpc-call",
+      relation: "route",
       from: { member: "api", symbol: "c" },
+      bucket: "unbound",
+      state: "unbound",
+      reason: "no-provider-in-workspace",
+    },
+    {
+      relation: "route",
+      from: { member: "api", symbol: "d" },
+      bucket: "unbound",
+      state: "unbound",
+      reason: "no-provider-in-workspace",
+    },
+    {
+      relation: "grpc-call",
+      from: { member: "api", symbol: "e" },
       bucket: "ambiguous",
       state: "unbound",
       reason: "ambiguous",
@@ -54,55 +71,11 @@ const COVERAGE_WITH_REFS: CrossServiceCoverage = {
   bound_ratio: 0.3333,
 };
 
-const EMPTY_COVERAGE: CrossServiceCoverage = {
-  references: [],
-  bound: 0,
-  ambiguous: 0,
-  unbound: 0,
-  no_provider_in_workspace: 0,
-  bound_ratio: 1,
-};
-
 const BINDING: BridgeEdge = {
   relation: "route",
   from: { member: "api", symbol: "op" },
   to: { member: "web", symbol: "route" },
 };
-
-function stubWorkspace({
-  coverage = EMPTY_COVERAGE,
-  providers = [],
-  probeStatus = 200,
-}: { coverage?: CrossServiceCoverage; providers?: BridgeEdge[]; probeStatus?: number } = {}) {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn((url: string) => {
-      if (url.startsWith("/api/v1/workspace/status")) {
-        return Promise.resolve({
-          ok: probeStatus === 200,
-          status: probeStatus,
-          json: () =>
-            Promise.resolve({
-              workspace: "shop",
-              members: [
-                { member: "api", result: { indexed: true } },
-                { member: "web", result: { indexed: true } },
-              ],
-              coverage,
-            }),
-        } as Response);
-      }
-      if (url.startsWith("/api/v1/workspace/route-providers")) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () => Promise.resolve({ providers }),
-        } as Response);
-      }
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) } as Response);
-    }),
-  );
-}
 
 function mount() {
   return render(
@@ -119,34 +92,41 @@ afterEach(() => {
 });
 
 describe("WorkspaceView (S-250, FR-UI-29)", () => {
-  it("says so honestly in single-root mode instead of fetching a surface that is not there", async () => {
-    stubWorkspace({ probeStatus: 404 });
+  it("does NOT claim 'not a workspace' while the probe is still in flight", async () => {
+    // The guard must distinguish "single-root" from "not known yet". Asserting a mode
+    // we have not established would flash a falsehood at every real workspace on the
+    // way in (NFR-CC-04) — and would make the single-root test below tautological.
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+    mount();
+    expect(screen.queryByText(/not a workspace/i)).toBeNull();
+    expect(await screen.findByText(/reading the workspace/i)).toBeInTheDocument();
+  });
+
+  it("says so honestly once single-root mode is SETTLED", async () => {
+    stubApi({ probeStatus: 404 });
     mount();
     expect(await screen.findByText(/not a workspace/i)).toBeInTheDocument();
   });
 
   it("rolls the workspace up: its name, its services, and the coverage headline", async () => {
-    stubWorkspace({ coverage: COVERAGE_WITH_REFS, providers: [BINDING] });
+    stubApi({ coverage: COVERAGE, providers: [BINDING] });
     mount();
     expect(await screen.findByText("shop")).toBeInTheDocument();
-    // The roll-up is one line: service count AND the coverage headline together (the
-    // same counts also appear inside the coverage panel, so assert on this element).
     const rollup = screen.getByText(/2 services/);
     expect(rollup.textContent).toMatch(/1 bound · 1 ambiguous · 1 unbound/);
   });
 
   it("draws services as nodes and resolved bindings as edges on the shared canvas", async () => {
-    stubWorkspace({ providers: [BINDING] });
+    stubApi({ providers: [BINDING] });
     mount();
     await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
     expect(screen.getByTestId("canvas-edges")).toHaveTextContent("1");
-    // The accessible twin of the canvas names the binding in full.
     expect(screen.getByRole("cell", { name: "api" })).toBeInTheDocument();
     expect(screen.getByText(/HTTP \(OpenAPI ↔ route\)/)).toBeInTheDocument();
   });
 
   it("clicking a service focuses its member — the shell selector follows the canvas", async () => {
-    stubWorkspace({ providers: [BINDING] });
+    stubApi({ providers: [BINDING] });
     mount();
     await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
     await userEvent.click(screen.getByRole("button", { name: "web" }));
@@ -154,30 +134,134 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
   });
 
   it("states an empty service map honestly rather than drawing a fabricated edge", async () => {
-    stubWorkspace({ providers: [] });
+    stubApi({ providers: [] });
     mount();
     expect(await screen.findByText(/no cross-service bindings resolved yet/i)).toBeInTheDocument();
     expect(screen.getByTestId("canvas-edges")).toHaveTextContent("0");
   });
 
-  it("shows bound/ambiguous/unbound per arm with the reasons, and the server's ratio verbatim", async () => {
-    stubWorkspace({ coverage: COVERAGE_WITH_REFS, providers: [BINDING] });
+  it("shows the per-arm board whose columns RECONCILE with the headline above them", async () => {
+    stubApi({ coverage: COVERAGE, providers: [BINDING] });
     mount();
     await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
 
-    // The ratio is the server's (33.3%), NOT bound/total (1/3 of 5 references = 20%):
-    // `no-provider-in-workspace` is excluded from the denominator (ADR-53).
+    // The ratio is the server's (33.3%), not bound/total (1/5 = 20%): the two
+    // no-provider references are outside the denominator (ADR-53).
     expect(screen.getAllByText("33.3%").length).toBeGreaterThan(0);
     expect(screen.getByText(/2 with no provider in this workspace/)).toBeInTheDocument();
-    // One row per relation arm, with the unbound reason spelled out.
-    expect(screen.getByRole("cell", { name: /HTTP \(OpenAPI ↔ route\)/ })).toBeInTheDocument();
+
+    // The `route` row: 1 bound, 0 ambiguous, 1 unbound, 2 no-provider. The wire `bucket`
+    // says "unbound" for the no-provider pair, but the summary's `unbound` counter
+    // excludes them — so folding them in would print "3 unbound" inches below a headline
+    // that says "1 unbound". Pin the split.
+    const routeRow = screen.getByRole("cell", { name: /HTTP \(OpenAPI ↔ route\)/ }).closest("tr")!;
+    const cells = [...routeRow.querySelectorAll("td")].map((c) => c.textContent);
+    expect(cells.slice(1, 5)).toEqual(["1", "0", "1", "2"]);
     expect(screen.getByText(/Path could not be composed/)).toBeInTheDocument();
   });
 
   it("renders the coverage empty state — never a fabricated 100% over nothing", async () => {
-    stubWorkspace({ coverage: EMPTY_COVERAGE });
+    stubApi();
     mount();
     await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
     expect(screen.getByText(/no cross-boundary references found/i)).toBeInTheDocument();
+  });
+});
+
+describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
+  /** An impact answer: one healthy seed member, one degraded, no cross-service reach. */
+  const IMPACT_DEGRADED = {
+    query: "get_user",
+    seed: [
+      {
+        member: "api",
+        result: {
+          query: "get_user",
+          resolved: { symbol: "s", name: "get_user", kind: "function", file: "a.rs", line: 1 },
+          depth: 2,
+          upstream_label: "Callers",
+          upstream: [
+            { symbol: "c1", name: "handler", kind: "function", file: "h.rs", line: 9, distance: 1 },
+          ],
+          downstream_label: "Calls",
+          downstream: [],
+          docs_label: "Docs",
+          docs: [],
+          suggestions: [],
+          warnings: [],
+        },
+      },
+      { member: "web", error: "engine failed to start" },
+    ],
+    cross_service: [],
+  };
+
+  async function traceSymbol() {
+    await userEvent.click(await screen.findByRole("tab", { name: /cross-service impact/i }));
+    await userEvent.type(screen.getByLabelText(/symbol/i), "get_user");
+    await userEvent.click(screen.getByRole("button", { name: /trace impact/i }));
+  }
+
+  it("invites a symbol before it fetches anything", async () => {
+    stubApi();
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: /cross-service impact/i }));
+    expect(screen.getByText(/name a symbol to trace its impact/i)).toBeInTheDocument();
+  });
+
+  it("states a DEGRADED seed member rather than rendering it as zero impact", async () => {
+    stubApi({ impact: IMPACT_DEGRADED });
+    mount();
+    await traceSymbol();
+    // A member that could not be read has UNKNOWN impact, not none (NFR-RA-05).
+    expect(await screen.findByText(/Degraded: engine failed to start/)).toBeInTheDocument();
+    // The healthy member's impact is still shown.
+    expect(screen.getByRole("cell", { name: "handler" })).toBeInTheDocument();
+  });
+
+  it("states the honest empty when no binding reaches the symbol from another service", async () => {
+    stubApi({ impact: IMPACT_DEGRADED });
+    mount();
+    await traceSymbol();
+    expect(await screen.findByText(/no cross-service impact/i)).toBeInTheDocument();
+  });
+
+  it("names the binding each far-side impact was stitched across", async () => {
+    stubApi({
+      impact: {
+        ...IMPACT_DEGRADED,
+        cross_service: [
+          {
+            via: BINDING,
+            member: "web",
+            impact: {
+              query: "get_user",
+              resolved: { symbol: "w", name: "get_user", kind: "route", file: "m.rs", line: 3 },
+              depth: 2,
+              upstream_label: "Callers",
+              upstream: [
+                { symbol: "w1", name: "route_handler", kind: "function", file: "m.rs", line: 4, distance: 1 },
+              ],
+              downstream_label: "Calls",
+              downstream: [],
+              docs_label: "Docs",
+              docs: [],
+              suggestions: [],
+              warnings: [],
+            },
+          },
+        ],
+      },
+    });
+    mount();
+    await traceSymbol();
+    // The card heading names the far-side member AND the arm it was reached over (the
+    // table's caption repeats it, so query the heading specifically).
+    expect(
+      await screen.findByRole("heading", {
+        name: /web — reached across a HTTP \(OpenAPI ↔ route\) binding/,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "route_handler" })).toBeInTheDocument();
   });
 });

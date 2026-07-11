@@ -16,10 +16,23 @@
 
 import { ApiError } from "../intent.ts";
 import { apiFetch } from "./client.ts";
-import type { WorkspaceStatus, XserviceImpact, XserviceRouteProviders } from "./types.ts";
+import type {
+  WorkspaceRoster,
+  WorkspaceStatus,
+  XserviceImpact,
+  XserviceRouteProviders,
+} from "./types.ts";
 
-/** `GET /api/v1/workspace/status` — the member roster + the cross-service coverage
- *  summary (the selector's list, the service map's nodes, the dashboard's figures). */
+/** `GET /api/v1/workspace/roster` — the manifest-only roster (name, default member,
+ *  member names). The shell's boot probe: it starts NO member engine, so opening the
+ *  dashboard cannot eagerly warm all N members (NFR-PE-10). */
+export function fetchWorkspaceRoster(): Promise<WorkspaceRoster> {
+  return apiFetch<WorkspaceRoster>("workspace/roster");
+}
+
+/** `GET /api/v1/workspace/status` — per-member index freshness + the cross-service
+ *  coverage summary. This one DOES fan out over every member, so it is fetched by the
+ *  Workspace tab (which exists to show exactly that), never by the shell. */
 export function fetchWorkspaceStatus(): Promise<WorkspaceStatus> {
   return apiFetch<WorkspaceStatus>("workspace/status");
 }
@@ -37,9 +50,9 @@ export function fetchWorkspaceImpact(symbol: string, member?: string): Promise<X
   return apiFetch<XserviceImpact>("workspace/impact", { symbol, repo: member });
 }
 
-/** What the boot-time probe found: a workspace (with its status) or a plain repo. */
+/** What the boot-time probe found: a workspace (with its roster) or a plain repo. */
 export type WorkspaceProbe =
-  | { mode: "workspace"; status: WorkspaceStatus }
+  | { mode: "workspace"; roster: WorkspaceRoster }
   | { mode: "single" };
 
 /**
@@ -51,7 +64,7 @@ export type WorkspaceProbe =
  */
 export async function probeWorkspace(): Promise<WorkspaceProbe> {
   try {
-    return { mode: "workspace", status: await fetchWorkspaceStatus() };
+    return { mode: "workspace", roster: await fetchWorkspaceRoster() };
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) return { mode: "single" };
     throw err;

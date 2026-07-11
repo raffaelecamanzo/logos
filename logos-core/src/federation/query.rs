@@ -286,6 +286,45 @@ pub struct WorkspaceStatus {
     pub coverage: CrossServiceCoverage,
 }
 
+/// The workspace **roster** — the manifest, and nothing but the manifest
+/// ([FR-WS-06], [NFR-PE-10]).
+///
+/// Deliberately engine-free. [`workspace_status`] fans out over every member (it
+/// reads each one's index freshness and the cross-service coverage), which
+/// *constructs and watches every member's engine*. That is right for the coverage
+/// dashboard and wrong for the thing the web shell needs on **every page load**:
+/// the member names, so it can render its selector. Serving the selector from
+/// `workspace_status` would eagerly warm all N members on first paint and undo
+/// [NFR-PE-10]'s warm-only-the-default policy.
+///
+/// This read touches no engine at all: it projects the already-discovered
+/// [`Federation`](super::Federation).
+#[derive(Debug, Serialize)]
+pub struct WorkspaceRoster {
+    /// The workspace name (`[workspace] name`).
+    pub workspace: String,
+    /// The default member's name, when the manifest named one that survived
+    /// resolution — the member an unscoped request answers from, so the shell can
+    /// open on it rather than guessing at the roster's first entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// Every member's repo-qualified name, in manifest order.
+    pub members: Vec<String>,
+}
+
+/// The engine-free workspace roster ([`WorkspaceRoster`], [FR-WS-06], [NFR-PE-10]).
+pub fn workspace_roster<E>(registry: &EngineRegistry<E>) -> WorkspaceRoster
+where
+    E: super::registry::MemberEngine,
+{
+    let federation = registry.federation();
+    WorkspaceRoster {
+        workspace: federation.name.clone(),
+        default: federation.default.clone(),
+        members: federation.members.iter().map(|m| m.name.clone()).collect(),
+    }
+}
+
 /// Per-member freshness plus the 3-state coverage summary ([FR-WS-05]).
 pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
     WorkspaceStatus {

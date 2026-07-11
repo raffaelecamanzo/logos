@@ -21,11 +21,22 @@
  * no nav item is rendered — and it says so honestly if navigated to by hand.
  */
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 
 import { AsyncResource, useApiResource } from "../../api/index.ts";
-import { fetchWorkspaceBindings, fetchWorkspaceImpact } from "../../api/workspaceClient.ts";
-import type { CrossServiceImpact, ImpactResult, XserviceImpact, XserviceRouteProviders } from "../../api/types.ts";
+import {
+  fetchWorkspaceBindings,
+  fetchWorkspaceImpact,
+  fetchWorkspaceStatus,
+} from "../../api/workspaceClient.ts";
+import type {
+  CrossServiceImpact,
+  ImpactEntry,
+  ImpactResult,
+  WorkspaceStatus,
+  XserviceImpact,
+  XserviceRouteProviders,
+} from "../../api/types.ts";
 import {
   Badge,
   Button,
@@ -34,6 +45,8 @@ import {
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
   EmptyState,
+  ErrorPanel,
+  LoadingState,
   ScoreBar,
   Tabs,
   TextField,
@@ -42,13 +55,28 @@ import {
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { GraphCanvas } from "../graph/GraphCanvas.tsx";
 import { EdgeRow } from "../graph/Legend.tsx";
-import { armLabel, buildCoverageDashboard, REASON_LABEL, type ArmCoverage } from "./coverageModel.ts";
-import { buildServiceMap, memberOfServiceId, type ServiceLink } from "./serviceMapModel.ts";
+import {
+  ARM_LABEL,
+  armLabel,
+  buildCoverageDashboard,
+  reasonLabel,
+  type ArmCoverage,
+  type CoverageDashboard,
+} from "./coverageModel.ts";
+import {
+  buildServiceMap,
+  memberOfServiceId,
+  serviceMembers,
+  type ServiceLink,
+  type ServiceMember,
+} from "./serviceMapModel.ts";
 import graphStyles from "../graph/GraphView.module.css";
 import styles from "./Workspace.module.css";
 
-/** The relation arms the service map can draw — the legend's rows. */
-const RELATION_ARMS = ["route", "grpc-call", "broker-topic"];
+/** The relation arms the service map can draw — the legend's rows. Derived from the
+ *  arm-label map so a new arm cannot be added to the dashboard yet silently omitted
+ *  from the legend. */
+const RELATION_ARMS = Object.keys(ARM_LABEL);
 
 /** A percentage rendered from a 0–1 ratio, at one decimal — never rounded up to a
  *  flattering figure. */
@@ -57,11 +85,35 @@ function pct(ratio: number): string {
 }
 
 export function WorkspaceView() {
-  const { mode, workspace, members, status } = useWorkspace();
+  const { mode, workspace, members, error } = useWorkspace();
+  // The fan-out status (per-member freshness + coverage). Fetched HERE, not in the
+  // shell: it constructs every member's engine, which is right for the tab that shows
+  // cross-service coverage and wrong for a probe on every page load (NFR-PE-10).
+  const status = useApiResource<WorkspaceStatus>(() => fetchWorkspaceStatus(), []);
 
-  // Reachable only in workspace mode; a hand-typed `/workspace` in a plain repo gets
-  // the honest answer rather than a broken fetch.
-  if (mode !== "workspace" || !status) {
+  // The probe has not answered yet. We do NOT know the mode, so we must not assert
+  // one: claiming "not a workspace" here would flash a falsehood at every real
+  // workspace on its way in (NFR-CC-04 — an honest "reading…" is not an empty state).
+  if (mode === "loading") {
+    return (
+      <div className={styles.view}>
+        <LoadingState label="Reading the workspace…" />
+      </div>
+    );
+  }
+
+  // The probe failed outright — say so; a broken read is not a plain repo (NFR-RA-05).
+  if (error) {
+    return (
+      <div className={styles.view}>
+        <ErrorPanel>The workspace status could not be read: {error.message}</ErrorPanel>
+      </div>
+    );
+  }
+
+  // Settled, and this is genuinely a single-root serve: a hand-typed `/workspace` in a
+  // plain repo gets the honest answer rather than a broken fetch.
+  if (mode !== "workspace") {
     return (
       <div className={styles.view}>
         <EmptyState message="Not a workspace — this serve has a single repository root. Start Logos at a directory with a logos.workspace.toml to federate members." />
@@ -69,10 +121,29 @@ export function WorkspaceView() {
     );
   }
 
-  const coverage = buildCoverageDashboard(status.coverage);
-
   return (
     <div className={styles.view}>
+      <AsyncResource resource={status} loadingLabel="Loading the workspace…">
+        {(model) => <WorkspaceContent workspace={workspace} members={members} status={model} />}
+      </AsyncResource>
+    </div>
+  );
+}
+
+function WorkspaceContent({
+  workspace,
+  members,
+  status,
+}: {
+  workspace: string | null;
+  members: string[];
+  status: WorkspaceStatus;
+}) {
+  const coverage = buildCoverageDashboard(status.coverage);
+  const services = serviceMembers(status);
+
+  return (
+    <>
       <Callout label="Workspace" tone="signal">
         <span>
           <span className="mono">{workspace}</span> · {members.length} service
@@ -90,7 +161,7 @@ export function WorkspaceView() {
       <Tabs
         label="Workspace views"
         tabs={[
-          { id: "map", label: "Service map", panel: <ServiceMapPanel /> },
+          { id: "map", label: "Service map", panel: <ServiceMapPanel services={services} /> },
           {
             id: "coverage",
             label: "Cross-service coverage",
@@ -99,17 +170,17 @@ export function WorkspaceView() {
           { id: "impact", label: "Cross-service impact", panel: <ImpactPanel /> },
         ]}
       />
-    </div>
+    </>
   );
 }
 
 // ── Service map (frontend-design §4.16) ──────────────────────────────────────
 
-function ServiceMapPanel() {
+function ServiceMapPanel({ services }: { services: ServiceMember[] }) {
   const bindings = useApiResource<XserviceRouteProviders>(() => fetchWorkspaceBindings(), []);
   return (
     <AsyncResource resource={bindings} loadingLabel="Loading the service map…">
-      {(model) => <ServiceMap providers={model} />}
+      {(model) => <ServiceMap services={services} providers={model} />}
     </AsyncResource>
   );
 }
@@ -132,10 +203,15 @@ const LINK_COLUMNS: Column<ServiceLink>[] = [
   },
 ];
 
-function ServiceMap({ providers }: { providers: XserviceRouteProviders }) {
-  const { members, selectMember } = useWorkspace();
-  const map = buildServiceMap(members, providers.providers);
-  const canvasRef = useRef(null);
+function ServiceMap({
+  services,
+  providers,
+}: {
+  services: ServiceMember[];
+  providers: XserviceRouteProviders;
+}) {
+  const { selectMember } = useWorkspace();
+  const map = buildServiceMap(services, providers.providers);
 
   return (
     <div className={styles.panel}>
@@ -146,7 +222,6 @@ function ServiceMap({ providers }: { providers: XserviceRouteProviders }) {
       {/* Clicking a service focuses its member: the shell selector switches to it and
           every other view re-fetches scoped to that member (frontend-design §4.16). */}
       <GraphCanvas
-        ref={canvasRef}
         loaded={map.loaded}
         selection={{ seed: null, focusId: null, lockedId: null, locatedId: null, depth: 0 }}
         onNodeClick={(id) => {
@@ -174,10 +249,15 @@ function ServiceMap({ providers }: { providers: XserviceRouteProviders }) {
         </p>
       )}
 
-      <Card title="Cross-service bindings">
-        {map.links.length === 0 ? (
-          <p className="muted">No resolved bindings — nothing to list.</p>
-        ) : (
+      {map.degraded.length > 0 && (
+        <p className="muted">
+          Unavailable: <span className="mono">{map.degraded.join(", ")}</span> — these members could
+          not be read (a fault, not an empty index); their couplings are unknown.
+        </p>
+      )}
+
+      {map.links.length > 0 && (
+        <Card title="Cross-service bindings">
           <DataTable
             caption="Cross-service bindings (the accessible twin of the service map)"
             columns={LINK_COLUMNS}
@@ -185,8 +265,8 @@ function ServiceMap({ providers }: { providers: XserviceRouteProviders }) {
             rowKey={(l) => `${l.from}->${l.to}:${l.relation}`}
             pageSize={DEFAULT_TABLE_PAGE_SIZE}
           />
-        )}
-      </Card>
+        </Card>
+      )}
     </div>
   );
 }
@@ -216,8 +296,19 @@ const ARM_COLUMNS: Column<ArmCoverage>[] = [
     sortValue: (a) => a.unbound,
   },
   {
+    // Its own column, never folded into Unbound — so this row's figures sum to the
+    // headline's above it (ADR-53).
+    key: "noProvider",
+    header: "No provider here",
+    numeric: true,
+    cell: (a) => a.noProvider,
+    sortValue: (a) => a.noProvider,
+  },
+  {
     key: "reasons",
-    header: "Unbound because",
+    // "Not bound", not "Unbound": ambiguity and no-provider are their own buckets,
+    // so calling their reasons "unbound" would contradict the columns beside them.
+    header: "Not bound because",
     cell: (a) =>
       a.reasons.length === 0 ? (
         <span className="muted">—</span>
@@ -225,7 +316,7 @@ const ARM_COLUMNS: Column<ArmCoverage>[] = [
         <ul className={styles.reasons}>
           {a.reasons.map((r) => (
             <li key={r.reason}>
-              {REASON_LABEL[r.reason]} <Badge tone="muted">{r.count}</Badge>
+              {reasonLabel(r.reason)} <Badge tone="muted">{r.count}</Badge>
             </li>
           ))}
         </ul>
@@ -234,7 +325,7 @@ const ARM_COLUMNS: Column<ArmCoverage>[] = [
   },
 ];
 
-function CoveragePanel({ dashboard }: { dashboard: ReturnType<typeof buildCoverageDashboard> }) {
+function CoveragePanel({ dashboard }: { dashboard: CoverageDashboard }) {
   if (dashboard.isEmpty) {
     return (
       <div className={styles.panel}>
@@ -276,8 +367,7 @@ function CoveragePanel({ dashboard }: { dashboard: ReturnType<typeof buildCovera
 
 // ── Cross-service impact ─────────────────────────────────────────────────────
 
-const IMPACT_COLUMNS: Column<{ symbol: string; name: string; kind: string; file: string | null; distance: number }>[] =
-  [
+const IMPACT_COLUMNS: Column<ImpactEntry>[] = [
     { key: "name", header: "Symbol", mono: true, cell: (e) => e.name, sortValue: (e) => e.name },
     { key: "kind", header: "Kind", cell: (e) => e.kind, sortValue: (e) => e.kind },
     {
@@ -287,14 +377,14 @@ const IMPACT_COLUMNS: Column<{ symbol: string; name: string; kind: string; file:
       cell: (e) => e.file ?? <span className="muted">n/a</span>,
       sortValue: (e) => e.file ?? "",
     },
-    {
-      key: "distance",
-      header: "Distance",
-      numeric: true,
-      cell: (e) => e.distance,
-      sortValue: (e) => e.distance,
-    },
-  ];
+  {
+    key: "distance",
+    header: "Distance",
+    numeric: true,
+    cell: (e) => e.distance,
+    sortValue: (e) => e.distance,
+  },
+];
 
 function ImpactTable({ label, impact }: { label: string; impact: ImpactResult }) {
   const rows = impact.upstream;

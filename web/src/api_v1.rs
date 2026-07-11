@@ -438,7 +438,7 @@ pub(crate) async fn search(
 
 /// Read a trimmed, non-empty query parameter, else `None` — the shared optional
 /// accessor for the workspace surface's `?repo=`/`?limit=` params.
-fn opt_param(q: &HashMap<String, String>, key: &str) -> Option<String> {
+pub(crate) fn opt_param(q: &HashMap<String, String>, key: &str) -> Option<String> {
     q.get(key).map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
@@ -493,6 +493,25 @@ where
         "page render",
     );
     ok(out)
+}
+
+/// `GET /api/v1/workspace/roster` — the manifest-only roster (workspace name,
+/// default member, member names) the SPA shell probes on **every** page load to
+/// decide its mode and populate the member selector ([FR-WS-06], [FR-UI-29]).
+///
+/// Engine-free by construction ([`workspace_roster`](fed_query::workspace_roster)):
+/// unlike [`workspace_status`] it starts no member, so the shell's boot probe cannot
+/// eagerly warm all N members and undo the warm-only-the-default policy
+/// ([NFR-PE-10]). Answers the same honest `404` under a single-root backing — which
+/// is exactly how the SPA discovers it is NOT a workspace.
+pub(crate) async fn workspace_roster(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+) -> Response {
+    workspace_fan(backing, bridge, "api_v1_workspace_roster", |registry, _bridge| {
+        fed_query::workspace_roster(registry)
+    })
+    .await
 }
 
 /// `GET /api/v1/workspace/status` — per-member index freshness + the 3-state

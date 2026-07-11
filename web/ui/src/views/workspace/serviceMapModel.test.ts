@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import type { BridgeEdge } from "../../api/types.ts";
-import type { WorkspaceMember } from "../../workspace/WorkspaceContext.tsx";
-import { buildServiceMap, memberOfServiceId, serviceId } from "./serviceMapModel.ts";
+import type { BridgeEdge, WorkspaceStatus } from "../../api/types.ts";
+import {
+  buildServiceMap,
+  memberOfServiceId,
+  serviceId,
+  serviceMembers,
+  type ServiceMember,
+} from "./serviceMapModel.ts";
 
-function member(name: string, indexed = true): WorkspaceMember {
-  return { name, status: null, indexed, error: null };
+function member(name: string, indexed = true): ServiceMember {
+  return { name, indexed, error: null };
 }
 
 function binding(from: string, to: string, relation = "route", symbol = "sym"): BridgeEdge {
@@ -59,6 +64,31 @@ describe("buildServiceMap (S-250, FR-UI-29)", () => {
     expect(map.awaitingIndex).toEqual(["web"]);
     expect(map.loaded.nodes[serviceId("web")].layer).toBe("doc");
     expect(map.loaded.nodes[serviceId("api")].layer).toBe("code");
+  });
+
+  it("keeps a DEGRADED member apart from a merely un-indexed one — different facts, different remedies", () => {
+    const broken: ServiceMember = { name: "web", indexed: false, error: "store is locked" };
+    const map = buildServiceMap([member("api"), broken], []);
+    expect(map.degraded).toEqual(["web"]);
+    // It is NOT reported as "awaiting index" — that would send the user to `logos
+    // index` for a fault indexing cannot fix.
+    expect(map.awaitingIndex).toEqual([]);
+    expect(map.loaded.nodes[serviceId("web")].layer).toBe("doc");
+  });
+
+  it("projects the status fan-out onto the roster, degradation and all", () => {
+    const status = {
+      workspace: "shop",
+      members: [
+        { member: "api", result: { indexed: true } },
+        { member: "web", error: "engine failed to start" },
+      ],
+      coverage: { references: [], bound: 0, ambiguous: 0, unbound: 0, no_provider_in_workspace: 0, bound_ratio: 1 },
+    } as unknown as WorkspaceStatus;
+    expect(serviceMembers(status)).toEqual([
+      { name: "api", indexed: true, error: null },
+      { name: "web", indexed: false, error: "engine failed to start" },
+    ]);
   });
 
   it("never fabricates a service for a binding endpoint outside the roster", () => {

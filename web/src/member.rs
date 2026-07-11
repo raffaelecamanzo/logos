@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use axum::{
     async_trait,
-    extract::{FromRef, FromRequestParts, Query},
+    extract::{rejection::QueryRejection, FromRef, FromRequestParts, Query},
     http::{request::Parts, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -55,17 +55,33 @@ pub(crate) const REPO_PARAM: &str = "repo";
 /// so a handler body is unchanged — it still just holds an `Arc<Engine>`.
 pub(crate) struct MemberEngine(pub(crate) Arc<Engine>);
 
-/// The honest `404` for a `?repo=` naming a member this workspace does not have —
-/// the selector's counterpart to the fan-out's "not a workspace" `404`. The
-/// resolution error chain is surfaced verbatim, never papered over ([NFR-RA-05]).
-fn unknown_member(member: &str, err: &anyhow::Error) -> Response {
-    (
+/// An honest error body at `status` ([NFR-RA-05]).
+fn refuse(status: StatusCode, error: String) -> Response {
+    (status, Json(ApiError { error })).into_response()
+}
+
+/// The `404` for a `?repo=` naming a member this workspace does not have — the
+/// selector's counterpart to the fan-out's "not a workspace" `404`.
+///
+/// Reserved for **genuine absence**. A member that *is* in the manifest but whose
+/// engine cannot start is a `500` ([`member_unavailable`]) — answering `404` there
+/// would assert the member does not exist while the very same message admitted that
+/// it does, and would send the SPA hunting for a typo instead of a broken store.
+fn unknown_member(member: &str) -> Response {
+    refuse(
         StatusCode::NOT_FOUND,
-        Json(ApiError {
-            error: format!("no workspace member `{member}`: {err:#}"),
-        }),
+        format!("no workspace member `{member}` in this workspace"),
     )
-        .into_response()
+}
+
+/// The `500` for a member that exists but whose engine failed to start (a locked or
+/// corrupt store, an I/O fault) — the failure chain verbatim, never masked as a
+/// missing member ([NFR-RA-05]).
+fn member_unavailable(member: &str, err: &anyhow::Error) -> Response {
+    refuse(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("workspace member `{member}` could not be started: {err:#}"),
+    )
 }
 
 #[async_trait]
@@ -80,14 +96,32 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let default: Arc<Engine> = FromRef::from_ref(state);
         let backing: Arc<Backing<Engine>> = FromRef::from_ref(state);
-        // Nothing to resolve: no `?repo=`, or a single-root backing (where the
-        // param is inert and the one engine IS the root).
-        let Some(member) = requested_member(parts) else {
+        // The single-root fast path, taken BEFORE the query is even looked at: a
+        // plain repo must pay nothing at all for federation — not a registry, not an
+        // allocation, not a query-string parse ([ADR-52]). The one engine IS the
+        // root, so `?repo=` is inert there.
+        let Some(registry) = backing.as_federated() else {
             return Ok(Self(default));
         };
-        if backing.as_federated().is_none() {
-            return Ok(Self(default));
+        let member = match requested_member(parts) {
+            Ok(None) => return Ok(Self(default)), // unscoped → the warmed default member
+            Ok(Some(member)) => member,
+            // The request named a scope we cannot read. Answering from the default
+            // member would hand back a DIFFERENT member's figures under a `200` —
+            // the one thing this extractor exists to prevent.
+            Err(err) => {
+                return Err(refuse(
+                    StatusCode::BAD_REQUEST,
+                    format!("the query string could not be parsed: {err}"),
+                ))
+            }
+        };
+        // Absence is decided against the manifest roster — cheaply, and without
+        // starting anything — so it is never confused with a start failure below.
+        if !registry.members().iter().any(|m| m.name == member) {
+            return Err(unknown_member(&member));
         }
+        let backing = Arc::clone(&backing);
         let resolved = {
             let member = member.clone();
             tokio::task::spawn_blocking(move || {
@@ -98,25 +132,24 @@ where
             })
             .await
             // A panic crossing the pool is a core bug — re-raise it rather than
-            // mask it as an unknown member (mirrors `crate::bridge`).
+            // mask it as an unavailable member (mirrors `crate::bridge`).
             .unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()))
         };
         resolved
             .map(Self)
-            .map_err(|err| unknown_member(&member, &err))
+            .map_err(|err| member_unavailable(&member, &err))
     }
 }
 
 /// The trimmed, non-empty `?repo=` value, or `None` — an absent, blank, or
 /// whitespace-only param is "unscoped", never a member named `""`.
-fn requested_member(parts: &Parts) -> Option<String> {
-    let Ok(Query(q)) = Query::<HashMap<String, String>>::try_from_uri(&parts.uri) else {
-        return None;
-    };
-    q.get(REPO_PARAM)
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+///
+/// An unparsable query string is an `Err`, **not** a `None`: silently treating it as
+/// "unscoped" would resolve the default member and answer `200` with the wrong
+/// member's figures for a request that explicitly named one.
+fn requested_member(parts: &Parts) -> Result<Option<String>, QueryRejection> {
+    let Query(q) = Query::<HashMap<String, String>>::try_from_uri(&parts.uri)?;
+    Ok(crate::api_v1::opt_param(&q, REPO_PARAM))
 }
 
 #[cfg(test)]
@@ -128,24 +161,41 @@ mod tests {
         Request::builder().uri(uri).body(()).unwrap().into_parts().0
     }
 
+    /// The parsed member, panicking on the (separately-tested) parse-failure arm.
+    fn member_of(uri: &str) -> Option<String> {
+        requested_member(&parts_for(uri)).expect("the query string parses")
+    }
+
     #[test]
     fn no_repo_param_is_unscoped() {
-        assert_eq!(requested_member(&parts_for("/api/v1/health")), None);
-        assert_eq!(requested_member(&parts_for("/api/v1/health?untested=1")), None);
+        assert_eq!(member_of("/api/v1/health"), None);
+        assert_eq!(member_of("/api/v1/health?untested=1"), None);
     }
 
     #[test]
     fn a_blank_repo_param_is_unscoped_not_a_member_named_empty() {
-        assert_eq!(requested_member(&parts_for("/api/v1/health?repo=")), None);
-        assert_eq!(requested_member(&parts_for("/api/v1/health?repo=%20")), None);
+        assert_eq!(member_of("/api/v1/health?repo="), None);
+        assert_eq!(member_of("/api/v1/health?repo=%20"), None);
     }
 
     #[test]
     fn a_named_repo_is_the_requested_member_trimmed_and_decoded() {
-        assert_eq!(requested_member(&parts_for("/api/v1/health?repo=api")).as_deref(), Some("api"));
+        assert_eq!(member_of("/api/v1/health?repo=api").as_deref(), Some("api"));
         assert_eq!(
-            requested_member(&parts_for("/api/v1/health?repo=services%2Fapi&untested=1")).as_deref(),
+            member_of("/api/v1/health?repo=services%2Fapi&untested=1").as_deref(),
             Some("services/api"),
         );
+    }
+
+    /// The `?repo=` normalisation is the SAME one the `/api/v1/workspace/*` fan-out
+    /// applies (`api_v1::opt_param`) — one param, one rule. If these two ever drifted,
+    /// `/api/v1/health?repo=%20api` and `/api/v1/workspace/search?repo=%20api` would
+    /// disagree about which member they mean.
+    #[test]
+    fn the_repo_rule_is_shared_with_the_fan_out() {
+        let q: HashMap<String, String> =
+            [(REPO_PARAM.to_string(), " api ".to_string())].into_iter().collect();
+        assert_eq!(crate::api_v1::opt_param(&q, REPO_PARAM).as_deref(), Some("api"));
+        assert_eq!(member_of("/api/v1/health?repo=%20api%20").as_deref(), Some("api"));
     }
 }
