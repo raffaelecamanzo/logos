@@ -108,6 +108,12 @@ async fn body_string(resp: Response<Body>) -> (StatusCode, String, axum::http::H
     (status, String::from_utf8(bytes.to_vec()).unwrap(), headers)
 }
 
+/// The exact self-only CSP the surface stamps on every response — pinned
+/// byte-for-byte (mirrors `api_v1.rs`'s `EXPECTED_CSP`) so a drift in *any*
+/// directive on the workspace surface is caught, not just the `default-src`.
+const EXPECTED_CSP: &str = "default-src 'self'; base-uri 'none'; form-action 'none'; \
+                            frame-ancestors 'none'; object-src 'none'";
+
 /// The self-only CSP must stay byte-identical on the workspace surface too.
 fn assert_self_only_csp(headers: &axum::http::HeaderMap, path: &str) {
     let csp = headers
@@ -115,8 +121,7 @@ fn assert_self_only_csp(headers: &axum::http::HeaderMap, path: &str) {
         .expect("every response carries a CSP")
         .to_str()
         .unwrap();
-    assert!(csp.contains("default-src 'self'"), "{path} self-only CSP: {csp}");
-    assert!(!csp.contains('*'), "{path} CSP allows no wildcard: {csp}");
+    assert_eq!(csp, EXPECTED_CSP, "{path} carries the byte-identical self-only CSP");
 }
 
 /// The full workspace read endpoint set the SPA fetches.
@@ -184,6 +189,84 @@ async fn workspace_impact_exposes_seed_and_cross_service_tiers() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(v["seed"].is_array(), "impact carries the per-member seed tier: {body}");
     assert!(v["cross_service"].is_array(), "impact carries the cross-service tier: {body}");
+}
+
+/// Each parametrised workspace handler rejects a missing/empty required query
+/// param with `400` before any fan-out (mirrors the single-root `search`/`node`
+/// contract) — the error branch the happy-path loop never exercises.
+#[tokio::test]
+async fn workspace_handlers_require_their_query_param() {
+    let tmp = workspace();
+    let router = ws_router(&tmp);
+    // `search` needs `q`; `callers`/`impact` need `symbol`. Empty counts as missing.
+    for path in [
+        "/api/v1/workspace/search",
+        "/api/v1/workspace/search?q=",
+        "/api/v1/workspace/callers",
+        "/api/v1/workspace/callers?symbol=",
+        "/api/v1/workspace/impact",
+        "/api/v1/workspace/impact?symbol=%20",
+    ] {
+        let resp = router.clone().oneshot(get(path)).await.expect("route responds");
+        let (status, body, _h) = body_string(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path} is 400 without its required param: {body}");
+        assert!(body.contains("query parameter is required"), "{path} explains the missing param: {body}");
+    }
+}
+
+/// `?repo=<member>` scopes the fan-out to that one member — asserted on `search`,
+/// whose member set narrows without needing any cross-service edge (grammar-free):
+/// unscoped fans over both members, `?repo=api` returns only `api`, and an unknown
+/// repo surfaces as a single degraded per-member `error` (never a panic or a leak).
+#[tokio::test]
+async fn workspace_search_repo_scopes_the_fan_out() {
+    let tmp = workspace();
+    let router = ws_router(&tmp);
+
+    let unscoped = router.clone().oneshot(get("/api/v1/workspace/search?q=user")).await.unwrap();
+    let (_s, body, _h) = body_string(unscoped).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("scope").is_none(), "no scope key when unscoped: {body}");
+    let members: Vec<&str> =
+        v["members"].as_array().unwrap().iter().map(|m| m["member"].as_str().unwrap()).collect();
+    assert_eq!(members.len(), 2, "unscoped search fans over both members: {body}");
+
+    let scoped = router.clone().oneshot(get("/api/v1/workspace/search?q=user&repo=api")).await.unwrap();
+    let (_s, body, _h) = body_string(scoped).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["scope"], "api", "the applied scope is echoed: {body}");
+    let members = v["members"].as_array().unwrap();
+    assert_eq!(members.len(), 1, "scoped search fans over one member: {body}");
+    assert_eq!(members[0]["member"], "api", "repo-qualified to the scoped member");
+
+    // An unknown repo degrades to one per-member `error`, HTTP 200 (S-248 contract).
+    let unknown = router.oneshot(get("/api/v1/workspace/search?q=user&repo=nope")).await.unwrap();
+    let (status, body, _h) = body_string(unknown).await;
+    assert_eq!(status, StatusCode::OK, "an unknown repo is not an HTTP error: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let members = v["members"].as_array().unwrap();
+    assert_eq!(members.len(), 1);
+    assert!(members[0]["error"].as_str().unwrap_or("").contains("no such workspace member"),
+        "unknown repo surfaces as a degraded per-member error: {body}");
+}
+
+/// A plain repo with no manifest resolves `Backing::Single` through
+/// `resolve_serve_backing` directly (the no-manifest branch), and a malformed
+/// manifest makes it fail loud — the discovery decision, independent of the socket.
+#[test]
+fn resolve_serve_backing_single_for_a_plain_repo_and_fails_loud_on_a_bad_manifest() {
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path(), "src/lib.rs", "pub fn f() {}\n");
+    let single = web::resolve_serve_backing(tmp.path(), false).expect("plain repo resolves");
+    assert!(!single.is_federated(), "no manifest → single-root backing");
+    assert!(single.as_single().is_some(), "the single-root engine is used");
+
+    // A malformed manifest fails loud rather than silently degrading to single-root.
+    std::fs::write(tmp.path().join("logos.workspace.toml"), "[workspace]\nname = \n").unwrap();
+    assert!(
+        web::resolve_serve_backing(tmp.path(), false).is_err(),
+        "a malformed workspace manifest fails discovery loud"
+    );
 }
 
 /// The cross-service *edge* is actually resolved (`lang-all`: OpenAPI + axum
