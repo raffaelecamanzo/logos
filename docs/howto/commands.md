@@ -48,13 +48,16 @@ flags `--project <PATH>`, `--json`, and `--quiet`; see
 
 ## Index & freshness
 
-### `init [-i] [--hooks]`
+### `init [-i] [--hooks] [--workspace] [--yes] [--exclude <GLOB>]`
 
 ```bash
-logos init             # create .logos/ and the canonical store (bare)
-logos init -i          # interactive: policy files + .mcp.json + CLAUDE.md
-logos init --hooks     # install managed git hooks only
-logos init -i --hooks  # interactive setup plus git hooks
+logos init                     # create .logos/ and the canonical store (bare)
+logos init -i                  # interactive: policy files + .mcp.json + CLAUDE.md
+logos init --hooks             # install managed git hooks only
+logos init -i --hooks          # interactive setup plus git hooks
+logos init --workspace         # federate sibling repos into a workspace (prompts per member)
+logos init --workspace --yes   # non-interactive: approve every discovered member
+logos init --workspace --exclude 'vendor-*'  # skip members whose name matches the glob
 ```
 
 Bootstraps the project. All forms are **idempotent and non-clobbering** —
@@ -106,6 +109,43 @@ Together these hooks realize the local legs of the **freshen / enforce / report
 and the SessionEnd quality-report hook *reports*. The CI leg (and the
 release-only *bless* with `logos gate --save`) is documented in
 [CI integration](ci-integration.md).
+
+**Workspace (`--workspace`)** — turns a parent folder of sibling repositories
+into a **Logos workspace** ([FR-WS-02](../specs/requirements/FR-WS-02.md)). Run
+it from the directory that contains your service repos. It:
+
+1. **Discovers members** — scans immediate child directories for distinct git
+   roots (a repo already carrying `.logos/logos.db` also counts).
+2. **Gates approval** — prompts per candidate on stderr (y/n). `--yes` approves
+   all discovered members non-interactively; `--exclude <GLOB>` drops members
+   whose workspace-relative name matches the glob (repeatable). The exclude
+   applies only to newly-proposed candidates — members already in an existing
+   manifest are never re-prompted or re-excluded.
+3. **Initialises each member** — runs the ordinary per-member `init`
+   (write-if-absent, **never** clobbering an existing member config).
+4. **Writes the manifest** — a `logos.workspace.toml` at the parent listing the
+   approved members, plus your hand-written `default`/`autodiscover`/`[[links]]`
+   preserved verbatim on a re-run.
+5. **Injects one MCP entry** — a single `logos-workspace` server key in the
+   parent `.mcp.json` (distinct from the per-repo `logos` key so a member's own
+   entry is never shadowed).
+
+Indexing is **hybrid**: the command returns immediately while each approved
+member warms its index in a detached background process; a member that has not
+finished warming still indexes correctly on first real use (lazy
+`ensure_indexed`). A member that fails to initialise is reported **degraded**
+without aborting the others. stdout stays machine-clean (the approval prompt is
+on stderr), so `logos init --workspace --yes` is safe to script. Re-running is
+incremental — `manifest`/`mcp` actions report `unchanged` and no duplicate MCP
+entry is written. When no sibling repos are found, nothing is written and the
+command exits 0.
+
+> **Federation is an in-memory overlay, never a graph union.** Each member keeps
+> its own `.logos/logos.db` and its single-root behaviour unchanged; the
+> workspace is assembled on demand and never persisted across a database
+> boundary ([ADR-52](../specs/architecture/decisions/ADR-52.md)). With **no**
+> `logos.workspace.toml` present, every command behaves exactly as a single-repo
+> checkout — federation is entirely dormant.
 
 ### `index`
 
