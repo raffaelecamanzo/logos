@@ -626,6 +626,36 @@ mod tests {
         assert_eq!(watches(), 3, "serve re-watches the rebuilt engine");
     }
 
+    /// Under serve, a member whose engine fails to **start** is skipped during
+    /// the eager warm (logged, not fatal) while the healthy members stay
+    /// resident — the warm must not panic ([ADR-53] degrade-don't-abort).
+    #[test]
+    fn serve_warm_skips_a_failing_member_and_keeps_the_healthy_ones() {
+        #[derive(Debug)]
+        struct PickyEngine;
+        impl MemberEngine for PickyEngine {
+            type Watcher = ();
+            fn start(root: &Path) -> Result<Arc<Self>> {
+                if root.ends_with("b") {
+                    anyhow::bail!("store is corrupt");
+                }
+                Ok(Arc::new(PickyEngine))
+            }
+            fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
+                Ok(())
+            }
+        }
+
+        // Eager warm over a workspace whose member "b" cannot start.
+        let registry = EngineRegistry::<PickyEngine>::new(fed(&["a", "b", "c"]), RegistryMode::Serve);
+        assert_eq!(
+            registry.resident_members(),
+            ["a", "c"],
+            "the failing member is skipped; the healthy members stay resident"
+        );
+        assert_eq!(registry.resident_count(), 2);
+    }
+
     /// Under serve, a member whose **watcher** fails to spawn degrades to a
     /// watcherless-but-resident engine — the touch still succeeds ([FR-SY-06]).
     #[test]
