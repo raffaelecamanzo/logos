@@ -33,7 +33,8 @@ use crate::model::NodeKind;
 use crate::resolve::http_client_call::ClientCallRefusal;
 
 use super::bridge::{
-    classify, consumer_portable_key, BridgeEndpoint, MemberContracts, PortableKey, Role,
+    classify, consumer_portable_key, read_members, BridgeEndpoint, MemberContracts, PortableKey,
+    Role,
 };
 use super::registry::{EngineRegistry, MemberEngine};
 
@@ -204,28 +205,7 @@ where
     // through the same provider index as the contract-surface consumers.
     let mut inv_consumers: Vec<(String, super::bridge::InvocationConsumer)> = Vec::new();
 
-    for scoped in registry.fan_out(|_, engine| engine.contract_surface()) {
-        let member = scoped.member;
-        let surface = match scoped.value {
-            Ok(Ok(nodes)) => nodes,
-            Ok(Err(err)) => {
-                tracing::warn!(
-                    member = %member,
-                    "reading a workspace member's contract surface failed; \
-                     coverage degraded without it: {err:#}"
-                );
-                continue;
-            }
-            Err(err) => {
-                tracing::warn!(
-                    member = %member,
-                    "a workspace member engine failed to start; \
-                     coverage degraded without it: {err:#}"
-                );
-                continue;
-            }
-        };
-
+    for (member, surface) in read_members(registry, "contract surface", |e| e.contract_surface()) {
         for node in &surface {
             if node.kind == NodeKind::ApiOperation {
                 consumer_refs.push((member.clone(), node.name.clone(), node.symbol.clone()));
@@ -238,29 +218,11 @@ where
             }
         }
     }
-    // Arm consumer refs from each member's ledger — degrade-don't-abort, exactly
-    // as the contract-surface read above ([ADR-53]).
-    for scoped in registry.fan_out(|_, engine| engine.invocation_consumers()) {
-        let member = scoped.member;
-        let refs = match scoped.value {
-            Ok(Ok(refs)) => refs,
-            Ok(Err(err)) => {
-                tracing::warn!(
-                    member = %member,
-                    "reading a workspace member's invocation consumers failed; \
-                     coverage degraded without it: {err:#}"
-                );
-                continue;
-            }
-            Err(err) => {
-                tracing::warn!(
-                    member = %member,
-                    "a workspace member engine failed to start; \
-                     coverage degraded without it: {err:#}"
-                );
-                continue;
-            }
-        };
+    // Arm consumer refs from each member's ledger — degrade-don't-abort via the
+    // same `read_members` the bridge uses ([ADR-53]).
+    for (member, refs) in read_members(registry, "invocation consumers", |e| {
+        e.invocation_consumers()
+    }) {
         for consumer in refs {
             inv_consumers.push((member.clone(), consumer));
         }

@@ -547,6 +547,43 @@ where
     stamps
 }
 
+/// Read a per-member value through the registry fan-out, **degrading** (a warn +
+/// skip) on either an engine-start failure or a read failure rather than aborting
+/// the whole workspace ([ADR-53]). Returns `(member, value)` for every member
+/// whose read succeeded.
+///
+/// The one place the bridge and the coverage read-model express "read each
+/// member's `X` through its read pool, skip the degraded ones" — `subject` names
+/// `X` in the warning so both the contract-surface and invocation-consumer reads
+/// (and both tiers) share this handling verbatim.
+///
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+pub(super) fn read_members<E, T>(
+    registry: &EngineRegistry<E>,
+    subject: &str,
+    read: impl Fn(&Arc<E>) -> Result<T>,
+) -> Vec<(String, T)>
+where
+    E: MemberEngine + MemberContracts,
+{
+    let mut out = Vec::new();
+    for scoped in registry.fan_out(|_, engine| read(engine)) {
+        let member = scoped.member;
+        match scoped.value {
+            Ok(Ok(value)) => out.push((member, value)),
+            Ok(Err(err)) => tracing::warn!(
+                member = %member,
+                "reading a workspace member's {subject} failed; degraded without it: {err:#}"
+            ),
+            Err(err) => tracing::warn!(
+                member = %member,
+                "a workspace member engine failed to start; degraded without it: {err:#}"
+            ),
+        }
+    }
+    out
+}
+
 /// Read every member's contract surface through its read pool, index providers
 /// on portable keys, split providers from consumers by role, and hand the two
 /// indexes to the namespace-generic [`match_indexed`] matcher.
@@ -557,28 +594,7 @@ where
     let mut providers: HashMap<PortableKey, Vec<BridgeEndpoint>> = HashMap::new();
     let mut consumers: Vec<(PortableKey, BridgeEndpoint)> = Vec::new();
 
-    for scoped in registry.fan_out(|_, engine| engine.contract_surface()) {
-        let member = scoped.member;
-        let surface = match scoped.value {
-            Ok(Ok(nodes)) => nodes,
-            Ok(Err(err)) => {
-                tracing::warn!(
-                    member = %member,
-                    "reading a workspace member's contract surface failed; \
-                     bridging degraded without it: {err:#}"
-                );
-                continue;
-            }
-            Err(err) => {
-                tracing::warn!(
-                    member = %member,
-                    "a workspace member engine failed to start; \
-                     bridging degraded without it: {err:#}"
-                );
-                continue;
-            }
-        };
-
+    for (member, surface) in read_members(registry, "contract surface", |e| e.contract_surface()) {
         for node in surface {
             let Some((key, role)) = classify(node.kind, &node.name) else {
                 continue;
@@ -597,29 +613,10 @@ where
     // Arm-tagged invocation consumers (HTTP client calls, S-252, and the gRPC/
     // broker arms as they land) join the same candidate stream via the arm's
     // portable key — the consumer-side feed S-251's contract deferred to the
-    // arms ([FR-WS-07], [ADR-54]). Read through the read pool, degrade-don't-abort
-    // exactly as the contract surface does.
-    for scoped in registry.fan_out(|_, engine| engine.invocation_consumers()) {
-        let member = scoped.member;
-        let refs = match scoped.value {
-            Ok(Ok(refs)) => refs,
-            Ok(Err(err)) => {
-                tracing::warn!(
-                    member = %member,
-                    "reading a workspace member's invocation consumers failed; \
-                     bridging degraded without it: {err:#}"
-                );
-                continue;
-            }
-            Err(err) => {
-                tracing::warn!(
-                    member = %member,
-                    "a workspace member engine failed to start; \
-                     bridging degraded without it: {err:#}"
-                );
-                continue;
-            }
-        };
+    // arms ([FR-WS-07], [ADR-54]).
+    for (member, refs) in read_members(registry, "invocation consumers", |e| {
+        e.invocation_consumers()
+    }) {
         for consumer in refs {
             let Some(key) = consumer_portable_key(consumer.relation, &consumer.target) else {
                 continue; // an unkeyable / not-yet-registered arm contributes nothing
