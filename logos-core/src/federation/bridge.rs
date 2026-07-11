@@ -210,11 +210,19 @@ impl MemberContracts for crate::Engine {
             "reading a member's contract surface requires a long-lived engine \
              (Engine::start) with a read-only pool",
         )?;
-        // Nodes AND the `Contains` tree in one read: an `ApiOperation`'s route
-        // reference is reconstructed from its parent `ApiPath` (see `surface_from`).
-        let (nodes, edges) =
-            runtime.submit_read(|store| Ok((store.all_nodes()?, store.all_edges()?)))?;
-        Ok(surface_from(&nodes, &edges))
+        // Nodes, the `Contains` tree, AND the ProtoService rpc-method bodies in one
+        // read: an `ApiOperation`'s route reference is reconstructed from its parent
+        // `ApiPath`, and a `ProtoService` is expanded into one gRPC provider per
+        // rpc method from its body (see `surface_from`).
+        let (nodes, edges, bodies) = runtime.submit_read(|store| {
+            Ok((
+                store.all_nodes()?,
+                store.all_edges()?,
+                store.proto_service_bodies()?,
+            ))
+        })?;
+        let bodies: HashMap<LogosSymbol, String> = bodies.into_iter().collect();
+        Ok(surface_from(&nodes, &edges, &bodies))
     }
 
     fn contract_stamp(&self) -> u64 {
@@ -297,8 +305,20 @@ fn is_contract_surface(kind: NodeKind) -> bool {
 /// as non-normalizing — never fabricated). [`Route`](NodeKind::Route) and the
 /// proto/graphql kinds pass through with their own names.
 ///
+/// A [`ProtoService`](NodeKind::ProtoService) whose S-253 enrichment recorded its
+/// rpc method names in `bodies` (keyed by symbol) is **expanded** into one
+/// contract node per method, named `package.Service/Method` — the fully-qualified
+/// gRPC provider key [`classify`] keys on ([FR-WS-09]). A service with no method
+/// body passes through unexpanded (its bare package-qualified name carries no
+/// portable key, so [`classify`] drops it).
+///
 /// [route_key]: crate::resolve::route_template::route_key
-fn surface_from(nodes: &[NodeRow], edges: &[EdgeRow]) -> Vec<ContractNode> {
+/// [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
+fn surface_from(
+    nodes: &[NodeRow],
+    edges: &[EdgeRow],
+    bodies: &HashMap<LogosSymbol, String>,
+) -> Vec<ContractNode> {
     use std::collections::HashSet;
 
     // Each `ApiPath` id → its path-template name (`/users/{id}`).
@@ -323,7 +343,20 @@ fn surface_from(nodes: &[NodeRow], edges: &[EdgeRow]) -> Vec<ContractNode> {
     nodes
         .iter()
         .filter(|n| is_contract_surface(n.kind))
-        .map(|n| {
+        .flat_map(|n| {
+            // A ProtoService fans out into one node per rpc method (S-253): the
+            // provider key is the package-qualified service joined to each method.
+            if n.kind == NodeKind::ProtoService {
+                if let Some(body) = bodies.get(&n.symbol) {
+                    return rpc_methods(body)
+                        .map(|method| ContractNode {
+                            kind: n.kind,
+                            name: format!("{}/{}", n.name, method),
+                            symbol: n.symbol.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                }
+            }
             let name = if n.kind == NodeKind::ApiOperation {
                 match parent_of.get(&n.id).and_then(|p| path_template.get(p)) {
                     Some(template) => format!("{} {}", n.name.to_ascii_uppercase(), template),
@@ -332,13 +365,20 @@ fn surface_from(nodes: &[NodeRow], edges: &[EdgeRow]) -> Vec<ContractNode> {
             } else {
                 n.name.clone()
             };
-            ContractNode {
+            vec![ContractNode {
                 kind: n.kind,
                 name,
                 symbol: n.symbol.clone(),
-            }
+            }]
         })
         .collect()
+}
+
+/// The non-empty rpc method names encoded in a `ProtoService` node `body` (S-253
+/// provider enrichment): the newline-joined list the proto extractor wrote,
+/// split back and trimmed of any blank entry.
+fn rpc_methods(body: &str) -> impl Iterator<Item = &str> {
+    body.lines().map(str::trim).filter(|m| !m.is_empty())
 }
 
 /// The portable identity a candidate is matched on across members: a
@@ -410,8 +450,25 @@ pub(super) fn classify(kind: NodeKind, name: &str) -> Option<(PortableKey, Role)
             let (method, template) = route_key(name)?;
             Some((PortableKey::http(method, template), Role::Consumer))
         }
-        // Proto/GraphQL contract nodes are read into the surface but have no
-        // portable HTTP key in this story — deferred to the invocation arms.
+        NodeKind::ProtoService => {
+            // A ProtoService reaches `classify` already expanded by `surface_from`
+            // into its `package.Service/Method` form (S-253, [FR-WS-09]); that
+            // fully-qualified string is the gRPC provider key directly. A bare
+            // (method-less) service has no `/` and carries no portable key.
+            if name.contains('/') {
+                Some((
+                    PortableKey {
+                        namespace: BridgeNamespace::Grpc,
+                        key: name.to_string(),
+                    },
+                    Role::Provider,
+                ))
+            } else {
+                None
+            }
+        }
+        // The remaining contract nodes (`ProtoMessage`, `GqlType`) are read into
+        // the surface but carry no portable invocation key yet.
         _ => None,
     }
 }
@@ -449,8 +506,16 @@ pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) ->
             let (method, template) = route_key(target)?;
             Some(PortableKey::http(method, template))
         }
-        // The gRPC/broker arms (S-253/S-254) add their key builders here.
-        BridgeNamespace::Grpc | BridgeNamespace::BrokerTopic => None,
+        // A gRPC stub call's target is already the normalized, fully-qualified
+        // `package.Service/Method` key the `grpc_key` normalizer wrote (S-253,
+        // [FR-WS-09]); it is the exact string the expanded `ProtoService` provider
+        // classifies to, so the two meet on an identical `Grpc` key.
+        BridgeNamespace::Grpc => Some(PortableKey {
+            namespace: BridgeNamespace::Grpc,
+            key: target.to_string(),
+        }),
+        // The broker arm (S-254) adds its key builder here.
+        BridgeNamespace::BrokerTopic => None,
     }
 }
 
@@ -745,25 +810,34 @@ mod tests {
     }
     fn set_member(name: &str, stamp: u64, nodes: Vec<ContractNode>) {
         FIXTURES.with(|f| {
-            f.borrow_mut().insert(
-                name.to_string(),
-                MemberFixture {
-                    stamp,
-                    nodes,
-                    consumers: Vec::new(),
-                },
-            );
+            f.borrow_mut().entry(name.to_string()).or_default().nodes = nodes;
+        });
+        FIXTURES.with(|f| {
+            f.borrow_mut().get_mut(name).unwrap().stamp = stamp;
         });
     }
-    /// Attach arm-tagged invocation consumers (client-call sites) to a member —
-    /// the ledger-side feed the HTTP arm (S-252) adds to the bridge.
+    /// Attach arm-tagged invocation consumers (client-call sites, gRPC stub calls,
+    /// broker publishes) to a member — the ledger-sourced consumer stream, distinct
+    /// from the node-surface providers `set_member` supplies.
     fn set_consumers(name: &str, consumers: Vec<InvocationConsumer>) {
         FIXTURES.with(|f| {
-            f.borrow_mut()
-                .entry(name.to_string())
-                .or_default()
-                .consumers = consumers;
+            f.borrow_mut().entry(name.to_string()).or_default().consumers = consumers;
         });
+    }
+    /// A gRPC stub-call consumer at `symbol` invoking `key` (`package.Service/Method`).
+    fn grpc_consumer(key: &str, symbol: &str) -> InvocationConsumer {
+        InvocationConsumer {
+            relation: ArtifactRelation::GrpcCall,
+            target: key.to_string(),
+            symbol: LogosSymbol::parse(symbol).unwrap(),
+        }
+    }
+    fn proto_service(fqn: &str, symbol: &str) -> ContractNode {
+        ContractNode {
+            kind: NodeKind::ProtoService,
+            name: fqn.to_string(),
+            symbol: LogosSymbol::parse(symbol).unwrap(),
+        }
     }
     /// An HTTP client-call consumer at `symbol` calling `target` (`"METHOD /path"`).
     fn http_call(target: &str, symbol: &str) -> InvocationConsumer {
@@ -900,7 +974,7 @@ mod tests {
         ];
         let edges = vec![contains(1, 2), contains(1, 3)];
 
-        let surface = surface_from(&nodes, &edges);
+        let surface = surface_from(&nodes, &edges, &HashMap::new());
         let named: HashMap<&str, &ContractNode> =
             surface.iter().map(|c| (c.symbol.as_str(), c)).collect();
 
@@ -1490,5 +1564,188 @@ mod tests {
 
         let edges = ContractBridge::new().edges(&registry(&["web", "api"]));
         assert!(edges.is_empty(), "a POST call never binds a GET route: {edges:?}");
+    }
+
+    // ── S-253 / FR-WS-09: the gRPC stub-call → proto-service arm ──────────────
+
+    /// Provider enrichment at the bridge boundary: a `ProtoService` node whose
+    /// body carries its rpc method names fans out into one contract node per
+    /// method, named `package.Service/Method` — the fully-qualified provider key.
+    /// A method-less service passes through as its bare name (no portable key).
+    #[test]
+    fn surface_from_expands_a_proto_service_into_per_method_provider_nodes() {
+        let nodes = vec![
+            nrow(1, NodeKind::ProtoService, "example.v1.UserService", "local svc"),
+            // A second service with no captured methods: passes through unexpanded.
+            nrow(2, NodeKind::ProtoService, "example.v1.Empty", "local empty"),
+        ];
+        let mut bodies = HashMap::new();
+        bodies.insert(
+            LogosSymbol::parse("local svc").unwrap(),
+            "GetUser\nListUsers".to_string(),
+        );
+
+        let surface = surface_from(&nodes, &[], &bodies);
+        let names: Vec<&str> = surface.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            names.contains(&"example.v1.UserService/GetUser")
+                && names.contains(&"example.v1.UserService/ListUsers"),
+            "each rpc method becomes a per-method provider node: {names:?}"
+        );
+        // Every expansion keeps the service's own symbol as the endpoint identity.
+        for c in surface.iter().filter(|c| c.name.contains("UserService")) {
+            assert_eq!(c.symbol.as_str(), "local svc");
+        }
+        // The method-less service is present unexpanded (and carries no key).
+        assert!(names.contains(&"example.v1.Empty"));
+        assert!(classify(NodeKind::ProtoService, "example.v1.Empty").is_none());
+    }
+
+    /// An expanded `ProtoService` (a `/`-bearing FQN) classifies as a gRPC
+    /// **provider**; a bare, method-less service carries no portable key.
+    #[test]
+    fn classify_maps_an_expanded_proto_service_to_a_grpc_provider() {
+        let (key, role) =
+            classify(NodeKind::ProtoService, "example.v1.UserService/GetUser").unwrap();
+        assert_eq!(role, Role::Provider);
+        assert_eq!(key.namespace, BridgeNamespace::Grpc);
+        assert_eq!(key.key, "example.v1.UserService/GetUser");
+        assert_eq!(key.relation(), "grpc-call");
+        // A bare service (no rpc method) is not a provider key.
+        assert!(classify(NodeKind::ProtoService, "example.v1.UserService").is_none());
+    }
+
+    /// The generic ledger classifier ([`invocation_consumers_from`]) keeps only
+    /// rows whose relation declares a Consumer bridge role, recovering the arm
+    /// relation and portable target; a no-payload, non-arm, or provider-side row
+    /// contributes nothing. Exercised here on a gRPC-call row.
+    #[test]
+    fn invocation_consumers_from_recovers_only_arm_tagged_grpc_consumer_refs() {
+        let row = |payload: Option<&str>| crate::graph_store::UnresolvedRefRow {
+            id: 1,
+            file_id: None,
+            source_symbol: "local stub".to_string(),
+            target: "example.v1.UserService/GetUser".to_string(),
+            alias: None,
+            form: crate::model::RefForm::Method,
+            kind: EdgeKind::ArtifactRef,
+            line: Some(1),
+            resolved: false,
+            payload: payload.map(str::to_string),
+        };
+        // A gRPC-call row → a GrpcCall consumer keyed on its target.
+        let consumers = invocation_consumers_from(vec![row(Some("grpc-call"))]);
+        assert_eq!(consumers.len(), 1, "grpc-call is a consumer arm");
+        assert_eq!(consumers[0].relation, ArtifactRelation::GrpcCall);
+        assert_eq!(consumers[0].target, "example.v1.UserService/GetUser");
+        assert_eq!(consumers[0].symbol.as_str(), "local stub");
+        // A code/doc ref (no payload), a non-arm artifact relation, and a contract
+        // relation that is not an invocation arm are all ignored.
+        assert!(invocation_consumers_from(vec![row(None)]).is_empty());
+        assert!(invocation_consumers_from(vec![row(Some("proto-import"))]).is_empty());
+        assert!(invocation_consumers_from(vec![row(Some("route"))]).is_empty());
+    }
+
+    /// Acceptance (1): a gRPC stub call binds the `package.Service/Method`
+    /// provider in another member — the consumer reaches the bridge from the
+    /// ledger, the provider from the enriched proto surface, and they meet on the
+    /// fully-qualified key under the `grpc-call` relation.
+    #[test]
+    fn a_grpc_stub_call_binds_the_package_service_method_provider_in_another_member() {
+        reset();
+        set_member(
+            "svc",
+            0,
+            vec![proto_service("example.v1.UserService/GetUser", "local svc_getuser")],
+        );
+        set_consumers(
+            "api",
+            vec![grpc_consumer("example.v1.UserService/GetUser", "local stub_getuser")],
+        );
+
+        let edges = ContractBridge::new().edges(&registry(&["api", "svc"]));
+
+        assert_eq!(edges.len(), 1, "the stub call binds its one cross-member provider: {edges:?}");
+        assert_eq!(edges[0].relation, "grpc-call");
+        assert_eq!(edges[0].from.member, "api");
+        assert_eq!(edges[0].from.symbol.as_str(), "local stub_getuser");
+        assert_eq!(edges[0].to.member, "svc");
+        assert_eq!(edges[0].to.symbol.as_str(), "local svc_getuser");
+    }
+
+    /// Acceptance (3a): two members exposing the identical `package.Service/Method`
+    /// provider make the call ambiguous — exactly-one is violated, so no edge is
+    /// fabricated ([NFR-RA-05]).
+    #[test]
+    fn two_providers_of_the_same_grpc_key_are_ambiguous_no_edge() {
+        reset();
+        set_member(
+            "svc1",
+            0,
+            vec![proto_service("example.v1.UserService/GetUser", "local a")],
+        );
+        set_member(
+            "svc2",
+            0,
+            vec![proto_service("example.v1.UserService/GetUser", "local b")],
+        );
+        set_consumers(
+            "api",
+            vec![grpc_consumer("example.v1.UserService/GetUser", "local stub")],
+        );
+
+        let edges = ContractBridge::new().edges(&registry(&["api", "svc1", "svc2"]));
+        assert!(
+            edges.is_empty(),
+            "two providers of one gRPC key are ambiguous — no edge: {edges:?}"
+        );
+    }
+
+    /// Provider enrichment value (the "not just the bare service name" acceptance):
+    /// a same-named service in a **different package** is a different key, so it
+    /// does NOT collide — the consumer still binds the one same-package provider.
+    /// Without package qualification the two would have collided into ambiguity.
+    #[test]
+    fn a_same_service_in_a_different_package_does_not_collide() {
+        reset();
+        set_member(
+            "svc1",
+            0,
+            vec![proto_service("example.v1.UserService/GetUser", "local v1")],
+        );
+        set_member(
+            "svc2",
+            0,
+            vec![proto_service("example.v2.UserService/GetUser", "local v2")],
+        );
+        set_consumers(
+            "api",
+            vec![grpc_consumer("example.v1.UserService/GetUser", "local stub")],
+        );
+
+        let edges = ContractBridge::new().edges(&registry(&["api", "svc1", "svc2"]));
+        assert_eq!(edges.len(), 1, "the package disambiguates the two services: {edges:?}");
+        assert_eq!(edges[0].to.member, "svc1");
+        assert_eq!(edges[0].to.symbol.as_str(), "local v1");
+    }
+
+    /// An intra-repo gRPC call (stub call and provider in the same member) is an
+    /// intra-repo fact the per-repo graph owns — the bridge emits no cross-service
+    /// edge for it, exactly as the HTTP arm.
+    #[test]
+    fn an_intra_repo_grpc_call_is_not_a_bridge_edge() {
+        reset();
+        set_member(
+            "svc",
+            0,
+            vec![proto_service("example.v1.UserService/GetUser", "local svc_getuser")],
+        );
+        set_consumers(
+            "svc",
+            vec![grpc_consumer("example.v1.UserService/GetUser", "local stub_getuser")],
+        );
+
+        let edges = ContractBridge::new().edges(&registry(&["svc"]));
+        assert!(edges.is_empty(), "a same-member stub→service pair is intra-repo: {edges:?}");
     }
 }

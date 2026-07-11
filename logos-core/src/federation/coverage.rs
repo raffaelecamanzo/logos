@@ -1,10 +1,12 @@
 //! The **3-state cross-service coverage** read-model ([FR-WS-05], [ADR-53]).
 //!
 //! Extends the [bridge](super::bridge)'s binary bound/not-bound match outcome
-//! into a reason-annotated advisory tier: every cross-boundary reference (an
-//! `ApiOperation` consumer, today — the only role the bridge's HTTP key
-//! resolves) is classified **bound**, **ambiguous**, or **unbound**, and each
-//! non-bound reference carries a [`CoverageState`] naming *why*.
+//! into a reason-annotated advisory tier: every cross-boundary reference — an
+//! `ApiOperation` HTTP consumer node and a `GrpcCall` stub-call ledger consumer
+//! (S-253, [FR-WS-09]) — is classified **bound**, **ambiguous**, or **unbound**,
+//! and each non-bound reference carries a [`CoverageState`] naming *why*.
+//!
+//! [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
 //!
 //! # Advisory only ([ADR-53])
 //! This module is **never** called from `scan`, `gate`, or `check_rules`
@@ -218,8 +220,11 @@ where
             }
         }
     }
-    // Arm consumer refs from each member's ledger — degrade-don't-abort via the
-    // same `read_members` the bridge uses ([ADR-53]).
+    // Arm consumer refs from each member's ledger (HTTP client calls, gRPC stub
+    // calls, and later arms) — degrade-don't-abort via the same `read_members` the
+    // bridge uses ([ADR-53]). Classified below through the same provider index and
+    // the same `consumer_portable_key` as the bridge, so a new arm surfaces here
+    // with no coverage-tier change.
     for (member, refs) in read_members(registry, "invocation consumers", |e| {
         e.invocation_consumers()
     }) {
@@ -293,9 +298,10 @@ where
     }
 
     // Classify the arm-tagged invocation consumers against the same provider
-    // index (S-252, [FR-WS-08]). A stored consumer target normalizes by
+    // index (S-252 HTTP, S-253 gRPC). A stored consumer target normalizes by
     // construction (the arm's normalizer refused the rest before the ledger), so
-    // it keys; a target that nonetheless does not compose is `path-not-composed`.
+    // it keys; a target that nonetheless does not compose is `path-not-composed`
+    // (a gRPC key, already fully-qualified, never hits that arm).
     for (member, consumer) in inv_consumers {
         let from = BridgeEndpoint {
             member: member.clone(),
@@ -380,7 +386,7 @@ mod tests {
 
     use anyhow::Result;
 
-    use super::super::bridge::ContractNode;
+    use super::super::bridge::{ContractNode, InvocationConsumer};
     use super::super::registry::RegistryMode;
     use super::super::{Federation, Member};
     use crate::model::LogosSymbol;
@@ -413,6 +419,21 @@ mod tests {
         super::super::InvocationConsumer {
             relation: crate::model::ArtifactRelation::HttpClientCall,
             target: target.to_string(),
+            symbol: LogosSymbol::parse(symbol).unwrap(),
+        }
+    }
+    /// A gRPC stub-call consumer at `symbol` invoking `key` (`package.Service/Method`).
+    fn grpc_consumer(key: &str, symbol: &str) -> super::super::InvocationConsumer {
+        super::super::InvocationConsumer {
+            relation: crate::model::ArtifactRelation::GrpcCall,
+            target: key.to_string(),
+            symbol: LogosSymbol::parse(symbol).unwrap(),
+        }
+    }
+    fn proto_service(fqn: &str, symbol: &str) -> ContractNode {
+        ContractNode {
+            kind: NodeKind::ProtoService,
+            name: fqn.to_string(),
             symbol: LogosSymbol::parse(symbol).unwrap(),
         }
     }
@@ -921,6 +942,102 @@ mod tests {
         assert_eq!(cov.bound, 2, "the operation and the client call each bind once");
         assert_eq!(cov.references.len(), 2);
         assert!(cov.references.iter().all(|r| r.relation == "route"));
+    }
+
+    // ── S-253 / FR-WS-09: gRPC stub-call coverage ────────────────────────
+
+    /// A gRPC stub call whose `package.Service/Method` provider lives in another
+    /// member classifies `Bound`, under the `grpc-call` relation.
+    #[test]
+    fn a_grpc_stub_call_binds_its_cross_member_proto_service() {
+        reset();
+        set_member(
+            "svc",
+            vec![proto_service("example.v1.UserService/GetUser", "local svc")],
+        );
+        set_consumers(
+            "api",
+            vec![grpc_consumer("example.v1.UserService/GetUser", "local stub")],
+        );
+
+        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+        assert_eq!(cov.bound, 1);
+        assert_eq!(cov.references.len(), 1);
+        assert_eq!(cov.references[0].state, CoverageState::Bound);
+        assert_eq!(cov.references[0].relation, "grpc-call");
+    }
+
+    /// Acceptance (3): a qualifiable gRPC stub call with no provider anywhere in
+    /// the workspace stays honestly unbound with a coverage reason
+    /// (`no-provider-in-workspace`) — never silently dropped, never fabricated.
+    #[test]
+    fn a_grpc_stub_call_with_no_provider_is_unbound_with_a_reason() {
+        reset();
+        set_consumers(
+            "api",
+            vec![grpc_consumer("example.v1.UserService/GetUser", "local stub")],
+        );
+        // A second member with no matching proto service provider.
+        set_member("svc", vec![proto_service("example.v1.Other/Do", "local other")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+        assert_eq!(cov.no_provider_in_workspace, 1);
+        assert_eq!(cov.bound, 0);
+        assert_eq!(
+            cov.references[0].state,
+            CoverageState::Unbound {
+                reason: UnboundReason::NoProviderInWorkspace
+            }
+        );
+        assert_eq!(cov.references[0].relation, "grpc-call");
+    }
+
+    /// A gRPC stub call whose sole provider is in its own member is an intra-repo
+    /// fact the per-repo graph owns — excluded from the coverage tier entirely,
+    /// exactly as the HTTP path and the bridge (never counted as `Bound`).
+    #[test]
+    fn an_intra_repo_grpc_call_is_excluded_not_bound() {
+        reset();
+        set_member(
+            "svc",
+            vec![proto_service("example.v1.UserService/GetUser", "local svc")],
+        );
+        set_consumers(
+            "svc",
+            vec![grpc_consumer("example.v1.UserService/GetUser", "local stub")],
+        );
+
+        let cov = cross_service_coverage(&registry(&["svc"]));
+        assert!(
+            cov.references.is_empty(),
+            "a same-member stub→provider pair is intra-repo, not a cross-boundary reference: {:?}",
+            cov.references
+        );
+        assert_eq!(cov.bound + cov.ambiguous + cov.unbound + cov.no_provider_in_workspace, 0);
+    }
+
+    /// Two members exposing the identical `package.Service/Method` provider make
+    /// the stub call ambiguous — its own bucket, distinct from a plain unbound.
+    #[test]
+    fn two_grpc_providers_classify_ambiguous() {
+        reset();
+        set_member(
+            "svc1",
+            vec![proto_service("example.v1.UserService/GetUser", "local a")],
+        );
+        set_member(
+            "svc2",
+            vec![proto_service("example.v1.UserService/GetUser", "local b")],
+        );
+        set_consumers(
+            "api",
+            vec![grpc_consumer("example.v1.UserService/GetUser", "local stub")],
+        );
+
+        let cov = cross_service_coverage(&registry(&["api", "svc1", "svc2"]));
+        assert_eq!(cov.ambiguous, 1);
+        assert_eq!(cov.bound, 0);
+        assert_eq!(cov.references[0].state.bucket(), "ambiguous");
     }
 
     // ── advisory isolation (ADR-53 / sprint-55 risk register) ─────────────

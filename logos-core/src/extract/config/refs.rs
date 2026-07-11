@@ -381,6 +381,11 @@ mod proto {
         // File-level imports are sourced from the ConfigFile root.
         capture_imports(root, config_file_symbol, source, facts);
 
+        // The file-level proto `package` (S-253, [FR-WS-09]): the qualifier the
+        // gRPC provider key needs to disambiguate a same-named service across
+        // packages. `None` when the file declares no `package` statement.
+        let package = file_package(root, source);
+
         // Per-anchor references: type references and declared-name code bindings,
         // each sourced from its enclosing typed anchor.
         for anchor in super::super::resolve_anchor_identities(cfg, ctx, segments, source, root) {
@@ -402,10 +407,74 @@ mod proto {
                 NodeKind::ProtoService => {
                     // The RPC request/response types referenced by the service.
                     capture_type_refs(anchor.node, &anchor.symbol, source, facts);
+                    // Provider enrichment (S-253, [FR-WS-09]): qualify the service
+                    // node's name with its package and expose its per-`rpc` method
+                    // names, so the federation bridge can key a provider on the
+                    // fully-qualified `package.Service/Method` — not the bare
+                    // service name. Additive: it mutates only the already-emitted
+                    // `ProtoService` node's `name`/`body`, no new node or edge.
+                    enrich_service(&anchor, package.as_deref(), source, facts);
                 }
                 _ => {}
             }
         }
+    }
+
+    /// The dotted proto `package` for this file (`example.v1`), or `None` when
+    /// the file declares no top-level `package` statement. Read from the first
+    /// top-level `package` node's `full_ident` child.
+    fn file_package(root: Node<'_>, source: &[u8]) -> Option<String> {
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            if child.kind() == "package" {
+                let ident = first_named_child(child, "full_ident")?;
+                return non_empty_text(ident, source).map(str::to_string);
+            }
+        }
+        None
+    }
+
+    /// Enrich the already-emitted `ProtoService` node identified by `anchor`
+    /// (S-253, [FR-WS-09]): rewrite its `name` to the package-qualified service
+    /// (`example.v1.UserService`, or the bare name when the file has no package)
+    /// and record its per-`rpc` method names, newline-joined, in the node `body`
+    /// — the machine-readable channel the bridge expands into per-method provider
+    /// keys (the [`NodeKind::GqlType`] payload precedent). A service with no `rpc`
+    /// leaves `body` untouched.
+    fn enrich_service(
+        anchor: &super::super::ResolvedAnchor<'_>,
+        package: Option<&str>,
+        source: &[u8],
+        facts: &mut Facts,
+    ) {
+        let methods = rpc_method_names(anchor.node, source);
+        let Some(node) = facts.nodes.iter_mut().find(|n| n.symbol == anchor.symbol) else {
+            return;
+        };
+        if let Some(pkg) = package {
+            node.name = format!("{pkg}.{}", anchor.name);
+        }
+        if !methods.is_empty() {
+            node.body = Some(methods.join("\n"));
+        }
+    }
+
+    /// Every `rpc` method name declared directly in a `service` node, in source
+    /// order — the `rpc_name` child text of each direct `rpc` child.
+    fn rpc_method_names(service: Node<'_>, source: &[u8]) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut cursor = service.walk();
+        for child in service.named_children(&mut cursor) {
+            if child.kind() != "rpc" {
+                continue;
+            }
+            if let Some(name_node) = first_named_child(child, "rpc_name") {
+                if let Some(name) = non_empty_text(name_node, source) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        names
     }
 
     /// Push a [`ProtoImport`](ArtifactRelation::ProtoImport) reference per
@@ -1282,7 +1351,7 @@ mod tests {
             ArtifactRelation::Route,
             RefForm::Path,
             Vec::new(),
-            &render,
+            render,
         );
         assert_eq!(n, 0, "no capture file → no sites → no refs");
         assert!(facts.refs.is_empty());
@@ -1301,7 +1370,7 @@ mod tests {
             ArtifactRelation::Route,
             RefForm::Path,
             sites,
-            &render,
+            render,
         );
         assert_eq!(n, 2, "both static, workspace-relative sites are captured");
         assert_eq!(facts.refs.len(), 2);
@@ -1324,6 +1393,65 @@ mod tests {
         assert_eq!(first.form, RefForm::Path);
         assert_eq!(first.relation, Some(ArtifactRelation::Route));
         assert_eq!(first.kind, ArtifactRelation::Route.edge_kind());
+    }
+
+    /// S-253 ([FR-WS-09]): the gRPC stub-call arm drives the generic interpreter
+    /// with its real normalizer (`grpc_key`) and its real relation (`GrpcCall`).
+    /// A fully-qualifiable stub call is captured as a `grpc-call` ledger ref keyed
+    /// on the `package.Service/Method` the bridge binds on; an unqualifiable call
+    /// (a missing/dynamic part) is refused, contributing no reference and no
+    /// ledger entry — the never-fabricate discipline ([NFR-RA-05]).
+    #[test]
+    fn the_grpc_arm_captures_qualifiable_calls_and_refuses_unqualifiable_ones() {
+        use crate::resolve::grpc_key::grpc_key_from_slots;
+
+        let mut facts = empty_facts();
+        let sites = vec![
+            // A fully-qualified stub call → captured on its FQN key.
+            site(
+                "local caller_a",
+                12,
+                &[
+                    ("package", "example.v1"),
+                    ("service", "UserService"),
+                    ("method", "GetUser"),
+                ],
+            ),
+            // A dynamically-selected method (not a static identifier) → refused.
+            site(
+                "local caller_b",
+                20,
+                &[
+                    ("package", "example.v1"),
+                    ("service", "UserService"),
+                    ("method", "methods[i]"),
+                ],
+            ),
+            // A call whose package could not be captured → unqualifiable, refused.
+            site(
+                "local caller_c",
+                28,
+                &[("service", "UserService"), ("method", "GetUser")],
+            ),
+        ];
+        let n = capture_invocation_refs(
+            &mut facts,
+            ArtifactRelation::GrpcCall,
+            RefForm::Method,
+            sites,
+            grpc_key_from_slots,
+        );
+
+        assert_eq!(n, 1, "only the fully-qualifiable stub call is captured");
+        assert_eq!(facts.refs.len(), 1);
+        let r = &facts.refs[0];
+        assert_eq!(r.source.as_str(), "local caller_a");
+        assert_eq!(r.target, "example.v1.UserService/GetUser");
+        assert_eq!(r.relation, Some(ArtifactRelation::GrpcCall));
+        // The ledger payload token is what the bridge's consumer reader keys on.
+        assert_eq!(r.relation.unwrap().as_str(), "grpc-call");
+        assert_eq!(r.kind, ArtifactRelation::GrpcCall.edge_kind());
+        assert_eq!(r.line, 12);
     }
 
     // ── S-069: OpenAPI operation→route capture ───────────────────────────────

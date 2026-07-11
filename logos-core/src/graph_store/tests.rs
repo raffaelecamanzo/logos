@@ -882,6 +882,42 @@ fn all_nodes_and_all_edges_are_empty_on_a_fresh_store() {
     assert!(store.all_edges().unwrap().is_empty());
 }
 
+/// `proto_service_bodies` (S-253 provider enrichment) returns the `(symbol, body)`
+/// of exactly the `ProtoService` nodes carrying rpc-method body text — the narrow
+/// read the federation bridge expands into per-method gRPC provider keys. A
+/// body-less service and a body-carrying non-`ProtoService` node are both excluded.
+#[test]
+fn proto_service_bodies_returns_only_proto_services_with_a_body() {
+    let store = mem();
+    // A ProtoService with an rpc-method body — the one row expected back.
+    let svc = LogosSymbol::parse("local svc").unwrap();
+    let svc_id = store.upsert_symbol(&svc).unwrap();
+    store
+        .insert_node(&NewNode {
+            body: Some("GetUser\nListUsers"),
+            ..NewNode::plain(svc_id, NodeKind::ProtoService, "example.v1.UserService")
+        })
+        .unwrap();
+    // A ProtoService with no body (a method-less service) — excluded by IS NOT NULL.
+    seed(&store, 1, "example.v1.Empty", NodeKind::ProtoService);
+    // A body-carrying node of another kind (a DocSection) — excluded by the kind filter.
+    let doc = LogosSymbol::parse("local doc").unwrap();
+    let doc_id = store.upsert_symbol(&doc).unwrap();
+    store
+        .insert_node(&NewNode {
+            body: Some("some prose"),
+            ..NewNode::plain(doc_id, NodeKind::DocSection, "Heading")
+        })
+        .unwrap();
+
+    let bodies = store
+        .proto_service_bodies()
+        .expect("proto_service_bodies succeeds");
+    assert_eq!(bodies.len(), 1, "only the ProtoService carrying a body is returned");
+    assert_eq!(bodies[0].0.as_str(), "local svc");
+    assert_eq!(bodies[0].1, "GetUser\nListUsers");
+}
+
 // ── S-024-HF: the incremental framework-gate footprint probe ─────────────────
 
 #[test]

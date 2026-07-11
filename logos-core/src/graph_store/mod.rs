@@ -1107,6 +1107,21 @@ pub trait GraphStore {
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     fn all_nodes(&self) -> Result<Vec<NodeRow>>;
 
+    /// The `(symbol, body)` of every `ProtoService` node carrying rpc-method body
+    /// text (S-253 provider enrichment, [FR-WS-09]).
+    ///
+    /// The federation bridge expands each `ProtoService` into one gRPC provider
+    /// key per rpc method (`package.Service/Method`); the method names ride the
+    /// node `body`, which [`all_nodes`](GraphStore::all_nodes)'s [`NodeRow`] does
+    /// not carry, so this is the narrow companion read that supplies them. The
+    /// default is empty — only the SQLite store implements it — so a non-SQLite or
+    /// test store contributes no gRPC providers rather than failing to compile.
+    ///
+    /// [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
+    fn proto_service_bodies(&self) -> Result<Vec<(LogosSymbol, String)>> {
+        Ok(Vec::new())
+    }
+
     /// Stream **every** edge in the graph, ordered by `(source, target, kind)`.
     ///
     /// The relationship half of the hydration read: combined with
@@ -1880,6 +1895,34 @@ impl GraphStore for SqliteGraphStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting all nodes for hydration")?;
         raws.into_iter().map(raw_to_node).collect()
+    }
+
+    fn proto_service_bodies(&self) -> Result<Vec<(LogosSymbol, String)>> {
+        // Only `ProtoService` nodes carry the S-253 rpc-method body; ORDER BY id
+        // keeps the read deterministic ([NFR-RA-06]).
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT s.symbol, n.body \
+             FROM nodes n \
+             JOIN symbols s ON s.id = n.symbol_id \
+             WHERE n.kind = ?1 AND n.body IS NOT NULL \
+             ORDER BY n.id",
+        )?;
+        let rows = stmt
+            .query_map([NodeKind::ProtoService.as_i32()], |row| {
+                let symbol: String = row.get(0)?;
+                let body: String = row.get(1)?;
+                Ok((symbol, body))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting proto service bodies for the gRPC bridge")?;
+        rows.into_iter()
+            .map(|(symbol, body)| {
+                let symbol = LogosSymbol::parse(&symbol).with_context(|| {
+                    format!("corrupt symbol stored for proto service {symbol}; rebuild advised (NFR-RA-08)")
+                })?;
+                Ok((symbol, body))
+            })
+            .collect()
     }
 
     fn all_edges(&self) -> Result<Vec<EdgeRow>> {
