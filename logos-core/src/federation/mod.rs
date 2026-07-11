@@ -7,12 +7,20 @@
 //! This module is the foundation the rest of the overlay is built on — a later
 //! story adds the in-memory contract bridge ([FR-WS-04]) beside it. Here we own:
 //!
-//! - the manifest schema + parse ([`manifest`]);
+//! - the manifest schema + parse/write ([`manifest`]);
 //! - [`discover`] — the up-tree walk that locates the manifest, resolves and
 //!   validates each member, and returns the [`Federation`] member set;
 //! - the [`registry`] — the `root → Engine` registry over the member set, with
 //!   the repo-qualified fan-out helper and the `Backing::Single | Federated`
-//!   serve-layer choice ([FR-WS-03], [NFR-PE-10]).
+//!   serve-layer choice ([FR-WS-03], [NFR-PE-10]);
+//! - [`discover_candidates`] — the child-directory scan `logos init
+//!   --workspace` proposes for approval before any manifest exists
+//!   ([`enable`], [FR-WS-02]);
+//! - [`enable`] — the `logos init --workspace` orchestration: per-member
+//!   non-clobber `init`, the incremental manifest write, and the workspace
+//!   MCP injection ([FR-WS-02]).
+//!
+//! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 //!
 //! # Single-root invariant
 //! When **no** manifest is found anywhere up-tree, [`discover`] returns
@@ -32,6 +40,7 @@
 //! [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
+pub mod enable;
 pub mod manifest;
 pub mod registry;
 
@@ -199,7 +208,7 @@ fn resolve_members(root: &Path, workspace: &manifest::WorkspaceSection) -> Vec<M
 
     // Autodiscovered children (git root OR carries a .logos DB), when enabled.
     if workspace.autodiscover.as_ref().is_some_and(|a| a.enabled) {
-        for member in autodiscover_children(root) {
+        for member in discover_candidates(root) {
             push(&mut members, member);
         }
     }
@@ -221,10 +230,22 @@ fn resolve_explicit_member(root: &Path, spec: &str) -> Option<Member> {
     validate_member(root, &resolved)
 }
 
-/// Enumerate immediate child directories that qualify as members: a git root, or
-/// a directory already carrying `.logos/logos.db` ([FR-WS-01]). Sorted by name
-/// for deterministic ordering ([NFR-RA-06]).
-fn autodiscover_children(root: &Path) -> Vec<Member> {
+/// Enumerate immediate child directories of `root` that qualify as members: a
+/// git root, or a directory already carrying `.logos/logos.db` ([FR-WS-01]).
+/// Sorted by name for deterministic ordering ([NFR-RA-06]).
+///
+/// Two callers: [`resolve_members`]'s `[workspace.autodiscover]` union (an
+/// *existing* manifest, already canonicalised by [`discover`]), and `logos
+/// init --workspace`'s candidate-approval scan
+/// ([`enable::candidates_for_approval`], [FR-WS-02]) — run **before** any
+/// manifest exists, so it cannot go through [`discover`], and may be handed a
+/// non-canonical `root` (a raw CLI hint). `root` is canonicalised here (not
+/// just relied on from the caller) so [`validate_member`]'s `strip_prefix`
+/// against it always lines up with each candidate's own canonicalised path.
+///
+/// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
+pub fn discover_candidates(root: &Path) -> Vec<Member> {
+    let root = &root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };

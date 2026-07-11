@@ -64,6 +64,7 @@ fn fixture() -> TempDir {
 const REPRESENTATIVE: &[&[&str]] = &[
     &["init"],
     &["init", "-i", "--hooks"],
+    &["init", "--workspace", "--yes", "--exclude", "nope-*"],
     &["index"],
     &["sync", "src/lib.rs"],
     &["status"],

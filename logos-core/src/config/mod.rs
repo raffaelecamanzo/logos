@@ -38,7 +38,10 @@ mod admission;
 mod chat;
 mod discovery;
 mod error;
-mod globs;
+// `pub(crate)`: `federation::enable::candidates_for_approval` reuses
+// `globs::compile` for `--exclude` matching (FR-WS-02) rather than
+// hand-rolling a second `GlobSet` compiler.
+pub(crate) mod globs;
 mod rules;
 mod secrets;
 mod settings;

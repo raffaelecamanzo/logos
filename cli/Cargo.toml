@@ -89,3 +89,6 @@ serde_json = { workspace = true }
 # stdout-safety test, NFR-RA-01): throwaway project fixtures — dev-only,
 # never enters the shipped binary graph.
 tempfile   = { workspace = true }
+# tests/init_workspace.rs (S-246, FR-WS-02): parses the JSON report and
+# `.mcp.json` to assert on structured fields — dev-only.
+serde_json = { workspace = true }
