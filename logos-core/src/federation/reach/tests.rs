@@ -450,10 +450,26 @@ fn surface_from_keeps_only_the_live_set_adjacency_and_the_tri_state_verdict() {
         nrow(3, NodeKind::Function, "helper", "local helper"),
     ];
     let annotations = [arow(2, Some(true)), arow(3, None)];
+    // Every kind that is NOT `Calls`/`RoutesTo` must be excluded. This list is the
+    // load-bearing pin: the module's "no re-walk needed" argument holds only if this
+    // adjacency is *exactly* the one `annotate::live_set` walks. If `annotate` ever
+    // admits another kind (say `Implements`, for trait dispatch) and `reach` does
+    // not, the two silently diverge and the monotonicity premise breaks — so this
+    // enumerates the plausible-inclusion kinds rather than one token exclusion.
     let edges = [
         erow(1, 2, EdgeKind::RoutesTo),
         erow(2, 3, EdgeKind::Calls),
-        erow(3, 1, EdgeKind::Imports), // not a reachability edge
+        erow(3, 1, EdgeKind::Imports),
+        erow(3, 1, EdgeKind::References),
+        erow(3, 1, EdgeKind::Contains),
+        erow(3, 1, EdgeKind::Implements),
+        erow(3, 1, EdgeKind::Extends),
+        erow(3, 1, EdgeKind::Instantiates),
+        erow(3, 1, EdgeKind::TypeUses),
+        erow(3, 1, EdgeKind::Accesses),
+        erow(3, 1, EdgeKind::DocReference),
+        erow(3, 1, EdgeKind::ForbiddenDependency),
+        erow(3, 1, EdgeKind::ArtifactBinding),
     ];
 
     let surface = super::surface_from(&nodes, &annotations, &edges);
@@ -466,7 +482,7 @@ fn surface_from_keeps_only_the_live_set_adjacency_and_the_tri_state_verdict() {
     assert_eq!(
         surface.edges,
         [(0, 1), (1, 2)],
-        "RoutesTo + Calls survive as surface-local indices; Imports is dropped"
+        "ONLY RoutesTo + Calls survive — the same two kinds annotate::live_set walks"
     );
 }
 
@@ -485,4 +501,183 @@ fn surface_from_drops_an_edge_with_an_unknown_endpoint() {
         surface.nodes[0].is_dead, None,
         "no annotation row → NULL, never a fabricated `false`"
     );
+}
+
+/// NFR-CC-04: `extra_roots` counts **distinct provider endpoints**, not inbound
+/// edges. Two consumers calling one handler is one extra live root — reporting
+/// two would make the tally mean something other than what its name promises.
+#[test]
+fn two_consumers_of_one_endpoint_are_one_root() {
+    reset();
+    set_surface("orders", orders_surface());
+
+    let view = app_wide_reachability(
+        &registry(&["orders"]),
+        // The same provider endpoint, reached by two different consumer call sites.
+        &[
+            edge_to("orders", "local on_order"),
+            edge_to("orders", "local on_order"),
+        ],
+    );
+
+    assert_eq!(
+        view.members[0].extra_roots, 1,
+        "one provider endpoint = one root, however many consumers call it"
+    );
+    assert_eq!(names(&view.live_via_cross_service), ["on_order", "render"]);
+}
+
+/// The same discipline for the unresolved tally: one stale endpoint referenced by
+/// three consumers is **one** unresolved root, not three.
+#[test]
+fn repeated_unresolved_endpoints_are_counted_once() {
+    reset();
+    set_surface("orders", orders_surface());
+
+    let view = app_wide_reachability(
+        &registry(&["orders"]),
+        &[
+            edge_to("orders", "local ghost"),
+            edge_to("orders", "local ghost"),
+            edge_to("orders", "local ghost"),
+        ],
+    );
+
+    assert_eq!(view.members[0].unresolved_roots, 1);
+    assert_eq!(view.members[0].extra_roots, 0);
+}
+
+/// AR-05 false-live bias: one symbol may back more than one node. A root on that
+/// symbol must root **all** of them — resolving the ambiguity toward live, never
+/// toward a fabricated dead verdict. A regression to a last-write-wins
+/// `HashMap<&LogosSymbol, u32>` would be invisible without this.
+#[test]
+fn a_symbol_backing_several_nodes_roots_all_of_them() {
+    reset();
+    set_surface(
+        "orders",
+        ReachabilitySurface {
+            nodes: vec![
+                callable("handler", "local handler", Some(true)),
+                callable("handler", "local handler", Some(true)), // same symbol
+                callable("helper", "local helper", Some(true)),
+            ],
+            edges: vec![(1, 2)], // only the SECOND `handler` node calls the helper
+        },
+    );
+
+    let view = app_wide_reachability(
+        &registry(&["orders"]),
+        &[edge_to("orders", "local handler")],
+    );
+
+    assert_eq!(
+        names(&view.live_via_cross_service),
+        ["handler", "handler", "helper"],
+        "both nodes behind the symbol are rooted, so the helper is reached too"
+    );
+    assert!(view.dead.is_empty());
+    assert_eq!(
+        view.members[0].extra_roots, 1,
+        "one distinct provider endpoint, even though it backs two nodes"
+    );
+}
+
+/// The BFS terminates on a cyclic call graph, and on the `RoutesTo` **self-edge**
+/// the dispatch pass plants as a live-root marker — a shape that genuinely occurs
+/// in production graphs, and which `surface_from` preserves verbatim.
+#[test]
+fn the_walk_terminates_on_cycles_and_self_loops() {
+    reset();
+    set_surface(
+        "orders",
+        ReachabilitySurface {
+            nodes: vec![
+                callable("a", "local a", Some(true)),
+                callable("b", "local b", Some(true)),
+                callable("selfie", "local selfie", Some(true)),
+            ],
+            // a ⇄ b is a cycle; `selfie` carries a dispatch-marker self-loop.
+            edges: vec![(0, 1), (1, 0), (2, 2)],
+        },
+    );
+
+    let view = app_wide_reachability(&registry(&["orders"]), &[edge_to("orders", "local a")]);
+    assert_eq!(
+        names(&view.live_via_cross_service),
+        ["a", "b"],
+        "the cycle is walked once and terminates"
+    );
+    assert_eq!(names(&view.dead), ["selfie"]);
+
+    let via_loop = app_wide_reachability(
+        &registry(&["orders"]),
+        &[edge_to("orders", "local selfie")],
+    );
+    assert_eq!(
+        names(&via_loop.live_via_cross_service),
+        ["selfie"],
+        "a self-loop root terminates and promotes exactly itself"
+    );
+}
+
+/// ADR-53 / NFR-RA-05: a bridge edge naming a member that degraded, or one that
+/// is not in the workspace at all, is dropped without panicking and without
+/// touching any other member's verdicts. The skipped member is **named**, not just
+/// counted, so the shortfall is diagnosable.
+#[test]
+fn edges_into_unknown_or_degraded_members_are_dropped_safely() {
+    reset();
+    set_surface("orders", orders_surface());
+    set_surface("broken", orders_surface());
+
+    let view = app_wide_reachability(
+        &registry(&["orders", "broken"]),
+        &[
+            edge_to("orders", "local on_order"),
+            edge_to("broken", "local on_order"), // member failed to start
+            edge_to("ghost", "local whatever"),  // not a workspace member at all
+        ],
+    );
+
+    assert_eq!(view.skipped_members, ["broken"], "the degraded member is named");
+    assert_eq!(
+        names(&view.live_via_cross_service),
+        ["on_order", "render"],
+        "the healthy member's promotions are unaffected by the dropped edges"
+    );
+    assert!(
+        view.dead.iter().all(|c| c.member == "orders"),
+        "no member that could not be read is verdicted dead"
+    );
+}
+
+/// A workspace with no members yields an honest empty view — no NaN in the
+/// bound-ratio, no panic.
+#[test]
+fn an_empty_workspace_yields_an_honest_empty_view() {
+    reset();
+    let view = app_wide_reachability(&registry(&[]), &[]);
+
+    assert!(view.members.is_empty());
+    assert!(view.dead.is_empty());
+    assert!(view.live_via_cross_service.is_empty());
+    assert_eq!(view.coverage.members_read, 0);
+    assert_eq!(view.coverage.members_total, 0);
+    assert_eq!(
+        view.coverage.bound_ratio, 1.0,
+        "nothing to bind is full coverage, honestly — never NaN"
+    );
+}
+
+/// The verdict's JSON wire spelling is part of the contract every surface reads.
+/// Asserted directly, because the promotion bucket is empty on the real path
+/// today, so no E2E would catch a rename regression on it.
+#[test]
+fn the_verdict_wire_spellings_are_stable() {
+    assert_eq!(
+        serde_json::to_value(AppWideVerdict::LiveViaCrossService).unwrap(),
+        "live-via-cross-service"
+    );
+    assert_eq!(serde_json::to_value(AppWideVerdict::Dead).unwrap(), "dead");
 }

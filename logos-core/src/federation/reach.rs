@@ -196,6 +196,10 @@ pub struct ReachabilityClaim {
     pub symbol: LogosSymbol,
     /// The claimed node's human-facing name.
     pub name: String,
+    /// The claimed node's ontology kind — every other dead-code surface in the
+    /// product is kind-qualified, so a consumer reading `dead` can tell what it
+    /// is looking at without a second lookup.
+    pub kind: NodeKind,
     /// The union-view verdict.
     pub verdict: AppWideVerdict,
     /// The coverage rider this claim is only as good as — carried per claim by
@@ -240,6 +244,13 @@ pub struct AppWideReachability {
     ///
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     pub members: Vec<MemberReachability>,
+    /// Members the view could **not** read — engine-start or surface-read failure
+    /// ([ADR-53]) — by name, sorted. These carry no tally and no claims, so
+    /// without naming them the only trace of the shortfall is
+    /// `coverage.members_read < coverage.members_total`, which tells a reader
+    /// *that* the workspace degraded but not *where*. A skipped member contributes
+    /// no nodes and no roots, so it can only suppress a promotion, never demote.
+    pub skipped_members: Vec<String>,
     /// The promotions: dead per-repo, live across the union. Sorted.
     pub live_via_cross_service: Vec<ReachabilityClaim>,
     /// The app-wide dead set — a strict subset of the union of the per-repo dead
@@ -284,8 +295,17 @@ where
         members.push(tally);
     }
 
+    // The members `read_members` dropped as degraded — named, not just counted.
+    let mut skipped_members: Vec<String> = registry
+        .members()
+        .iter()
+        .map(|m| m.name.clone())
+        .filter(|name| !surfaces.iter().any(|(read, _)| read == name))
+        .collect();
+
     // Deterministic output regardless of member fan-out order ([NFR-RA-06]).
     members.sort_by(|a, b| a.member.cmp(&b.member));
+    skipped_members.sort();
     live_via_cross_service.sort_by(claim_order);
     dead.sort_by(claim_order);
 
@@ -294,6 +314,7 @@ where
         advisory: true,
         coverage: rider,
         members,
+        skipped_members,
         live_via_cross_service,
         dead,
     }
@@ -312,6 +333,17 @@ fn union_roots(edges: &[BridgeEdge]) -> HashMap<&str, Vec<&LogosSymbol>> {
             .entry(edge.to.member.as_str())
             .or_default()
             .push(&edge.to.symbol);
+    }
+    // One seed per **distinct** provider endpoint. Several consumers calling the
+    // same route (or publishing to the same subscribed topic) is the common shape,
+    // and it is *one* extra live root, not one per inbound edge. The walk itself
+    // does not care — re-seeding is idempotent against a `HashSet` — but the
+    // tallies count seeds, so without this `extra_roots` would silently report
+    // "inbound cross-service edges" while its name and doc promise "provider
+    // endpoints" ([NFR-CC-04]: a reported number must mean what it says).
+    for seeds in roots.values_mut() {
+        seeds.sort_unstable_by_key(|symbol| symbol.as_str());
+        seeds.dedup();
     }
     roots
 }
@@ -355,6 +387,7 @@ fn member_view(
             member: member.to_string(),
             symbol: node.symbol.clone(),
             name: node.name.clone(),
+            kind: node.kind,
             verdict,
             coverage,
         });
@@ -485,8 +518,13 @@ pub(super) fn surface_from(
     }
 
     // The same adjacency the per-repo live-set walk uses ([FR-AN-01]): `Calls`
-    // plus `RoutesTo`, and nothing else. An edge whose endpoint fell outside the
-    // indexed nodes is dropped rather than fabricated.
+    // plus `RoutesTo`, and nothing else. The per-repo walk *additionally* drops
+    // derived nodes and their edges; this projection does not, and does not need
+    // to — a derived artifact is a policy node whose only edge kind is
+    // `ForbiddenDependency`, which this filter already excludes. The two
+    // adjacencies are therefore equal, which is what lets the union view reuse the
+    // per-repo verdict instead of re-walking (see the module docs). An edge whose
+    // endpoint fell outside the indexed nodes is dropped rather than fabricated.
     let adjacency = edges
         .iter()
         .filter(|edge| matches!(edge.kind, EdgeKind::Calls | EdgeKind::RoutesTo))
