@@ -1,5 +1,8 @@
-//! The rmcp `ServerHandler` — 28 `logos:*` tools, each a thin delegator
-//! (S-017, FR-MC-01, FR-MC-02, NFR-MA-02).
+//! The rmcp `ServerHandler` — the `logos:*` tools, each a thin delegator
+//! (S-017, FR-MC-01, FR-MC-02, NFR-MA-02). The single-root backing exposes the
+//! 27-tool `single_tool_router` roster (byte-for-byte as today); the federated
+//! workspace backing composes the 5 `xservice_*` cross-service tools on top
+//! (FR-WS-05, S-248).
 //!
 //! Tool names are registered BARE (`search`, not `logos:search`): MCP hosts
 //! namespace tools by *server identity* — this server identifies as `logos`
@@ -9,6 +12,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use anyhow::Context as _;
+use logos_core::federation::{query, Backing, BridgeEdge, ContractBridge, EngineRegistry};
 use logos_core::{governance::DsmGranularity, model::NodeKind, Engine};
 use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
@@ -23,24 +28,52 @@ use serde::Deserialize;
 const INSTRUCTIONS: &str = include_str!("instructions.md");
 
 /// The Logos MCP server — a pure protocol adapter (ADR-01): every tool
-/// delegates to exactly one [`Engine`] method and returns its `Serialize`
-/// read-model as JSON content; no business logic lives here (FR-MC-02).
+/// delegates to one [`Engine`] method (or, for `xservice_*`, one [`query`]
+/// read-model over the member registry); no business logic lives here (FR-MC-02).
+///
+/// [`new`](Self::new) is the single-root server (one [`Engine`], the unchanged
+/// 27-tool `single_tool_router`); [`federated`](Self::federated) composes the
+/// `xservice_*` tools on top and runs the shared tools against the default
+/// member. The single-root roster carries no `repo` dimension, so its
+/// `tools/list` is byte-identical whether or not federation exists (FR-WS-05).
 #[derive(Clone)]
 pub struct LogosMcp {
-    /// The long-lived engine (ADR-04), shared with the blocking pool.
-    engine: Arc<Engine>,
+    /// The serve backing (ADR-52): the single engine, or the member registry.
+    backing: Arc<Backing<Engine>>,
+    /// The cross-service bridge, cached on member sync-stamps ([FR-WS-04]);
+    /// inert under [`Backing::Single`].
+    bridge: Arc<ContractBridge>,
     tool_router: ToolRouter<Self>,
 }
 
 impl LogosMcp {
     /// Wrap a started (long-lived) [`Engine`] — one per worktree root
-    /// (ADR-04, ADR-15, FR-WT-04). Accepts an `Arc` so the serve path can
-    /// share the engine with the S-022 watcher it hosts alongside.
+    /// (ADR-04, ADR-15, FR-WT-04). The single-root roster is byte-for-byte
+    /// today's (FR-WS-05).
     pub fn new(engine: impl Into<Arc<Engine>>) -> Self {
         Self {
-            engine: engine.into(),
-            tool_router: Self::tool_router(),
+            backing: Arc::new(Backing::Single(engine.into())),
+            bridge: Arc::new(ContractBridge::new()),
+            tool_router: Self::single_tool_router(),
         }
+    }
+
+    /// Wrap a workspace member [`EngineRegistry`] — the federated backing
+    /// ([FR-WS-05], [ADR-52]): the single-root roster (against the default
+    /// member) plus the `xservice_*` tools. Only constructed when a manifest is
+    /// present, so single-root never pays for the extra roster.
+    pub fn federated(registry: EngineRegistry<Engine>) -> Self {
+        Self {
+            backing: Arc::new(Backing::Federated(registry)),
+            bridge: Arc::new(ContractBridge::new()),
+            tool_router: Self::single_tool_router() + Self::xservice_tool_router(),
+        }
+    }
+
+    /// This backing's registered tool roster — introspection for the roster
+    /// byte-identity test (FR-WS-05 acceptance).
+    pub fn list_tools(&self) -> Vec<rmcp::model::Tool> {
+        self.tool_router.list_all()
     }
 
     /// The ADR-03 submit-and-await bridge: run one blocking [`Engine`] call
@@ -73,6 +106,24 @@ impl LogosMcp {
         self.run_result(tool, move |engine| Ok(call(engine))).await
     }
 
+    /// The single-root engine, or a federated workspace's **default member**
+    /// engine (the shared tools' target, FR-WS-05): `[workspace] default`,
+    /// falling back to the first member. Errors if the workspace has no member.
+    fn default_engine(backing: &Backing<Engine>) -> anyhow::Result<Arc<Engine>> {
+        match backing {
+            Backing::Single(engine) => Ok(Arc::clone(engine)),
+            Backing::Federated(registry) => {
+                let member = registry
+                    .federation()
+                    .default
+                    .clone()
+                    .or_else(|| registry.members().first().map(|m| m.name.clone()))
+                    .context("the workspace has no members to answer a single-root tool")?;
+                registry.engine_for(&member)
+            }
+        }
+    }
+
     /// The fallible body behind [`run`](Self::run), used directly by the
     /// quality/governance tools (S-020): the core returns `Result<T>` so a
     /// *structural* failure (store fault, invalid rules.toml — ADR-14
@@ -89,9 +140,53 @@ impl LogosMcp {
         T: serde::Serialize + Send + 'static,
         F: FnOnce(&Engine) -> anyhow::Result<T> + Send + 'static,
     {
-        let engine = Arc::clone(&self.engine);
+        let backing = Arc::clone(&self.backing);
+        self.run_blocking(tool, move || {
+            let engine = Self::default_engine(&backing)?;
+            call(&engine)
+        })
+        .await
+    }
+
+    /// Run one `xservice_*` read-model over the member registry (FR-WS-05):
+    /// resolve the federated registry, compute the cached bridge edges, and hand
+    /// both to the thick-core [`query`] fn (no surface logic, NFR-MA-02).
+    async fn run_xservice<T, F>(
+        &self,
+        tool: &'static str,
+        call: F,
+    ) -> Result<CallToolResult, ErrorData>
+    where
+        T: serde::Serialize + Send + 'static,
+        F: FnOnce(&EngineRegistry<Engine>, &[BridgeEdge]) -> T + Send + 'static,
+    {
+        let backing = Arc::clone(&self.backing);
+        let bridge = Arc::clone(&self.bridge);
+        self.run_blocking(tool, move || {
+            let registry = backing
+                .as_federated()
+                .context("xservice tools require a federated workspace backing")?;
+            let edges = query::edges(&bridge, registry);
+            Ok(call(registry, &edges))
+        })
+        .await
+    }
+
+    /// The shared submit-and-await bridge (ADR-03): run one blocking job, emit
+    /// the per-call telemetry event, and map the outcome to the tool result with
+    /// the ADR-14 severity tags — the error mapping lives here once, for both the
+    /// per-engine and `xservice_*` tools.
+    async fn run_blocking<T, F>(
+        &self,
+        tool: &'static str,
+        job: F,
+    ) -> Result<CallToolResult, ErrorData>
+    where
+        T: serde::Serialize + Send + 'static,
+        F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    {
         let started = Instant::now();
-        let outcome = tokio::task::spawn_blocking(move || call(&engine)).await;
+        let outcome = tokio::task::spawn_blocking(job).await;
         tracing::info!(
             target: "logos::mcp",
             surface = "mcp",
@@ -304,9 +399,13 @@ pub struct WikiSearchParams {
     pub list: Option<bool>,
 }
 
-// ── The 27 tools (FR-MC-01) ────────────────────────────────────────────────
+// ── The 27 single-root tools (FR-MC-01) ─────────────────────────────────────
+//
+// Named `single_tool_router` (not the default `tool_router`) so the federated
+// backing can compose it with `xservice_tool_router`; under `Backing::Single`
+// this roster is used alone, byte-for-byte as today (FR-WS-05 acceptance).
 
-#[tool_router]
+#[tool_router(router = single_tool_router)]
 impl LogosMcp {
     // — Navigation (8): wired, one Engine method each (FR-MC-02, S-013) —
 
@@ -598,6 +697,123 @@ impl LogosMcp {
     )]
     async fn session_end(&self) -> Result<CallToolResult, ErrorData> {
         self.run_result("session_end", |e| e.session_end()).await
+    }
+}
+
+// ── xservice cross-service tool parameter schemas (FR-WS-05 wire contracts) ──
+// Each carries the optional `repo` member filter; the shared navigation tools
+// deliberately do NOT (their single-root schema stays byte-identical).
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct XserviceSearchParams {
+    /// FTS5 search query (symbol name or free text).
+    pub query: String,
+    /// Optional node-kind filter, e.g. "function", "route".
+    pub kind: Option<String>,
+    /// Maximum hits per member (default 20).
+    pub limit: Option<usize>,
+    /// Scope to one workspace member (its workspace-relative name); omit to fan
+    /// across every member.
+    pub repo: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct XserviceCallersParams {
+    /// Symbol whose cross-service callers to list.
+    pub symbol: String,
+    /// Maximum intra-repo callers per member (default 50).
+    pub limit: Option<usize>,
+    /// Scope the intra-repo fan-out to one workspace member.
+    pub repo: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct XserviceImpactParams {
+    /// Symbol whose cross-service impact to trace.
+    pub symbol: String,
+    /// Traversal depth bound per member (default 3).
+    pub depth: Option<usize>,
+    /// Scope the seed impact to one workspace member.
+    pub repo: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct XserviceRepoParams {
+    /// Scope to one workspace member (its workspace-relative name).
+    pub repo: Option<String>,
+}
+
+// ── The xservice cross-service tools (FR-WS-05) ─────────────────────────────
+// Registered ONLY on the federated backing, so single-root `tools/list` never
+// sees them. Each is a thin delegator to one thick-core `query::*` read-model.
+
+#[tool_router(router = xservice_tool_router)]
+impl LogosMcp {
+    #[tool(
+        description = "Cross-service resolved route bindings (FR-WS-05): each consumer endpoint → its sole cross-member provider route, both repo-qualified (member, symbol). `repo` scopes to routes that member provides."
+    )]
+    async fn xservice_route_providers(
+        &self,
+        Parameters(p): Parameters<XserviceRepoParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run_xservice("xservice_route_providers", move |_reg, edges| {
+            query::xservice_route_providers(edges, p.repo.as_deref())
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Cross-service callers of a symbol (FR-WS-05): each member's intra-repo callers (repo-qualified) plus the cross-service consumers that reach it over a bridge edge. `repo` scopes the intra-repo fan-out to one member."
+    )]
+    async fn xservice_callers(
+        &self,
+        Parameters(p): Parameters<XserviceCallersParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run_xservice("xservice_callers", move |reg, edges| {
+            query::xservice_callers(reg, edges, &p.symbol, p.limit, p.repo.as_deref())
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Cross-service impact of changing a symbol (FR-WS-05): the seed member's impact plus the far member's impact stitched across every bridge edge the symbol is an endpoint of, all repo-qualified. `repo` scopes the seed to one member."
+    )]
+    async fn xservice_impact(
+        &self,
+        Parameters(p): Parameters<XserviceImpactParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run_xservice("xservice_impact", move |reg, edges| {
+            query::xservice_impact(reg, edges, &p.symbol, p.depth, p.repo.as_deref())
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Cross-service full-text search (FR-WS-05): FTS5 symbol search fanned across the workspace members, each hit repo-qualified. `repo` scopes to one member; `kind` filters by node kind."
+    )]
+    async fn xservice_search(
+        &self,
+        Parameters(p): Parameters<XserviceSearchParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let kind = parse_kind(p.kind.as_deref())?;
+        self.run_xservice("xservice_search", move |reg, _edges| {
+            query::xservice_search(reg, &p.query, kind, p.limit, p.repo.as_deref())
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Workspace status (FR-WS-05): each member's index freshness plus the 3-state (bound/ambiguous/unbound-with-reasons) cross-service coverage summary. The coverage tier is advisory only, never a gate input."
+    )]
+    async fn workspace_status(&self) -> Result<CallToolResult, ErrorData> {
+        self.run_xservice("workspace_status", |reg, _edges| {
+            query::workspace_status(reg)
+        })
+        .await
     }
 }
 

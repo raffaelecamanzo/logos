@@ -53,6 +53,7 @@ pub mod bridge;
 pub mod coverage;
 pub mod enable;
 pub mod manifest;
+pub mod query;
 pub mod registry;
 
 use std::path::{Path, PathBuf};
@@ -67,6 +68,11 @@ pub use coverage::{
     cross_service_coverage, CoverageState, CrossServiceCoverage, ReferenceCoverage, UnboundReason,
 };
 pub use manifest::{Link, MANIFEST_FILENAME};
+pub use query::{
+    workspace_status, xservice_callers, xservice_impact, xservice_route_providers, xservice_search,
+    CrossServiceImpact, MemberResult, WorkspaceStatus, XserviceCallers, XserviceImpact,
+    XserviceRouteProviders, XserviceSearch,
+};
 pub use registry::{Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode};
 
 /// One resolved, validated member repository of a [`Federation`] ([FR-WS-01]).

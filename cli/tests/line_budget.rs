@@ -73,7 +73,7 @@ fn adapter_lines() -> usize {
     file_lines(CLI_MAIN) + file_lines(CLI_DISPATCH)
 }
 
-/// Budget: ≤ 540 production lines of Rust in the CLI adapter (NFR-MA-02).
+/// Budget: ≤ 555 production lines of Rust in the CLI adapter (NFR-MA-02).
 ///
 /// S-072 500→520 for the CR-012 `ui` serve wiring: the `--ui`/`--port` flags on
 /// `serve` (cfg-gated behind the non-default `ui` feature) and the combined
@@ -92,12 +92,23 @@ fn adapter_lines() -> usize {
 /// net; the summed adapter actually shrank (533→530) but sits just over the old
 /// cap, so the budget is raised to fit with headroom. If this fires, move logic
 /// to logos-core/web — do not raise the number without a story-level justification.
+///
+/// S-248/CR-061 540→555 for the FR-WS-05 cross-service surface: the two new
+/// top-level commands (`xservice <route-providers|callers|impact|search>` and
+/// `workspace status`) contribute only their `Commands` variant declarations in
+/// `main.rs` and two one-line dispatch arms in `dispatch.rs` (~+12). The
+/// subcommand enums + the discover→registry→`query::*` routing live in the new
+/// `cli/src/xservice.rs` delegation module — deliberately kept out of `main.rs`/
+/// `dispatch.rs`, mirroring the `workspace_init.rs` precedent, since it is
+/// one-`query::*`-call routing with no business logic (all logic is in
+/// `logos_core::federation::query`, verified by `logos check`). Do not raise
+/// the number without a story-level justification.
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 540,
-        "cli adapter exceeds the 540 production-LOC budget (NFR-MA-02): \
+        lines <= 555,
+        "cli adapter exceeds the 555 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }
