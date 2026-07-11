@@ -415,7 +415,17 @@ pub enum Backing<E: MemberEngine = Engine> {
     /// No workspace: the single-root engine, byte-for-byte unchanged.
     Single(Arc<E>),
     /// A workspace: the member-engine registry.
-    Federated(EngineRegistry<E>),
+    ///
+    /// **Boxed** so the enum stays pointer-sized. The registry inlines a whole
+    /// [`Federation`] — member set, links, and (since S-258) the `[governance]`
+    /// rule family — which is hundreds of bytes, while [`Single`](Self::Single)
+    /// is one `Arc`. Boxing keeps the *single-root* path, which moves this enum
+    /// on every serve/CLI dispatch, from paying a large-variant memcpy for a
+    /// workspace it does not have — the same "federation never taxes single-root"
+    /// discipline as the rest of this module ([ADR-52], [NFR-PE-10]).
+    ///
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    Federated(Box<EngineRegistry<E>>),
 }
 
 impl<E: MemberEngine> Backing<E> {
@@ -435,7 +445,9 @@ impl<E: MemberEngine> Backing<E> {
     ) -> Self {
         match federation {
             None => Backing::Single(single()),
-            Some(federation) => Backing::Federated(EngineRegistry::new(federation, mode)),
+            Some(federation) => {
+                Backing::Federated(Box::new(EngineRegistry::new(federation, mode)))
+            }
         }
     }
 
@@ -448,9 +460,12 @@ impl<E: MemberEngine> Backing<E> {
     }
 
     /// The member-engine registry, if this is the federated backing.
+    ///
+    /// The [`Box`] is transparent to callers: they still get a plain
+    /// `&EngineRegistry<E>`.
     pub fn as_federated(&self) -> Option<&EngineRegistry<E>> {
         match self {
-            Backing::Federated(registry) => Some(registry),
+            Backing::Federated(registry) => Some(registry.as_ref()),
             Backing::Single(_) => None,
         }
     }
@@ -543,6 +558,7 @@ mod tests {
             root,
             default: None,
             links: Vec::new(),
+            governance: Default::default(),
         }
     }
 

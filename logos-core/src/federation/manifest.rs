@@ -58,6 +58,142 @@ pub struct Manifest {
     /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
+
+    /// The `[governance]` workspace rule family ([FR-WS-13], [ADR-56]) — the
+    /// cross-service policies [`super::governance`] evaluates over bridge
+    /// matches. A **separate family** from the per-repo `.logos/rules.toml`
+    /// ([FR-GV-01]): it lives in a different file, compiles to a different
+    /// violation type, and is reported at the workspace level without ever
+    /// touching a member's gated signal.
+    ///
+    /// Defaults to empty — a manifest declaring no `[governance]` produces **no**
+    /// workspace governance output at all ([NFR-CC-04] honest empty).
+    ///
+    /// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
+    /// [FR-GV-01]: ../../../docs/specs/requirements/FR-GV-01.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [ADR-56]: ../../../docs/specs/architecture/decisions/ADR-56.md
+    #[serde(default, skip_serializing_if = "Governance::is_empty")]
+    pub governance: Governance,
+}
+
+/// The `[governance]` table — the workspace-level rule family ([FR-WS-13]).
+///
+/// Every field is an optional array-of-tables, so a manifest may declare any
+/// subset. [`is_empty`](Self::is_empty) is the **honest-empty predicate**: when
+/// it holds, [`super::governance::workspace_governance`] returns `None` and no
+/// report is produced — an undeclared policy is never reported as a passing one
+/// ([NFR-CC-04]).
+///
+/// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Governance {
+    /// Named service layers over the **member set** (`[[governance.service_layers]]`)
+    /// — the workspace analogue of `rules.toml`'s path-glob `[[layers]]`, except a
+    /// band here is a set of *services*, not a set of files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_layers: Vec<ServiceLayer>,
+
+    /// Forbidden cross-service calls between named layers
+    /// (`[[governance.boundaries]]`), e.g. `edge` → `core`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boundaries: Vec<ServiceBoundary>,
+
+    /// Providers that must have **no** cross-service callers
+    /// (`[[governance.no_cross_service_callers]]`) — the "deprecated endpoint"
+    /// contract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_cross_service_callers: Vec<NoCrossServiceCallers>,
+}
+
+impl Governance {
+    /// Whether the workspace declares **no** governance rules at all — the
+    /// honest-empty predicate ([NFR-CC-04]).
+    ///
+    /// `service_layers` alone does not count as a rule: layers are *vocabulary*,
+    /// not policy. A manifest that names layers but forbids nothing has declared
+    /// no contract to check, so it still produces no report.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub fn is_empty(&self) -> bool {
+        self.boundaries.is_empty() && self.no_cross_service_callers.is_empty()
+    }
+}
+
+/// A `[[governance.service_layers]]` band: a named layer over workspace members
+/// ([FR-WS-13]).
+///
+/// Where a `rules.toml` `[[layers]]` assigns *files* to a band by path glob, a
+/// service layer assigns *members* to a band by name. A member named by two
+/// bands takes the **first declaration** (the same first-wins tiebreak the
+/// per-repo layer matcher uses); a member named by none is **unlayered** and no
+/// boundary rule can classify it — so it is never a violation, never fabricated
+/// ([NFR-RA-05]).
+///
+/// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceLayer {
+    /// The layer name (e.g. `edge`, `core`) — the vocabulary
+    /// [`ServiceBoundary`] refers to.
+    pub name: String,
+    /// The member names ([`Member::name`](super::Member::name)) in this layer.
+    pub members: Vec<String>,
+}
+
+/// A `[[governance.boundaries]]` entry: a forbidden cross-service call from one
+/// service layer to another ([FR-WS-13]).
+///
+/// Read over **bridge matches**, not stored edges: a [`BridgeEdge`](super::BridgeEdge)
+/// whose consumer (`from`) member sits in layer `from` and whose provider (`to`)
+/// member sits in layer `to` violates the boundary. An edge the bridge never
+/// matched cannot violate anything — the rules quantify over what was actually
+/// bound ([NFR-RA-05]).
+///
+/// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceBoundary {
+    /// The calling layer that may not reach `to`.
+    pub from: String,
+    /// The forbidden callee layer.
+    pub to: String,
+    /// Human-readable rationale surfaced in the violation message (optional).
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// A `[[governance.no_cross_service_callers]]` entry: a provider that must have
+/// **no** cross-service callers ([FR-WS-13]) — the "deprecated endpoint" contract.
+///
+/// [`symbol`](Self::symbol) is a **glob** matched against the provider endpoint's
+/// canonical [`LogosSymbol`](crate::model::LogosSymbol) string (compiled once via
+/// the same `globset` matcher every `rules.toml` family uses), so a whole
+/// deprecated namespace fences in one rule. [`member`](Self::member), when given,
+/// additionally scopes the rule to providers owned by that member.
+///
+/// Any [`BridgeEdge`](super::BridgeEdge) whose **provider** endpoint matches is a
+/// violation — the edge *is* the cross-service caller. The rule reads the bridge;
+/// it never synthesises a caller set ([NFR-RA-05]).
+///
+/// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoCrossServiceCallers {
+    /// Glob matched against the provider endpoint's canonical symbol string.
+    pub symbol: String,
+    /// Scope the rule to providers owned by this member (optional; omit to match
+    /// the symbol glob in **any** member).
+    #[serde(default)]
+    pub member: Option<String>,
+    /// Human-readable rationale surfaced in the violation message (optional).
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// The `[workspace]` table.
@@ -189,11 +325,18 @@ pub fn upsert(root: &Path, name: &str, members: &[String]) -> Result<InitStep, C
             autodiscover: existing.as_ref().and_then(|m| m.workspace.autodiscover.clone()),
         },
         links: existing.as_ref().map_or_else(Vec::new, |m| m.links.clone()),
+        // Like `links`, the workspace rule family is user-authored policy this
+        // command does not own: `upsert` rebuilds the whole struct, so a section
+        // not carried across here would be silently dropped on the next
+        // `logos init --workspace` ([FR-WS-13]).
+        governance: existing
+            .as_ref()
+            .map_or_else(Governance::default, |m| m.governance.clone()),
     };
 
     // The struct holds no maps/floats — every field is a String, Vec<String>,
-    // Option<String>, Option<Autodiscover>, or Vec<Link> of the same — so TOML
-    // serialisation cannot fail in practice.
+    // Option<String>, Option<Autodiscover>, or a Vec of Link/governance tables of
+    // the same — so TOML serialisation cannot fail in practice.
     let text = toml::to_string_pretty(&manifest)
         .expect("Manifest holds only TOML-representable scalar/table fields");
 
@@ -420,5 +563,120 @@ mod tests {
 
         let m = parse(&tmp.path().join(MANIFEST_FILENAME)).unwrap();
         assert_eq!(m.workspace.members, ["api"], "web was pruned");
+    }
+
+    // ── the `[governance]` workspace rule family (S-258, FR-WS-13) ────────
+
+    /// The `[governance]` table parses into the rule family: named service
+    /// layers, forbidden boundaries, and no-cross-service-callers contracts.
+    #[test]
+    fn parses_the_governance_rule_family() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        fs::write(
+            &path,
+            "[workspace]\nname = \"shop\"\nmembers = [\"web\", \"api\"]\n\n\
+             [[governance.service_layers]]\nname = \"edge\"\nmembers = [\"web\"]\n\n\
+             [[governance.service_layers]]\nname = \"core\"\nmembers = [\"api\"]\n\n\
+             [[governance.boundaries]]\nfrom = \"edge\"\nto = \"core\"\nreason = \"gateway only\"\n\n\
+             [[governance.no_cross_service_callers]]\nsymbol = \"*legacy*\"\nmember = \"api\"\n",
+        )
+        .unwrap();
+
+        let m = parse(&path).unwrap();
+        assert_eq!(m.governance.service_layers.len(), 2);
+        assert_eq!(m.governance.service_layers[0].name, "edge");
+        assert_eq!(m.governance.service_layers[0].members, ["web"]);
+        assert_eq!(m.governance.boundaries.len(), 1);
+        assert_eq!(m.governance.boundaries[0].from, "edge");
+        assert_eq!(m.governance.boundaries[0].reason.as_deref(), Some("gateway only"));
+        assert_eq!(m.governance.no_cross_service_callers.len(), 1);
+        assert_eq!(m.governance.no_cross_service_callers[0].symbol, "*legacy*");
+        assert_eq!(
+            m.governance.no_cross_service_callers[0].member.as_deref(),
+            Some("api")
+        );
+        assert!(!m.governance.is_empty(), "a declared boundary is a rule");
+    }
+
+    /// A manifest with no `[governance]` table parses to the empty family — the
+    /// honest-empty predicate holds, so no report is ever produced ([NFR-CC-04]).
+    #[test]
+    fn a_manifest_without_governance_is_the_empty_family() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        fs::write(&path, "[workspace]\nname = \"shop\"\nmembers = [\"api\"]\n").unwrap();
+
+        let m = parse(&path).unwrap();
+        assert!(m.governance.is_empty(), "no [governance] ⇒ nothing to check");
+    }
+
+    /// Service layers ALONE are vocabulary, not policy: the family still reads as
+    /// empty, so naming bands without forbidding anything produces no report.
+    #[test]
+    fn service_layers_alone_are_still_the_empty_family() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        fs::write(
+            &path,
+            "[workspace]\nname = \"shop\"\nmembers = [\"api\"]\n\n\
+             [[governance.service_layers]]\nname = \"core\"\nmembers = [\"api\"]\n",
+        )
+        .unwrap();
+
+        let m = parse(&path).unwrap();
+        assert!(
+            m.governance.is_empty(),
+            "layers declare vocabulary; only a boundary/no-callers rule is a contract",
+        );
+    }
+
+    /// `upsert` rebuilds the whole manifest, so it must carry the user-authored
+    /// rule family across — a re-run of `logos init --workspace` must never
+    /// silently drop `[governance]` (the same guarantee `[[links]]` has).
+    #[test]
+    fn upsert_preserves_the_governance_family() {
+        let tmp = TempDir::new().unwrap();
+        upsert(tmp.path(), "shop", &["api".into()]).unwrap();
+
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        let existing = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "{existing}\n[[governance.service_layers]]\nname = \"core\"\nmembers = [\"api\"]\n\n\
+                 [[governance.boundaries]]\nfrom = \"edge\"\nto = \"core\"\n"
+            ),
+        )
+        .unwrap();
+
+        // A re-run that adds a member must not clobber the rules.
+        upsert(tmp.path(), "shop", &["api".into(), "web".into()]).unwrap();
+
+        let m = parse(&path).unwrap();
+        assert_eq!(m.workspace.members, ["api", "web"], "the new member landed");
+        assert_eq!(
+            m.governance.boundaries.len(),
+            1,
+            "the user's workspace rules survived the re-run",
+        );
+        assert_eq!(m.governance.service_layers[0].name, "core");
+    }
+
+    /// An unknown key inside `[governance]` fails loud, like every other section
+    /// (`deny_unknown_fields`) — a typo'd rule must never be silently ignored.
+    #[test]
+    fn an_unknown_governance_key_fails_loud() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        fs::write(
+            &path,
+            "[workspace]\nname = \"shop\"\nmembers = [\"api\"]\n\n\
+             [[governance.boundaries]]\nfrom = \"edge\"\nto = \"core\"\nseverity = \"warn\"\n",
+        )
+        .unwrap();
+
+        let err = parse(&path).expect_err("an unknown rule key must fail loud");
+        assert_eq!(err.exit_code(), 2);
     }
 }

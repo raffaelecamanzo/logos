@@ -16,7 +16,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use logos_core::federation::{discover, query, ContractBridge, EngineRegistry, RegistryMode};
+use logos_core::federation::{
+    discover, query, workspace_governance, ContractBridge, EngineRegistry, RegistryMode,
+};
 use logos_core::{model::NodeKind, Engine};
 
 use crate::{parse_kind, Output};
@@ -73,11 +75,21 @@ pub(crate) enum XserviceCommands {
     },
 }
 
-/// `workspace` sub-subcommands ([FR-WS-05]).
+/// `workspace` sub-subcommands ([FR-WS-05], [FR-WS-13]).
+///
+/// [FR-WS-13]: ../../docs/specs/requirements/FR-WS-13.md
 #[derive(Subcommand)]
 pub(crate) enum WorkspaceCommands {
     /// Per-member index freshness + the 3-state cross-service coverage summary.
     Status,
+    /// Evaluate the workspace governance rules (`[governance]` in
+    /// logos.workspace.toml) over the cross-service bridge bindings (FR-WS-13).
+    ///
+    /// Reported at the WORKSPACE level and **advisory**: this never alters any
+    /// member's per-repo quality gate, and always exits 0 — a violation is
+    /// reported, not gated (ADR-56). With no rules declared, there is no output
+    /// at all (`null`), not a passing report.
+    Check,
 }
 
 /// Discover the workspace and build a lazy member registry (CLI one-shot: an
@@ -149,11 +161,22 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
     Ok(0)
 }
 
-/// Route one `workspace` subcommand to its read-model ([FR-WS-05]).
+/// Route one `workspace` subcommand to its read-model ([FR-WS-05], [FR-WS-13]).
+///
+/// `Check` prints an `Option<WorkspaceGovernance>` and always returns 0: the
+/// workspace rule family is **advisory** — it reports cross-service policy
+/// breaches without moving any member's gated signal ([ADR-56]). Serialising the
+/// `Option` directly is what makes the honest empty machine-readable: no declared
+/// rules ⇒ `null`, never a fabricated zero-violation report ([NFR-CC-04]).
 pub(crate) fn run_workspace(command: WorkspaceCommands, root: &Path, out: &Output) -> Result<i32> {
     let registry = registry(root)?;
     match command {
         WorkspaceCommands::Status => out.print(&query::workspace_status(&registry))?,
+        WorkspaceCommands::Check => {
+            let bridge = ContractBridge::new();
+            let edges = query::edges(&bridge, &registry);
+            out.print(&workspace_governance(registry.federation(), &edges)?)?;
+        }
     }
     Ok(0)
 }

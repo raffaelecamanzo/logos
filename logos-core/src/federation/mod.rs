@@ -27,9 +27,15 @@
 //!   coverage read-model with a per-reference reason, a non-gated advisory
 //!   tier over the same contract surfaces the bridge reads ([FR-WS-05],
 //!   [ADR-53]).
+//! - the [`governance`] — the workspace-level rule family quantifying over
+//!   [`bridge`] matches (service-layer boundaries, no-cross-service-callers),
+//!   reported at the workspace level and **structurally incapable** of moving a
+//!   member's per-repo gate ([FR-WS-13], [ADR-56]).
 //!
 //! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
+//! [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
 //! [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+//! [ADR-56]: ../../../docs/specs/architecture/decisions/ADR-56.md
 //!
 //! # Single-root invariant
 //! When **no** manifest is found anywhere up-tree, [`discover`] returns
@@ -53,6 +59,7 @@ pub mod bridge;
 pub mod broker;
 pub mod coverage;
 pub mod enable;
+pub mod governance;
 pub mod manifest;
 pub mod query;
 pub mod registry;
@@ -70,7 +77,10 @@ pub use bridge::{
 pub use coverage::{
     cross_service_coverage, CoverageState, CrossServiceCoverage, ReferenceCoverage, UnboundReason,
 };
-pub use manifest::{Link, MANIFEST_FILENAME};
+pub use governance::{workspace_governance, WorkspaceGovernance, WorkspaceViolation};
+pub use manifest::{
+    Governance, Link, NoCrossServiceCallers, ServiceBoundary, ServiceLayer, MANIFEST_FILENAME,
+};
 pub use query::{
     workspace_status, xservice_callers, xservice_impact, xservice_route_providers, xservice_search,
     CrossServiceImpact, MemberResult, WorkspaceStatus, XserviceCallers, XserviceImpact,
@@ -124,6 +134,12 @@ pub struct Federation {
     ///
     /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
     pub links: Vec<Link>,
+    /// The `[governance]` workspace rule family ([FR-WS-13]), carried through
+    /// verbatim for [`governance::workspace_governance`] to compile and evaluate
+    /// over bridge matches. Empty ⇒ no workspace governance output at all.
+    ///
+    /// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
+    pub governance: Governance,
 }
 
 /// Discover the workspace by walking **up** from `hint`'s resolved root
@@ -199,6 +215,7 @@ pub fn discover(hint: &Path) -> Result<Option<Federation>, ConfigError> {
         members,
         default,
         links: manifest.links,
+        governance: manifest.governance,
     }))
 }
 

@@ -357,6 +357,6 @@ fn only_the_default_member_is_warmed_at_startup() {
         "only the declared default member (api) is warmed eagerly; web stays lazy"
     );
     // The backing built from it is federated (sanity: the router path uses this).
-    let backing = Backing::Federated(registry);
+    let backing = Backing::Federated(Box::new(registry));
     assert!(backing.is_federated());
 }
