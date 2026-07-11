@@ -28,6 +28,7 @@ import { StatisticsView } from "./statistics/StatisticsView.tsx";
 import { CoverageView } from "./analytics/CoverageView.tsx";
 import { FilesView } from "./analytics/FilesView.tsx";
 import { WikiView } from "./wiki/WikiView.tsx";
+import { WorkspaceView } from "./workspace/WorkspaceView.tsx";
 
 /** A view is a plain, prop-less component mounted in the shell content slot. */
 export type ViewComponent = ComponentType;
@@ -55,6 +56,12 @@ export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   // S-191 — the Config policy editor (the last interactive tab, the SPA's only
   // mutating surface) over the unchanged intent-guarded config POSTs (ADR-31).
   "/config": ConfigView,
+  // S-250 — the app-level Workspace tab (service map / cross-service coverage /
+  // cross-service impact) over the S-249 `/api/v1/workspace/*` fan-out. Registered
+  // unconditionally so a hand-typed `/workspace` resolves; its NAV ITEM, though, is
+  // rendered only in workspace mode (nav.ts), and in a single-root serve the view
+  // states honestly that this is not a workspace (FR-UI-29).
+  "/workspace": WorkspaceView,
 };
 
 /**

@@ -64,6 +64,8 @@ use logos_core::model::EdgeKind;
 use logos_core::models::navigation::{GraphGranularity, GraphLayer};
 use logos_core::Engine;
 
+use crate::member::MemberEngine;
+
 mod api_v1;
 // The chat and wiki-**generation** surfaces are the LLM egress carve-out
 // (CR-078, ADR-60): they hold the only edges to chat-agent / wiki-agent /
@@ -74,6 +76,11 @@ mod api_v1;
 pub mod chat;
 pub mod components;
 mod markdown;
+// The per-request member scope (S-250, FR-UI-29): the `?repo=` → `Engine`
+// extractor every `/api/v1/*` handler resolves its engine through, so the
+// workspace SPA's member selector scopes every existing view. Inert (and
+// byte-for-byte unchanged) on the single-root path.
+mod member;
 mod query;
 pub mod spa;
 mod wiki;
@@ -506,6 +513,64 @@ pub fn workspace_router(registry: EngineRegistry<Engine>) -> Result<Router> {
     router_for_backing(Arc::new(Backing::Federated(registry)))
 }
 
+/// Build a workspace router over an explicit [`IntentToken`] — the seam the S-250
+/// member-scope tests drive to exercise the **mutating** routes (`/config/save` and
+/// friends) end-to-end under `?repo=`, which they cannot do through
+/// [`workspace_router`] because [`intent_guard`] (correctly) rejects a `POST` that
+/// does not echo the session's token, and that token is minted internally there.
+///
+/// # Errors
+/// The workspace's default member cannot start (see [`router_for_backing`]).
+pub fn workspace_router_with_intent(
+    registry: EngineRegistry<Engine>,
+    intent: IntentToken,
+) -> Result<Router> {
+    let backing = Arc::new(Backing::Federated(registry));
+    let engine = backing.default_engine()?;
+    Ok(build_router(make_state(engine, backing, intent)))
+}
+
+/// The chat service for this request's member scope (S-250, [FR-UI-29]).
+///
+/// The injected [`ChatService`](chat::ChatService) is bound to the **default** engine at
+/// router build (and, in the carve-out tests, is a mock provider). That is right for
+/// single-root and for an unscoped workspace request. But a `?repo=`-scoped request is
+/// reading member B, so answering its chat turn from member A's graph would state one
+/// member's answers under another member's name ([NFR-RA-05]) — so bind a service to the
+/// resolved engine instead. `Arc::ptr_eq` is the test: same engine ⇒ the injected service
+/// (mock seams preserved); a different engine ⇒ a service for that member.
+#[cfg(feature = "agents")]
+fn chat_for(
+    injected: &Arc<dyn chat::ChatService>,
+    default: &Arc<Engine>,
+    scoped: Arc<Engine>,
+) -> Arc<dyn chat::ChatService> {
+    if Arc::ptr_eq(default, &scoped) {
+        Arc::clone(injected)
+    } else {
+        Arc::new(chat::ConfiguredChatService::new(scoped))
+    }
+}
+
+/// The wiki-generation service for this request's member scope (S-250, [FR-UI-29]).
+///
+/// The load-bearing case is a **write**: the Wiki tab's read-models are member-scoped, so
+/// a generation pass launched from it must write into the member whose pages it is
+/// showing — not into the workspace default's `wiki.db`. See [`chat_for`] for the
+/// same-engine ⇒ injected-service rule that keeps the S-178 mock seam intact.
+#[cfg(feature = "agents")]
+fn wiki_for(
+    injected: &Arc<dyn wikigen::WikiRunService>,
+    default: &Arc<Engine>,
+    scoped: Arc<Engine>,
+) -> Arc<dyn wikigen::WikiRunService> {
+    if Arc::ptr_eq(default, &scoped) {
+        Arc::clone(injected)
+    } else {
+        Arc::new(wikigen::ConfiguredWikiRunService::new(scoped))
+    }
+}
+
 /// Assemble the [`WebState`] from a resolved default `engine` and its `backing`,
 /// wiring the `agents`-only chat/wiki seams when present — the one place state is
 /// constructed, shared by every router entry point.
@@ -688,6 +753,11 @@ fn build_router(state: WebState) -> Router {
         // covers them. Under a single-root `Backing::Single` (a plain repo, or
         // `--standalone`) they answer an honest `404` — the registry is never
         // allocated, so the single-root path pays nothing for these routes.
+        // The engine-free roster the SPA shell probes on every load (S-250): it
+        // decides workspace-vs-single-root mode and fills the member selector without
+        // warming a single member (NFR-PE-10) — `status` below fans out over all of
+        // them and is fetched only by the Workspace tab that actually shows coverage.
+        .route("/api/v1/workspace/roster", get(api_v1::workspace_roster))
         .route("/api/v1/workspace/status", get(api_v1::workspace_status))
         .route("/api/v1/workspace/route-providers", get(api_v1::workspace_route_providers))
         .route("/api/v1/workspace/search", get(api_v1::workspace_search))
@@ -778,9 +848,13 @@ fn build_router(state: WebState) -> Router {
 #[cfg(feature = "agents")]
 async fn chat_turn(
     State(chat): State<Arc<dyn chat::ChatService>>,
+    State(default): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
+    // Answer from the member the user is actually reading (S-250).
+    let chat = chat_for(&chat, &default, engine);
     let question = form
         .get("q")
         .or_else(|| form.get("message"))
@@ -858,9 +932,14 @@ async fn chat_turn(
 #[cfg(feature = "agents")]
 async fn wiki_generate(
     State(wiki): State<Arc<dyn wikigen::WikiRunService>>,
+    State(default): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     State(run_state): State<wikigen::WikiRunState>,
     headers: HeaderMap,
 ) -> Response {
+    // Generate INTO the member whose pages the tab is showing — never the default's
+    // wiki.db (S-250; the Wiki read-models are member-scoped).
+    let wiki = wiki_for(&wiki, &default, engine);
     let streaming = wants_event_stream(&headers);
     // The single-run lock ([FR-WK-18]): begin → own the one connection-independent
     // background run. The run's lifetime is owned by `run_state`, not this response
@@ -1229,7 +1308,7 @@ fn parse_policy_file(raw: Option<&String>) -> Option<PolicyFile> {
 /// leaves the file byte-identical — no partial write (S-096, NFR-RA-07). Save
 /// runs **no** pipeline; applying is the separate [`config_apply`] step.
 async fn config_save(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let Some(file) = parse_policy_file(form.get("file")) else {
@@ -1269,7 +1348,7 @@ fn config_write_status(e: &anyhow::Error) -> StatusCode {
 /// as honest `500` error text, never a blank or stale figure; the async progress
 /// panel is the S-100 consumer's concern.
 async fn config_apply(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let Some(file) = parse_policy_file(form.get("file")) else {
@@ -1292,7 +1371,7 @@ async fn config_apply(
 /// checked-in `config.toml` (it goes to `secrets.toml`). Error mapping mirrors
 /// [`config_save`]: an invalid existing store is a `422`, an I/O fault a `500`.
 async fn config_save_secret(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let api_key = form.get("api_key").cloned().unwrap_or_default();
@@ -1315,7 +1394,7 @@ async fn config_save_secret(
 /// work runs on the pool ([ADR-03]); a store fault is an honest `500`, never a
 /// silent success ([NFR-CC-04]). Returns the number of threads removed.
 #[cfg(feature = "agents")]
-async fn chat_clear(State(engine): State<Arc<Engine>>) -> Response {
+async fn chat_clear(MemberEngine(engine): MemberEngine) -> Response {
     let root = engine.root().to_path_buf();
     let result = tokio::task::spawn_blocking(move || {
         let mut store = chat_agent::ChatStore::open(&root)?;
@@ -1361,6 +1440,51 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The agent surfaces resolve their service against the request's member (S-250).
+    ///
+    /// The rule has two halves and both matter: the **default** engine must keep the
+    /// injected service (that is the S-170/S-178 mock seam the carve-out tests drive),
+    /// while a **scoped** engine must get a service bound to THAT member — otherwise the
+    /// Wiki tab, whose read-models are member-scoped, would launch a generation pass that
+    /// writes into the workspace default's `wiki.db` (a cross-member write, [NFR-RA-05]).
+    #[cfg(feature = "agents")]
+    #[test]
+    fn the_agent_services_follow_the_member_scope() {
+        use tempfile::TempDir;
+
+        let default_dir = TempDir::new().unwrap();
+        let other_dir = TempDir::new().unwrap();
+        let default = Arc::new(Engine::start(default_dir.path()).expect("default engine"));
+        let other = Arc::new(Engine::start(other_dir.path()).expect("member engine"));
+
+        let injected_chat: Arc<dyn chat::ChatService> =
+            Arc::new(chat::ConfiguredChatService::new(Arc::clone(&default)));
+        let injected_wiki: Arc<dyn wikigen::WikiRunService> =
+            Arc::new(wikigen::ConfiguredWikiRunService::new(Arc::clone(&default)));
+
+        // Unscoped (or single-root): the injected service is used verbatim — the mock
+        // seam the chat/wiki carve-out tests inject is never bypassed.
+        assert!(Arc::ptr_eq(
+            &chat_for(&injected_chat, &default, Arc::clone(&default)),
+            &injected_chat
+        ));
+        assert!(Arc::ptr_eq(
+            &wiki_for(&injected_wiki, &default, Arc::clone(&default)),
+            &injected_wiki
+        ));
+
+        // Scoped to another member: a DIFFERENT service, bound to that member's engine —
+        // so the turn is answered from, and the wiki written into, the member on screen.
+        assert!(!Arc::ptr_eq(
+            &chat_for(&injected_chat, &default, Arc::clone(&other)),
+            &injected_chat
+        ));
+        assert!(!Arc::ptr_eq(
+            &wiki_for(&injected_wiki, &default, Arc::clone(&other)),
+            &injected_wiki
+        ));
+    }
 
     #[test]
     fn bind_addr_is_the_loopback_compile_time_constant() {

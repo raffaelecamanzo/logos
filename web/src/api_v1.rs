@@ -74,6 +74,7 @@ use logos_core::models::quality::{
 use logos_core::wiki::{AnchorProvenance, DocCategory, WikiHit, WikiPage, WikiStatus};
 use logos_core::Engine;
 
+use crate::member::MemberEngine;
 use crate::query::QueryResponse;
 use crate::{
     bridge, parse_edge_types, parse_granularity, parse_intent, parse_layers, query,
@@ -137,7 +138,7 @@ pub(crate) struct OverviewModel {
 }
 
 /// `GET /api/v1/overview` — the Dashboard data ([FR-UI-09], [FR-UI-21]).
-pub(crate) async fn overview(State(engine): State<Arc<Engine>>) -> Response {
+pub(crate) async fn overview(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_overview", |e| -> anyhow::Result<OverviewModel> {
         Ok(OverviewModel {
             status: e.status(),
@@ -170,7 +171,7 @@ pub(crate) struct HealthModel {
 }
 
 /// `GET /api/v1/health` — the Health data ([FR-UI-04], [FR-UI-21]).
-pub(crate) async fn health(State(engine): State<Arc<Engine>>) -> Response {
+pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_health", |e| -> anyhow::Result<HealthModel> {
         Ok(HealthModel {
             status: e.status(),
@@ -200,7 +201,7 @@ pub(crate) async fn health(State(engine): State<Arc<Engine>>) -> Response {
 /// "no telemetry recorded yet" warning, never an error ([NFR-CC-04]) — so this pairs
 /// `bridge` with `ok`, not the fallible `respond`.
 pub(crate) async fn statistics(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let window = q.get("window").and_then(|w| w.trim().parse::<u32>().ok());
@@ -219,7 +220,7 @@ pub(crate) struct ArchitectureModel {
 }
 
 /// `GET /api/v1/architecture` — the Architecture / Cycles data ([FR-UI-21]).
-pub(crate) async fn architecture(State(engine): State<Arc<Engine>>) -> Response {
+pub(crate) async fn architecture(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_architecture", |e| -> anyhow::Result<ArchitectureModel> {
         Ok(ArchitectureModel { status: e.status(), dsm: e.dsm(None, false)? })
     })
@@ -238,7 +239,7 @@ pub(crate) struct GapsModel {
 }
 
 /// `GET /api/v1/gaps` — the Rule-findings data ([FR-UI-21]).
-pub(crate) async fn gaps(State(engine): State<Arc<Engine>>) -> Response {
+pub(crate) async fn gaps(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_gaps", |e| -> anyhow::Result<GapsModel> {
         Ok(GapsModel {
             status: e.status(),
@@ -269,7 +270,7 @@ pub(crate) struct FilesModel {
 /// `--production-scope` flag and MCP `production_scope` argument expose,
 /// reached through the same [`Engine::latest_hotspots`] call.
 pub(crate) async fn files(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let untested = wants_flag(&params, "untested");
@@ -304,7 +305,7 @@ pub(crate) struct CoverageModel {
 }
 
 /// `GET /api/v1/coverage` — the Coverage data ([FR-UI-21]).
-pub(crate) async fn coverage(State(engine): State<Arc<Engine>>) -> Response {
+pub(crate) async fn coverage(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_coverage", |e| -> anyhow::Result<CoverageModel> {
         Ok(CoverageModel {
             status: e.status(),
@@ -326,7 +327,7 @@ pub(crate) async fn coverage(State(engine): State<Arc<Engine>>) -> Response {
 /// ([ADR-28]). [`GraphElements`] is infallible at the surface (a read fault
 /// degrades to the honest empty snapshot in the read-model itself).
 pub(crate) async fn graph(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let seed = q.get("seed").cloned().filter(|s| !s.is_empty());
@@ -352,7 +353,7 @@ pub(crate) async fn graph(
 /// read-only read-models — no new engine primitive ([ADR-35]); an empty result is
 /// an honest `200` no-matches payload, never an error ([NFR-CC-04]).
 pub(crate) async fn search_query(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let response: QueryResponse = bridge(engine, "api_v1_query", move |e| query::run(e, &params)).await;
@@ -372,7 +373,7 @@ pub(crate) async fn search_query(
 /// ([NFR-CC-04]). An absent/empty `seed` is the honest empty default (`200`), so
 /// the panel renders its opening prompt without an error.
 pub(crate) async fn impact(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let Some(seed) = q.get("seed").map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_string)
@@ -391,7 +392,7 @@ pub(crate) async fn impact(
 /// to an honest empty read-model carrying `warnings`, never a `404` ([NFR-CC-04]).
 /// A missing/empty `symbol` is a client error (`400`).
 pub(crate) async fn node(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let Some(symbol) = q.get("symbol").map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_string)
@@ -412,7 +413,7 @@ pub(crate) async fn node(
 /// missing/empty `q` is a client error (`400`). An unrecognised `kind` is dropped
 /// (the search runs unfiltered), matching the read-model's lenient contract.
 pub(crate) async fn search(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let Some(term) = q.get("q").map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_string) else {
@@ -437,7 +438,7 @@ pub(crate) async fn search(
 
 /// Read a trimmed, non-empty query parameter, else `None` — the shared optional
 /// accessor for the workspace surface's `?repo=`/`?limit=` params.
-fn opt_param(q: &HashMap<String, String>, key: &str) -> Option<String> {
+pub(crate) fn opt_param(q: &HashMap<String, String>, key: &str) -> Option<String> {
     q.get(key).map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
@@ -492,6 +493,25 @@ where
         "page render",
     );
     ok(out)
+}
+
+/// `GET /api/v1/workspace/roster` — the manifest-only roster (workspace name,
+/// default member, member names) the SPA shell probes on **every** page load to
+/// decide its mode and populate the member selector ([FR-WS-06], [FR-UI-29]).
+///
+/// Engine-free by construction ([`workspace_roster`](fed_query::workspace_roster)):
+/// unlike [`workspace_status`] it starts no member, so the shell's boot probe cannot
+/// eagerly warm all N members and undo the warm-only-the-default policy
+/// ([NFR-PE-10]). Answers the same honest `404` under a single-root backing — which
+/// is exactly how the SPA discovers it is NOT a workspace.
+pub(crate) async fn workspace_roster(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+) -> Response {
+    workspace_fan(backing, bridge, "api_v1_workspace_roster", |registry, _bridge| {
+        fed_query::workspace_roster(registry)
+    })
+    .await
 }
 
 /// `GET /api/v1/workspace/status` — per-member index freshness + the 3-state
@@ -596,7 +616,7 @@ pub(crate) async fn workspace_impact(
 /// [FR-WK-12]): per-anchor freshness counts, the revision-stale count, and the
 /// revision they were computed at. A documented pure read that never prunes
 /// ([ADR-28]).
-pub(crate) async fn wiki_index(State(engine): State<Arc<Engine>>) -> Response {
+pub(crate) async fn wiki_index(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_wiki", |e| -> anyhow::Result<WikiStatus> {
         e.wiki_status()
     })
@@ -609,7 +629,7 @@ pub(crate) async fn wiki_index(State(engine): State<Arc<Engine>>) -> Response {
 /// read-only — no `wiki.db` write ([ADR-28]). An empty `q` is an honest empty list
 /// (`200`), never an error.
 pub(crate) async fn wiki_search(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let term = q.get("q").cloned().unwrap_or_default().trim().to_string();
@@ -670,7 +690,7 @@ pub(crate) struct WikiPageView {
 /// `200` placeholder (the honest "not yet generated" state, [NFR-CC-04]); any other
 /// unknown slug is an honest `404` — never a fabricated body. Read-only ([ADR-28]).
 pub(crate) async fn wiki_page(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Path(slug): Path<String>,
 ) -> Response {
     let model = bridge(engine, "api_v1_wiki_page", move |e| -> anyhow::Result<WikiPageOutcome> {
@@ -852,7 +872,7 @@ fn resolve_doc_asset(root: &FsPath, rel_path: &str) -> AssetOutcome {
 /// [ADR-28]: ../../docs/specs/architecture/decisions/ADR-28.md
 /// [ADR-03]: ../../docs/specs/architecture/decisions/ADR-03.md
 pub(crate) async fn wiki_asset(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Path(rel_path): Path<String>,
 ) -> Response {
     let outcome =
@@ -913,7 +933,7 @@ pub(crate) struct WikiNav {
 /// read: the fixed Summary/Design/Specs slug contracts, a single engine read for
 /// Frontend-Design presence, and a single engine read for the dynamic User Guide
 /// page set; it touches no store ([ADR-28]).
-pub(crate) async fn wiki_nav(State(engine): State<Arc<Engine>>) -> Response {
+pub(crate) async fn wiki_nav(MemberEngine(engine): MemberEngine) -> Response {
     use crate::wiki::{
         DESIGN_DOCS, GUIDED_TOUR, OVERVIEW_ARCHITECTURE, OVERVIEW_ARCHITECTURE_LABEL, SPECS_DOCS,
         SPECS_SRS, SPECS_SRS_LABEL, USER_GUIDE_TIER_TITLE,
@@ -966,7 +986,7 @@ pub(crate) async fn wiki_nav(State(engine): State<Arc<Engine>>) -> Response {
 /// last-4 only — masked by construction in [`ConfigReadModel`], the raw secret is
 /// never serialized; [FR-CF-06], [NFR-SE-07]). A pure filesystem read — it touches
 /// no graph store, so a load mutates nothing ([FR-UI-03], [ADR-28]).
-pub(crate) async fn config(State(engine): State<Arc<Engine>>) -> Response {
+pub(crate) async fn config(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_config", |e| -> anyhow::Result<ConfigReadModel> {
         e.config_read()
     })
@@ -1007,7 +1027,7 @@ pub(crate) async fn config(State(engine): State<Arc<Engine>>) -> Response {
 /// [ADR-31]: ../../docs/specs/architecture/decisions/ADR-31.md
 /// [ADR-46]: ../../docs/specs/architecture/decisions/ADR-46.md
 /// [spa-frontend]: ../../docs/specs/architecture/components/spa-frontend.md
-pub(crate) async fn verify(State(engine): State<Arc<Engine>>) -> Response {
+pub(crate) async fn verify(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_verify", |e| -> anyhow::Result<VerifyReport> {
         e.verify()
     })

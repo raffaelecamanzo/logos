@@ -48,6 +48,13 @@ export const EDGE_STYLE: Record<string, "solid" | "dashed" | "dotted"> = {
   artifact_ref: "dashed",
   artifact_binding: "dashed",
   forbidden_dependency: "solid",
+  // The cross-service relation arms (S-250, CR-061) — the service map draws its
+  // edges through this same canvas, so its arms live in the same palette and get
+  // the same legend grammar. Additive: no intra-repo edge type carries these
+  // tokens (the intra-repo route edge is `routes_to`).
+  route: "dashed",
+  "grpc-call": "solid",
+  "broker-topic": "dotted",
 };
 
 /** Edge color by relationship kind — distinct, mutually-legible hues (CR-030). */
@@ -67,6 +74,12 @@ export const EDGE_COLOR: Record<string, string> = {
   artifact_ref: "#92400e",
   artifact_binding: "#be123c",
   forbidden_dependency: "#da291c",
+  // The cross-service relation arms (S-250) — distinct, mutually-legible hues in
+  // the established palette, so a service map reads at a glance which boundary a
+  // coupling crosses.
+  route: "#db2777",
+  "grpc-call": "#7c3aed",
+  "broker-topic": "#0891b2",
 };
 
 /** Node sizing — a base scaled gently by degree; the selection is bumped so it pops. */

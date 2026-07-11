@@ -16,6 +16,7 @@
  */
 
 import { apiGet, ApiError } from "../intent.ts";
+import { scopedMember } from "../workspace/scope.ts";
 import type {
   ArchitectureModel,
   CoverageModel,
@@ -52,12 +53,25 @@ export type Params = Record<string, ParamValue>;
  * all-on ⇒ no-param invariant, S-122). A `false` boolean is also omitted (a
  * toggle that is off carries no param, matching the `?intent=` contract); pass a
  * truthy value to include a flag. Values are URL-encoded.
+ *
+ * In **workspace mode** it also appends the active member scope as `?repo=<member>`
+ * (S-250, FR-UI-29) — the one place the selector reaches every existing view's
+ * read. Two exemptions keep that from being a lie:
+ *   - the `workspace/*` fan-out endpoints own their own `?repo=` semantics (there
+ *     it *narrows the fan-out*, and the service map is deliberately app-level), so
+ *     the scope is never auto-applied to them;
+ *   - an explicit `repo` param always wins over the ambient scope.
+ * In single-root mode the scope is `null` and no param is appended, so the URL is
+ * byte-for-byte the pre-workspace one.
  */
 export function apiUrl(endpoint: string, params?: Params): string {
-  const path = `${API_BASE}/${endpoint.replace(/^\/+/, "")}`;
-  if (!params) return path;
+  const rel = endpoint.replace(/^\/+/, "");
+  const path = `${API_BASE}/${rel}`;
+  const scope = rel.startsWith("workspace/") ? null : scopedMember();
+  if (!params && !scope) return path;
   const search = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
+  if (scope) search.set("repo", scope);
+  for (const [key, value] of Object.entries(params ?? {})) {
     if (value === undefined || value === null || value === "" || value === false) continue;
     search.set(key, String(value));
   }

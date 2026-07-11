@@ -957,3 +957,121 @@ export interface VerifyReport {
   structural: DoctorReport;
   message: string;
 }
+
+// ── The cross-service workspace read-models (S-249/S-250, CR-061, FR-WS-04/05/06,
+// FR-UI-29) — the `/api/v1/workspace/*` fan-out the workspace UI consumes. Mirrors
+// `logos_core::federation::{bridge, coverage, query}`. Served ONLY in workspace
+// mode; a single-root serve answers these endpoints `404` (not a workspace), which
+// is exactly how the SPA detects its mode.
+
+/** One member's slice of a fan-out: its `result`, or a per-member `error` when
+ *  that member degraded (never fatal to the whole answer — mirrors `MemberResult`). */
+export interface MemberResult<T> {
+  /** The repo-qualified member name (its workspace-relative path). */
+  member: string;
+  result?: T;
+  error?: string;
+}
+
+/** One endpoint of a cross-service binding — an in-memory overlay endpoint that
+ *  carries no per-database node id, only `(member, symbol)` (ADR-52). */
+export interface BridgeEndpoint {
+  member: string;
+  /** The canonical, database-portable SCIP symbol. */
+  symbol: string;
+}
+
+/** A cross-service link the bridge resolved: a consumer bound to exactly one
+ *  provider in another member (`relation` is the arm — `route`, `grpc-call`,
+ *  `broker-topic`). Never persisted, never fabricated (FR-WS-04). */
+export interface BridgeEdge {
+  relation: string;
+  from: BridgeEndpoint;
+  to: BridgeEndpoint;
+}
+
+/** Why a cross-boundary reference did not bind (mirrors `UnboundReason`, ADR-53). */
+export type UnboundReason =
+  | "no-provider-in-workspace"
+  | "path-not-composed"
+  | "base-url-runtime"
+  | "ambiguous"
+  | "schema-mismatch";
+
+/** The 3-state display bucket of one reference (FR-WS-05). `ambiguous` is its own
+ *  bucket, never folded into `unbound`. */
+export type CoverageBucket = "bound" | "ambiguous" | "unbound";
+
+/** One cross-boundary reference's coverage classification (FR-WS-05). `state` +
+ *  `reason` are the flattened `CoverageState`; `bucket` is the display bucket
+ *  derived from them server-side, so the two can never disagree. */
+export interface ReferenceCoverage {
+  relation: string;
+  from: BridgeEndpoint;
+  bucket: CoverageBucket;
+  state: "bound" | "unbound";
+  reason?: UnboundReason;
+}
+
+/** The advisory 3-state cross-service coverage summary (FR-WS-05, ADR-53) — never
+ *  a gate input. `no_provider_in_workspace` is bucketed out of `bound_ratio`'s
+ *  denominator: a reference to a service outside this workspace is not a *broken*
+ *  binding, so it must not depress the ratio. */
+export interface CrossServiceCoverage {
+  references: ReferenceCoverage[];
+  bound: number;
+  ambiguous: number;
+  unbound: number;
+  no_provider_in_workspace: number;
+  /** `bound / (bound + ambiguous + unbound)`; `1.0` when that denominator is 0. */
+  bound_ratio: number;
+}
+
+/** `GET /api/v1/workspace/roster` — the manifest-only roster the shell probes on
+ *  every page load: workspace name, default member, member names. Engine-free by
+ *  construction, so the probe warms no member (NFR-PE-10) — unlike
+ *  {@link WorkspaceStatus}, which fans out over all of them. */
+export interface WorkspaceRoster {
+  workspace: string;
+  /** The member an unscoped request answers from (the manifest `default`), when the
+   *  manifest named one. The shell opens on it rather than guessing. */
+  default?: string;
+  /** Every member's repo-qualified name, in manifest order. */
+  members: string[];
+}
+
+/** `GET /api/v1/workspace/status` — per-member index freshness + the coverage
+ *  summary. Fetched by the Workspace tab (it fans out over every member). */
+export interface WorkspaceStatus {
+  /** The workspace name from the manifest. */
+  workspace: string;
+  members: MemberResult<StatusInfo>[];
+  coverage: CrossServiceCoverage;
+}
+
+/** `GET /api/v1/workspace/route-providers` — the resolved cross-service bindings:
+ *  the service map's edges. */
+export interface XserviceRouteProviders {
+  /** The applied `?repo=` scope, absent when unscoped. */
+  scope?: string;
+  providers: BridgeEdge[];
+}
+
+/** One far-side impact reached across a bridge edge. */
+export interface CrossServiceImpact {
+  /** The binding the impact was stitched across. */
+  via: BridgeEdge;
+  /** The member the far-side impact was computed in. */
+  member: string;
+  impact: ImpactResult;
+}
+
+/** `GET /api/v1/workspace/impact?symbol=<s>` — the seed member(s)\' impact plus
+ *  each far-side impact stitched across a bridge edge (the cross-service impact
+ *  view). */
+export interface XserviceImpact {
+  query: string;
+  scope?: string;
+  seed: MemberResult<ImpactResult>[];
+  cross_service: CrossServiceImpact[];
+}

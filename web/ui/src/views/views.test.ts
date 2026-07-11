@@ -41,3 +41,10 @@ describe("viewForPath", () => {
     expect(result).not.toBe(DashboardView);
   });
 });
+
+describe("the workspace route (S-250, FR-UI-29)", () => {
+  it("registers /workspace so a hand-typed URL resolves (its NAV item is workspace-only)", () => {
+    expect(viewForPath("/workspace")).toBe(VIEW_REGISTRY["/workspace"]);
+    expect(VIEW_REGISTRY["/workspace"]).toBeDefined();
+  });
+});

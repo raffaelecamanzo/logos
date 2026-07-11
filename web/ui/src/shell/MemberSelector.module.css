@@ -1,0 +1,31 @@
+/* The workspace member selector (S-250, FR-UI-29) — the shell's project axis.
+   Reuses the design-system tokens verbatim (FR-UI-23): no new colour, no new
+   spacing step, so a theme remains a token remap. Rendered in workspace mode only. */
+
+.selector {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.label {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.select {
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  padding: var(--space-1) var(--space-2);
+  max-width: 18rem;
+}
+
+.select:hover {
+  border-color: var(--border-strong, var(--border-subtle));
+}

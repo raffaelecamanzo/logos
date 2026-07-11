@@ -12,7 +12,10 @@ import { useEffect, useState } from "react";
 
 import { Badge, ThemeToggle } from "../components/index.ts";
 import { apiGet } from "../intent.ts";
+import { apiUrl } from "../api/client.ts";
 import { navigate } from "../router.tsx";
+import { useWorkspace } from "../workspace/WorkspaceContext.tsx";
+import { MemberSelector } from "./MemberSelector.tsx";
 import styles from "./Header.module.css";
 
 type ApiState = "loading" | "ok" | "error";
@@ -41,10 +44,21 @@ function BrandMark() {
 
 export function Header() {
   const [state, setState] = useState<ApiState>("loading");
+  // The header sits outside the member-keyed view subtree, so the member is an
+  // explicit dependency: the badge must report the member the shell is CURRENTLY
+  // presenting. Otherwise selecting a member whose engine cannot start would leave a
+  // green "connected" badge sitting inches from that member's name (S-250).
+  const { cacheKey, mode } = useWorkspace();
 
   useEffect(() => {
+    // Until the workspace probe settles we do not know the member, so a request now
+    // would go out unscoped and have to be re-issued anyway. Stay honestly "Connecting…".
+    if (mode === "loading") return;
     let alive = true;
-    apiGet("/api/v1/health")
+    setState("loading");
+    // Through `apiUrl`, so the probe carries the active `?repo=` scope. In single-root
+    // mode no param is appended and the request is byte-for-byte the one it always was.
+    apiGet(apiUrl("health"))
       .then(() => {
         if (alive) setState("ok");
       })
@@ -54,7 +68,7 @@ export function Header() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [cacheKey, mode]);
 
   return (
     <header className={styles.header}>
@@ -74,6 +88,9 @@ export function Header() {
         <span className={styles.brandSub}>code intelligence</span>
       </a>
       <div className={styles.spacer} />
+      {/* Workspace mode only — in a single-root serve this renders nothing and the
+          header is byte-for-byte unchanged (FR-UI-29). */}
+      <MemberSelector />
       <span className={styles.status} role="status">
         {state === "loading" && <Badge tone="muted">Connecting…</Badge>}
         {state === "ok" && <Badge tone="green">Read-model connected</Badge>}
