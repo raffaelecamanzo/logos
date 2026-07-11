@@ -38,7 +38,7 @@ fn edge_count(store: &SqliteGraphStore) -> i64 {
         .unwrap()
 }
 
-// ── FR-DB-01: kind CHECK constraints (15 node / 10 edge) ─────────────────────
+// ── FR-DB-01: kind CHECK constraints (37 node / 17 edge) ─────────────────────
 
 #[test]
 fn every_valid_node_kind_discriminant_is_accepted() {
@@ -55,11 +55,11 @@ fn out_of_range_node_kind_discriminants_are_rejected_by_check() {
     let sym = store
         .upsert_symbol(&LogosSymbol::parse("local 0").unwrap())
         .unwrap();
-    // 0 (the deliberately-never-valid zero) and 35 (one past the taxonomy:
-    // migration 8 widened to the CR-003 documentation kinds 18..=22 and
-    // migration 13 to the CR-010 config kinds 23..=34, so 35 is the first
-    // out-of-range discriminant).
-    for bad in [0_i64, 35, -1, 99] {
+    // 0 (the deliberately-never-valid zero) and 38 (one past the taxonomy:
+    // migration 8 widened to the CR-003 documentation kinds 18..=22, migration
+    // 13 to the CR-010 config kinds 23..=34, and migration 17 to the CR-061
+    // broker kinds 35..=37, so 38 is the first out-of-range discriminant).
+    for bad in [0_i64, 38, -1, 99] {
         let res = store.conn.execute(
             "INSERT INTO nodes (symbol_id, kind, name) VALUES (?1, ?2, 'x')",
             rusqlite::params![sym, bad],
@@ -92,12 +92,13 @@ fn out_of_range_edge_kind_discriminants_are_rejected_by_check() {
     let store = mem();
     let a = seed(&store, 0, "a", NodeKind::Function);
     let b = seed(&store, 1, "b", NodeKind::Function);
-    // 16 is one past the taxonomy: the doc edges 11/12 (doc_reference,
+    // 18 is one past the taxonomy: the doc edges 11/12 (doc_reference,
     // traces_to) were added by migration 8, the member-access `accesses` edge 13
-    // by migration 10 (CR-005), and the artifact edges 14/15 (artifact_ref,
-    // artifact_binding) by migration 14 (CR-011), so 15 is now valid and 16 is
-    // the first out-of-range discriminant.
-    for bad in [0_i64, 16, -1] {
+    // by migration 10 (CR-005), the artifact edges 14/15 (artifact_ref,
+    // artifact_binding) by migration 14 (CR-011), and the broker edges 16/17
+    // (publishes, subscribes) by migration 17 (CR-061), so 18 is the first
+    // out-of-range discriminant.
+    for bad in [0_i64, 18, -1] {
         let res = store.conn.execute(
             "INSERT INTO edges (source, target, kind) VALUES (?1, ?2, ?3)",
             rusqlite::params![a.get(), b.get(), bad],
@@ -376,8 +377,8 @@ fn fresh_database_applies_all_migrations_and_records_them() {
     let store = mem();
     assert_eq!(
         store.schema_version().unwrap(),
-        16,
-        "v16 = migration 16 (S-201 CR-052 UNIQUE(symbol_id) dedup rebuild)"
+        17,
+        "v17 = migration 17 (S-255 CR-061 broker kind widening)"
     );
 
     let recorded: i64 = store
@@ -385,7 +386,7 @@ fn fresh_database_applies_all_migrations_and_records_them() {
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        recorded, 16,
+        recorded, 17,
         "schema_versions records every applied migration"
     );
 }
@@ -396,16 +397,16 @@ fn reopening_an_up_to_date_database_is_idempotent() {
     let path = dir.path().join("logos.db");
     {
         let store = SqliteGraphStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 16);
+        assert_eq!(store.schema_version().unwrap(), 17);
     }
     // Reopen: migrations must NOT re-apply (no duplicate schema_versions rows).
     let store = SqliteGraphStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 16);
+    assert_eq!(store.schema_version().unwrap(), 17);
     let rows: i64 = store
         .conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(rows, 16, "migrations must not re-apply on reopen");
+    assert_eq!(rows, 17, "migrations must not re-apply on reopen");
 }
 
 // ── NFR-RA-07: an interrupted write batch rolls back atomically ──────────────
@@ -473,7 +474,7 @@ fn database_file_is_copyable_and_reopens_intact() {
     std::fs::copy(&original, &copy).unwrap();
 
     let reopened = SqliteGraphStore::open(&copy).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 16);
+    assert_eq!(reopened.schema_version().unwrap(), 17);
     let hits = reopened.search("portable", None, 10).unwrap();
     assert_eq!(hits.len(), 1, "all data must survive a plain file copy");
     assert_eq!(hits[0].name, "portable");
@@ -1039,11 +1040,11 @@ fn upgrading_a_v1_database_applies_migration_two_forward_only() {
     }
 
     // Opening through the store must upgrade v1 → latest without touching v1
-    // data (the runner applies v2..v16 forward-only).
+    // data (the runner applies v2..v17 forward-only).
     let store = SqliteGraphStore::open(&path).unwrap();
     assert_eq!(
         store.schema_version().unwrap(),
-        16,
+        17,
         "v1 store upgrades to the latest version"
     );
     assert!(

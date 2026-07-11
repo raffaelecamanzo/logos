@@ -1505,8 +1505,10 @@ mod tests {
             "UNIQUE(symbol_id) rejects a duplicate symbol"
         );
 
-        // Idempotent: re-running the runner applies nothing and changes no row.
-        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        // Idempotent: re-running the runner (pinned to the first sixteen
+        // migrations, so this test stays scoped to migration 16 as later
+        // migrations land) applies nothing and changes no row.
+        apply_migrations_from(&mut conn, &MIGRATIONS[..16]).unwrap();
         assert_eq!(
             current_version(&conn).unwrap(),
             16,
@@ -1516,5 +1518,179 @@ mod tests {
             .query_row("SELECT count(*) FROM nodes", [], |r| r.get(0))
             .unwrap();
         assert_eq!(nodes_after, 3, "a second runner pass changes nothing (idempotent)");
+    }
+
+    /// A populated database created **before** migration 17 (at v16, with a
+    /// cross-file graph carrying real annotation data, a shingle, and a
+    /// resolved ledger row — and, critically, **no** broker topic) upgrades to
+    /// v17 forward-only with no data loss (S-255, CR-061, ADR-55, FR-WS-11,
+    /// FR-DB-01, NFR-MA-06): `PRAGMA user_version` advances by exactly one, and
+    /// the graph is byte-for-byte unaffected — every node, edge, shingle, and
+    /// ledger row survives with its id and every column verbatim, and the FTS
+    /// index needs no `'rebuild'` (no row is deleted, unlike migration 16's
+    /// dedup rebuild). Afterwards the widened CHECKs accept the three broker
+    /// node kinds and the two broker edge kinds (on both `edges` and the
+    /// `unresolved_refs` ledger) and still reject out-of-ontology values, and
+    /// the migration-16 `UNIQUE(symbol_id)` constraint is still enforced.
+    #[test]
+    fn migration_17_widens_to_broker_kinds_preserving_a_no_topic_graph_byte_for_byte() {
+        let mut conn = contract_conn();
+
+        // Stop at v16 and populate a small annotated graph exactly as a
+        // pre-CR-061 database holds: a cross-file caller/callee edge, a
+        // doc-body node, a shingle, and a resolved ledger row. No broker kind
+        // appears anywhere — the byte-for-byte-unaffected acceptance case.
+        apply_migrations_from(&mut conn, &MIGRATIONS[..16]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path) VALUES (1, 'a.rs'), (2, 'b.rs');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local a'), (2, 'local b');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, exported,
+                                cyclomatic_complexity, is_test, body) VALUES
+                 (10, 1, 7,  'caller',   1, 1, 3,    0, NULL),
+                 (20, 2, 19, 'Overview', 2, 0, NULL, 0, 'the body prose');
+             INSERT INTO edges (source, target, kind, payload) VALUES (20, 10, 11, 'doc-ref');
+             INSERT INTO shingles (node_id, hash) VALUES (10, 111), (10, 222);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, resolved)
+                 VALUES (1, 'local a', 'helper', 1, 2, 1);",
+        )
+        .unwrap();
+
+        // Upgrade across the v16 → v17 bump under the production FK contract.
+        apply_migrations_from(&mut conn, &MIGRATIONS[..17]).unwrap();
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            17,
+            "PRAGMA user_version advances by exactly one (16 → 17)"
+        );
+
+        // Byte-for-byte: every row, every id, every column survives verbatim.
+        let (nodes, edges, shingles, refs): (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM nodes), (SELECT count(*) FROM edges), \
+                        (SELECT count(*) FROM shingles), (SELECT count(*) FROM unresolved_refs)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (nodes, edges, shingles, refs),
+            (2, 1, 2, 1),
+            "a no-topic graph is byte-for-byte unaffected: every row survives v17"
+        );
+        let (exported, cc, is_test, body): (i64, Option<i64>, i64, Option<String>) = conn
+            .query_row(
+                "SELECT exported, cyclomatic_complexity, is_test, body FROM nodes WHERE id = 10",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (exported, cc, is_test, body),
+            (1, Some(3), 0, None),
+            "annotation columns carry over verbatim (no data loss)"
+        );
+        let edge_payload: Option<String> = conn
+            .query_row("SELECT payload FROM edges WHERE source = 20", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(edge_payload, Some("doc-ref".to_string()), "edge payload carries over");
+        let ref_resolved: i64 = conn
+            .query_row(
+                "SELECT resolved FROM unresolved_refs WHERE source_symbol = 'local a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ref_resolved, 1, "the pre-migration ledger row survives verbatim");
+
+        // No row was deleted, so the FTS index was never desynced — no
+        // 'rebuild' was needed, and it still finds the pre-migration name and
+        // the doc-body phrase.
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent after the widening rebuild (NFR-RA-09)");
+        let (by_name, by_body): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM nodes_fts WHERE nodes_fts MATCH 'caller'), \
+                        (SELECT count(*) FROM nodes_fts WHERE nodes_fts MATCH 'prose')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(by_name, 1, "FTS still finds the pre-migration name");
+        assert_eq!(by_body, 1, "FTS still finds the pre-migration doc-body phrase");
+
+        // The widened CHECK accepts the three broker node kinds — each under
+        // its own fresh symbol, since migration 16's UNIQUE(symbol_id) forbids
+        // a second node on symbol 1.
+        for (i, kind) in (35..=37).enumerate() {
+            let symbol_id = i as i64 + 3;
+            conn.execute(
+                "INSERT INTO symbols (id, symbol) VALUES (?1, ?2)",
+                rusqlite::params![symbol_id, format!("local {symbol_id}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO nodes (symbol_id, kind, name) VALUES (?1, ?2, 'broker')",
+                rusqlite::params![symbol_id, kind],
+            )
+            .unwrap_or_else(|e| panic!("broker node kind {kind} must be accepted: {e}"));
+        }
+        // …and the two broker edge kinds, on both edges and the ledger…
+        for kind in [16, 17] {
+            conn.execute(
+                "INSERT INTO edges (source, target, kind) VALUES (10, 20, ?1)",
+                [kind],
+            )
+            .unwrap_or_else(|e| panic!("broker edge kind {kind} must be accepted: {e}"));
+            conn.execute(
+                "INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, resolved) \
+                 VALUES (1, 'local a', 'topic', 1, ?1, 0)",
+                [kind],
+            )
+            .unwrap_or_else(|e| panic!("the ledger must accept broker edge kind {kind}: {e}"));
+        }
+        // …while still rejecting out-of-ontology values in every table.
+        assert!(
+            conn.execute(
+                "INSERT INTO nodes (symbol_id, kind, name) VALUES (1, 38, 'nope')",
+                [],
+            )
+            .is_err(),
+            "node kind 38 is outside the widened ontology"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO edges (source, target, kind) VALUES (10, 20, 18)",
+                [],
+            )
+            .is_err(),
+            "edge kind 18 is outside the widened ontology"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, resolved) \
+                 VALUES (1, 'local a', 'x', 1, 18, 0)",
+                [],
+            )
+            .is_err(),
+            "ledger kind 18 is outside the widened ontology"
+        );
+
+        // The migration-16 UNIQUE(symbol_id) constraint survives this rebuild.
+        assert!(
+            conn.execute(
+                "INSERT INTO nodes (symbol_id, kind, name) VALUES (1, 7, 'dup')",
+                [],
+            )
+            .is_err(),
+            "UNIQUE(symbol_id) still rejects a duplicate symbol after v17"
+        );
+
+        assert_eq!(
+            foreign_key_violations(&conn),
+            0,
+            "no FK violations after the migration-17 rebuild"
+        );
     }
 }
