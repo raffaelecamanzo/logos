@@ -533,6 +533,12 @@ mod tests {
     impl MemberContracts for FakeEngine {
         fn contract_surface(&self) -> Result<Vec<ContractNode>> {
             SURFACE_READS.with(|c| c.set(c.get() + 1));
+            // A member literally named "unreadable" starts fine but its surface
+            // READ fails — the `Ok(Err)` degrade arm, distinct from a start
+            // failure ("broken").
+            if self.member == "unreadable" {
+                anyhow::bail!("store read failed");
+            }
             Ok(FIXTURES.with(|f| {
                 f.borrow()
                     .get(&self.member)
@@ -839,6 +845,28 @@ mod tests {
         let edges = ContractBridge::new().edges(&registry(&["api", "web", "broken"]));
 
         assert_eq!(edges.len(), 1, "the healthy members still bind despite a degraded one");
+        assert_eq!(edges[0].from.member, "api");
+        assert_eq!(edges[0].to.member, "web");
+    }
+
+    /// A member whose engine starts but whose surface READ fails is skipped, not
+    /// fatal — the `Ok(Err)` degrade arm, distinct from the start-failure `Err`
+    /// arm ([ADR-53]).
+    #[test]
+    fn a_surface_read_failure_is_skipped_not_fatal() {
+        reset();
+        set_member("api", 0, vec![op("GET /users/{id}", "local op_get")]);
+        set_member("web", 0, vec![route("GET /users/{id}", "local route_get")]);
+        // "unreadable" starts fine but its `contract_surface()` errors.
+        set_member("unreadable", 0, vec![]);
+
+        let edges = ContractBridge::new().edges(&registry(&["api", "web", "unreadable"]));
+
+        assert_eq!(
+            edges.len(),
+            1,
+            "the healthy members still bind despite a read-failed member"
+        );
         assert_eq!(edges[0].from.member, "api");
         assert_eq!(edges[0].to.member, "web");
     }
