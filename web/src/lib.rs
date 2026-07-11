@@ -59,6 +59,7 @@ use axum::{
 #[cfg(feature = "agents")]
 use axum::response::sse::{KeepAlive, Sse};
 use logos_core::config::{ConfigError, PolicyFile};
+use logos_core::federation::{discover, Backing, ContractBridge, EngineRegistry};
 use logos_core::model::EdgeKind;
 use logos_core::models::navigation::{GraphGranularity, GraphLayer};
 use logos_core::Engine;
@@ -95,32 +96,53 @@ const CSP: &str = "default-src 'self'; base-uri 'none'; form-action 'none'; \
 
 // ── Surface orchestration (FR-UI-01) ───────────────────────────────────────
 
-/// Run the requested surface combination in **one process** over **one
-/// `Engine`** and **one watcher** (FR-UI-01, ADR-04).
+/// Run the requested surface combination in **one process** (FR-UI-01, ADR-04),
+/// context-aware over a discovered workspace ([FR-WS-06], [ADR-52]).
+///
+/// At startup `serve` runs workspace **discovery** ([`discover`]): with **no**
+/// manifest up-tree — or with `--standalone` — it serves single-root over one
+/// [`Engine`] and one watcher, **byte-for-byte** as today ([`Backing::Single`]);
+/// with a manifest it serves workspace mode over the member [`EngineRegistry`]
+/// ([`Backing::Federated`]), warming only the **default member** eagerly and
+/// leaving the rest lazy ([`EngineRegistry::new_serve_default`], [NFR-PE-10]).
 ///
 /// - `serve --ui` → the web server alone.
 /// - `serve --mcp --ui` → both surfaces on one current-thread runtime; the MCP
 ///   serve loop owns stdout (JSON-RPC only, NFR-RA-01) while the web surface
 ///   logs to stderr. The first to finish (MCP host disconnect, or a web bind
-///   failure) ends the process; the other is dropped.
+///   failure) ends the process; the other is dropped. The MCP loop runs against
+///   the single/default engine (its federation wiring is a later story).
 /// - `serve --mcp` (no `--ui`) → delegates to the MCP loop, same as the
 ///   default-build path.
 ///
 /// # Errors
-/// Fails if the engine cannot start, the runtime cannot build, the loopback
-/// port is already taken (an actionable error naming `--port`, NFR-UX-02), or a
-/// serve loop fails irrecoverably.
-pub fn serve_surfaces(root: &Path, mcp: bool, ui: bool, port: u16) -> Result<()> {
-    let engine = Engine::start(root)
-        .map(Arc::new)
-        .context("starting the Logos engine for the web surface")?;
-    // One watcher for the whole process (S-022/FR-SY-04); a spawn failure
-    // degrades to watcherless serving (reconcile backstops freshness), and the
-    // handle's drop on return orphans nothing (NFR-RA-12).
-    let _watcher = engine
-        .watch()
-        .inspect_err(|e| tracing::warn!(target: "logos::web", "serving without a watcher: {e:#}"))
-        .ok();
+/// Fails if discovery hits a malformed manifest, the engine cannot start, the
+/// runtime cannot build, the loopback port is already taken (an actionable error
+/// naming `--port`, NFR-UX-02), or a serve loop fails irrecoverably.
+///
+/// [FR-WS-06]: ../../../docs/specs/requirements/FR-WS-06.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+pub fn serve_surfaces(root: &Path, mcp: bool, ui: bool, port: u16, standalone: bool) -> Result<()> {
+    let backing = Arc::new(resolve_serve_backing(root, standalone)?);
+    // One watcher for the whole process **only** on the single-root path
+    // (S-022/FR-SY-04); a spawn failure degrades to watcherless serving (reconcile
+    // backstops freshness), and the handle's drop on return orphans nothing
+    // (NFR-RA-12). Under the federated backing the registry owns every member's
+    // watcher (its default member is already warmed + watched), so there is no
+    // separate process watcher to hold here.
+    let _watcher: Option<logos_core::watch::WatchHandle> = backing.as_single().and_then(|engine| {
+        engine
+            .watch()
+            .inspect_err(|e| tracing::warn!(target: "logos::web", "serving without a watcher: {e:#}"))
+            .ok()
+    });
+    // The engine the shared single-root surfaces (`/api/v1/*`, and the MCP loop)
+    // run against: the one engine under `Single`, or the workspace's default
+    // member. Resolving it once fails loud if a federated default cannot start.
+    let engine = backing
+        .default_engine()
+        .context("resolving the default engine for the serve surface")?;
     // Current-thread runtime: HTTP + MCP I/O only (ADR-03). `enable_all` brings
     // the I/O driver the loopback TcpListener needs; Engine work runs on the
     // blocking pool via the submit-and-await bridge.
@@ -133,10 +155,10 @@ pub fn serve_surfaces(root: &Path, mcp: bool, ui: bool, port: u16) -> Result<()>
             // Both: race the two serve loops on one runtime (NFR-RA-01 — MCP
             // keeps stdout; the web surface is stderr-only).
             (true, true) => tokio::select! {
-                r = serve_web(Arc::clone(&engine), port) => r,
+                r = serve_web(Arc::clone(&backing), port) => r,
                 r = mcp::serve_stdio_on(Arc::clone(&engine)) => r,
             },
-            (false, true) => serve_web(engine, port).await,
+            (false, true) => serve_web(backing, port).await,
             (true, false) => mcp::serve_stdio_on(engine).await,
             // clap guarantees at least one of --mcp/--ui; defend anyway.
             (false, false) => anyhow::bail!("serve needs --mcp and/or --ui"),
@@ -144,8 +166,42 @@ pub fn serve_surfaces(root: &Path, mcp: bool, ui: bool, port: u16) -> Result<()>
     })
 }
 
-/// Bind the loopback listener and serve the router until the process ends.
-async fn serve_web(engine: Arc<Engine>, port: u16) -> Result<()> {
+/// Resolve the serve [`Backing`] from workspace discovery ([FR-WS-06], [ADR-52])
+/// — the context-awareness decision, split out so it is unit-testable without
+/// binding a socket or blocking on a serve loop.
+///
+/// `standalone == true` forces the single-root focus **even under a manifest**:
+/// discovery is skipped entirely and the repo is served on its own, byte-for-byte
+/// as a plain single-root serve (the `--standalone` escape hatch, [FR-WS-06]).
+/// Otherwise [`discover`] walks up-tree: **no** manifest → [`Backing::Single`]
+/// (one `Engine`, unchanged); a manifest → [`Backing::Federated`] over an
+/// [`EngineRegistry`] that warms only its default member eagerly ([NFR-PE-10]).
+///
+/// # Errors
+/// A malformed manifest (discovery fails loud), or the single-root engine fails
+/// to start. A federated default member that fails to start is **not** fatal here
+/// — it degrades inside [`EngineRegistry::new_serve_default`]; it surfaces later
+/// when [`default_engine`] resolves the shared surface's engine.
+pub fn resolve_serve_backing(root: &Path, standalone: bool) -> Result<Backing<Engine>> {
+    let federation = if standalone {
+        None
+    } else {
+        discover(root).context("discovering the workspace for the serve surface")?
+    };
+    Ok(match federation {
+        None => {
+            let engine = Engine::start(root)
+                .map(Arc::new)
+                .context("starting the Logos engine for the web surface")?;
+            Backing::Single(engine)
+        }
+        Some(federation) => Backing::Federated(EngineRegistry::new_serve_default(federation)),
+    })
+}
+
+/// Bind the loopback listener and serve the router until the process ends, over
+/// the discovered [`Backing`] (single-root or the member registry).
+async fn serve_web(backing: Arc<Backing<Engine>>, port: u16) -> Result<()> {
     let listener = bind(port)?;
     let addr = listener
         .local_addr()
@@ -173,7 +229,7 @@ async fn serve_web(engine: Arc<Engine>, port: u16) -> Result<()> {
         .context("switching the web listener to non-blocking")?;
     let listener = tokio::net::TcpListener::from_std(listener)
         .context("adopting the loopback listener into tokio")?;
-    axum::serve(listener, router(engine))
+    axum::serve(listener, router_for_backing(backing)?)
         .await
         .context("the web serve loop failed")
 }
@@ -335,7 +391,20 @@ impl IntentToken {
 /// the read-only GET handlers.
 #[derive(Clone)]
 pub(crate) struct WebState {
+    /// The engine the shared single-root surfaces run against: the one engine
+    /// under [`Backing::Single`], or the workspace's warmed default member under
+    /// [`Backing::Federated`]. Resolved once at router build so every existing
+    /// read handler keeps extracting `State<Arc<Engine>>` **unchanged** — the
+    /// single-root path is byte-for-byte as today ([ADR-52]).
     engine: Arc<Engine>,
+    /// The serve backing ([ADR-52]): the single engine, or the member registry.
+    /// The `/api/v1/workspace/*` fan-out handlers read the registry through it and
+    /// answer `404` under [`Backing::Single`] (this is not a workspace, [FR-WS-06]).
+    backing: Arc<Backing<Engine>>,
+    /// The cross-service contract bridge, cached on member sync-stamps
+    /// ([FR-WS-04]); inert under [`Backing::Single`]. Shared with the workspace
+    /// handlers so a fan-out stitches over one bridge edge set.
+    bridge: Arc<ContractBridge>,
     intent: IntentToken,
     /// The chat seam (S-170): production resolves the configured provider; the
     /// carve-out tests inject a mock-provider service. Behind an [`Arc`] so the
@@ -363,6 +432,18 @@ pub(crate) struct WebState {
 impl FromRef<WebState> for Arc<Engine> {
     fn from_ref(state: &WebState) -> Self {
         Arc::clone(&state.engine)
+    }
+}
+
+impl FromRef<WebState> for Arc<Backing<Engine>> {
+    fn from_ref(state: &WebState) -> Self {
+        Arc::clone(&state.backing)
+    }
+}
+
+impl FromRef<WebState> for Arc<ContractBridge> {
+    fn from_ref(state: &WebState) -> Self {
+        Arc::clone(&state.bridge)
     }
 }
 
@@ -394,9 +475,67 @@ impl FromRef<WebState> for wikigen::WikiRunState {
 }
 
 /// Build the router with the carve-out middleware stack, minting a fresh
-/// per-session [`IntentToken`]. The single production entry point.
+/// per-session [`IntentToken`]. The single-root production entry point (and the
+/// seam the byte-identical `/api/v1/*` regression tests drive).
 pub fn router(engine: Arc<Engine>) -> Router {
     router_with_intent(engine, IntentToken::generate())
+}
+
+/// Build the router over a discovered [`Backing`] — the context-aware serve entry
+/// point ([FR-WS-06], [ADR-52]). Single-root backings behave exactly as
+/// [`router`]; a federated backing additionally answers the `/api/v1/workspace/*`
+/// fan-out surface over the member registry, its shared `/api/v1/*` routes running
+/// against the warmed default member.
+///
+/// # Errors
+/// A federated backing whose default member cannot start (so no engine can answer
+/// the shared surface). The single-root backing is infallible.
+pub fn router_for_backing(backing: Arc<Backing<Engine>>) -> Result<Router> {
+    let engine = backing.default_engine()?;
+    Ok(build_router(make_state(engine, backing, IntentToken::generate())))
+}
+
+/// Build a workspace router over a member [`EngineRegistry`] — the seam the S-249
+/// axum handler tests drive to exercise `/api/v1/workspace/*` end-to-end without a
+/// socket. Wraps the registry in [`Backing::Federated`] and delegates to
+/// [`router_for_backing`].
+///
+/// # Errors
+/// The workspace's default member cannot start (see [`router_for_backing`]).
+pub fn workspace_router(registry: EngineRegistry<Engine>) -> Result<Router> {
+    router_for_backing(Arc::new(Backing::Federated(registry)))
+}
+
+/// Assemble the [`WebState`] from a resolved default `engine` and its `backing`,
+/// wiring the `agents`-only chat/wiki seams when present — the one place state is
+/// constructed, shared by every router entry point.
+fn make_state(engine: Arc<Engine>, backing: Arc<Backing<Engine>>, intent: IntentToken) -> WebState {
+    let bridge = Arc::new(ContractBridge::new());
+    #[cfg(feature = "agents")]
+    {
+        let chat: Arc<dyn chat::ChatService> =
+            Arc::new(chat::ConfiguredChatService::new(Arc::clone(&engine)));
+        let wiki: Arc<dyn wikigen::WikiRunService> =
+            Arc::new(wikigen::ConfiguredWikiRunService::new(Arc::clone(&engine)));
+        WebState {
+            engine,
+            backing,
+            bridge,
+            intent,
+            chat,
+            wiki,
+            wiki_state: wikigen::WikiRunState::new(),
+        }
+    }
+    #[cfg(not(feature = "agents"))]
+    {
+        WebState {
+            engine,
+            backing,
+            bridge,
+            intent,
+        }
+    }
 }
 
 /// Build the router over an explicit [`IntentToken`] — the seam the carve-out
@@ -409,26 +548,13 @@ pub fn router(engine: Arc<Engine>) -> Router {
 /// the enumerated config `POST`s) → [`intent_guard`] (403 on a forged/cross-origin
 /// mutating `POST`) → routes.
 pub fn router_with_intent(engine: Arc<Engine>, intent: IntentToken) -> Router {
+    // Single-root backing: the engine IS the default, no registry is allocated —
+    // the `/api/v1/workspace/*` surface answers `404` (not a workspace, ADR-52).
     // Under `agents` the state carries the config-resolved chat + wiki-generation
     // seams; under a plain `--features ui` build it is just the engine + intent
     // token, and the chat/wiki routes are never mounted (CR-078, ADR-60).
-    #[cfg(feature = "agents")]
-    let state = {
-        let chat: Arc<dyn chat::ChatService> =
-            Arc::new(chat::ConfiguredChatService::new(Arc::clone(&engine)));
-        let wiki: Arc<dyn wikigen::WikiRunService> =
-            Arc::new(wikigen::ConfiguredWikiRunService::new(Arc::clone(&engine)));
-        WebState {
-            engine,
-            intent,
-            chat,
-            wiki,
-            wiki_state: wikigen::WikiRunState::new(),
-        }
-    };
-    #[cfg(not(feature = "agents"))]
-    let state = WebState { engine, intent };
-    build_router(state)
+    let backing = Arc::new(Backing::Single(Arc::clone(&engine)));
+    build_router(make_state(engine, backing, intent))
 }
 
 /// Build the router over an explicit [`IntentToken`] **and** chat service — the
@@ -451,8 +577,11 @@ pub fn router_with_chat(
 ) -> Router {
     let wiki: Arc<dyn wikigen::WikiRunService> =
         Arc::new(wikigen::ConfiguredWikiRunService::new(Arc::clone(&engine)));
+    let backing = Arc::new(Backing::Single(Arc::clone(&engine)));
     build_router(WebState {
         engine,
+        backing,
+        bridge: Arc::new(ContractBridge::new()),
         intent,
         chat,
         wiki,
@@ -478,8 +607,11 @@ pub fn router_with_wiki(
 ) -> Router {
     let chat: Arc<dyn chat::ChatService> =
         Arc::new(chat::ConfiguredChatService::new(Arc::clone(&engine)));
+    let backing = Arc::new(Backing::Single(Arc::clone(&engine)));
     build_router(WebState {
         engine,
+        backing,
+        bridge: Arc::new(ContractBridge::new()),
         intent,
         chat,
         wiki,
@@ -549,6 +681,18 @@ fn build_router(state: WebState) -> Router {
         // scoping the trailing window (default 7). GET, so the read-only carve-out
         // stack already covers it.
         .route("/api/v1/statistics", get(api_v1::statistics))
+        // ── The cross-service workspace read-model fan-out (S-249, FR-WS-06,
+        // ADR-52): the `/api/v1/workspace/*` surface the workspace SPA (S-250) will
+        // consume. Each is a GET serialising one `query::*` read-model over the
+        // member registry, so the read-only carve-out stack (method/host/CSP) already
+        // covers them. Under a single-root `Backing::Single` (a plain repo, or
+        // `--standalone`) they answer an honest `404` — the registry is never
+        // allocated, so the single-root path pays nothing for these routes.
+        .route("/api/v1/workspace/status", get(api_v1::workspace_status))
+        .route("/api/v1/workspace/route-providers", get(api_v1::workspace_route_providers))
+        .route("/api/v1/workspace/search", get(api_v1::workspace_search))
+        .route("/api/v1/workspace/callers", get(api_v1::workspace_callers))
+        .route("/api/v1/workspace/impact", get(api_v1::workspace_impact))
         // The one intent-guarded read-model POST (S-206, FR-UI-25, ADR-46): the
         // deep graph-consistency check the Config tab (S-207) posts to. It rides
         // the mutating-method slot so it keeps the same-origin + intent-token proof

@@ -153,8 +153,8 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
         // combined-surface orchestration lives in the `web` adapter so this
         // surface stays thin (ADR-27, NFR-MA-02).
         #[cfg(feature = "ui")]
-        Commands::Serve { mcp, ui, port } => {
-            web::serve_surfaces(root, mcp, ui, port)?;
+        Commands::Serve { mcp, ui, port, standalone } => {
+            web::serve_surfaces(root, mcp, ui, port, standalone)?;
             Ok(0)
         }
         #[cfg(not(feature = "ui"))]
