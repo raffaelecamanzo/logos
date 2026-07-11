@@ -1289,12 +1289,14 @@ mod tests {
         assert_eq!(n, 0, "no capture file → no sites → no refs");
         assert!(facts.refs.is_empty());
 
-        // A static site is captured; a refused and an external one are dropped.
+        // Two static sites are captured (proving the count accumulates past the
+        // first emit); a refused and an external one are dropped.
         let mut facts = empty_facts();
         let sites = vec![
             site("local 1", 5, &[("method", "GET"), ("path", "/users/{id}")]),
             site("local 2", 6, &[("method", "POST"), ("path", "$base/orders")]),
             site("local 3", 7, &[("method", "GET"), ("path", "https://ext/x")]),
+            site("local 4", 8, &[("method", "POST"), ("path", "/orders")]),
         ];
         let n = capture_invocation_refs(
             &mut facts,
@@ -1303,13 +1305,27 @@ mod tests {
             sites,
             &render,
         );
-        assert_eq!(n, 1, "only the static, workspace-relative site is captured");
-        assert_eq!(facts.refs.len(), 1);
-        let r = &facts.refs[0];
-        assert_eq!(r.source.as_str(), "local 1");
-        assert_eq!(r.target, "GET /users/{id}");
-        assert_eq!(r.line, 5);
-        assert_eq!(r.relation, Some(ArtifactRelation::Route));
+        assert_eq!(n, 2, "both static, workspace-relative sites are captured");
+        assert_eq!(facts.refs.len(), 2);
+        // Emission order follows site order (the refused/external sites in
+        // between leave no gap and do not reorder the captured ones).
+        let captured: Vec<(&str, &str)> = facts
+            .refs
+            .iter()
+            .map(|r| (r.source.as_str(), r.target.as_str()))
+            .collect();
+        assert_eq!(
+            captured,
+            vec![("local 1", "GET /users/{id}"), ("local 4", "POST /orders")]
+        );
+        // The relation, the reported line, and the RefForm/edge-kind pass through
+        // unchanged — the interpreter defers the edge-kind decision to
+        // `push_artifact_ref` (`relation.edge_kind()`), never overriding it.
+        let first = &facts.refs[0];
+        assert_eq!(first.line, 5);
+        assert_eq!(first.form, RefForm::Path);
+        assert_eq!(first.relation, Some(ArtifactRelation::Route));
+        assert_eq!(first.kind, ArtifactRelation::Route.edge_kind());
     }
 
     // ── S-069: OpenAPI operation→route capture ───────────────────────────────
