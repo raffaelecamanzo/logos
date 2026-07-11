@@ -239,24 +239,6 @@ fn surface_from(nodes: &[NodeRow], edges: &[EdgeRow]) -> Vec<ContractNode> {
         .collect()
 }
 
-/// The portable, database-independent identity a contract-surface node is
-/// matched on across members.
-///
-/// Only the HTTP key is populated in this story; the gRPC `package.Service/Method`
-/// and broker-topic keys arrive with the invocation arms ([FR-WS-07]+). Proto and
-/// GraphQL nodes are still *read* into the surface (so the reader is complete and
-/// future-ready) but yield no key yet, so they contribute no edges — honestly
-/// unbound rather than approximately matched ([NFR-RA-05]).
-///
-/// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
-/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-/// Visible within `federation` (not just this file) so the coverage read-model
-/// ([`super::coverage`], [FR-WS-05], [ADR-53]) classifies references with the
-/// exact same key vocabulary the bridge matches edges on — one classifier, no
-/// drift between "why did this bind" and "why didn't this bind".
-///
-/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
-/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 /// The portable identity a candidate is matched on across members: a
 /// [`BridgeNamespace`] plus the arm's normalized **key string** ([FR-WS-07],
 /// [ADR-54]).

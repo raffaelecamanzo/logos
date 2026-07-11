@@ -408,6 +408,7 @@ impl ArtifactRelation {
     ///
     /// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
     /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+    /// [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
     /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
     /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
     pub const fn bridge_namespace(self) -> Option<BridgeNamespace> {
@@ -432,9 +433,9 @@ impl ArtifactRelation {
     ///
     /// Paired with [`bridge_namespace`](ArtifactRelation::bridge_namespace): a
     /// relation is an invocation arm iff **both** are `Some`. The pairing is a
-    /// hard invariant ([`is_invocation_arm`](ArtifactRelation::is_invocation_arm)
-    /// asserts it), so a half-declared arm cannot reach the bridge in an
-    /// ill-defined state.
+    /// hard invariant asserted for every variant by the
+    /// `bridge_namespace_and_role_are_declared_together_or_not_at_all` test, so a
+    /// half-declared arm cannot reach the bridge in an ill-defined state.
     ///
     /// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
     /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
@@ -458,7 +459,7 @@ impl ArtifactRelation {
     ///
     /// The two descriptors must agree (both `Some` or both `None`); a relation
     /// that declares exactly one is a contract bug this method's callers rely on
-    /// never happening (the round-trip test asserts it for every variant).
+    /// never happening (the pairing test asserts it for every variant in `ALL`).
     ///
     /// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
     /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
