@@ -222,8 +222,9 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// Each member's result is a [`Result`]: a member whose engine fails to
     /// start is reported as an `Err` for that member rather than aborting the
     /// whole query, so a partly-degraded workspace still answers ([ADR-53]).
-    /// Members are visited in discovery order; each engine runs on its own pools,
-    /// so callers may parallelise the returned work safely.
+    /// `f` runs eagerly, once per member, in discovery order; because each
+    /// member's engine is independent (its own pools and store), the per-member
+    /// calls never interfere.
     ///
     /// [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
     /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
