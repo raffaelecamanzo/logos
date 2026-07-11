@@ -337,6 +337,12 @@ pub(crate) enum Commands {
         #[cfg(feature = "ui")]
         #[arg(long, default_value_t = web::DEFAULT_PORT)]
         port: u16,
+        /// Force single-repo focus even under a workspace manifest (FR-WS-06):
+        /// serve this repo alone, byte-for-byte as a plain single-root serve,
+        /// skipping workspace discovery and the `/api/v1/workspace/*` surface.
+        #[cfg(feature = "ui")]
+        #[arg(long)]
+        standalone: bool,
     },
 }
 

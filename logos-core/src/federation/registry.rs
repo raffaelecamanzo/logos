@@ -144,16 +144,53 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// touch. A member that fails to start under serve is logged and skipped
     /// (degraded), never fatal.
     pub fn new(federation: Federation, mode: RegistryMode) -> Self {
-        let registry = Self {
-            federation,
-            mode,
-            residents: Mutex::new(HashMap::new()),
-            tick: AtomicU64::new(0),
-        };
+        let registry = Self::build(federation, mode);
         if mode == RegistryMode::Serve {
             registry.warm_all();
         }
         registry
+    }
+
+    /// Build a **serve-path** registry that warms only the **default member**
+    /// eagerly (and watches it), leaving every other member lazy — the
+    /// context-aware `serve --ui` policy ([FR-WS-06], [NFR-PE-10]).
+    ///
+    /// This is the serve registry [`RegistryMode::Serve`] refines: members carry
+    /// watch-on-touch semantics (a member built on its first cross-service query
+    /// is also watched, exactly as under [`RegistryMode::Serve`]), but opening the
+    /// workspace does **not** pay N× cold-start + N× watchers up front. Only the
+    /// default member — the one the shared single-root `/api/v1/*` surface runs
+    /// against — is warmed at startup; the rest are constructed on first use.
+    ///
+    /// A default member that fails to warm **degrades** (logged, not fatal): the
+    /// registry is still returned so the healthy members answer their
+    /// `/api/v1/workspace/*` queries, mirroring [`warm_all`](Self::warm_all)'s
+    /// per-member degrade contract ([ADR-53]).
+    ///
+    /// [FR-WS-06]: ../../../docs/specs/requirements/FR-WS-06.md
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    pub fn new_serve_default(federation: Federation) -> Self {
+        let registry = Self::build(federation, RegistryMode::Serve);
+        if let Err(err) = registry.default_engine() {
+            tracing::warn!(
+                "workspace default member engine failed to warm; serving degraded without an \
+                 eager default: {err:#}"
+            );
+        }
+        registry
+    }
+
+    /// Construct the registry struct **without** warming any member — the shared
+    /// skeleton [`new`](Self::new) and [`new_serve_default`](Self::new_serve_default)
+    /// layer their construction policy on top of.
+    fn build(federation: Federation, mode: RegistryMode) -> Self {
+        Self {
+            federation,
+            mode,
+            residents: Mutex::new(HashMap::new()),
+            tick: AtomicU64::new(0),
+        }
     }
 
     /// The workspace this registry federates.
@@ -725,6 +762,59 @@ mod tests {
         let registry = EngineRegistry::<SpyEngine>::new(federation, RegistryMode::Lazy);
         registry.default_engine().unwrap();
         assert_eq!(registry.resident_members(), ["b"], "declared default wins");
+    }
+
+    /// `new_serve_default` warms **only** the default member eagerly (watching
+    /// it), leaving the rest lazy — the context-aware `serve --ui` policy
+    /// ([FR-WS-06], [NFR-PE-10]): opening the workspace must not pay N× cold-start
+    /// or start N watchers up front.
+    #[test]
+    fn serve_default_warms_and_watches_only_the_default_member() {
+        reset_spies();
+        // No declared default → the first member in discovery order is warmed.
+        let registry = EngineRegistry::<SpyEngine>::new_serve_default(fed(&["a", "b", "c"]));
+        assert_eq!(starts(), 1, "only the default member is built up front, not all N");
+        assert_eq!(watches(), 1, "only the default member is watched up front");
+        assert_eq!(registry.resident_members(), ["a"], "the first member is the eager default");
+
+        // A touch of another member builds + watches it lazily (serve semantics).
+        registry.engine_for("c").unwrap();
+        assert_eq!((starts(), watches()), (2, 2), "a later member is built and watched on first touch");
+    }
+
+    /// `new_serve_default` honours a **declared** default over discovery order.
+    #[test]
+    fn serve_default_prefers_the_declared_default() {
+        reset_spies();
+        let mut federation = fed(&["a", "b", "c"]);
+        federation.default = Some("b".to_string());
+        let registry = EngineRegistry::<SpyEngine>::new_serve_default(federation);
+        assert_eq!(registry.resident_members(), ["b"], "the declared default is the eager member");
+        assert_eq!(starts(), 1, "still exactly one eager engine");
+    }
+
+    /// A default member that fails to warm **degrades** — `new_serve_default`
+    /// still returns a usable registry (the failure is logged, not fatal) so the
+    /// healthy members answer their cross-service queries ([ADR-53]).
+    #[test]
+    fn serve_default_degrades_when_the_default_fails_to_warm() {
+        #[derive(Debug)]
+        struct FailingEngine;
+        impl MemberEngine for FailingEngine {
+            type Watcher = ();
+            fn start(_root: &Path) -> Result<Arc<Self>> {
+                anyhow::bail!("store is corrupt")
+            }
+            fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
+                Ok(())
+            }
+        }
+        // Must not panic even though the default cannot start.
+        let registry = EngineRegistry::<FailingEngine>::new_serve_default(fed(&["a", "b"]));
+        assert_eq!(registry.resident_count(), 0, "the failed default left no resident");
+        // The registry is still usable — a fan-out reports the members as degraded
+        // rather than the whole workspace aborting.
+        assert_eq!(registry.fan_out(|_, _| ()).len(), 2);
     }
 
     /// `default_engine` on a member-less workspace errors rather than panicking.

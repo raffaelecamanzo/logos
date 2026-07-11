@@ -61,6 +61,7 @@ use axum::{
 use serde::Serialize;
 
 use logos_core::config::ConfigReadModel;
+use logos_core::federation::{query as fed_query, Backing, ContractBridge, EngineRegistry};
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
 use logos_core::models::navigation::{
@@ -422,6 +423,171 @@ pub(crate) async fn search(
     let limit = q.get("limit").and_then(|n| n.parse::<usize>().ok());
     let result: SearchResult = bridge(engine, "api_v1_search", move |e| e.search(&term, kind, limit)).await;
     ok(result)
+}
+
+// ── Cross-service workspace fan-out (S-249, [FR-WS-06], [ADR-52]) ─────────────
+//
+// The `/api/v1/workspace/*` surface the workspace SPA ([S-250]) will consume: each
+// endpoint serialises one `query::*` read-model over the member [`EngineRegistry`]
+// (the federated [`Backing`]), repo-qualified and `?repo=`-scopable. They are the
+// only handlers that reach the registry rather than the single default engine, and
+// they answer an honest `404` when serving single-root (a plain repo, or
+// `--standalone`) — the registry is never allocated there, so the single-root path
+// pays nothing for them ([ADR-52]).
+
+/// Read a trimmed, non-empty query parameter, else `None` — the shared optional
+/// accessor for the workspace surface's `?repo=`/`?limit=` params.
+fn opt_param(q: &HashMap<String, String>, key: &str) -> Option<String> {
+    q.get(key).map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// The single-root `404` for the workspace surface: honest, machine-clean, and
+/// self-describing — this is not a workspace, so the fan-out has nothing to answer.
+fn not_a_workspace() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiError {
+            error: "not a workspace: the /api/v1/workspace/* cross-service surface is served only \
+                    under a workspace manifest (this is a single-root serve, or --standalone)"
+                .to_string(),
+        }),
+    )
+        .into_response()
+}
+
+/// Fan a `query::*` read-model over the member registry on the blocking pool (the
+/// [ADR-03] `spawn_blocking` hop, exactly like [`bridge`]), or answer `404` when
+/// serving single-root. `call` receives the registry and the shared bridge, so a
+/// route-stitching read (`route-providers`/`callers`/`impact`) resolves the bridge
+/// edges inside the blocking closure.
+async fn workspace_fan<T, F>(
+    backing: Arc<Backing<Engine>>,
+    bridge: Arc<ContractBridge>,
+    view: &'static str,
+    call: F,
+) -> Response
+where
+    F: FnOnce(&EngineRegistry<Engine>, &ContractBridge) -> T + Send + 'static,
+    T: Serialize + Send + 'static,
+{
+    if backing.as_federated().is_none() {
+        return not_a_workspace();
+    }
+    let started = std::time::Instant::now();
+    let out = tokio::task::spawn_blocking(move || {
+        let registry = backing
+            .as_federated()
+            .expect("federated backing checked before spawn");
+        call(registry, &bridge)
+    })
+    .await
+    // The read-models are infallible at the surface (ADR-14); a panic crossing the
+    // pool is a core bug — re-raise rather than mask it, mirroring `bridge`.
+    .unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()));
+    tracing::info!(
+        target: "logos::web",
+        surface = "web",
+        view,
+        duration_ms = started.elapsed().as_millis() as u64,
+        "page render",
+    );
+    ok(out)
+}
+
+/// `GET /api/v1/workspace/status` — per-member index freshness + the 3-state
+/// cross-service coverage summary ([`workspace_status`](fed_query::workspace_status),
+/// [FR-WS-05]/[FR-WS-06]): the coverage dashboard's data.
+pub(crate) async fn workspace_status(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+) -> Response {
+    workspace_fan(backing, bridge, "api_v1_workspace_status", |registry, _bridge| {
+        fed_query::workspace_status(registry)
+    })
+    .await
+}
+
+/// `GET /api/v1/workspace/route-providers[?repo=<member>]` — the resolved
+/// cross-service route bindings (the service map), optionally scoped to routes a
+/// member provides ([`xservice_route_providers`](fed_query::xservice_route_providers)).
+pub(crate) async fn workspace_route_providers(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let repo = opt_param(&q, "repo");
+    workspace_fan(backing, bridge, "api_v1_workspace_route_providers", move |registry, bridge| {
+        let edges = fed_query::edges(bridge, registry);
+        fed_query::xservice_route_providers(&edges, repo.as_deref())
+    })
+    .await
+}
+
+/// `GET /api/v1/workspace/search?q=<term>[&kind=<k>][&limit=<n>][&repo=<member>]` —
+/// cross-service full-text search fanned across the members
+/// ([`xservice_search`](fed_query::xservice_search)). A missing/empty `q` is a
+/// `400`; an unrecognised `kind` is dropped (the search runs unfiltered), matching
+/// the single-root [`search`] contract.
+pub(crate) async fn workspace_search(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(term) = opt_param(&q, "q") else {
+        return (StatusCode::BAD_REQUEST, Json(ApiError { error: "a `q` query parameter is required".into() }))
+            .into_response();
+    };
+    let kind = q.get("kind").and_then(|k| NodeKind::from_wire(k.trim()));
+    let limit = opt_param(&q, "limit").and_then(|n| n.parse::<usize>().ok());
+    let repo = opt_param(&q, "repo");
+    workspace_fan(backing, bridge, "api_v1_workspace_search", move |registry, _bridge| {
+        fed_query::xservice_search(registry, &term, kind, limit, repo.as_deref())
+    })
+    .await
+}
+
+/// `GET /api/v1/workspace/callers?symbol=<s>[&limit=<n>][&repo=<member>]` — each
+/// member's intra-repo callers plus the cross-service consumers that reach the
+/// symbol over a bridge edge ([`xservice_callers`](fed_query::xservice_callers)). A
+/// missing/empty `symbol` is a `400`.
+pub(crate) async fn workspace_callers(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(symbol) = opt_param(&q, "symbol") else {
+        return (StatusCode::BAD_REQUEST, Json(ApiError { error: "a `symbol` query parameter is required".into() }))
+            .into_response();
+    };
+    let limit = opt_param(&q, "limit").and_then(|n| n.parse::<usize>().ok());
+    let repo = opt_param(&q, "repo");
+    workspace_fan(backing, bridge, "api_v1_workspace_callers", move |registry, bridge| {
+        let edges = fed_query::edges(bridge, registry);
+        fed_query::xservice_callers(registry, &edges, &symbol, limit, repo.as_deref())
+    })
+    .await
+}
+
+/// `GET /api/v1/workspace/impact?symbol=<s>[&depth=<n>][&repo=<member>]` — the
+/// seed member(s)' impact plus each far-side impact stitched across a bridge edge
+/// ([`xservice_impact`](fed_query::xservice_impact)). A missing/empty `symbol` is a
+/// `400`.
+pub(crate) async fn workspace_impact(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(symbol) = opt_param(&q, "symbol") else {
+        return (StatusCode::BAD_REQUEST, Json(ApiError { error: "a `symbol` query parameter is required".into() }))
+            .into_response();
+    };
+    let depth = opt_param(&q, "depth").and_then(|n| n.parse::<usize>().ok());
+    let repo = opt_param(&q, "repo");
+    workspace_fan(backing, bridge, "api_v1_workspace_impact", move |registry, bridge| {
+        let edges = fed_query::edges(bridge, registry);
+        fed_query::xservice_impact(registry, &edges, &symbol, depth, repo.as_deref())
+    })
+    .await
 }
 
 // ── Wiki (index / search / page, [FR-UI-06]/[FR-WK-05]) ───────────────────────
