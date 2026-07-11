@@ -872,6 +872,30 @@ mod tests {
         assert_eq!(cov.references[0].relation, "grpc-call");
     }
 
+    /// A gRPC stub call whose sole provider is in its own member is an intra-repo
+    /// fact the per-repo graph owns — excluded from the coverage tier entirely,
+    /// exactly as the HTTP path and the bridge (never counted as `Bound`).
+    #[test]
+    fn an_intra_repo_grpc_call_is_excluded_not_bound() {
+        reset();
+        set_member(
+            "svc",
+            vec![proto_service("example.v1.UserService/GetUser", "local svc")],
+        );
+        set_consumers(
+            "svc",
+            vec![grpc_consumer("example.v1.UserService/GetUser", "local stub")],
+        );
+
+        let cov = cross_service_coverage(&registry(&["svc"]));
+        assert!(
+            cov.references.is_empty(),
+            "a same-member stub→provider pair is intra-repo, not a cross-boundary reference: {:?}",
+            cov.references
+        );
+        assert_eq!(cov.bound + cov.ambiguous + cov.unbound + cov.no_provider_in_workspace, 0);
+    }
+
     /// Two members exposing the identical `package.Service/Method` provider make
     /// the stub call ambiguous — its own bucket, distinct from a plain unbound.
     #[test]

@@ -168,6 +168,28 @@ fn proto_service_without_package_keeps_bare_name_but_exposes_methods() {
     assert_eq!(svc.body.as_deref(), Some("Do"));
 }
 
+/// A `service` with **no** `rpc` declarations exposes its (package-qualified)
+/// name but leaves the node `body` untouched — nothing to expose, never a
+/// fabricated method — so the bridge produces no per-method provider key for it.
+#[test]
+fn proto_service_with_no_rpc_leaves_the_body_unset() {
+    let facts = extract(
+        &FileInput::new(
+            "api/empty.proto",
+            "syntax = \"proto3\";\npackage example.v1;\nservice Empty {\n}\n",
+        ),
+        &proto_plugin(),
+        &SymbolContext::default(),
+    );
+    let svc = facts
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ProtoService)
+        .expect("one ProtoService");
+    assert_eq!(svc.name, "example.v1.Empty", "package qualification still applies");
+    assert_eq!(svc.body, None, "a method-less service records no rpc-method body");
+}
+
 /// Extraction emits only `Contains` **edges**; cross-artifact references are
 /// captured as `facts.refs` (bound into `ArtifactRef`/`ArtifactBinding` edges by
 /// the resolution pass, CR-011), never as extraction-time edges. Anchors hang
