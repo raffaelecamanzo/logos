@@ -428,6 +428,20 @@ impl PortableKey {
         }
     }
 
+    /// A broker-topic key from an arm-normalized topic string (a topic name,
+    /// optionally guarded by a `#`-appended message-schema FQN) under the fan-out
+    /// [`BrokerTopic`](BridgeNamespace::BrokerTopic) namespace (S-254,
+    /// [FR-WS-10]). The [`super::broker`] classifier builds these; two sides meet
+    /// iff their whole topic key (topic + optional guard) is byte-equal.
+    ///
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    pub(super) fn broker(key: String) -> PortableKey {
+        PortableKey {
+            namespace: BridgeNamespace::BrokerTopic,
+            key,
+        }
+    }
+
     /// The relation class a binding on this key is filed under — the namespace's
     /// stable relation label ([`BridgeNamespace::relation`]).
     pub(super) fn relation(&self) -> &'static str {
@@ -514,8 +528,20 @@ pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) ->
             namespace: BridgeNamespace::Grpc,
             key: target.to_string(),
         }),
-        // The broker arm (S-254) adds its key builder here.
-        BridgeNamespace::BrokerTopic => None,
+        // A broker publish's target is the arm-normalized topic key (a topic name,
+        // optionally `#`-guarded by a message-schema FQN) the broker normalizer
+        // wrote (S-254, [FR-WS-10]) — the same string [`super::broker::classify`]
+        // builds its [`PortableKey::broker`] from, so a publish keys identically
+        // whichever intake it arrives through.
+        //
+        // The broker arm's *provider* side (a subscribe) is a `Provider`-role
+        // ledger relation, which the consumer-only ledger intake here cannot index;
+        // the fan-out that binds one publish to every subscribe is therefore
+        // computed by [`super::broker::broker_edges`], which builds both indexes and
+        // runs the *same* namespace-generic [`match_indexed`] loop. Keying the
+        // publish here still matters: it keeps the coverage tier from reporting a
+        // perfectly-composed topic as `path-not-composed`.
+        BridgeNamespace::BrokerTopic => Some(PortableKey::broker(target.to_string())),
     }
 }
 

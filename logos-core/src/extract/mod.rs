@@ -55,6 +55,10 @@ pub mod config;
 // same helpers extraction uses, so the two passes can never disagree on what
 // a path's segments are.
 pub(crate) mod refs;
+// The message-broker publish/subscribe invocation arm's capture side (S-254,
+// FR-WS-10): runs a grammar's optional `brokers` query and funnels topic-keyed
+// sites through the generic `capture_invocation_refs` interpreter.
+mod broker;
 mod shape;
 // Extraction-time test-marker evidence (S-027, FR-EX-06): the per-function
 // `test_evidence` flag captured while the AST is in hand — the input the
@@ -671,6 +675,40 @@ fn extract_one(
         }
     }
 
+    // 7b) Cross-service invocation arms (S-254, [FR-WS-10]): a code arm captures
+    // its publish/subscribe sites through its own optional `brokers` query and
+    // funnels them through the generic invocation interpreter. A grammar without
+    // the capability contributes nothing. The site's source symbol is its
+    // innermost enclosing declaration — the same attribution `collect_refs` uses.
+    if let Some(broker_query) = plugin.query("brokers") {
+        let id_to_idx: HashMap<usize, usize> =
+            decls.iter().enumerate().map(|(i, d)| (d.node.id(), i)).collect();
+        let enclosing = |node: Node<'_>| -> Option<LogosSymbol> {
+            let mut ancestor = node.parent();
+            while let Some(n) = ancestor {
+                if let Some(&idx) = id_to_idx.get(&n.id()) {
+                    if let Some(sym) = &symbols[idx] {
+                        return Some(sym.clone());
+                    }
+                }
+                ancestor = n.parent();
+            }
+            file_module.clone()
+        };
+        if broker::capture_broker_invocations(
+            broker_query,
+            tree.root_node(),
+            source,
+            enclosing,
+            &mut facts,
+        ) > 0
+        {
+            // Broker refs are appended after the code-reference sort; restore the
+            // canonical ledger order + dedup so the output stays byte-stable.
+            dedup_sort_refs(&mut facts.refs);
+        }
+    }
+
     sort_facts(&mut facts);
     facts
 }
@@ -697,22 +735,40 @@ pub(super) fn sort_facts(facts: &mut Facts) {
 }
 
 /// Deduplicate references on the ledger's uniqueness key
-/// `(source, target, form, kind)` — the same reference on two lines is one ref,
-/// first wins — then sort into that canonical order ([NFR-RA-06]).
+/// `(source, target, form, kind, relation)` — the same reference on two lines is
+/// one ref, first wins — then sort into that canonical order ([NFR-RA-06]).
+///
+/// The `relation` is part of the identity: two facts that share source, target,
+/// form, and edge kind but carry **different** [`ArtifactRelation`]s are distinct
+/// (they file distinct ledger rows and bind under distinct relation classes), so
+/// collapsing them would silently drop one. This is load-bearing for the broker
+/// invocation arm (S-254, [FR-WS-10]): a relay method that both *subscribes to*
+/// and *publishes on* one topic emits a `BrokerSubscribe` and a `BrokerPublish`
+/// that coincide on `(source, target=topic, Method, ArtifactRef)` and differ
+/// only in relation — both must survive to the ledger or a real cross-service
+/// fan-out edge is never produced. For every earlier relation (each capture site
+/// files at most one relation per `(source, target, form, kind)`) the extra key
+/// component is a no-op, so the byte-stable output is unchanged.
 ///
 /// Shared by the code [`collect_refs`] and the documentation extractor
 /// ([`doc`], S-035) so both passes produce byte-identical, order-independent
 /// ledger input.
 ///
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+/// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
 pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
-    let mut seen: HashSet<(String, String, i32, i32)> = HashSet::new();
+    // The relation token (`None` for a plain code/doc reference) completes the
+    // ledger identity; a `&'static str` keeps the key allocation-free.
+    let relation_token =
+        |r: &RefFact| -> Option<&'static str> { r.relation.map(crate::model::ArtifactRelation::as_str) };
+    let mut seen: HashSet<(String, String, i32, i32, Option<&'static str>)> = HashSet::new();
     refs.retain(|r| {
         seen.insert((
             r.source.as_str().to_string(),
             r.target.clone(),
             r.form.as_i32(),
             r.kind.as_i32(),
+            relation_token(r),
         ))
     });
     refs.sort_by(|a, b| {
@@ -721,12 +777,14 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
             &a.target,
             a.form.as_i32(),
             a.kind.as_i32(),
+            relation_token(a),
         )
             .cmp(&(
                 b.source.as_str(),
                 &b.target,
                 b.form.as_i32(),
                 b.kind.as_i32(),
+                relation_token(b),
             ))
     });
 }

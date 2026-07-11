@@ -93,7 +93,12 @@ mod profiles;
 // the resolution pass into ArtifactRef/ArtifactBinding edges. The substrate ships
 // the dispatch point and the shared push/classify helper; the per-format arms are
 // the consumer stories' (S-069/070/071) isolated extensions.
-mod refs;
+//
+// `pub(crate)` so the pluggable invocation arms (S-252/253/254) can reach the
+// generic `capture_invocation_refs` interpreter + `InvocationSite` from the
+// code-extraction seam (a code arm's sites come from a `.scm` over code files,
+// not the config walk).
+pub(crate) mod refs;
 
 // The generic consumer-side invocation interpreter (S-251, FR-WS-07) and its
 // captured-site carrier are re-exported to the code-extraction path so a code

@@ -386,7 +386,7 @@ mod tests {
 
     use anyhow::Result;
 
-    use super::super::bridge::{ContractNode, InvocationConsumer};
+    use super::super::bridge::ContractNode;
     use super::super::registry::RegistryMode;
     use super::super::{Federation, Member};
     use crate::model::LogosSymbol;
@@ -427,6 +427,14 @@ mod tests {
         super::super::InvocationConsumer {
             relation: crate::model::ArtifactRelation::GrpcCall,
             target: key.to_string(),
+            symbol: LogosSymbol::parse(symbol).unwrap(),
+        }
+    }
+    /// A broker **publish** consumer at `symbol` emitting on `topic` (S-254).
+    fn broker_publish(topic: &str, symbol: &str) -> super::super::InvocationConsumer {
+        super::super::InvocationConsumer {
+            relation: crate::model::ArtifactRelation::BrokerPublish,
+            target: topic.to_string(),
             symbol: LogosSymbol::parse(symbol).unwrap(),
         }
     }
@@ -1038,6 +1046,45 @@ mod tests {
         assert_eq!(cov.ambiguous, 1);
         assert_eq!(cov.bound, 0);
         assert_eq!(cov.references[0].state.bucket(), "ambiguous");
+    }
+
+    // ── S-254 / FR-WS-10: broker-topic consumers in the coverage tier ─────────
+
+    /// Integration guard (S-INT): a broker **publish** is a `Consumer`-role arm, so
+    /// it reaches the coverage tier through the same generic ledger intake the HTTP
+    /// and gRPC arms use. Its topic key *composes* — so it must never be reported
+    /// as `path-not-composed` (the HTTP arm's refusal reason) and must never land
+    /// in the `unbound` defect bucket that drags the bound ratio down.
+    ///
+    /// The broker fan-out itself (one publish → every cross-member subscribe) is
+    /// computed by [`super::broker::broker_edges`], which indexes the `Provider`-
+    /// side subscribes the consumer-only intake here cannot see. Against this
+    /// exactly-one provider index a publish is therefore honestly
+    /// `no-provider-in-workspace` — outside the boundary, not a defect.
+    #[test]
+    fn a_broker_publish_topic_keys_and_is_never_path_not_composed() {
+        reset();
+        set_consumers("api", vec![broker_publish("orders", "local emit_order")]);
+        set_member("svc", vec![]);
+
+        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+
+        assert_eq!(
+            cov.unbound, 0,
+            "a statically-composed topic is never `path-not-composed`: {:?}",
+            cov.references
+        );
+        assert_eq!(cov.no_provider_in_workspace, 1);
+        assert_eq!(cov.references.len(), 1);
+        assert_eq!(cov.references[0].relation, "broker-topic");
+        assert_eq!(
+            cov.references[0].state,
+            CoverageState::Unbound {
+                reason: UnboundReason::NoProviderInWorkspace
+            }
+        );
+        // The non-defect bucket: it does not drag the bound ratio down.
+        assert_eq!(cov.bound_ratio, 1.0);
     }
 
     // ── advisory isolation (ADR-53 / sprint-55 risk register) ─────────────

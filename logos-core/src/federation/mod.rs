@@ -50,6 +50,7 @@
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
 pub mod bridge;
+pub mod broker;
 pub mod coverage;
 pub mod enable;
 pub mod manifest;

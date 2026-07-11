@@ -240,13 +240,23 @@ pub enum ArtifactRelation {
     /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     GrpcCall,
+    /// A message-broker **publish** site keyed by topic/queue name → every
+    /// subscriber on the same topic across members (S-254, [FR-WS-10]). The
+    /// consumer side of the [`BrokerTopic`](BridgeNamespace::BrokerTopic)
+    /// fan-out arm: one publish binds every cross-member subscribe. Ledger-only
+    /// — the wire token rides `unresolved_refs.payload`, no new node/edge kind.
+    BrokerPublish,
+    /// A message-broker **subscribe** site keyed by topic/queue name (S-254,
+    /// [FR-WS-10]). The provider side of the fan-out arm: it is indexed by topic
+    /// so every cross-member publish on that topic binds it. Ledger-only.
+    BrokerSubscribe,
 }
 
 impl ArtifactRelation {
     /// Every relation class, in declaration order — the iteration universe tests
     /// and coverage surfaces drive off so a newly added relation cannot silently
     /// skip a contract assertion.
-    pub const ALL: [ArtifactRelation; 11] = [
+    pub const ALL: [ArtifactRelation; 13] = [
         ArtifactRelation::ProtoImport,
         ArtifactRelation::ProtoType,
         ArtifactRelation::GraphqlType,
@@ -258,6 +268,8 @@ impl ArtifactRelation {
         ArtifactRelation::ShellSource,
         ArtifactRelation::HttpClientCall,
         ArtifactRelation::GrpcCall,
+        ArtifactRelation::BrokerPublish,
+        ArtifactRelation::BrokerSubscribe,
     ];
 
     /// The on-disk payload token (kebab-case, matching the `serde` form).
@@ -274,6 +286,8 @@ impl ArtifactRelation {
             ArtifactRelation::ShellSource => "shell-source",
             ArtifactRelation::HttpClientCall => "http-client-call",
             ArtifactRelation::GrpcCall => "grpc-call",
+            ArtifactRelation::BrokerPublish => "broker-publish",
+            ArtifactRelation::BrokerSubscribe => "broker-subscribe",
         }
     }
 
@@ -314,7 +328,12 @@ impl ArtifactRelation {
             // an artifact→artifact reference (the cross-service bind is computed
             // by the in-memory bridge, never stored as an edge; the ledger entry
             // is fenced out of the code subgraph like every artifact reference).
-            | ArtifactRelation::GrpcCall => EdgeKind::ArtifactRef,
+            | ArtifactRelation::GrpcCall
+            // The broker arm is ledger-only: a publish/subscribe reference is an
+            // artifact→artifact fact keyed by topic, resolved across services by
+            // the fan-out bridge — never an artifact→code binding ([FR-WS-10]).
+            | ArtifactRelation::BrokerPublish
+            | ArtifactRelation::BrokerSubscribe => EdgeKind::ArtifactRef,
         }
     }
 
@@ -364,7 +383,11 @@ impl ArtifactRelation {
             // fully-qualified `package.Service/Method` key, not by a bare
             // artifact name through the intra-repo name binder, so it fences to
             // no single artifact node kind here.
-            | ArtifactRelation::GrpcCall => None,
+            | ArtifactRelation::GrpcCall
+            // The broker arm resolves cross-service by topic key, never to a
+            // local artifact node kind ([FR-WS-10]).
+            | ArtifactRelation::BrokerPublish
+            | ArtifactRelation::BrokerSubscribe => None,
         }
     }
 
@@ -445,6 +468,20 @@ impl ArtifactRelation {
             // refused any target it could not fully qualify before it reached the
             // ledger, so a captured gRPC key is always a workspace candidate.
             | ArtifactRelation::GrpcCall => TargetClass::Workspace,
+            // A broker topic key is a workspace candidate unless it carries an
+            // interpolation marker — a dynamically-composed topic (`"orders." +
+            // env`, `${region}-orders`) is not a static, matchable identity and
+            // is never a candidate ([FR-WS-10], [NFR-RA-05]). The topic
+            // normalizer refuses these before the ledger; this is the
+            // defence-in-depth twin of the `ShellSource` interpolation rule so a
+            // dynamic key can never reach an edge even if a capture leaked one.
+            ArtifactRelation::BrokerPublish | ArtifactRelation::BrokerSubscribe => {
+                if target.contains('$') || target.contains('{') {
+                    TargetClass::External
+                } else {
+                    TargetClass::Workspace
+                }
+            }
         }
     }
 
@@ -485,8 +522,16 @@ impl ArtifactRelation {
             // The gRPC stub-call arm (S-253) binds in the exactly-one
             // [`Grpc`](BridgeNamespace::Grpc) namespace.
             ArtifactRelation::GrpcCall => Some(BridgeNamespace::Grpc),
+            // The broker arm (S-254, [FR-WS-10]): both publish and subscribe live
+            // in the fan-out `BrokerTopic` namespace — one publish binds every
+            // cross-member subscribe on the same topic.
+            //
+            // [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+            ArtifactRelation::BrokerPublish | ArtifactRelation::BrokerSubscribe => {
+                Some(BridgeNamespace::BrokerTopic)
+            }
             // The remaining CR-011 relations are contract/artifact relations, not
-            // invocation arms; the broker arm (S-254) adds its own variants.
+            // invocation arms.
             ArtifactRelation::ProtoImport
             | ArtifactRelation::ProtoType
             | ArtifactRelation::GraphqlType
@@ -520,6 +565,19 @@ impl ArtifactRelation {
             // A gRPC stub call is the **consumer** side of the invocation; its
             // provider is the enriched `ProtoService` method in another member.
             ArtifactRelation::GrpcCall => Some(BridgeRole::Consumer),
+            // A **publish** refers to a topic (it emits a message) — the
+            // [`Consumer`](BridgeRole::Consumer) side, the edge's `from`. A
+            // **subscribe** exposes a topic endpoint — the
+            // [`Provider`](BridgeRole::Provider) side, indexed by topic so every
+            // publish fans out to it (the edge's `to`). This orientation is fixed
+            // by the namespace-generic match loop's fan-out arm ("a consumer binds
+            // every provider of its key" ⇒ one publish binds every subscribe) and
+            // the [`BridgeRole`] contract ("Consumer = a publish") — see
+            // [FR-WS-10] acceptance: *a publish binds every subscribe*.
+            //
+            // [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+            ArtifactRelation::BrokerPublish => Some(BridgeRole::Consumer),
+            ArtifactRelation::BrokerSubscribe => Some(BridgeRole::Provider),
             ArtifactRelation::ProtoImport
             | ArtifactRelation::ProtoType
             | ArtifactRelation::GraphqlType
@@ -859,6 +917,64 @@ mod tests {
         );
     }
 
+    /// The broker arm (S-254, [FR-WS-10]): both variants are invocation arms in
+    /// the fan-out `BrokerTopic` namespace. Publish is the **consumer** (the edge
+    /// `from`), subscribe the **provider** (indexed by topic) — the orientation
+    /// that makes the match loop's fan-out read "one publish binds every
+    /// subscribe". Ledger-only: both file an artifact→artifact `ArtifactRef`.
+    #[test]
+    fn broker_arms_are_fan_out_topic_invocation_arms() {
+        for rel in [
+            ArtifactRelation::BrokerPublish,
+            ArtifactRelation::BrokerSubscribe,
+        ] {
+            assert_eq!(rel.bridge_namespace(), Some(BridgeNamespace::BrokerTopic));
+            assert_eq!(
+                rel.bridge_namespace().unwrap().match_discipline(),
+                MatchDiscipline::FanOut,
+                "{} must fan out (one publish → all subscribers)",
+                rel.as_str()
+            );
+            assert!(rel.is_invocation_arm(), "{}", rel.as_str());
+            // Ledger-only: no artifact→code binding, no local artifact target.
+            assert_eq!(rel.edge_kind(), EdgeKind::ArtifactRef, "{}", rel.as_str());
+            assert_eq!(rel.target_kind(), None, "{}", rel.as_str());
+        }
+        // The fan-out orientation: publish = consumer (edge source), subscribe =
+        // provider (indexed, the edge target).
+        assert_eq!(
+            ArtifactRelation::BrokerPublish.bridge_role(),
+            Some(BridgeRole::Consumer),
+            "a publish emits — the consumer side / edge `from`"
+        );
+        assert_eq!(
+            ArtifactRelation::BrokerSubscribe.bridge_role(),
+            Some(BridgeRole::Provider),
+            "a subscribe exposes a topic endpoint — the provider side / edge `to`"
+        );
+    }
+
+    /// A dynamically-composed topic is never a candidate: an interpolation marker
+    /// classifies the topic key external, so the ledger never records it and no
+    /// edge can be fabricated ([FR-WS-10], [NFR-RA-05]). A static topic (with or
+    /// without a `#`-appended message-schema FQN guard) is a workspace candidate.
+    #[test]
+    fn broker_dynamic_topics_are_external_static_topics_are_not() {
+        for rel in [
+            ArtifactRelation::BrokerPublish,
+            ArtifactRelation::BrokerSubscribe,
+        ] {
+            assert!(rel.is_external("${region}-orders"), "{}", rel.as_str());
+            assert!(rel.is_external("orders.$env"), "{}", rel.as_str());
+            assert_eq!(rel.classify_target("orders"), TargetClass::Workspace);
+            assert_eq!(
+                rel.classify_target("orders#com.acme.OrderCreated"),
+                TargetClass::Workspace,
+                "a topic guarded by a message-schema FQN is still a static candidate"
+            );
+        }
+    }
+
     /// The hard pairing invariant every arm — present or future — must honor: a
     /// relation declares **both** `bridge_namespace` and `bridge_role`, or
     /// **neither**. A half-declared arm is a contract bug the bridge relies on
@@ -902,6 +1018,8 @@ mod tests {
                 ArtifactRelation::ShellSource => 8,
                 ArtifactRelation::HttpClientCall => 9,
                 ArtifactRelation::GrpcCall => 10,
+                ArtifactRelation::BrokerPublish => 11,
+                ArtifactRelation::BrokerSubscribe => 12,
             }
         }
         for (i, rel) in ArtifactRelation::ALL.into_iter().enumerate() {
@@ -913,7 +1031,7 @@ mod tests {
             );
         }
         // No extras/duplicates: `ALL` is exactly the declared variants, once each.
-        assert_eq!(ArtifactRelation::ALL.len(), 11);
+        assert_eq!(ArtifactRelation::ALL.len(), 13);
     }
 
     /// The per-namespace match discipline the bridge switches on: HTTP and gRPC
