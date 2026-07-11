@@ -59,7 +59,7 @@ fn single_root_roster_is_the_unchanged_27_with_no_repo_dimension() {
 
     for tool in &single {
         assert!(
-            !tool.name.starts_with("xservice_") && tool.name != "workspace_status",
+            !tool.name.starts_with("xservice_") && !tool.name.starts_with("workspace_"),
             "no cross-service tool leaks into the single-root roster: {}",
             tool.name
         );
@@ -73,7 +73,8 @@ fn single_root_roster_is_the_unchanged_27_with_no_repo_dimension() {
 }
 
 /// The 27 single-root tools appear **byte-identical** under the federated
-/// backing, which adds exactly the 5 cross-service tools on top (FR-WS-05).
+/// backing, which adds exactly the 6 cross-service tools on top (FR-WS-05, plus
+/// S-257's `workspace_reachability` union view, FR-WS-12).
 #[test]
 fn federated_backing_adds_xservice_without_touching_the_single_roster() {
     let single = single_tools();
@@ -95,8 +96,8 @@ fn federated_backing_adds_xservice_without_touching_the_single_roster() {
 
     assert_eq!(
         federated.len(),
-        27 + 5,
-        "federated backing is the 27 single tools + the 5 xservice tools: {:?}",
+        27 + 6,
+        "federated backing is the 27 single tools + the 6 cross-service tools: {:?}",
         names(&federated)
     );
 
@@ -109,12 +110,14 @@ fn federated_backing_adds_xservice_without_touching_the_single_roster() {
     assert_eq!(
         added,
         vec![
+            "workspace_reachability",
             "workspace_status",
             "xservice_callers",
             "xservice_impact",
             "xservice_route_providers",
             "xservice_search",
         ],
-        "federation adds exactly the FR-WS-05 cross-service tools",
+        "federation adds exactly the FR-WS-05 cross-service tools plus the \
+         FR-WS-12 app-wide reachability union view",
     );
 }

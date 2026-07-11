@@ -16,7 +16,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use logos_core::federation::{discover, query, ContractBridge, EngineRegistry, RegistryMode};
+use logos_core::federation::{
+    app_wide_reachability, discover, query, ContractBridge, EngineRegistry, RegistryMode,
+};
 use logos_core::{model::NodeKind, Engine};
 
 use crate::{parse_kind, Output};
@@ -73,11 +75,18 @@ pub(crate) enum XserviceCommands {
     },
 }
 
-/// `workspace` sub-subcommands ([FR-WS-05]).
+/// `workspace` sub-subcommands ([FR-WS-05], [FR-WS-12]).
+///
+/// [FR-WS-12]: ../../docs/specs/requirements/FR-WS-12.md
 #[derive(Subcommand)]
 pub(crate) enum WorkspaceCommands {
     /// Per-member index freshness + the 3-state cross-service coverage summary.
     Status,
+    /// App-wide cross-service dead code (FR-WS-12): the union of every member's
+    /// call graph plus the bridge's edges as extra live roots. Advisory only —
+    /// never a gate input, never alters a repo's own dead-code verdict. Every
+    /// claim carries a coverage rider.
+    Reachability,
 }
 
 /// Discover the workspace and build a lazy member registry (CLI one-shot: an
@@ -149,11 +158,16 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
     Ok(0)
 }
 
-/// Route one `workspace` subcommand to its read-model ([FR-WS-05]).
+/// Route one `workspace` subcommand to its read-model ([FR-WS-05], [FR-WS-12]).
 pub(crate) fn run_workspace(command: WorkspaceCommands, root: &Path, out: &Output) -> Result<i32> {
     let registry = registry(root)?;
     match command {
         WorkspaceCommands::Status => out.print(&query::workspace_status(&registry))?,
+        WorkspaceCommands::Reachability => {
+            let bridge = ContractBridge::new();
+            let edges = query::edges(&bridge, &registry);
+            out.print(&app_wide_reachability(&registry, &edges))?;
+        }
     }
     Ok(0)
 }
