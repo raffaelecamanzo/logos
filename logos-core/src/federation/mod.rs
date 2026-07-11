@@ -4,8 +4,8 @@
 //!
 //! Federation is an **overlay, never a union** ([ADR-52]): each member keeps its
 //! own `.logos/logos.db` and its single-root behaviour byte-for-byte unchanged.
-//! This module is the foundation the rest of the overlay is built on — a later
-//! story adds the in-memory contract bridge ([FR-WS-04]) beside it. Here we own:
+//! This module is the foundation the rest of the overlay is built on. Here we
+//! own:
 //!
 //! - the manifest schema + parse/write ([`manifest`]);
 //! - [`discover`] — the up-tree walk that locates the manifest, resolves and
@@ -19,6 +19,10 @@
 //! - [`enable`] — the `logos init --workspace` orchestration: per-member
 //!   non-clobber `init`, the incremental manifest write, and the workspace
 //!   MCP injection ([FR-WS-02]).
+//! - the [`bridge`] — the in-memory cross-service contract bridge: reads each
+//!   member's contract surface through its read pool, matches portable keys
+//!   across members exactly-one, and emits ephemeral `BridgeEdge` values cached
+//!   on member sync-stamps; never persisted, never `ATTACH`-ed ([FR-WS-04]).
 //!
 //! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 //!
@@ -40,6 +44,7 @@
 //! [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
+pub mod bridge;
 pub mod enable;
 pub mod manifest;
 pub mod registry;
@@ -51,6 +56,7 @@ use serde::Serialize;
 use crate::config::ConfigError;
 use crate::workspace::{is_git_root, resolve_root};
 
+pub use bridge::{BridgeEdge, BridgeEndpoint, ContractBridge, ContractNode, MemberContracts};
 pub use manifest::{Link, MANIFEST_FILENAME};
 pub use registry::{Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode};
 
