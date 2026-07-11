@@ -834,6 +834,29 @@ mod tests {
         assert_eq!(first, second, "the edge set is unchanged, but freshly computed");
     }
 
+    /// The cache key is the member *set*, not just the stamps: a member
+    /// appearing (e.g. on re-discovery) is a miss, not a stale hit.
+    #[test]
+    fn cache_invalidates_when_the_member_set_changes() {
+        reset();
+        set_member("api", 0, vec![op("GET /users/{id}", "local op_get")]);
+        set_member("web", 0, vec![route("GET /users/{id}", "local route_get")]);
+        let bridge = ContractBridge::new();
+
+        let before = bridge.edges(&registry(&["api"]));
+        assert!(before.is_empty(), "no provider in the one-member workspace");
+        let reads_before = surface_reads();
+
+        // A second member appears; the stamps vector grows → cache miss.
+        let after = bridge.edges(&registry(&["api", "web"]));
+        assert!(
+            surface_reads() > reads_before,
+            "a member appearing is a cache miss (the key is the member set)"
+        );
+        assert_eq!(after.len(), 1, "the newly-present member's route now binds");
+        assert_eq!(after[0].to.member, "web");
+    }
+
     /// A member whose engine fails to start is skipped, not fatal — the bridge
     /// still answers for the healthy members ([ADR-53]).
     #[test]
