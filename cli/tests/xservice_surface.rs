@@ -339,10 +339,22 @@ fn workspace_reachability_is_labeled_advisory_and_riders_every_claim() {
 
     // The rider the whole view rests on — the same coverage `workspace status`
     // reports, so a reachability claim can never be read without it.
+    // Pinned to exactly the numbers `workspace status` reports for the same
+    // fixture — so a field-swap in `CoverageRider::new` (e.g. `unbound:
+    // coverage.ambiguous`) cannot pass. Without non-trivial values here, four of
+    // the five copied fields would be asserted only as zero-vs-zero.
     let rider = &view["coverage"];
     assert_eq!(rider["bound"], 1, "the GET operation bound its cross-member route");
+    assert_eq!(
+        rider["no_provider_in_workspace"], 1,
+        "DELETE has no provider — the same bucket `workspace status` reports"
+    );
+    assert_eq!(rider["ambiguous"], 0);
+    assert_eq!(rider["unbound"], 0);
+    assert_eq!(rider["bound_ratio"], 1.0);
     assert_eq!(rider["members_read"], 2);
     assert_eq!(rider["members_total"], 2);
+    assert_eq!(view["skipped_members"].as_array().unwrap().len(), 0);
 
     // `orphan` is dead in web's own graph and no cross-service edge reaches it,
     // so it is dead app-wide too — and its claim carries the rider verbatim.
