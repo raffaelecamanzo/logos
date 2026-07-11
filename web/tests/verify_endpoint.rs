@@ -38,6 +38,10 @@ const VERIFY: &str = "/api/v1/verify";
 
 // ── Fixtures & helpers ────────────────────────────────────────────────────────
 
+// Consumed only by the `#[cfg(feature = "lang-rust")]` tests below (which index a
+// store), so dead code without that feature. Keep it compiled (its imports are
+// shared) and silence the lint rather than cfg-gating it and its imports.
+#[allow(dead_code)]
 fn write(root: &std::path::Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -73,6 +77,7 @@ fn verify_post(intent: Option<&str>, origin: Option<&str>, host: Option<&str>) -
     builder.body(Body::empty()).unwrap()
 }
 
+#[allow(dead_code)]
 async fn body_string(resp: axum::http::Response<Body>) -> (StatusCode, String, axum::http::HeaderMap) {
     let status = resp.status();
     let headers = resp.headers().clone();
