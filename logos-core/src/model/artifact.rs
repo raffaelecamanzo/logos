@@ -743,6 +743,43 @@ mod tests {
         }
     }
 
+    /// Guards `ArtifactRelation::ALL` — the array every contract test iterates —
+    /// against drift. The exhaustive `index` match assigns each variant its
+    /// declaration position, so adding a variant fails to compile here until it
+    /// is handled, and the assertion then fails until the variant sits at that
+    /// index in `ALL`. This catches reordering, duplication, and an `ALL` whose
+    /// length disagrees with the declared variant count, and adds one more
+    /// compiler-forced touch-point a new arm must pass through. (Fully proving a
+    /// new variant was *added* to `ALL` at all would need an enum-iteration derive
+    /// — deliberately not taken on here; the enum's six exhaustive `match self`
+    /// methods plus this guard make silent drift highly unlikely.)
+    #[test]
+    fn all_lists_every_variant_in_declaration_order() {
+        const fn index(rel: ArtifactRelation) -> usize {
+            match rel {
+                ArtifactRelation::ProtoImport => 0,
+                ArtifactRelation::ProtoType => 1,
+                ArtifactRelation::GraphqlType => 2,
+                ArtifactRelation::SchemaType => 3,
+                ArtifactRelation::Route => 4,
+                ArtifactRelation::TfModuleCall => 5,
+                ArtifactRelation::TfVarRef => 6,
+                ArtifactRelation::SqlObjectRef => 7,
+                ArtifactRelation::ShellSource => 8,
+            }
+        }
+        for (i, rel) in ArtifactRelation::ALL.into_iter().enumerate() {
+            assert_eq!(
+                index(rel),
+                i,
+                "{} is out of place in ArtifactRelation::ALL",
+                rel.as_str()
+            );
+        }
+        // No extras/duplicates: `ALL` is exactly the declared variants, once each.
+        assert_eq!(ArtifactRelation::ALL.len(), 9);
+    }
+
     /// The per-namespace match discipline the bridge switches on: HTTP and gRPC
     /// bind exactly-one; a broker topic fans out. This is the only
     /// namespace-specific decision the arm-agnostic match loop makes.
