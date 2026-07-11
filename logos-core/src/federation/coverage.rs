@@ -30,8 +30,11 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use crate::model::NodeKind;
+use crate::resolve::http_client_call::ClientCallRefusal;
 
-use super::bridge::{classify, BridgeEndpoint, MemberContracts, PortableKey, Role};
+use super::bridge::{
+    classify, consumer_portable_key, BridgeEndpoint, MemberContracts, PortableKey, Role,
+};
 use super::registry::{EngineRegistry, MemberEngine};
 
 /// Why one cross-boundary reference did not bind ([FR-WS-05], [ADR-53]).
@@ -63,6 +66,22 @@ pub enum UnboundReason {
     /// The consumer and provider shapes at this key diverge — deferred to a
     /// later invocation arm's schema check ([ADR-54]).
     SchemaMismatch,
+}
+
+impl From<ClientCallRefusal> for UnboundReason {
+    /// Map the HTTP client-call arm's refusal ([`ClientCallRefusal`], S-252) onto
+    /// the shared coverage vocabulary — so a call the arm's normalizer refused
+    /// (contributing no reference, [FR-WS-08]) surfaces under the *same* reason
+    /// bucket the read-model reports for the composable cases. This is the point
+    /// where "the normalizer returned `None`" becomes an advisory coverage reason.
+    ///
+    /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+    fn from(refusal: ClientCallRefusal) -> Self {
+        match refusal {
+            ClientCallRefusal::BaseUrlRuntime => UnboundReason::BaseUrlRuntime,
+            ClientCallRefusal::PathNotComposed => UnboundReason::PathNotComposed,
+        }
+    }
 }
 
 /// The 3-state classification of one cross-boundary reference ([FR-WS-05],
@@ -180,6 +199,10 @@ where
 {
     let mut providers: HashMap<PortableKey, Vec<BridgeEndpoint>> = HashMap::new();
     let mut consumer_refs: Vec<(String, String, crate::model::LogosSymbol)> = Vec::new();
+    // Arm-tagged invocation consumers (HTTP client calls, S-252, and later arms):
+    // `(member, consumer)` pairs read from each member's ledger, classified below
+    // through the same provider index as the contract-surface consumers.
+    let mut inv_consumers: Vec<(String, super::bridge::InvocationConsumer)> = Vec::new();
 
     for scoped in registry.fan_out(|_, engine| engine.contract_surface()) {
         let member = scoped.member;
@@ -215,6 +238,34 @@ where
             }
         }
     }
+    // Arm consumer refs from each member's ledger — degrade-don't-abort, exactly
+    // as the contract-surface read above ([ADR-53]).
+    for scoped in registry.fan_out(|_, engine| engine.invocation_consumers()) {
+        let member = scoped.member;
+        let refs = match scoped.value {
+            Ok(Ok(refs)) => refs,
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    member = %member,
+                    "reading a workspace member's invocation consumers failed; \
+                     coverage degraded without it: {err:#}"
+                );
+                continue;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    member = %member,
+                    "a workspace member engine failed to start; \
+                     coverage degraded without it: {err:#}"
+                );
+                continue;
+            }
+        };
+        for consumer in refs {
+            inv_consumers.push((member.clone(), consumer));
+        }
+    }
+
     for endpoints in providers.values_mut() {
         endpoints.sort();
     }
@@ -279,6 +330,65 @@ where
         }
     }
 
+    // Classify the arm-tagged invocation consumers against the same provider
+    // index (S-252, [FR-WS-08]). A stored consumer target normalizes by
+    // construction (the arm's normalizer refused the rest before the ledger), so
+    // it keys; a target that nonetheless does not compose is `path-not-composed`.
+    for (member, consumer) in inv_consumers {
+        let from = BridgeEndpoint {
+            member: member.clone(),
+            symbol: consumer.symbol,
+        };
+        let relation = consumer
+            .relation
+            .bridge_namespace()
+            .map(|ns| ns.relation().to_string())
+            .unwrap_or_else(|| consumer.relation.as_str().to_string());
+
+        let Some(key) = consumer_portable_key(consumer.relation, &consumer.target) else {
+            references.push(ReferenceCoverage::new(
+                relation,
+                from,
+                CoverageState::Unbound {
+                    reason: UnboundReason::PathNotComposed,
+                },
+            ));
+            unbound += 1;
+            continue;
+        };
+
+        match providers.get(&key).map(Vec::as_slice) {
+            None => {
+                references.push(ReferenceCoverage::new(
+                    relation,
+                    from,
+                    CoverageState::Unbound {
+                        reason: UnboundReason::NoProviderInWorkspace,
+                    },
+                ));
+                no_provider_in_workspace += 1;
+            }
+            // A sole same-member provider is an intra-repo fact the per-repo graph
+            // owns, not a cross-boundary reference — excluded, as for operations.
+            Some([only]) if only.member == member => {}
+            Some([only]) => {
+                debug_assert_ne!(only.member, member);
+                references.push(ReferenceCoverage::new(relation, from, CoverageState::Bound));
+                bound += 1;
+            }
+            Some(_) => {
+                references.push(ReferenceCoverage::new(
+                    relation,
+                    from,
+                    CoverageState::Unbound {
+                        reason: UnboundReason::Ambiguous,
+                    },
+                ));
+                ambiguous += 1;
+            }
+        }
+    }
+
     references.sort_by(|a, b| a.from.cmp(&b.from));
 
     let denom = bound + ambiguous + unbound;
@@ -318,15 +428,31 @@ mod tests {
     // test-isolated.
     thread_local! {
         static FIXTURES: RefCell<HashMap<String, Vec<ContractNode>>> = RefCell::new(HashMap::new());
+        static CONSUMERS: RefCell<HashMap<String, Vec<super::super::InvocationConsumer>>> =
+            RefCell::new(HashMap::new());
     }
 
     fn reset() {
         FIXTURES.with(|f| f.borrow_mut().clear());
+        CONSUMERS.with(|c| c.borrow_mut().clear());
     }
     fn set_member(name: &str, nodes: Vec<ContractNode>) {
         FIXTURES.with(|f| {
             f.borrow_mut().insert(name.to_string(), nodes);
         });
+    }
+    fn set_consumers(name: &str, consumers: Vec<super::super::InvocationConsumer>) {
+        CONSUMERS.with(|c| {
+            c.borrow_mut().insert(name.to_string(), consumers);
+        });
+    }
+    /// An HTTP client-call consumer at `symbol` calling `target` (`"METHOD /path"`).
+    fn http_call(target: &str, symbol: &str) -> super::super::InvocationConsumer {
+        super::super::InvocationConsumer {
+            relation: crate::model::ArtifactRelation::HttpClientCall,
+            target: target.to_string(),
+            symbol: LogosSymbol::parse(symbol).unwrap(),
+        }
     }
 
     #[derive(Debug)]
@@ -361,6 +487,12 @@ mod tests {
         }
         fn contract_stamp(&self) -> u64 {
             0
+        }
+        fn invocation_consumers(&self) -> Result<Vec<super::super::InvocationConsumer>> {
+            if self.member == "unreadable" {
+                anyhow::bail!("store read failed");
+            }
+            Ok(CONSUMERS.with(|c| c.borrow().get(&self.member).cloned().unwrap_or_default()))
         }
     }
 
@@ -712,6 +844,121 @@ mod tests {
         let one = cross_service_coverage(&registry(&["api", "web", "svc"]));
         let two = cross_service_coverage(&registry(&["svc", "web", "api"]));
         assert_eq!(one.references, two.references);
+    }
+
+    // ── S-252 / FR-WS-08: HTTP client-call consumers in the coverage tier ─────
+
+    /// A static client call with exactly one cross-member route classifies
+    /// `Bound` under the `route` relation — the same 3-state model an operation
+    /// consumer gets, now driven by a ledger-side invocation consumer.
+    #[test]
+    fn a_client_call_with_a_sole_cross_member_route_is_bound() {
+        reset();
+        set_consumers("web", vec![http_call("GET /users/{id}", "local get_user_call")]);
+        set_member("api", vec![route("GET /users/{userId}", "local route_get")]);
+
+        let cov = cross_service_coverage(&registry(&["web", "api"]));
+
+        assert_eq!(cov.bound, 1);
+        assert_eq!(cov.ambiguous, 0);
+        assert_eq!(cov.unbound, 0);
+        assert_eq!(cov.no_provider_in_workspace, 0);
+        assert_eq!(cov.references.len(), 1);
+        assert_eq!(cov.references[0].state, CoverageState::Bound);
+        assert_eq!(cov.references[0].relation, "route");
+        assert_eq!(cov.references[0].from.member, "web");
+    }
+
+    /// Two matching routes make the client call `Ambiguous` (its own bucket).
+    #[test]
+    fn a_client_call_with_two_routes_is_ambiguous() {
+        reset();
+        set_consumers("web", vec![http_call("GET /users/{id}", "local get_user_call")]);
+        set_member("api", vec![route("GET /users/{id}", "local route_api")]);
+        set_member("admin", vec![route("GET /users/{userId}", "local route_admin")]);
+
+        let cov = cross_service_coverage(&registry(&["web", "api", "admin"]));
+
+        assert_eq!(cov.ambiguous, 1);
+        assert_eq!(cov.bound, 0);
+        assert_eq!(cov.references[0].state.bucket(), "ambiguous");
+    }
+
+    /// A client call with no matching route anywhere is bucketed
+    /// `no-provider-in-workspace` (outside the boundary, not a defect), excluded
+    /// from the bound-ratio denominator.
+    #[test]
+    fn a_client_call_with_no_route_is_no_provider_in_workspace() {
+        reset();
+        set_consumers("web", vec![http_call("GET /orphans/{id}", "local orphan_call")]);
+        set_member("api", vec![]);
+
+        let cov = cross_service_coverage(&registry(&["web", "api"]));
+
+        assert_eq!(cov.no_provider_in_workspace, 1);
+        assert_eq!(cov.bound, 0);
+        assert_eq!(cov.bound_ratio, 1.0);
+    }
+
+    /// A client call whose only matching route is in its own member is an
+    /// intra-repo fact — excluded from the coverage tier, mirroring operations.
+    #[test]
+    fn a_same_member_client_call_route_pair_is_excluded() {
+        reset();
+        set_consumers("web", vec![http_call("GET /users/{id}", "local get_user_call")]);
+        set_member("web", vec![route("GET /users/{id}", "local route_local")]);
+
+        let cov = cross_service_coverage(&registry(&["web"]));
+        assert!(
+            cov.references.is_empty(),
+            "an intra-repo client call→route pair is not a cross-boundary reference: {:?}",
+            cov.references
+        );
+    }
+
+    /// Acceptance (2): the HTTP arm's refusals map onto the coverage vocabulary —
+    /// a base-URL-composed call is `base-url-runtime`, a non-normalizable one is
+    /// `path-not-composed`. This is the reason a call the normalizer refused (and
+    /// therefore left out of the ledger) is reported under, tying the arm's
+    /// `None` render to the coverage reason enum.
+    #[test]
+    fn client_call_refusals_map_to_the_coverage_reasons() {
+        assert_eq!(
+            UnboundReason::from(ClientCallRefusal::BaseUrlRuntime),
+            UnboundReason::BaseUrlRuntime
+        );
+        assert_eq!(
+            UnboundReason::from(ClientCallRefusal::PathNotComposed),
+            UnboundReason::PathNotComposed
+        );
+        // And they render as the FR-WS-08 wire tokens.
+        assert_eq!(
+            serde_json::to_value(UnboundReason::BaseUrlRuntime).unwrap(),
+            "base-url-runtime"
+        );
+        assert_eq!(
+            serde_json::to_value(UnboundReason::PathNotComposed).unwrap(),
+            "path-not-composed"
+        );
+    }
+
+    /// Operation consumers and client-call consumers coexist: an `ApiOperation`
+    /// and an HTTP client call both binding cross-member each count once, proving
+    /// the two intake paths compose without double-counting or interfering.
+    #[test]
+    fn operation_and_client_call_consumers_coexist() {
+        reset();
+        // An operation in `spec` bound by a route in `web`; a client call in `web`
+        // bound by a route in `api` — both cross-member, no same-member collision.
+        set_member("spec", vec![op("GET /users/{id}", "local op_get")]);
+        set_member("web", vec![route("GET /users/{id}", "local route_users")]);
+        set_consumers("web", vec![http_call("GET /orders/{id}", "local orders_call")]);
+        set_member("api", vec![route("GET /orders/{id}", "local route_orders")]);
+
+        let cov = cross_service_coverage(&registry(&["spec", "web", "api"]));
+        assert_eq!(cov.bound, 2, "the operation and the client call each bind once");
+        assert_eq!(cov.references.len(), 2);
+        assert!(cov.references.iter().all(|r| r.relation == "route"));
     }
 
     // ── advisory isolation (ADR-53 / sprint-55 risk register) ─────────────

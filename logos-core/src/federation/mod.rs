@@ -63,7 +63,9 @@ use serde::Serialize;
 use crate::config::ConfigError;
 use crate::workspace::{is_git_root, resolve_root};
 
-pub use bridge::{BridgeEdge, BridgeEndpoint, ContractBridge, ContractNode, MemberContracts};
+pub use bridge::{
+    BridgeEdge, BridgeEndpoint, ContractBridge, ContractNode, InvocationConsumer, MemberContracts,
+};
 pub use coverage::{
     cross_service_coverage, CoverageState, CrossServiceCoverage, ReferenceCoverage, UnboundReason,
 };

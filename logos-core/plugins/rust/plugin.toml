@@ -35,7 +35,7 @@ abi_version = 15
 # call paths, method calls, and `use` imports for the resolution pass (S-011);
 # `frameworks` captures Axum/Actix route- and component-promotion anchors for
 # the framework pass (S-012, FR-FW-01..04).
-capabilities = ["symbols", "references", "frameworks"]
+capabilities = ["symbols", "references", "frameworks", "invocations"]
 
 # Keywords that increment cyclomatic complexity for this language. Declarative
 # so it becomes tunable via a descriptor override once descriptor shadowing lands
@@ -82,3 +82,4 @@ framework_detectors = ["axum", "actix_web"]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"
 frameworks = "queries/frameworks.scm"
+invocations = "queries/invocations.scm"

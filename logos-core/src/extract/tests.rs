@@ -1181,3 +1181,104 @@ fn smart_pointer_dyn_with_trait_bounds_is_trait_qualified() {
         method_call_targets(&facts)
     );
 }
+
+// ── S-252 / FR-WS-08: HTTP client-call arm capture ───────────────────────────
+
+/// The `HttpClientCall` reference targets captured from a source.
+fn http_client_call_targets(facts: &Facts) -> Vec<String> {
+    facts
+        .refs
+        .iter()
+        .filter(|r| r.relation == Some(crate::model::ArtifactRelation::HttpClientCall))
+        .map(|r| r.target.clone())
+        .collect()
+}
+
+/// A static, absolute client call is captured as a `"METHOD /template"` ref under
+/// the `HttpClientCall` relation — an artifact→code binding on the `Path` form,
+/// so it rides the same route binder the OpenAPI arm does.
+#[test]
+fn a_static_client_call_is_captured_as_a_method_template_ref() {
+    let facts = extract_src(
+        "src/client.rs",
+        r#"async fn fetch(client: reqwest::Client) { client.get("/users/{id}").await; }"#,
+    );
+    assert_eq!(
+        http_client_call_targets(&facts),
+        vec!["GET /users/{id}".to_string()]
+    );
+    let r = facts
+        .refs
+        .iter()
+        .find(|r| r.relation == Some(crate::model::ArtifactRelation::HttpClientCall))
+        .expect("the client-call ref is present");
+    assert_eq!(r.form, crate::model::RefForm::Path);
+    assert_eq!(r.kind, EdgeKind::ArtifactBinding);
+}
+
+/// A runtime-composed path — a bare variable or a `format!` — is refused: the
+/// arm's normalizer returns `None`, so no reference and no ledger entry
+/// (base-url-runtime, never approximately matched).
+#[test]
+fn a_runtime_composed_client_call_is_not_captured() {
+    let bare = extract_src(
+        "src/c.rs",
+        r#"async fn f(client: reqwest::Client, url: String) { client.get(url).await; }"#,
+    );
+    assert!(
+        http_client_call_targets(&bare).is_empty(),
+        "a bare-variable path is base-url-runtime: {:?}",
+        http_client_call_targets(&bare)
+    );
+
+    let composed = extract_src(
+        "src/c.rs",
+        r#"async fn f(client: reqwest::Client, base: String) { client.get(format!("{base}/users")).await; }"#,
+    );
+    assert!(
+        http_client_call_targets(&composed).is_empty(),
+        "a format!-composed path is base-url-runtime: {:?}",
+        http_client_call_targets(&composed)
+    );
+}
+
+/// A catch-all/non-normalizable absolute literal, and a relative (base-URL) one,
+/// are refused — path-not-composed / base-url-runtime, never approximated.
+#[test]
+fn a_non_composable_client_call_literal_is_not_captured() {
+    let catch_all = extract_src(
+        "src/c.rs",
+        r#"async fn f(client: reqwest::Client) { client.get("/files/{*rest}").await; }"#,
+    );
+    assert!(
+        http_client_call_targets(&catch_all).is_empty(),
+        "a catch-all path is path-not-composed: {:?}",
+        http_client_call_targets(&catch_all)
+    );
+
+    let relative = extract_src(
+        "src/c.rs",
+        r#"async fn f(client: reqwest::Client) { client.get("users/{id}").await; }"#,
+    );
+    assert!(
+        http_client_call_targets(&relative).is_empty(),
+        "a relative path has no absolute route prefix: {:?}",
+        http_client_call_targets(&relative)
+    );
+}
+
+/// A method call whose name is not an HTTP verb (a collection `insert`/`contains`)
+/// is never captured, even with a `/`-shaped string literal — the HTTP-verb
+/// filter keeps the broad method-call anchor from over-capturing.
+#[test]
+fn a_non_http_method_call_is_not_captured() {
+    let facts = extract_src(
+        "src/c.rs",
+        r#"fn f(map: std::collections::HashMap<String, i32>) { map.insert("/users/{id}".to_string(), 1); }"#,
+    );
+    assert!(
+        http_client_call_targets(&facts).is_empty(),
+        "`insert` is not an HTTP verb: {:?}",
+        http_client_call_targets(&facts)
+    );
+}
