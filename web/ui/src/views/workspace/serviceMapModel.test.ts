@@ -255,3 +255,49 @@ describe("buildServiceMap with topics (S-256, FR-WS-11)", () => {
     ]);
   });
 });
+
+describe("buildServiceMap — the broker line is suppressed only when a topic carries it", () => {
+  it("KEEPS the flat line when the binding is resolved but the inventory is empty", () => {
+    // A member indexed by a pre-S-256 binary (ledger rows, no promoted topic nodes), or
+    // one whose topic read degraded and was skipped: the coupling is REAL and resolved,
+    // but no topic hop exists to carry it. Dropping the line unconditionally would make
+    // a resolved coupling vanish from the canvas while still counting it in the table.
+    const map = buildServiceMap(
+      [member("api"), member("billing")],
+      [binding("api", "billing", "broker-topic")],
+      [], // no inventory
+    );
+
+    expect(map.loaded.edges).toEqual([
+      { source: serviceId("api"), target: serviceId("billing"), edge_type: "broker-topic" },
+    ]);
+    expect(map.links).toEqual([
+      { from: "api", to: "billing", relation: "broker-topic", count: 1 },
+    ]);
+  });
+
+  it("KEEPS the flat line when a topic exists but does not carry THIS pair", () => {
+    // `orders` couples api → billing; the resolved binding is api → shipping (some other
+    // topic whose inventory we do not have). The unrelated topic must not suppress it.
+    const map = buildServiceMap(
+      [member("api"), member("billing"), member("shipping")],
+      [binding("api", "shipping", "broker-topic")],
+      [topics("api", ["orders", 1, 0]), topics("billing", ["orders", 0, 1])],
+    );
+
+    const flat = map.loaded.edges.filter((e) => e.edge_type === "broker-topic");
+    expect(flat).toEqual([
+      { source: serviceId("api"), target: serviceId("shipping"), edge_type: "broker-topic" },
+    ]);
+  });
+
+  it("SUPPRESSES the flat line only when the topic hop demonstrably replaces it", () => {
+    const map = buildServiceMap(
+      [member("api"), member("billing")],
+      [binding("api", "billing", "broker-topic")],
+      [topics("api", ["orders", 1, 0]), topics("billing", ["orders", 0, 1])],
+    );
+    expect(map.loaded.edges.some((e) => e.edge_type === "broker-topic")).toBe(false);
+    expect(map.loaded.edges.map((e) => e.edge_type).sort()).toEqual(["publishes", "subscribes"]);
+  });
+});

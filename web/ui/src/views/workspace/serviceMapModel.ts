@@ -208,8 +208,11 @@ export function buildServiceMap(
       // The honest kind of the node — it mirrors the `topic` NodeKind the graph now
       // carries, so the canvas tooltip says the same word the CLI and MCP do.
       kind: "topic",
-      // A topic is an artifact of the running system rather than a source symbol; the
-      // artifact hue distinguishes it from the services at a glance.
+      // `layer` is this map's HUE channel, not an ontology claim: S-250 already draws an
+      // un-indexed member in the `doc` hue for the same reason. The artifact hue simply
+      // separates topics from services at a glance. It deliberately does NOT mirror the
+      // graph's own layer for a `Topic` — S-255 kept the broker kinds in the CODE
+      // subgraph (`is_config()` excludes them), which is what the node views render.
       layer: "artifact",
     };
     for (const member of t.producers) {
@@ -257,20 +260,35 @@ export function buildServiceMap(
       a.from.localeCompare(b.from) || a.to.localeCompare(b.to) || a.relation.localeCompare(b.relation),
   );
 
+  /** Is this broker coupling already drawn as `from → topic → to`? Only then may the
+   *  flat service→service line be suppressed as a duplicate.
+   *
+   *  The two data sources are INDEPENDENT: bindings come from the ledger, topics from
+   *  the promoted graph. They can disagree — a member indexed by a pre-S-256 binary and
+   *  not yet re-synced has the ledger rows but no promoted nodes, and a member whose
+   *  topic read degrades is skipped from the inventory entirely. Suppressing the line
+   *  unconditionally would make a RESOLVED coupling vanish from the canvas in exactly
+   *  those cases, while still counting it in the links table — the map would quietly
+   *  under-draw the workspace (NFR-CC-04). So the line is dropped only when a topic hop
+   *  demonstrably replaces it. */
+  const drawnThroughATopic = (l: ServiceLink): boolean =>
+    topics.some((t) => t.producers.includes(l.from) && t.consumers.includes(l.to));
+
   return {
     loaded: {
       nodes,
       edges: [
         ...links
-          // The broker arm is drawn through its topic node instead (see above), so its
-          // flat service→service line is not emitted onto the canvas.
-          .filter((l) => l.relation !== "broker-topic")
+          // The broker arm is drawn through its topic node instead (see above) — but
+          // only where a topic actually carries it; otherwise the direct line stays, so
+          // a resolved coupling is never silently un-drawn.
+          .filter((l) => l.relation !== "broker-topic" || !drawnThroughATopic(l))
           .map((l) => ({
             source: serviceId(l.from),
             target: serviceId(l.to),
             // The canvas colours/styles an edge by its wire type; the relation arm IS
-            // that type here (`route` / `grpc-call`), so the legend grammar carries
-            // straight over.
+            // that type here (`route` / `grpc-call`, or `broker-topic` when no topic
+            // hop carries it), so the legend grammar carries straight over.
             edge_type: l.relation,
           })),
         ...topicEdges,
