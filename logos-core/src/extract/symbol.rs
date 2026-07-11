@@ -340,6 +340,31 @@ mod tests {
         }
     }
 
+    /// The CR-061 broker kinds (S-255): `Topic`/`Producer`/`Consumer` are
+    /// shared-identity declarations like `Route`/`Component`, so they take the
+    /// `#` type-descriptor and the same trailing-ordinal disambiguation as every
+    /// other non-method kind. Extraction does not yet emit these kinds
+    /// ([S-256](../../../docs/planning/journal.md#s-256-promote-broker-coupling-to-first-class-topics)'s
+    /// concern), but the mapping is pinned so a future emitter's symbols are
+    /// well-defined from day one.
+    #[test]
+    fn broker_kind_descriptor_suffixes() {
+        for kind in [NodeKind::Topic, NodeKind::Producer, NodeKind::Consumer] {
+            assert_eq!(
+                descriptor_for(kind, "orders", 0),
+                "orders#",
+                "{} must take the `#` type-descriptor anchor",
+                kind.as_str()
+            );
+            assert_eq!(
+                descriptor_for(kind, "orders", 3),
+                "orders#3:",
+                "{} ordinal disambiguation",
+                kind.as_str()
+            );
+        }
+    }
+
     #[test]
     fn methods_disambiguate_via_the_native_slot() {
         // Methods/functions: the ordinal rides the native SCIP disambiguator slot.
