@@ -55,6 +55,10 @@ pub mod config;
 // same helpers extraction uses, so the two passes can never disagree on what
 // a path's segments are.
 pub(crate) mod refs;
+// The message-broker publish/subscribe invocation arm's capture side (S-254,
+// FR-WS-10): runs a grammar's optional `brokers` query and funnels topic-keyed
+// sites through the generic `capture_invocation_refs` interpreter.
+mod broker;
 mod shape;
 // Extraction-time test-marker evidence (S-027, FR-EX-06): the per-function
 // `test_evidence` flag captured while the AST is in hand — the input the
@@ -626,6 +630,40 @@ fn extract_one(
     if !impl_refs.is_empty() {
         facts.refs.append(&mut impl_refs);
         dedup_sort_refs(&mut facts.refs);
+    }
+
+    // 7b) Cross-service invocation arms (S-254, [FR-WS-10]): a code arm captures
+    // its publish/subscribe sites through its own optional `brokers` query and
+    // funnels them through the generic invocation interpreter. A grammar without
+    // the capability contributes nothing. The site's source symbol is its
+    // innermost enclosing declaration — the same attribution `collect_refs` uses.
+    if let Some(broker_query) = plugin.query("brokers") {
+        let id_to_idx: HashMap<usize, usize> =
+            decls.iter().enumerate().map(|(i, d)| (d.node.id(), i)).collect();
+        let enclosing = |node: Node<'_>| -> Option<LogosSymbol> {
+            let mut ancestor = node.parent();
+            while let Some(n) = ancestor {
+                if let Some(&idx) = id_to_idx.get(&n.id()) {
+                    if let Some(sym) = &symbols[idx] {
+                        return Some(sym.clone());
+                    }
+                }
+                ancestor = n.parent();
+            }
+            file_module.clone()
+        };
+        if broker::capture_broker_invocations(
+            broker_query,
+            tree.root_node(),
+            source,
+            enclosing,
+            &mut facts,
+        ) > 0
+        {
+            // Broker refs are appended after the code-reference sort; restore the
+            // canonical ledger order + dedup so the output stays byte-stable.
+            dedup_sort_refs(&mut facts.refs);
+        }
     }
 
     sort_facts(&mut facts);

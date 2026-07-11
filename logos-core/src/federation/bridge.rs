@@ -286,6 +286,20 @@ impl PortableKey {
         }
     }
 
+    /// A broker-topic key from an arm-normalized topic string (a topic name,
+    /// optionally guarded by a `#`-appended message-schema FQN) under the fan-out
+    /// [`BrokerTopic`](BridgeNamespace::BrokerTopic) namespace (S-254,
+    /// [FR-WS-10]). The [`super::broker`] classifier builds these; two sides meet
+    /// iff their whole topic key (topic + optional guard) is byte-equal.
+    ///
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    pub(super) fn broker(key: String) -> PortableKey {
+        PortableKey {
+            namespace: BridgeNamespace::BrokerTopic,
+            key,
+        }
+    }
+
     /// The relation class a binding on this key is filed under — the namespace's
     /// stable relation label ([`BridgeNamespace::relation`]).
     pub(super) fn relation(&self) -> &'static str {

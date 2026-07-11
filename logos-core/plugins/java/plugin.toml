@@ -13,7 +13,7 @@ module_separator = "."
 # tree-sitter-java 0.23 is generated against ABI 14.
 abi_version = 14
 
-capabilities = ["symbols", "references", "frameworks"]
+capabilities = ["symbols", "references", "frameworks", "brokers"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "&&", "||", "?"]
@@ -40,6 +40,9 @@ framework_detectors = ["org::springframework"]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"
 frameworks = "queries/frameworks.scm"
+# Message-broker publish/subscribe invocation arm (S-254, FR-WS-10): Spring
+# Kafka/Rabbit/JMS listener annotations and template sends, keyed by topic.
+brokers = "queries/brokers.scm"
 # Captured `@fw.route.method` annotation name → HTTP method (S-015).
 # `@RequestMapping` declares no single verb.
 [framework_methods]

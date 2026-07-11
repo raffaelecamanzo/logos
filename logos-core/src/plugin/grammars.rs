@@ -405,6 +405,13 @@ fn java_entry() -> GrammarEntry {
                 label: "java/queries/frameworks.scm",
                 source: include_str!("../../plugins/java/queries/frameworks.scm"),
             },
+            // The message-broker publish/subscribe invocation arm (S-254,
+            // [FR-WS-10]): a per-language `.scm` is the entire capture surface.
+            EmbeddedQuery {
+                relative_path: "queries/brokers.scm",
+                label: "java/queries/brokers.scm",
+                source: include_str!("../../plugins/java/queries/brokers.scm"),
+            },
         ],
     }
 }

@@ -93,7 +93,12 @@ mod profiles;
 // the resolution pass into ArtifactRef/ArtifactBinding edges. The substrate ships
 // the dispatch point and the shared push/classify helper; the per-format arms are
 // the consumer stories' (S-069/070/071) isolated extensions.
-mod refs;
+//
+// `pub(crate)` so the pluggable invocation arms (S-252/253/254) can reach the
+// generic `capture_invocation_refs` interpreter + `InvocationSite` from the
+// code-extraction seam (a code arm's sites come from a `.scm` over code files,
+// not the config walk).
+pub(crate) mod refs;
 
 /// The fixed maximum `ConfigSection` nesting depth ([BR-30], [FR-CG-02]). A
 /// `ConfigFile` is depth 0; sections are emitted at depth 1 and 2 only. The
