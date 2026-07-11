@@ -36,7 +36,15 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output) -> R
     let workspace_root = existing
         .as_ref()
         .map_or_else(|| root.to_path_buf(), |f| f.root.clone());
+    // Canonicalise before deriving the name: the common invocation (`cd` into
+    // the parent folder, run `logos init --workspace` with no `--project`)
+    // has `root == "."`, whose `file_name()` is `None` — canonicalising
+    // resolves it to the real directory name. This name is written verbatim
+    // into a fresh manifest and preserved on every re-run
+    // (`federation::manifest::upsert`), so getting it right here matters once.
     let default_name = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.clone())
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("workspace")

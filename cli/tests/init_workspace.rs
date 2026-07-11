@@ -171,3 +171,37 @@ fn no_candidates_is_a_noop() {
     assert_eq!(exit_code(&out), 0);
     assert!(!tmp.path().join("logos.workspace.toml").exists());
 }
+
+/// The default workspace name derives from the real directory name even when
+/// invoked with no `--project` (root resolves to the literal `"."`, whose
+/// `file_name()` is `None` unless canonicalised first) — the primary intended
+/// usage: `cd` into the parent folder and run `logos init --workspace`.
+#[test]
+fn default_name_is_the_real_directory_name_not_the_literal_dot() {
+    let tmp = two_member_fixture();
+    let canonical_dir_name = tmp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_logos"))
+        .current_dir(tmp.path())
+        .args(["--json", "init", "--workspace", "--yes"])
+        .output()
+        .expect("the logos binary runs");
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        report["workspace"], canonical_dir_name,
+        "must not fall back to the literal \"workspace\""
+    );
+
+    let manifest = fs::read_to_string(tmp.path().join("logos.workspace.toml")).unwrap();
+    assert!(manifest.contains(&format!("name = \"{canonical_dir_name}\"")));
+}
