@@ -1507,3 +1507,76 @@ fn worst_offenders_cap_applies_to_clone_and_container_dimensions() {
     );
     assert_eq!(w2.focus.len(), 3, "focus capped at 3");
 }
+
+// ── S-256 / CR-061: the promoted broker vertices must not move the gated signal ──
+
+/// **Regression for the S-256 signal move.** Promoting broker coupling to first-class
+/// `Topic`/`Producer`/`Consumer` nodes must leave a repo's gated quality signal
+/// **byte-identical**: the promoted vertices are markers of code that is *already* in
+/// the graph (the publishing/subscribing method), so counting them would measure the
+/// model rather than the source.
+///
+/// The `Topic` is the sharp case. It is a repo-scoped identity with **no file**
+/// ([FR-WS-11]), so before the fix it fell into the `<unbound>` directory community and
+/// every `Publishes`/`Subscribes` edge ran from its producer's directory into
+/// `<unbound>` — external to both communities, contributing to `degree` but never to
+/// `internal`. Modularity therefore *fell* for any repo that indexed a broker topic,
+/// purely as an artifact of how the topic is modelled. This asserts the whole snapshot
+/// is unchanged, not merely that it "did not crash".
+///
+/// [FR-WS-11]: ../../../../docs/specs/requirements/FR-WS-11.md
+#[test]
+fn promoted_broker_vertices_leave_the_metric_snapshot_byte_identical() {
+    // A plain two-directory codebase with intra-directory calls (a well-modularised
+    // fixture, so a modularity drop would be visible).
+    let base_nodes = [
+        node(1, "a1", NodeKind::Function, Some("src/a/one.rs")),
+        node(2, "a2", NodeKind::Function, Some("src/a/two.rs")),
+        node(3, "b1", NodeKind::Function, Some("src/b/one.rs")),
+        node(4, "b2", NodeKind::Function, Some("src/b/two.rs")),
+    ];
+    let base_edges = [
+        edge(1, 2, EdgeKind::Calls),
+        edge(3, 4, EdgeKind::Calls),
+    ];
+    let funcs = [
+        func(1, Some(1), Some(false), Some(false)),
+        func(2, Some(1), Some(false), Some(false)),
+        func(3, Some(1), Some(false), Some(false)),
+        func(4, Some(1), Some(false), Some(false)),
+    ];
+
+    let before = run_scoped(&base_nodes, &base_edges, &funcs, &[]);
+
+    // Now promote a broker topic over exactly the same code: `a1` publishes to
+    // `orders` and `b1` subscribes from it. The topic carries NO file (repo-scoped);
+    // the producer/consumer are anchored in their declaring files.
+    let mut nodes = base_nodes.to_vec();
+    nodes.extend([
+        node(10, "orders", NodeKind::Topic, None),
+        node(11, "orders", NodeKind::Producer, Some("src/a/one.rs")),
+        node(12, "orders", NodeKind::Consumer, Some("src/b/one.rs")),
+    ]);
+    let mut edges = base_edges.to_vec();
+    edges.extend([
+        edge(1, 11, EdgeKind::Contains),   // the publishing fn contains its producer
+        edge(3, 12, EdgeKind::Contains),   // the subscribing fn contains its consumer
+        edge(11, 10, EdgeKind::Publishes), // producer --publishes--> topic
+        edge(12, 10, EdgeKind::Subscribes), // consumer --subscribes--> topic
+    ]);
+
+    let after = run_scoped(&nodes, &edges, &funcs, &[]);
+
+    // Byte-identical, literally: the serialized snapshot IS the gated artifact, so
+    // comparing it catches drift in any dimension — not only the modularity this
+    // regressed on.
+    let render = |s: &crate::models::quality::MetricSnapshot| {
+        serde_json::to_string(s).expect("a metric snapshot serializes")
+    };
+    assert_eq!(
+        render(&after),
+        render(&before),
+        "promoting a broker topic moved the gated signal — the file-less Topic vertex \
+         is polluting the `<unbound>` community and depressing modularity"
+    );
+}
