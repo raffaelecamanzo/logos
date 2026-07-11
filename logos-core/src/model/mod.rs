@@ -39,6 +39,8 @@ mod kinds;
 mod symbol;
 
 pub use annotations::Annotations;
-pub use artifact::{ArtifactRelation, TargetClass};
+pub use artifact::{
+    ArtifactRelation, BridgeNamespace, BridgeRole, MatchDiscipline, TargetClass,
+};
 pub use kinds::{EdgeKind, NodeKind, RefForm, UnknownKind};
 pub use symbol::{LogosSymbol, NodeId};
