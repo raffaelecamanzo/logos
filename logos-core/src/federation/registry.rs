@@ -194,7 +194,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
         // start and orphan a watcher). Fan-out is member-sequential and serve
         // warm is one-shot, so this does not serialise steady-state reads —
         // those run on each engine's own pools after the Arc is cloned out.
-        let mut residents = self.residents.lock().expect("registry mutex poisoned");
+        let mut residents = self.lock_residents();
         let tick = self.tick.fetch_add(1, Ordering::Relaxed);
 
         if let Some(resident) = residents.get_mut(member) {
@@ -241,7 +241,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// The members with a resident (constructed) engine right now, sorted by
     /// name — introspection for eviction accounting and tests.
     pub fn resident_members(&self) -> Vec<String> {
-        let residents = self.residents.lock().expect("registry mutex poisoned");
+        let residents = self.lock_residents();
         let mut names: Vec<String> = residents.keys().cloned().collect();
         names.sort();
         names
@@ -249,7 +249,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
 
     /// The number of resident member engines.
     pub fn resident_count(&self) -> usize {
-        self.residents.lock().expect("registry mutex poisoned").len()
+        self.lock_residents().len()
     }
 
     /// Evict least-recently-touched member engines until at most `cap` remain,
@@ -262,7 +262,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
     ///
     /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
     pub fn evict_to_capacity(&self, cap: usize) -> Vec<String> {
-        let mut residents = self.residents.lock().expect("registry mutex poisoned");
+        let mut residents = self.lock_residents();
         if residents.len() <= cap {
             return Vec::new();
         }
@@ -280,6 +280,23 @@ impl<E: MemberEngine> EngineRegistry<E> {
                 name
             })
             .collect()
+    }
+
+    /// Lock the resident map, **recovering** a poisoned lock rather than
+    /// propagating the poison.
+    ///
+    /// The map is a plain engine cache; a poisoned view is still usable. The
+    /// registry is shared behind an [`Arc`] across serve request tasks, and the
+    /// module's contract is per-member degradation — so a single member's panic
+    /// (e.g. inside a build held under this lock) must not brick every
+    /// subsequent `engine_for` / `fan_out` for the healthy members. Recovering
+    /// the guard keeps that all-or-nothing failure from happening ([ADR-53]).
+    ///
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    fn lock_residents(&self) -> std::sync::MutexGuard<'_, HashMap<String, Resident<E>>> {
+        self.residents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Eagerly build (and, under serve, watch) every member. Degraded members
