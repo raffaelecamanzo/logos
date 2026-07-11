@@ -52,8 +52,15 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::graph_store::{EdgeRow, NodeRow};
-use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind};
+use crate::model::{BridgeNamespace, EdgeKind, LogosSymbol, MatchDiscipline, NodeId, NodeKind};
 use crate::resolve::route_template::route_key;
+
+/// Which side of a portable-key match a node sits on — the bridge's local alias
+/// for the model's [`BridgeRole`](crate::model::BridgeRole), the same
+/// `Consumer`/`Provider` split an invocation arm declares via
+/// [`ArtifactRelation::bridge_role`](crate::model::ArtifactRelation::bridge_role).
+/// Re-exported so [`super::coverage`] classifies with one role vocabulary.
+pub(super) use crate::model::BridgeRole as Role;
 
 use super::registry::{EngineRegistry, MemberEngine};
 
@@ -232,17 +239,24 @@ fn surface_from(nodes: &[NodeRow], edges: &[EdgeRow]) -> Vec<ContractNode> {
         .collect()
 }
 
-/// The portable, database-independent identity a contract-surface node is
-/// matched on across members.
+/// The portable identity a candidate is matched on across members: a
+/// [`BridgeNamespace`] plus the arm's normalized **key string** ([FR-WS-07],
+/// [ADR-54]).
 ///
-/// Only the HTTP key is populated in this story; the gRPC `package.Service/Method`
-/// and broker-topic keys arrive with the invocation arms ([FR-WS-07]+). Proto and
-/// GraphQL nodes are still *read* into the surface (so the reader is complete and
-/// future-ready) but yield no key yet, so they contribute no edges — honestly
-/// unbound rather than approximately matched ([NFR-RA-05]).
+/// Namespace-generic by construction — the match loop keys on this struct and
+/// applies the namespace's [`match_discipline`](BridgeNamespace::match_discipline),
+/// never any per-arm code. The HTTP key folds the shared positional
+/// [`route_key`] `(METHOD, template)` into `"METHOD /template"`; the gRPC and
+/// broker arms ([FR-WS-09], [FR-WS-10]) build their own key strings
+/// (`package.Service/Method`, a topic name) under their own namespace. Any two
+/// candidates with the same `(namespace, key)` meet — regardless of which arm
+/// produced them.
 ///
+/// [route_key]: crate::resolve::route_template::route_key
 /// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
-/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
+/// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
 /// Visible within `federation` (not just this file) so the coverage read-model
 /// ([`super::coverage`], [FR-WS-05], [ADR-53]) classifies references with the
 /// exact same key vocabulary the bridge matches edges on — one classifier, no
@@ -251,28 +265,32 @@ fn surface_from(nodes: &[NodeRow], edges: &[EdgeRow]) -> Vec<ContractNode> {
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) enum PortableKey {
-    /// An HTTP endpoint keyed by the shared positional `route_key`:
-    /// `(upper-cased METHOD, positionally-normalized template)`.
-    Http(String, String),
+pub(super) struct PortableKey {
+    /// The invocation namespace this key lives in — decides the match discipline.
+    pub(super) namespace: BridgeNamespace,
+    /// The arm-normalized, database-portable key string two candidates meet on.
+    pub(super) key: String,
 }
 
 impl PortableKey {
-    /// The relation class a binding on this key is filed under.
-    pub(super) fn relation(&self) -> &'static str {
-        match self {
-            PortableKey::Http(..) => "route",
+    /// An HTTP key from the shared positional [`route_key`] parts: the
+    /// upper-cased method and positionally-normalized template folded into one
+    /// `"METHOD /template"` string under the [`Http`](BridgeNamespace::Http)
+    /// namespace.
+    ///
+    /// [route_key]: crate::resolve::route_template::route_key
+    pub(super) fn http(method: String, template: String) -> PortableKey {
+        PortableKey {
+            namespace: BridgeNamespace::Http,
+            key: format!("{method} {template}"),
         }
     }
-}
 
-/// Which side of a portable-key match a node sits on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Role {
-    /// Exposes the endpoint (a framework `Route` handler).
-    Provider,
-    /// Refers to the endpoint (an OpenAPI `ApiOperation`).
-    Consumer,
+    /// The relation class a binding on this key is filed under — the namespace's
+    /// stable relation label ([`BridgeNamespace::relation`]).
+    pub(super) fn relation(&self) -> &'static str {
+        self.namespace.relation()
+    }
 }
 
 /// Reduce a contract-surface node to its portable key and role, or `None` when
@@ -284,11 +302,11 @@ pub(super) fn classify(kind: NodeKind, name: &str) -> Option<(PortableKey, Role)
     match kind {
         NodeKind::Route => {
             let (method, template) = route_key(name)?;
-            Some((PortableKey::Http(method, template), Role::Provider))
+            Some((PortableKey::http(method, template), Role::Provider))
         }
         NodeKind::ApiOperation => {
             let (method, template) = route_key(name)?;
-            Some((PortableKey::Http(method, template), Role::Consumer))
+            Some((PortableKey::http(method, template), Role::Consumer))
         }
         // Proto/GraphQL contract nodes are read into the surface but have no
         // portable HTTP key in this story — deferred to the invocation arms.
@@ -390,8 +408,8 @@ where
 }
 
 /// Read every member's contract surface through its read pool, index providers
-/// on portable keys, and match consumers across members with the exactly-one
-/// rule. Deterministic: provider lists and the emitted edges are sorted.
+/// on portable keys, split providers from consumers by role, and hand the two
+/// indexes to the namespace-generic [`match_indexed`] matcher.
 fn compute_edges<E>(registry: &EngineRegistry<E>) -> Vec<BridgeEdge>
 where
     E: MemberEngine + MemberContracts,
@@ -436,6 +454,38 @@ where
         }
     }
 
+    match_indexed(providers, consumers)
+}
+
+/// The **namespace-generic** cross-service match core ([FR-WS-04], [ADR-54]).
+///
+/// Given providers indexed on their [`PortableKey`] and the consumer keys, emit
+/// one [`BridgeEdge`] per cross-member binding, applying the *key's namespace*
+/// [`match_discipline`](BridgeNamespace::match_discipline) — the **only**
+/// namespace-specific decision made here, which is what keeps the loop genuinely
+/// arm-agnostic:
+///
+/// - [`MatchDiscipline::ExactlyOne`] (HTTP, gRPC): a consumer binds the **sole**
+///   provider of its key across the whole workspace; two or more providers are
+///   ambiguous and produce no edge (never fabricated, [NFR-RA-05]). A sole
+///   provider in the consumer's *own* member is an intra-repo fact the per-repo
+///   graph already owns, so no cross-service edge is emitted for it — the same
+///   relation binds it locally.
+/// - [`MatchDiscipline::FanOut`] (broker topic): a consumer binds **every**
+///   cross-member provider of its key — one publish reaches all subscribers.
+///   Same-member providers are the intra-repo fan-out, excluded here.
+///
+/// The matcher never names a concrete namespace, so a freshly-registered
+/// namespace matches through the exact same code. Deterministic: provider lists
+/// and the emitted edges are sorted.
+///
+/// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+pub(super) fn match_indexed(
+    mut providers: HashMap<PortableKey, Vec<BridgeEndpoint>>,
+    consumers: Vec<(PortableKey, BridgeEndpoint)>,
+) -> Vec<BridgeEdge> {
     // Deterministic candidate order regardless of member fan-out order.
     for endpoints in providers.values_mut() {
         endpoints.sort();
@@ -446,21 +496,42 @@ where
         let Some(candidates) = providers.get(&key) else {
             continue; // no provider anywhere in the workspace — no edge
         };
-        // Exactly-one across members ([NFR-RA-05]): two or more providers of the
-        // same key are ambiguous and never fabricate an edge.
-        let [only] = candidates.as_slice() else {
-            continue;
-        };
-        // A sole provider in the consumer's *own* member is an intra-repo fact
-        // the per-repo graph owns; the bridge only emits cross-member links.
-        if only.member == consumer.member {
-            continue;
+        match key.namespace.match_discipline() {
+            MatchDiscipline::ExactlyOne => {
+                // Exactly-one across members ([NFR-RA-05]): two or more providers
+                // of the same key are ambiguous and never fabricate an edge.
+                let [only] = candidates.as_slice() else {
+                    continue;
+                };
+                // A sole provider in the consumer's *own* member is an intra-repo
+                // fact the per-repo graph owns; the bridge only emits cross-member
+                // links.
+                if only.member == consumer.member {
+                    continue;
+                }
+                edges.push(BridgeEdge {
+                    relation: key.relation().to_string(),
+                    from: consumer,
+                    to: only.clone(),
+                });
+            }
+            MatchDiscipline::FanOut => {
+                // One publish → every cross-member subscriber. No ambiguity: a
+                // topic with many subscribers fans out to all of them. A
+                // same-member subscriber is the intra-repo fan-out, owned by the
+                // per-repo graph.
+                for provider in candidates {
+                    if provider.member == consumer.member {
+                        continue;
+                    }
+                    edges.push(BridgeEdge {
+                        relation: key.relation().to_string(),
+                        from: consumer.clone(),
+                        to: provider.clone(),
+                    });
+                }
+            }
         }
-        edges.push(BridgeEdge {
-            relation: key.relation().to_string(),
-            from: consumer,
-            to: only.clone(),
-        });
     }
 
     edges.sort();
@@ -913,5 +984,147 @@ mod tests {
         let two = ContractBridge::new().edges(&registry(&["svc", "web", "api"]));
         assert_eq!(one, two, "the edge set is independent of discovery order");
         assert_eq!(one.len(), 2);
+    }
+
+    // ── FR-WS-07 / ADR-54: the namespace-generic match core ──────────────────
+    //
+    // These drive `match_indexed` directly with **synthetic** namespaces — gRPC
+    // and broker-topic — that have NO classifier feeding them yet (no invocation
+    // arm exists). They prove the match loop resolves a freshly-registered
+    // namespace generically, through the exact same code path HTTP takes, for
+    // both disciplines. This is the sprint's "synthetic-namespace test before any
+    // real arm exists" gate.
+
+    use crate::model::BridgeNamespace;
+
+    fn ep(member: &str, symbol: &str) -> BridgeEndpoint {
+        BridgeEndpoint {
+            member: member.to_string(),
+            symbol: LogosSymbol::parse(symbol).unwrap(),
+        }
+    }
+    fn pkey(namespace: BridgeNamespace, key: &str) -> PortableKey {
+        PortableKey {
+            namespace,
+            key: key.to_string(),
+        }
+    }
+    fn indexed(
+        providers: &[(PortableKey, BridgeEndpoint)],
+        consumers: Vec<(PortableKey, BridgeEndpoint)>,
+    ) -> Vec<BridgeEdge> {
+        let mut index: HashMap<PortableKey, Vec<BridgeEndpoint>> = HashMap::new();
+        for (key, endpoint) in providers {
+            index.entry(key.clone()).or_default().push(endpoint.clone());
+        }
+        match_indexed(index, consumers)
+    }
+
+    /// A freshly-registered **exactly-one** namespace (gRPC — nothing classifies
+    /// into it yet) matches through the same core as HTTP: a sole cross-member
+    /// provider binds, two providers are ambiguous (no edge), and a sole
+    /// same-member provider is an intra-repo fact (no bridge edge). No
+    /// namespace-specific match code exists for gRPC — the loop only consults its
+    /// discipline.
+    #[test]
+    fn a_synthetic_exactly_one_namespace_matches_generically() {
+        let key = pkey(BridgeNamespace::Grpc, "pkg.UserService/Get");
+
+        // Sole cross-member provider → binds, under the namespace's relation label.
+        let edges = indexed(
+            &[(key.clone(), ep("web", "local svc_get"))],
+            vec![(key.clone(), ep("api", "local stub_get"))],
+        );
+        assert_eq!(edges.len(), 1, "a sole cross-member provider binds: {edges:?}");
+        assert_eq!(edges[0].relation, "grpc-call");
+        assert_eq!(edges[0].from.member, "api");
+        assert_eq!(edges[0].to.member, "web");
+
+        // Two providers of the same key → ambiguous, never fabricated.
+        let edges = indexed(
+            &[
+                (key.clone(), ep("web", "local a")),
+                (key.clone(), ep("svc", "local b")),
+            ],
+            vec![(key.clone(), ep("api", "local stub"))],
+        );
+        assert!(
+            edges.is_empty(),
+            "two providers are ambiguous under exactly-one: {edges:?}"
+        );
+    }
+
+    /// A freshly-registered **fan-out** namespace (broker topic) matches through
+    /// the same core: one publish binds EVERY cross-member subscriber (fan-out,
+    /// not ambiguous), and a same-member subscriber is the intra-repo fan-out,
+    /// excluded.
+    #[test]
+    fn a_synthetic_fan_out_namespace_binds_every_cross_member_provider() {
+        let key = pkey(BridgeNamespace::BrokerTopic, "orders");
+        let edges = indexed(
+            &[
+                (key.clone(), ep("billing", "local sub_bill")),
+                (key.clone(), ep("ship", "local sub_ship")),
+                (key.clone(), ep("api", "local sub_local")),
+            ],
+            vec![(key.clone(), ep("api", "local pub_orders"))],
+        );
+
+        assert_eq!(
+            edges.len(),
+            2,
+            "one publish fans out to both cross-member subscribers: {edges:?}"
+        );
+        let tos: Vec<&str> = edges.iter().map(|e| e.to.member.as_str()).collect();
+        assert!(tos.contains(&"billing") && tos.contains(&"ship"));
+        assert!(
+            !tos.contains(&"api"),
+            "the same-member subscriber is the intra-repo fan-out, excluded"
+        );
+        for e in &edges {
+            assert_eq!(e.relation, "broker-topic");
+            assert_eq!(e.from.member, "api", "the publish is the edge source");
+        }
+    }
+
+    /// A consumer in a namespace with **no** provider anywhere contributes no
+    /// edge — the match-grain form of "a language lacking that capture
+    /// contributes nothing" (nothing was classified into the namespace, so the
+    /// consumer resolves to no provider and no edge is fabricated).
+    #[test]
+    fn a_namespace_with_no_provider_contributes_no_edge() {
+        let key = pkey(BridgeNamespace::Grpc, "pkg.Svc/Method");
+        let edges = match_indexed(HashMap::new(), vec![(key, ep("api", "local stub"))]);
+        assert!(edges.is_empty(), "no provider anywhere → no edge: {edges:?}");
+    }
+
+    /// Acceptance (3): an intra-repo invocation binds **locally through the same
+    /// relation**, not as a cross-service bridge edge. A consumer whose sole
+    /// provider is in its own member yields no bridge edge under either
+    /// discipline — the per-repo graph already owns that binding (the same
+    /// relation resolves it through the intra-repo artifact binder, unchanged).
+    #[test]
+    fn an_intra_repo_invocation_is_owned_by_the_local_graph_not_the_bridge() {
+        // Exactly-one: a sole same-member provider is intra-repo.
+        let http = pkey(BridgeNamespace::Http, "GET /users/{}");
+        let edges = indexed(
+            &[(http.clone(), ep("api", "local route_local"))],
+            vec![(http, ep("api", "local op_local"))],
+        );
+        assert!(
+            edges.is_empty(),
+            "an in-repo consumer→provider pair binds locally, not via the bridge: {edges:?}"
+        );
+
+        // Fan-out: a same-member subscriber is likewise intra-repo, no bridge edge.
+        let topic = pkey(BridgeNamespace::BrokerTopic, "orders");
+        let edges = indexed(
+            &[(topic.clone(), ep("api", "local sub_local"))],
+            vec![(topic, ep("api", "local pub_local"))],
+        );
+        assert!(
+            edges.is_empty(),
+            "an in-repo publish→subscribe pair is the local graph's fan-out: {edges:?}"
+        );
     }
 }

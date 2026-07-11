@@ -39,6 +39,99 @@ use serde::{Deserialize, Serialize};
 
 use super::{EdgeKind, NodeKind};
 
+/// The cross-service **invocation namespace** an [`ArtifactRelation`] arm
+/// participates in ([FR-WS-07], [ADR-54]).
+///
+/// Each pluggable invocation arm (an HTTP client call, a gRPC stub call, a
+/// broker publish/subscribe) declares its namespace via
+/// [`ArtifactRelation::bridge_namespace`]. The federation bridge's match loop is
+/// **namespace-generic**: it keys candidates on `(namespace, portable-key)` and
+/// applies the namespace's [`match_discipline`](BridgeNamespace::match_discipline)
+/// — never any arm-specific matching code. Adding an arm therefore never edits
+/// the match loop; it only maps a new relation variant onto one of these
+/// already-defined namespaces.
+///
+/// The three namespaces are fixed by the invocation-arm surface arc: HTTP and
+/// gRPC bind **exactly-one** provider, a broker topic **fans out** (one publish
+/// → every subscriber).
+///
+/// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BridgeNamespace {
+    /// HTTP client-call → route arm ([FR-WS-08]). Exactly-one.
+    Http,
+    /// gRPC stub-call → proto-service arm ([FR-WS-09]). Exactly-one.
+    Grpc,
+    /// Message-broker publish/subscribe arm ([FR-WS-10]). Fan-out.
+    BrokerTopic,
+}
+
+/// How the [namespace-generic bridge match loop](crate::federation) resolves a
+/// consumer key against the workspace's providers ([ADR-54]).
+///
+/// The single per-namespace knob the match loop switches on — the reason the
+/// loop is arm-agnostic: it never names a concrete namespace, only its
+/// discipline.
+///
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MatchDiscipline {
+    /// A consumer binds the **sole** provider of its key in another member; two
+    /// or more providers are ambiguous and produce **no** edge (never
+    /// fabricated, [NFR-RA-05]). HTTP and gRPC.
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    ExactlyOne,
+    /// A consumer binds **every** provider of its key in another member — one
+    /// publish reaches all subscribers. A broker topic.
+    FanOut,
+}
+
+impl BridgeNamespace {
+    /// The match discipline the bridge applies for keys in this namespace
+    /// ([ADR-54]) — the only namespace-specific decision the otherwise
+    /// arm-agnostic match loop makes.
+    ///
+    /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+    pub const fn match_discipline(self) -> MatchDiscipline {
+        match self {
+            BridgeNamespace::Http | BridgeNamespace::Grpc => MatchDiscipline::ExactlyOne,
+            BridgeNamespace::BrokerTopic => MatchDiscipline::FanOut,
+        }
+    }
+
+    /// The relation-class label a binding in this namespace files its edge
+    /// under — the intra-repo vocabulary a cross-service answer speaks.
+    pub const fn relation(self) -> &'static str {
+        match self {
+            BridgeNamespace::Http => "route",
+            BridgeNamespace::Grpc => "grpc-call",
+            BridgeNamespace::BrokerTopic => "broker-topic",
+        }
+    }
+}
+
+/// Which side of a cross-service invocation an [`ArtifactRelation`] arm sits on
+/// ([FR-WS-07], [ADR-54]).
+///
+/// The bridge indexes [`Provider`](BridgeRole::Provider) endpoints by portable
+/// key and iterates [`Consumer`](BridgeRole::Consumer) endpoints against that
+/// index. An arm declares its side via [`ArtifactRelation::bridge_role`].
+///
+/// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BridgeRole {
+    /// Refers to an endpoint (a client call, a publish) — the edge's `from`.
+    Consumer,
+    /// Exposes an endpoint (a route handler, a subscribe) — the edge's `to`.
+    Provider,
+}
+
 /// Whether an extracted reference target is a binding **candidate**.
 ///
 /// The gate that keeps the `unresolved_refs` ledger an honest work list rather
@@ -295,6 +388,84 @@ impl ArtifactRelation {
     pub fn is_external(self, target: &str) -> bool {
         self.classify_target(target) == TargetClass::External
     }
+
+    /// The cross-service invocation [`BridgeNamespace`] this relation is an arm
+    /// of, or `None` when it is not an invocation arm ([FR-WS-07], [ADR-54]).
+    ///
+    /// This is one of the **two pure descriptors** a pluggable invocation arm
+    /// declares (the other is [`bridge_role`](ArtifactRelation::bridge_role)).
+    /// Together with a per-language capture file they are the *entire* surface of
+    /// adding an arm — no schema migration, no edit to the bridge's
+    /// namespace-generic match loop. The bridge routes any arm to the right match
+    /// namespace purely through this method, so a freshly-added arm participates
+    /// generically without arm-specific match code.
+    ///
+    /// Every relation shipped today (the CR-011 cross-artifact relations) is a
+    /// **contract/artifact** relation, not an invocation arm, so all return
+    /// `None`. The HTTP/gRPC/broker arms ([FR-WS-08]–[FR-WS-10]) override this to
+    /// their [`BridgeNamespace`]. An arm MUST declare **both** descriptors or
+    /// **neither** — see [`bridge_role`](ArtifactRelation::bridge_role).
+    ///
+    /// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
+    /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+    /// [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+    pub const fn bridge_namespace(self) -> Option<BridgeNamespace> {
+        match self {
+            // No relation shipped today is an invocation arm; the HTTP/gRPC/
+            // broker arms (S-252/S-253/S-254) each add a variant overriding this.
+            ArtifactRelation::ProtoImport
+            | ArtifactRelation::ProtoType
+            | ArtifactRelation::GraphqlType
+            | ArtifactRelation::SchemaType
+            | ArtifactRelation::Route
+            | ArtifactRelation::TfModuleCall
+            | ArtifactRelation::TfVarRef
+            | ArtifactRelation::SqlObjectRef
+            | ArtifactRelation::ShellSource => None,
+        }
+    }
+
+    /// Which side of a cross-service invocation this relation captures — the
+    /// second of the arm's **two pure descriptors** — or `None` when it is not an
+    /// invocation arm ([FR-WS-07], [ADR-54]).
+    ///
+    /// Paired with [`bridge_namespace`](ArtifactRelation::bridge_namespace): a
+    /// relation is an invocation arm iff **both** are `Some`. The pairing is a
+    /// hard invariant asserted for every variant by the
+    /// `bridge_namespace_and_role_are_declared_together_or_not_at_all` test, so a
+    /// half-declared arm cannot reach the bridge in an ill-defined state.
+    ///
+    /// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
+    /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+    pub const fn bridge_role(self) -> Option<BridgeRole> {
+        match self {
+            ArtifactRelation::ProtoImport
+            | ArtifactRelation::ProtoType
+            | ArtifactRelation::GraphqlType
+            | ArtifactRelation::SchemaType
+            | ArtifactRelation::Route
+            | ArtifactRelation::TfModuleCall
+            | ArtifactRelation::TfVarRef
+            | ArtifactRelation::SqlObjectRef
+            | ArtifactRelation::ShellSource => None,
+        }
+    }
+
+    /// `true` iff this relation is a pluggable cross-service invocation arm —
+    /// iff it declares **both** [`bridge_namespace`](ArtifactRelation::bridge_namespace)
+    /// and [`bridge_role`](ArtifactRelation::bridge_role) ([FR-WS-07], [ADR-54]).
+    ///
+    /// The two descriptors must agree (both `Some` or both `None`); a relation
+    /// that declares exactly one is a contract bug this method's callers rely on
+    /// never happening (the pairing test asserts it for every variant in `ALL`).
+    ///
+    /// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
+    /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+    pub const fn is_invocation_arm(self) -> bool {
+        self.bridge_namespace().is_some()
+    }
 }
 
 /// `true` if `target` is an absolute URL — a `scheme://` authority form. Cheap,
@@ -533,5 +704,142 @@ mod tests {
                 rel.as_str()
             );
         }
+    }
+
+    // ── FR-WS-07 / ADR-54: the pluggable invocation-arm descriptors ──────────
+
+    /// No relation shipped today is a cross-service invocation arm: every variant
+    /// declares neither descriptor. This is the pre-arm baseline the HTTP/gRPC/
+    /// broker arms (S-252/S-253/S-254) flip to `Some` one variant at a time.
+    #[test]
+    fn no_shipped_relation_is_an_invocation_arm() {
+        for rel in ArtifactRelation::ALL {
+            assert_eq!(
+                rel.bridge_namespace(),
+                None,
+                "{} is a contract/artifact relation, not an invocation arm",
+                rel.as_str()
+            );
+            assert_eq!(rel.bridge_role(), None, "{}", rel.as_str());
+            assert!(!rel.is_invocation_arm(), "{}", rel.as_str());
+        }
+    }
+
+    /// The hard pairing invariant every arm — present or future — must honor: a
+    /// relation declares **both** `bridge_namespace` and `bridge_role`, or
+    /// **neither**. A half-declared arm is a contract bug the bridge relies on
+    /// never seeing. Iterating `ALL` means a future arm variant is auto-checked.
+    #[test]
+    fn bridge_namespace_and_role_are_declared_together_or_not_at_all() {
+        for rel in ArtifactRelation::ALL {
+            assert_eq!(
+                rel.bridge_namespace().is_some(),
+                rel.bridge_role().is_some(),
+                "{} must declare both invocation-arm descriptors or neither",
+                rel.as_str()
+            );
+            // `is_invocation_arm` is exactly "both descriptors present".
+            assert_eq!(rel.is_invocation_arm(), rel.bridge_role().is_some());
+        }
+    }
+
+    /// Guards `ArtifactRelation::ALL` — the array every contract test iterates —
+    /// against drift. The exhaustive `index` match assigns each variant its
+    /// declaration position, so adding a variant fails to compile here until it
+    /// is handled, and the assertion then fails until the variant sits at that
+    /// index in `ALL`. This catches reordering, duplication, and an `ALL` whose
+    /// length disagrees with the declared variant count, and adds one more
+    /// compiler-forced touch-point a new arm must pass through. (Fully proving a
+    /// new variant was *added* to `ALL` at all would need an enum-iteration derive
+    /// — deliberately not taken on here; the enum's six exhaustive `match self`
+    /// methods plus this guard make silent drift highly unlikely.)
+    #[test]
+    fn all_lists_every_variant_in_declaration_order() {
+        const fn index(rel: ArtifactRelation) -> usize {
+            match rel {
+                ArtifactRelation::ProtoImport => 0,
+                ArtifactRelation::ProtoType => 1,
+                ArtifactRelation::GraphqlType => 2,
+                ArtifactRelation::SchemaType => 3,
+                ArtifactRelation::Route => 4,
+                ArtifactRelation::TfModuleCall => 5,
+                ArtifactRelation::TfVarRef => 6,
+                ArtifactRelation::SqlObjectRef => 7,
+                ArtifactRelation::ShellSource => 8,
+            }
+        }
+        for (i, rel) in ArtifactRelation::ALL.into_iter().enumerate() {
+            assert_eq!(
+                index(rel),
+                i,
+                "{} is out of place in ArtifactRelation::ALL",
+                rel.as_str()
+            );
+        }
+        // No extras/duplicates: `ALL` is exactly the declared variants, once each.
+        assert_eq!(ArtifactRelation::ALL.len(), 9);
+    }
+
+    /// The per-namespace match discipline the bridge switches on: HTTP and gRPC
+    /// bind exactly-one; a broker topic fans out. This is the only
+    /// namespace-specific decision the arm-agnostic match loop makes.
+    #[test]
+    fn match_discipline_is_exactly_one_for_http_grpc_and_fan_out_for_broker() {
+        assert_eq!(
+            BridgeNamespace::Http.match_discipline(),
+            MatchDiscipline::ExactlyOne
+        );
+        assert_eq!(
+            BridgeNamespace::Grpc.match_discipline(),
+            MatchDiscipline::ExactlyOne
+        );
+        assert_eq!(
+            BridgeNamespace::BrokerTopic.match_discipline(),
+            MatchDiscipline::FanOut
+        );
+    }
+
+    /// Each namespace carries a stable relation-class label the bridge files its
+    /// edges under (the intra-repo vocabulary cross-service answers speak). The
+    /// HTTP label is `route` — the same class the intra-repo `ApiOperation`→
+    /// `Route` binder uses — so HTTP arm edges read identically across the seam.
+    #[test]
+    fn each_namespace_has_a_stable_relation_label() {
+        assert_eq!(BridgeNamespace::Http.relation(), "route");
+        assert_eq!(BridgeNamespace::Grpc.relation(), "grpc-call");
+        assert_eq!(BridgeNamespace::BrokerTopic.relation(), "broker-topic");
+    }
+
+    /// The descriptor enums serialize as stable kebab-case wire tokens (they ride
+    /// the coverage read-model and the arm registry), and round-trip.
+    #[test]
+    fn descriptor_enums_round_trip_through_kebab_wire_tokens() {
+        for (ns, token) in [
+            (BridgeNamespace::Http, "\"http\""),
+            (BridgeNamespace::Grpc, "\"grpc\""),
+            (BridgeNamespace::BrokerTopic, "\"broker-topic\""),
+        ] {
+            assert_eq!(serde_json::to_string(&ns).unwrap(), token);
+            assert_eq!(
+                serde_json::from_str::<BridgeNamespace>(token).unwrap(),
+                ns
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&BridgeRole::Consumer).unwrap(),
+            "\"consumer\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BridgeRole::Provider).unwrap(),
+            "\"provider\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MatchDiscipline::ExactlyOne).unwrap(),
+            "\"exactly-one\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MatchDiscipline::FanOut).unwrap(),
+            "\"fan-out\""
+        );
     }
 }

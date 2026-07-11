@@ -45,7 +45,7 @@
 //! [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
 //! [NFR-RA-06]: ../../../../docs/specs/requirements/NFR-RA-06.md
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use tree_sitter::Node;
 
@@ -96,6 +96,89 @@ pub(super) fn push_artifact_ref(
         relation: Some(relation),
     });
     true
+}
+
+/// One captured cross-service **invocation site** — the language-neutral slots a
+/// per-language capture query (`.scm`) pulled from a single call / publish /
+/// subscribe expression, plus the enclosing anchor it is attributed to
+/// ([FR-WS-07], [ADR-54]).
+///
+/// The `slots` map is opaque to the [`capture_invocation_refs`] interpreter (an
+/// arm names its own capture slots — `method`/`path` for HTTP, `package`/
+/// `service`/`method` for gRPC, `topic` for a broker); the interpreter passes
+/// them verbatim to the arm's normalizer.
+///
+/// Consumed by the S-252/S-253/S-254 invocation arms; the contract ships the
+/// carrier and interpreter so an arm is "one relation variant + one capture
+/// file", never new plumbing here.
+///
+/// [FR-WS-07]: ../../../../docs/specs/requirements/FR-WS-07.md
+/// [ADR-54]: ../../../../docs/specs/architecture/decisions/ADR-54.md
+#[allow(dead_code)] // exercised by tests now; consumed by the S-252/253/254 arms.
+pub(crate) struct InvocationSite {
+    /// The enclosing anchor/function symbol the invocation is attributed to.
+    pub(crate) source: LogosSymbol,
+    /// The arm's named captures for this site (`capture-name → text`).
+    pub(crate) slots: BTreeMap<String, String>,
+    /// The 1-based source line the invocation is reported at.
+    pub(crate) line: u32,
+}
+
+/// The generic, **arm-agnostic** consumer-side capture interpreter ([FR-WS-07],
+/// [ADR-54]).
+///
+/// Drives the per-language captured `sites` through the arm's `render_target`
+/// normalizer and funnels each rendered target through the existing
+/// [`push_artifact_ref`] emission point under the arm's `relation`. This is the
+/// reuse foundation the three invocation arms share — the loop, the refusal
+/// discipline, and the emission choke-point are written once; an arm brings only
+/// its per-language `.scm` (→ `sites`), its normalizer (`render_target`, e.g.
+/// `route_key`/`grpc_key`/topic), and its [`ArtifactRelation`] variant.
+///
+/// Three invariants fall out for free, so every arm inherits them:
+///
+/// 1. **A language lacking the capture contributes nothing** — a language with
+///    no capture file yields no `sites`, so the loop emits nothing.
+/// 2. **Never fabricate** ([NFR-RA-05]) — a site the normalizer cannot reduce to
+///    a static portable key (a runtime-composed path, a dynamic topic) is
+///    refused by returning `None`, contributing no reference and no ledger entry.
+/// 3. **Externals never enter the ledger** ([FR-CG-07]) — a rendered target the
+///    relation classifies external is dropped by [`push_artifact_ref`]'s gate.
+///
+/// Returns the number of references captured. The routine is deliberately
+/// relation-agnostic (it does not require `relation.is_invocation_arm()`), so
+/// the contract's own tests exercise it with a stand-in relation before any real
+/// arm variant exists.
+///
+/// [FR-WS-07]: ../../../../docs/specs/requirements/FR-WS-07.md
+/// [FR-CG-07]: ../../../../docs/specs/requirements/FR-CG-07.md
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+/// [ADR-54]: ../../../../docs/specs/architecture/decisions/ADR-54.md
+#[allow(dead_code)] // the reuse foundation; the S-252/253/254 arms are its callers.
+pub(crate) fn capture_invocation_refs<F>(
+    facts: &mut Facts,
+    relation: ArtifactRelation,
+    form: RefForm,
+    sites: impl IntoIterator<Item = InvocationSite>,
+    render_target: F,
+) -> usize
+where
+    F: Fn(&BTreeMap<String, String>) -> Option<String>,
+{
+    let mut emitted = 0;
+    for site in sites {
+        // The arm's normalizer refuses a runtime-composed / non-normalizable site
+        // by returning None: it contributes nothing (never fabricate).
+        let Some(target) = render_target(&site.slots) else {
+            continue;
+        };
+        // push_artifact_ref applies the external-target gate; an external target
+        // produces no fact and no ledger entry.
+        if push_artifact_ref(facts, &site.source, &target, relation, form, site.line) {
+            emitted += 1;
+        }
+    }
+    emitted
 }
 
 /// Capture every cross-artifact reference fact for one config/artifact file
@@ -1159,6 +1242,90 @@ mod tests {
             EdgeKind::ArtifactBinding,
             "a schema type-name reference binds artifact→code"
         );
+    }
+
+    // ── FR-WS-07 / ADR-54: the generic consumer-side capture interpreter ──────
+
+    fn site(source: &str, line: u32, slots: &[(&str, &str)]) -> InvocationSite {
+        InvocationSite {
+            source: LogosSymbol::parse(source).unwrap(),
+            slots: slots
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            line,
+        }
+    }
+
+    /// The interpreter renders each captured site via the arm's (synthetic)
+    /// normalizer and funnels it through the shared emission point: a rendered
+    /// static site is captured; a site the normalizer refuses (a runtime-composed
+    /// target) contributes nothing; an external rendered target is dropped by the
+    /// push gate; and an empty site stream (a language with no capture file)
+    /// contributes nothing. The stand-in relation is `Route` — no relation is an
+    /// invocation arm yet, and the interpreter is relation-agnostic plumbing.
+    #[test]
+    fn the_interpreter_renders_refuses_and_drops_externals() {
+        // A synthetic arm normalizer: join `method` + `path`, refusing a
+        // runtime-composed path (one carrying a `$` marker).
+        let render = |slots: &BTreeMap<String, String>| -> Option<String> {
+            let method = slots.get("method")?;
+            let path = slots.get("path")?;
+            if path.contains('$') {
+                return None; // runtime-composed → refuse (never fabricate)
+            }
+            Some(format!("{method} {path}"))
+        };
+
+        // A language lacking the capture file yields no sites → nothing captured.
+        let mut facts = empty_facts();
+        let n = capture_invocation_refs(
+            &mut facts,
+            ArtifactRelation::Route,
+            RefForm::Path,
+            Vec::new(),
+            &render,
+        );
+        assert_eq!(n, 0, "no capture file → no sites → no refs");
+        assert!(facts.refs.is_empty());
+
+        // Two static sites are captured (proving the count accumulates past the
+        // first emit); a refused and an external one are dropped.
+        let mut facts = empty_facts();
+        let sites = vec![
+            site("local 1", 5, &[("method", "GET"), ("path", "/users/{id}")]),
+            site("local 2", 6, &[("method", "POST"), ("path", "$base/orders")]),
+            site("local 3", 7, &[("method", "GET"), ("path", "https://ext/x")]),
+            site("local 4", 8, &[("method", "POST"), ("path", "/orders")]),
+        ];
+        let n = capture_invocation_refs(
+            &mut facts,
+            ArtifactRelation::Route,
+            RefForm::Path,
+            sites,
+            &render,
+        );
+        assert_eq!(n, 2, "both static, workspace-relative sites are captured");
+        assert_eq!(facts.refs.len(), 2);
+        // Emission order follows site order (the refused/external sites in
+        // between leave no gap and do not reorder the captured ones).
+        let captured: Vec<(&str, &str)> = facts
+            .refs
+            .iter()
+            .map(|r| (r.source.as_str(), r.target.as_str()))
+            .collect();
+        assert_eq!(
+            captured,
+            vec![("local 1", "GET /users/{id}"), ("local 4", "POST /orders")]
+        );
+        // The relation, the reported line, and the RefForm/edge-kind pass through
+        // unchanged — the interpreter defers the edge-kind decision to
+        // `push_artifact_ref` (`relation.edge_kind()`), never overriding it.
+        let first = &facts.refs[0];
+        assert_eq!(first.line, 5);
+        assert_eq!(first.form, RefForm::Path);
+        assert_eq!(first.relation, Some(ArtifactRelation::Route));
+        assert_eq!(first.kind, ArtifactRelation::Route.edge_kind());
     }
 
     // ── S-069: OpenAPI operation→route capture ───────────────────────────────
