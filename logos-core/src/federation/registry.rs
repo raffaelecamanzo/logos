@@ -626,6 +626,30 @@ mod tests {
         assert_eq!(watches(), 3, "serve re-watches the rebuilt engine");
     }
 
+    /// Under serve, a member whose **watcher** fails to spawn degrades to a
+    /// watcherless-but-resident engine — the touch still succeeds ([FR-SY-06]).
+    #[test]
+    fn serve_degrades_when_a_watcher_fails_to_spawn() {
+        #[derive(Debug)]
+        struct NoWatchEngine;
+        impl MemberEngine for NoWatchEngine {
+            type Watcher = ();
+            fn start(_root: &Path) -> Result<Arc<Self>> {
+                Ok(Arc::new(NoWatchEngine))
+            }
+            fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
+                anyhow::bail!("OS watcher could not attach")
+            }
+        }
+
+        let registry = EngineRegistry::<NoWatchEngine>::new(fed(&["a", "b"]), RegistryMode::Serve);
+        // Watcher failure is non-fatal: both engines are still built and resident.
+        assert_eq!(registry.resident_members(), ["a", "b"]);
+        assert_eq!(registry.resident_count(), 2);
+        // A subsequent scoped touch of a watcherless member still succeeds.
+        assert!(registry.engine_for("a").is_ok());
+    }
+
     /// Touching an unknown member is an error, not a silent build.
     #[test]
     fn unknown_member_is_an_error() {
