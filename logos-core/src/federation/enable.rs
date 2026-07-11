@@ -10,9 +10,9 @@
 use std::path::Path;
 
 use anyhow::Result;
-use globset::{Glob, GlobSetBuilder};
 use serde::Serialize;
 
+use crate::config::globs;
 use crate::init::{self, InitOptions};
 use crate::models::pipeline::{InitResult, InitStep};
 
@@ -62,8 +62,12 @@ pub struct WorkspaceEnableReport {
 /// anything matching an `--exclude` glob ([FR-WS-02]): the approval-gate
 /// input. Pure and testable — no interactivity, no writes.
 ///
+/// Reuses the crate's single glob compiler ([`globs::compile`]) rather than
+/// hand-rolling a second one — the same "fail loud on a bad glob" primitive
+/// `config_artifacts`/`documentation` already share.
+///
 /// # Errors
-/// A malformed `--exclude` glob.
+/// A malformed `--exclude` glob ([`crate::config::ConfigError::BadGlob`]).
 ///
 /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 pub fn candidates_for_approval(
@@ -71,11 +75,7 @@ pub fn candidates_for_approval(
     already_included: &[String],
     exclude: &[String],
 ) -> Result<Vec<Member>> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in exclude {
-        builder.add(Glob::new(pattern)?);
-    }
-    let excluded = builder.build()?;
+    let excluded = globs::compile(exclude)?;
 
     Ok(discover_candidates(root)
         .into_iter()
@@ -103,8 +103,14 @@ pub fn enable(root: &Path, name: &str, members: &[Member]) -> Result<WorkspaceEn
             root: member.root.display().to_string(),
             outcome: match crate::Engine::init_with(&member.root, &InitOptions::default()) {
                 Ok(result) => MemberOutcome::Ready(result),
+                // `{err:#}` (not `{err}`/`.to_string()`) to keep the causal
+                // chain: `Engine::init_with`'s steps wrap I/O failures with
+                // `.with_context(...)` (e.g. "writing .logos/config.toml"),
+                // so the bare Display would show only that wrapper and drop
+                // the actual underlying cause (permission denied, disk
+                // full, …) — the same convention `cli/src/main.rs` uses.
                 Err(err) => MemberOutcome::Degraded {
-                    reason: err.to_string(),
+                    reason: format!("{err:#}"),
                 },
             },
         })
