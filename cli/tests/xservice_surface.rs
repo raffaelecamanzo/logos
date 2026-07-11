@@ -222,6 +222,69 @@ fn search_fans_repo_qualified_and_repo_scopes() {
     assert_eq!(scoped_members[0]["member"], "web");
 }
 
+/// AC1: `xservice callers` fans intra-repo callers across members and surfaces
+/// the cross-service consumers that reach a provider symbol over a bridge edge;
+/// `--repo` scopes the intra-repo fan-out.
+#[test]
+fn callers_lists_cross_service_consumers_and_repo_scopes() {
+    let tmp = workspace();
+
+    // Resolve the web route provider symbol via search.
+    let hits = logos_json(
+        tmp.path(),
+        &["xservice", "search", "users", "--kind", "route", "--repo", "web"],
+    );
+    let route_symbol = hits["members"][0]["result"]["hits"][0]["symbol"]
+        .as_str()
+        .expect("the axum route node is indexed in web")
+        .to_string();
+
+    let callers = logos_json(tmp.path(), &["xservice", "callers", &route_symbol]);
+    let members = callers["members"].as_array().expect("members array");
+    assert_eq!(members.len(), 2, "callers fans across both members");
+
+    // The cross-service consumer of the web-provided route is the api operation.
+    let cross = callers["cross_service"].as_array().expect("cross_service array");
+    assert_eq!(
+        cross.len(),
+        1,
+        "the provider route has exactly one cross-service consumer: {cross:?}"
+    );
+    assert_eq!(
+        cross[0]["from"]["member"], "api",
+        "the cross-service caller is the consumer endpoint in api"
+    );
+    assert_eq!(cross[0]["to"]["member"], "web", "reaching the provider in web");
+
+    // `--repo web` scopes the intra-repo fan-out to one member.
+    let scoped = logos_json(
+        tmp.path(),
+        &["xservice", "callers", &route_symbol, "--repo", "web"],
+    );
+    assert_eq!(scoped["scope"], "web");
+    assert_eq!(scoped["members"].as_array().unwrap().len(), 1);
+}
+
+/// AC1 (degrade-don't-abort): an unknown `--repo` surfaces as a single
+/// per-member error, exit 0, machine-clean JSON — never a panic.
+#[test]
+fn unknown_repo_surfaces_a_per_member_error() {
+    let tmp = workspace();
+    let out = logos_json(tmp.path(), &["xservice", "search", "get_user", "--repo", "nope"]);
+    let members = out["members"].as_array().expect("members array");
+    assert_eq!(members.len(), 1, "an unknown repo yields exactly one member entry");
+    assert_eq!(members[0]["member"], "nope");
+    assert!(
+        members[0]["error"].as_str().is_some(),
+        "the unknown member surfaces an error channel: {}",
+        members[0]
+    );
+    assert!(
+        members[0].get("result").is_none(),
+        "no result for the unknown member"
+    );
+}
+
 /// AC1: `xservice impact` stitches per-member impact across the bridge edges —
 /// impacting the provider route surfaces its cross-service consumer in `api`.
 #[test]
