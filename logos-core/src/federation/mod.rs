@@ -23,8 +23,13 @@
 //!   member's contract surface through its read pool, matches portable keys
 //!   across members exactly-one, and emits ephemeral `BridgeEdge` values cached
 //!   on member sync-stamps; never persisted, never `ATTACH`-ed ([FR-WS-04]).
+//! - the [`coverage`] — the 3-state (bound/ambiguous/unbound) cross-service
+//!   coverage read-model with a per-reference reason, a non-gated advisory
+//!   tier over the same contract surfaces the bridge reads ([FR-WS-05],
+//!   [ADR-53]).
 //!
 //! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
+//! [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 //!
 //! # Single-root invariant
 //! When **no** manifest is found anywhere up-tree, [`discover`] returns
@@ -45,6 +50,7 @@
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
 pub mod bridge;
+pub mod coverage;
 pub mod enable;
 pub mod manifest;
 pub mod registry;
@@ -57,6 +63,9 @@ use crate::config::ConfigError;
 use crate::workspace::{is_git_root, resolve_root};
 
 pub use bridge::{BridgeEdge, BridgeEndpoint, ContractBridge, ContractNode, MemberContracts};
+pub use coverage::{
+    cross_service_coverage, CoverageState, CrossServiceCoverage, ReferenceCoverage, UnboundReason,
+};
 pub use manifest::{Link, MANIFEST_FILENAME};
 pub use registry::{Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode};
 

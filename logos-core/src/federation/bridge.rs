@@ -243,8 +243,15 @@ fn surface_from(nodes: &[NodeRow], edges: &[EdgeRow]) -> Vec<ContractNode> {
 ///
 /// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// Visible within `federation` (not just this file) so the coverage read-model
+/// ([`super::coverage`], [FR-WS-05], [ADR-53]) classifies references with the
+/// exact same key vocabulary the bridge matches edges on — one classifier, no
+/// drift between "why did this bind" and "why didn't this bind".
+///
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum PortableKey {
+pub(super) enum PortableKey {
     /// An HTTP endpoint keyed by the shared positional `route_key`:
     /// `(upper-cased METHOD, positionally-normalized template)`.
     Http(String, String),
@@ -252,7 +259,7 @@ enum PortableKey {
 
 impl PortableKey {
     /// The relation class a binding on this key is filed under.
-    fn relation(&self) -> &'static str {
+    pub(super) fn relation(&self) -> &'static str {
         match self {
             PortableKey::Http(..) => "route",
         }
@@ -261,7 +268,7 @@ impl PortableKey {
 
 /// Which side of a portable-key match a node sits on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
+pub(super) enum Role {
     /// Exposes the endpoint (a framework `Route` handler).
     Provider,
     /// Refers to the endpoint (an OpenAPI `ApiOperation`).
@@ -273,7 +280,7 @@ enum Role {
 /// normalize cleanly (a catch-all/regex route is never a candidate, [NFR-RA-05]).
 ///
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-fn classify(kind: NodeKind, name: &str) -> Option<(PortableKey, Role)> {
+pub(super) fn classify(kind: NodeKind, name: &str) -> Option<(PortableKey, Role)> {
     match kind {
         NodeKind::Route => {
             let (method, template) = route_key(name)?;
