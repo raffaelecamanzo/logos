@@ -456,7 +456,12 @@ logos xservice impact <SYMBOL> [--depth <N>] [--repo <MEMBER>] [--json]
 - **`route-providers`** — the workspace service map: every cross-service binding
   where one member's declared route provides for a reference in another
   (`BridgeEdge`s matched exactly-one on a portable `route_key`; two providers ⇒
-  ambiguous, no edge). `--repo X` scopes to routes *provided by* member `X`.
+  ambiguous, no edge). As of Sprint 56 the consumer side includes not just
+  declared cross-service contracts but **static HTTP client calls** — an outbound
+  `"METHOD /template"` call in one member binds a matching `Route` in another
+  through the same `route_key` (a base-URL-composed or non-static path stays
+  unbound with a reason, never approximately matched). `--repo X` scopes to
+  routes *provided by* member `X`.
 - **`search`** — full-text search fanned across every member, each hit tagged
   with its member. `--repo X` scopes the fan to member `X`.
 - **`callers`** — direct callers of a symbol per member, plus the cross-service
@@ -469,6 +474,16 @@ logos xservice impact <SYMBOL> [--depth <N>] [--repo <MEMBER>] [--json]
 `--repo` constructs only the member engines the answer needs (a one-shot never
 builds all N, [NFR-PE-10](../specs/requirements/NFR-PE-10.md)). All `--json`
 output is a single machine-clean line.
+
+**Cross-service invocation arms.** The bridge binds real runtime invocations, not
+just declared contracts, through a pluggable arm contract (each arm normalizes a
+call to a portable key and refuses anything non-static — zero approximate binds).
+The HTTP client-call arm is live in `route-providers` (above). The gRPC
+stub-call arm (binding `package.Service/Method` FQNs) and the message-broker
+publish/subscribe arm (fan-out on a shared topic) are captured and covered at the
+ledger tier but their live cross-service edges are not yet surfaced through
+`route-providers` — that wiring is a scheduled follow-up. No schema migration is
+involved in any arm.
 
 ### `workspace status`
 
