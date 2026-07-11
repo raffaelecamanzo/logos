@@ -64,14 +64,33 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// `tests/xservice_roster.rs`), so this is additive surface, not leaked logic.
 /// Flagged for the Sprint 55 human review as a deliberate tool-family addition,
 /// per the S-284 precedent above.
+///
+/// S-258/CR-061 raised 880→890 (+8 measured) for the FR-WS-13 workspace
+/// governance twin. Two additions, both delegation-only.
+///
+/// `workspace_check` (~10 lines) is an attribute, a signature, and ONE
+/// `logos_core::federation::workspace_governance` call. The whole rule family
+/// (manifest schema, glob compilation, boundary + no-cross-service-callers
+/// evaluation, the honest-empty `Option`) lives in `logos-core`; the surface
+/// decides nothing.
+///
+/// `run_xservice_result` (net ~+8 after `run_xservice` collapses onto it) is the
+/// fallible twin of the registry delegator, mirroring the `run`/`run_result` pair
+/// that already exists directly above it. It is the ADR-14 error-mapping seam,
+/// not policy: `workspace_check` compiles user-authored globs, and a malformed
+/// rule must surface as a structured MCP error rather than silently matching
+/// nothing (a rule that quietly never fires would report a false all-clear).
+///
+/// No logic to trim — the same "honest, delegation-only addition" the S-284
+/// precedent blesses. Flagged for the Sprint 57 human review.
 #[test]
 fn mcp_surface_line_budget() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 880,
-        "mcp adapter exceeds the 880 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 890,
+        "mcp adapter exceeds the 890 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

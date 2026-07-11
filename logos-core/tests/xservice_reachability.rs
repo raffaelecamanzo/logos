@@ -101,6 +101,7 @@ fn federation(root: &Path, members: Vec<Member>) -> Federation {
         members,
         default: None,
         links: Vec::new(),
+        governance: Default::default(),
     }
 }
 

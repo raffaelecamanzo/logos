@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use logos_core::federation::{
-    self, query, Backing, BridgeEdge, ContractBridge, EngineRegistry,
+    self, query, workspace_governance, Backing, BridgeEdge, ContractBridge, EngineRegistry,
 };
 use logos_core::{governance::DsmGranularity, model::NodeKind, Engine};
 use rmcp::{
@@ -66,7 +66,7 @@ impl LogosMcp {
     /// present, so single-root never pays for the extra roster.
     pub fn federated(registry: EngineRegistry<Engine>) -> Self {
         Self {
-            backing: Arc::new(Backing::Federated(registry)),
+            backing: Arc::new(Backing::Federated(Box::new(registry))),
             bridge: Arc::new(ContractBridge::new()),
             tool_router: Self::single_tool_router() + Self::xservice_tool_router(),
         }
@@ -144,6 +144,27 @@ impl LogosMcp {
         T: serde::Serialize + Send + 'static,
         F: FnOnce(&EngineRegistry<Engine>, &[BridgeEdge]) -> T + Send + 'static,
     {
+        self.run_xservice_result(tool, move |registry, edges| Ok(call(registry, edges)))
+            .await
+    }
+
+    /// The fallible body behind [`run_xservice`](Self::run_xservice) — the
+    /// [`run_result`](Self::run_result) twin for the cross-service surface
+    /// (S-258, FR-WS-13).
+    ///
+    /// `workspace_check` needs it: the workspace rule family compiles
+    /// user-authored globs, and a malformed rule must fail **loud** as a
+    /// structured MCP error (ADR-14) rather than silently matching nothing — a
+    /// governance rule that quietly never fires would report a false all-clear.
+    async fn run_xservice_result<T, F>(
+        &self,
+        tool: &'static str,
+        call: F,
+    ) -> Result<CallToolResult, ErrorData>
+    where
+        T: serde::Serialize + Send + 'static,
+        F: FnOnce(&EngineRegistry<Engine>, &[BridgeEdge]) -> anyhow::Result<T> + Send + 'static,
+    {
         let backing = Arc::clone(&self.backing);
         let bridge = Arc::clone(&self.bridge);
         self.run_blocking(tool, move || {
@@ -151,7 +172,7 @@ impl LogosMcp {
                 .as_federated()
                 .context("xservice tools require a federated workspace backing")?;
             let edges = query::edges(&bridge, registry);
-            Ok(call(registry, &edges))
+            call(registry, &edges)
         })
         .await
     }
@@ -806,6 +827,16 @@ impl LogosMcp {
     async fn workspace_reachability(&self) -> Result<CallToolResult, ErrorData> {
         self.run_xservice("workspace_reachability", federation::app_wide_reachability)
             .await
+    }
+
+    #[tool(
+        description = "Workspace governance (FR-WS-13): evaluate the workspace rule family ([governance] in logos.workspace.toml — service-layer boundaries and no-cross-service-callers contracts) over the cross-service bridge bindings. Reported at the workspace level and ADVISORY: it never alters any member's per-repo quality gate. Returns null when no workspace rules are declared (honest empty), never a fabricated passing report."
+    )]
+    async fn workspace_check(&self) -> Result<CallToolResult, ErrorData> {
+        self.run_xservice_result("workspace_check", |reg, edges| {
+            workspace_governance(reg.federation(), edges)
+        })
+        .await
     }
 }
 

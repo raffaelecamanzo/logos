@@ -415,7 +415,18 @@ pub enum Backing<E: MemberEngine = Engine> {
     /// No workspace: the single-root engine, byte-for-byte unchanged.
     Single(Arc<E>),
     /// A workspace: the member-engine registry.
-    Federated(EngineRegistry<E>),
+    ///
+    /// **Boxed** to keep the two variants the same order of size. The registry
+    /// inlines a whole [`Federation`] — member set, links, and (since S-258) the
+    /// `[governance]` rule family — running to hundreds of bytes, while
+    /// [`Single`](Self::Single) is a lone `Arc`; without the box every `Backing`,
+    /// including a single-root one carrying no workspace, would be sized for the
+    /// federated variant (`clippy::large_enum_variant`).
+    ///
+    /// The saving is in *size*, not in copies: every construction site wraps this
+    /// enum in an `Arc` immediately, so it is moved once at startup and never per
+    /// dispatch.
+    Federated(Box<EngineRegistry<E>>),
 }
 
 impl<E: MemberEngine> Backing<E> {
@@ -435,7 +446,9 @@ impl<E: MemberEngine> Backing<E> {
     ) -> Self {
         match federation {
             None => Backing::Single(single()),
-            Some(federation) => Backing::Federated(EngineRegistry::new(federation, mode)),
+            Some(federation) => {
+                Backing::Federated(Box::new(EngineRegistry::new(federation, mode)))
+            }
         }
     }
 
@@ -448,9 +461,12 @@ impl<E: MemberEngine> Backing<E> {
     }
 
     /// The member-engine registry, if this is the federated backing.
+    ///
+    /// The [`Box`] is transparent to callers: they still get a plain
+    /// `&EngineRegistry<E>`.
     pub fn as_federated(&self) -> Option<&EngineRegistry<E>> {
         match self {
-            Backing::Federated(registry) => Some(registry),
+            Backing::Federated(registry) => Some(registry.as_ref()),
             Backing::Single(_) => None,
         }
     }
@@ -543,6 +559,7 @@ mod tests {
             root,
             default: None,
             links: Vec::new(),
+            governance: Default::default(),
         }
     }
 

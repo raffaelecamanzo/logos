@@ -381,3 +381,233 @@ fn workspace_reachability_is_labeled_advisory_and_riders_every_claim() {
         );
     }
 }
+
+// ── Workspace governance over cross-service bindings (S-258, FR-WS-13) ──────
+//
+// The fixture's one bridge binding is `api` (the OpenAPI consumer) → `web` (the
+// axum route provider), so a rule forbidding calls from `api`'s layer into
+// `web`'s layer is breached by exactly that binding.
+
+/// The `[governance]` section declaring `edge` (api) → `core` (web) forbidden,
+/// appended to the workspace manifest the `workspace()` fixture wrote.
+const GOVERNANCE: &str = "
+[[governance.service_layers]]
+name = \"edge\"
+members = [\"api\"]
+
+[[governance.service_layers]]
+name = \"core\"
+members = [\"web\"]
+
+[[governance.boundaries]]
+from = \"edge\"
+to = \"core\"
+reason = \"edge services must not call core services directly\"
+";
+
+/// Append the `[governance]` rule family to an existing workspace manifest.
+fn declare_rules(root: &Path, rules: &str) {
+    let manifest = root.join("logos.workspace.toml");
+    let existing = std::fs::read_to_string(&manifest).expect("the fixture wrote a manifest");
+    std::fs::write(&manifest, format!("{existing}{rules}")).expect("append governance");
+}
+
+/// AC (honest empty): with NO `[governance]` declared, `workspace check` produces
+/// no governance output at all — `null`, not a zero-violation report. An
+/// undeclared policy must never read as a *passing* one ([NFR-CC-04]).
+#[test]
+fn workspace_check_with_no_rules_produces_no_output() {
+    let tmp = workspace();
+    let report = logos_json(tmp.path(), &["workspace", "check"]);
+    assert!(
+        report.is_null(),
+        "no declared rules ⇒ no workspace governance output: {report}"
+    );
+}
+
+/// AC1: a workspace rule referencing service layers evaluates over the BRIDGE
+/// bindings and reports the violation at the workspace level ([FR-WS-13]).
+#[test]
+fn a_service_layer_rule_reports_a_violating_bridge_binding() {
+    let tmp = workspace();
+    declare_rules(tmp.path(), GOVERNANCE);
+
+    let report = logos_json(tmp.path(), &["workspace", "check"]);
+    assert_eq!(report["workspace"], "shop");
+    assert_eq!(report["rules_checked"], 1);
+    assert_eq!(
+        report["bindings_checked"], 1,
+        "the rules quantified over the one matched bridge binding"
+    );
+
+    let violations = report["violations"].as_array().expect("violations array");
+    assert_eq!(violations.len(), 1, "the edge→core binding breaches the rule: {violations:?}");
+    let v = &violations[0];
+    assert_eq!(v["rule"], "workspace-boundary:edge->core");
+    assert_eq!(v["rule_type"], "workspace-boundary");
+    assert_eq!(v["severity"], "error");
+    // The endpoints are the real bridge binding, repo-qualified — not fabricated.
+    assert_eq!(v["from"]["member"], "api", "the consumer side of the binding");
+    assert_eq!(v["to"]["member"], "web", "the provider side of the binding");
+    assert_eq!(v["relation"], "route");
+    assert!(
+        v["message"].as_str().unwrap().contains("edge services must not call core"),
+        "the declared reason is surfaced: {}",
+        v["message"]
+    );
+}
+
+/// The workspace rule family is ADVISORY: a violation is *reported*, and the
+/// command still exits 0 — it is not a gate ([ADR-56]).
+#[test]
+fn a_workspace_violation_is_advisory_and_exits_zero() {
+    let tmp = workspace();
+    declare_rules(tmp.path(), GOVERNANCE);
+
+    let out = logos(tmp.path(), &["workspace", "check", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a workspace-rule violation is reported, never gated: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A per-repo contract for a member, with a constraint that is GUARANTEED to fire:
+/// every function has cyclomatic complexity >= 1, so `max_cc = 0` always yields
+/// violations. This gives the member a real, *failing* gated signal — the thing
+/// the workspace tier must not be able to move.
+const MEMBER_RULES: &str = "[constraints]\nmax_cc = 0\n";
+
+/// AC2 — the load-bearing CR-061 invariant: workspace-rule violations are
+/// reported SEPARATELY from the per-repo gate, and a member's gated signal is
+/// **unchanged** by their existence.
+///
+/// The member under test is deliberately given a real `.logos/rules.toml` that
+/// genuinely FAILS (`max_cc = 0`). Without it this test would be near-vacuous: the
+/// `workspace()` fixture only runs `logos index` (never `logos init`), so a member
+/// has no contract at all and `check` would return an empty, contract-less report
+/// — and "two empty reports are equal" proves nothing. Here the member carries a
+/// loaded contract with real violations and a real exit-1 verdict, and *that* is
+/// what must survive the workspace rules byte-for-byte ([FR-WS-13], [ADR-56]).
+#[test]
+fn declaring_workspace_rules_leaves_the_member_gate_byte_identical() {
+    let tmp = workspace();
+    let web = tmp.path().join("web");
+    write(&web, ".logos/rules.toml", MEMBER_RULES);
+
+    let before = logos(&web, &["check", "--json"]);
+    declare_rules(tmp.path(), GOVERNANCE);
+    let after = logos(&web, &["check", "--json"]);
+
+    // Anti-vacuity: the member must have evaluated a REAL contract that REALLY
+    // fails — otherwise the byte-equality below is a comparison of two nothings.
+    let report: Value = serde_json::from_slice(&before.stdout)
+        .expect("the member's `check` emits a RulesReport");
+    assert_eq!(
+        report["rules_present"], true,
+        "the member loaded its own rules.toml: {report}"
+    );
+    assert!(
+        report["violations"].as_array().is_some_and(|v| !v.is_empty()),
+        "the member's contract genuinely fires (max_cc = 0): {report}",
+    );
+    assert_eq!(report["passed"], false, "so its gated verdict is a real FAIL");
+    assert_eq!(
+        before.status.code(),
+        Some(1),
+        "and the per-repo gate exits 1 (FR-GV-03)",
+    );
+
+    // The invariant: that real, failing gated signal is untouched.
+    assert_eq!(
+        before.status.code(),
+        after.status.code(),
+        "the member's per-repo exit code is untouched by a workspace rule",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&before.stdout),
+        String::from_utf8_lossy(&after.stdout),
+        "the member's gated signal is byte-for-byte unchanged (CR-061 invariant)",
+    );
+
+    // ...and the workspace tier DID fire, so the equality above is a real
+    // separation, not both tiers being silent.
+    let workspace_report = logos_json(tmp.path(), &["workspace", "check"]);
+    assert_eq!(
+        workspace_report["violations"].as_array().map(Vec::len),
+        Some(1),
+        "the workspace rule genuinely fired while the member gate stayed put",
+    );
+    // The two families never share a vocabulary: no per-repo violation is tagged
+    // with a workspace rule_type, and vice versa.
+    for v in report["violations"].as_array().expect("member violations") {
+        assert!(
+            !v["rule_type"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("workspace-"),
+            "no workspace rule leaked into the member's per-repo report: {v}",
+        );
+    }
+}
+
+/// AC3: a "no cross-service callers" rule reads the BRIDGE — it names the real
+/// consumer that binds the provider, never a fabricated caller set ([NFR-RA-05]).
+#[test]
+fn a_no_cross_service_callers_rule_reads_the_bridge() {
+    let tmp = workspace();
+    // The axum provider route is `GET /users/{id}` in member `web`; its symbol
+    // carries the enclosing `get_user` handler name.
+    declare_rules(
+        tmp.path(),
+        "
+[[governance.no_cross_service_callers]]
+member = \"web\"
+symbol = \"*users*\"
+reason = \"deprecated in v3\"
+",
+    );
+
+    let report = logos_json(tmp.path(), &["workspace", "check"]);
+    let violations = report["violations"].as_array().expect("violations array");
+    assert_eq!(
+        violations.len(),
+        1,
+        "the deprecated provider has exactly one cross-service caller: {violations:?}"
+    );
+    let v = &violations[0];
+    assert_eq!(v["rule"], "no-cross-service-callers:*users*");
+    assert_eq!(v["rule_type"], "workspace-no-cross-service-callers");
+    assert_eq!(
+        v["from"]["member"], "api",
+        "the caller is read off the bridge binding, not synthesised"
+    );
+    assert_eq!(v["to"]["member"], "web");
+    assert!(
+        v["message"].as_str().unwrap().contains("deprecated in v3"),
+        "the declared reason is surfaced: {}",
+        v["message"]
+    );
+}
+
+/// A malformed rule fails LOUD (exit 2, the config-error code) rather than
+/// silently matching nothing — a governance rule that quietly never fires would
+/// report a false all-clear ([ADR-14]).
+#[test]
+fn a_malformed_workspace_rule_fails_loud() {
+    let tmp = workspace();
+    declare_rules(
+        tmp.path(),
+        "
+[[governance.no_cross_service_callers]]
+symbol = \"[unclosed\"
+",
+    );
+
+    let out = logos(tmp.path(), &["workspace", "check", "--json"]);
+    assert!(
+        !out.status.success(),
+        "an uncompilable rule glob must not report a clean workspace",
+    );
+}

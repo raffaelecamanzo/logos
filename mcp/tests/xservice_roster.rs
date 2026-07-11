@@ -31,6 +31,7 @@ fn federated_tools() -> Vec<rmcp::model::Tool> {
         members: Vec::new(),
         default: None,
         links: Vec::new(),
+        governance: Default::default(),
     };
     LogosMcp::federated(EngineRegistry::new(federation, RegistryMode::Lazy)).list_tools()
 }
@@ -73,8 +74,9 @@ fn single_root_roster_is_the_unchanged_27_with_no_repo_dimension() {
 }
 
 /// The 27 single-root tools appear **byte-identical** under the federated
-/// backing, which adds exactly the 6 cross-service tools on top (FR-WS-05, plus
-/// S-257's `workspace_reachability` union view, FR-WS-12).
+/// backing, which adds exactly the 7 cross-service tools on top (FR-WS-05, plus
+/// S-257's `workspace_reachability` union view, FR-WS-12, and S-258's
+/// `workspace_check` governance tool, FR-WS-13).
 #[test]
 fn federated_backing_adds_xservice_without_touching_the_single_roster() {
     let single = single_tools();
@@ -96,8 +98,8 @@ fn federated_backing_adds_xservice_without_touching_the_single_roster() {
 
     assert_eq!(
         federated.len(),
-        27 + 6,
-        "federated backing is the 27 single tools + the 6 cross-service tools: {:?}",
+        27 + 7,
+        "federated backing is the 27 single tools + the 7 cross-service tools: {:?}",
         names(&federated)
     );
 
@@ -110,6 +112,7 @@ fn federated_backing_adds_xservice_without_touching_the_single_roster() {
     assert_eq!(
         added,
         vec![
+            "workspace_check",
             "workspace_reachability",
             "workspace_status",
             "xservice_callers",
@@ -117,7 +120,31 @@ fn federated_backing_adds_xservice_without_touching_the_single_roster() {
             "xservice_route_providers",
             "xservice_search",
         ],
-        "federation adds exactly the FR-WS-05 cross-service tools plus the \
-         FR-WS-12 app-wide reachability union view",
+        "federation adds exactly the FR-WS-05 query tools + the \
+         FR-WS-12 app-wide reachability union view + the FR-WS-13 governance tool",
+    );
+}
+
+/// The workspace governance tool is federation-only and **advisory**: it never
+/// appears under the single-root backing, so a repo with no workspace cannot even
+/// reach the workspace rule family — the per-repo gate is untouched by
+/// construction ([FR-WS-13], [ADR-56]).
+#[test]
+fn workspace_check_is_federated_only_and_never_a_gate_tool() {
+    let single = single_tools();
+    assert!(
+        !single.iter().any(|t| t.name == "workspace_check"),
+        "workspace_check must not exist without a workspace manifest",
+    );
+
+    let federated = federated_tools();
+    let check = federated
+        .iter()
+        .find(|t| t.name == "workspace_check")
+        .expect("the federated backing registers workspace_check");
+    let description = check.description.as_deref().unwrap_or_default();
+    assert!(
+        description.contains("ADVISORY") && description.contains("never alters"),
+        "the tool description states it cannot move a member's gate: {description}",
     );
 }

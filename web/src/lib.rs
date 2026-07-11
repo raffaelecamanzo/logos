@@ -202,7 +202,9 @@ pub fn resolve_serve_backing(root: &Path, standalone: bool) -> Result<Backing<En
                 .context("starting the Logos engine for the web surface")?;
             Backing::Single(engine)
         }
-        Some(federation) => Backing::Federated(EngineRegistry::new_serve_default(federation)),
+        Some(federation) => Backing::Federated(Box::new(EngineRegistry::new_serve_default(
+            federation,
+        ))),
     })
 }
 
@@ -510,7 +512,7 @@ pub fn router_for_backing(backing: Arc<Backing<Engine>>) -> Result<Router> {
 /// # Errors
 /// The workspace's default member cannot start (see [`router_for_backing`]).
 pub fn workspace_router(registry: EngineRegistry<Engine>) -> Result<Router> {
-    router_for_backing(Arc::new(Backing::Federated(registry)))
+    router_for_backing(Arc::new(Backing::Federated(Box::new(registry))))
 }
 
 /// Build a workspace router over an explicit [`IntentToken`] — the seam the S-250
@@ -525,7 +527,7 @@ pub fn workspace_router_with_intent(
     registry: EngineRegistry<Engine>,
     intent: IntentToken,
 ) -> Result<Router> {
-    let backing = Arc::new(Backing::Federated(registry));
+    let backing = Arc::new(Backing::Federated(Box::new(registry)));
     let engine = backing.default_engine()?;
     Ok(build_router(make_state(engine, backing, intent)))
 }

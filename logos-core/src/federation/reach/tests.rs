@@ -100,6 +100,7 @@ fn registry(names: &[&str]) -> EngineRegistry<FakeEngine> {
         root,
         default: None,
         links: Vec::new(),
+        governance: Default::default(),
     };
     EngineRegistry::new(federation, RegistryMode::Lazy)
 }

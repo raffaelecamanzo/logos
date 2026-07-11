@@ -999,6 +999,7 @@ mod tests {
             root,
             default: None,
             links: Vec::new(),
+            governance: Default::default(),
         }
     }
 
