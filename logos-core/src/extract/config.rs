@@ -95,6 +95,12 @@ mod profiles;
 // the consumer stories' (S-069/070/071) isolated extensions.
 mod refs;
 
+// The generic consumer-side invocation interpreter (S-251, FR-WS-07) and its
+// captured-site carrier are re-exported to the code-extraction path so a code
+// arm (S-252 HTTP client calls) funnels its per-language captures through the
+// same emission choke-point the config arms use.
+pub(crate) use refs::{capture_invocation_refs, InvocationSite};
+
 /// The fixed maximum `ConfigSection` nesting depth ([BR-30], [FR-CG-02]). A
 /// `ConfigFile` is depth 0; sections are emitted at depth 1 and 2 only. The
 /// constant is the single source of truth for the bound — never size-dependent.

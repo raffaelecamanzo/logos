@@ -628,6 +628,49 @@ fn extract_one(
         dedup_sort_refs(&mut facts.refs);
     }
 
+    // 8) HTTP client-call arm (S-252, CR-061, FR-WS-08): capture outbound calls
+    // via the optional `invocations` capability and funnel them through the
+    // shared S-251 interpreter with the `route_key`-based normalizer. A grammar
+    // without the capability produces none; the interpreter's `push_artifact_ref`
+    // choke-point applies the external gate and `HttpClientCall.edge_kind()`.
+    //
+    // Ledger-gated candidacy (the consumer-side mirror of the framework pass's
+    // FR-FW-04): the `.scm` anchor is a broad `<receiver>.<method>(<arg>)` shape,
+    // so it is captured ONLY in a file that references a known HTTP-client crate.
+    // Without this gate an incidental collection/registry call whose key looks
+    // like a route (`perms.get("/admin/users")`, a route-table `.get("/health")`)
+    // would be captured, normalize, and fabricate a cross-service edge — exactly
+    // what never-fabricate forbids ([NFR-RA-05]).
+    if let Some(inv_query) = plugin.query("invocations") {
+        let detectors = crate::resolve::http_client_call::http_client_crates(plugin.name());
+        let is_http_client_file = !detectors.is_empty()
+            && facts.refs.iter().any(|r| {
+                let head = r.target.split("::").next().unwrap_or_default();
+                detectors.contains(&head)
+            });
+        if is_http_client_file {
+            let sites = collect_invocation_sites(
+                inv_query,
+                tree.root_node(),
+                source,
+                &decls,
+                &symbols,
+                file_module.as_ref(),
+            );
+            if !sites.is_empty() {
+                crate::extract::config::capture_invocation_refs(
+                    &mut facts,
+                    ArtifactRelation::HttpClientCall,
+                    RefForm::Path,
+                    sites,
+                    crate::resolve::http_client_call::render_client_call_target,
+                );
+                // Re-canonicalize: the interpreter appended to `facts.refs`.
+                dedup_sort_refs(&mut facts.refs);
+            }
+        }
+    }
+
     sort_facts(&mut facts);
     facts
 }
@@ -905,6 +948,181 @@ fn collect_refs(
     // Dedup on the ledger's uniqueness key, then canonical sort (NFR-RA-06).
     dedup_sort_refs(&mut out);
     out
+}
+
+/// The HTTP verbs the client-call arm (S-252, [FR-WS-08]) captures. A method call
+/// whose name is not one of these is not an outbound HTTP call.
+///
+/// This name filter is **necessary but not sufficient**: a collection/registry
+/// method that shares a verb name (`HashMap::get`) still passes it, and a
+/// `/`-prefixed string key (`map.get("/health")`) would normalize and fabricate a
+/// cross-service edge. Two further guards make the capture honest ([NFR-RA-05]):
+/// the file-level HTTP-client-crate gate in `extract_one` (only a file that uses
+/// a client crate is a candidate at all), and the arm's normalizer (which refuses
+/// any non-static / non-absolute / non-normalizable path). The residual ceiling —
+/// a genuine HTTP-client file that also does an incidental `/`-keyed collection
+/// `.get` — is a documented accuracy ceiling ([ADR-54]), reported unbound-or-not
+/// at worst, never silently guessed.
+///
+/// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+const HTTP_METHODS: &[&str] = &["get", "post", "put", "delete", "patch", "head", "options"];
+
+/// `true` if `name` (case-insensitively) is one of the [`HTTP_METHODS`].
+fn is_http_method(name: &str) -> bool {
+    HTTP_METHODS
+        .iter()
+        .any(|m| name.eq_ignore_ascii_case(m))
+}
+
+/// The **static** content of a string-literal node, or `None` when the argument
+/// is not a static literal (a bare variable, a `format!`, a concatenation) or is
+/// an interpolated/templated string with runtime substitutions ([NFR-RA-05]).
+///
+/// Grammar-agnostic: a literal node's kind contains `"string"` across the
+/// supported grammars (Rust `string_literal`/`raw_string_literal`, Python
+/// `string`, JS/TS `string`/`template_string`, Go `*_string_literal`). Its static
+/// text is the concatenation of its literal-content children; **any** other child
+/// (an interpolation / substitution / expansion) makes the whole literal dynamic,
+/// so the arm refuses it rather than guessing a target. A node that exposes no
+/// content children (e.g. a raw-string form) falls back to trimming its quote and
+/// prefix characters.
+fn static_string_literal(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if !node.kind().contains("string") {
+        return None;
+    }
+    let mut content = String::new();
+    let mut saw_child = false;
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        saw_child = true;
+        match child.kind() {
+            // Static literal-content fragments and escapes across grammars.
+            "string_content" | "string_fragment" | "escape_sequence" => {
+                content.push_str(child.utf8_text(source).ok()?);
+            }
+            // An interpolation / template substitution / expansion → dynamic.
+            _ => return None,
+        }
+    }
+    if !saw_child {
+        // A literal whose grammar exposes no content node (e.g. a raw string):
+        // strip the surrounding quote and literal-prefix characters.
+        let raw = node.utf8_text(source).ok()?;
+        content.push_str(
+            raw.trim_start_matches(['r', 'b', '#'])
+                .trim_matches(['"', '\'', '`', '#']),
+        );
+    }
+    let content = content.trim().to_string();
+    (!content.is_empty()).then_some(content)
+}
+
+/// Collect the file's outbound **HTTP client-call** invocation sites from the
+/// `invocations` query matches (S-252, [FR-WS-08], [ADR-54]).
+///
+/// The code-side twin of [`collect_refs`] for the pluggable invocation-arm
+/// contract: each match anchors a `<receiver>.<method>(<first-arg>)` call; a site
+/// is emitted only when the method is an HTTP verb ([`is_http_method`]). The first
+/// argument becomes the arm's slots — a static string literal fills the `path`
+/// slot ([`PATH_SLOT`](crate::resolve::http_client_call::PATH_SLOT)); any other
+/// shape sets the dynamic-path marker
+/// ([`DYNAMIC_PATH_SLOT`](crate::resolve::http_client_call::DYNAMIC_PATH_SLOT)) so
+/// the arm's normalizer refuses it as base-url-runtime. The sites are funnelled
+/// through the shared [`capture_invocation_refs`](crate::extract::config::capture_invocation_refs)
+/// interpreter by the caller; no reference is emitted here, and no judgment of
+/// bind-ability is made — that is the normalizer's job ([NFR-RA-05]).
+///
+/// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn collect_invocation_sites(
+    query: &Query,
+    root: Node<'_>,
+    source: &[u8],
+    decls: &[Decl<'_>],
+    symbols: &[Option<LogosSymbol>],
+    file_module: Option<&LogosSymbol>,
+) -> Vec<crate::extract::config::InvocationSite> {
+    use crate::resolve::http_client_call::{DYNAMIC_PATH_SLOT, METHOD_SLOT, PATH_SLOT};
+
+    let id_to_idx: HashMap<usize, usize> = decls
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.node.id(), i))
+        .collect();
+    // The innermost enclosing captured declaration (the call site's owner), or
+    // the file module at file scope — the same attribution `collect_refs` uses.
+    let enclosing_symbol = |node: Node<'_>| -> Option<LogosSymbol> {
+        let mut ancestor = node.parent();
+        while let Some(n) = ancestor {
+            if let Some(&idx) = id_to_idx.get(&n.id()) {
+                if let Some(sym) = &symbols[idx] {
+                    return Some(sym.clone());
+                }
+            }
+            ancestor = n.parent();
+        }
+        file_module.cloned()
+    };
+
+    let capture_names = query.capture_names();
+    let mut sites = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, root, source);
+    while let Some(m) = matches.next() {
+        let mut method_node = None;
+        let mut arg_node = None;
+        for cap in m.captures {
+            match capture_names[cap.index as usize] {
+                "invoke.http.method" => method_node = Some(cap.node),
+                "invoke.http.arg" => arg_node = Some(cap.node),
+                _ => {}
+            }
+        }
+        let (Some(method_node), Some(arg_node)) = (method_node, arg_node) else {
+            continue;
+        };
+        let Ok(method) = method_node.utf8_text(source) else {
+            continue;
+        };
+        let method = method.trim();
+        // Narrow the broad method-call anchor to HTTP verbs (a map/collection
+        // `.get(...)` is not an outbound call).
+        if !is_http_method(method) {
+            continue;
+        }
+        let Some(source_symbol) = enclosing_symbol(method_node) else {
+            continue; // no attributable scope
+        };
+        let line = method_node.start_position().row as u32 + 1;
+
+        let mut slots = std::collections::BTreeMap::new();
+        slots.insert(METHOD_SLOT.to_string(), method.to_string());
+        match static_string_literal(arg_node, source) {
+            // A static string literal → the `"METHOD /template"` path candidate.
+            Some(path) => {
+                slots.insert(PATH_SLOT.to_string(), path);
+            }
+            // Anything else → a runtime-composed path; the marker's presence makes
+            // the normalizer refuse it (base-url-runtime), no target guessed.
+            None => {
+                let raw = arg_node
+                    .utf8_text(source)
+                    .ok()
+                    .map(|t| t.trim().to_string())
+                    .unwrap_or_default();
+                slots.insert(DYNAMIC_PATH_SLOT.to_string(), raw);
+            }
+        }
+        sites.push(crate::extract::config::InvocationSite {
+            source: source_symbol,
+            slots,
+            line,
+        });
+    }
+    sites
 }
 
 /// Lift a captured name's parent past any C-family *declarator* wrapper to the

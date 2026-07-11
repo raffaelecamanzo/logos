@@ -52,6 +52,11 @@ pub mod framework;
 /// OpenAPI `ApiOperation` path templates with framework-extracted `route` node
 /// templates under one parameter-position-only comparison. See its module docs.
 pub(crate) mod route_template;
+/// The HTTP client-call arm normalizer (S-252, CR-061, FR-WS-08): reduces a
+/// captured outbound call to its `"METHOD /template"` bind target or the reason
+/// it is honestly unbindable (base-url-runtime / path-not-composed). The one
+/// arm-specific piece of the pluggable invocation-arm contract. See its module docs.
+pub(crate) mod http_client_call;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 

@@ -772,6 +772,11 @@ fn rust_entry() -> GrammarEntry {
                 label: "rust/queries/frameworks.scm",
                 source: include_str!("../../plugins/rust/queries/frameworks.scm"),
             },
+            EmbeddedQuery {
+                relative_path: "queries/invocations.scm",
+                label: "rust/queries/invocations.scm",
+                source: include_str!("../../plugins/rust/queries/invocations.scm"),
+            },
         ],
     }
 }

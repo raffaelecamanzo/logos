@@ -52,7 +52,10 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::graph_store::{EdgeRow, NodeRow};
-use crate::model::{BridgeNamespace, EdgeKind, LogosSymbol, MatchDiscipline, NodeId, NodeKind};
+use crate::model::{
+    ArtifactRelation, BridgeNamespace, BridgeRole, EdgeKind, LogosSymbol, MatchDiscipline, NodeId,
+    NodeKind,
+};
 use crate::resolve::route_template::route_key;
 
 /// Which side of a portable-key match a node sits on — the bridge's local alias
@@ -122,6 +125,37 @@ pub struct ContractNode {
     pub symbol: LogosSymbol,
 }
 
+/// One arm-tagged **cross-service invocation consumer** read from a member's
+/// `unresolved_refs` ledger ([FR-WS-07], [FR-WS-08], [ADR-54]).
+///
+/// Where a [`ContractNode`] carries a member's *declared contract surface*
+/// (routes, operations, proto/graphql types the bridge already indexes), an
+/// invocation consumer is a *captured call site* — an HTTP client call, a gRPC
+/// stub call, a broker publish — that S-251's generic interpreter emitted into
+/// the ledger under an invocation-arm [`ArtifactRelation`]. It is the consumer
+/// side the bridge feeds into its candidate stream via the arm's
+/// [`bridge_namespace`](ArtifactRelation::bridge_namespace) /
+/// [`bridge_role`](ArtifactRelation::bridge_role) descriptors, so a new arm
+/// reaches the bridge with no edit to the namespace-generic match loop.
+///
+/// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
+/// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvocationConsumer {
+    /// The invocation arm this consumer reference belongs to — its
+    /// [`bridge_namespace`](ArtifactRelation::bridge_namespace) decides the
+    /// portable-key form and the match discipline.
+    pub relation: ArtifactRelation,
+    /// The arm-normalized reference target the interpreter emitted (for HTTP, the
+    /// raw `"METHOD /template"` string a `route_key` reduces to the portable key).
+    pub target: String,
+    /// The canonical, database-portable symbol of the *call site* (the enclosing
+    /// declaration the interpreter attributed the reference to) — the consumer
+    /// endpoint a bridge edge starts at.
+    pub symbol: LogosSymbol,
+}
+
 /// The per-member read the bridge needs: a member's contract surface plus the
 /// sync-stamp the bridge caches against.
 ///
@@ -144,6 +178,30 @@ pub trait MemberContracts {
     /// The member's current sync-stamp as a monotonic `u64` — the value the
     /// bridge caches against; it advances when the member re-syncs.
     fn contract_stamp(&self) -> u64;
+
+    /// Read this member's arm-tagged cross-service **invocation consumers** — the
+    /// captured call sites (HTTP client calls, gRPC stub calls, broker publishes)
+    /// in its `unresolved_refs` ledger whose relation declares
+    /// [`bridge_role`](ArtifactRelation::bridge_role) `Consumer` ([FR-WS-07],
+    /// [ADR-54]).
+    ///
+    /// These feed the bridge's candidate stream alongside the contract-surface
+    /// consumers ([`contract_surface`](Self::contract_surface)). The default is
+    /// **empty** — a member/engine with no invocation-arm capture contributes no
+    /// consumers, so pre-arm members and lightweight test doubles need not
+    /// implement it; the real [`Engine`](crate::Engine) overrides it to read the
+    /// ledger.
+    ///
+    /// # Errors
+    /// Propagates a read failure so the bridge can skip the member as degraded
+    /// rather than aborting the whole workspace ([ADR-53]).
+    ///
+    /// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+    fn invocation_consumers(&self) -> Result<Vec<InvocationConsumer>> {
+        Ok(Vec::new())
+    }
 }
 
 impl MemberContracts for crate::Engine {
@@ -164,6 +222,50 @@ impl MemberContracts for crate::Engine {
         // bridge caches on the bare monotonic value.
         self.sync_stamp().0
     }
+
+    fn invocation_consumers(&self) -> Result<Vec<InvocationConsumer>> {
+        let runtime = self.runtime().context(
+            "reading a member's invocation consumers requires a long-lived engine \
+             (Engine::start) with a read-only pool",
+        )?;
+        let rows = runtime.submit_read(|store| store.unresolved_refs())?;
+        Ok(invocation_consumers_from(rows))
+    }
+}
+
+/// Project a member's `unresolved_refs` ledger onto its arm-tagged invocation
+/// **consumers** ([FR-WS-07], [ADR-54]).
+///
+/// A row is a consumer iff its `payload` names an [`ArtifactRelation`] whose
+/// [`bridge_role`](ArtifactRelation::bridge_role) is
+/// [`Consumer`](BridgeRole::Consumer) — the same generic test for every arm, so
+/// this projection never names a concrete arm. A row whose payload is absent, is
+/// not a known relation, or is a non-invocation / provider relation is skipped;
+/// a row whose `source_symbol` does not parse is skipped rather than fabricating
+/// a malformed endpoint ([NFR-RA-05]). Both `resolved` and unresolved rows are
+/// included: the cross-service bind is an overlay fact independent of whether the
+/// call also bound a route intra-repo.
+///
+/// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn invocation_consumers_from(
+    rows: Vec<crate::graph_store::UnresolvedRefRow>,
+) -> Vec<InvocationConsumer> {
+    rows.into_iter()
+        .filter_map(|row| {
+            let relation = row.payload.as_deref().and_then(ArtifactRelation::from_wire)?;
+            if relation.bridge_role() != Some(BridgeRole::Consumer) {
+                return None;
+            }
+            let symbol = LogosSymbol::parse(&row.source_symbol).ok()?;
+            Some(InvocationConsumer {
+                relation,
+                target: row.target,
+                symbol,
+            })
+        })
+        .collect()
 }
 
 /// `true` for the contract-surface node kinds the bridge reads ([FR-WS-04]).
@@ -314,6 +416,44 @@ pub(super) fn classify(kind: NodeKind, name: &str) -> Option<(PortableKey, Role)
     }
 }
 
+/// Reduce an arm-tagged invocation **consumer** ([`InvocationConsumer`]) to the
+/// portable key it meets a provider on, or `None` when it does not compose
+/// ([FR-WS-07], [ADR-54]).
+///
+/// The consumer-side twin of [`classify`]: where `classify` keys a
+/// contract-surface *provider node*, this keys a captured *call site*. It routes
+/// on the arm's [`bridge_namespace`](ArtifactRelation::bridge_namespace) — the
+/// per-arm registration point ([ADR-54]) — and produces the **same**
+/// [`PortableKey`] the provider side does, so the two meet through the
+/// namespace-generic [`match_indexed`] loop unchanged:
+///
+/// - [`Http`](BridgeNamespace::Http): the target is the arm's raw
+///   `"METHOD /template"`; the shared [`route_key`] reduces it to the identical
+///   `(METHOD, normalized-template)` a framework `Route` provider reduces to. A
+///   target that does not normalize yields `None` (never approximately matched,
+///   [NFR-RA-05]) — though the arm's normalizer has already refused those before
+///   the ledger, so a stored HTTP target normalizes by construction.
+///
+/// The gRPC and broker arms ([FR-WS-09], [FR-WS-10]) register their own namespace
+/// key here; until then their consumers contribute nothing (an arm lacking its
+/// key builder is inert, exactly like a language lacking its capture).
+///
+/// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
+/// [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
+/// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) -> Option<PortableKey> {
+    match relation.bridge_namespace()? {
+        BridgeNamespace::Http => {
+            let (method, template) = route_key(target)?;
+            Some(PortableKey::http(method, template))
+        }
+        // The gRPC/broker arms (S-253/S-254) add their key builders here.
+        BridgeNamespace::Grpc | BridgeNamespace::BrokerTopic => None,
+    }
+}
+
 /// The in-memory cross-service contract bridge over a workspace's members
 /// ([FR-WS-04], [ADR-52]).
 ///
@@ -407,6 +547,43 @@ where
     stamps
 }
 
+/// Read a per-member value through the registry fan-out, **degrading** (a warn +
+/// skip) on either an engine-start failure or a read failure rather than aborting
+/// the whole workspace ([ADR-53]). Returns `(member, value)` for every member
+/// whose read succeeded.
+///
+/// The one place the bridge and the coverage read-model express "read each
+/// member's `X` through its read pool, skip the degraded ones" — `subject` names
+/// `X` in the warning so both the contract-surface and invocation-consumer reads
+/// (and both tiers) share this handling verbatim.
+///
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+pub(super) fn read_members<E, T>(
+    registry: &EngineRegistry<E>,
+    subject: &str,
+    read: impl Fn(&Arc<E>) -> Result<T>,
+) -> Vec<(String, T)>
+where
+    E: MemberEngine + MemberContracts,
+{
+    let mut out = Vec::new();
+    for scoped in registry.fan_out(|_, engine| read(engine)) {
+        let member = scoped.member;
+        match scoped.value {
+            Ok(Ok(value)) => out.push((member, value)),
+            Ok(Err(err)) => tracing::warn!(
+                member = %member,
+                "reading a workspace member's {subject} failed; degraded without it: {err:#}"
+            ),
+            Err(err) => tracing::warn!(
+                member = %member,
+                "a workspace member engine failed to start; degraded without it: {err:#}"
+            ),
+        }
+    }
+    out
+}
+
 /// Read every member's contract surface through its read pool, index providers
 /// on portable keys, split providers from consumers by role, and hand the two
 /// indexes to the namespace-generic [`match_indexed`] matcher.
@@ -417,28 +594,7 @@ where
     let mut providers: HashMap<PortableKey, Vec<BridgeEndpoint>> = HashMap::new();
     let mut consumers: Vec<(PortableKey, BridgeEndpoint)> = Vec::new();
 
-    for scoped in registry.fan_out(|_, engine| engine.contract_surface()) {
-        let member = scoped.member;
-        let surface = match scoped.value {
-            Ok(Ok(nodes)) => nodes,
-            Ok(Err(err)) => {
-                tracing::warn!(
-                    member = %member,
-                    "reading a workspace member's contract surface failed; \
-                     bridging degraded without it: {err:#}"
-                );
-                continue;
-            }
-            Err(err) => {
-                tracing::warn!(
-                    member = %member,
-                    "a workspace member engine failed to start; \
-                     bridging degraded without it: {err:#}"
-                );
-                continue;
-            }
-        };
-
+    for (member, surface) in read_members(registry, "contract surface", |e| e.contract_surface()) {
         for node in surface {
             let Some((key, role)) = classify(node.kind, &node.name) else {
                 continue;
@@ -451,6 +607,27 @@ where
                 Role::Provider => providers.entry(key).or_default().push(endpoint),
                 Role::Consumer => consumers.push((key, endpoint)),
             }
+        }
+    }
+
+    // Arm-tagged invocation consumers (HTTP client calls, S-252, and the gRPC/
+    // broker arms as they land) join the same candidate stream via the arm's
+    // portable key — the consumer-side feed S-251's contract deferred to the
+    // arms ([FR-WS-07], [ADR-54]).
+    for (member, refs) in read_members(registry, "invocation consumers", |e| {
+        e.invocation_consumers()
+    }) {
+        for consumer in refs {
+            let Some(key) = consumer_portable_key(consumer.relation, &consumer.target) else {
+                continue; // an unkeyable / not-yet-registered arm contributes nothing
+            };
+            consumers.push((
+                key,
+                BridgeEndpoint {
+                    member: member.clone(),
+                    symbol: consumer.symbol,
+                },
+            ));
         }
     }
 
@@ -559,6 +736,7 @@ mod tests {
     struct MemberFixture {
         stamp: u64,
         nodes: Vec<ContractNode>,
+        consumers: Vec<InvocationConsumer>,
     }
 
     fn reset() {
@@ -567,9 +745,33 @@ mod tests {
     }
     fn set_member(name: &str, stamp: u64, nodes: Vec<ContractNode>) {
         FIXTURES.with(|f| {
-            f.borrow_mut()
-                .insert(name.to_string(), MemberFixture { stamp, nodes });
+            f.borrow_mut().insert(
+                name.to_string(),
+                MemberFixture {
+                    stamp,
+                    nodes,
+                    consumers: Vec::new(),
+                },
+            );
         });
+    }
+    /// Attach arm-tagged invocation consumers (client-call sites) to a member —
+    /// the ledger-side feed the HTTP arm (S-252) adds to the bridge.
+    fn set_consumers(name: &str, consumers: Vec<InvocationConsumer>) {
+        FIXTURES.with(|f| {
+            f.borrow_mut()
+                .entry(name.to_string())
+                .or_default()
+                .consumers = consumers;
+        });
+    }
+    /// An HTTP client-call consumer at `symbol` calling `target` (`"METHOD /path"`).
+    fn http_call(target: &str, symbol: &str) -> InvocationConsumer {
+        InvocationConsumer {
+            relation: ArtifactRelation::HttpClientCall,
+            target: target.to_string(),
+            symbol: LogosSymbol::parse(symbol).unwrap(),
+        }
     }
     fn bump_stamp(name: &str) {
         FIXTURES.with(|f| {
@@ -626,6 +828,19 @@ mod tests {
         }
         fn contract_stamp(&self) -> u64 {
             FIXTURES.with(|f| f.borrow().get(&self.member).map(|m| m.stamp).unwrap_or(0))
+        }
+        fn invocation_consumers(&self) -> Result<Vec<InvocationConsumer>> {
+            // "unreadable" fails its surface read; keep the same degrade behaviour
+            // here so a degraded member is skipped for consumers too.
+            if self.member == "unreadable" {
+                anyhow::bail!("store read failed");
+            }
+            Ok(FIXTURES.with(|f| {
+                f.borrow()
+                    .get(&self.member)
+                    .map(|m| m.consumers.clone())
+                    .unwrap_or_default()
+            }))
         }
     }
 
@@ -1126,5 +1341,154 @@ mod tests {
             edges.is_empty(),
             "an in-repo publish→subscribe pair is the local graph's fan-out: {edges:?}"
         );
+    }
+
+    // ── S-252 / FR-WS-08: the HTTP client-call → route arm ────────────────────
+    //
+    // The arm feeds its captured client-call sites into the bridge as `Http`
+    // `Consumer` candidates (via `invocation_consumers`), keyed through the shared
+    // `route_key`, and relies on the unchanged namespace-generic match loop.
+
+    /// The ledger projection keeps only invocation-arm **consumer** rows: a
+    /// non-invocation relation (`route`, `proto-import`), a non-consumer arm role,
+    /// an absent/unknown payload, and an unparseable source symbol are all
+    /// dropped — never a fabricated endpoint ([NFR-RA-05]).
+    #[test]
+    fn invocation_consumers_from_keeps_only_consumer_arm_rows() {
+        use crate::graph_store::UnresolvedRefRow;
+        use crate::model::RefForm;
+
+        let row = |source_symbol: &str, target: &str, payload: Option<&str>| UnresolvedRefRow {
+            id: 0,
+            file_id: None,
+            source_symbol: source_symbol.to_string(),
+            target: target.to_string(),
+            alias: None,
+            form: RefForm::Path,
+            kind: EdgeKind::ArtifactBinding,
+            line: None,
+            resolved: false,
+            payload: payload.map(str::to_string),
+        };
+
+        let rows = vec![
+            // A genuine HTTP client-call consumer — kept.
+            row("local handler", "GET /users/{id}", Some("http-client-call")),
+            // A `route` binding is a contract relation, not an invocation arm — dropped.
+            row("local op", "GET /users/{id}", Some("route")),
+            // A proto import (not an invocation arm) — dropped.
+            row("local file", "common.proto", Some("proto-import")),
+            // No payload / unknown payload — dropped.
+            row("local x", "GET /a", None),
+            row("local y", "GET /b", Some("not-a-relation")),
+            // A consumer arm row whose source symbol does not parse — dropped.
+            row("", "GET /c", Some("http-client-call")),
+        ];
+
+        let consumers = invocation_consumers_from(rows);
+        assert_eq!(consumers.len(), 1, "only the one parseable consumer row survives");
+        assert_eq!(consumers[0].relation, ArtifactRelation::HttpClientCall);
+        assert_eq!(consumers[0].target, "GET /users/{id}");
+        assert_eq!(consumers[0].symbol.as_str(), "local handler");
+    }
+
+    /// A client-call consumer key equals the provider `Route`'s key across the
+    /// `{id}`/`{userId}` parameter-name drift — so they meet on one `PortableKey`.
+    #[test]
+    fn a_client_call_keys_equal_to_its_matching_route_provider() {
+        let consumer = consumer_portable_key(ArtifactRelation::HttpClientCall, "GET /users/{id}")
+            .expect("a static client-call target keys");
+        let (provider, role) =
+            classify(NodeKind::Route, "GET /users/{userId}").expect("a route classifies");
+        assert_eq!(role, Role::Provider);
+        assert_eq!(
+            consumer, provider,
+            "the client call and its route meet on one key (param-name drift erased)"
+        );
+        // A non-normalizing client-call target keys to nothing (never approximated).
+        assert!(consumer_portable_key(ArtifactRelation::HttpClientCall, "GET /files/{*rest}").is_none());
+    }
+
+    /// Acceptance (1): a static client call in one member binds the sole matching
+    /// `Route` in **another** member — the edge starts at the call site and points
+    /// at the route, filed under the `route` relation.
+    #[test]
+    fn a_static_client_call_binds_a_sole_route_in_another_member() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers("web", vec![http_call("GET /users/{id}", "local get_user_call")]);
+        set_member("api", 0, vec![route("GET /users/{userId}", "local route_get")]);
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "api"]));
+
+        assert_eq!(edges.len(), 1, "the client call binds its one cross-member route: {edges:?}");
+        let edge = &edges[0];
+        assert_eq!(edge.relation, "route", "an HTTP arm edge speaks the intra-repo `route` vocabulary");
+        assert_eq!(edge.from.member, "web");
+        assert_eq!(edge.from.symbol.as_str(), "local get_user_call");
+        assert_eq!(edge.to.member, "api");
+        assert_eq!(edge.to.symbol.as_str(), "local route_get");
+    }
+
+    /// Acceptance (1): two matching routes across the workspace make the same
+    /// client call **ambiguous** — no edge (never fabricated, [NFR-RA-05]).
+    #[test]
+    fn two_matching_routes_make_a_client_call_ambiguous_no_edge() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers("web", vec![http_call("GET /users/{id}", "local get_user_call")]);
+        set_member("api", 0, vec![route("GET /users/{id}", "local route_api")]);
+        set_member("admin", 0, vec![route("GET /users/{userId}", "local route_admin")]);
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "api", "admin"]));
+        assert!(
+            edges.is_empty(),
+            "two providers of one client-call key are ambiguous — no edge: {edges:?}"
+        );
+    }
+
+    /// A client call whose only matching route is in its **own** member is an
+    /// intra-repo fact the per-repo graph already owns (via the same `route`
+    /// relation) — the bridge emits no cross-service edge for it.
+    #[test]
+    fn a_client_call_to_a_same_member_route_is_not_a_bridge_edge() {
+        reset();
+        set_member("web", 0, vec![route("GET /users/{id}", "local route_local")]);
+        set_consumers("web", vec![http_call("GET /users/{id}", "local get_user_call")]);
+
+        let edges = ContractBridge::new().edges(&registry(&["web"]));
+        assert!(
+            edges.is_empty(),
+            "an in-repo client call→route pair binds locally, not via the bridge: {edges:?}"
+        );
+    }
+
+    /// Acceptance (3): a client call whose target does not normalize is never a
+    /// candidate — it keys to nothing, so no edge is fabricated even when a
+    /// same-shaped route exists. (The arm's normalizer refuses such calls before
+    /// the ledger; this guards the bridge intake belt-and-suspenders.)
+    #[test]
+    fn a_non_normalizing_client_call_target_never_binds() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers("web", vec![http_call("GET /files/{*rest}", "local list_files_call")]);
+        set_member("api", 0, vec![route("GET /files/{id}", "local route_files")]);
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "api"]));
+        assert!(edges.is_empty(), "a catch-all client-call target is not a candidate: {edges:?}");
+    }
+
+    /// A client call with no matching route anywhere produces no edge (honestly
+    /// unbound, not guessed) — and the method still keys, so a method mismatch
+    /// never binds.
+    #[test]
+    fn a_client_call_method_mismatch_never_binds() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers("web", vec![http_call("POST /users/{id}", "local create_user_call")]);
+        set_member("api", 0, vec![route("GET /users/{id}", "local route_get")]);
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "api"]));
+        assert!(edges.is_empty(), "a POST call never binds a GET route: {edges:?}");
     }
 }

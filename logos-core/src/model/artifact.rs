@@ -209,13 +209,30 @@ pub enum ArtifactRelation {
     /// A shell `source ./path` with a **literal** workspace-relative path → the
     /// target `ConfigFile` (S-071). External: interpolated paths (`$DIR/x.sh`).
     ShellSource,
+    /// An outbound **HTTP client call** rendered `"METHOD /template"` → the
+    /// framework `Route` handler it invokes (S-252, [FR-WS-08]). The first
+    /// pluggable cross-service invocation arm ([ADR-54]): its
+    /// [`bridge_namespace`](ArtifactRelation::bridge_namespace) is
+    /// [`Http`](BridgeNamespace::Http) (exactly-one) and its
+    /// [`bridge_role`](ArtifactRelation::bridge_role) is
+    /// [`Consumer`](BridgeRole::Consumer). Artifact→code, positional-template +
+    /// method match — so it binds through the *same* `route_key`
+    /// ([FR-CG-09](../../../docs/specs/requirements/FR-CG-09.md)) and intra-repo
+    /// `(ArtifactBinding, Path)` route binder the OpenAPI [`Route`] arm uses. Only
+    /// a statically present path literal is emitted; a base-URL-composed or
+    /// non-normalizable call produces no reference ([NFR-RA-05]).
+    ///
+    /// [`Route`]: ArtifactRelation::Route
+    /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+    /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+    HttpClientCall,
 }
 
 impl ArtifactRelation {
     /// Every relation class, in declaration order — the iteration universe tests
     /// and coverage surfaces drive off so a newly added relation cannot silently
     /// skip a contract assertion.
-    pub const ALL: [ArtifactRelation; 9] = [
+    pub const ALL: [ArtifactRelation; 10] = [
         ArtifactRelation::ProtoImport,
         ArtifactRelation::ProtoType,
         ArtifactRelation::GraphqlType,
@@ -225,6 +242,7 @@ impl ArtifactRelation {
         ArtifactRelation::TfVarRef,
         ArtifactRelation::SqlObjectRef,
         ArtifactRelation::ShellSource,
+        ArtifactRelation::HttpClientCall,
     ];
 
     /// The on-disk payload token (kebab-case, matching the `serde` form).
@@ -239,6 +257,7 @@ impl ArtifactRelation {
             ArtifactRelation::TfVarRef => "tf-var-ref",
             ArtifactRelation::SqlObjectRef => "sql-object-ref",
             ArtifactRelation::ShellSource => "shell-source",
+            ArtifactRelation::HttpClientCall => "http-client-call",
         }
     }
 
@@ -261,7 +280,13 @@ impl ArtifactRelation {
     /// [ADR-26]: ../../../docs/specs/architecture/decisions/ADR-26.md
     pub const fn edge_kind(self) -> EdgeKind {
         match self {
-            ArtifactRelation::SchemaType | ArtifactRelation::Route => EdgeKind::ArtifactBinding,
+            // `HttpClientCall` binds a client call to a framework `Route` — a
+            // code symbol — exactly as the OpenAPI `Route` arm does, so it is an
+            // artifact→code binding and rides the same `(ArtifactBinding, Path)`
+            // route binder intra-repo.
+            ArtifactRelation::SchemaType
+            | ArtifactRelation::Route
+            | ArtifactRelation::HttpClientCall => EdgeKind::ArtifactBinding,
             ArtifactRelation::ProtoImport
             | ArtifactRelation::ProtoType
             | ArtifactRelation::GraphqlType
@@ -310,7 +335,10 @@ impl ArtifactRelation {
             | ArtifactRelation::TfModuleCall
             | ArtifactRelation::ShellSource
             | ArtifactRelation::SchemaType
-            | ArtifactRelation::Route => None,
+            | ArtifactRelation::Route
+            // Resolved by the positional `route_key`/route binder (by path +
+            // method), not by an artifact name-kind — like `Route`.
+            | ArtifactRelation::HttpClientCall => None,
         }
     }
 
@@ -379,7 +407,13 @@ impl ArtifactRelation {
             | ArtifactRelation::SchemaType
             | ArtifactRelation::Route
             | ArtifactRelation::TfVarRef
-            | ArtifactRelation::SqlObjectRef => TargetClass::Workspace,
+            | ArtifactRelation::SqlObjectRef
+            // A client call's target is a `"METHOD /template"` route reference;
+            // it carries no external form beyond the universal absolute-URL rule
+            // (a call to an absolute URL is a different service, dropped above).
+            // The arm's normalizer has already refused any non-static path before
+            // this gate is reached.
+            | ArtifactRelation::HttpClientCall => TargetClass::Workspace,
         }
     }
 
@@ -413,8 +447,13 @@ impl ArtifactRelation {
     /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
     pub const fn bridge_namespace(self) -> Option<BridgeNamespace> {
         match self {
-            // No relation shipped today is an invocation arm; the HTTP/gRPC/
-            // broker arms (S-252/S-253/S-254) each add a variant overriding this.
+            // The HTTP client-call arm (S-252, FR-WS-08) — the first invocation
+            // arm — lives in the exactly-one `Http` namespace, bound to a `Route`
+            // provider via the shared `route_key`.
+            ArtifactRelation::HttpClientCall => Some(BridgeNamespace::Http),
+            // The remaining CR-011 relations are contract/artifact relations, not
+            // invocation arms; the gRPC/broker arms (S-253/S-254) each add a
+            // variant overriding this.
             ArtifactRelation::ProtoImport
             | ArtifactRelation::ProtoType
             | ArtifactRelation::GraphqlType
@@ -441,6 +480,10 @@ impl ArtifactRelation {
     /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
     pub const fn bridge_role(self) -> Option<BridgeRole> {
         match self {
+            // A client call *refers to* an endpoint — the consumer side of the
+            // HTTP arm; the provider is the framework `Route` (a contract-surface
+            // node the bridge already indexes).
+            ArtifactRelation::HttpClientCall => Some(BridgeRole::Consumer),
             ArtifactRelation::ProtoImport
             | ArtifactRelation::ProtoType
             | ArtifactRelation::GraphqlType
@@ -546,6 +589,12 @@ mod tests {
             ArtifactRelation::Route.edge_kind(),
             EdgeKind::ArtifactBinding
         );
+        // The HTTP client-call arm binds to a code `Route` handler — an
+        // artifact→code binding, like the OpenAPI `Route` arm.
+        assert_eq!(
+            ArtifactRelation::HttpClientCall.edge_kind(),
+            EdgeKind::ArtifactBinding
+        );
         // Artifact→artifact references.
         for rel in [
             ArtifactRelation::ProtoImport,
@@ -593,6 +642,7 @@ mod tests {
             ArtifactRelation::ShellSource,
             ArtifactRelation::SchemaType,
             ArtifactRelation::Route,
+            ArtifactRelation::HttpClientCall,
         ] {
             assert_eq!(
                 rel.target_kind(),
@@ -708,12 +758,16 @@ mod tests {
 
     // ── FR-WS-07 / ADR-54: the pluggable invocation-arm descriptors ──────────
 
-    /// No relation shipped today is a cross-service invocation arm: every variant
-    /// declares neither descriptor. This is the pre-arm baseline the HTTP/gRPC/
-    /// broker arms (S-252/S-253/S-254) flip to `Some` one variant at a time.
+    /// Every CR-011 contract/artifact relation declares neither descriptor — only
+    /// the invocation arms do. With the HTTP client-call arm (S-252) landed, it is
+    /// the sole invocation arm today; the gRPC/broker arms (S-253/S-254) flip one
+    /// more variant each.
     #[test]
-    fn no_shipped_relation_is_an_invocation_arm() {
+    fn only_invocation_arms_declare_the_bridge_descriptors() {
         for rel in ArtifactRelation::ALL {
+            if rel.is_invocation_arm() {
+                continue; // the invocation arms are asserted positively below
+            }
             assert_eq!(
                 rel.bridge_namespace(),
                 None,
@@ -723,6 +777,28 @@ mod tests {
             assert_eq!(rel.bridge_role(), None, "{}", rel.as_str());
             assert!(!rel.is_invocation_arm(), "{}", rel.as_str());
         }
+    }
+
+    /// The HTTP client-call arm (S-252, [FR-WS-08], [ADR-54]) declares the exactly
+    /// two descriptors that define it: the exactly-one `Http` namespace and the
+    /// `Consumer` role. It is a full invocation arm, and it files its edges under
+    /// the intra-repo `route` vocabulary (via `BridgeNamespace::Http.relation()`),
+    /// so a cross-service client-call bind reads identically to a local one.
+    #[test]
+    fn http_client_call_is_the_http_consumer_arm() {
+        let rel = ArtifactRelation::HttpClientCall;
+        assert_eq!(rel.bridge_namespace(), Some(BridgeNamespace::Http));
+        assert_eq!(rel.bridge_role(), Some(BridgeRole::Consumer));
+        assert!(rel.is_invocation_arm());
+        // Exactly-one discipline — a client call binds the sole matching route.
+        assert_eq!(
+            rel.bridge_namespace().unwrap().match_discipline(),
+            MatchDiscipline::ExactlyOne
+        );
+        // It binds to a code `Route` and speaks the `route` relation vocabulary.
+        assert_eq!(rel.edge_kind(), EdgeKind::ArtifactBinding);
+        assert_eq!(rel.bridge_namespace().unwrap().relation(), "route");
+        assert_eq!(rel.as_str(), "http-client-call");
     }
 
     /// The hard pairing invariant every arm — present or future — must honor: a
@@ -766,6 +842,7 @@ mod tests {
                 ArtifactRelation::TfVarRef => 6,
                 ArtifactRelation::SqlObjectRef => 7,
                 ArtifactRelation::ShellSource => 8,
+                ArtifactRelation::HttpClientCall => 9,
             }
         }
         for (i, rel) in ArtifactRelation::ALL.into_iter().enumerate() {
@@ -777,7 +854,7 @@ mod tests {
             );
         }
         // No extras/duplicates: `ALL` is exactly the declared variants, once each.
-        assert_eq!(ArtifactRelation::ALL.len(), 9);
+        assert_eq!(ArtifactRelation::ALL.len(), 10);
     }
 
     /// The per-namespace match discipline the bridge switches on: HTTP and gRPC

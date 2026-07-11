@@ -114,7 +114,6 @@ pub(super) fn push_artifact_ref(
 ///
 /// [FR-WS-07]: ../../../../docs/specs/requirements/FR-WS-07.md
 /// [ADR-54]: ../../../../docs/specs/architecture/decisions/ADR-54.md
-#[allow(dead_code)] // exercised by tests now; consumed by the S-252/253/254 arms.
 pub(crate) struct InvocationSite {
     /// The enclosing anchor/function symbol the invocation is attributed to.
     pub(crate) source: LogosSymbol,
@@ -154,7 +153,6 @@ pub(crate) struct InvocationSite {
 /// [FR-CG-07]: ../../../../docs/specs/requirements/FR-CG-07.md
 /// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
 /// [ADR-54]: ../../../../docs/specs/architecture/decisions/ADR-54.md
-#[allow(dead_code)] // the reuse foundation; the S-252/253/254 arms are its callers.
 pub(crate) fn capture_invocation_refs<F>(
     facts: &mut Facts,
     relation: ArtifactRelation,
