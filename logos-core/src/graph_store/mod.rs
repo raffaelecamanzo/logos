@@ -1262,6 +1262,28 @@ pub trait GraphStore {
     /// [NFR-PE-03]: ../../../docs/specs/requirements/NFR-PE-03.md
     fn has_broker_footprint(&self) -> Result<bool>;
 
+    /// The **promoted broker subgraph** alone: the `topic`/`producer`/`consumer`
+    /// nodes and the `publishes`/`subscribes` edges joining them (S-256,
+    /// [FR-WS-11]).
+    ///
+    /// A targeted read, for the same reason
+    /// [`dispatch_markers`](GraphStore::dispatch_markers) is one: the workspace topic
+    /// inventory ([`crate::federation::topics`]) is served on every `workspace status`
+    /// request, per member, and its answer is O(topics) — typically **zero**. Reading
+    /// it via the whole-graph [`all_nodes`](GraphStore::all_nodes) +
+    /// [`all_edges`](GraphStore::all_edges) would make a read-model that usually
+    /// returns nothing cost a full graph materialisation of every member ([NFR-PE-10]).
+    /// A repo with no broker coupling answers with two empty vectors after an index
+    /// scan.
+    ///
+    /// Ordered (`id`, then `source, target, kind`) so the projection built from it is
+    /// deterministic ([NFR-RA-06]).
+    ///
+    /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    fn broker_subgraph(&self) -> Result<(Vec<NodeRow>, Vec<EdgeRow>)>;
+
     /// The ids of every node the annotation pass marked `is_test = 1`, ordered
     /// by `id` ([FR-AN-05]).
     ///
@@ -2290,6 +2312,63 @@ impl GraphStore for SqliteGraphStore {
             .context("checking for broker-arm ledger references")?
             != 0;
         Ok(has_ref)
+    }
+
+    fn broker_subgraph(&self) -> Result<(Vec<NodeRow>, Vec<EdgeRow>)> {
+        let (topic, producer, consumer) = (
+            crate::model::NodeKind::Topic.as_i32(),
+            crate::model::NodeKind::Producer.as_i32(),
+            crate::model::NodeKind::Consumer.as_i32(),
+        );
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT n.id, s.symbol, n.kind, n.name, f.path, n.start_line, n.end_line \
+             FROM nodes n \
+             JOIN symbols s ON s.id = n.symbol_id \
+             LEFT JOIN files f ON f.id = n.file_id \
+             WHERE n.kind IN (?1, ?2, ?3) \
+             ORDER BY n.id",
+        )?;
+        let raws = stmt
+            .query_map(rusqlite::params![topic, producer, consumer], map_raw_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting the promoted broker nodes")?;
+        let nodes: Vec<NodeRow> = raws
+            .into_iter()
+            .map(raw_to_node)
+            .collect::<Result<Vec<_>>>()?;
+
+        let (publishes, subscribes) = (
+            crate::model::EdgeKind::Publishes.as_i32(),
+            crate::model::EdgeKind::Subscribes.as_i32(),
+        );
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT source, target, kind FROM edges \
+             WHERE kind IN (?1, ?2) \
+             ORDER BY source, target, kind",
+        )?;
+        let edges = stmt
+            .query_map(rusqlite::params![publishes, subscribes], |row| {
+                Ok((
+                    NodeId(row.get::<_, i64>(0)?),
+                    NodeId(row.get::<_, i64>(1)?),
+                    row.get::<_, i32>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting the promoted broker edges")?
+            .into_iter()
+            .map(|(source, target, kind)| {
+                Ok(EdgeRow {
+                    source,
+                    target,
+                    kind: EdgeKind::try_from(kind).with_context(|| {
+                        format!("corrupt edge kind {kind} stored; rebuild advised (NFR-RA-08)")
+                    })?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok((nodes, edges))
     }
 
     fn test_node_ids(&self) -> Result<Vec<NodeId>> {

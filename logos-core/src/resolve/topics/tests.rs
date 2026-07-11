@@ -259,8 +259,15 @@ fn a_declaration_publishing_one_topic_twice_is_a_single_producer_at_the_first_li
 
 /// A relay declaration that both subscribes to and re-publishes on one topic is a
 /// producer **and** a consumer of it — the two promoted nodes are distinct
-/// identities, so neither shadows the other (the S-254 dedup-collision shape,
-/// carried into the first-class graph).
+/// identities, so neither shadows the other.
+///
+/// This pins the **pure core**, which is already correct. End-to-end a relay does NOT
+/// yet reach this state: the ledger's relation-blind `UNIQUE` key drops the relay's
+/// subscribe row before the pass ever sees it (see
+/// `a_relay_method_loses_its_subscribe_to_the_relation_blind_ledger_key` in
+/// `tests/broker_topic_promotion.rs`, which pins that defect and the migration-18 fix
+/// it needs). So this test says "when both rows arrive, both are promoted" — not
+/// "relays work today".
 #[test]
 fn a_relay_declaration_is_both_a_producer_and_a_consumer_of_one_topic() {
     let relay = decl(1, "relay");

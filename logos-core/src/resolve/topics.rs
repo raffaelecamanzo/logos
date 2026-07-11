@@ -43,10 +43,11 @@
 //! disappeared is demoted cleanly.
 //!
 //! # A no-topic graph is byte-for-byte unaffected ([NFR-RA-06], [FR-WS-11])
-//! An incremental `sync` first asks the store for a **broker footprint** — any
-//! promoted broker node, or any broker-arm ledger row. A repo with neither (every
-//! repo that indexes no broker topics) skips the whole-graph snapshot and writes
-//! nothing at all, so its store is bit-identical with and without this pass.
+//! Every run — cold `index` and incremental `sync` alike — first asks the store for
+//! a **broker footprint**: any promoted broker node, or any broker-arm ledger row.
+//! A repo with neither (every repo that indexes no broker topics) skips the
+//! whole-graph snapshot and writes nothing at all, so its store is bit-identical
+//! with and without this pass.
 //!
 //! # The cross-member bind is *not* here
 //! Promotion is per-repo. Binding a producer in one member to a consumer in
@@ -94,25 +95,25 @@ const PROMOTED: [NodeKind; 3] = [NodeKind::Topic, NodeKind::Producer, NodeKind::
 /// rolls back wholesale, [NFR-RA-07]).
 ///
 /// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
-pub fn run(runtime: &Runtime, delta: Option<&super::Delta>) -> Result<TopicStats> {
+pub fn run(runtime: &Runtime) -> Result<TopicStats> {
     let started = Instant::now();
 
-    // The no-topic fast path (see the module docs): on a `sync`, a graph with no
-    // broker footprint can promote nothing and has nothing to demote, so the
-    // whole-graph snapshot below is provably a no-op and is skipped. One cheap
-    // EXISTS read instead of the O(graph) materialisation. A full `index`
-    // (`delta` is `None`) always runs the pass — its own read is the snapshot it
-    // would otherwise need anyway.
-    if delta.is_some() {
-        let has_footprint = runtime.submit_read(|store| store.has_broker_footprint())?;
-        if !has_footprint {
-            return Ok(TopicStats {
-                duration_ms: elapsed_ms(started),
-                ..TopicStats::default()
-            });
-        }
+    // The no-topic fast path (see the module docs): a graph with no broker footprint
+    // can promote nothing and has nothing to demote, so the whole-graph snapshot below
+    // is provably a no-op. One cheap EXISTS read instead of the O(graph)
+    // materialisation.
+    //
+    // Deliberately **unconditional**, unlike the framework pass's `delta.is_some()`
+    // gate: the overwhelming majority of repos index no broker coupling at all, and a
+    // cold `index` of one of them has no reason to materialise
+    // `indexed_files + all_nodes + all_edges + unresolved_refs` only to discover an
+    // empty desired set. The probe is strictly cheaper on both paths.
+    if !runtime.submit_read(|store| store.has_broker_footprint())? {
+        return Ok(TopicStats {
+            duration_ms: elapsed_ms(started),
+            ..TopicStats::default()
+        });
     }
-
     // One consistent snapshot, the same basis the framework pass reconciles from.
     let (files, nodes, edges, refs) = runtime.submit_read(|store| {
         Ok((
@@ -132,9 +133,10 @@ pub fn run(runtime: &Runtime, delta: Option<&super::Delta>) -> Result<TopicStats
         files.iter().map(|f| (f.path.as_str(), f.id)).collect();
     let desired = desired_set(&refs, &nodes, &file_id_by_path);
 
-    // A graph with neither a broker ref nor a promoted broker node is untouched:
-    // no writer batch is opened at all, so its store stays byte-identical
-    // ([FR-WS-11], [NFR-RA-06]).
+    // Belt and braces behind the footprint probe: a ledger that carries a broker row
+    // whose enclosing declaration is unknown (so it promotes nothing) leaves an empty
+    // desired set with nothing promoted. No writer batch is opened at all, so the store
+    // stays byte-identical ([FR-WS-11], [NFR-RA-06]).
     if desired.is_empty() && existing.is_empty() {
         return Ok(TopicStats {
             duration_ms: elapsed_ms(started),
@@ -143,17 +145,18 @@ pub fn run(runtime: &Runtime, delta: Option<&super::Delta>) -> Result<TopicStats
     }
 
     let count = |kind: NodeKind| desired.values().filter(|d| d.kind == kind).count() as u64;
-    let stats = TopicStats {
-        topics: count(NodeKind::Topic),
-        producers: count(NodeKind::Producer),
-        consumers: count(NodeKind::Consumer),
-        duration_ms: 0, // stamped after the commit, below
-    };
+    let (topics, producers, consumers) = (
+        count(NodeKind::Topic),
+        count(NodeKind::Producer),
+        count(NodeKind::Consumer),
+    );
 
     commit(runtime, &existing, &edges, desired)?;
     Ok(TopicStats {
+        topics,
+        producers,
+        consumers,
         duration_ms: elapsed_ms(started),
-        ..stats
     })
 }
 
@@ -256,13 +259,19 @@ fn topic_symbol(ctx: &SymbolContext, key: &str) -> Result<LogosSymbol> {
 /// enclosing declaration's own symbol under a **role namespace**, so it is unique
 /// per `(declaration, role, topic)` and lives in the file that declares it.
 ///
-/// The role namespace (`producer/` | `consumer/`) is load-bearing, not decoration:
+/// The role namespace (`producer/` | `consumer/`) is not decoration:
 /// [`descriptor_for`] renders both roles as the same `name#` type descriptor, so
 /// without it a **relay** — one declaration that subscribes to a topic and
-/// re-publishes on it, the shape S-254 explicitly preserves through the ledger
-/// dedup — would collide its producer and its consumer onto one symbol and
-/// silently lose a real broker fact. Mirrors the framework pass's `route/` /
+/// re-publishes on it — would collide its producer and its consumer onto one symbol
+/// and silently lose a real broker fact. Mirrors the framework pass's `route/` /
 /// `component/` pseudo-namespace convention.
+///
+/// Defensive *today*, load-bearing *soon*: the ledger's `UNIQUE (source_symbol,
+/// target, form, kind)` key excludes the relation `payload`, so a relay's two rows
+/// collide **before** this pass ever sees them and only the publish survives (pinned
+/// by `a_relay_method_loses_its_subscribe_to_the_relation_blind_ledger_key` in
+/// `tests/broker_topic_promotion.rs`). The moment migration 18 widens that key, the
+/// relay's consumer arrives here — and this namespace is what keeps it distinct.
 fn site_symbol(enclosing: &LogosSymbol, kind: NodeKind, key: &str) -> Result<LogosSymbol> {
     let role = match kind {
         NodeKind::Producer => "producer",
@@ -339,13 +348,17 @@ fn desired_set(
                 edges: vec![DesiredEdge::ContainedBy(r.enclosing.id), broker_edge],
             });
         // A second capture of the same site keeps the earliest line — deterministic
-        // regardless of ledger order.
-        if let (Some(existing), Some(line)) = (entry.start_line, r.line) {
-            if line < existing {
-                entry.start_line = Some(line);
-                entry.end_line = Some(line);
-            }
-        }
+        // regardless of ledger order. The fold must be **total**: `None` means "line
+        // unknown", so a known line must win over it in either arrival order. (A
+        // partial fold guarded on `(Some, Some)` would leave the node at `None` when
+        // the unknown-line row happened to arrive first, making the output depend on
+        // ledger order — exactly what [NFR-RA-06] forbids.)
+        entry.start_line = match (entry.start_line, r.line) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, b) => b,
+        };
+        entry.end_line = entry.start_line;
     }
 
     desired

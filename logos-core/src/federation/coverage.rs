@@ -535,9 +535,8 @@ mod tests {
         fn contract_stamp(&self) -> u64 {
             0
         }
-        // The single ledger seam; the `invocation_consumers` the coverage tier reads
-        // is the role-filtered projection of it (every fixture here is consumer-role,
-        // so the projection is the identity).
+        // The single ledger seam: the coverage tier reads it and applies the role filter
+        // itself (every fixture here is consumer-role, plus the S-256 broker subscribes).
         fn invocation_refs(&self) -> Result<Vec<super::super::InvocationRef>> {
             if self.member == "unreadable" {
                 anyhow::bail!("store read failed");

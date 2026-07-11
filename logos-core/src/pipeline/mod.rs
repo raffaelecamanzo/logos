@@ -212,7 +212,7 @@ pub fn index(
     // Broker-topic promotion (S-256, CR-061, FR-WS-11): promote the ledger-only
     // broker refs to `topic`/`producer`/`consumer` nodes — a cold index always
     // reconciles the whole graph.
-    topics_pass(runtime, None)?;
+    topics_pass(runtime)?;
     // Framework-dispatch live-rooting (CR-043, ADR-39): live-root the methods
     // dispatched only through an external framework so Pass 3 below stops
     // mis-reporting them dead — a cold index reconciles every `.rs` file.
@@ -726,7 +726,7 @@ pub fn sync(
     // Broker-topic promotion (S-256, CR-061, FR-WS-11), incrementally gated: a
     // graph with no broker footprint skips the whole-graph snapshot entirely, so a
     // repo that indexes no topics does no work and its store stays byte-identical.
-    topics_pass(runtime, Some(&delta))?;
+    topics_pass(runtime)?;
     // Framework-dispatch live-rooting (CR-043, ADR-39), incrementally gated:
     // only the changed `.rs` files are rescanned and only their markers
     // reconciled, so a sync that touched no Rust file does no work — keeping the
@@ -1672,8 +1672,8 @@ fn framework_pass(
 /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
 /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
 /// [ADR-55]: ../../../docs/specs/architecture/decisions/ADR-55.md
-fn topics_pass(runtime: &Runtime, delta: Option<&crate::resolve::Delta>) -> Result<()> {
-    let stats = crate::resolve::topics::run(runtime, delta)?;
+fn topics_pass(runtime: &Runtime) -> Result<()> {
+    let stats = crate::resolve::topics::run(runtime)?;
     if stats.topics > 0 {
         tracing::debug!(
             topics = stats.topics,

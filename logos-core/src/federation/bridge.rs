@@ -199,9 +199,12 @@ pub trait MemberContracts {
     /// nothing, so pre-arm members and lightweight test doubles need not implement
     /// it; the real [`Engine`](crate::Engine) overrides it to read the ledger.
     ///
-    /// This is the **one** ledger seam: [`invocation_consumers`](Self::invocation_consumers)
-    /// is derived from it, so a double that overrides only this method is coherent
-    /// for both.
+    /// This is the **one and only** ledger seam. Both consumers of it — the bridge's
+    /// [`compute_edges`] and the coverage tier ([`super::coverage`]) — read this method
+    /// and apply the arm's own [`bridge_role`](ArtifactRelation::bridge_role)
+    /// themselves. There is deliberately no second, role-filtered trait method: a
+    /// defaulted one would be *overridable*, so an implementor could make the two views
+    /// of one ledger disagree — the very drift the single seam exists to prevent.
     ///
     /// # Errors
     /// Propagates a read failure so the bridge can skip the member as degraded
@@ -213,27 +216,6 @@ pub trait MemberContracts {
     /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
     fn invocation_refs(&self) -> Result<Vec<InvocationRef>> {
         Ok(Vec::new())
-    }
-
-    /// The **consumer-role** subset of [`invocation_refs`](Self::invocation_refs) —
-    /// the call sites that *refer to* an endpoint someone else provides
-    /// ([FR-WS-07]).
-    ///
-    /// The coverage read-model ([`super::coverage`]) asks "did this reference find
-    /// its provider?", which is a question only a consumer can be asked; it reads
-    /// this projection rather than re-deriving the role filter, so the two can
-    /// never drift.
-    ///
-    /// # Errors
-    /// Propagates the underlying [`invocation_refs`](Self::invocation_refs) failure.
-    ///
-    /// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
-    fn invocation_consumers(&self) -> Result<Vec<InvocationRef>> {
-        Ok(self
-            .invocation_refs()?
-            .into_iter()
-            .filter(|r| r.relation.bridge_role() == Some(BridgeRole::Consumer))
-            .collect())
     }
 
     /// Read this member's **topic surface** — its promoted per-repo topic graph,
@@ -322,10 +304,14 @@ impl MemberContracts for crate::Engine {
             "reading a member's topic surface requires a long-lived engine \
              (Engine::start) with a read-only pool",
         )?;
-        // The promoted topic graph and the two broker edge kinds joining it — the
-        // nodes `crate::resolve::topics` reconciled on this member's last index.
-        let (nodes, edges) =
-            runtime.submit_read(|store| Ok((store.all_nodes()?, store.all_edges()?)))?;
+        // A **targeted** read of just the promoted broker subgraph — the nodes
+        // `crate::resolve::topics` reconciled on this member's last index. This
+        // read-model is served on every `workspace status` request, per member, and its
+        // answer is O(topics) — usually zero — so materialising each member's whole
+        // node+edge set for it (which is what `all_nodes` + `all_edges` would do, and on
+        // top of the full read `contract_surface` already performs on the same request)
+        // would be a whole-graph cost for an empty answer ([NFR-PE-10]).
+        let (nodes, edges) = runtime.submit_read(|store| store.broker_subgraph())?;
         Ok(super::topics::topic_summaries_from(&nodes, &edges))
     }
 
@@ -1098,8 +1084,9 @@ mod tests {
         fn contract_stamp(&self) -> u64 {
             FIXTURES.with(|f| f.borrow().get(&self.member).map(|m| m.stamp).unwrap_or(0))
         }
-        // The single ledger seam: `invocation_consumers` is derived from this, so a
-        // fixture's provider-role rows (a broker subscribe) reach the bridge too.
+        // The single ledger seam — the bridge and the coverage tier both read it and
+        // apply the role themselves, so a fixture's provider-role rows (a broker
+        // subscribe) reach both.
         fn invocation_refs(&self) -> Result<Vec<InvocationRef>> {
             // "unreadable" fails its surface read; keep the same degrade behaviour
             // here so a degraded member is skipped for its ledger too.
@@ -1618,7 +1605,7 @@ mod tests {
     // ── S-252 / FR-WS-08: the HTTP client-call → route arm ────────────────────
     //
     // The arm feeds its captured client-call sites into the bridge as `Http`
-    // `Consumer` candidates (via `invocation_consumers`), keyed through the shared
+    // `Consumer` candidates (via `invocation_refs`), keyed through the shared
     // `route_key`, and relies on the unchanged namespace-generic match loop.
 
     /// The ledger projection keeps every **invocation-arm** row, on either side of
@@ -1629,9 +1616,8 @@ mod tests {
     /// The `Provider`-role broker subscribe surviving here is the whole point
     /// (S-256, [FR-WS-11]): it has no contract-surface node behind it, so a
     /// consumer-only intake would index no broker provider anywhere and the arm
-    /// could never bind. The role is applied downstream (in
-    /// [`invocation_consumers`](MemberContracts::invocation_consumers) and in
-    /// [`compute_edges`]), not here.
+    /// could never bind. The role is applied downstream — by [`compute_edges`] and by
+    /// the coverage tier, each off the arm's own `bridge_role` — not here.
     ///
     /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
     #[test]
@@ -1850,7 +1836,7 @@ mod tests {
     /// relation and portable target; a no-payload, non-arm, or provider-side row
     /// contributes nothing. Exercised here on a gRPC-call row.
     #[test]
-    fn invocation_consumers_from_recovers_only_arm_tagged_grpc_consumer_refs() {
+    fn invocation_refs_from_recovers_only_arm_tagged_grpc_consumer_refs() {
         let row = |payload: Option<&str>| crate::graph_store::UnresolvedRefRow {
             id: 1,
             file_id: None,
@@ -2078,22 +2064,49 @@ mod tests {
     /// index; were it pushed into both, this single publish/subscribe pair would
     /// emit its edge twice and every service-map link count would be doubled.
     ///
-    /// The guard is the edge count against a topic that also has a same-key HTTP
-    /// namesake in play, so a namespace mix-up would show up here too.
+    /// The fixture deliberately puts a **same-string HTTP namesake** in play — a route
+    /// literally named `orders` alongside the `orders` topic — so a namespace mix-up
+    /// (a broker key meeting an HTTP key, or a publish leaking into the consumer index
+    /// the route provider is indexed against) would surface here as an extra edge
+    /// rather than passing silently. The two keys share a string and must still never
+    /// meet: they live in different [`BridgeNamespace`]s.
     #[test]
     fn a_publish_is_never_counted_through_two_intakes() {
         reset();
+        // `api` publishes to the topic `orders` AND calls an unrelated HTTP route.
         set_member("api", 0, vec![]);
-        set_consumers("api", vec![broker_publish("orders", "local emit_order")]);
-        set_member("billing", 0, vec![]);
+        set_consumers(
+            "api",
+            vec![
+                broker_publish("orders", "local emit_order"),
+                http_call("GET /orders", "local list_orders_call"),
+            ],
+        );
+        // `billing` subscribes to `orders` and also PROVIDES a route whose name shares
+        // the topic's string — the namesake that would catch a namespace collapse.
+        set_member("billing", 0, vec![route("GET /orders", "local route_orders")]);
         set_consumers("billing", vec![broker_subscribe("orders", "local on_order")]);
 
         let edges = ContractBridge::new().edges(&registry(&["api", "billing"]));
+
+        let mut relations: Vec<&str> = edges.iter().map(|e| e.relation.as_str()).collect();
+        relations.sort_unstable();
         assert_eq!(
-            edges.len(),
-            1,
-            "exactly one edge per (publish, subscribe) pair — never one per intake: {edges:?}"
+            relations,
+            ["broker-topic", "route"],
+            "exactly one edge per coupling — one per (publish, subscribe) pair and one \
+             per (call, route), never one per intake, and never a cross-namespace \
+             match on the shared `orders` string: {edges:?}"
         );
+
+        // The broker edge is the publish→subscribe pair, exactly once.
+        let broker: Vec<&BridgeEdge> = edges
+            .iter()
+            .filter(|e| e.relation == "broker-topic")
+            .collect();
+        assert_eq!(broker.len(), 1, "the publish is counted once, not once per intake");
+        assert_eq!(broker[0].from.symbol.as_str(), "local emit_order");
+        assert_eq!(broker[0].to.symbol.as_str(), "local on_order");
     }
 
     /// A differing message-schema FQN keeps the two sides apart through the live

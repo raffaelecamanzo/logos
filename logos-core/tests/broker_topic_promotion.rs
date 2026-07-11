@@ -186,8 +186,14 @@ fn broker_coupling_is_promoted_to_topic_producer_and_consumer_nodes() {
 /// the promotion adds no node, no edge, and (being a pure reconcile over an empty
 /// desired set) writes nothing at all ([FR-WS-11], [NFR-RA-06]).
 ///
-/// The strongest available statement of "unaffected": the store's own content
-/// digest is unchanged by a re-sync, and no broker node or edge exists.
+/// Three layers of statement, from weakest to strongest:
+/// 1. no broker node and no broker edge exists;
+/// 2. the **gate itself** reports no footprint — so the pass provably short-circuits
+///    before its whole-graph snapshot, rather than running and happening to write
+///    nothing (an implementation whose gate always returned `true` would still pass a
+///    counts-only assertion, which is what this suite previously had);
+/// 3. the graph's node/edge **identity** — every `(id, kind, symbol)` — is unchanged
+///    across a re-sync, not merely its cardinality.
 ///
 /// [FR-WS-11]: ../../docs/specs/requirements/FR-WS-11.md
 /// [NFR-RA-06]: ../../docs/specs/requirements/NFR-RA-06.md
@@ -223,17 +229,40 @@ class Plain {
         );
     }
 
-    // And the node/edge counts are stable across a sync — the pass's incremental
-    // gate short-circuits on the empty broker footprint, so it cannot perturb a
-    // graph it has no business in.
-    let counts = |rt: &Runtime| {
-        rt.submit_read(|store| Ok((store.all_nodes()?.len(), store.all_edges()?.len())))
-            .expect("read runs")
+    // The gate itself: no footprint ⇒ the pass short-circuits before its whole-graph
+    // snapshot on every sync. Asserting the gate — not just the outcome — is what
+    // makes this test sensitive to the skip: a `has_broker_footprint` that always
+    // returned `true` would still leave the graph unchanged (the desired set is empty
+    // either way) and a counts-only test would never notice the lost fast path.
+    assert!(
+        !rt.submit_read(|store| store.has_broker_footprint())
+            .expect("read runs"),
+        "a topic-free repo must report NO broker footprint — that is what lets an \
+         incremental sync skip the promotion pass entirely"
+    );
+
+    // And the graph's identity — not merely its cardinality — is unchanged across a
+    // sync: every node's (id, kind, symbol) and every edge's (source, target, kind).
+    let identity = |rt: &Runtime| {
+        rt.submit_read(|store| {
+            let nodes: Vec<(i64, i32, String)> = store
+                .all_nodes()?
+                .into_iter()
+                .map(|n| (n.id.get(), n.kind.as_i32(), n.symbol.as_str().to_string()))
+                .collect();
+            let edges: Vec<(i64, i64, i32)> = store
+                .all_edges()?
+                .into_iter()
+                .map(|e| (e.source.get(), e.target.get(), e.kind.as_i32()))
+                .collect();
+            Ok((nodes, edges))
+        })
+        .expect("read runs")
     };
-    let before = counts(rt);
+    let before = identity(rt);
     engine.sync(&[PathBuf::from("src/Plain.java")]);
     assert_eq!(
-        counts(rt),
+        identity(rt),
         before,
         "a no-topic graph is untouched by the promotion pass, on index and on sync"
     );
@@ -456,4 +485,54 @@ class {class} {{
         publishes.iter().all(|(_, target)| *target == topic_id),
         "both producers point at the same topic node: {publishes:?}"
     );
+}
+
+/// A topic added to a previously **topic-free** repo is promoted on the next
+/// incremental `sync` — not only on a full re-index.
+///
+/// This is the `has_broker_footprint` gate's *ledger* branch, and it is the branch with
+/// the highest practical risk: every other promotion test here runs under a cold
+/// `index`, which skips the gate entirely. A repo with no promoted broker node yet,
+/// whose ledger has just gained its first broker row, is exactly the "add a Kafka
+/// publish, then save the file" case. If that branch regressed, topics would only ever
+/// appear after a full re-index — and every other test in this suite would still pass.
+#[test]
+fn a_topic_added_to_a_topic_free_repo_is_promoted_on_the_next_sync() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/OrderService.java",
+        r#"
+package com.acme;
+class OrderService {
+    public void publish(String payload) {}
+}
+"#,
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.index();
+
+    // The repo starts genuinely topic-free — so the sync below takes the gate's ledger
+    // branch (no promoted node exists to force the reconcile).
+    assert!(
+        names_of(rt, NodeKind::Topic).is_empty(),
+        "the fixture must start with no promoted broker node, or the gate's ledger \
+         branch is not the branch under test"
+    );
+
+    // Now add a real publish and sync just that file.
+    write(tmp.path(), "src/OrderService.java", ORDER_SERVICE);
+    engine.sync(&[PathBuf::from("src/OrderService.java")]);
+
+    assert_eq!(
+        names_of(rt, NodeKind::Topic),
+        ["orders", "shipments"],
+        "the newly-captured topics are promoted on the incremental sync"
+    );
+    assert_eq!(names_of(rt, NodeKind::Producer), ["orders"]);
+    assert_eq!(names_of(rt, NodeKind::Consumer), ["shipments"]);
+    assert_eq!(edges_of(rt, EdgeKind::Publishes).len(), 1);
+    assert_eq!(edges_of(rt, EdgeKind::Subscribes).len(), 1);
 }
