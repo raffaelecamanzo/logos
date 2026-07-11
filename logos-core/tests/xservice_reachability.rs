@@ -28,6 +28,7 @@ use logos_core::federation::{
     app_wide_reachability, AppWideVerdict, ContractBridge, EngineRegistry, Federation, Member,
     RegistryMode, UNION_VIEW,
 };
+use logos_core::model::NodeKind;
 use logos_core::Engine;
 
 /// The `api` member's OpenAPI spec: its `get` operation is the cross-service
@@ -103,10 +104,21 @@ fn federation(root: &Path, members: Vec<Member>) -> Federation {
     }
 }
 
-/// The bytes of a member's persisted graph database — the file the "the view
-/// writes nothing" assertion is about.
+/// The bytes of a member's persisted graph store — **including the WAL sidecars**.
+///
+/// The store runs in WAL mode (`PRAGMA journal_mode = WAL`), so a write can land
+/// in `logos.db-wal` and leave `logos.db` byte-identical until a checkpoint. Reading
+/// only the main file would let a real write slip past the "nothing was written"
+/// assertion; the sidecars close that hole.
 fn db_bytes(root: &Path) -> Vec<u8> {
-    fs::read(root.join(".logos").join("logos.db")).expect("member db exists")
+    let logos = root.join(".logos");
+    let mut bytes = fs::read(logos.join("logos.db")).expect("member db exists");
+    for sidecar in ["logos.db-wal", "logos.db-shm"] {
+        if let Ok(extra) = fs::read(logos.join(sidecar)) {
+            bytes.extend_from_slice(&extra);
+        }
+    }
+    bytes
 }
 
 /// A two-member workspace (`api` + `web`), both indexed.
@@ -161,6 +173,44 @@ fn the_union_view_is_advisory_riderd_and_never_exceeds_the_per_repo_dead_set() {
             claim.name
         );
     }
+
+    // ── The one real integration seam ───────────────────────────────────────
+    // A `BridgeEndpoint`'s symbol comes from the *contract surface* read; the
+    // reachability surface's symbols come from `all_nodes`. `walk_union` matches
+    // the two by symbol. If those spellings ever diverge, EVERY root silently
+    // becomes unresolved, the view goes permanently inert — and every other
+    // assertion in this file still passes green (the dead set would still equal
+    // the per-repo dead set, monotonicity would still hold, the rider would still
+    // be attached). This is the assertion that makes the feature falsifiable.
+    let web_tally = view
+        .members
+        .iter()
+        .find(|m| m.member == "web")
+        .expect("web has a tally");
+    assert_eq!(
+        (web_tally.extra_roots, web_tally.unresolved_roots),
+        (1, 0),
+        "the bridge's provider endpoint must RESOLVE against web's reachability \
+         surface — BridgeEndpoint.symbol and NodeRow.symbol are the same spelling"
+    );
+    assert!(view.skipped_members.is_empty(), "no member degraded");
+
+    // Today the resolved root promotes nothing, and that is the view being
+    // *correct*, not broken: every provider endpoint the bridge currently emits is
+    // either a framework `Route` — which the per-repo walk already roots (ADR-56's
+    // own Notes) — or a `ProtoService` schema node, which is not a callable. The
+    // root resolved (above); it simply had nothing dead to lift.
+    //
+    // Pinned as a test rather than left as a claim in a notes file. When S-256
+    // lands the broker subscribe side (a provider endpoint that IS an ordinary
+    // callable), this assertion is what fails — telling that engineer, precisely
+    // then, to write the real-path promotion E2E that AC1 ultimately wants.
+    assert!(
+        view.live_via_cross_service.is_empty(),
+        "no promotion is possible until a provider endpoint is an ordinary callable \
+         (S-256); if this fires, write the real-path promotion test: {:?}",
+        view.live_via_cross_service
+    );
 
     // `orphan` is dead per-repo and no cross-service edge reaches it — the union
     // view leaves it dead rather than promoting on no evidence (NFR-RA-05).
@@ -244,11 +294,19 @@ fn computing_the_view_leaves_the_per_repo_dead_code_signal_unchanged() {
         "app-wide dead {app_wide_dead:?} must be a subset of per-repo dead \
          {per_repo_dead:?} — the union view is monotone toward live"
     );
+    // Every claim in the `dead` bucket really is a Dead verdict — a non-vacuous
+    // check, because `dead` is non-empty here (asserted above). The mirror-image
+    // assertion on `live_via_cross_service` would be vacuous today (that bucket is
+    // provably empty until S-256 — see the sibling test), so it is deliberately
+    // not made here: an `.all()` over an empty vector is an assertion that cannot
+    // fail, which is worse than no assertion at all.
     assert!(
-        view.live_via_cross_service
-            .iter()
-            .all(|c| c.verdict == AppWideVerdict::LiveViaCrossService),
-        "the promotion bucket carries only promotions"
+        view.dead.iter().all(|c| c.verdict == AppWideVerdict::Dead),
+        "the dead bucket carries only Dead verdicts"
+    );
+    assert!(
+        view.dead.iter().all(|c| c.kind == NodeKind::Function),
+        "the per-repo dead verdict is only ever written for callables"
     );
 }
 
