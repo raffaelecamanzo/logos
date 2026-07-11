@@ -107,12 +107,30 @@ pub struct ReferenceCoverage {
     pub relation: String,
     /// The consumer endpoint this reference belongs to.
     pub from: BridgeEndpoint,
-    /// This reference's 3-state classification. Flattened so the JSON carries
-    /// one top-level `state` key (`"bound"` or `"unbound"`) plus `reason` when
-    /// unbound, rather than nesting the internally-tagged enum under a second
-    /// `state` object.
+    /// The 3-state display bucket (`"bound"`, `"ambiguous"`, or `"unbound"`,
+    /// [`CoverageState::bucket`]) — carried as its own field so a consumer
+    /// reads the FR-WS-05 3-state classification directly, without having to
+    /// special-case `reason == "ambiguous"` against `state` to recover it.
+    pub bucket: &'static str,
+    /// This reference's full classification. Flattened so the JSON also
+    /// carries a top-level `state` key (`"bound"` or `"unbound"`) plus
+    /// `reason` when unbound, rather than nesting the internally-tagged enum
+    /// under a second `state` object.
     #[serde(flatten)]
     pub state: CoverageState,
+}
+
+impl ReferenceCoverage {
+    /// Build a [`ReferenceCoverage`], deriving [`bucket`](Self::bucket) from
+    /// `state` so the two can never disagree.
+    fn new(relation: String, from: BridgeEndpoint, state: CoverageState) -> Self {
+        Self {
+            relation,
+            from,
+            bucket: state.bucket(),
+            state,
+        }
+    }
 }
 
 /// The non-gated 3-state cross-service coverage summary over a workspace
@@ -214,13 +232,13 @@ where
         };
 
         let Some((key, _role)) = classify(NodeKind::ApiOperation, &name) else {
-            references.push(ReferenceCoverage {
-                relation: "route".to_string(),
+            references.push(ReferenceCoverage::new(
+                "route".to_string(),
                 from,
-                state: CoverageState::Unbound {
+                CoverageState::Unbound {
                     reason: UnboundReason::PathNotComposed,
                 },
-            });
+            ));
             unbound += 1;
             continue;
         };
@@ -228,13 +246,13 @@ where
 
         match providers.get(&key).map(Vec::as_slice) {
             None => {
-                references.push(ReferenceCoverage {
+                references.push(ReferenceCoverage::new(
                     relation,
                     from,
-                    state: CoverageState::Unbound {
+                    CoverageState::Unbound {
                         reason: UnboundReason::NoProviderInWorkspace,
                     },
-                });
+                ));
                 no_provider_in_workspace += 1;
             }
             Some([only]) if only.member == member => {
@@ -245,21 +263,17 @@ where
             }
             Some([only]) => {
                 debug_assert_ne!(only.member, member);
-                references.push(ReferenceCoverage {
-                    relation,
-                    from,
-                    state: CoverageState::Bound,
-                });
+                references.push(ReferenceCoverage::new(relation, from, CoverageState::Bound));
                 bound += 1;
             }
             Some(_) => {
-                references.push(ReferenceCoverage {
+                references.push(ReferenceCoverage::new(
                     relation,
                     from,
-                    state: CoverageState::Unbound {
+                    CoverageState::Unbound {
                         reason: UnboundReason::Ambiguous,
                     },
-                });
+                ));
                 ambiguous += 1;
             }
         }
@@ -407,30 +421,48 @@ mod tests {
 
     /// The flattened `state` field serializes as one top-level `"state"` key
     /// (never a nested `state.state`), with `reason` present only when
-    /// unbound.
+    /// unbound, and `bucket` always present as the direct 3-state label
+    /// (`"bound"`/`"ambiguous"`/`"unbound"`) — a per-reference consumer reads
+    /// `bucket` without special-casing `reason == "ambiguous"` ([FR-WS-05]).
     #[test]
     fn state_serializes_flat_not_double_nested() {
-        let bound = ReferenceCoverage {
-            relation: "route".to_string(),
-            from: BridgeEndpoint {
+        let bound = ReferenceCoverage::new(
+            "route".to_string(),
+            BridgeEndpoint {
                 member: "api".to_string(),
                 symbol: LogosSymbol::parse("local op_get").unwrap(),
             },
-            state: CoverageState::Bound,
-        };
+            CoverageState::Bound,
+        );
         let bound_json = serde_json::to_value(&bound).unwrap();
         assert_eq!(bound_json["state"], "bound");
+        assert_eq!(bound_json["bucket"], "bound");
         assert!(bound_json.get("reason").is_none());
 
-        let unbound = ReferenceCoverage {
-            state: CoverageState::Unbound {
+        let unbound = ReferenceCoverage::new(
+            bound.relation.clone(),
+            bound.from.clone(),
+            CoverageState::Unbound {
                 reason: UnboundReason::NoProviderInWorkspace,
             },
-            ..bound
-        };
+        );
         let unbound_json = serde_json::to_value(&unbound).unwrap();
         assert_eq!(unbound_json["state"], "unbound");
+        assert_eq!(unbound_json["bucket"], "unbound");
         assert_eq!(unbound_json["reason"], "no-provider-in-workspace");
+
+        let ambiguous = ReferenceCoverage::new(
+            bound.relation.clone(),
+            bound.from.clone(),
+            CoverageState::Unbound {
+                reason: UnboundReason::Ambiguous,
+            },
+        );
+        let ambiguous_json = serde_json::to_value(&ambiguous).unwrap();
+        assert_eq!(
+            ambiguous_json["bucket"], "ambiguous",
+            "an ambiguous reason gets its own bucket, distinct from the generic unbound bucket"
+        );
     }
 
     /// No provider anywhere in the workspace classifies as its own bucket,
