@@ -581,6 +581,27 @@ mod tests {
         assert_eq!(evicted_sorted, ["b", "c"], "the two idle members are evicted");
     }
 
+    /// Eviction returns the evicted members least-recently-touched **first** —
+    /// asserted with a non-alphabetical touch order, so a name-sorted (rather
+    /// than recency-ordered) result would fail.
+    #[test]
+    fn eviction_returns_evicted_members_least_recently_touched_first() {
+        let registry = lazy(&["a", "b", "c"]);
+        // Touch out of alphabetical order: c (oldest), then a, then b (newest).
+        registry.engine_for("c").unwrap();
+        registry.engine_for("a").unwrap();
+        registry.engine_for("b").unwrap();
+
+        let evicted = registry.evict_to_capacity(1);
+        assert_eq!(
+            evicted,
+            ["c", "a"],
+            "keeps the most-recently-touched (b); evicts the rest LRU-first, \
+             not name-sorted"
+        );
+        assert_eq!(registry.resident_members(), ["b"]);
+    }
+
     /// Eviction under capacity is a no-op.
     #[test]
     fn eviction_under_capacity_evicts_nothing() {
