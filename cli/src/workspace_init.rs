@@ -25,12 +25,15 @@ use crate::{ask, Output};
 /// [`enable::enable`] runs the non-clobber per-member `init`, the manifest
 /// upsert, and the workspace MCP injection.
 ///
-/// Returns without blocking on indexing: each approved member's index is
-/// warmed by a detached background process ([`spawn_background_warm`]) —
-/// best-effort, never awaited. A member whose warm never starts (or hasn't
-/// finished before first real use) still indexes correctly via the engine's
-/// lazy `ensure_indexed` fallback (FR-IX-07), so this command never needs to
-/// wait on it.
+/// Returns without blocking on indexing: each **newly** approved member's
+/// index is warmed by a detached background process
+/// ([`spawn_background_warm`]) — best-effort, never awaited. Members already
+/// in the manifest are not re-warmed on every re-run (they were warmed, or
+/// fell back to lazy indexing, on the run that first added them) — only the
+/// delta this invocation approves. A member whose warm never starts (or
+/// hasn't finished before first real use) still indexes correctly via the
+/// engine's lazy `ensure_indexed` fallback (FR-IX-07), so this command never
+/// needs to wait on it.
 pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output) -> Result<i32> {
     let existing = federation::discover(root)?;
     let workspace_root = existing
@@ -56,8 +59,7 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output) -> R
     let already_names: Vec<String> = already.iter().map(|m| m.name.clone()).collect();
 
     let proposed = enable::candidates_for_approval(&workspace_root, &already_names, exclude)?;
-    let mut members = already;
-    members.extend(gate(&proposed, yes, |m| {
+    let approved_new = gate(&proposed, yes, |m| {
         ask(
             &format!(
                 "include member \"{}\" ({}) in the workspace?",
@@ -66,7 +68,10 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output) -> R
             ),
             true,
         )
-    }));
+    });
+
+    let mut members = already;
+    members.extend(approved_new.iter().cloned());
 
     if members.is_empty() {
         eprintln!(
@@ -77,7 +82,7 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output) -> R
     }
 
     let report = enable::enable(&workspace_root, &name, &members)?;
-    for member in &members {
+    for member in &approved_new {
         spawn_background_warm(&member.root);
     }
 
