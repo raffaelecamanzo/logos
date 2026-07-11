@@ -1,7 +1,8 @@
 # Command Reference
 
-All 27 subcommands of the `logos` binary. Every command accepts the global
-flags `--project <PATH>`, `--json`, and `--quiet`; see
+All subcommands of the `logos` binary (29 top-level commands, including the
+Sprint-55 `xservice` and `workspace` federation groups). Every command accepts
+the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 [usage.md](usage.md#global-flags-and-exit-codes) for those and for the
 `0/1/2/3` exit-code contract.
 
@@ -25,6 +26,8 @@ flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`stats`](#stats) | ✅ | Usage/performance statistics |
 | [`languages`](#languages) | ✅ | Registered language grammars |
 | [`serve`](#serve) | ✅ | MCP server over stdio and/or the localhost web UI (`--ui`, requires a `--features ui` build) |
+| [`xservice`](#xservice-workspace-federation-queries) | ✅ | Cross-service queries over a workspace: `route-providers` / `callers` / `impact` / `search` (`--repo` to scope) |
+| [`workspace status`](#workspace-status) | ✅ | Per-member freshness + the 3-state cross-service coverage summary |
 | [`scan`](#scan) | ✅ | Full architecture-quality scan |
 | [`check`](#check) | ✅ | Architecture-rules compliance check |
 | [`gate`](#gate) | ✅ | CI quality gate on the signal |
@@ -399,6 +402,87 @@ in [configuration.md](configuration.md)) and folded into a single `sync`
 batch. Navigation and governance responses always reflect the current on-disk
 state; the reconcile backstop in every quality command is the correctness
 safety net regardless.
+
+**Workspace mode (context-aware `--ui`).** When `serve --ui` starts inside a
+[workspace](#xservice-workspace-federation-queries) (a `logos.workspace.toml`
+found up-tree, see [configuration.md](configuration.md)), it serves **workspace
+mode**: the shared `/api/v1/*` surface runs against the default member (only that
+member is warmed eagerly at startup; the rest are built lazily on first touch),
+and a `/api/v1/workspace/*` fan-out surface exposes the cross-service
+read-models (`status`, `route-providers`, `search`, `callers`, `impact`) to the
+frontend. In a plain repo with no manifest up-tree, `serve --ui` is byte-for-byte
+as before — the `/api/v1/workspace/*` routes answer `404` and no member registry
+is allocated. Pass **`--standalone`** to force single-repo focus even under a
+manifest. Every response (workspace or single-root) still carries the unchanged
+self-only CSP and binds `127.0.0.1` only.
+
+```bash
+logos serve --ui --standalone                        # force single-repo focus even under a workspace manifest
+curl 127.0.0.1:4983/api/v1/workspace/status          # (workspace mode) per-member freshness + coverage
+```
+
+---
+
+## Workspace federation queries
+
+These commands answer **cross-service** questions over a
+[workspace](configuration.md) — a `logos.workspace.toml` manifest at a parent
+folder listing sibling member repos (set up with
+[`init --workspace`](#init)). They compute an **in-memory overlay** over each
+member's own graph: nothing is persisted, no graph union is ever written, and no
+`NodeId` crosses a member's database boundary ([ADR-52](../specs/architecture/decisions/ADR-52.md)).
+Every answer is repo-qualified; a member whose engine fails to start degrades to
+a per-member `error` rather than aborting the query. In a plain (non-workspace)
+repo these commands report that no workspace was found (exit `3`).
+
+The same thick-core read-models back every surface identically — the `logos
+xservice` / `logos workspace` CLI here and the `/api/v1/workspace/*` HTTP
+endpoints under [`serve --ui`](#serve) (both live now) — so the
+coverage/service-map/impact numbers are always the same whichever way you reach
+them. The matching `xservice_*` MCP tools are implemented on the federated MCP
+server but are **not yet exposed over `serve --mcp`** (which still runs
+single-backed today); wiring the served MCP loop to the workspace lands with a
+later CR-061 story.
+
+### `xservice` (workspace federation queries)
+
+```bash
+logos xservice route-providers [--repo <MEMBER>] [--json]   # the service map: cross-service route bindings
+logos xservice search <QUERY> [--kind <K>] [--limit <N>] [--repo <MEMBER>] [--json]
+logos xservice callers <SYMBOL> [--limit <N>] [--repo <MEMBER>] [--json]
+logos xservice impact <SYMBOL> [--depth <N>] [--repo <MEMBER>] [--json]
+```
+
+- **`route-providers`** — the workspace service map: every cross-service binding
+  where one member's declared route provides for a reference in another
+  (`BridgeEdge`s matched exactly-one on a portable `route_key`; two providers ⇒
+  ambiguous, no edge). `--repo X` scopes to routes *provided by* member `X`.
+- **`search`** — full-text search fanned across every member, each hit tagged
+  with its member. `--repo X` scopes the fan to member `X`.
+- **`callers`** — direct callers of a symbol per member, plus the cross-service
+  callers stitched across bridge edges (a consumer in another member that binds
+  the symbol's route).
+- **`impact`** — transitive impact per member, extended across bridge edges: a
+  handler reachable only via a matched cross-service call is included, tagged
+  with the bridge edge it was reached through.
+
+`--repo` constructs only the member engines the answer needs (a one-shot never
+builds all N, [NFR-PE-10](../specs/requirements/NFR-PE-10.md)). All `--json`
+output is a single machine-clean line.
+
+### `workspace status`
+
+```bash
+logos workspace status [--json]
+```
+
+Per-member freshness (each member's index/sync state) plus the **3-state
+cross-service coverage summary** — every cross-boundary reference classified
+`bound` / `ambiguous` / `unbound`, each unbound one carrying a reason
+(`no-provider-in-workspace`, `path-not-composed`, `base-url-runtime`,
+`ambiguous`, `schema-mismatch`). The coverage tier is **advisory only** — it is
+bucketed separately (`no-provider-in-workspace` never depresses the bound-ratio)
+and never feeds any member's quality gate ([ADR-53](../specs/architecture/decisions/ADR-53.md)).
 
 ---
 
