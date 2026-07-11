@@ -31,7 +31,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::model::NodeKind;
+use crate::model::{BridgeRole, MatchDiscipline, NodeKind};
 use crate::resolve::http_client_call::ClientCallRefusal;
 
 use super::bridge::{
@@ -220,16 +220,42 @@ where
             }
         }
     }
-    // Arm consumer refs from each member's ledger (HTTP client calls, gRPC stub
-    // calls, and later arms) — degrade-don't-abort via the same `read_members` the
-    // bridge uses ([ADR-53]). Classified below through the same provider index and
-    // the same `consumer_portable_key` as the bridge, so a new arm surfaces here
-    // with no coverage-tier change.
-    for (member, refs) in read_members(registry, "invocation consumers", |e| {
-        e.invocation_consumers()
-    }) {
-        for consumer in refs {
-            inv_consumers.push((member.clone(), consumer));
+    // Arm-tagged ledger refs from each member (HTTP client calls, gRPC stub calls,
+    // broker publishes **and subscribes**) — degrade-don't-abort via the same
+    // `read_members` the bridge uses ([ADR-53]). Read through the **same seam** the
+    // bridge reads (`invocation_refs`, both roles), then split by the arm's own
+    // `bridge_role` — so the coverage tier and the bridge see one ledger, not two.
+    //
+    // Indexing the **provider**-role rows is what keeps this tier honest after S-256
+    // ([FR-WS-11]): a broker subscribe has no contract-surface node behind it, so a
+    // provider index built from `contract_surface` alone contains no broker provider
+    // at all — and every publish, *including the ones the bridge now binds*, would be
+    // reported `no-provider-in-workspace`. The service map would draw the coupling
+    // while the coverage board next to it denied that any provider existed
+    // ([NFR-CC-04]). The bridge's own contract says it: "one classifier, no drift
+    // between 'why did this bind' and 'why didn't this bind'".
+    //
+    // [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
+    // [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    for (member, refs) in read_members(registry, "invocation references", |e| e.invocation_refs()) {
+        for reference in refs {
+            match reference.relation.bridge_role() {
+                Some(BridgeRole::Consumer) => inv_consumers.push((member.clone(), reference)),
+                Some(BridgeRole::Provider) => {
+                    // A ledger-only provider (a broker subscribe) keys on exactly the
+                    // string its consumer side keys on, so the two meet in this index
+                    // the same way they meet in the bridge's.
+                    let Some(key) = consumer_portable_key(reference.relation, &reference.target)
+                    else {
+                        continue; // an unkeyable arm contributes no provider
+                    };
+                    providers.entry(key).or_default().push(BridgeEndpoint {
+                        member: member.clone(),
+                        symbol: reference.symbol,
+                    });
+                }
+                None => {} // not an invocation arm — not this tier's business
+            }
         }
     }
 
@@ -237,11 +263,7 @@ where
         endpoints.sort();
     }
 
-    let mut references = Vec::new();
-    let mut bound = 0u64;
-    let mut ambiguous = 0u64;
-    let mut unbound = 0u64;
-    let mut no_provider_in_workspace = 0u64;
+    let mut tally = Tally::default();
 
     for (member, name, symbol) in consumer_refs {
         let from = BridgeEndpoint {
@@ -250,58 +272,28 @@ where
         };
 
         let Some((key, _role)) = classify(NodeKind::ApiOperation, &name) else {
-            references.push(ReferenceCoverage::new(
+            tally.record(
                 "route".to_string(),
                 from,
                 CoverageState::Unbound {
                     reason: UnboundReason::PathNotComposed,
                 },
-            ));
-            unbound += 1;
+            );
             continue;
         };
         let relation = key.relation().to_string();
 
-        match providers.get(&key).map(Vec::as_slice) {
-            None => {
-                references.push(ReferenceCoverage::new(
-                    relation,
-                    from,
-                    CoverageState::Unbound {
-                        reason: UnboundReason::NoProviderInWorkspace,
-                    },
-                ));
-                no_provider_in_workspace += 1;
-            }
-            Some([only]) if only.member == member => {
-                // A sole same-member provider is an intra-repo fact the
-                // per-repo graph already owns, not a cross-boundary reference
-                // ([FR-WS-04]) — excluded from the coverage tier entirely,
-                // exactly as the bridge emits no edge for it.
-            }
-            Some([only]) => {
-                debug_assert_ne!(only.member, member);
-                references.push(ReferenceCoverage::new(relation, from, CoverageState::Bound));
-                bound += 1;
-            }
-            Some(_) => {
-                references.push(ReferenceCoverage::new(
-                    relation,
-                    from,
-                    CoverageState::Unbound {
-                        reason: UnboundReason::Ambiguous,
-                    },
-                ));
-                ambiguous += 1;
-            }
+        if let Some(state) = tier(&key, &member, &providers) {
+            tally.record(relation, from, state);
         }
     }
 
-    // Classify the arm-tagged invocation consumers against the same provider
-    // index (S-252 HTTP, S-253 gRPC). A stored consumer target normalizes by
-    // construction (the arm's normalizer refused the rest before the ledger), so
-    // it keys; a target that nonetheless does not compose is `path-not-composed`
-    // (a gRPC key, already fully-qualified, never hits that arm).
+    // Classify the arm-tagged invocation consumers against the same provider index
+    // (S-252 HTTP, S-253 gRPC, S-254/S-256 broker). A stored consumer target
+    // normalizes by construction (the arm's normalizer refused the rest before the
+    // ledger), so it keys; a target that nonetheless does not compose is
+    // `path-not-composed` (a gRPC or broker key, already normalized, never hits that
+    // arm).
     for (member, consumer) in inv_consumers {
         let from = BridgeEndpoint {
             member: member.clone(),
@@ -314,65 +306,117 @@ where
             .unwrap_or_else(|| consumer.relation.as_str().to_string());
 
         let Some(key) = consumer_portable_key(consumer.relation, &consumer.target) else {
-            references.push(ReferenceCoverage::new(
+            tally.record(
                 relation,
                 from,
                 CoverageState::Unbound {
                     reason: UnboundReason::PathNotComposed,
                 },
-            ));
-            unbound += 1;
+            );
             continue;
         };
 
-        match providers.get(&key).map(Vec::as_slice) {
-            None => {
-                references.push(ReferenceCoverage::new(
-                    relation,
-                    from,
-                    CoverageState::Unbound {
-                        reason: UnboundReason::NoProviderInWorkspace,
-                    },
-                ));
-                no_provider_in_workspace += 1;
-            }
-            // A sole same-member provider is an intra-repo fact the per-repo graph
-            // owns, not a cross-boundary reference — excluded, as for operations.
-            Some([only]) if only.member == member => {}
-            Some([only]) => {
-                debug_assert_ne!(only.member, member);
-                references.push(ReferenceCoverage::new(relation, from, CoverageState::Bound));
-                bound += 1;
-            }
-            Some(_) => {
-                references.push(ReferenceCoverage::new(
-                    relation,
-                    from,
-                    CoverageState::Unbound {
-                        reason: UnboundReason::Ambiguous,
-                    },
-                ));
-                ambiguous += 1;
-            }
+        if let Some(state) = tier(&key, &member, &providers) {
+            tally.record(relation, from, state);
         }
     }
 
-    references.sort_by(|a, b| a.from.cmp(&b.from));
+    tally.finish()
+}
 
-    let denom = bound + ambiguous + unbound;
-    let bound_ratio = if denom == 0 {
-        1.0
-    } else {
-        bound as f64 / denom as f64
+/// The running coverage tally — one `record` point, so a state and its counter can
+/// never drift apart (the `bound`/`ambiguous`/`unbound`/`no-provider` buckets were
+/// previously incremented by hand at eight separate call sites).
+#[derive(Default)]
+struct Tally {
+    references: Vec<ReferenceCoverage>,
+    bound: u64,
+    ambiguous: u64,
+    unbound: u64,
+    no_provider_in_workspace: u64,
+}
+
+impl Tally {
+    fn record(&mut self, relation: String, from: BridgeEndpoint, state: CoverageState) {
+        match &state {
+            CoverageState::Bound => self.bound += 1,
+            CoverageState::Unbound { reason } => match reason {
+                UnboundReason::Ambiguous => self.ambiguous += 1,
+                // `no-provider-in-workspace` is its own bucket, deliberately OUTSIDE
+                // the `bound_ratio` denominator: a reference to a service outside this
+                // workspace is not a *broken* binding ([ADR-53]).
+                UnboundReason::NoProviderInWorkspace => self.no_provider_in_workspace += 1,
+                _ => self.unbound += 1,
+            },
+        }
+        self.references
+            .push(ReferenceCoverage::new(relation, from, state));
+    }
+
+    fn finish(mut self) -> CrossServiceCoverage {
+        self.references.sort_by(|a, b| a.from.cmp(&b.from));
+        let denom = self.bound + self.ambiguous + self.unbound;
+        let bound_ratio = if denom == 0 {
+            1.0
+        } else {
+            self.bound as f64 / denom as f64
+        };
+        CrossServiceCoverage {
+            references: self.references,
+            bound: self.bound,
+            ambiguous: self.ambiguous,
+            unbound: self.unbound,
+            no_provider_in_workspace: self.no_provider_in_workspace,
+            bound_ratio,
+        }
+    }
+}
+
+/// The coverage verdict for one consumer reference against the workspace provider
+/// index — applying the key's **own namespace discipline** ([ADR-54]) rather than a
+/// hardcoded arity, so this tier reaches the same verdict
+/// [`match_indexed`](super::bridge::match_indexed) reaches when it decides whether to
+/// emit the edge. One classifier, no drift between "why did this bind" and "why
+/// didn't this bind".
+///
+/// `None` means the reference is not a **cross-boundary** one at all — its only
+/// provider is in its own member. That is an intra-repo fact the per-repo graph
+/// already owns, excluded from the tier entirely, exactly as the bridge emits no edge
+/// for it ([FR-WS-04]).
+///
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+/// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
+fn tier(
+    key: &PortableKey,
+    member: &str,
+    providers: &HashMap<PortableKey, Vec<BridgeEndpoint>>,
+) -> Option<CoverageState> {
+    let Some(candidates) = providers.get(key) else {
+        return Some(CoverageState::Unbound {
+            reason: UnboundReason::NoProviderInWorkspace,
+        });
     };
 
-    CrossServiceCoverage {
-        references,
-        bound,
-        ambiguous,
-        unbound,
-        no_provider_in_workspace,
-        bound_ratio,
+    match key.namespace.match_discipline() {
+        MatchDiscipline::ExactlyOne => match candidates.as_slice() {
+            // A sole same-member provider is intra-repo — not a cross-boundary
+            // reference (unchanged from the pre-S-256 tier).
+            [only] if only.member == member => None,
+            [_only] => Some(CoverageState::Bound),
+            // Two or more providers of one key: the sole-provider rule fails, so the
+            // bridge fabricates no edge and this is honestly ambiguous.
+            _ => Some(CoverageState::Unbound {
+                reason: UnboundReason::Ambiguous,
+            }),
+        },
+        // Fan-out (a broker topic): one publish binds EVERY cross-member subscriber,
+        // so any cross-member provider means bound — many subscribers is the arm
+        // working as designed, never an ambiguity ([FR-WS-10]). All-same-member
+        // subscribers are the intra-repo fan-out the per-repo graph owns.
+        MatchDiscipline::FanOut => candidates
+            .iter()
+            .any(|p| p.member != member)
+            .then_some(CoverageState::Bound),
     }
 }
 
@@ -434,6 +478,18 @@ mod tests {
     fn broker_publish(topic: &str, symbol: &str) -> super::super::InvocationRef {
         super::super::InvocationRef {
             relation: crate::model::ArtifactRelation::BrokerPublish,
+            target: topic.to_string(),
+            symbol: LogosSymbol::parse(symbol).unwrap(),
+        }
+    }
+    /// A broker **subscribe** — a `Provider`-role ledger row with no contract-surface
+    /// node behind it, which is why the coverage tier must index the ledger's provider
+    /// side to see it at all (S-256, [FR-WS-11]).
+    ///
+    /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
+    fn broker_subscribe(topic: &str, symbol: &str) -> super::super::InvocationRef {
+        super::super::InvocationRef {
+            relation: crate::model::ArtifactRelation::BrokerSubscribe,
             target: topic.to_string(),
             symbol: LogosSymbol::parse(symbol).unwrap(),
         }
@@ -1060,11 +1116,11 @@ mod tests {
     /// as `path-not-composed` (the HTTP arm's refusal reason) and must never land
     /// in the `unbound` defect bucket that drags the bound ratio down.
     ///
-    /// The broker fan-out itself (one publish → every cross-member subscribe) is
-    /// computed by [`super::broker::broker_edges`], which indexes the `Provider`-
-    /// side subscribes the consumer-only intake here cannot see. Against this
-    /// exactly-one provider index a publish is therefore honestly
-    /// `no-provider-in-workspace` — outside the boundary, not a defect.
+    /// With **no subscriber anywhere in the workspace** (this fixture), the publish is
+    /// honestly `no-provider-in-workspace` — outside the boundary, not a defect. Once a
+    /// subscriber exists the verdict flips to `bound`, which is
+    /// [`a_bound_broker_publish_is_reported_bound_not_no_provider`] — the two together
+    /// pin both halves.
     #[test]
     fn a_broker_publish_topic_keys_and_is_never_path_not_composed() {
         reset();
@@ -1089,6 +1145,121 @@ mod tests {
         );
         // The non-defect bucket: it does not drag the bound ratio down.
         assert_eq!(cov.bound_ratio, 1.0);
+    }
+
+    // ── S-256 / FR-WS-11: the coverage tier and the bridge must not disagree ──
+
+    /// **Regression for the S-256 cross-surface contradiction.** A publish that the
+    /// bridge BINDS to a cross-member subscribe must be reported `bound` here.
+    ///
+    /// Before the fix, the coverage tier built its provider index from
+    /// `contract_surface` alone. A broker subscribe has no contract-surface node — it
+    /// exists only in the ledger — so no broker provider was ever indexed and this
+    /// publish was reported `no-provider-in-workspace` *while the service map drew the
+    /// very coupling it denied*. The board and the map, side by side in the same tab,
+    /// disagreed about the same fact ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn a_bound_broker_publish_is_reported_bound_not_no_provider() {
+        reset();
+        set_member("api", vec![]);
+        set_consumers("api", vec![broker_publish("orders", "local emit_order")]);
+        set_member("billing", vec![]);
+        set_consumers("billing", vec![broker_subscribe("orders", "local on_order")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "billing"]));
+
+        assert_eq!(
+            cov.bound, 1,
+            "the publish binds its cross-member subscribe — the tier must say so: {:?}",
+            cov.references
+        );
+        assert_eq!(
+            cov.no_provider_in_workspace, 0,
+            "a provider EXISTS in this workspace — it is a ledger-only one"
+        );
+        assert_eq!(cov.unbound, 0);
+        assert_eq!(cov.ambiguous, 0);
+        assert_eq!(cov.references.len(), 1, "the subscribe is a provider, not a second reference");
+        assert_eq!(cov.references[0].state, CoverageState::Bound);
+        assert_eq!(cov.references[0].relation, "broker-topic");
+        assert_eq!(cov.bound_ratio, 1.0);
+    }
+
+    /// A topic with **two** cross-member subscribers is `bound`, never `ambiguous`.
+    /// The broker namespace's discipline is fan-out ([ADR-54]): one publish reaches
+    /// every subscriber, so a second subscriber is the arm working as designed. The
+    /// tier now reads the discipline off the key's namespace instead of hardcoding
+    /// exactly-one arity — the same decision the bridge's `match_indexed` makes, which
+    /// is what keeps the two from drifting.
+    ///
+    /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+    #[test]
+    fn a_topic_with_two_subscribers_is_bound_not_ambiguous() {
+        reset();
+        set_member("api", vec![]);
+        set_consumers("api", vec![broker_publish("orders", "local emit_order")]);
+        set_member("billing", vec![]);
+        set_consumers("billing", vec![broker_subscribe("orders", "local bill_on_order")]);
+        set_member("shipping", vec![]);
+        set_consumers("shipping", vec![broker_subscribe("orders", "local ship_on_order")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "billing", "shipping"]));
+
+        assert_eq!(
+            cov.ambiguous, 0,
+            "two subscribers is fan-out, not ambiguity: {:?}",
+            cov.references
+        );
+        assert_eq!(cov.bound, 1);
+    }
+
+    /// A publish whose ONLY subscriber is in its own member is the intra-repo fan-out
+    /// the per-repo graph already owns — the bridge emits no edge for it, so the tier
+    /// reports no cross-boundary reference either (it is excluded, not `unbound`).
+    #[test]
+    fn a_same_member_only_subscriber_is_not_a_cross_boundary_reference() {
+        reset();
+        set_member("api", vec![]);
+        set_consumers(
+            "api",
+            vec![
+                broker_publish("orders", "local emit_order"),
+                broker_subscribe("orders", "local api_local_listener"),
+            ],
+        );
+        set_member("billing", vec![]);
+
+        let cov = cross_service_coverage(&registry(&["api", "billing"]));
+
+        assert!(
+            cov.references.is_empty(),
+            "an intra-repo publish→subscribe pair is not a cross-boundary reference: {:?}",
+            cov.references
+        );
+        assert_eq!((cov.bound, cov.ambiguous, cov.unbound, cov.no_provider_in_workspace), (0, 0, 0, 0));
+    }
+
+    /// The HTTP arm's exactly-one discipline is **unchanged** by the discipline-aware
+    /// tiering: two providers of one route key are still `ambiguous`, not "bound
+    /// because a cross-member one exists". Guards against the fan-out rule leaking
+    /// across namespaces.
+    #[test]
+    fn the_http_arm_stays_exactly_one_under_the_discipline_aware_tier() {
+        reset();
+        set_member("api", vec![op("GET /users/{id}", "local op_get")]);
+        set_member("web", vec![route("GET /users/{id}", "local route_a")]);
+        set_member("svc", vec![route("GET /users/{id}", "local route_b")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "web", "svc"]));
+
+        assert_eq!(
+            cov.ambiguous, 1,
+            "two route providers remain ambiguous — HTTP is exactly-one: {:?}",
+            cov.references
+        );
+        assert_eq!(cov.bound, 0);
     }
 
     // ── advisory isolation (ADR-53 / sprint-55 risk register) ─────────────
