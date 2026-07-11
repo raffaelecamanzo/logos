@@ -410,32 +410,53 @@ fn a_workspace_violation_is_advisory_and_exits_zero() {
     );
 }
 
+/// A per-repo contract for a member, with a constraint that is GUARANTEED to fire:
+/// every function has cyclomatic complexity >= 1, so `max_cc = 0` always yields
+/// violations. This gives the member a real, *failing* gated signal — the thing
+/// the workspace tier must not be able to move.
+const MEMBER_RULES: &str = "[constraints]\nmax_cc = 0\n";
+
 /// AC2 — the load-bearing CR-061 invariant: workspace-rule violations are
 /// reported SEPARATELY from the per-repo gate, and a member's gated signal is
 /// **unchanged** by their existence.
 ///
-/// Byte-for-byte: `logos check` inside member `web` (the member the workspace
-/// rule accuses) produces identical output before and after the `[governance]`
-/// family is declared — the two families never meet ([FR-WS-13], [ADR-56]).
+/// The member under test is deliberately given a real `.logos/rules.toml` that
+/// genuinely FAILS (`max_cc = 0`). Without it this test would be near-vacuous: the
+/// `workspace()` fixture only runs `logos index` (never `logos init`), so a member
+/// has no contract at all and `check` would return an empty, contract-less report
+/// — and "two empty reports are equal" proves nothing. Here the member carries a
+/// loaded contract with real violations and a real exit-1 verdict, and *that* is
+/// what must survive the workspace rules byte-for-byte ([FR-WS-13], [ADR-56]).
 #[test]
 fn declaring_workspace_rules_leaves_the_member_gate_byte_identical() {
     let tmp = workspace();
     let web = tmp.path().join("web");
+    write(&web, ".logos/rules.toml", MEMBER_RULES);
 
     let before = logos(&web, &["check", "--json"]);
     declare_rules(tmp.path(), GOVERNANCE);
     let after = logos(&web, &["check", "--json"]);
 
-    // Guard against a vacuous pass: if `check` merely errored identically both
-    // times, byte-equality below would prove nothing. Assert it produced a real
-    // per-repo rules report first.
+    // Anti-vacuity: the member must have evaluated a REAL contract that REALLY
+    // fails — otherwise the byte-equality below is a comparison of two nothings.
     let report: Value = serde_json::from_slice(&before.stdout)
-        .expect("the member's `check` emits a real RulesReport");
+        .expect("the member's `check` emits a RulesReport");
+    assert_eq!(
+        report["rules_present"], true,
+        "the member loaded its own rules.toml: {report}"
+    );
     assert!(
-        report["passed"].is_boolean() && report["checked_rules"].as_u64().is_some(),
-        "the member gate genuinely evaluated its own contract: {report}",
+        report["violations"].as_array().is_some_and(|v| !v.is_empty()),
+        "the member's contract genuinely fires (max_cc = 0): {report}",
+    );
+    assert_eq!(report["passed"], false, "so its gated verdict is a real FAIL");
+    assert_eq!(
+        before.status.code(),
+        Some(1),
+        "and the per-repo gate exits 1 (FR-GV-03)",
     );
 
+    // The invariant: that real, failing gated signal is untouched.
     assert_eq!(
         before.status.code(),
         after.status.code(),
@@ -449,12 +470,23 @@ fn declaring_workspace_rules_leaves_the_member_gate_byte_identical() {
 
     // ...and the workspace tier DID fire, so the equality above is a real
     // separation, not both tiers being silent.
-    let report = logos_json(tmp.path(), &["workspace", "check"]);
+    let workspace_report = logos_json(tmp.path(), &["workspace", "check"]);
     assert_eq!(
-        report["violations"].as_array().map(Vec::len),
+        workspace_report["violations"].as_array().map(Vec::len),
         Some(1),
         "the workspace rule genuinely fired while the member gate stayed put",
     );
+    // The two families never share a vocabulary: no per-repo violation is tagged
+    // with a workspace rule_type, and vice versa.
+    for v in report["violations"].as_array().expect("member violations") {
+        assert!(
+            !v["rule_type"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("workspace-"),
+            "no workspace rule leaked into the member's per-repo report: {v}",
+        );
+    }
 }
 
 /// AC3: a "no cross-service callers" rule reads the BRIDGE — it names the real
