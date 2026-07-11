@@ -205,7 +205,7 @@ where
     // Arm-tagged invocation consumers (HTTP client calls, S-252, and later arms):
     // `(member, consumer)` pairs read from each member's ledger, classified below
     // through the same provider index as the contract-surface consumers.
-    let mut inv_consumers: Vec<(String, super::bridge::InvocationConsumer)> = Vec::new();
+    let mut inv_consumers: Vec<(String, super::bridge::InvocationRef)> = Vec::new();
 
     for (member, surface) in read_members(registry, "contract surface", |e| e.contract_surface()) {
         for node in &surface {
@@ -396,7 +396,7 @@ mod tests {
     // test-isolated.
     thread_local! {
         static FIXTURES: RefCell<HashMap<String, Vec<ContractNode>>> = RefCell::new(HashMap::new());
-        static CONSUMERS: RefCell<HashMap<String, Vec<super::super::InvocationConsumer>>> =
+        static CONSUMERS: RefCell<HashMap<String, Vec<super::super::InvocationRef>>> =
             RefCell::new(HashMap::new());
     }
 
@@ -409,30 +409,30 @@ mod tests {
             f.borrow_mut().insert(name.to_string(), nodes);
         });
     }
-    fn set_consumers(name: &str, consumers: Vec<super::super::InvocationConsumer>) {
+    fn set_consumers(name: &str, consumers: Vec<super::super::InvocationRef>) {
         CONSUMERS.with(|c| {
             c.borrow_mut().insert(name.to_string(), consumers);
         });
     }
     /// An HTTP client-call consumer at `symbol` calling `target` (`"METHOD /path"`).
-    fn http_call(target: &str, symbol: &str) -> super::super::InvocationConsumer {
-        super::super::InvocationConsumer {
+    fn http_call(target: &str, symbol: &str) -> super::super::InvocationRef {
+        super::super::InvocationRef {
             relation: crate::model::ArtifactRelation::HttpClientCall,
             target: target.to_string(),
             symbol: LogosSymbol::parse(symbol).unwrap(),
         }
     }
     /// A gRPC stub-call consumer at `symbol` invoking `key` (`package.Service/Method`).
-    fn grpc_consumer(key: &str, symbol: &str) -> super::super::InvocationConsumer {
-        super::super::InvocationConsumer {
+    fn grpc_consumer(key: &str, symbol: &str) -> super::super::InvocationRef {
+        super::super::InvocationRef {
             relation: crate::model::ArtifactRelation::GrpcCall,
             target: key.to_string(),
             symbol: LogosSymbol::parse(symbol).unwrap(),
         }
     }
     /// A broker **publish** consumer at `symbol` emitting on `topic` (S-254).
-    fn broker_publish(topic: &str, symbol: &str) -> super::super::InvocationConsumer {
-        super::super::InvocationConsumer {
+    fn broker_publish(topic: &str, symbol: &str) -> super::super::InvocationRef {
+        super::super::InvocationRef {
             relation: crate::model::ArtifactRelation::BrokerPublish,
             target: topic.to_string(),
             symbol: LogosSymbol::parse(symbol).unwrap(),
@@ -479,7 +479,10 @@ mod tests {
         fn contract_stamp(&self) -> u64 {
             0
         }
-        fn invocation_consumers(&self) -> Result<Vec<super::super::InvocationConsumer>> {
+        // The single ledger seam; the `invocation_consumers` the coverage tier reads
+        // is the role-filtered projection of it (every fixture here is consumer-role,
+        // so the projection is the identity).
+        fn invocation_refs(&self) -> Result<Vec<super::super::InvocationRef>> {
             if self.member == "unreadable" {
                 anyhow::bail!("store read failed");
             }

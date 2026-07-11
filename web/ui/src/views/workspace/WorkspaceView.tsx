@@ -33,6 +33,7 @@ import type {
   CrossServiceImpact,
   ImpactEntry,
   ImpactResult,
+  MemberTopics,
   WorkspaceStatus,
   XserviceImpact,
   XserviceRouteProviders,
@@ -161,7 +162,11 @@ function WorkspaceContent({
       <Tabs
         label="Workspace views"
         tabs={[
-          { id: "map", label: "Service map", panel: <ServiceMapPanel services={services} /> },
+          {
+            id: "map",
+            label: "Service map",
+            panel: <ServiceMapPanel services={services} topics={status.topics ?? []} />,
+          },
           {
             id: "coverage",
             label: "Cross-service coverage",
@@ -176,11 +181,17 @@ function WorkspaceContent({
 
 // ── Service map (frontend-design §4.16) ──────────────────────────────────────
 
-function ServiceMapPanel({ services }: { services: ServiceMember[] }) {
+function ServiceMapPanel({
+  services,
+  topics,
+}: {
+  services: ServiceMember[];
+  topics: MemberTopics[];
+}) {
   const bindings = useApiResource<XserviceRouteProviders>(() => fetchWorkspaceBindings(), []);
   return (
     <AsyncResource resource={bindings} loadingLabel="Loading the service map…">
-      {(model) => <ServiceMap services={services} providers={model} />}
+      {(model) => <ServiceMap services={services} providers={model} topics={topics} />}
     </AsyncResource>
   );
 }
@@ -206,21 +217,29 @@ const LINK_COLUMNS: Column<ServiceLink>[] = [
 function ServiceMap({
   services,
   providers,
+  topics,
 }: {
   services: ServiceMember[];
   providers: XserviceRouteProviders;
+  topics: MemberTopics[];
 }) {
   const { selectMember } = useWorkspace();
-  const map = buildServiceMap(services, providers.providers);
+  const map = buildServiceMap(services, providers.providers, topics);
 
   return (
     <div className={styles.panel}>
-      {map.links.length === 0 ? (
+      {/* A map with topics but no resolved bindings is NOT empty — a published topic is
+          real coupling the user can see and act on, even before anything subscribes to
+          it (S-256, FR-WS-11). Reporting it as "nothing here" would hide the very thing
+          promoting topics to first-class nodes was meant to reveal. */}
+      {map.links.length === 0 && map.topics.length === 0 ? (
         <EmptyState message="No cross-service bindings resolved yet — every service is drawn, and the Cross-service coverage tab reports why each reference has not bound." />
       ) : null}
 
       {/* Clicking a service focuses its member: the shell selector switches to it and
-          every other view re-fetches scoped to that member (frontend-design §4.16). */}
+          every other view re-fetches scoped to that member (frontend-design §4.16).
+          A topic node is NOT a member, so clicking it selects nothing — `memberOfServiceId`
+          returns null for a `topic:` id, which is why the two namespaces are distinct. */}
       <GraphCanvas
         loaded={map.loaded}
         selection={{ seed: null, focusId: null, lockedId: null, locatedId: null, depth: 0 }}
@@ -239,8 +258,26 @@ function ServiceMap({
               <EdgeRow type={arm} key={arm} />
             ))}
           </ul>
+          {map.topics.length > 0 && (
+            <>
+              <span className={graphStyles.legendHeading}>Broker topics</span>
+              <ul className={graphStyles.legendList}>
+                <EdgeRow type="publishes" />
+                <EdgeRow type="subscribes" />
+              </ul>
+            </>
+          )}
         </div>
       </details>
+
+      {map.topics.length > 0 && (
+        <p className="muted">
+          {map.topics.length} topic{map.topics.length === 1 ? "" : "s"} · a topic is drawn as its
+          own node, so a coupling reads as{" "}
+          <span className="mono">publisher → topic → subscriber</span>. A topic with no subscriber
+          yet is still drawn — it is unconsumed, not absent.
+        </p>
+      )}
 
       {map.awaitingIndex.length > 0 && (
         <p className="muted">

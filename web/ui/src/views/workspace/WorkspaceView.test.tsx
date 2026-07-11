@@ -140,6 +140,63 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     expect(screen.getByTestId("canvas-edges")).toHaveTextContent("0");
   });
 
+  // ── S-256 / FR-WS-11: topics on the map ────────────────────────────────────
+
+  it("draws a broker topic as its own node on the service map", async () => {
+    stubApi({
+      providers: [],
+      topics: [
+        { member: "api", topics: [{ topic: "orders", producers: 1, consumers: 0 }] },
+        { member: "web", topics: [{ topic: "orders", producers: 0, consumers: 1 }] },
+      ],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+
+    // The topic is a node on the canvas alongside the services…
+    expect(screen.getByRole("button", { name: "orders" })).toBeInTheDocument();
+    // …and the coupling is drawn as two hops (api → orders → web), not one flat line.
+    expect(screen.getByTestId("canvas-edges")).toHaveTextContent("2");
+    expect(screen.getByText(/1 topic ·/)).toBeInTheDocument();
+  });
+
+  it("clicking a TOPIC selects no member — it is not a service", async () => {
+    // The two id namespaces are disjoint precisely so this cannot happen: were a topic
+    // id to decode as a service id, clicking `orders` would scope the whole shell to a
+    // member named "orders" that does not exist.
+    stubApi({
+      providers: [],
+      topics: [{ member: "api", topics: [{ topic: "orders", producers: 1, consumers: 0 }] }],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+
+    // The shell already opens on the manifest default, so the invariant is that a topic
+    // click leaves the selection UNCHANGED — and above all never scopes to "orders".
+    const before = scopedMember();
+    await userEvent.click(screen.getByRole("button", { name: "orders" }));
+    expect(scopedMember()).toBe(before);
+    expect(scopedMember()).not.toBe("orders");
+    // …while clicking a real service still focuses it.
+    await userEvent.click(screen.getByRole("button", { name: "web" }));
+    expect(scopedMember()).toBe("web");
+  });
+
+  it("ACCEPTANCE: a published-but-unconsumed topic is drawn, not reported as empty", async () => {
+    // No binding exists (nobody subscribes), so the pre-S-256 map would have shown the
+    // "no cross-service bindings" empty state and nothing else. The topic is real — a
+    // per-repo topic is visible before any cross-repo match (FR-WS-11).
+    stubApi({
+      providers: [],
+      topics: [{ member: "api", topics: [{ topic: "orders", producers: 1, consumers: 0 }] }],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+
+    expect(screen.getByRole("button", { name: "orders" })).toBeInTheDocument();
+    expect(screen.queryByText(/no cross-service bindings resolved yet/i)).toBeNull();
+  });
+
   it("shows the per-arm board whose columns RECONCILE with the headline above them", async () => {
     stubApi({ coverage: COVERAGE, providers: [BINDING] });
     mount();

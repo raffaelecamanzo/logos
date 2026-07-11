@@ -55,6 +55,11 @@ export const EDGE_STYLE: Record<string, "solid" | "dashed" | "dotted"> = {
   route: "dashed",
   "grpc-call": "solid",
   "broker-topic": "dotted",
+  // The first-class broker edges (S-256, FR-WS-11). These are REAL graph edge kinds
+  // — a `producer --publishes--> topic` in the node views, and the two hops the
+  // service map now draws through a topic node — not a cross-service rollup arm.
+  publishes: "solid",
+  subscribes: "dashed",
 };
 
 /** Edge color by relationship kind — distinct, mutually-legible hues (CR-030). */
@@ -80,6 +85,10 @@ export const EDGE_COLOR: Record<string, string> = {
   route: "#db2777",
   "grpc-call": "#7c3aed",
   "broker-topic": "#0891b2",
+  // The first-class broker edges (S-256) share the broker arm's teal, so a topic's
+  // two hops read as one coupling: `publishes` into it, `subscribes` out of it.
+  publishes: "#0891b2",
+  subscribes: "#0891b2",
 };
 
 /** Node sizing — a base scaled gently by degree; the selection is bumped so it pops. */

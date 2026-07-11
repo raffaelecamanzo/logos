@@ -1242,6 +1242,26 @@ pub trait GraphStore {
     /// [NFR-PE-03]: ../../../docs/specs/requirements/NFR-PE-03.md
     fn has_framework_footprint(&self, detector_prefixes: &[String]) -> Result<bool>;
 
+    /// Whether this graph carries any **broker footprint** — a promoted
+    /// `topic`/`producer`/`consumer` node, or a broker-arm reference in the ledger
+    /// (S-256, [FR-WS-11]).
+    ///
+    /// The incremental gate of the broker-topic promotion pass
+    /// ([`crate::resolve::topics`]), and the exact sibling of
+    /// [`has_framework_footprint`](GraphStore::has_framework_footprint): that pass
+    /// is a pure, idempotent function of the broker ledger and the bound graph, so
+    /// a graph with neither a promoted broker node nor a broker ref can promote
+    /// nothing and has nothing to demote. An incremental `sync` therefore skips the
+    /// whole-graph snapshot entirely, which is what keeps a repo that indexes **no
+    /// broker topics** byte-for-byte unaffected ([FR-WS-11], [NFR-RA-06]) and
+    /// inside the [NFR-PE-03] single-file-sync budget. A full `index` never calls
+    /// this.
+    ///
+    /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    /// [NFR-PE-03]: ../../../docs/specs/requirements/NFR-PE-03.md
+    fn has_broker_footprint(&self) -> Result<bool>;
+
     /// The ids of every node the annotation pass marked `is_test = 1`, ordered
     /// by `id` ([FR-AN-05]).
     ///
@@ -2223,6 +2243,51 @@ impl GraphStore for SqliteGraphStore {
                 row.get::<_, i64>(0)
             })
             .context("checking for framework-detector references")?
+            != 0;
+        Ok(has_ref)
+    }
+
+    fn has_broker_footprint(&self) -> Result<bool> {
+        // 1) A promoted broker node already in the graph? Its presence alone forces
+        //    the full reconcile (a demotion may be due — the last publish may have
+        //    just been deleted).
+        let (topic, producer, consumer) = (
+            crate::model::NodeKind::Topic.as_i32(),
+            crate::model::NodeKind::Producer.as_i32(),
+            crate::model::NodeKind::Consumer.as_i32(),
+        );
+        let has_promoted: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM nodes WHERE kind IN (?1, ?2, ?3))",
+                rusqlite::params![topic, producer, consumer],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("checking for promoted broker nodes")?
+            != 0;
+        if has_promoted {
+            return Ok(true);
+        }
+
+        // 2) Any broker-arm reference in the ledger? Both arms ride the free
+        //    `payload` relation token the S-254 capture wrote (MIGRATION_14). The
+        //    `resolved` column is deliberately NOT filtered on: a broker ref binds
+        //    to no local artifact kind (`ArtifactRelation::target_kind` is `None`
+        //    and a topic is not a config kind), so it is unresolved by construction
+        //    today — but the promotion pass owns every broker row regardless of how
+        //    the resolution pass later classifies it, and a `resolved = 0` filter
+        //    here would silently stop promoting the day that changed.
+        let has_ref: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM unresolved_refs WHERE payload IN (?1, ?2))",
+                rusqlite::params![
+                    crate::model::ArtifactRelation::BrokerPublish.as_str(),
+                    crate::model::ArtifactRelation::BrokerSubscribe.as_str(),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("checking for broker-arm ledger references")?
             != 0;
         Ok(has_ref)
     }

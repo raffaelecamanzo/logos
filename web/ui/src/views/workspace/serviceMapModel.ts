@@ -23,7 +23,7 @@
  * No React, no ECharts, no fetch — every function here is pure (NFR-RA-06).
  */
 
-import type { BridgeEdge, WorkspaceStatus } from "../../api/types.ts";
+import type { BridgeEdge, MemberTopics, WorkspaceStatus } from "../../api/types.ts";
 import type { LoadedSet } from "../graph/graphModel.ts";
 
 /** One service as the map knows it — read from the workspace status fan-out, which
@@ -51,6 +51,12 @@ export function serviceMembers(status: WorkspaceStatus): ServiceMember[] {
 /** The canvas-id namespace for a service node — never collides with a SCIP symbol. */
 const SERVICE_ID_PREFIX = "service:";
 
+/** The canvas-id namespace for a topic node (S-256) — a *separate* namespace, so a
+ *  topic id can never decode as a service id. That matters beyond tidiness: the
+ *  canvas's `onNodeClick` selects a member for any id that decodes as a service, so
+ *  a topic sharing the namespace would silently "select" a member named after it. */
+const TOPIC_ID_PREFIX = "topic:";
+
 /** The canvas node id for a member. */
 export function serviceId(member: string): string {
   return `${SERVICE_ID_PREFIX}${member}`;
@@ -59,6 +65,19 @@ export function serviceId(member: string): string {
 /** The member a canvas node id names, or `null` when it is not a service node. */
 export function memberOfServiceId(id: string): string | null {
   return id.startsWith(SERVICE_ID_PREFIX) ? id.slice(SERVICE_ID_PREFIX.length) : null;
+}
+
+/** The canvas node id for a topic. Topics are keyed by their identity ALONE — not by
+ *  member — because that shared identity is exactly what couples two services
+ *  (FR-WS-11): one `orders` node with a publisher on one side and a subscriber on
+ *  the other IS the cross-service binding, drawn. */
+export function topicId(topic: string): string {
+  return `${TOPIC_ID_PREFIX}${topic}`;
+}
+
+/** The topic a canvas node id names, or `null` when it is not a topic node. */
+export function topicOfTopicId(id: string): string | null {
+  return id.startsWith(TOPIC_ID_PREFIX) ? id.slice(TOPIC_ID_PREFIX.length) : null;
 }
 
 /** One service-to-service coupling: every binding between two members under one
@@ -74,12 +93,27 @@ export interface ServiceLink {
   count: number;
 }
 
+/** One topic as the map draws it: the shared identity, and which members produce and
+ *  consume it. A topic with producers in one member and consumers in another IS a
+ *  cross-service coupling — rendered as two hops through the topic rather than as one
+ *  opaque service→service line (S-256, FR-WS-11). */
+export interface TopicLink {
+  /** The topic key — its own identity, independent of any member. */
+  topic: string;
+  /** Members publishing to it, sorted. */
+  producers: string[];
+  /** Members subscribing from it, sorted. */
+  consumers: string[];
+}
+
 /** The service map: the canvas set plus the roll-up figures the view states. */
 export interface ServiceMap {
   /** The set the unchanged `GraphCanvas` renders. */
   loaded: LoadedSet;
   /** The deduped service-to-service couplings, sorted deterministically. */
   links: ServiceLink[];
+  /** The topics on the canvas, sorted by key (S-256). */
+  topics: TopicLink[];
   /** Members with no index yet — rendered muted, never as "no couplings". */
   awaitingIndex: string[];
   /** Members whose engine could not be read — stated as *unavailable*, never folded
@@ -98,13 +132,53 @@ function linkKey(l: Pick<ServiceLink, "from" | "to" | "relation">): string {
 }
 
 /**
- * Build the service map from the member roster and the resolved cross-service
- * bindings. Deterministic: members keep manifest order, links sort by
- * (from, to, relation), so two runs over the same workspace render identically.
+ * Fold the per-member topic inventory into the shared topic view the map draws.
+ *
+ * Keyed by topic identity ALONE: `orders` published by `api` and subscribed by
+ * `billing` is ONE node with a producer edge and a consumer edge — which is the
+ * cross-member binding made visible, without the map ever having to consult the
+ * bridge (FR-WS-11).
+ *
+ * A member that reports a topic with `producers: 0, consumers: 0` (a promoted topic
+ * whose sites were all removed but which has not been reconciled away yet) still
+ * yields the topic node, with no edges — honest, and never a fabricated coupling.
+ */
+export function topicLinks(inventory: readonly MemberTopics[]): TopicLink[] {
+  const byTopic = new Map<string, TopicLink>();
+  for (const member of inventory) {
+    for (const t of member.topics) {
+      let link = byTopic.get(t.topic);
+      if (!link) {
+        link = { topic: t.topic, producers: [], consumers: [] };
+        byTopic.set(t.topic, link);
+      }
+      if (t.producers > 0) link.producers.push(member.member);
+      if (t.consumers > 0) link.consumers.push(member.member);
+    }
+  }
+  const links = [...byTopic.values()];
+  for (const l of links) {
+    l.producers.sort((a, b) => a.localeCompare(b));
+    l.consumers.sort((a, b) => a.localeCompare(b));
+  }
+  return links.sort((a, b) => a.topic.localeCompare(b.topic));
+}
+
+/**
+ * Build the service map from the member roster, the resolved cross-service
+ * bindings, and the promoted topic inventory. Deterministic: members keep manifest
+ * order, links sort by (from, to, relation) and topics by key, so two runs over the
+ * same workspace render identically.
+ *
+ * Topics are drawn as first-class nodes (S-256, FR-WS-11) rather than folded into an
+ * opaque service→service `broker-topic` line, so the map answers *which* topic
+ * couples two services — and shows a topic that is published but not yet consumed
+ * anywhere, which has no binding to fold.
  */
 export function buildServiceMap(
   members: readonly ServiceMember[],
   bindings: readonly BridgeEdge[],
+  inventory: readonly MemberTopics[] = [],
 ): ServiceMap {
   const nodes: LoadedSet["nodes"] = {};
   for (const m of members) {
@@ -121,6 +195,44 @@ export function buildServiceMap(
     };
   }
 
+  // Topic nodes + their publish/subscribe edges. A topic whose member is not in the
+  // roster is skipped for the same reason a binding to an unknown member is: the
+  // canvas resolves links by node id, and inventing the endpoint would fabricate a
+  // service (NFR-RA-05).
+  const topics = topicLinks(inventory);
+  const topicEdges: LoadedSet["edges"] = [];
+  for (const t of topics) {
+    nodes[topicId(t.topic)] = {
+      id: topicId(t.topic),
+      label: t.topic,
+      // The honest kind of the node — it mirrors the `topic` NodeKind the graph now
+      // carries, so the canvas tooltip says the same word the CLI and MCP do.
+      kind: "topic",
+      // A topic is an artifact of the running system rather than a source symbol; the
+      // artifact hue distinguishes it from the services at a glance.
+      layer: "artifact",
+    };
+    for (const member of t.producers) {
+      if (!nodes[serviceId(member)]) continue;
+      topicEdges.push({
+        source: serviceId(member),
+        target: topicId(t.topic),
+        edge_type: "publishes",
+      });
+    }
+    for (const member of t.consumers) {
+      if (!nodes[serviceId(member)]) continue;
+      topicEdges.push({
+        // A subscribe points FROM the topic TO the consuming service — the direction
+        // the message actually travels, so the map reads as a flow
+        // (producer → topic → consumer) rather than as two arrows into a sink.
+        source: topicId(t.topic),
+        target: serviceId(member),
+        edge_type: "subscribes",
+      });
+    }
+  }
+
   const byKey = new Map<string, ServiceLink>();
   for (const b of bindings) {
     // A binding whose endpoints are not both in the roster cannot be drawn — the
@@ -128,6 +240,11 @@ export function buildServiceMap(
     // would fabricate a service (NFR-RA-05).
     if (!nodes[serviceId(b.from.member)] || !nodes[serviceId(b.to.member)]) continue;
     if (b.from.member === b.to.member) continue; // not a cross-service edge
+    // A `broker-topic` binding is now drawn THROUGH its topic node (publisher →
+    // topic → subscriber), so also drawing the direct service→service line would
+    // render the same coupling twice — once opaque, once named. The topic hop is the
+    // better of the two (it says *which* topic), so the flat line is dropped rather
+    // than doubled. It still counts in `links`, which the view states as a figure.
     const link = { from: b.from.member, to: b.to.member, relation: b.relation };
     const key = linkKey(link);
     const existing = byKey.get(key);
@@ -143,16 +260,24 @@ export function buildServiceMap(
   return {
     loaded: {
       nodes,
-      edges: links.map((l) => ({
-        source: serviceId(l.from),
-        target: serviceId(l.to),
-        // The canvas colours/styles an edge by its wire type; the relation arm IS
-        // that type here (`route` / `grpc-call` / `broker-topic`), so the legend
-        // grammar carries straight over.
-        edge_type: l.relation,
-      })),
+      edges: [
+        ...links
+          // The broker arm is drawn through its topic node instead (see above), so its
+          // flat service→service line is not emitted onto the canvas.
+          .filter((l) => l.relation !== "broker-topic")
+          .map((l) => ({
+            source: serviceId(l.from),
+            target: serviceId(l.to),
+            // The canvas colours/styles an edge by its wire type; the relation arm IS
+            // that type here (`route` / `grpc-call`), so the legend grammar carries
+            // straight over.
+            edge_type: l.relation,
+          })),
+        ...topicEdges,
+      ],
     },
     links,
+    topics,
     // Un-indexed and degraded are DIFFERENT facts: "no index yet" is a state the user
     // can fix by indexing; "could not be read" is a fault. Reporting the second as
     // the first would send them to the wrong remedy.
