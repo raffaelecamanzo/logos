@@ -29,8 +29,12 @@ use logos_core::Engine;
 
 /// A client module making a static outbound call `GET /users/{id}` — captured as
 /// an `HttpClientCall` reference `"GET /users/{id}"` sourced from `fetch_user`.
+/// The `use reqwest` import makes the file a client-call candidate (the
+/// FR-FW-04-style ledger gate that keeps a non-client `.get` from over-capturing).
 const CLIENT_STATIC: &str = r#"
-pub async fn fetch_user(client: reqwest::Client) {
+use reqwest::Client;
+
+pub async fn fetch_user(client: Client) {
     let _ = client.get("/users/{id}").await;
 }
 "#;
@@ -39,7 +43,9 @@ pub async fn fetch_user(client: reqwest::Client) {
 /// composed at runtime, so the arm refuses it (base-url-runtime): no reference,
 /// no ledger entry, no bind.
 const CLIENT_COMPOSED: &str = r#"
-pub async fn fetch_user(client: reqwest::Client, url: String) {
+use reqwest::Client;
+
+pub async fn fetch_user(client: Client, url: String) {
     let _ = client.get(url).await;
 }
 "#;

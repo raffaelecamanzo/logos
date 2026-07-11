@@ -633,25 +633,41 @@ fn extract_one(
     // shared S-251 interpreter with the `route_key`-based normalizer. A grammar
     // without the capability produces none; the interpreter's `push_artifact_ref`
     // choke-point applies the external gate and `HttpClientCall.edge_kind()`.
+    //
+    // Ledger-gated candidacy (the consumer-side mirror of the framework pass's
+    // FR-FW-04): the `.scm` anchor is a broad `<receiver>.<method>(<arg>)` shape,
+    // so it is captured ONLY in a file that references a known HTTP-client crate.
+    // Without this gate an incidental collection/registry call whose key looks
+    // like a route (`perms.get("/admin/users")`, a route-table `.get("/health")`)
+    // would be captured, normalize, and fabricate a cross-service edge — exactly
+    // what never-fabricate forbids ([NFR-RA-05]).
     if let Some(inv_query) = plugin.query("invocations") {
-        let sites = collect_invocation_sites(
-            inv_query,
-            tree.root_node(),
-            source,
-            &decls,
-            &symbols,
-            file_module.as_ref(),
-        );
-        if !sites.is_empty() {
-            crate::extract::config::capture_invocation_refs(
-                &mut facts,
-                ArtifactRelation::HttpClientCall,
-                RefForm::Path,
-                sites,
-                crate::resolve::http_client_call::render_client_call_target,
+        let detectors = crate::resolve::http_client_call::http_client_crates(plugin.name());
+        let is_http_client_file = !detectors.is_empty()
+            && facts.refs.iter().any(|r| {
+                let head = r.target.split("::").next().unwrap_or_default();
+                detectors.contains(&head)
+            });
+        if is_http_client_file {
+            let sites = collect_invocation_sites(
+                inv_query,
+                tree.root_node(),
+                source,
+                &decls,
+                &symbols,
+                file_module.as_ref(),
             );
-            // Re-canonicalize: the interpreter appended to `facts.refs`.
-            dedup_sort_refs(&mut facts.refs);
+            if !sites.is_empty() {
+                crate::extract::config::capture_invocation_refs(
+                    &mut facts,
+                    ArtifactRelation::HttpClientCall,
+                    RefForm::Path,
+                    sites,
+                    crate::resolve::http_client_call::render_client_call_target,
+                );
+                // Re-canonicalize: the interpreter appended to `facts.refs`.
+                dedup_sort_refs(&mut facts.refs);
+            }
         }
     }
 
@@ -935,12 +951,22 @@ fn collect_refs(
 }
 
 /// The HTTP verbs the client-call arm (S-252, [FR-WS-08]) captures. A method call
-/// whose name is not one of these is not an outbound HTTP call — the same broad
-/// anchor / narrow filter split the framework pass uses (a `.get("key")` map read
-/// is filtered out here, and any `"/…"`-shaped false positive is refused by the
-/// arm's normalizer downstream).
+/// whose name is not one of these is not an outbound HTTP call.
+///
+/// This name filter is **necessary but not sufficient**: a collection/registry
+/// method that shares a verb name (`HashMap::get`) still passes it, and a
+/// `/`-prefixed string key (`map.get("/health")`) would normalize and fabricate a
+/// cross-service edge. Two further guards make the capture honest ([NFR-RA-05]):
+/// the file-level HTTP-client-crate gate in `extract_one` (only a file that uses
+/// a client crate is a candidate at all), and the arm's normalizer (which refuses
+/// any non-static / non-absolute / non-normalizable path). The residual ceiling —
+/// a genuine HTTP-client file that also does an incidental `/`-keyed collection
+/// `.get` — is a documented accuracy ceiling ([ADR-54]), reported unbound-or-not
+/// at worst, never silently guessed.
 ///
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
 const HTTP_METHODS: &[&str] = &["get", "post", "put", "delete", "patch", "head", "options"];
 
 /// `true` if `name` (case-insensitively) is one of the [`HTTP_METHODS`].

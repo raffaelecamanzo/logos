@@ -1196,12 +1196,14 @@ fn http_client_call_targets(facts: &Facts) -> Vec<String> {
 
 /// A static, absolute client call is captured as a `"METHOD /template"` ref under
 /// the `HttpClientCall` relation — an artifact→code binding on the `Path` form,
-/// so it rides the same route binder the OpenAPI arm does.
+/// so it rides the same route binder the OpenAPI arm does. The `use reqwest`
+/// import makes the file a client-call candidate (the FR-FW-04-style gate).
 #[test]
 fn a_static_client_call_is_captured_as_a_method_template_ref() {
     let facts = extract_src(
         "src/client.rs",
-        r#"async fn fetch(client: reqwest::Client) { client.get("/users/{id}").await; }"#,
+        r#"use reqwest::Client;
+async fn fetch(client: Client) { client.get("/users/{id}").await; }"#,
     );
     assert_eq!(
         http_client_call_targets(&facts),
@@ -1223,7 +1225,8 @@ fn a_static_client_call_is_captured_as_a_method_template_ref() {
 fn a_runtime_composed_client_call_is_not_captured() {
     let bare = extract_src(
         "src/c.rs",
-        r#"async fn f(client: reqwest::Client, url: String) { client.get(url).await; }"#,
+        r#"use reqwest::Client;
+async fn f(client: Client, url: String) { client.get(url).await; }"#,
     );
     assert!(
         http_client_call_targets(&bare).is_empty(),
@@ -1233,7 +1236,8 @@ fn a_runtime_composed_client_call_is_not_captured() {
 
     let composed = extract_src(
         "src/c.rs",
-        r#"async fn f(client: reqwest::Client, base: String) { client.get(format!("{base}/users")).await; }"#,
+        r#"use reqwest::Client;
+async fn f(client: Client, base: String) { client.get(format!("{base}/users")).await; }"#,
     );
     assert!(
         http_client_call_targets(&composed).is_empty(),
@@ -1248,7 +1252,8 @@ fn a_runtime_composed_client_call_is_not_captured() {
 fn a_non_composable_client_call_literal_is_not_captured() {
     let catch_all = extract_src(
         "src/c.rs",
-        r#"async fn f(client: reqwest::Client) { client.get("/files/{*rest}").await; }"#,
+        r#"use reqwest::Client;
+async fn f(client: Client) { client.get("/files/{*rest}").await; }"#,
     );
     assert!(
         http_client_call_targets(&catch_all).is_empty(),
@@ -1258,7 +1263,8 @@ fn a_non_composable_client_call_literal_is_not_captured() {
 
     let relative = extract_src(
         "src/c.rs",
-        r#"async fn f(client: reqwest::Client) { client.get("users/{id}").await; }"#,
+        r#"use reqwest::Client;
+async fn f(client: Client) { client.get("users/{id}").await; }"#,
     );
     assert!(
         http_client_call_targets(&relative).is_empty(),
@@ -1267,18 +1273,41 @@ fn a_non_composable_client_call_literal_is_not_captured() {
     );
 }
 
-/// A method call whose name is not an HTTP verb (a collection `insert`/`contains`)
-/// is never captured, even with a `/`-shaped string literal — the HTTP-verb
-/// filter keeps the broad method-call anchor from over-capturing.
+/// Within a client file, a method call whose name is not an HTTP verb (a
+/// collection `insert`) is never captured, even with a `/`-shaped literal — the
+/// HTTP-verb filter keeps the broad anchor from over-capturing.
 #[test]
 fn a_non_http_method_call_is_not_captured() {
     let facts = extract_src(
         "src/c.rs",
-        r#"fn f(map: std::collections::HashMap<String, i32>) { map.insert("/users/{id}".to_string(), 1); }"#,
+        r#"use reqwest::Client;
+async fn f(client: Client, map: std::collections::HashMap<String, i32>) {
+    let _ = client.get("/health").await;
+    map.insert("/users/{id}".to_string(), 1);
+}"#,
+    );
+    // Only the genuine `client.get` is captured; `map.insert` is not an HTTP verb.
+    assert_eq!(
+        http_client_call_targets(&facts),
+        vec!["GET /health".to_string()],
+        "only the HTTP-verb call is captured, not `insert`"
+    );
+}
+
+/// Never-fabricate gate (S-252 review-fix): a `/`-shaped-key collection `.get`
+/// in a file that does NOT reference any HTTP-client crate is NOT captured — so
+/// an incidental `perms.get("/admin/users")` can never fabricate a cross-service
+/// edge to a same-shaped route in another member ([NFR-RA-05]).
+#[test]
+fn a_route_shaped_get_in_a_non_client_file_is_not_captured() {
+    let facts = extract_src(
+        "src/authz.rs",
+        r#"use std::collections::HashMap;
+fn authorize(perms: HashMap<String, i32>) { let _ = perms.get("/admin/users"); }"#,
     );
     assert!(
         http_client_call_targets(&facts).is_empty(),
-        "`insert` is not an HTTP verb: {:?}",
+        "a non-client file never emits an outbound-call ref: {:?}",
         http_client_call_targets(&facts)
     );
 }

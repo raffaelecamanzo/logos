@@ -44,6 +44,34 @@ use std::collections::BTreeMap;
 
 use super::route_template::route_key;
 
+/// The HTTP-client crates whose presence in a file's references marks it a
+/// plausible **client** file, per language ([FR-WS-08], [NFR-RA-05]).
+///
+/// The consumer-side twin of the framework provider capture's ledger-gated
+/// candidacy ([FR-FW-04]): the outbound-call `.scm` anchor is a broad
+/// `<receiver>.<method>(<arg>)` shape, so a collection/registry `.get("/x")` is
+/// syntactically indistinguishable from `client.get("/x")`. Rather than
+/// fabricate an outbound call from an incidental `/`-shaped string key, the arm
+/// captures **only** in a file that actually references one of these crates — a
+/// file that uses an undetected client wrapper simply stays honestly unbound
+/// (under-capture is safe; over-capture would fabricate a cross-service edge).
+///
+/// Rust-only today (the only language shipping an `invocations` capability); a
+/// new language's arm adds its own detector set here (a follow-up may lift this
+/// into the plugin descriptor alongside `framework_detectors`).
+///
+/// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+/// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+pub(crate) fn http_client_crates(language: &str) -> &'static [&'static str] {
+    match language {
+        "rust" => &["reqwest", "hyper", "isahc", "ureq", "awc", "surf"],
+        // A language without a declared client-detector set never captures — its
+        // `invocations` capture (if any) contributes nothing until its arm lands.
+        _ => &[],
+    }
+}
+
 /// The capture slot naming the request's HTTP method (`get`, `POST`, …). Filled
 /// by every per-language client-call capture.
 pub(crate) const METHOD_SLOT: &str = "method";
