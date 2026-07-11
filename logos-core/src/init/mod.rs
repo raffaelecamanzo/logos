@@ -515,8 +515,11 @@ fn read_optional(path: &Path) -> Result<Option<String>> {
 // ── MCP host config injection (FR-IN-02) ───────────────────────────────────
 
 /// The `logos` server entry per the locked operating model (SRS §10.1): the
-/// host launches `logos serve --mcp` rooted at the project.
-fn mcp_server_entry() -> Value {
+/// host launches `logos serve --mcp` rooted at the project. Shared with the
+/// workspace-wide entry `logos init --workspace` injects at the parent
+/// ([`crate::federation::enable`], FR-WS-02) — same command, different
+/// `.mcp.json` key.
+pub(crate) fn mcp_server_entry() -> Value {
     json!({ "command": "logos", "args": ["serve", "--mcp"] })
 }
 
@@ -527,10 +530,22 @@ fn mcp_server_entry() -> Value {
 ///
 /// [MCP Host]: ../../../docs/specs/architecture/integrations/mcp-host.md
 fn inject_mcp(root: &Path) -> Result<InitStep> {
+    inject_mcp_entry(root, "logos", mcp_server_entry())
+}
+
+/// Shared `.mcp.json` server-entry injector (FR-IN-02, FR-WS-02): create the
+/// file if absent, add `entry` under `server_key` if missing, and *skip* if
+/// that key is already present or the file cannot be parsed safely
+/// (non-clobber). [`inject_mcp`] is the per-repo `"logos"` caller;
+/// [`crate::federation::enable::enable`] is the workspace-wide
+/// `"logos-workspace"` caller.
+///
+/// [MCP Host]: ../../../docs/specs/architecture/integrations/mcp-host.md
+pub(crate) fn inject_mcp_entry(root: &Path, server_key: &str, entry: Value) -> Result<InitStep> {
     const TARGET: &str = ".mcp.json";
     let path = root.join(TARGET);
     let Some(text) = read_optional(&path)? else {
-        let value = json!({ "mcpServers": { "logos": mcp_server_entry() } });
+        let value = json!({ "mcpServers": { server_key: entry } });
         write_json(&path, &value)?;
         return Ok(step(TARGET, InitAction::Created, ""));
     };
@@ -538,8 +553,10 @@ fn inject_mcp(root: &Path) -> Result<InitStep> {
         return Ok(step(
             TARGET,
             InitAction::Skipped,
-            "existing .mcp.json is not valid JSON — left untouched; \
-             add the `logos` server entry manually",
+            format!(
+                "existing .mcp.json is not valid JSON — left untouched; \
+                 add the `{server_key}` server entry manually"
+            ),
         ));
     };
     let Some(servers) = config
@@ -553,19 +570,19 @@ fn inject_mcp(root: &Path) -> Result<InitStep> {
             "existing .mcp.json does not hold an `mcpServers` object — left untouched",
         ));
     };
-    if servers.contains_key("logos") {
+    if servers.contains_key(server_key) {
         return Ok(step(
             TARGET,
             InitAction::Unchanged,
-            "a `logos` server entry is already present — left untouched",
+            format!("a `{server_key}` server entry is already present — left untouched"),
         ));
     }
-    servers.insert("logos".to_string(), mcp_server_entry());
+    servers.insert(server_key.to_string(), entry);
     write_json(&path, &config)?;
     Ok(step(
         TARGET,
         InitAction::Updated,
-        "`logos` server entry added",
+        format!("`{server_key}` server entry added"),
     ))
 }
 

@@ -22,6 +22,7 @@ use logos_core::{
 };
 
 mod dispatch;
+mod workspace_init;
 
 // ── Exit codes (FR-CL-03 / BR-09) ──────────────────────────────────────────
 
@@ -72,6 +73,21 @@ pub(crate) enum Commands {
         /// Install git hooks (core.hooksPath) syncing on commit/checkout/merge.
         #[arg(long)]
         hooks: bool,
+        /// Turn a parent folder of sibling repos into a Logos workspace
+        /// (FR-WS-02): discover member repos, gate their inclusion, run the
+        /// non-clobber per-member `init`, write `logos.workspace.toml`, and
+        /// inject one workspace MCP entry at the parent. Indexing is hybrid
+        /// (background-warmed, lazy-fallback) — this never blocks on it.
+        #[arg(long)]
+        workspace: bool,
+        /// With `--workspace`: skip the interactive approval gate and include
+        /// every discovered candidate not dropped by `--exclude`.
+        #[arg(long, requires = "workspace")]
+        yes: bool,
+        /// With `--workspace`: drop a candidate member whose name matches this
+        /// glob (repeatable).
+        #[arg(long, value_name = "GLOB", requires = "workspace")]
+        exclude: Vec<String>,
     },
     /// Build or rebuild the full code-graph index.
     Index,
@@ -514,7 +530,9 @@ pub(crate) fn init_options(interactive: bool, hooks: bool) -> InitOptions {
 
 /// One y/n prompt on stderr (stdout stays machine-clean, FR-CL-02); a
 /// non-TTY stdin or a read failure resolves to `default` without prompting.
-fn ask(question: &str, default: bool) -> bool {
+/// `pub(crate)`: also the `logos init --workspace` per-candidate approval
+/// gate ([`crate::workspace_init`], FR-WS-02).
+pub(crate) fn ask(question: &str, default: bool) -> bool {
     use std::io::{BufRead, IsTerminal, Write};
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {

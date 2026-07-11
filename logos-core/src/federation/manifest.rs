@@ -26,6 +26,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigError;
+use crate::models::pipeline::{InitAction, InitStep};
 
 /// The manifest filename discovered by the up-tree walk ([`super::discover`]).
 ///
@@ -44,7 +45,7 @@ pub const MANIFEST_FILENAME: &str = "logos.workspace.toml";
 /// filesystem. Unknown top-level keys are rejected ([`serde(deny_unknown_fields)`]).
 ///
 /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     /// The `[workspace]` section — name, members, default, and the optional
@@ -55,12 +56,12 @@ pub struct Manifest {
     /// never fabricated. Empty when the manifest declares none.
     ///
     /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
 }
 
 /// The `[workspace]` table.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSection {
     /// The workspace name (`[workspace] name`) — required.
@@ -68,20 +69,20 @@ pub struct WorkspaceSection {
     /// Member repository paths, **relative to the manifest directory**
     /// (`members = [...]`). Resolved and validated by [`super::discover`];
     /// absent ⇒ rely solely on [`autodiscover`](Self::autodiscover).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<String>,
     /// The optional default member (`[workspace] default`) — a member path as
     /// written in [`members`](Self::members) (or an autodiscovered directory
     /// name). Carried through; validated against the resolved set by
     /// [`super::discover`].
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     /// The optional `[workspace.autodiscover]` toggle. Present ⇒ immediate child
     /// directories that are git roots (or already carry `.logos/logos.db`) are
     /// unioned with the explicit [`members`](Self::members) ([FR-WS-01]).
     ///
     /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autodiscover: Option<Autodiscover>,
 }
 
@@ -93,7 +94,7 @@ pub struct WorkspaceSection {
 /// inert.
 ///
 /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Autodiscover {
     /// Whether auto-discovery is active (default `true`).
@@ -148,6 +149,81 @@ pub fn parse(path: &Path) -> Result<Manifest, ConfigError> {
     toml::from_str(&text).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
         source,
+    })
+}
+
+/// Create or incrementally update the manifest at `root` from the approved
+/// member-name set (`logos init --workspace`, [FR-WS-02]): a fresh manifest is
+/// created with `name` and `members`; an existing one keeps its `name`,
+/// `default`, `autodiscover`, and `links` untouched and only has `members`
+/// upserted (sorted, de-duplicated). A result byte-identical to what's already
+/// on disk reports [`InitAction::Unchanged`] without writing — the
+/// write-if-different extension of [FR-IN-01]'s write-if-absent posture,
+/// applied to the one field this command owns.
+///
+/// # Errors
+/// [`ConfigError::Io`]/[`ConfigError::Parse`] reading a malformed existing
+/// manifest; [`ConfigError::Write`] if the write itself fails.
+///
+/// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
+/// [FR-IN-01]: ../../../docs/specs/requirements/FR-IN-01.md
+pub fn upsert(root: &Path, name: &str, members: &[String]) -> Result<InitStep, ConfigError> {
+    let path = root.join(MANIFEST_FILENAME);
+    let mut members = members.to_vec();
+    members.sort();
+    members.dedup();
+
+    let existing = if path.is_file() {
+        Some(parse(&path)?)
+    } else {
+        None
+    };
+
+    let manifest = Manifest {
+        workspace: WorkspaceSection {
+            name: existing
+                .as_ref()
+                .map_or_else(|| name.to_string(), |m| m.workspace.name.clone()),
+            members,
+            default: existing.as_ref().and_then(|m| m.workspace.default.clone()),
+            autodiscover: existing.as_ref().and_then(|m| m.workspace.autodiscover.clone()),
+        },
+        links: existing.as_ref().map_or_else(Vec::new, |m| m.links.clone()),
+    };
+
+    // The struct holds no maps/floats — every field is a String, Vec<String>,
+    // Option<String>, Option<Autodiscover>, or Vec<Link> of the same — so TOML
+    // serialisation cannot fail in practice.
+    let text = toml::to_string_pretty(&manifest)
+        .expect("Manifest holds only TOML-representable scalar/table fields");
+
+    if existing.is_some() {
+        let current = std::fs::read_to_string(&path).map_err(|source| ConfigError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if current == text {
+            return Ok(InitStep {
+                target: MANIFEST_FILENAME.to_string(),
+                action: InitAction::Unchanged,
+                detail: String::new(),
+            });
+        }
+    }
+
+    std::fs::write(&path, &text).map_err(|source| ConfigError::Write {
+        path: path.clone(),
+        source,
+    })?;
+
+    Ok(InitStep {
+        target: MANIFEST_FILENAME.to_string(),
+        action: if existing.is_none() {
+            InitAction::Created
+        } else {
+            InitAction::Updated
+        },
+        detail: String::new(),
     })
 }
 
@@ -275,5 +351,74 @@ mod tests {
             Err(ConfigError::Io { path, .. }) => assert_eq!(path, ghost),
             other => panic!("expected an Io error, got {other:?}"),
         }
+    }
+
+    // ── upsert (FR-WS-02) ─────────────────────────────────────────────────
+
+    /// No manifest yet: `upsert` creates one with the given name and members,
+    /// sorted and de-duplicated.
+    #[test]
+    fn upsert_creates_a_fresh_manifest() {
+        let tmp = TempDir::new().unwrap();
+        let step = upsert(tmp.path(), "shop", &["web".into(), "api".into(), "api".into()])
+            .expect("creates");
+        assert_eq!(step.action, InitAction::Created);
+
+        let m = parse(&tmp.path().join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(m.workspace.name, "shop");
+        assert_eq!(m.workspace.members, ["api", "web"], "sorted + de-duplicated");
+        assert!(m.workspace.default.is_none());
+        assert!(m.workspace.autodiscover.is_none());
+        assert!(m.links.is_empty());
+    }
+
+    /// An existing manifest keeps its name/default/autodiscover/links
+    /// untouched; only `members` is upserted.
+    #[test]
+    fn upsert_preserves_hand_written_sections_on_an_existing_manifest() {
+        let tmp = TempDir::new().unwrap();
+        write_manifest(
+            &tmp,
+            "[workspace]\nname = \"shop\"\nmembers = [\"api\"]\ndefault = \"api\"\n\n\
+             [workspace.autodiscover]\nenabled = false\n\n\
+             [[links]]\nrelation = \"http_call\"\nfrom = \"web::c\"\nto = \"api::h\"\n",
+        );
+
+        let step = upsert(tmp.path(), "ignored-name", &["api".into(), "web".into()])
+            .expect("updates");
+        assert_eq!(step.action, InitAction::Updated);
+
+        let m = parse(&tmp.path().join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(m.workspace.name, "shop", "name is never overwritten by a re-run");
+        assert_eq!(m.workspace.members, ["api", "web"]);
+        assert_eq!(m.workspace.default.as_deref(), Some("api"));
+        assert!(!m.workspace.autodiscover.unwrap().enabled, "preserved verbatim");
+        assert_eq!(m.links.len(), 1, "links carried through untouched");
+    }
+
+    /// Re-running `upsert` with the same member set is a no-op — `Unchanged`,
+    /// no write.
+    #[test]
+    fn upsert_is_unchanged_on_an_identical_rerun() {
+        let tmp = TempDir::new().unwrap();
+        upsert(tmp.path(), "shop", &["api".into()]).unwrap();
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        let before = fs::read_to_string(&path).unwrap();
+
+        let step = upsert(tmp.path(), "shop", &["api".into()]).expect("no-op");
+        assert_eq!(step.action, InitAction::Unchanged);
+        assert_eq!(fs::read_to_string(&path).unwrap(), before, "byte-identical, no rewrite");
+    }
+
+    /// A member dropped from the approved set on a re-run is pruned from
+    /// `members` — the incremental-prune half of FR-WS-02.
+    #[test]
+    fn upsert_prunes_a_member_no_longer_in_the_approved_set() {
+        let tmp = TempDir::new().unwrap();
+        upsert(tmp.path(), "shop", &["api".into(), "web".into()]).unwrap();
+        upsert(tmp.path(), "shop", &["api".into()]).unwrap();
+
+        let m = parse(&tmp.path().join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(m.workspace.members, ["api"], "web was pruned");
     }
 }

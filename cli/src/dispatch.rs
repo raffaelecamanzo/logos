@@ -27,9 +27,19 @@ use crate::{engine, init_options, read_wiki_body, Commands, CoverageCommands, Ou
 /// delegates to [`wiki`]; `serve` owns stdout and delegates to the surface crate.
 pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i32> {
     match command {
-        Commands::Init { interactive, hooks } => {
-            out.print(&Engine::init_with(root, &init_options(interactive, hooks))?)?;
-            Ok(0)
+        Commands::Init {
+            interactive,
+            hooks,
+            workspace,
+            yes,
+            exclude,
+        } => {
+            if workspace {
+                crate::workspace_init::run(root, yes, &exclude, out)
+            } else {
+                out.print(&Engine::init_with(root, &init_options(interactive, hooks))?)?;
+                Ok(0)
+            }
         }
         Commands::Index => {
             // A malformed `config.toml` is a usage fault that must fail loud with
