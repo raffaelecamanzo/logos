@@ -140,7 +140,8 @@ pub fn serve_surfaces(root: &Path, mcp: bool, ui: bool, port: u16, standalone: b
     // The engine the shared single-root surfaces (`/api/v1/*`, and the MCP loop)
     // run against: the one engine under `Single`, or the workspace's default
     // member. Resolving it once fails loud if a federated default cannot start.
-    let engine = default_engine(&backing)
+    let engine = backing
+        .default_engine()
         .context("resolving the default engine for the serve surface")?;
     // Current-thread runtime: HTTP + MCP I/O only (ADR-03). `enable_all` brings
     // the I/O driver the loopback TcpListener needs; Engine work runs on the
@@ -196,17 +197,6 @@ pub fn resolve_serve_backing(root: &Path, standalone: bool) -> Result<Backing<En
         }
         Some(federation) => Backing::Federated(EngineRegistry::new_serve_default(federation)),
     })
-}
-
-/// The engine the shared single-root surfaces run against: the one engine under
-/// [`Backing::Single`], or the federated workspace's default member (the
-/// default-member policy lives in the core, [`EngineRegistry::default_engine`],
-/// NFR-MA-02) — one definition every adapter (MCP, web) shares.
-fn default_engine(backing: &Backing<Engine>) -> Result<Arc<Engine>> {
-    match backing {
-        Backing::Single(engine) => Ok(Arc::clone(engine)),
-        Backing::Federated(registry) => registry.default_engine(),
-    }
 }
 
 /// Bind the loopback listener and serve the router until the process ends, over
@@ -501,7 +491,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
 /// A federated backing whose default member cannot start (so no engine can answer
 /// the shared surface). The single-root backing is infallible.
 pub fn router_for_backing(backing: Arc<Backing<Engine>>) -> Result<Router> {
-    let engine = default_engine(&backing)?;
+    let engine = backing.default_engine()?;
     Ok(build_router(make_state(engine, backing, IntentToken::generate())))
 }
 

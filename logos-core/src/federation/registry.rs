@@ -12,11 +12,16 @@
 //! Member engines are **not** all built up front. A [`RegistryMode::Lazy`]
 //! registry (CLI one-shots) builds a member's engine only when a command first
 //! touches it, so a scoped answer constructs only the engines it needs — never
-//! all N. A [`RegistryMode::Serve`] registry is **eager**: it warms every member
-//! and spawns one filesystem watcher per member, then leans on
-//! [`evict_to_capacity`](EngineRegistry::evict_to_capacity) to bound the
-//! steady-state resident set. A per-member start (or watch) failure **degrades**
-//! — it is logged and skipped — rather than aborting the whole workspace.
+//! all N. Under [`RegistryMode::Serve`] the mode-level invariant is **watch-on-
+//! touch** (every member built — whenever it is built — is also watched); the
+//! *eager-warming scope* is chosen by the constructor: [`new`](EngineRegistry::new)
+//! warms every member up front, while [`new_serve_default`](EngineRegistry::new_serve_default)
+//! — the context-aware `serve --ui` policy — warms only the default and leaves the
+//! rest lazy ([FR-WS-06]). [`evict_to_capacity`](EngineRegistry::evict_to_capacity)
+//! is available to bound the steady-state resident set (idle members + their
+//! watchers), though wiring it onto a running serve loop is a later concern. A
+//! per-member start (or watch) failure **degrades** — it is logged and skipped —
+//! rather than aborting the whole workspace.
 //!
 //! # Single-root invariant
 //! The registry is never on the single-root path. [`Backing::resolve`] returns
@@ -26,6 +31,7 @@
 //! unchanged.
 //!
 //! [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
+//! [FR-WS-06]: ../../../docs/specs/requirements/FR-WS-06.md
 //! [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
@@ -162,10 +168,14 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// default member — the one the shared single-root `/api/v1/*` surface runs
     /// against — is warmed at startup; the rest are constructed on first use.
     ///
-    /// A default member that fails to warm **degrades** (logged, not fatal): the
-    /// registry is still returned so the healthy members answer their
-    /// `/api/v1/workspace/*` queries, mirroring [`warm_all`](Self::warm_all)'s
-    /// per-member degrade contract ([ADR-53]).
+    /// A default member that fails to warm **degrades at this layer** (logged, not
+    /// fatal): the registry is still returned, so a caller that only fans out over
+    /// members (e.g. the cross-service query surface) still answers for the healthy
+    /// ones, mirroring [`warm_all`](Self::warm_all)'s per-member degrade contract
+    /// ([ADR-53]). A caller that *requires* the default engine for a shared
+    /// single-root surface — the `serve` path via [`default_engine`](Backing::default_engine)
+    /// — will still surface that failure when it resolves the default, exactly as a
+    /// single-root serve fails loud on a corrupt engine.
     ///
     /// [FR-WS-06]: ../../../docs/specs/requirements/FR-WS-06.md
     /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
@@ -448,6 +458,22 @@ impl<E: MemberEngine> Backing<E> {
     /// Whether this backing federates a workspace.
     pub fn is_federated(&self) -> bool {
         matches!(self, Backing::Federated(_))
+    }
+
+    /// The engine the shared single-root surfaces run against: the one engine
+    /// under [`Backing::Single`], or the federated workspace's default member
+    /// ([`EngineRegistry::default_engine`]). The default-member policy lives here
+    /// in the core so every adapter (MCP, web) shares **one** definition
+    /// (NFR-MA-02) rather than copy-pasting the `Single`/`Federated` unwrap.
+    ///
+    /// # Errors
+    /// Under [`Backing::Federated`], the workspace has no members or the resolved
+    /// default member's engine fails to start (see [`EngineRegistry::default_engine`]).
+    pub fn default_engine(&self) -> Result<Arc<E>> {
+        match self {
+            Backing::Single(engine) => Ok(Arc::clone(engine)),
+            Backing::Federated(registry) => registry.default_engine(),
+        }
     }
 }
 

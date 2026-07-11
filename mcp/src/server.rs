@@ -106,16 +106,6 @@ impl LogosMcp {
         self.run_result(tool, move |engine| Ok(call(engine))).await
     }
 
-    /// The engine the shared (single-root) tools run against: the one engine
-    /// under [`Backing::Single`], or the federated workspace's default member
-    /// (the default-member policy lives in the core, [`EngineRegistry::default_engine`]).
-    fn default_engine(backing: &Backing<Engine>) -> anyhow::Result<Arc<Engine>> {
-        match backing {
-            Backing::Single(engine) => Ok(Arc::clone(engine)),
-            Backing::Federated(registry) => registry.default_engine(),
-        }
-    }
-
     /// The fallible body behind [`run`](Self::run), used directly by the
     /// quality/governance tools (S-020): the core returns `Result<T>` so a
     /// *structural* failure (store fault, invalid rules.toml — ADR-14
@@ -134,7 +124,7 @@ impl LogosMcp {
     {
         let backing = Arc::clone(&self.backing);
         self.run_blocking(tool, move || {
-            let engine = Self::default_engine(&backing)?;
+            let engine = backing.default_engine()?;
             call(&engine)
         })
         .await
