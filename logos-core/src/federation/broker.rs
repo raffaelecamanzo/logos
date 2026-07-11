@@ -260,18 +260,23 @@ mod tests {
         );
     }
 
-    /// Acceptance (3): the broker arm is **ledger-only** — it introduces no
-    /// schema migration, so a freshly-migrated database's `PRAGMA user_version`
-    /// is unchanged at 16. The relation token rides the existing free
-    /// `unresolved_refs.payload` column (MIGRATION_14); no new node/edge kind and
-    /// no migration are added ([FR-WS-10]).
+    /// Acceptance (3): the broker arm itself is **ledger-only** — it introduces
+    /// no schema migration of its own. The relation token rides the existing
+    /// free `unresolved_refs.payload` column (MIGRATION_14); no new node/edge
+    /// kind and no migration are added by this arm ([FR-WS-10]). Migration 17
+    /// (`PRAGMA user_version` 17) exists in the fully-migrated database, but it
+    /// was added later by the first-class-topic promotion this arm precedes
+    /// ([S-255], [FR-WS-11]) — not by the ledger-only binding under test here.
+    ///
+    /// [S-255]: ../../../../docs/planning/journal.md#s-255-migration-17-first-class-broker-topic-node-and-edge-kinds
     #[test]
     fn the_broker_arm_introduces_no_schema_migration() {
         let store = SqliteGraphStore::open_in_memory().expect("in-memory store opens");
         assert_eq!(
             store.schema_version().expect("read PRAGMA user_version"),
-            16,
-            "the broker arm must add no migration — user_version stays at 16"
+            17,
+            "no migration is added by the ledger-only arm itself — user_version reflects \
+             only the later, separate S-255 broker-kind widening (migration 17)"
         );
     }
 }

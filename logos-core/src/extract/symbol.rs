@@ -96,8 +96,8 @@ pub(crate) fn path_segments(rel: &str) -> Vec<&str> {
 ///
 /// The mapping from [`NodeKind`] to SCIP descriptor suffix:
 /// - `Module` → namespace (`name/`)
-/// - `Class`/`Interface`/`Trait`/`Struct`/`Enum`/`TypeAlias`/`Route`/`Component`
-///   → type (`name#`)
+/// - `Class`/`Interface`/`Trait`/`Struct`/`Enum`/`TypeAlias`/`Route`/`Component`/
+///   `Topic`/`Producer`/`Consumer` → type (`name#`)
 /// - `Function`/`Method` → method (`name().`, or `name(N).` when `ordinal > 0`)
 /// - `Field`/`Constant`/`Variable` → term (`name.`)
 /// - `Macro` → macro (`name!`)
@@ -162,7 +162,13 @@ pub(crate) fn descriptor_for(kind: NodeKind, name: &str, ordinal: u32) -> String
         | NodeKind::SqlObject
         | NodeKind::TfBlock
         | NodeKind::ApiPath
-        | NodeKind::ApiOperation => with_ordinal(format!("{n}#"), ordinal),
+        | NodeKind::ApiOperation
+        // `Topic`/`Producer`/`Consumer` (CR-061, S-255) are shared-identity
+        // declarations like `Route`/`Component`; extraction never emits them
+        // here (S-256's concern), but the mapping stays total.
+        | NodeKind::Topic
+        | NodeKind::Producer
+        | NodeKind::Consumer => with_ordinal(format!("{n}#"), ordinal),
         NodeKind::Field | NodeKind::Constant | NodeKind::Variable => {
             with_ordinal(format!("{n}."), ordinal)
         }
@@ -328,6 +334,31 @@ mod tests {
             assert_eq!(
                 descriptor_for(kind, "anchor", 2),
                 "anchor#2:",
+                "{} ordinal disambiguation",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// The CR-061 broker kinds (S-255): `Topic`/`Producer`/`Consumer` are
+    /// shared-identity declarations like `Route`/`Component`, so they take the
+    /// `#` type-descriptor and the same trailing-ordinal disambiguation as every
+    /// other non-method kind. Extraction does not yet emit these kinds
+    /// ([S-256](../../../docs/planning/journal.md#s-256-promote-broker-coupling-to-first-class-topics)'s
+    /// concern), but the mapping is pinned so a future emitter's symbols are
+    /// well-defined from day one.
+    #[test]
+    fn broker_kind_descriptor_suffixes() {
+        for kind in [NodeKind::Topic, NodeKind::Producer, NodeKind::Consumer] {
+            assert_eq!(
+                descriptor_for(kind, "orders", 0),
+                "orders#",
+                "{} must take the `#` type-descriptor anchor",
+                kind.as_str()
+            );
+            assert_eq!(
+                descriptor_for(kind, "orders", 3),
+                "orders#3:",
                 "{} ordinal disambiguation",
                 kind.as_str()
             );

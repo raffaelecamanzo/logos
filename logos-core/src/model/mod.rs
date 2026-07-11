@@ -6,7 +6,7 @@
 //!
 //! - [`LogosSymbol`] — the canonical SCIP symbol-identity newtype;
 //! - [`NodeId`] — the storage-local node handle;
-//! - [`NodeKind`] (34) and [`EdgeKind`] (15) — the frozen-discriminant ontology
+//! - [`NodeKind`] (37) and [`EdgeKind`] (17) — the frozen-discriminant ontology
 //!   ([FR-EX-05]);
 //! - [`RefForm`] (4) — the frozen target-form discriminants of the
 //!   `unresolved_refs` reference ledger (S-011);

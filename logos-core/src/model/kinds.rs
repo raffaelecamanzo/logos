@@ -43,7 +43,7 @@ impl std::fmt::Display for UnknownKind {
 
 impl std::error::Error for UnknownKind {}
 
-/// The 34 node kinds of the Logos data model.
+/// The 37 node kinds of the Logos data model.
 ///
 /// Variants span the union of the five supported languages (Rust, Python,
 /// TypeScript/JS, Go, Java) plus the two framework-promoted kinds, [`Route`]
@@ -56,13 +56,17 @@ impl std::error::Error for UnknownKind {}
 /// [`DocFile`]/[`DocSection`] for the generic markdown layer ([FR-DG-02](../../../../docs/specs/requirements/FR-DG-02.md))
 /// and the typed [`Requirement`]/[`Adr`]/[`Story`] enrichment for swe-skills
 /// repositories ([FR-DG-07](../../../../docs/specs/requirements/FR-DG-07.md)),
-/// and the twelve config & artifact kinds added by
+/// the twelve config & artifact kinds added by
 /// [CR-010](../../../../docs/requests/CR-010-config-artifact-graph-layer.md):
 /// the generic [`ConfigFile`]/[`ConfigSection`] layer ([FR-CG-02](../../../../docs/specs/requirements/FR-CG-02.md))
 /// and the per-format typed anchors ([FR-CG-03](../../../../docs/specs/requirements/FR-CG-03.md))
 /// [`ShellFunction`], [`DockerfileStage`], [`MakeTarget`], [`ProtoMessage`],
 /// [`ProtoService`], [`GqlType`], [`SqlObject`], [`TfBlock`], [`ApiPath`], and
-/// [`ApiOperation`]. Discriminants are frozen — see the module docs.
+/// [`ApiOperation`], and the three first-class broker kinds added by
+/// [CR-061](../../../../docs/requests/CR-061-multi-repo-workspace-federation.md):
+/// [`Topic`], [`Producer`], and [`Consumer`]
+/// ([FR-WS-11](../../../../docs/specs/requirements/FR-WS-11.md)). Discriminants
+/// are frozen — see the module docs.
 ///
 /// Documentation **and** config kinds are excluded from the code subgraph at
 /// hydration ([ADR-19](../../../../docs/specs/architecture/decisions/ADR-19.md),
@@ -70,7 +74,9 @@ impl std::error::Error for UnknownKind {}
 /// [FR-DG-06](../../../../docs/specs/requirements/FR-DG-06.md),
 /// [FR-CG-05](../../../../docs/specs/requirements/FR-CG-05.md)) — the non-code-layer
 /// scope ([`is_non_code`](NodeKind::is_non_code)) — so admitting either never
-/// moves the quality signal.
+/// moves the quality signal. The broker kinds are **not** non-code: a `Topic`
+/// and its `Producer`/`Consumer` are real application entities, kept in the
+/// code subgraph like [`Route`]/[`Component`].
 ///
 /// [`Route`]: NodeKind::Route
 /// [`Component`]: NodeKind::Component
@@ -93,6 +99,9 @@ impl std::error::Error for UnknownKind {}
 /// [`TfBlock`]: NodeKind::TfBlock
 /// [`ApiPath`]: NodeKind::ApiPath
 /// [`ApiOperation`]: NodeKind::ApiOperation
+/// [`Topic`]: NodeKind::Topic
+/// [`Producer`]: NodeKind::Producer
+/// [`Consumer`]: NodeKind::Consumer
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[repr(i32)]
@@ -210,14 +219,32 @@ pub enum NodeKind {
     ///
     /// [`ApiPath`]: NodeKind::ApiPath
     ApiOperation = 34,
+    /// A message-broker topic a per-repo [`Producer`]/[`Consumer`] publishes to
+    /// or subscribes from (CR-061, FR-WS-11, ADR-55). The bridge binds
+    /// producers to consumers across workspace members via shared topic
+    /// identity; a graph that indexes no broker topic never emits this kind.
+    ///
+    /// [`Producer`]: NodeKind::Producer
+    /// [`Consumer`]: NodeKind::Consumer
+    Topic = 35,
+    /// A message-broker producer — the code site that publishes to a [`Topic`]
+    /// (CR-061, FR-WS-11, ADR-55).
+    ///
+    /// [`Topic`]: NodeKind::Topic
+    Producer = 36,
+    /// A message-broker consumer — the code site that subscribes to a
+    /// [`Topic`] (CR-061, FR-WS-11, ADR-55).
+    ///
+    /// [`Topic`]: NodeKind::Topic
+    Consumer = 37,
 }
 
 impl NodeKind {
     /// Every node kind, in declaration (discriminant) order.
     ///
     /// Used by `graph-store` to emit the `CHECK (kind IN (…))` clause and by
-    /// tests asserting the taxonomy is complete (exactly 34).
-    pub const ALL: [NodeKind; 34] = [
+    /// tests asserting the taxonomy is complete (exactly 37).
+    pub const ALL: [NodeKind; 37] = [
         NodeKind::Module,
         NodeKind::Class,
         NodeKind::Interface,
@@ -252,6 +279,9 @@ impl NodeKind {
         NodeKind::TfBlock,
         NodeKind::ApiPath,
         NodeKind::ApiOperation,
+        NodeKind::Topic,
+        NodeKind::Producer,
+        NodeKind::Consumer,
     ];
 
     /// The stable integer discriminant written to the `nodes.kind` column.
@@ -308,6 +338,9 @@ impl NodeKind {
             NodeKind::TfBlock => "tf_block",
             NodeKind::ApiPath => "api_path",
             NodeKind::ApiOperation => "api_operation",
+            NodeKind::Topic => "topic",
+            NodeKind::Producer => "producer",
+            NodeKind::Consumer => "consumer",
         }
     }
 
@@ -442,12 +475,15 @@ impl TryFrom<i32> for NodeKind {
             32 => Ok(NodeKind::TfBlock),
             33 => Ok(NodeKind::ApiPath),
             34 => Ok(NodeKind::ApiOperation),
+            35 => Ok(NodeKind::Topic),
+            36 => Ok(NodeKind::Producer),
+            37 => Ok(NodeKind::Consumer),
             other => Err(UnknownKind(other)),
         }
     }
 }
 
-/// The 15 edge kinds of the Logos data model.
+/// The 17 edge kinds of the Logos data model.
 ///
 /// [`Contains`] is the lexical-containment edge that graph hydration excludes
 /// from the dependency graph ([FR-DB-06](../../../../docs/specs/requirements/FR-DB-06.md));
@@ -462,14 +498,22 @@ impl TryFrom<i32> for NodeKind {
 /// [FR-DG-07](../../../../docs/specs/requirements/FR-DG-07.md)) — are distinct
 /// kinds precisely so the hydration scope filter can exclude them from the code
 /// subgraph ([ADR-19](../../../../docs/specs/architecture/decisions/ADR-19.md),
-/// [FR-DG-06](../../../../docs/specs/requirements/FR-DG-06.md)). Discriminants
-/// are frozen — see the module docs.
+/// [FR-DG-06](../../../../docs/specs/requirements/FR-DG-06.md)). The two broker
+/// edges added by [CR-061](../../../../docs/requests/CR-061-multi-repo-workspace-federation.md)
+/// — [`Publishes`] ([`NodeKind::Producer`] → [`NodeKind::Topic`]) and
+/// [`Subscribes`] ([`NodeKind::Consumer`] → [`NodeKind::Topic`]) — are ordinary
+/// code-coupling edges, **not** excluded from the dependency graph
+/// ([FR-WS-11](../../../../docs/specs/requirements/FR-WS-11.md),
+/// [ADR-55](../../../../docs/specs/architecture/decisions/ADR-55.md)).
+/// Discriminants are frozen — see the module docs.
 ///
 /// [`Contains`]: EdgeKind::Contains
 /// [`ForbiddenDependency`]: EdgeKind::ForbiddenDependency
 /// [`RoutesTo`]: EdgeKind::RoutesTo
 /// [`DocReference`]: EdgeKind::DocReference
 /// [`TracesTo`]: EdgeKind::TracesTo
+/// [`Publishes`]: EdgeKind::Publishes
+/// [`Subscribes`]: EdgeKind::Subscribes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[repr(i32)]
@@ -561,11 +605,19 @@ pub enum EdgeKind {
     /// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
     /// [ADR-26]: ../../../../docs/specs/architecture/decisions/ADR-26.md
     ArtifactBinding = 15,
+    /// A [`NodeKind::Producer`] publishes to a [`NodeKind::Topic`] (CR-061,
+    /// FR-WS-11, ADR-55). An ordinary code-coupling edge — not excluded from
+    /// the dependency graph.
+    Publishes = 16,
+    /// A [`NodeKind::Consumer`] subscribes from a [`NodeKind::Topic`] (CR-061,
+    /// FR-WS-11, ADR-55). An ordinary code-coupling edge — not excluded from
+    /// the dependency graph.
+    Subscribes = 17,
 }
 
 impl EdgeKind {
     /// Every edge kind, in declaration (discriminant) order.
-    pub const ALL: [EdgeKind; 15] = [
+    pub const ALL: [EdgeKind; 17] = [
         EdgeKind::Contains,
         EdgeKind::Calls,
         EdgeKind::Imports,
@@ -581,6 +633,8 @@ impl EdgeKind {
         EdgeKind::Accesses,
         EdgeKind::ArtifactRef,
         EdgeKind::ArtifactBinding,
+        EdgeKind::Publishes,
+        EdgeKind::Subscribes,
     ];
 
     /// The stable integer discriminant written to the `edges.kind` column.
@@ -606,6 +660,8 @@ impl EdgeKind {
             EdgeKind::Accesses => "accesses",
             EdgeKind::ArtifactRef => "artifact_ref",
             EdgeKind::ArtifactBinding => "artifact_binding",
+            EdgeKind::Publishes => "publishes",
+            EdgeKind::Subscribes => "subscribes",
         }
     }
 
@@ -687,6 +743,8 @@ impl TryFrom<i32> for EdgeKind {
             13 => Ok(EdgeKind::Accesses),
             14 => Ok(EdgeKind::ArtifactRef),
             15 => Ok(EdgeKind::ArtifactBinding),
+            16 => Ok(EdgeKind::Publishes),
+            17 => Ok(EdgeKind::Subscribes),
             other => Err(UnknownKind(other)),
         }
     }
@@ -777,13 +835,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn node_kind_taxonomy_has_exactly_34() {
-        assert_eq!(NodeKind::ALL.len(), 34);
+    fn node_kind_taxonomy_has_exactly_37() {
+        assert_eq!(NodeKind::ALL.len(), 37);
     }
 
     #[test]
-    fn edge_kind_taxonomy_has_exactly_15() {
-        assert_eq!(EdgeKind::ALL.len(), 15);
+    fn edge_kind_taxonomy_has_exactly_17() {
+        assert_eq!(EdgeKind::ALL.len(), 17);
     }
 
     #[test]
@@ -895,9 +953,9 @@ mod tests {
 
     #[test]
     fn out_of_range_discriminants_are_rejected() {
-        assert_eq!(NodeKind::try_from(35), Err(UnknownKind(35)));
+        assert_eq!(NodeKind::try_from(38), Err(UnknownKind(38)));
         assert_eq!(NodeKind::try_from(-1), Err(UnknownKind(-1)));
-        assert_eq!(EdgeKind::try_from(16), Err(UnknownKind(16)));
+        assert_eq!(EdgeKind::try_from(18), Err(UnknownKind(18)));
     }
 
     /// The twelve config & artifact kinds added by CR-010/ADR-25 ride the
@@ -928,9 +986,9 @@ mod tests {
             assert_eq!(NodeKind::try_from(disc), Ok(kind), "{name} round-trip");
         }
         // CR-010 burned no edge kinds — the layer was Contains-only (FR-EX-05
-        // note). The two artifact edge kinds (14..=15) are the CR-011 addition,
-        // lifting the total to 15.
-        assert_eq!(EdgeKind::ALL.len(), 15, "edge kinds total after CR-011");
+        // note). The two artifact edge kinds (14..=15) were the CR-011 addition;
+        // the two broker edge kinds (16..=17, CR-061) lifted the total to 17.
+        assert_eq!(EdgeKind::ALL.len(), 17, "edge kinds total after CR-011/CR-061");
         assert!(
             !EdgeKind::ArtifactRef.is_documentation()
                 && !EdgeKind::ArtifactBinding.is_documentation(),
@@ -1001,6 +1059,44 @@ mod tests {
         assert_eq!(EdgeKind::ArtifactBinding.as_str(), "artifact_binding");
         assert_eq!(EdgeKind::try_from(14), Ok(EdgeKind::ArtifactRef));
         assert_eq!(EdgeKind::try_from(15), Ok(EdgeKind::ArtifactBinding));
+    }
+
+    /// The three broker node kinds (CR-061/ADR-55/FR-WS-11) ride the documented
+    /// evolution path: appended with the next free integers (35..=37), never
+    /// reordered, with their `topic`/`producer`/`consumer` wire names. CR-061
+    /// also burns two edge kinds (`Publishes`/`Subscribes`, 16..=17), lifting the
+    /// edge total to 17 — asserted alongside so a future edit can't widen one
+    /// ontology without the other.
+    #[test]
+    fn broker_kinds_carry_the_appended_discriminants() {
+        let expected_nodes = [
+            (NodeKind::Topic, 35, "topic"),
+            (NodeKind::Producer, 36, "producer"),
+            (NodeKind::Consumer, 37, "consumer"),
+        ];
+        for (kind, disc, name) in expected_nodes {
+            assert_eq!(kind.as_i32(), disc, "{name} discriminant");
+            assert_eq!(kind.as_str(), name, "{name} wire name");
+            assert_eq!(NodeKind::try_from(disc), Ok(kind), "{name} round-trip");
+            // Broker kinds are real application entities, not a non-code layer.
+            assert!(!kind.is_non_code(), "{name} must not be non-code");
+        }
+        assert_eq!(NodeKind::ALL.len(), 37, "node kinds total after CR-061");
+
+        let expected_edges = [
+            (EdgeKind::Publishes, 16, "publishes"),
+            (EdgeKind::Subscribes, 17, "subscribes"),
+        ];
+        for (kind, disc, name) in expected_edges {
+            assert_eq!(kind.as_i32(), disc, "{name} discriminant");
+            assert_eq!(kind.as_str(), name, "{name} wire name");
+            assert_eq!(EdgeKind::try_from(disc), Ok(kind), "{name} round-trip");
+            assert!(
+                !kind.is_documentation() && !kind.is_config_reference(),
+                "{name} must be an ordinary code-coupling edge"
+            );
+        }
+        assert_eq!(EdgeKind::ALL.len(), 17, "edge kinds total after CR-061");
     }
 
     /// `EdgeKind::is_config_reference` marks exactly `ArtifactRef`/`ArtifactBinding`

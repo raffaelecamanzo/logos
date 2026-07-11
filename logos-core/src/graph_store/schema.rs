@@ -17,8 +17,8 @@
 //! # Discriminant contract
 //!
 //! The `nodes.kind` / `edges.kind` `CHECK` lists below are the on-disk half of
-//! the discriminant contract frozen in [`crate::model`] ([NodeKind] 1..=34,
-//! [EdgeKind] 1..=15). The `schema_check_matches_model_ontology` test in
+//! the discriminant contract frozen in [`crate::model`] ([NodeKind] 1..=37,
+//! [EdgeKind] 1..=17). The `schema_check_matches_model_ontology` test in
 //! [`super`] asserts these lists equal `NodeKind::ALL` / `EdgeKind::ALL`, so the
 //! schema can never silently drift from the model it guards ([FR-DB-01]).
 //!
@@ -49,6 +49,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (14, MIGRATION_14),
     (15, MIGRATION_15),
     (16, MIGRATION_16),
+    (17, MIGRATION_17),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -1584,11 +1585,226 @@ CREATE VIEW annotations AS
     FROM nodes;
 ";
 
+/// Migration 17 — first-class broker `Topic`/`Producer`/`Consumer` node kinds
+/// and `Publishes`/`Subscribes` edge kinds (S-255, [CR-061], [ADR-55],
+/// [FR-WS-11], [FR-DB-01]).
+///
+/// Promotes the M2 ledger-only broker binding ([ADR-54]) to first-class graph
+/// entities: a per-repo `Topic` a `Producer` publishes to and a `Consumer`
+/// subscribes from, visible before any cross-repo match. This burns three node
+/// discriminants (`NodeKind` 1..=34 → 1..=37) and two edge discriminants
+/// (`EdgeKind` 1..=15 → 1..=17) — the frozen on-disk contract widens in
+/// lockstep with [`crate::model::kinds`] exactly as every prior kind addition
+/// has ([FR-DB-01]).
+///
+/// SQLite cannot widen a `CHECK` in place, so — exactly as migrations 14 and 16
+/// did — every table carrying a kind `CHECK` is rebuilt copy-style, following
+/// the referenced-table-safe procedure: drop the FTS triggers and the
+/// `annotations` view, stash every table's rows in plain holders (`shingles`
+/// too, since dropping `nodes` performs an implicit `DELETE` that would
+/// otherwise cascade through its `ON DELETE CASCADE` FK and wipe them), drop
+/// children first (`edges`/`shingles` before `nodes`; `unresolved_refs`
+/// independently — it carries no FK to `nodes`), recreate all four under their
+/// final names with the widened `CHECK`s, copy every row back with identical
+/// ids, recreate the indexes, and recreate the FTS triggers + `annotations`
+/// view.
+///
+/// `unresolved_refs.kind` widens in lockstep with `edges.kind` — the same
+/// dual-widening migration 14 did for the CR-011 artifact edges — so an
+/// unresolved cross-member topic binding can persist in the ledger and retry
+/// on sync ([NFR-RA-05]), exactly as an unindexed artifact reference does.
+///
+/// This migration only widens what the schema *accepts*; it inserts no `Topic`
+/// row. Emission is [S-256]'s concern, so a graph that indexes no broker topic
+/// is **byte-for-byte unaffected** — every row keeps its id, and (unlike
+/// migration 16's dedup rebuild) no row is deleted, so the FTS index needs no
+/// `'rebuild'` repopulation: the copy-back is a pure identity pass, the same
+/// shape migration 13's widening took.
+///
+/// [CR-061]: ../../../../docs/requests/CR-061-multi-repo-workspace-federation.md
+/// [ADR-55]: ../../../../docs/specs/architecture/decisions/ADR-55.md
+/// [ADR-54]: ../../../../docs/specs/architecture/decisions/ADR-54.md
+/// [FR-WS-11]: ../../../../docs/specs/requirements/FR-WS-11.md
+/// [FR-DB-01]: ../../../../docs/specs/requirements/FR-DB-01.md
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+/// [S-256]: ../../../../docs/planning/journal.md#s-256-promote-broker-coupling-to-first-class-topics
+const MIGRATION_17: &str = "\
+-- Drop the FTS sync triggers around the nodes rebuild: the copy below must not
+-- double-index, and the triggers are recreated verbatim afterwards (migration
+-- 9/13/16 shape, carrying `body`). No node is deleted by this migration
+-- (pure additive widening), so no 'rebuild' repopulation is needed afterwards
+-- (mirrors migration 13, not migration 16's dedup rebuild).
+DROP TRIGGER nodes_fts_ai;
+DROP TRIGGER nodes_fts_ad;
+DROP TRIGGER nodes_fts_au;
+
+-- The annotations view (FR-AN-04) reads native `nodes` columns; drop it so it
+-- never references the transiently-dropped table, and recreate it unchanged
+-- (migration-16 projection) once the rebuild completes.
+DROP VIEW annotations;
+
+-- Stash every table's rows in plain holders (CTAS: no FKs/constraints) with the
+-- FULL post-migration-16 column set, so the rebuild preserves every annotation
+-- column, every edge payload, and every shingle — not just the shape.
+-- `shingles` must be stashed too: dropping `nodes` below performs an implicit
+-- DELETE that fires the shingles ON DELETE CASCADE, so an unstashed shingle
+-- store would be wiped.
+CREATE TABLE edges_stash AS SELECT id, source, target, kind, derived, payload FROM edges;
+CREATE TABLE shingles_stash AS SELECT node_id, hash FROM shingles;
+CREATE TABLE nodes_stash AS
+    SELECT id, symbol_id, kind, name, file_id, start_line, end_line,
+           derived, exported, cyclomatic_complexity, line_count, fingerprint,
+           is_dead, is_duplicate, layer_membership, test_evidence, is_test,
+           body, max_nesting_depth, clone_group
+    FROM nodes;
+CREATE TABLE unresolved_refs_stash AS
+    SELECT id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload
+    FROM unresolved_refs;
+
+-- Children first: dropping edges and shingles removes every FK reference to
+-- nodes, so the nodes drop cascades nothing. Clean under live FK enforcement.
+-- unresolved_refs carries no FK to nodes, so its drop is independent of order.
+DROP TABLE edges;
+DROP TABLE shingles;
+DROP TABLE nodes;
+DROP TABLE unresolved_refs;
+
+-- The rebuilt nodes table: the migration-16 column set and UNIQUE(symbol_id)
+-- constraint, byte-identical, with the kind CHECK widened to the three CR-061
+-- broker kinds (35..=37 — Topic/Producer/Consumer, FR-WS-11).
+CREATE TABLE nodes (
+    id                    INTEGER PRIMARY KEY,
+    symbol_id             INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+    kind                  INTEGER NOT NULL CHECK (kind IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37)),
+    name                  TEXT NOT NULL,
+    file_id               INTEGER REFERENCES files(id) ON DELETE SET NULL,
+    start_line            INTEGER,
+    end_line              INTEGER,
+    derived               INTEGER NOT NULL DEFAULT 0 CHECK (derived IN (0,1)),
+    exported              INTEGER NOT NULL DEFAULT 0 CHECK (exported IN (0,1)),
+    cyclomatic_complexity INTEGER,
+    line_count            INTEGER,
+    fingerprint           TEXT,
+    is_dead               INTEGER CHECK (is_dead IN (0,1)),
+    is_duplicate          INTEGER CHECK (is_duplicate IN (0,1)),
+    layer_membership      TEXT,
+    test_evidence         INTEGER NOT NULL DEFAULT 0 CHECK (test_evidence IN (0,1)),
+    is_test               INTEGER NOT NULL DEFAULT 0 CHECK (is_test IN (0,1)),
+    body                  TEXT,
+    max_nesting_depth     INTEGER,
+    clone_group           INTEGER,
+    UNIQUE (symbol_id)
+) STRICT;
+
+-- The rebuilt edges table: the migration-16 shape with the kind CHECK widened
+-- to the two CR-061 broker edge kinds (16..=17 — Publishes/Subscribes).
+CREATE TABLE edges (
+    id      INTEGER PRIMARY KEY,
+    source  INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    target  INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    kind    INTEGER NOT NULL CHECK (kind IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17)),
+    derived INTEGER NOT NULL DEFAULT 0 CHECK (derived IN (0,1)),
+    payload TEXT,
+    UNIQUE (source, target, kind)
+) STRICT;
+
+-- The rebuilt shingles store: the migration-10 shape verbatim, recreated only
+-- because it FK-references the rebuilt nodes table.
+CREATE TABLE shingles (
+    node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    hash    INTEGER NOT NULL,
+    PRIMARY KEY (node_id, hash)
+) STRICT;
+
+-- The rebuilt ledger: the migration-14 shape with the kind CHECK widened in
+-- lockstep with edges.kind — an unresolved cross-member topic binding must
+-- persist and retry on sync (NFR-RA-05), exactly as an unresolved artifact
+-- reference does.
+CREATE TABLE unresolved_refs (
+    id            INTEGER PRIMARY KEY,
+    file_id       INTEGER REFERENCES files(id) ON DELETE CASCADE,
+    source_symbol TEXT NOT NULL,
+    target        TEXT NOT NULL,
+    alias         TEXT,
+    form          INTEGER NOT NULL CHECK (form IN (1,2,3,4)),
+    kind          INTEGER NOT NULL CHECK (kind IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17)),
+    line          INTEGER,
+    resolved      INTEGER NOT NULL DEFAULT 0 CHECK (resolved IN (0,1)),
+    payload       TEXT,
+    UNIQUE (source_symbol, target, form, kind)
+) STRICT;
+
+-- Copy rows back with identical ids (parents before children, so FK checks
+-- hold and the FTS postings stay aligned by rowid). Every annotation column,
+-- edge payload, and shingle is carried over verbatim — no row reverts to a
+-- default.
+INSERT INTO nodes (id, symbol_id, kind, name, file_id, start_line, end_line,
+                   derived, exported, cyclomatic_complexity, line_count, fingerprint,
+                   is_dead, is_duplicate, layer_membership, test_evidence, is_test,
+                   body, max_nesting_depth, clone_group)
+    SELECT id, symbol_id, kind, name, file_id, start_line, end_line,
+           derived, exported, cyclomatic_complexity, line_count, fingerprint,
+           is_dead, is_duplicate, layer_membership, test_evidence, is_test,
+           body, max_nesting_depth, clone_group
+    FROM nodes_stash;
+INSERT INTO edges (id, source, target, kind, derived, payload)
+    SELECT id, source, target, kind, derived, payload FROM edges_stash;
+INSERT INTO shingles (node_id, hash)
+    SELECT node_id, hash FROM shingles_stash;
+INSERT INTO unresolved_refs
+       (id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload)
+    SELECT id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload
+    FROM unresolved_refs_stash;
+
+DROP TABLE nodes_stash;
+DROP TABLE edges_stash;
+DROP TABLE shingles_stash;
+DROP TABLE unresolved_refs_stash;
+
+-- Recreate the indexes (migration 1 + 3 + 10 + 14). The old non-unique
+-- idx_nodes_symbol_id stays retired (migration 16): UNIQUE(symbol_id) already
+-- provides its own covering index.
+CREATE INDEX idx_nodes_kind        ON nodes(kind);
+CREATE INDEX idx_edges_source_kind ON edges(source, kind);
+CREATE INDEX idx_edges_target_kind ON edges(target, kind);
+CREATE INDEX idx_shingles_hash     ON shingles(hash);
+CREATE INDEX idx_unresolved_refs_file     ON unresolved_refs(file_id);
+CREATE INDEX idx_unresolved_refs_resolved ON unresolved_refs(resolved);
+
+-- Recreate the FTS sync triggers carrying `body` alongside `name` (migration
+-- 9/13/16 shape, FR-DB-03). The 'delete' command rows retract the OLD postings
+-- so the external-content index never silently desyncs (NFR-RA-09).
+CREATE TRIGGER nodes_fts_ai AFTER INSERT ON nodes BEGIN
+    INSERT INTO nodes_fts(rowid, name, body) VALUES (new.id, new.name, new.body);
+END;
+CREATE TRIGGER nodes_fts_ad AFTER DELETE ON nodes BEGIN
+    INSERT INTO nodes_fts(nodes_fts, rowid, name, body) VALUES ('delete', old.id, old.name, old.body);
+END;
+CREATE TRIGGER nodes_fts_au AFTER UPDATE ON nodes BEGIN
+    INSERT INTO nodes_fts(nodes_fts, rowid, name, body) VALUES ('delete', old.id, old.name, old.body);
+    INSERT INTO nodes_fts(rowid, name, body) VALUES (new.id, new.name, new.body);
+END;
+
+-- Recreate the FR-AN-04 queryable view exactly as migration 16 left it
+-- (projecting clone_group alongside the other verdicts).
+CREATE VIEW annotations AS
+    SELECT id AS node_id,
+           cyclomatic_complexity,
+           line_count,
+           is_dead,
+           is_duplicate,
+           is_test,
+           layer_membership,
+           clone_group
+    FROM nodes;
+";
+
 #[cfg(test)]
 mod tests {
     use super::{
         MIGRATION_1, MIGRATION_10, MIGRATION_11, MIGRATION_12, MIGRATION_13, MIGRATION_14,
-        MIGRATION_15, MIGRATION_16, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_8,
+        MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_2, MIGRATION_3, MIGRATION_4,
+        MIGRATION_8,
     };
     use crate::model::{EdgeKind, NodeKind, RefForm};
 
@@ -1610,31 +1826,30 @@ mod tests {
     /// The on-disk CHECK lists of the **latest** schema state must be exactly
     /// the model's frozen discriminants — no missing, extra, or reordered
     /// values. Guards against silent schema / model drift in BOTH directions
-    /// (FR-DB-01). The authoritative `nodes.kind` CHECK lives in the migration-13
-    /// rebuild (the CR-010 config-kind widening), where it is the first
-    /// `kind IN (`; the authoritative `edges.kind` CHECK moved to the migration-14
-    /// rebuild (the CR-011 artifact-edge widening), where it is the first
-    /// `kind IN (` (the `unresolved_refs.kind` widening is the second).
+    /// (FR-DB-01). The authoritative `nodes.kind`/`edges.kind`/
+    /// `unresolved_refs.kind` CHECKs all now live in the migration-17 rebuild
+    /// (the CR-061 broker-kind widening) — the first `kind IN (` is `nodes.kind`,
+    /// the second `edges.kind`, the third `unresolved_refs.kind`.
     #[test]
     fn schema_check_matches_model_ontology() {
         let node_model: Vec<i32> = NodeKind::ALL.iter().map(|k| k.as_i32()).collect();
         let edge_model: Vec<i32> = EdgeKind::ALL.iter().map(|k| k.as_i32()).collect();
         assert_eq!(
-            check_discriminants(MIGRATION_13, "kind IN (", 0),
+            check_discriminants(MIGRATION_17, "kind IN (", 0),
             node_model,
-            "nodes.kind CHECK (migration 13 rebuild) must equal NodeKind::ALL discriminants"
+            "nodes.kind CHECK (migration 17 rebuild) must equal NodeKind::ALL discriminants"
         );
         assert_eq!(
-            check_discriminants(MIGRATION_14, "kind IN (", 0),
+            check_discriminants(MIGRATION_17, "kind IN (", 1),
             edge_model,
-            "edges.kind CHECK (migration 14 rebuild) must equal EdgeKind::ALL discriminants"
+            "edges.kind CHECK (migration 17 rebuild) must equal EdgeKind::ALL discriminants"
         );
-        // The ledger's kind CHECK (the second `kind IN (` in migration 14) widens
-        // in lockstep — an unindexed workspace-relative artifact ref must persist.
+        // The ledger's kind CHECK (the third `kind IN (` in migration 17) widens
+        // in lockstep — an unindexed workspace-relative topic binding must persist.
         assert_eq!(
-            check_discriminants(MIGRATION_14, "kind IN (", 1),
+            check_discriminants(MIGRATION_17, "kind IN (", 2),
             edge_model,
-            "unresolved_refs.kind CHECK (migration 14) must equal EdgeKind::ALL discriminants"
+            "unresolved_refs.kind CHECK (migration 17) must equal EdgeKind::ALL discriminants"
         );
     }
 
@@ -1814,6 +2029,78 @@ mod tests {
                 && MIGRATION_16.contains("CREATE VIEW annotations")
                 && MIGRATION_16.contains("clone_group"),
             "migration 16 must recreate the annotations view with clone_group (migration-13 shape)"
+        );
+    }
+
+    /// Migration 17 widens `nodes.kind`, `edges.kind`, and `unresolved_refs.kind`
+    /// together to the CR-061 broker kinds (S-255, [ADR-55], [FR-WS-11]): three
+    /// node discriminants (35..=37) and two edge discriminants (16..=17). The
+    /// load-bearing invariants: all three CHECKs land at their widened bounds,
+    /// the rebuild drops and recreates `nodes`/`edges`/`shingles`/
+    /// `unresolved_refs` (children-first), the UNIQUE keys and the
+    /// `UNIQUE(symbol_id)` constraint (carried from migration 16) are unchanged,
+    /// and no `'rebuild'` FTS repopulation is needed — this migration deletes no
+    /// row (pure additive widening, unlike migration 16's dedup rebuild).
+    #[test]
+    fn migration_17_widens_nodes_edges_and_ledger_to_the_broker_kinds() {
+        // All three kind CHECKs widen to their new bounds.
+        assert_eq!(
+            check_discriminants(MIGRATION_17, "kind IN (", 0),
+            (1..=37).collect::<Vec<i32>>(),
+            "migration 17 nodes.kind must widen to the broker kinds (1..=37)"
+        );
+        assert_eq!(
+            check_discriminants(MIGRATION_17, "kind IN (", 1),
+            (1..=17).collect::<Vec<i32>>(),
+            "migration 17 edges.kind must widen to the broker kinds (1..=17)"
+        );
+        assert_eq!(
+            check_discriminants(MIGRATION_17, "kind IN (", 2),
+            (1..=17).collect::<Vec<i32>>(),
+            "migration 17 unresolved_refs.kind must widen to the broker kinds (1..=17)"
+        );
+
+        // A CHECK cannot be widened in place — every kind-bearing table (plus
+        // shingles, which FK-references nodes) is rebuilt.
+        assert!(
+            MIGRATION_17.contains("DROP TABLE nodes")
+                && MIGRATION_17.contains("DROP TABLE edges")
+                && MIGRATION_17.contains("DROP TABLE shingles")
+                && MIGRATION_17.contains("DROP TABLE unresolved_refs"),
+            "migration 17 must rebuild nodes, edges, shingles, and unresolved_refs"
+        );
+        assert!(
+            MIGRATION_17.contains("CREATE TABLE shingles_stash")
+                && MIGRATION_17.contains("CREATE TABLE unresolved_refs_stash"),
+            "migration 17 must stash shingles and unresolved_refs before the drop"
+        );
+
+        // The UNIQUE keys — including the migration-16 UNIQUE(symbol_id) — are
+        // unchanged; this migration widens CHECKs only, adds no key.
+        assert!(
+            MIGRATION_17.contains("UNIQUE (symbol_id)")
+                && MIGRATION_17.contains("UNIQUE (source, target, kind)")
+                && MIGRATION_17.contains("UNIQUE (source_symbol, target, form, kind)"),
+            "migration 17 must keep every UNIQUE key unchanged (including UNIQUE(symbol_id))"
+        );
+
+        // No row is deleted (pure additive widening), so the FTS index needs no
+        // 'rebuild' repopulation — unlike migration 16's dedup rebuild.
+        assert!(
+            !MIGRATION_17.contains("VALUES('rebuild')"),
+            "migration 17 deletes no row, so no FTS 'rebuild' repopulation is needed"
+        );
+        for trigger in ["nodes_fts_ai", "nodes_fts_ad", "nodes_fts_au"] {
+            assert!(
+                MIGRATION_17.contains(&format!("CREATE TRIGGER {trigger}")),
+                "migration 17 must recreate the {trigger} FTS trigger (NFR-RA-09)"
+            );
+        }
+        assert!(
+            MIGRATION_17.contains("DROP VIEW annotations")
+                && MIGRATION_17.contains("CREATE VIEW annotations")
+                && MIGRATION_17.contains("clone_group"),
+            "migration 17 must recreate the annotations view with clone_group (migration-16 shape)"
         );
     }
 
@@ -2168,25 +2455,32 @@ mod tests {
         );
     }
 
-    /// The **latest** `unresolved_refs.kind` CHECK now lives in migration 14's
-    /// rebuild (the second `kind IN (` there, after edges) and must equal the
-    /// model's `EdgeKind::ALL` — the same exact drift guard the nodes/edges
-    /// CHECKs carry, now that the ledger retries cross-artifact references too
-    /// (CR-011/ADR-26, FR-CG-07). The migration-10 ledger CHECK is frozen at the
-    /// kinds current when it shipped (1..=13) and is no longer authoritative.
+    /// The **latest** `unresolved_refs.kind` CHECK now lives in migration 17's
+    /// rebuild (the third `kind IN (` there, after nodes/edges) and must equal
+    /// the model's `EdgeKind::ALL` — the same exact drift guard the
+    /// nodes/edges CHECKs carry, now that the ledger retries broker-topic
+    /// bindings too (CR-061/ADR-55, FR-WS-11). The migration-10 and migration-14
+    /// ledger CHECKs are frozen at the kinds current when each shipped and are
+    /// no longer authoritative.
     #[test]
     fn latest_unresolved_refs_kind_check_matches_edge_ontology() {
         let edge_model: Vec<i32> = EdgeKind::ALL.iter().map(|k| k.as_i32()).collect();
         assert_eq!(
-            check_discriminants(MIGRATION_14, "kind IN (", 1),
+            check_discriminants(MIGRATION_17, "kind IN (", 2),
             edge_model,
-            "unresolved_refs.kind CHECK (migration 14 rebuild) must equal EdgeKind::ALL"
+            "unresolved_refs.kind CHECK (migration 17 rebuild) must equal EdgeKind::ALL"
         );
         // Migration 10's ledger CHECK is frozen at its shipped value (1..=13).
         assert_eq!(
             check_discriminants(MIGRATION_10, "kind IN (", 1),
             (1..=13).collect::<Vec<i32>>(),
             "MIGRATION_10 unresolved_refs.kind is frozen at 1..=13"
+        );
+        // Migration 14's ledger CHECK is frozen at its shipped value (1..=15).
+        assert_eq!(
+            check_discriminants(MIGRATION_14, "kind IN (", 1),
+            (1..=15).collect::<Vec<i32>>(),
+            "MIGRATION_14 unresolved_refs.kind is frozen at 1..=15"
         );
     }
 
