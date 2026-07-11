@@ -51,6 +51,7 @@ pub mod framework;
 /// The shared positional route-template normalizer (S-069, CR-011): aligns the
 /// OpenAPI `ApiOperation` path templates with framework-extracted `route` node
 /// templates under one parameter-position-only comparison. See its module docs.
+pub(crate) mod grpc_key;
 pub(crate) mod route_template;
 
 use std::collections::{BTreeMap, HashMap, HashSet};

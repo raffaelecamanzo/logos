@@ -95,8 +95,8 @@ fn messages_and_services_become_typed_anchors() {
     );
     assert_eq!(
         names_of(&facts, NodeKind::ProtoService),
-        vec!["UserService"],
-        "one ProtoService per service"
+        vec!["example.v1.UserService"],
+        "one ProtoService per service, package-qualified for the gRPC provider key (S-253)"
     );
     // Exactly one ConfigFile root.
     assert_eq!(
@@ -107,6 +107,65 @@ fn messages_and_services_become_typed_anchors() {
             .count(),
         1
     );
+}
+
+/// S-253 ([FR-WS-09]) provider enrichment: a `ProtoService` exposes its file-level
+/// `package` (its `name` is package-qualified) and its per-`rpc` method names (in
+/// the node `body`), so the federation bridge can key a provider on the
+/// fully-qualified `package.Service/Method` rather than the bare service name.
+#[test]
+fn proto_service_exposes_package_and_rpc_methods() {
+    const MULTI_RPC: &str = r#"syntax = "proto3";
+package example.v1;
+
+message User { string id = 1; }
+
+service UserService {
+  rpc GetUser (User) returns (User);
+  rpc ListUsers (User) returns (User);
+}
+"#;
+    let facts = extract(
+        &FileInput::new("api/user.proto", MULTI_RPC),
+        &proto_plugin(),
+        &SymbolContext::default(),
+    );
+    let svc = facts
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ProtoService)
+        .expect("one ProtoService");
+    // Package qualification: the name carries the file-level package.
+    assert_eq!(svc.name, "example.v1.UserService");
+    // Per-rpc method granularity: every declared rpc name is exposed, in source
+    // order, in the node body (the bridge splits this into per-method keys).
+    assert_eq!(
+        svc.body.as_deref(),
+        Some("GetUser\nListUsers"),
+        "the service body lists its rpc method names in source order"
+    );
+}
+
+/// A `ProtoService` in a file with **no** `package` statement keeps its bare
+/// service name (nothing to qualify with) but still exposes its rpc methods —
+/// an honestly under-qualified provider, never a fabricated package.
+#[test]
+fn proto_service_without_package_keeps_bare_name_but_exposes_methods() {
+    let facts = extract(
+        &FileInput::new(
+            "api/svc.proto",
+            "syntax = \"proto3\";\nmessage R {}\nservice Bare {\n  rpc Do (R) returns (R);\n}\n",
+        ),
+        &proto_plugin(),
+        &SymbolContext::default(),
+    );
+    let svc = facts
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::ProtoService)
+        .expect("one ProtoService");
+    assert_eq!(svc.name, "Bare", "no package to qualify with");
+    assert_eq!(svc.body.as_deref(), Some("Do"));
 }
 
 /// Extraction emits only `Contains` **edges**; cross-artifact references are
@@ -358,9 +417,11 @@ fn proto_reference_capture_is_exact() {
         vec![
             r(ProtoImport, "user.proto", "common/types.proto"),
             r(ProtoType, "User", "Account"), // the User.account field
-            r(ProtoType, "UserService", "Account"), // the RPC return type
-            r(ProtoType, "UserService", "User"), // the RPC request type
-            r(SchemaType, "Account", "Account"), // declared name → code
+            // The RPC request/response type refs are sourced from the service
+            // anchor, whose name is now package-qualified (S-253 enrichment).
+            r(ProtoType, "example.v1.UserService", "Account"), // the RPC return type
+            r(ProtoType, "example.v1.UserService", "User"),    // the RPC request type
+            r(SchemaType, "Account", "Account"),               // declared name → code
             r(SchemaType, "User", "User"),
         ]
     );

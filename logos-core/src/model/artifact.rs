@@ -209,13 +209,27 @@ pub enum ArtifactRelation {
     /// A shell `source ./path` with a **literal** workspace-relative path → the
     /// target `ConfigFile` (S-071). External: interpolated paths (`$DIR/x.sh`).
     ShellSource,
+    /// A generated-stub gRPC method call → the proto service method it invokes,
+    /// rendered as a fully-qualified `package.Service/Method` reference (S-253,
+    /// [FR-WS-09]). The first pluggable cross-service **invocation arm**: it
+    /// declares [`BridgeNamespace::Grpc`] + [`BridgeRole::Consumer`] via
+    /// [`bridge_namespace`](ArtifactRelation::bridge_namespace)/[`bridge_role`](ArtifactRelation::bridge_role),
+    /// so the federation bridge binds it to the exactly-one enriched
+    /// `ProtoService` provider in another member ([ADR-54]). A stub call whose
+    /// target cannot be fully qualified emits no reference and surfaces as a
+    /// coverage reason — never an approximate bind ([NFR-RA-05]).
+    ///
+    /// [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
+    /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    GrpcCall,
 }
 
 impl ArtifactRelation {
     /// Every relation class, in declaration order — the iteration universe tests
     /// and coverage surfaces drive off so a newly added relation cannot silently
     /// skip a contract assertion.
-    pub const ALL: [ArtifactRelation; 9] = [
+    pub const ALL: [ArtifactRelation; 10] = [
         ArtifactRelation::ProtoImport,
         ArtifactRelation::ProtoType,
         ArtifactRelation::GraphqlType,
@@ -225,6 +239,7 @@ impl ArtifactRelation {
         ArtifactRelation::TfVarRef,
         ArtifactRelation::SqlObjectRef,
         ArtifactRelation::ShellSource,
+        ArtifactRelation::GrpcCall,
     ];
 
     /// The on-disk payload token (kebab-case, matching the `serde` form).
@@ -239,6 +254,7 @@ impl ArtifactRelation {
             ArtifactRelation::TfVarRef => "tf-var-ref",
             ArtifactRelation::SqlObjectRef => "sql-object-ref",
             ArtifactRelation::ShellSource => "shell-source",
+            ArtifactRelation::GrpcCall => "grpc-call",
         }
     }
 
@@ -268,7 +284,12 @@ impl ArtifactRelation {
             | ArtifactRelation::TfModuleCall
             | ArtifactRelation::TfVarRef
             | ArtifactRelation::SqlObjectRef
-            | ArtifactRelation::ShellSource => EdgeKind::ArtifactRef,
+            | ArtifactRelation::ShellSource
+            // A gRPC stub call references the proto service method it invokes —
+            // an artifact→artifact reference (the cross-service bind is computed
+            // by the in-memory bridge, never stored as an edge; the ledger entry
+            // is fenced out of the code subgraph like every artifact reference).
+            | ArtifactRelation::GrpcCall => EdgeKind::ArtifactRef,
         }
     }
 
@@ -310,7 +331,12 @@ impl ArtifactRelation {
             | ArtifactRelation::TfModuleCall
             | ArtifactRelation::ShellSource
             | ArtifactRelation::SchemaType
-            | ArtifactRelation::Route => None,
+            | ArtifactRelation::Route
+            // A gRPC stub call resolves cross-service through the bridge on its
+            // fully-qualified `package.Service/Method` key, not by a bare
+            // artifact name through the intra-repo name binder, so it fences to
+            // no single artifact node kind here.
+            | ArtifactRelation::GrpcCall => None,
         }
     }
 
@@ -379,7 +405,12 @@ impl ArtifactRelation {
             | ArtifactRelation::SchemaType
             | ArtifactRelation::Route
             | ArtifactRelation::TfVarRef
-            | ArtifactRelation::SqlObjectRef => TargetClass::Workspace,
+            | ArtifactRelation::SqlObjectRef
+            // A `package.Service/Method` FQN carries no external form beyond the
+            // universal absolute-URL rule; the `grpc_key` normalizer already
+            // refused any target it could not fully qualify before it reached the
+            // ledger, so a captured gRPC key is always a workspace candidate.
+            | ArtifactRelation::GrpcCall => TargetClass::Workspace,
         }
     }
 
@@ -413,8 +444,12 @@ impl ArtifactRelation {
     /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
     pub const fn bridge_namespace(self) -> Option<BridgeNamespace> {
         match self {
-            // No relation shipped today is an invocation arm; the HTTP/gRPC/
-            // broker arms (S-252/S-253/S-254) each add a variant overriding this.
+            // The gRPC stub-call arm (S-253) is the first invocation arm: it binds
+            // in the exactly-one [`Grpc`](BridgeNamespace::Grpc) namespace. The
+            // HTTP client-call and broker arms (S-252/S-254) add their own variants.
+            ArtifactRelation::GrpcCall => Some(BridgeNamespace::Grpc),
+            // The CR-011 cross-artifact relations are contract/artifact relations,
+            // not invocation arms.
             ArtifactRelation::ProtoImport
             | ArtifactRelation::ProtoType
             | ArtifactRelation::GraphqlType
@@ -441,6 +476,9 @@ impl ArtifactRelation {
     /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
     pub const fn bridge_role(self) -> Option<BridgeRole> {
         match self {
+            // A gRPC stub call is the **consumer** side of the invocation; its
+            // provider is the enriched `ProtoService` method in another member.
+            ArtifactRelation::GrpcCall => Some(BridgeRole::Consumer),
             ArtifactRelation::ProtoImport
             | ArtifactRelation::ProtoType
             | ArtifactRelation::GraphqlType
@@ -555,6 +593,7 @@ mod tests {
             ArtifactRelation::TfVarRef,
             ArtifactRelation::SqlObjectRef,
             ArtifactRelation::ShellSource,
+            ArtifactRelation::GrpcCall,
         ] {
             assert_eq!(
                 rel.edge_kind(),
@@ -708,12 +747,16 @@ mod tests {
 
     // ── FR-WS-07 / ADR-54: the pluggable invocation-arm descriptors ──────────
 
-    /// No relation shipped today is a cross-service invocation arm: every variant
-    /// declares neither descriptor. This is the pre-arm baseline the HTTP/gRPC/
-    /// broker arms (S-252/S-253/S-254) flip to `Some` one variant at a time.
+    /// The CR-011 cross-artifact relations are contract/artifact relations, not
+    /// invocation arms — every one declares neither descriptor. The `GrpcCall`
+    /// arm (S-253) is the first to flip both to `Some`; the HTTP client-call and
+    /// broker arms (S-252/S-254) add theirs later, one variant at a time.
     #[test]
-    fn no_shipped_relation_is_an_invocation_arm() {
+    fn only_invocation_arms_declare_the_bridge_descriptors() {
         for rel in ArtifactRelation::ALL {
+            if rel == ArtifactRelation::GrpcCall {
+                continue;
+            }
             assert_eq!(
                 rel.bridge_namespace(),
                 None,
@@ -723,6 +766,26 @@ mod tests {
             assert_eq!(rel.bridge_role(), None, "{}", rel.as_str());
             assert!(!rel.is_invocation_arm(), "{}", rel.as_str());
         }
+    }
+
+    /// The gRPC stub-call arm (S-253, [FR-WS-09]) is a fully-declared invocation
+    /// arm: the exactly-one `Grpc` namespace on the consumer side, filed under the
+    /// `grpc-call` relation the bridge speaks. This is the concrete override the
+    /// pluggable-arm contract (S-251) was built to receive.
+    #[test]
+    fn grpc_call_is_the_grpc_consumer_invocation_arm() {
+        let arm = ArtifactRelation::GrpcCall;
+        assert_eq!(arm.bridge_namespace(), Some(BridgeNamespace::Grpc));
+        assert_eq!(arm.bridge_role(), Some(BridgeRole::Consumer));
+        assert!(arm.is_invocation_arm());
+        assert_eq!(arm.as_str(), "grpc-call");
+        // The namespace's stable relation label matches the arm's own wire token,
+        // so a cross-service answer and the intra-repo ledger speak one vocabulary.
+        assert_eq!(BridgeNamespace::Grpc.relation(), arm.as_str());
+        assert_eq!(
+            BridgeNamespace::Grpc.match_discipline(),
+            MatchDiscipline::ExactlyOne
+        );
     }
 
     /// The hard pairing invariant every arm — present or future — must honor: a
@@ -766,6 +829,7 @@ mod tests {
                 ArtifactRelation::TfVarRef => 6,
                 ArtifactRelation::SqlObjectRef => 7,
                 ArtifactRelation::ShellSource => 8,
+                ArtifactRelation::GrpcCall => 9,
             }
         }
         for (i, rel) in ArtifactRelation::ALL.into_iter().enumerate() {
@@ -777,7 +841,7 @@ mod tests {
             );
         }
         // No extras/duplicates: `ALL` is exactly the declared variants, once each.
-        assert_eq!(ArtifactRelation::ALL.len(), 9);
+        assert_eq!(ArtifactRelation::ALL.len(), 10);
     }
 
     /// The per-namespace match discipline the bridge switches on: HTTP and gRPC

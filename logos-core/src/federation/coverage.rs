@@ -1,10 +1,12 @@
 //! The **3-state cross-service coverage** read-model ([FR-WS-05], [ADR-53]).
 //!
 //! Extends the [bridge](super::bridge)'s binary bound/not-bound match outcome
-//! into a reason-annotated advisory tier: every cross-boundary reference (an
-//! `ApiOperation` consumer, today — the only role the bridge's HTTP key
-//! resolves) is classified **bound**, **ambiguous**, or **unbound**, and each
-//! non-bound reference carries a [`CoverageState`] naming *why*.
+//! into a reason-annotated advisory tier: every cross-boundary reference — an
+//! `ApiOperation` HTTP consumer node and a `GrpcCall` stub-call ledger consumer
+//! (S-253, [FR-WS-09]) — is classified **bound**, **ambiguous**, or **unbound**,
+//! and each non-bound reference carries a [`CoverageState`] naming *why*.
+//!
+//! [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
 //!
 //! # Advisory only ([ADR-53])
 //! This module is **never** called from `scan`, `gate`, or `check_rules`
@@ -215,6 +217,44 @@ where
             }
         }
     }
+    // Arm-tagged consumer references captured in code (gRPC stub calls) reach the
+    // coverage tier from the ledger, not the node surface (S-253, [FR-WS-09]) —
+    // the same generic stream the bridge binds. Each carries its normalized
+    // portable key already; a degraded member is skipped as above.
+    let mut arm_consumers: Vec<(String, PortableKey, crate::model::LogosSymbol)> = Vec::new();
+    for scoped in registry.fan_out(|_, engine| engine.invocation_consumers()) {
+        let member = scoped.member;
+        let consumers = match scoped.value {
+            Ok(Ok(consumers)) => consumers,
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    member = %member,
+                    "reading a workspace member's invocation consumers failed; \
+                     coverage degraded without it: {err:#}"
+                );
+                continue;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    member = %member,
+                    "a workspace member engine failed to start; \
+                     coverage degraded without it: {err:#}"
+                );
+                continue;
+            }
+        };
+        for c in consumers {
+            arm_consumers.push((
+                member.clone(),
+                PortableKey {
+                    namespace: c.namespace,
+                    key: c.key,
+                },
+                c.symbol,
+            ));
+        }
+    }
+
     for endpoints in providers.values_mut() {
         endpoints.sort();
     }
@@ -279,6 +319,49 @@ where
         }
     }
 
+    // The gRPC arm's consumer references (S-253, [FR-WS-09]): each already carries
+    // its normalized `package.Service/Method` key, so — unlike an `ApiOperation`
+    // whose template may not compose — there is no `PathNotComposed` case here (an
+    // unqualifiable stub call was refused by the `grpc_key` normalizer before it
+    // ever reached the ledger). Otherwise the 3-state classification is identical.
+    for (member, key, symbol) in arm_consumers {
+        let from = BridgeEndpoint {
+            member: member.clone(),
+            symbol,
+        };
+        let relation = key.relation().to_string();
+        match providers.get(&key).map(Vec::as_slice) {
+            None => {
+                references.push(ReferenceCoverage::new(
+                    relation,
+                    from,
+                    CoverageState::Unbound {
+                        reason: UnboundReason::NoProviderInWorkspace,
+                    },
+                ));
+                no_provider_in_workspace += 1;
+            }
+            // A sole same-member provider is an intra-repo fact the per-repo graph
+            // owns — excluded, exactly as the HTTP path and the bridge.
+            Some([only]) if only.member == member => {}
+            Some([only]) => {
+                debug_assert_ne!(only.member, member);
+                references.push(ReferenceCoverage::new(relation, from, CoverageState::Bound));
+                bound += 1;
+            }
+            Some(_) => {
+                references.push(ReferenceCoverage::new(
+                    relation,
+                    from,
+                    CoverageState::Unbound {
+                        reason: UnboundReason::Ambiguous,
+                    },
+                ));
+                ambiguous += 1;
+            }
+        }
+    }
+
     references.sort_by(|a, b| a.from.cmp(&b.from));
 
     let denom = bound + ambiguous + unbound;
@@ -308,7 +391,7 @@ mod tests {
 
     use anyhow::Result;
 
-    use super::super::bridge::ContractNode;
+    use super::super::bridge::{ContractNode, InvocationConsumer};
     use super::super::registry::RegistryMode;
     use super::super::{Federation, Member};
     use crate::model::LogosSymbol;
@@ -318,15 +401,36 @@ mod tests {
     // test-isolated.
     thread_local! {
         static FIXTURES: RefCell<HashMap<String, Vec<ContractNode>>> = RefCell::new(HashMap::new());
+        static CONSUMERS: RefCell<HashMap<String, Vec<InvocationConsumer>>> = RefCell::new(HashMap::new());
     }
 
     fn reset() {
         FIXTURES.with(|f| f.borrow_mut().clear());
+        CONSUMERS.with(|c| c.borrow_mut().clear());
     }
     fn set_member(name: &str, nodes: Vec<ContractNode>) {
         FIXTURES.with(|f| {
             f.borrow_mut().insert(name.to_string(), nodes);
         });
+    }
+    fn set_consumers(name: &str, consumers: Vec<InvocationConsumer>) {
+        CONSUMERS.with(|c| {
+            c.borrow_mut().insert(name.to_string(), consumers);
+        });
+    }
+    fn grpc_consumer(key: &str, symbol: &str) -> InvocationConsumer {
+        InvocationConsumer {
+            namespace: crate::model::BridgeNamespace::Grpc,
+            key: key.to_string(),
+            symbol: LogosSymbol::parse(symbol).unwrap(),
+        }
+    }
+    fn proto_service(fqn: &str, symbol: &str) -> ContractNode {
+        ContractNode {
+            kind: NodeKind::ProtoService,
+            name: fqn.to_string(),
+            symbol: LogosSymbol::parse(symbol).unwrap(),
+        }
     }
 
     #[derive(Debug)]
@@ -361,6 +465,12 @@ mod tests {
         }
         fn contract_stamp(&self) -> u64 {
             0
+        }
+        fn invocation_consumers(&self) -> Result<Vec<InvocationConsumer>> {
+            if self.member == "unreadable" {
+                anyhow::bail!("ledger read failed");
+            }
+            Ok(CONSUMERS.with(|c| c.borrow().get(&self.member).cloned().unwrap_or_default()))
         }
     }
 
@@ -712,6 +822,78 @@ mod tests {
         let one = cross_service_coverage(&registry(&["api", "web", "svc"]));
         let two = cross_service_coverage(&registry(&["svc", "web", "api"]));
         assert_eq!(one.references, two.references);
+    }
+
+    // ── S-253 / FR-WS-09: gRPC stub-call coverage ────────────────────────
+
+    /// A gRPC stub call whose `package.Service/Method` provider lives in another
+    /// member classifies `Bound`, under the `grpc-call` relation.
+    #[test]
+    fn a_grpc_stub_call_binds_its_cross_member_proto_service() {
+        reset();
+        set_member(
+            "svc",
+            vec![proto_service("example.v1.UserService/GetUser", "local svc")],
+        );
+        set_consumers(
+            "api",
+            vec![grpc_consumer("example.v1.UserService/GetUser", "local stub")],
+        );
+
+        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+        assert_eq!(cov.bound, 1);
+        assert_eq!(cov.references.len(), 1);
+        assert_eq!(cov.references[0].state, CoverageState::Bound);
+        assert_eq!(cov.references[0].relation, "grpc-call");
+    }
+
+    /// Acceptance (3): a qualifiable gRPC stub call with no provider anywhere in
+    /// the workspace stays honestly unbound with a coverage reason
+    /// (`no-provider-in-workspace`) — never silently dropped, never fabricated.
+    #[test]
+    fn a_grpc_stub_call_with_no_provider_is_unbound_with_a_reason() {
+        reset();
+        set_consumers(
+            "api",
+            vec![grpc_consumer("example.v1.UserService/GetUser", "local stub")],
+        );
+        // A second member with no matching proto service provider.
+        set_member("svc", vec![proto_service("example.v1.Other/Do", "local other")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+        assert_eq!(cov.no_provider_in_workspace, 1);
+        assert_eq!(cov.bound, 0);
+        assert_eq!(
+            cov.references[0].state,
+            CoverageState::Unbound {
+                reason: UnboundReason::NoProviderInWorkspace
+            }
+        );
+        assert_eq!(cov.references[0].relation, "grpc-call");
+    }
+
+    /// Two members exposing the identical `package.Service/Method` provider make
+    /// the stub call ambiguous — its own bucket, distinct from a plain unbound.
+    #[test]
+    fn two_grpc_providers_classify_ambiguous() {
+        reset();
+        set_member(
+            "svc1",
+            vec![proto_service("example.v1.UserService/GetUser", "local a")],
+        );
+        set_member(
+            "svc2",
+            vec![proto_service("example.v1.UserService/GetUser", "local b")],
+        );
+        set_consumers(
+            "api",
+            vec![grpc_consumer("example.v1.UserService/GetUser", "local stub")],
+        );
+
+        let cov = cross_service_coverage(&registry(&["api", "svc1", "svc2"]));
+        assert_eq!(cov.ambiguous, 1);
+        assert_eq!(cov.bound, 0);
+        assert_eq!(cov.references[0].state.bucket(), "ambiguous");
     }
 
     // ── advisory isolation (ADR-53 / sprint-55 risk register) ─────────────
