@@ -54,15 +54,19 @@
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{Glob, GlobMatcher};
 use serde::Serialize;
 
 use super::bridge::{BridgeEdge, BridgeEndpoint};
 use super::manifest::Governance;
 use super::Federation;
 
-/// Every workspace-rule violation is an error — like the per-repo contract,
-/// checked-in workspace policy is binding ([FR-WS-13]).
+/// Every workspace-rule violation carries `severity = "error"`: checked-in
+/// workspace policy is a real breach, not a hint ([FR-WS-13]).
+///
+/// This is the severity of the *finding*, not a gate verdict — the family stays
+/// **advisory**: reported at the workspace level, never gating, and never able to
+/// move a member's per-repo signal ([ADR-56]).
 const SEVERITY_ERROR: &str = "error";
 
 /// The `rule_type` discriminator for a `[[governance.boundaries]]` breach.
@@ -94,7 +98,8 @@ pub struct WorkspaceViolation {
     /// [`RULE_TYPE_BOUNDARY`] or [`RULE_TYPE_NO_CALLERS`] — the family
     /// discriminator, mirroring the per-repo `rule_type`.
     pub rule_type: String,
-    /// `"error"` — workspace policy is binding.
+    /// Always `"error"` — see [`SEVERITY_ERROR`]. The severity of the *finding*;
+    /// the family itself stays advisory and gates nothing ([ADR-56]).
     pub severity: String,
     /// The relation class of the breaching binding (e.g. `"route"`), carried from
     /// the [`BridgeEdge`] so a reader can see *how* the two services are coupled.
@@ -126,6 +131,27 @@ pub struct WorkspaceGovernance {
     pub rules_checked: usize,
     /// How many bridge bindings the rules quantified over — the coverage rider.
     pub bindings_checked: usize,
+    /// Member names referenced by a rule (a `[[governance.service_layers]]`
+    /// member, or a `no_cross_service_callers` `member` scope) that are **not**
+    /// members of this workspace — sorted, de-duplicated.
+    ///
+    /// The second honesty rider ([NFR-CC-04]). Such a reference can never match,
+    /// so the rule it belongs to is silently narrowed — exactly the false
+    /// all-clear this module refuses to produce. Unlike an undeclared *layer*
+    /// (rejected outright at compile — layer names are internal to the manifest,
+    /// so an unresolvable one is unambiguously a typo), an unknown *member* is
+    /// **not** fatal: a member can be legitimately absent — not yet cloned, or
+    /// dropped by [`discover`](super::discover) for not being a distinct git root
+    /// — and [ADR-53] is explicit that a degraded member surfaces as a reported
+    /// condition rather than aborting the whole answer. So we report it loudly and
+    /// keep checking the rest.
+    ///
+    /// Empty in the healthy case.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unknown_member_refs: Vec<String>,
     /// The violations found, in deterministic order ([NFR-RA-06]).
     ///
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
@@ -147,13 +173,24 @@ impl WorkspaceGovernance {
 /// compiled once — the compiled-matcher-per-declaration pattern the per-repo
 /// engine uses for every glob family ([FR-WS-13], [FR-GV-01]).
 struct CompiledNoCallers {
-    /// The original glob string, retained for the violation's `rule` key.
-    symbol_glob: String,
     /// The compiled matcher over the provider endpoint's canonical symbol.
-    symbol: GlobSet,
+    ///
+    /// A [`GlobMatcher`] (not a `GlobSet`): there is exactly **one** pattern per
+    /// rule, and it hands the original pattern back via `glob().glob()` — so it
+    /// serves the violation's `rule` key too, with no second copy of the string to
+    /// keep in sync. (The per-repo engine retains a separate `String` only because
+    /// its families take a *list* of globs, which a `GlobSet` cannot give back.)
+    symbol: GlobMatcher,
     /// Optional member scope — only providers owned by this member match.
     member: Option<String>,
     reason: Option<String>,
+}
+
+impl CompiledNoCallers {
+    /// The rule's original glob pattern — the violation's `rule` key.
+    fn symbol_glob(&self) -> &str {
+        self.symbol.glob().glob()
+    }
 }
 
 /// The compiled workspace rule family: the member→layer index plus one compiled
@@ -174,9 +211,17 @@ impl<'a> CompiledWorkspaceRules<'a> {
     /// Compile the declared family once ([FR-GV-01]'s "compiled once" discipline).
     ///
     /// # Errors
-    /// A symbol glob that fails to compile is a **hard** error: a governance rule
-    /// that silently matched nothing would report a false all-clear, which is the
-    /// one failure mode a policy tool must never have ([ADR-14], [NFR-CC-04]).
+    /// A rule that **could never fire** is a hard error, because a rule that
+    /// silently matches nothing reports a false all-clear — the one failure mode a
+    /// policy tool must never have ([ADR-14], [NFR-CC-04]). Two cases:
+    /// - a symbol glob that fails to compile;
+    /// - a boundary naming a service layer no `[[governance.service_layers]]`
+    ///   declares (a typo, or a layer since renamed). Layer names are *internal*
+    ///   to the manifest — nothing on disk can make one legitimately absent — so
+    ///   an unresolvable one is unambiguously a mistake.
+    ///
+    /// Member names are deliberately **not** validated here; see
+    /// [`unknown_member_refs`].
     fn compile(governance: &'a Governance) -> Result<Self> {
         let mut layer_of: HashMap<&str, &str> = HashMap::new();
         for layer in &governance.service_layers {
@@ -187,12 +232,30 @@ impl<'a> CompiledWorkspaceRules<'a> {
             }
         }
 
+        // A boundary can only ever fire between two DECLARED layers, so one that
+        // names an undeclared band is dead on arrival. Reject it rather than let
+        // it inflate `rules_checked` while matching nothing ([ADR-14]).
+        let declared: BTreeSet<&str> = governance
+            .service_layers
+            .iter()
+            .map(|layer| layer.name.as_str())
+            .collect();
+        for boundary in &governance.boundaries {
+            for side in [&boundary.from, &boundary.to] {
+                anyhow::ensure!(
+                    declared.contains(side.as_str()),
+                    "governance.boundaries references undeclared service layer \
+                     '{side}' (declared: {declared:?}) — a rule that can never fire \
+                     would report a false all-clear",
+                );
+            }
+        }
+
         let no_callers = governance
             .no_cross_service_callers
             .iter()
             .map(|rule| {
                 Ok(CompiledNoCallers {
-                    symbol_glob: rule.symbol.clone(),
                     symbol: compile_symbol_glob(&rule.symbol).with_context(|| {
                         format!("compiling no_cross_service_callers symbol '{}'", rule.symbol)
                     })?,
@@ -233,10 +296,36 @@ impl<'a> CompiledWorkspaceRules<'a> {
 /// A malformed glob — surfaced by the caller as a loud compile failure.
 ///
 /// [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
-fn compile_symbol_glob(pattern: &str) -> Result<GlobSet> {
-    let mut builder = GlobSetBuilder::new();
-    builder.add(Glob::new(pattern)?);
-    Ok(builder.build()?)
+fn compile_symbol_glob(pattern: &str) -> Result<GlobMatcher> {
+    Ok(Glob::new(pattern)?.compile_matcher())
+}
+
+/// Member names a rule references that are **not** members of this workspace —
+/// the [`unknown_member_refs`](WorkspaceGovernance::unknown_member_refs) rider.
+///
+/// Sorted and de-duplicated for a deterministic report ([NFR-RA-06]).
+fn unknown_member_refs(federation: &Federation, governance: &Governance) -> Vec<String> {
+    let known: BTreeSet<&str> = federation
+        .members
+        .iter()
+        .map(|member| member.name.as_str())
+        .collect();
+
+    governance
+        .service_layers
+        .iter()
+        .flat_map(|layer| layer.members.iter())
+        .chain(
+            governance
+                .no_cross_service_callers
+                .iter()
+                .filter_map(|rule| rule.member.as_ref()),
+        )
+        .filter(|name| !known.contains(name.as_str()))
+        .cloned()
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect()
 }
 
 /// Evaluate the workspace rule family over the bridge's matched bindings
@@ -251,13 +340,17 @@ fn compile_symbol_glob(pattern: &str) -> Result<GlobSet> {
 /// trigger a rule ([NFR-RA-05]).
 ///
 /// # Errors
-/// A malformed rule (an uncompilable symbol glob) fails loud rather than silently
-/// never matching ([ADR-14]).
+/// A rule that could never fire fails loud rather than silently matching nothing
+/// ([ADR-14]) — an uncompilable symbol glob, or a boundary naming an undeclared
+/// service layer. A rule referencing an unknown *member* is reported on the
+/// [`unknown_member_refs`](WorkspaceGovernance::unknown_member_refs) rider instead
+/// of aborting, since a member can be legitimately absent ([ADR-53]).
 ///
 /// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 /// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 /// [ADR-56]: ../../../docs/specs/architecture/decisions/ADR-56.md
 pub fn workspace_governance(
     federation: &Federation,
@@ -277,6 +370,7 @@ pub fn workspace_governance(
         workspace: federation.name.clone(),
         rules_checked: compiled.rules_checked(),
         bindings_checked: edges.len(),
+        unknown_member_refs: unknown_member_refs(federation, &federation.governance),
         violations,
     }))
 }
@@ -348,22 +442,31 @@ fn boundary_violation(
 /// endpoint matches the rule is itself the forbidden caller ([FR-WS-13]).
 ///
 /// This reads the bridge rather than a synthesised caller set — the AC's
-/// "reads the bridge, not a fabricated edge set" ([NFR-RA-05]). Each matching
-/// edge is reported, so a deprecated endpoint with three cross-service callers
-/// yields three violations naming all three.
+/// "reads the bridge, not a fabricated edge set" ([NFR-RA-05]). Every distinct
+/// *caller* is reported, so a deprecated endpoint with three cross-service callers
+/// yields three violations naming all three — that list is the migration list.
+///
+/// Deduplicated per `(rule, consumer→provider pair)`, the **same** discipline
+/// [`check_boundaries`] uses: two arms coupling one consumer to one provider (a
+/// route match *and* a gRPC match) are still one caller to migrate, so they report
+/// once rather than twice.
 fn check_no_cross_service_callers(
     compiled: &CompiledWorkspaceRules<'_>,
     edges: &[BridgeEdge],
 ) -> Vec<WorkspaceViolation> {
     let mut violations = Vec::new();
+    let mut seen: BTreeSet<(usize, &BridgeEndpoint, &BridgeEndpoint)> = BTreeSet::new();
 
     for edge in edges {
-        for rule in &compiled.no_callers {
+        for (i, rule) in compiled.no_callers.iter().enumerate() {
             let member_scoped = rule
                 .member
                 .as_deref()
                 .is_none_or(|member| member == edge.to.member);
-            if member_scoped && rule.symbol.is_match(edge.to.symbol.as_str()) {
+            if member_scoped
+                && rule.symbol.is_match(edge.to.symbol.as_str())
+                && seen.insert((i, &edge.from, &edge.to))
+            {
                 violations.push(no_callers_violation(edge, rule));
             }
         }
@@ -380,7 +483,7 @@ fn no_callers_violation(edge: &BridgeEdge, rule: &CompiledNoCallers) -> Workspac
         .map(|r| format!(" — {r}"))
         .unwrap_or_default();
     WorkspaceViolation {
-        rule: format!("no-cross-service-callers:{}", rule.symbol_glob),
+        rule: format!("no-cross-service-callers:{}", rule.symbol_glob()),
         rule_type: RULE_TYPE_NO_CALLERS.to_string(),
         severity: SEVERITY_ERROR.to_string(),
         relation: edge.relation.clone(),
@@ -402,7 +505,10 @@ fn no_callers_violation(edge: &BridgeEdge, rule: &CompiledNoCallers) -> Workspac
 mod tests {
     use super::*;
 
+    use std::path::PathBuf;
+
     use crate::federation::manifest::{NoCrossServiceCallers, ServiceBoundary, ServiceLayer};
+    use crate::federation::Member;
     use crate::model::LogosSymbol;
 
     /// A bridge endpoint. `local <name>` is the smallest valid SCIP symbol the
@@ -438,13 +544,27 @@ mod tests {
         }
     }
 
-    /// A federation carrying `governance`, with no members resolved (the rules
-    /// quantify over the bridge edges passed in, not over the member set).
+    /// The workspace's resolved member set — every member the fixtures reference.
+    /// Real members matter now: a rule naming a non-member is reported on the
+    /// `unknown_member_refs` rider, so an empty member set would flag every rule.
+    fn members() -> Vec<Member> {
+        ["web", "api", "orders", "legacy", "admin", "jobs"]
+            .iter()
+            .map(|name| Member {
+                name: (*name).to_string(),
+                root: PathBuf::from("/ws").join(name),
+            })
+            .collect()
+    }
+
+    /// A federation carrying `governance` over the fixture member set. The rules
+    /// still quantify over the bridge edges passed in, not over the member set —
+    /// the members only ground the `unknown_member_refs` rider.
     fn federation(governance: Governance) -> Federation {
         Federation {
             name: "shop".to_string(),
             root: "/ws".into(),
-            members: Vec::new(),
+            members: members(),
             default: None,
             links: Vec::new(),
             governance,
@@ -674,6 +794,161 @@ mod tests {
     }
 
     // ── fail-loud on a malformed rule ─────────────────────────────────────
+
+
+    // ── rules that could never fire (the false all-clear class) ───────────
+
+    /// A boundary naming a service layer no `[[service_layers]]` declares fails
+    /// **loud**. It could only ever match nothing, so leaving it to report a clean
+    /// workspace would be the false all-clear this module refuses to produce
+    /// ([ADR-14], [NFR-CC-04]).
+    #[test]
+    fn a_boundary_naming_an_undeclared_layer_fails_loud() {
+        let governance = Governance {
+            service_layers: vec![layer("edge", &["web"]), layer("core", &["api"])],
+            // `cor` is a typo for `core` — it names no declared band.
+            boundaries: vec![boundary("edge", "cor", None)],
+            no_cross_service_callers: Vec::new(),
+        };
+        let edges = [edge("web", "fetchOrder", "api", "getOrder")];
+
+        let err = workspace_governance(&federation(governance), &edges)
+            .expect_err("a boundary that can never fire is a hard error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("cor") && msg.contains("undeclared service layer"),
+            "the error names the unresolvable layer: {msg}",
+        );
+    }
+
+    /// A boundary declared with NO service layers at all is the degenerate case of
+    /// the same bug — it can never fire, so it must not report clean.
+    #[test]
+    fn a_boundary_with_no_declared_layers_fails_loud() {
+        let governance = Governance {
+            service_layers: Vec::new(),
+            boundaries: vec![boundary("edge", "core", None)],
+            no_cross_service_callers: Vec::new(),
+        };
+        assert!(
+            workspace_governance(&federation(governance), &[]).is_err(),
+            "a boundary over an empty layer vocabulary can never fire",
+        );
+    }
+
+    /// A rule referencing a member that is not in the workspace is reported on the
+    /// `unknown_member_refs` rider rather than aborting: unlike a layer name, a
+    /// member can be legitimately absent (not yet cloned, or dropped by `discover`
+    /// for not being a git root), and [ADR-53] says a degraded member is reported,
+    /// not fatal. But it must never pass silently.
+    #[test]
+    fn a_rule_naming_an_unknown_member_is_reported_on_the_rider() {
+        let governance = Governance {
+            // `checkout` is not a workspace member.
+            service_layers: vec![layer("edge", &["web", "checkout"]), layer("core", &["api"])],
+            boundaries: vec![boundary("edge", "core", None)],
+            no_cross_service_callers: vec![NoCrossServiceCallers {
+                symbol: "*".to_string(),
+                member: Some("billing".to_string()), // also not a member
+                reason: None,
+            }],
+        };
+        let edges = [edge("web", "fetchOrder", "api", "getOrder")];
+        let report = run(governance, &edges).expect("a report");
+
+        assert_eq!(
+            report.unknown_member_refs,
+            ["billing", "checkout"],
+            "both unknown member references surface, sorted — never silently narrowed",
+        );
+        // The rest of the family still evaluates: the real edge→core edge fires.
+        assert_eq!(report.violations.len(), 1);
+    }
+
+    /// The healthy case carries an empty rider.
+    #[test]
+    fn known_members_leave_the_rider_empty() {
+        let report = run(layered(None), &[]).expect("a report");
+        assert!(report.unknown_member_refs.is_empty());
+    }
+
+    // ── report composition ────────────────────────────────────────────────
+
+    /// Both rule kinds can fire on the SAME binding; the report concatenates them
+    /// and `rules_checked` counts both.
+    #[test]
+    fn both_rule_kinds_fire_on_one_binding() {
+        let governance = Governance {
+            service_layers: vec![layer("edge", &["web"]), layer("core", &["api"])],
+            boundaries: vec![boundary("edge", "core", None)],
+            no_cross_service_callers: vec![NoCrossServiceCallers {
+                symbol: "*getOrder*".to_string(),
+                member: None,
+                reason: None,
+            }],
+        };
+        let edges = [edge("web", "fetchOrder", "api", "getOrder")];
+        let report = run(governance, &edges).expect("a report");
+
+        assert_eq!(report.rules_checked, 2);
+        let kinds: BTreeSet<&str> = report
+            .violations
+            .iter()
+            .map(|v| v.rule_type.as_str())
+            .collect();
+        assert_eq!(
+            kinds,
+            ["workspace-boundary", "workspace-no-cross-service-callers"]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "one binding breaching two rules reports under both families",
+        );
+    }
+
+    /// An intra-layer boundary (`from == to`) forbids sibling calls *within* a
+    /// band — a natural rule shape that must keep working.
+    #[test]
+    fn an_intra_layer_boundary_forbids_sibling_calls() {
+        let governance = Governance {
+            service_layers: vec![layer("core", &["api", "orders"])],
+            boundaries: vec![boundary("core", "core", Some("core services must not chain"))],
+            no_cross_service_callers: Vec::new(),
+        };
+        let edges = [edge("api", "callOrders", "orders", "getOrder")];
+        let report = run(governance, &edges).expect("a report");
+        assert_eq!(
+            report.violations.len(),
+            1,
+            "a core→core sibling call breaches an intra-layer boundary",
+        );
+    }
+
+    /// The no-callers arm dedups per `(rule, binding pair)` exactly as the boundary
+    /// arm does: one consumer coupled to one provider by TWO arms (route + gRPC) is
+    /// still ONE caller to migrate, so it reports once.
+    #[test]
+    fn no_cross_service_callers_dedups_per_binding_pair_like_boundaries() {
+        let governance = Governance {
+            service_layers: Vec::new(),
+            boundaries: Vec::new(),
+            no_cross_service_callers: vec![NoCrossServiceCallers {
+                symbol: "*getOrder*".to_string(),
+                member: None,
+                reason: None,
+            }],
+        };
+        let mut grpc = edge("web", "fetchOrder", "api", "getOrder");
+        grpc.relation = "grpc".to_string();
+        let edges = [edge("web", "fetchOrder", "api", "getOrder"), grpc];
+
+        let report = run(governance, &edges).expect("a report");
+        assert_eq!(
+            report.violations.len(),
+            1,
+            "one caller coupled by two arms is one violation, as for boundaries",
+        );
+        assert_eq!(report.bindings_checked, 2, "both bindings were still checked");
+    }
 
     /// A symbol glob that does not compile fails **loud**. A governance rule that
     /// silently matched nothing would report a false all-clear — the one failure

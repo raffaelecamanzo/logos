@@ -416,15 +416,16 @@ pub enum Backing<E: MemberEngine = Engine> {
     Single(Arc<E>),
     /// A workspace: the member-engine registry.
     ///
-    /// **Boxed** so the enum stays pointer-sized. The registry inlines a whole
-    /// [`Federation`] — member set, links, and (since S-258) the `[governance]`
-    /// rule family — which is hundreds of bytes, while [`Single`](Self::Single)
-    /// is one `Arc`. Boxing keeps the *single-root* path, which moves this enum
-    /// on every serve/CLI dispatch, from paying a large-variant memcpy for a
-    /// workspace it does not have — the same "federation never taxes single-root"
-    /// discipline as the rest of this module ([ADR-52], [NFR-PE-10]).
+    /// **Boxed** to keep the two variants the same order of size. The registry
+    /// inlines a whole [`Federation`] — member set, links, and (since S-258) the
+    /// `[governance]` rule family — running to hundreds of bytes, while
+    /// [`Single`](Self::Single) is a lone `Arc`; without the box every `Backing`,
+    /// including a single-root one carrying no workspace, would be sized for the
+    /// federated variant (`clippy::large_enum_variant`).
     ///
-    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    /// The saving is in *size*, not in copies: every construction site wraps this
+    /// enum in an `Arc` immediately, so it is moved once at startup and never per
+    /// dispatch.
     Federated(Box<EngineRegistry<E>>),
 }
 
