@@ -151,7 +151,16 @@ where
 /// slot — a dynamically-composed topic the `.scm` refused to capture — yields
 /// `None`.
 ///
+/// **Separator invariant (unreachable today):** the `#` join is injective only
+/// while topic names contain no `#`. No shipped `brokers.scm` populates a
+/// `schema` slot yet, so the guarded form never arises in practice; the first
+/// arm to capture `@broker.*.schema` (notably for a broker like RabbitMQ whose
+/// routing keys admit `#`) must pick a separator that cannot occur in a topic
+/// name, or escape it, to keep the key injective and avoid a false bind
+/// ([NFR-RA-05]).
+///
 /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 fn broker_topic_key(slots: &BTreeMap<String, String>) -> Option<String> {
     let topic = slots.get("topic").map(String::as_str).unwrap_or("").trim();
     if topic.is_empty() {
@@ -336,5 +345,55 @@ class C {
             "the single-value @KafkaListener(\"events\") form binds: {:?}",
             facts.refs
         );
+    }
+
+    /// A relay method that both **subscribes to** and **re-publishes on** the same
+    /// topic emits a `BrokerSubscribe` and a `BrokerPublish` that coincide on
+    /// `(source, target, form, kind)` and differ only in relation. Both must
+    /// survive the ledger dedup — dropping the subscribe would lose a real
+    /// cross-service fan-out fact ([FR-WS-10], [NFR-RA-05]). Regression for the
+    /// relation-blind `dedup_sort_refs` collision.
+    #[test]
+    fn a_relay_method_keeps_both_its_publish_and_subscribe_on_one_topic() {
+        let src = r#"
+package com.acme;
+class Relay {
+    private KafkaTemplate<String, String> kafkaTemplate;
+
+    @KafkaListener(topics = "orders")
+    public void relay(String msg) {
+        kafkaTemplate.send("orders", msg);
+    }
+}
+"#;
+        let facts = extract_java(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["orders".to_string()],
+            "the subscribe survives alongside the same-topic publish: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["orders".to_string()],
+            "the publish survives alongside the same-topic subscribe: {:?}",
+            facts.refs
+        );
+        // Both are attributed to the relay method, coincide on target/form/kind,
+        // and differ only in relation — the exact dedup-collision shape.
+        let broker: Vec<_> = facts
+            .refs
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.relation,
+                    Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+                )
+            })
+            .collect();
+        assert_eq!(broker.len(), 2, "both broker refs survive: {broker:?}");
+        assert!(broker.iter().all(|r| r.source.as_str().contains("relay")
+            && r.target == "orders"
+            && r.form == RefForm::Method));
     }
 }
