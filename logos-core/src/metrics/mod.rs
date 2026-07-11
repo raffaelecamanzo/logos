@@ -688,6 +688,29 @@ fn metric_graph(
         if matches!(vertex.kind, Some(NodeKind::Layer | NodeKind::Boundary)) {
             continue; // derived policy vertex — not part of the code graph
         }
+        // Promoted broker vertices (S-256, CR-061) are **markers**, not code: the code
+        // they mark — the publishing/subscribing method — is already a vertex here, so
+        // counting them too would measure the model rather than the source.
+        //
+        // For a `Topic` this is not merely tidy, it is load-bearing. A topic is a
+        // repo-scoped identity with **no file** ([FR-WS-11]), so `file_of` misses it and
+        // it lands in the `UNBOUND_DIR` community. Every `Publishes`/`Subscribes` edge
+        // would then run from its producer's directory into `<unbound>` — external to
+        // both communities, contributing to `degree` but never to `internal` — so
+        // modularity would fall for **any** repo that indexes a broker topic, purely as
+        // an artifact of how we model it. The user's real coupling (publisher → topic →
+        // subscriber) is not a call edge and was never in this graph to begin with;
+        // adding the model of it must not move the gated signal ([NFR-RA-06], and the
+        // CR-061 invariant that these features never alter a member's gated verdict).
+        //
+        // [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
+        // [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+        if matches!(
+            vertex.kind,
+            Some(NodeKind::Topic | NodeKind::Producer | NodeKind::Consumer)
+        ) {
+            continue;
+        }
         if vertex.node_id.is_some_and(|id| test_ids.contains(&id)) {
             continue; // is_test vertex — excluded from the production scope (FR-QM-08)
         }

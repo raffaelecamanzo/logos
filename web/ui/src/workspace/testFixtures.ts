@@ -6,7 +6,12 @@
 
 import { vi } from "vitest";
 
-import type { CrossServiceCoverage, WorkspaceRoster, WorkspaceStatus } from "../api/types.ts";
+import type {
+  CrossServiceCoverage,
+  MemberTopics,
+  WorkspaceRoster,
+  WorkspaceStatus,
+} from "../api/types.ts";
 
 /** The two-member roster the shell probe answers with. */
 export const ROSTER: WorkspaceRoster = {
@@ -24,8 +29,15 @@ export const EMPTY_COVERAGE: CrossServiceCoverage = {
   bound_ratio: 1,
 };
 
+/** No member has promoted a broker topic — the default, and the shape every repo
+ *  that indexes no broker coupling reports (S-256). */
+export const NO_TOPICS: MemberTopics[] = [];
+
 /** A status fan-out over the two members. */
-export function status(coverage: CrossServiceCoverage = EMPTY_COVERAGE): WorkspaceStatus {
+export function status(
+  coverage: CrossServiceCoverage = EMPTY_COVERAGE,
+  topics: MemberTopics[] = NO_TOPICS,
+): WorkspaceStatus {
   return {
     workspace: "shop",
     members: [
@@ -33,6 +45,7 @@ export function status(coverage: CrossServiceCoverage = EMPTY_COVERAGE): Workspa
       { member: "web", result: { indexed: true } as WorkspaceStatus["members"][0]["result"] },
     ],
     coverage,
+    topics,
   };
 }
 
@@ -45,6 +58,8 @@ export interface StubOptions {
   providers?: unknown[];
   /** The cross-service impact payload. */
   impact?: unknown;
+  /** Each member's promoted broker topics — the service map draws a node per topic. */
+  topics?: MemberTopics[];
 }
 
 /**
@@ -53,7 +68,13 @@ export interface StubOptions {
  * the test does not care about.
  */
 export function stubApi(opts: StubOptions = {}): () => string[] {
-  const { probeStatus = 200, coverage = EMPTY_COVERAGE, providers = [], impact = {} } = opts;
+  const {
+    probeStatus = 200,
+    coverage = EMPTY_COVERAGE,
+    providers = [],
+    impact = {},
+    topics = NO_TOPICS,
+  } = opts;
   const calls: string[] = [];
   const json = (body: unknown, ok = true, code = 200) =>
     Promise.resolve({ ok, status: code, json: () => Promise.resolve(body) } as Response);
@@ -65,7 +86,7 @@ export function stubApi(opts: StubOptions = {}): () => string[] {
       if (url.startsWith("/api/v1/workspace/roster")) {
         return json(ROSTER, probeStatus === 200, probeStatus);
       }
-      if (url.startsWith("/api/v1/workspace/status")) return json(status(coverage));
+      if (url.startsWith("/api/v1/workspace/status")) return json(status(coverage, topics));
       if (url.startsWith("/api/v1/workspace/route-providers")) return json({ providers });
       if (url.startsWith("/api/v1/workspace/impact")) return json(impact);
       return json({});

@@ -120,6 +120,17 @@ describe("palettes & sizing", () => {
     expect(edgeStyle("nonexistent")).toBe("solid");
   });
 
+  it("styles the first-class broker edges (S-256) — the node-views half of FR-WS-11", () => {
+    // `publishes`/`subscribes` are REAL graph edge kinds now, rendered in the node
+    // views as well as on the service map. Both lookups fall back silently (grey /
+    // solid), so without these assertions a dropped palette entry would degrade the
+    // rendering with no test failing.
+    expect(edgeColor("publishes")).toBe("#0891b2");
+    expect(edgeColor("subscribes")).toBe("#0891b2");
+    expect(edgeStyle("publishes")).toBe("solid");
+    expect(edgeStyle("subscribes")).toBe("dashed");
+  });
+
   it("bumps the selected node to at least the focus size", () => {
     expect(nodeSize(0, false)).toBe(12);
     expect(nodeSize(0, true)).toBe(26);

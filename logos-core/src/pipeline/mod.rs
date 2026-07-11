@@ -209,6 +209,10 @@ pub fn index(
         &promoted_nodes,
         &mut resolution,
     )?;
+    // Broker-topic promotion (S-256, CR-061, FR-WS-11): promote the ledger-only
+    // broker refs to `topic`/`producer`/`consumer` nodes — a cold index always
+    // reconciles the whole graph.
+    topics_pass(runtime)?;
     // Framework-dispatch live-rooting (CR-043, ADR-39): live-root the methods
     // dispatched only through an external framework so Pass 3 below stops
     // mis-reporting them dead — a cold index reconciles every `.rs` file.
@@ -719,6 +723,10 @@ pub fn sync(
         &promoted_nodes,
         &mut result.resolution,
     )?;
+    // Broker-topic promotion (S-256, CR-061, FR-WS-11), incrementally gated: a
+    // graph with no broker footprint skips the whole-graph snapshot entirely, so a
+    // repo that indexes no topics does no work and its store stays byte-identical.
+    topics_pass(runtime)?;
     // Framework-dispatch live-rooting (CR-043, ADR-39), incrementally gated:
     // only the changed `.rs` files are rescanned and only their markers
     // reconciled, so a sync that touched no Rust file does no work — keeping the
@@ -1644,6 +1652,38 @@ fn framework_pass(
     delta: Option<&crate::resolve::Delta>,
 ) -> Result<(FrameworkStats, Vec<String>)> {
     crate::resolve::framework::run(runtime, registry, root, policy, delta)
+}
+
+/// The broker-topic promotion pass ([resolution-engine], S-256, [FR-WS-11],
+/// [ADR-55]).
+///
+/// Runs after [`framework_pass`] on both [`index`] and [`sync`]: promotes the
+/// ledger-only broker publish/subscribe references S-254 captured ([FR-WS-10]) to
+/// the first-class `topic`/`producer`/`consumer` nodes joined by
+/// `publishes`/`subscribes` edges that migration 17 admitted (S-255) — reconciled
+/// every run, never fabricated (a dynamic topic was already refused at capture).
+///
+/// Its counts are **traced, not returned**: the promoted nodes are ordinary graph
+/// entities that the existing node/search/graph surfaces report on, and folding a
+/// fourth stats block into the public index/sync result would widen every adapter's
+/// wire shape for a number no gate consumes.
+///
+/// [resolution-engine]: ../../../docs/specs/architecture/components/resolution-engine.md
+/// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
+/// [ADR-55]: ../../../docs/specs/architecture/decisions/ADR-55.md
+fn topics_pass(runtime: &Runtime) -> Result<()> {
+    let stats = crate::resolve::topics::run(runtime)?;
+    if stats.topics > 0 {
+        tracing::debug!(
+            topics = stats.topics,
+            producers = stats.producers,
+            consumers = stats.consumers,
+            duration_ms = stats.duration_ms,
+            "promoted broker topics"
+        );
+    }
+    Ok(())
 }
 
 /// The framework-dispatch live-rooting pass ([resolution-engine], [CR-043],

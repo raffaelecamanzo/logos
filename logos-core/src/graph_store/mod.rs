@@ -1242,6 +1242,48 @@ pub trait GraphStore {
     /// [NFR-PE-03]: ../../../docs/specs/requirements/NFR-PE-03.md
     fn has_framework_footprint(&self, detector_prefixes: &[String]) -> Result<bool>;
 
+    /// Whether this graph carries any **broker footprint** — a promoted
+    /// `topic`/`producer`/`consumer` node, or a broker-arm reference in the ledger
+    /// (S-256, [FR-WS-11]).
+    ///
+    /// The incremental gate of the broker-topic promotion pass
+    /// ([`crate::resolve::topics`]), and the exact sibling of
+    /// [`has_framework_footprint`](GraphStore::has_framework_footprint): that pass
+    /// is a pure, idempotent function of the broker ledger and the bound graph, so
+    /// a graph with neither a promoted broker node nor a broker ref can promote
+    /// nothing and has nothing to demote. An incremental `sync` therefore skips the
+    /// whole-graph snapshot entirely, which is what keeps a repo that indexes **no
+    /// broker topics** byte-for-byte unaffected ([FR-WS-11], [NFR-RA-06]) and
+    /// inside the [NFR-PE-03] single-file-sync budget. A full `index` never calls
+    /// this.
+    ///
+    /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    /// [NFR-PE-03]: ../../../docs/specs/requirements/NFR-PE-03.md
+    fn has_broker_footprint(&self) -> Result<bool>;
+
+    /// The **promoted broker subgraph** alone: the `topic`/`producer`/`consumer`
+    /// nodes and the `publishes`/`subscribes` edges joining them (S-256,
+    /// [FR-WS-11]).
+    ///
+    /// A targeted read, for the same reason
+    /// [`dispatch_markers`](GraphStore::dispatch_markers) is one: the workspace topic
+    /// inventory ([`crate::federation::topics`]) is served on every `workspace status`
+    /// request, per member, and its answer is O(topics) — typically **zero**. Reading
+    /// it via the whole-graph [`all_nodes`](GraphStore::all_nodes) +
+    /// [`all_edges`](GraphStore::all_edges) would make a read-model that usually
+    /// returns nothing cost a full graph materialisation of every member ([NFR-PE-10]).
+    /// A repo with no broker coupling answers with two empty vectors after an index
+    /// scan.
+    ///
+    /// Ordered (`id`, then `source, target, kind`) so the projection built from it is
+    /// deterministic ([NFR-RA-06]).
+    ///
+    /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    fn broker_subgraph(&self) -> Result<(Vec<NodeRow>, Vec<EdgeRow>)>;
+
     /// The ids of every node the annotation pass marked `is_test = 1`, ordered
     /// by `id` ([FR-AN-05]).
     ///
@@ -2225,6 +2267,108 @@ impl GraphStore for SqliteGraphStore {
             .context("checking for framework-detector references")?
             != 0;
         Ok(has_ref)
+    }
+
+    fn has_broker_footprint(&self) -> Result<bool> {
+        // 1) A promoted broker node already in the graph? Its presence alone forces
+        //    the full reconcile (a demotion may be due — the last publish may have
+        //    just been deleted).
+        let (topic, producer, consumer) = (
+            crate::model::NodeKind::Topic.as_i32(),
+            crate::model::NodeKind::Producer.as_i32(),
+            crate::model::NodeKind::Consumer.as_i32(),
+        );
+        let has_promoted: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM nodes WHERE kind IN (?1, ?2, ?3))",
+                rusqlite::params![topic, producer, consumer],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("checking for promoted broker nodes")?
+            != 0;
+        if has_promoted {
+            return Ok(true);
+        }
+
+        // 2) Any broker-arm reference in the ledger? Both arms ride the free
+        //    `payload` relation token the S-254 capture wrote (MIGRATION_14). The
+        //    `resolved` column is deliberately NOT filtered on: a broker ref binds
+        //    to no local artifact kind (`ArtifactRelation::target_kind` is `None`
+        //    and a topic is not a config kind), so it is unresolved by construction
+        //    today — but the promotion pass owns every broker row regardless of how
+        //    the resolution pass later classifies it, and a `resolved = 0` filter
+        //    here would silently stop promoting the day that changed.
+        let has_ref: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM unresolved_refs WHERE payload IN (?1, ?2))",
+                rusqlite::params![
+                    crate::model::ArtifactRelation::BrokerPublish.as_str(),
+                    crate::model::ArtifactRelation::BrokerSubscribe.as_str(),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("checking for broker-arm ledger references")?
+            != 0;
+        Ok(has_ref)
+    }
+
+    fn broker_subgraph(&self) -> Result<(Vec<NodeRow>, Vec<EdgeRow>)> {
+        let (topic, producer, consumer) = (
+            crate::model::NodeKind::Topic.as_i32(),
+            crate::model::NodeKind::Producer.as_i32(),
+            crate::model::NodeKind::Consumer.as_i32(),
+        );
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT n.id, s.symbol, n.kind, n.name, f.path, n.start_line, n.end_line \
+             FROM nodes n \
+             JOIN symbols s ON s.id = n.symbol_id \
+             LEFT JOIN files f ON f.id = n.file_id \
+             WHERE n.kind IN (?1, ?2, ?3) \
+             ORDER BY n.id",
+        )?;
+        let raws = stmt
+            .query_map(rusqlite::params![topic, producer, consumer], map_raw_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting the promoted broker nodes")?;
+        let nodes: Vec<NodeRow> = raws
+            .into_iter()
+            .map(raw_to_node)
+            .collect::<Result<Vec<_>>>()?;
+
+        let (publishes, subscribes) = (
+            crate::model::EdgeKind::Publishes.as_i32(),
+            crate::model::EdgeKind::Subscribes.as_i32(),
+        );
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT source, target, kind FROM edges \
+             WHERE kind IN (?1, ?2) \
+             ORDER BY source, target, kind",
+        )?;
+        let edges = stmt
+            .query_map(rusqlite::params![publishes, subscribes], |row| {
+                Ok((
+                    NodeId(row.get::<_, i64>(0)?),
+                    NodeId(row.get::<_, i64>(1)?),
+                    row.get::<_, i32>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting the promoted broker edges")?
+            .into_iter()
+            .map(|(source, target, kind)| {
+                Ok(EdgeRow {
+                    source,
+                    target,
+                    kind: EdgeKind::try_from(kind).with_context(|| {
+                        format!("corrupt edge kind {kind} stored; rebuild advised (NFR-RA-08)")
+                    })?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok((nodes, edges))
     }
 
     fn test_node_ids(&self) -> Result<Vec<NodeId>> {

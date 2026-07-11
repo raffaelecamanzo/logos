@@ -1040,13 +1040,42 @@ export interface WorkspaceRoster {
   members: string[];
 }
 
-/** `GET /api/v1/workspace/status` — per-member index freshness + the coverage
- *  summary. Fetched by the Workspace tab (it fans out over every member). */
+/** One promoted broker topic in one member (S-256, FR-WS-11) — the per-repo topic
+ *  graph, summarised. Counts are of *declarations*, not of call sites: a method
+ *  publishing one topic twice is one producer, exactly as the graph records it. */
+export interface TopicSummary {
+  /** The topic key — the identity two members meet on (`orders`,
+   *  `orders#com.acme.OrderCreated`). */
+  topic: string;
+  /** Declarations in this member that publish to the topic. */
+  producers: number;
+  /** Declarations in this member that subscribe from the topic. */
+  consumers: number;
+}
+
+/** One member's topic inventory, repo-qualified (FR-WS-03). */
+export interface MemberTopics {
+  member: string;
+  /** Its promoted topics, sorted by key. */
+  topics: TopicSummary[];
+}
+
+/** `GET /api/v1/workspace/status` — per-member index freshness, the coverage
+ *  summary, and the promoted topic inventory. Fetched by the Workspace tab (it fans
+ *  out over every member). */
 export interface WorkspaceStatus {
   /** The workspace name from the manifest. */
   workspace: string;
   members: MemberResult<StatusInfo>[];
   coverage: CrossServiceCoverage;
+  /** Each member's promoted broker topics (S-256, FR-WS-11).
+   *
+   *  Read from the per-repo topic *graph*, not from the cross-member bind — which is
+   *  what lets the service map draw a topic that one member publishes and nobody
+   *  consumes yet. Such a topic has NO binding edge, so a map built from bindings
+   *  alone would render it as an absence; FR-WS-11's promise is that it is visible
+   *  before any cross-repo match. */
+  topics: MemberTopics[];
 }
 
 /** `GET /api/v1/workspace/route-providers` — the resolved cross-service bindings:

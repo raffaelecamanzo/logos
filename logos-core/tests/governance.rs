@@ -1420,7 +1420,10 @@ fn health_reports_store_integrity_and_counts() {
         health.structural_ok && health.structural_faults.is_empty(),
         "a clean graph is structurally sound (CR-052, NFR-RA-13)"
     );
-    assert_eq!(health.schema_version, 16, "migration 16 applied");
+    // Migration 17 (S-255, CR-061) widened the frozen node/edge discriminants for the
+    // first-class broker kinds; this assertion tracked the schema and was left at 16 by
+    // that merge. The store itself has said 17 since — `federation::broker` asserts it.
+    assert_eq!(health.schema_version, 17, "migration 17 applied");
     assert!(health.db_size_bytes > 0);
     assert!(health.db_path.ends_with("logos.db"));
     assert!(health.files >= 1 && health.nodes >= 2);

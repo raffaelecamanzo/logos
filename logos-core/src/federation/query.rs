@@ -40,6 +40,7 @@ use crate::Engine;
 use super::bridge::BridgeEdge;
 use super::coverage::{cross_service_coverage, CrossServiceCoverage};
 use super::registry::{EngineRegistry, MemberScoped};
+use super::topics::{workspace_topics, MemberTopics};
 
 /// One member's outcome for a repo-qualified fan-out query ([FR-WS-03]).
 ///
@@ -272,7 +273,8 @@ pub fn xservice_route_providers(
 }
 
 /// The `logos workspace status` read-model ([FR-WS-05]): each member's index
-/// freshness plus the 3-state cross-service coverage summary.
+/// freshness, the 3-state cross-service coverage summary, and the promoted topic
+/// inventory.
 #[derive(Debug, Serialize)]
 pub struct WorkspaceStatus {
     /// The workspace name (`[workspace] name`).
@@ -284,6 +286,16 @@ pub struct WorkspaceStatus {
     ///
     /// [S-247]: ../coverage/index.html
     pub coverage: CrossServiceCoverage,
+    /// Each member's promoted broker topics (S-256, [`workspace_topics`],
+    /// [FR-WS-11]).
+    ///
+    /// Read from the per-repo topic **graph**, not from the cross-member bind, so a
+    /// topic one member publishes and nobody consumes yet is still reported — the
+    /// service map draws it, and its `consumers: 0` is an honest fact rather than an
+    /// absence ([FR-WS-11]).
+    ///
+    /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
+    pub topics: Vec<MemberTopics>,
 }
 
 /// The workspace **roster** — the manifest, and nothing but the manifest
@@ -325,12 +337,16 @@ where
     }
 }
 
-/// Per-member freshness plus the 3-state coverage summary ([FR-WS-05]).
+/// Per-member freshness, the 3-state coverage summary, and the promoted topic
+/// inventory ([FR-WS-05], [FR-WS-11]).
+///
+/// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
 pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
     WorkspaceStatus {
         workspace: registry.federation().name.clone(),
         members: fan(registry, None, Engine::status),
         coverage: cross_service_coverage(registry),
+        topics: workspace_topics(registry),
     }
 }
 

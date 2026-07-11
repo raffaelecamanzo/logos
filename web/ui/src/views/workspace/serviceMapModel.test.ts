@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import type { BridgeEdge, WorkspaceStatus } from "../../api/types.ts";
+import type { BridgeEdge, MemberTopics, WorkspaceStatus } from "../../api/types.ts";
 import {
   buildServiceMap,
   memberOfServiceId,
   serviceId,
   serviceMembers,
+  topicId,
+  topicLinks,
+  topicOfTopicId,
   type ServiceMember,
 } from "./serviceMapModel.ts";
 
@@ -112,5 +115,189 @@ describe("buildServiceMap (S-250, FR-UI-29)", () => {
       "a->c:grpc-call",
       "c->a:route",
     ]);
+  });
+});
+
+// ── S-256 / FR-WS-11: topics as first-class nodes on the service map ─────────
+
+/** One member's topic inventory entry. */
+function topics(member: string, ...entries: [string, number, number][]): MemberTopics {
+  return {
+    member,
+    topics: entries.map(([topic, producers, consumers]) => ({ topic, producers, consumers })),
+  };
+}
+
+describe("topicLinks (S-256, FR-WS-11)", () => {
+  it("folds the per-member inventory onto ONE node per shared topic identity", () => {
+    // `orders` is published by api and subscribed by billing — the same identity in
+    // two members IS the coupling.
+    const links = topicLinks([
+      topics("api", ["orders", 1, 0]),
+      topics("billing", ["orders", 0, 2]),
+    ]);
+    expect(links).toEqual([{ topic: "orders", producers: ["api"], consumers: ["billing"] }]);
+  });
+
+  it("records a member on both sides when it both publishes and subscribes", () => {
+    const links = topicLinks([topics("relay", ["orders", 1, 1])]);
+    expect(links).toEqual([{ topic: "orders", producers: ["relay"], consumers: ["relay"] }]);
+  });
+
+  it("omits a member from a side it has no sites on — a zero is not a producer", () => {
+    const links = topicLinks([topics("api", ["orders", 0, 0])]);
+    expect(links).toEqual([{ topic: "orders", producers: [], consumers: [] }]);
+  });
+
+  it("is deterministic: topics sort by key, members within a side sort by name", () => {
+    const links = topicLinks([
+      topics("zeta", ["shipments", 1, 0]),
+      topics("alpha", ["shipments", 1, 0], ["orders", 1, 0]),
+    ]);
+    expect(links.map((l) => l.topic)).toEqual(["orders", "shipments"]);
+    expect(links[1].producers).toEqual(["alpha", "zeta"]);
+  });
+});
+
+describe("buildServiceMap with topics (S-256, FR-WS-11)", () => {
+  it("draws a topic as its own node, in a namespace that never decodes as a service", () => {
+    const map = buildServiceMap(
+      [member("api"), member("billing")],
+      [],
+      [topics("api", ["orders", 1, 0]), topics("billing", ["orders", 0, 1])],
+    );
+
+    expect(map.loaded.nodes[topicId("orders")]).toMatchObject({
+      label: "orders",
+      kind: "topic",
+      layer: "artifact",
+    });
+    // The two namespaces are disjoint — critical, because the canvas selects a MEMBER
+    // for any id that decodes as a service. A topic must never do that.
+    expect(memberOfServiceId(topicId("orders"))).toBeNull();
+    expect(topicOfTopicId(topicId("orders"))).toBe("orders");
+    expect(topicOfTopicId(serviceId("api"))).toBeNull();
+  });
+
+  it("renders a coupling as publisher → topic → subscriber, not one opaque line", () => {
+    const map = buildServiceMap(
+      [member("api"), member("billing")],
+      [],
+      [topics("api", ["orders", 1, 0]), topics("billing", ["orders", 0, 1])],
+    );
+    expect(map.loaded.edges).toEqual([
+      { source: serviceId("api"), target: topicId("orders"), edge_type: "publishes" },
+      { source: topicId("orders"), target: serviceId("billing"), edge_type: "subscribes" },
+    ]);
+  });
+
+  it("ACCEPTANCE: a topic with a publisher and NO subscriber anywhere is still drawn", () => {
+    // The per-repo promise (FR-WS-11): this topic has no cross-member binding at all,
+    // so a map built from bindings alone would render it as an absence. It is not an
+    // absence — it is an unconsumed topic, and the map must say so.
+    const map = buildServiceMap([member("api")], [], [topics("api", ["orders", 1, 0])]);
+
+    expect(map.topics).toEqual([{ topic: "orders", producers: ["api"], consumers: [] }]);
+    expect(map.loaded.nodes[topicId("orders")]).toBeDefined();
+    expect(map.loaded.edges).toEqual([
+      { source: serviceId("api"), target: topicId("orders"), edge_type: "publishes" },
+    ]);
+    expect(map.links).toEqual([]); // no binding — and none is fabricated
+  });
+
+  it("draws a broker binding through its topic, never ALSO as a flat service line", () => {
+    // The bridge resolves the same coupling as a `broker-topic` binding. Drawing both
+    // the topic hops AND the flat line would render one coupling twice — once named,
+    // once opaque. The topic hops win; the binding still counts in `links`.
+    const map = buildServiceMap(
+      [member("api"), member("billing")],
+      [binding("api", "billing", "broker-topic")],
+      [topics("api", ["orders", 1, 0]), topics("billing", ["orders", 0, 1])],
+    );
+
+    expect(map.loaded.edges.map((e) => e.edge_type).sort()).toEqual(["publishes", "subscribes"]);
+    expect(map.loaded.edges.some((e) => e.edge_type === "broker-topic")).toBe(false);
+    // …but the binding is still reported as a resolved coupling.
+    expect(map.links).toEqual([
+      { from: "api", to: "billing", relation: "broker-topic", count: 1 },
+    ]);
+  });
+
+  it("keeps the HTTP/gRPC arms as direct service lines — only the broker arm re-routes", () => {
+    const map = buildServiceMap(
+      [member("web"), member("api")],
+      [binding("web", "api", "route")],
+      [],
+    );
+    expect(map.loaded.edges).toEqual([
+      { source: serviceId("web"), target: serviceId("api"), edge_type: "route" },
+    ]);
+    expect(map.topics).toEqual([]);
+  });
+
+  it("never draws a topic edge to a member absent from the roster (NFR-RA-05)", () => {
+    // The inventory names a member the roster does not carry (it was removed from the
+    // manifest). The topic is still real, but the edge has no service node to land on —
+    // and inventing one would fabricate a service.
+    const map = buildServiceMap([member("api")], [], [topics("ghost", ["orders", 1, 0])]);
+    expect(map.loaded.nodes[topicId("orders")]).toBeDefined();
+    expect(map.loaded.nodes[serviceId("ghost")]).toBeUndefined();
+    expect(map.loaded.edges).toEqual([]);
+  });
+
+  it("a workspace with no topics is byte-identical to the pre-S-256 map", () => {
+    const withArg = buildServiceMap([member("api"), member("web")], [binding("api", "web")], []);
+    const withoutArg = buildServiceMap([member("api"), member("web")], [binding("api", "web")]);
+    expect(withArg.loaded).toEqual(withoutArg.loaded);
+    expect(withArg.topics).toEqual([]);
+    expect(withoutArg.loaded.edges).toEqual([
+      { source: serviceId("api"), target: serviceId("web"), edge_type: "route" },
+    ]);
+  });
+});
+
+describe("buildServiceMap — the broker line is suppressed only when a topic carries it", () => {
+  it("KEEPS the flat line when the binding is resolved but the inventory is empty", () => {
+    // A member indexed by a pre-S-256 binary (ledger rows, no promoted topic nodes), or
+    // one whose topic read degraded and was skipped: the coupling is REAL and resolved,
+    // but no topic hop exists to carry it. Dropping the line unconditionally would make
+    // a resolved coupling vanish from the canvas while still counting it in the table.
+    const map = buildServiceMap(
+      [member("api"), member("billing")],
+      [binding("api", "billing", "broker-topic")],
+      [], // no inventory
+    );
+
+    expect(map.loaded.edges).toEqual([
+      { source: serviceId("api"), target: serviceId("billing"), edge_type: "broker-topic" },
+    ]);
+    expect(map.links).toEqual([
+      { from: "api", to: "billing", relation: "broker-topic", count: 1 },
+    ]);
+  });
+
+  it("KEEPS the flat line when a topic exists but does not carry THIS pair", () => {
+    // `orders` couples api → billing; the resolved binding is api → shipping (some other
+    // topic whose inventory we do not have). The unrelated topic must not suppress it.
+    const map = buildServiceMap(
+      [member("api"), member("billing"), member("shipping")],
+      [binding("api", "shipping", "broker-topic")],
+      [topics("api", ["orders", 1, 0]), topics("billing", ["orders", 0, 1])],
+    );
+
+    const flat = map.loaded.edges.filter((e) => e.edge_type === "broker-topic");
+    expect(flat).toEqual([
+      { source: serviceId("api"), target: serviceId("shipping"), edge_type: "broker-topic" },
+    ]);
+  });
+
+  it("SUPPRESSES the flat line only when the topic hop demonstrably replaces it", () => {
+    const map = buildServiceMap(
+      [member("api"), member("billing")],
+      [binding("api", "billing", "broker-topic")],
+      [topics("api", ["orders", 1, 0]), topics("billing", ["orders", 0, 1])],
+    );
+    expect(map.loaded.edges.some((e) => e.edge_type === "broker-topic")).toBe(false);
+    expect(map.loaded.edges.map((e) => e.edge_type).sort()).toEqual(["publishes", "subscribes"]);
   });
 });

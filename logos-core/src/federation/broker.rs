@@ -37,11 +37,11 @@
 //! [`ArtifactRelation::bridge_namespace`]: crate::model::ArtifactRelation::bridge_namespace
 //! [`ArtifactRelation::bridge_role`]: crate::model::ArtifactRelation::bridge_role
 
-// The arm's bind-side classifier is the reuse foundation the cross-service
-// bridge-consumption story wires into the live edge stream; today it is proven
-// end-to-end by this module's tests, mirroring how S-251 shipped
+// S-256 ([FR-WS-11]) wired this classifier into the live edge stream: it is now
+// called by [`super::bridge::compute_edges`], which routes every broker-arm ledger
+// reference here (both roles) instead of into its own consumer-only index. Until
+// then it was proven only by this module's tests, mirroring how S-251 shipped
 // `capture_invocation_refs` ahead of its arm callers.
-#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 

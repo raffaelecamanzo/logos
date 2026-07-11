@@ -58,6 +58,12 @@ pub(crate) mod route_template;
 /// it is honestly unbindable (base-url-runtime / path-not-composed). The one
 /// arm-specific piece of the pluggable invocation-arm contract. See its module docs.
 pub(crate) mod http_client_call;
+/// The broker-topic promotion pass (S-256, CR-061, FR-WS-11, ADR-55): promotes the
+/// ledger-only broker publish/subscribe references S-254 captured to first-class
+/// `topic`/`producer`/`consumer` nodes joined by `publishes`/`subscribes` edges —
+/// reconciled every run, and provably inert on a graph with no broker topics. See
+/// its module docs.
+pub mod topics;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 

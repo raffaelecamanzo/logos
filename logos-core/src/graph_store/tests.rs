@@ -2270,3 +2270,167 @@ fn structural_check_stays_within_the_point_query_budget() {
         "structural_check must stay within the point-query budget (NFR-PE-01), took {elapsed:?}"
     );
 }
+
+// ── S-256 / FR-WS-11: the incremental broker-gate footprint probe ────────────
+
+/// One broker-arm ledger row (`payload` carries the relation token, exactly as the
+/// S-254 capture writes it).
+fn broker_ref<'a>(source_symbol: &'a str, topic: &'a str, payload: &'a str) -> NewUnresolvedRef<'a> {
+    NewUnresolvedRef {
+        file_id: None,
+        source_symbol,
+        target: topic,
+        alias: None,
+        form: RefForm::Method,
+        kind: EdgeKind::ArtifactRef,
+        line: Some(7),
+        payload: Some(payload),
+    }
+}
+
+/// A graph with no broker node and no broker ref has **no footprint** — the case that
+/// lets an incremental sync skip the whole promotion pass entirely, and the reason a
+/// repo that indexes no topics is byte-for-byte unaffected ([FR-WS-11]).
+///
+/// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
+#[test]
+fn broker_footprint_is_false_for_a_plain_graph() {
+    let mut store = mem();
+    seed(&store, 0, "helper", NodeKind::Function);
+    store
+        .write_batch(|w| w.insert_unresolved_ref(&path_ref(None, "local src", "crate::b::helper")))
+        .unwrap();
+    assert!(
+        !store.has_broker_footprint().unwrap(),
+        "no promoted broker node and no broker ref ⇒ no footprint (the sync-skip case)"
+    );
+}
+
+/// Each of the three promoted kinds is a footprint on its own — its presence forces the
+/// reconcile even with an empty ledger, because a **demotion** may be due (the last
+/// publish may have just been deleted).
+#[test]
+fn broker_footprint_is_true_for_each_promoted_kind() {
+    for (n, kind) in [
+        (1, NodeKind::Topic),
+        (2, NodeKind::Producer),
+        (3, NodeKind::Consumer),
+    ] {
+        let store = mem();
+        seed(&store, n, "orders", kind);
+        assert!(
+            store.has_broker_footprint().unwrap(),
+            "a promoted {kind:?} node is a footprint"
+        );
+    }
+}
+
+/// A bare broker ledger row — with **no** promoted node yet — is a footprint. This is
+/// the branch that makes a topic appear on an incremental `sync` after it is first
+/// added to a previously topic-free repo; without it, topics would only ever surface
+/// after a full re-index.
+#[test]
+fn broker_footprint_is_true_for_a_bare_broker_ledger_row() {
+    for payload in ["broker-publish", "broker-subscribe"] {
+        let mut store = mem();
+        store
+            .write_batch(|w| w.insert_unresolved_ref(&broker_ref("local emit", "orders", payload)))
+            .unwrap();
+        assert!(
+            store.has_broker_footprint().unwrap(),
+            "an unresolved `{payload}` ledger row is a footprint even with nothing promoted"
+        );
+    }
+}
+
+/// A non-broker arm relation is not this pass's business: an HTTP client call, a
+/// contract `route` binding, and a plain code ref (no payload) are all NOT footprints,
+/// so an HTTP-only workspace still takes the no-broker fast path.
+#[test]
+fn broker_footprint_ignores_a_non_broker_payload() {
+    for payload in ["http-client-call", "grpc-call", "route", "proto-import"] {
+        let mut store = mem();
+        store
+            .write_batch(|w| w.insert_unresolved_ref(&broker_ref("local call", "GET /x", payload)))
+            .unwrap();
+        assert!(
+            !store.has_broker_footprint().unwrap(),
+            "`{payload}` is not a broker arm — it must not force the broker reconcile"
+        );
+    }
+}
+
+/// The probe deliberately does **not** filter on `resolved`, unlike its framework
+/// sibling. A broker ref binds to no local artifact kind today, so it is unresolved by
+/// construction — but the promotion pass owns every broker row regardless of how the
+/// resolution pass later classifies it, and a `resolved = 0` filter here would silently
+/// stop promoting the day that changed.
+#[test]
+fn broker_footprint_survives_a_resolved_broker_row() {
+    let mut store = mem();
+    store
+        .write_batch(|w| {
+            w.insert_unresolved_ref(&broker_ref("local emit", "orders", "broker-publish"))?;
+            w.mark_ref_resolved(1, true)
+        })
+        .unwrap();
+    assert!(
+        store.has_broker_footprint().unwrap(),
+        "a resolved broker row is still a footprint — the pass owns it either way"
+    );
+}
+
+/// `broker_subgraph` returns the promoted broker nodes and the two broker edge kinds —
+/// and **nothing else**. The whole point is that the workspace topic inventory, served
+/// per member on every `workspace status`, costs O(topics) rather than a whole-graph
+/// materialisation ([NFR-PE-10]); a projection that leaked ordinary code nodes would
+/// silently reintroduce that cost and mis-count the inventory.
+///
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+#[test]
+fn broker_subgraph_returns_only_the_promoted_broker_nodes_and_edges() {
+    let mut store = mem();
+    // The broker subgraph: a topic, its producer, its consumer.
+    let topic = seed(&store, 1, "orders", NodeKind::Topic);
+    let producer = seed(&store, 2, "orders", NodeKind::Producer);
+    let consumer = seed(&store, 3, "orders", NodeKind::Consumer);
+    // …surrounded by ordinary code that must NOT come back.
+    let publisher_fn = seed(&store, 4, "publish", NodeKind::Method);
+    let other_fn = seed(&store, 5, "helper", NodeKind::Function);
+
+    store
+        .write_batch(|w| {
+            w.insert_edge(producer, topic, EdgeKind::Publishes)?;
+            w.insert_edge(consumer, topic, EdgeKind::Subscribes)?;
+            // Edges of other kinds incident to the broker nodes, and a plain call —
+            // none of them belong to this projection.
+            w.insert_edge(publisher_fn, producer, EdgeKind::Contains)?;
+            w.insert_edge(publisher_fn, other_fn, EdgeKind::Calls)
+        })
+        .unwrap();
+
+    let (nodes, edges) = store.broker_subgraph().expect("broker_subgraph succeeds");
+
+    let mut kinds: Vec<NodeKind> = nodes.iter().map(|n| n.kind).collect();
+    kinds.sort_by_key(|k| k.as_i32());
+    assert_eq!(
+        kinds,
+        [NodeKind::Topic, NodeKind::Producer, NodeKind::Consumer],
+        "exactly the three promoted kinds — no ordinary code node leaks in"
+    );
+
+    let edge_kinds: Vec<EdgeKind> = edges.iter().map(|e| e.kind).collect();
+    assert_eq!(
+        edge_kinds,
+        [EdgeKind::Publishes, EdgeKind::Subscribes],
+        "exactly the two broker edge kinds — the Contains anchor and the Calls edge \
+         belong to other passes"
+    );
+    assert!(edges.iter().all(|e| e.target == topic));
+
+    // A repo with no broker coupling answers with two empty vectors — the common case.
+    let plain = mem();
+    seed(&plain, 9, "main", NodeKind::Function);
+    let (nodes, edges) = plain.broker_subgraph().unwrap();
+    assert!(nodes.is_empty() && edges.is_empty());
+}
