@@ -73,7 +73,15 @@ pub struct Manifest {
     /// [FR-GV-01]: ../../../docs/specs/requirements/FR-GV-01.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     /// [ADR-56]: ../../../docs/specs/architecture/decisions/ADR-56.md
-    #[serde(default, skip_serializing_if = "Governance::is_empty")]
+    /// Skipped on write only when the table is **entirely unset** — NOT when
+    /// [`Governance::is_empty`] holds. The two predicates differ deliberately and
+    /// must not be conflated: `is_empty` is the *policy* predicate (layers alone
+    /// are vocabulary, so they declare no contract to check), while a layers-only
+    /// table is still **user-authored content** that [`upsert`] must round-trip.
+    /// Wiring `is_empty` here would make `logos init --workspace` silently delete
+    /// a manifest that declares layers but no rule yet — a natural intermediate
+    /// authoring state.
+    #[serde(default, skip_serializing_if = "Governance::is_unset")]
     pub governance: Governance,
 }
 
@@ -109,16 +117,31 @@ pub struct Governance {
 }
 
 impl Governance {
-    /// Whether the workspace declares **no** governance rules at all — the
-    /// honest-empty predicate ([NFR-CC-04]).
+    /// Whether the workspace declares **no governance rules** — the honest-empty
+    /// *policy* predicate ([NFR-CC-04]).
     ///
     /// `service_layers` alone does not count as a rule: layers are *vocabulary*,
     /// not policy. A manifest that names layers but forbids nothing has declared
     /// no contract to check, so it still produces no report.
     ///
+    /// **Not** the serialization predicate — see [`is_unset`](Self::is_unset).
+    ///
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub fn is_empty(&self) -> bool {
         self.boundaries.is_empty() && self.no_cross_service_callers.is_empty()
+    }
+
+    /// Whether the `[governance]` table holds **nothing at all** — the
+    /// serialization predicate.
+    ///
+    /// Distinct from [`is_empty`](Self::is_empty) by design: a layers-only table
+    /// declares no *policy* (so it produces no report) but is still user-authored
+    /// *content*, and [`upsert`] rebuilds the whole manifest from this struct. If
+    /// the serializer skipped on `is_empty`, re-running `logos init --workspace`
+    /// over a manifest that declared layers but no rule yet would silently erase
+    /// those layers from disk.
+    pub fn is_unset(&self) -> bool {
+        self.service_layers.is_empty() && self.is_empty()
     }
 }
 
@@ -659,6 +682,43 @@ mod tests {
             m.governance.boundaries.len(),
             1,
             "the user's workspace rules survived the re-run",
+        );
+        assert_eq!(m.governance.service_layers[0].name, "core");
+    }
+
+    /// A **layers-only** `[governance]` table survives `upsert` too.
+    ///
+    /// Regression test: the serialization predicate must be [`Governance::is_unset`],
+    /// not [`Governance::is_empty`]. `is_empty` is the *policy* predicate and
+    /// deliberately ignores `service_layers`, so wiring it to
+    /// `skip_serializing_if` made `upsert` silently erase a manifest that declared
+    /// layers but no rule yet — a natural intermediate authoring state. The
+    /// sibling test above missed this because its fixture declares a boundary too.
+    #[test]
+    fn upsert_preserves_a_layers_only_governance_table() {
+        let tmp = TempDir::new().unwrap();
+        upsert(tmp.path(), "shop", &["api".into()]).unwrap();
+
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        let existing = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            format!("{existing}\n[[governance.service_layers]]\nname = \"core\"\nmembers = [\"api\"]\n"),
+        )
+        .unwrap();
+
+        // The layers declare no policy...
+        let m = parse(&path).unwrap();
+        assert!(m.governance.is_empty(), "layers alone are not a contract");
+        assert!(!m.governance.is_unset(), "...but they ARE authored content");
+
+        upsert(tmp.path(), "shop", &["api".into(), "web".into()]).unwrap();
+
+        let m = parse(&path).unwrap();
+        assert_eq!(
+            m.governance.service_layers.len(),
+            1,
+            "a layers-only table must survive the re-run, not be silently erased",
         );
         assert_eq!(m.governance.service_layers[0].name, "core");
     }
