@@ -632,85 +632,124 @@ fn extract_one(
         dedup_sort_refs(&mut facts.refs);
     }
 
-    // 8) HTTP client-call arm (S-252, CR-061, FR-WS-08): capture outbound calls
-    // via the optional `invocations` capability and funnel them through the
-    // shared S-251 interpreter with the `route_key`-based normalizer. A grammar
-    // without the capability produces none; the interpreter's `push_artifact_ref`
-    // choke-point applies the external gate and `HttpClientCall.edge_kind()`.
-    //
-    // Ledger-gated candidacy (the consumer-side mirror of the framework pass's
-    // FR-FW-04): the `.scm` anchor is a broad `<receiver>.<method>(<arg>)` shape,
-    // so it is captured ONLY in a file that references a known HTTP-client crate.
-    // Without this gate an incidental collection/registry call whose key looks
-    // like a route (`perms.get("/admin/users")`, a route-table `.get("/health")`)
-    // would be captured, normalize, and fabricate a cross-service edge — exactly
-    // what never-fabricate forbids ([NFR-RA-05]).
-    if let Some(inv_query) = plugin.query("invocations") {
-        let detectors = crate::resolve::http_client_call::http_client_crates(plugin.name());
-        let is_http_client_file = !detectors.is_empty()
-            && facts.refs.iter().any(|r| {
-                let head = r.target.split("::").next().unwrap_or_default();
-                detectors.contains(&head)
-            });
-        if is_http_client_file {
-            let sites = collect_invocation_sites(
-                inv_query,
-                tree.root_node(),
-                source,
-                &decls,
-                &symbols,
-                file_module.as_ref(),
-            );
-            if !sites.is_empty() {
-                crate::extract::config::capture_invocation_refs(
-                    &mut facts,
-                    ArtifactRelation::HttpClientCall,
-                    RefForm::Path,
-                    sites,
-                    crate::resolve::http_client_call::render_client_call_target,
-                );
-                // Re-canonicalize: the interpreter appended to `facts.refs`.
-                dedup_sort_refs(&mut facts.refs);
-            }
-        }
-    }
+    // 8) HTTP client-call arm (S-252, CR-061, FR-WS-08).
+    capture_http_client_call_arm(
+        plugin,
+        tree.root_node(),
+        source,
+        &decls,
+        &symbols,
+        file_module.as_ref(),
+        &mut facts,
+    );
 
-    // 7b) Cross-service invocation arms (S-254, [FR-WS-10]): a code arm captures
-    // its publish/subscribe sites through its own optional `brokers` query and
-    // funnels them through the generic invocation interpreter. A grammar without
-    // the capability contributes nothing. The site's source symbol is its
-    // innermost enclosing declaration — the same attribution `collect_refs` uses.
-    if let Some(broker_query) = plugin.query("brokers") {
-        let id_to_idx: HashMap<usize, usize> =
-            decls.iter().enumerate().map(|(i, d)| (d.node.id(), i)).collect();
-        let enclosing = |node: Node<'_>| -> Option<LogosSymbol> {
-            let mut ancestor = node.parent();
-            while let Some(n) = ancestor {
-                if let Some(&idx) = id_to_idx.get(&n.id()) {
-                    if let Some(sym) = &symbols[idx] {
-                        return Some(sym.clone());
-                    }
-                }
-                ancestor = n.parent();
-            }
-            file_module.clone()
-        };
-        if broker::capture_broker_invocations(
-            broker_query,
-            tree.root_node(),
-            source,
-            enclosing,
-            &mut facts,
-        ) > 0
-        {
-            // Broker refs are appended after the code-reference sort; restore the
-            // canonical ledger order + dedup so the output stays byte-stable.
-            dedup_sort_refs(&mut facts.refs);
-        }
-    }
+    // 9) Message-broker publish/subscribe invocation arm (S-254, FR-WS-10).
+    capture_broker_invocation_arm(
+        plugin,
+        tree.root_node(),
+        source,
+        &decls,
+        &symbols,
+        file_module.as_ref(),
+        &mut facts,
+    );
 
     sort_facts(&mut facts);
     facts
+}
+
+/// HTTP client-call arm (S-252, CR-061, FR-WS-08): capture outbound calls via
+/// the optional `invocations` capability and funnel them through the shared
+/// S-251 interpreter with the `route_key`-based normalizer. A grammar without
+/// the capability produces none; the interpreter's `push_artifact_ref`
+/// choke-point applies the external gate and `HttpClientCall.edge_kind()`.
+///
+/// Ledger-gated candidacy (the consumer-side mirror of the framework pass's
+/// FR-FW-04): the `.scm` anchor is a broad `<receiver>.<method>(<arg>)` shape,
+/// so it is captured ONLY in a file that references a known HTTP-client crate.
+/// Without this gate an incidental collection/registry call whose key looks
+/// like a route (`perms.get("/admin/users")`, a route-table `.get("/health")`)
+/// would be captured, normalize, and fabricate a cross-service edge — exactly
+/// what never-fabricate forbids ([NFR-RA-05]).
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[allow(clippy::too_many_arguments)]
+fn capture_http_client_call_arm(
+    plugin: &dyn LanguagePlugin,
+    root: Node<'_>,
+    source: &[u8],
+    decls: &[Decl<'_>],
+    symbols: &[Option<LogosSymbol>],
+    file_module: Option<&LogosSymbol>,
+    facts: &mut Facts,
+) {
+    let Some(inv_query) = plugin.query("invocations") else {
+        return;
+    };
+    let detectors = crate::resolve::http_client_call::http_client_crates(plugin.name());
+    let is_http_client_file = !detectors.is_empty()
+        && facts.refs.iter().any(|r| {
+            let head = r.target.split("::").next().unwrap_or_default();
+            detectors.contains(&head)
+        });
+    if !is_http_client_file {
+        return;
+    }
+    let sites = collect_invocation_sites(inv_query, root, source, decls, symbols, file_module);
+    if sites.is_empty() {
+        return;
+    }
+    crate::extract::config::capture_invocation_refs(
+        facts,
+        ArtifactRelation::HttpClientCall,
+        RefForm::Path,
+        sites,
+        crate::resolve::http_client_call::render_client_call_target,
+    );
+    // Re-canonicalize: the interpreter appended to `facts.refs`.
+    dedup_sort_refs(&mut facts.refs);
+}
+
+/// Message-broker publish/subscribe invocation arm (S-254, [FR-WS-10]): a code
+/// arm captures its publish/subscribe sites through its own optional `brokers`
+/// query and funnels them through the generic invocation interpreter. A
+/// grammar without the capability contributes nothing. The site's source
+/// symbol is its innermost enclosing declaration — the same attribution
+/// `collect_refs` uses.
+///
+/// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+#[allow(clippy::too_many_arguments)]
+fn capture_broker_invocation_arm(
+    plugin: &dyn LanguagePlugin,
+    root: Node<'_>,
+    source: &[u8],
+    decls: &[Decl<'_>],
+    symbols: &[Option<LogosSymbol>],
+    file_module: Option<&LogosSymbol>,
+    facts: &mut Facts,
+) {
+    let Some(broker_query) = plugin.query("brokers") else {
+        return;
+    };
+    let id_to_idx: HashMap<usize, usize> =
+        decls.iter().enumerate().map(|(i, d)| (d.node.id(), i)).collect();
+    let enclosing = |node: Node<'_>| -> Option<LogosSymbol> {
+        let mut ancestor = node.parent();
+        while let Some(n) = ancestor {
+            if let Some(&idx) = id_to_idx.get(&n.id()) {
+                if let Some(sym) = &symbols[idx] {
+                    return Some(sym.clone());
+                }
+            }
+            ancestor = n.parent();
+        }
+        file_module.cloned()
+    };
+    if broker::capture_broker_invocations(broker_query, root, source, enclosing, facts) > 0 {
+        // Broker refs are appended after the code-reference sort; restore the
+        // canonical ledger order + dedup so the output stays byte-stable.
+        dedup_sort_refs(&mut facts.refs);
+    }
 }
 
 /// Sort a [`Facts`]'s nodes and edges into canonical order ([NFR-RA-06]): node
