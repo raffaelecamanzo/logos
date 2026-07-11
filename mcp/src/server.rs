@@ -13,7 +13,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context as _;
-use logos_core::federation::{query, Backing, BridgeEdge, ContractBridge, EngineRegistry};
+use logos_core::federation::{
+    self, query, Backing, BridgeEdge, ContractBridge, EngineRegistry,
+};
 use logos_core::{governance::DsmGranularity, model::NodeKind, Engine};
 use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
@@ -796,6 +798,14 @@ impl LogosMcp {
             query::workspace_status(reg)
         })
         .await
+    }
+
+    #[tool(
+        description = "App-wide cross-service dead code (FR-WS-12): reachability over the union of every member's call graph plus the bridge's cross-service edges as extra live roots. Reports callables their own repo calls dead that a cross-service call keeps alive, and the ones still dead app-wide. Additive and monotone toward live — a missing invocation edge never marks anything dead. ADVISORY ONLY: never a gate input, and it never alters a repo's own dead-code verdict. Every claim carries a coverage rider stating how much of the invocation graph bound."
+    )]
+    async fn workspace_reachability(&self) -> Result<CallToolResult, ErrorData> {
+        self.run_xservice("workspace_reachability", federation::app_wide_reachability)
+            .await
     }
 }
 

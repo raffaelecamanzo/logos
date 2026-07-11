@@ -27,9 +27,16 @@
 //!   coverage read-model with a per-reference reason, a non-gated advisory
 //!   tier over the same contract surfaces the bridge reads ([FR-WS-05],
 //!   [ADR-53]).
+//! - the [`reach`] — the app-wide cross-service reachability **union view**: a
+//!   separate, explicitly-labeled union of every member's `Calls`/`RoutesTo`
+//!   adjacency plus the bridge's edges as extra live roots, additive and
+//!   monotone toward live, advisory, with a coverage rider on every claim
+//!   ([FR-WS-12], [ADR-56]).
 //!
 //! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
+//! [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
 //! [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+//! [ADR-56]: ../../../docs/specs/architecture/decisions/ADR-56.md
 //!
 //! # Single-root invariant
 //! When **no** manifest is found anywhere up-tree, [`discover`] returns
@@ -55,6 +62,7 @@ pub mod coverage;
 pub mod enable;
 pub mod manifest;
 pub mod query;
+pub mod reach;
 pub mod registry;
 
 use std::path::{Path, PathBuf};
@@ -71,6 +79,10 @@ pub use coverage::{
     cross_service_coverage, CoverageState, CrossServiceCoverage, ReferenceCoverage, UnboundReason,
 };
 pub use manifest::{Link, MANIFEST_FILENAME};
+pub use reach::{
+    app_wide_reachability, AppWideReachability, AppWideVerdict, CoverageRider, MemberReachability,
+    ReachNode, ReachabilityClaim, ReachabilitySurface, UNION_VIEW,
+};
 pub use query::{
     workspace_status, xservice_callers, xservice_impact, xservice_route_providers, xservice_search,
     CrossServiceImpact, MemberResult, WorkspaceStatus, XserviceCallers, XserviceImpact,

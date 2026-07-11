@@ -202,6 +202,28 @@ pub trait MemberContracts {
     fn invocation_consumers(&self) -> Result<Vec<InvocationConsumer>> {
         Ok(Vec::new())
     }
+
+    /// Read this member's **reachability surface** — every node with the per-repo
+    /// tri-state dead-code verdict its own graph last computed, plus the
+    /// `Calls`/`RoutesTo` adjacency the app-wide union view walks ([FR-WS-12],
+    /// [ADR-56]).
+    ///
+    /// Read-only: the `is_dead` column is *read*, never set. The union view is a
+    /// separate advisory overlay and cannot move a member's gated signal.
+    ///
+    /// The default is **empty** — a member/engine that cannot serve a surface
+    /// contributes no nodes and no roots, so it can only ever fail to *promote*,
+    /// never demote ([ADR-56]); lightweight test doubles need not implement it.
+    ///
+    /// # Errors
+    /// Propagates a read failure so the union view can skip the member as degraded
+    /// rather than aborting the whole workspace ([ADR-53]).
+    ///
+    /// [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
+    /// [ADR-56]: ../../../docs/specs/architecture/decisions/ADR-56.md
+    fn reachability_surface(&self) -> Result<super::reach::ReachabilitySurface> {
+        Ok(super::reach::ReachabilitySurface::default())
+    }
 }
 
 impl MemberContracts for crate::Engine {
@@ -238,6 +260,25 @@ impl MemberContracts for crate::Engine {
         )?;
         let rows = runtime.submit_read(|store| store.unresolved_refs())?;
         Ok(invocation_consumers_from(rows))
+    }
+
+    fn reachability_surface(&self) -> Result<super::reach::ReachabilitySurface> {
+        let runtime = self.runtime().context(
+            "reading a member's reachability surface requires a long-lived engine \
+             (Engine::start) with a read-only pool",
+        )?;
+        // Three reads in one snapshot: `all_nodes` carries the portable symbol a
+        // bridge endpoint roots on, `annotation_nodes` the per-repo `is_dead`
+        // verdict, and `all_edges` the adjacency — joined by node id in
+        // `reach::surface_from`, which then discards the ids ([ADR-52]).
+        let (nodes, annotations, edges) = runtime.submit_read(|store| {
+            Ok((
+                store.all_nodes()?,
+                store.annotation_nodes()?,
+                store.all_edges()?,
+            ))
+        })?;
+        Ok(super::reach::surface_from(&nodes, &annotations, &edges))
     }
 }
 

@@ -33,12 +33,18 @@ paths:
       summary: Delete a user
 ";
 
-/// An axum app registering exactly one route, `GET /users/{id}`.
+/// An axum app registering exactly one route, `GET /users/{id}`. `orphan` is
+/// called by nobody — the annotation pass verdicts it dead, giving `workspace
+/// reachability` (S-257, [FR-WS-12]) a real per-repo dead callable to claim over.
 const AXUM_MAIN: &str = r#"
 use axum::routing::get;
 use axum::Router;
 
 async fn get_user() {}
+
+fn orphan() -> i32 {
+    41 + 1
+}
 
 fn app() -> Router {
     Router::new().route("/users/{id}", get(get_user))
@@ -317,4 +323,61 @@ fn impact_stitches_across_bridge_edges() {
     );
     assert_eq!(cross[0]["via"]["to"]["member"], "web");
     assert_eq!(cross[0]["via"]["from"]["member"], "api");
+}
+
+/// S-257 acceptance through the real binary: `workspace reachability` emits the
+/// app-wide union view — explicitly labeled advisory, with a coverage rider on
+/// every claim, and a dead set that never exceeds what each repo already called
+/// dead ([FR-WS-12], [ADR-56]).
+#[test]
+fn workspace_reachability_is_labeled_advisory_and_riders_every_claim() {
+    let tmp = workspace();
+    let view = logos_json(tmp.path(), &["workspace", "reachability"]);
+
+    assert_eq!(view["view"], "cross-service-union", "the view is explicitly labeled");
+    assert_eq!(view["advisory"], true, "never a gate input (ADR-56)");
+
+    // The rider the whole view rests on — the same coverage `workspace status`
+    // reports, so a reachability claim can never be read without it.
+    // Pinned to exactly the numbers `workspace status` reports for the same
+    // fixture — so a field-swap in `CoverageRider::new` (e.g. `unbound:
+    // coverage.ambiguous`) cannot pass. Without non-trivial values here, four of
+    // the five copied fields would be asserted only as zero-vs-zero.
+    let rider = &view["coverage"];
+    assert_eq!(rider["bound"], 1, "the GET operation bound its cross-member route");
+    assert_eq!(
+        rider["no_provider_in_workspace"], 1,
+        "DELETE has no provider — the same bucket `workspace status` reports"
+    );
+    assert_eq!(rider["ambiguous"], 0);
+    assert_eq!(rider["unbound"], 0);
+    assert_eq!(rider["bound_ratio"], 1.0);
+    assert_eq!(rider["members_read"], 2);
+    assert_eq!(rider["members_total"], 2);
+    assert_eq!(view["skipped_members"].as_array().unwrap().len(), 0);
+
+    // `orphan` is dead in web's own graph and no cross-service edge reaches it,
+    // so it is dead app-wide too — and its claim carries the rider verbatim.
+    let dead = view["dead"].as_array().expect("dead array");
+    let orphan = dead
+        .iter()
+        .find(|c| c["name"] == "orphan")
+        .unwrap_or_else(|| panic!("web's unreferenced `orphan` is claimed dead app-wide: {dead:?}"));
+    assert_eq!(orphan["member"], "web");
+    assert_eq!(orphan["verdict"], "dead");
+    assert_eq!(&orphan["coverage"], rider, "every claim carries the coverage rider");
+
+    // Monotone toward live: no claim invents deadness — the per-member tallies
+    // account for every per-repo dead callable exactly once.
+    for tally in view["members"].as_array().expect("members array") {
+        let per_repo = tally["dead_per_repo"].as_u64().unwrap();
+        let promoted = tally["live_via_cross_service"].as_u64().unwrap();
+        let still_dead = tally["dead_app_wide"].as_u64().unwrap();
+        assert_eq!(
+            per_repo,
+            promoted + still_dead,
+            "member {} loses or invents a dead callable: {tally}",
+            tally["member"]
+        );
+    }
 }
