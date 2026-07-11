@@ -22,10 +22,12 @@ import {
   IconHealth,
   IconStatistics,
   IconWiki,
+  IconWorkspace,
 } from "../components/icons.tsx";
-import { NAV_GROUPS, NAV_ITEMS, type NavItem } from "../nav.ts";
+import { NAV_GROUPS, navItemsFor, type NavItem } from "../nav.ts";
 import { navigate } from "../router.tsx";
 import { useStatisticsAwaiting } from "../views/statistics/useStatisticsAvailability.ts";
+import { useWorkspace } from "../workspace/WorkspaceContext.tsx";
 import styles from "./Sidebar.module.css";
 
 /** The idiomatic icon for each nav id (keyed to nav.ts ids). */
@@ -41,6 +43,8 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   coverage: IconCoverage,
   statistics: IconStatistics,
   config: IconConfig,
+  // Workspace mode only (S-250) — absent from a single-root sidebar.
+  workspace: IconWorkspace,
 };
 
 function NavLink({ item, active, muted }: { item: NavItem; active: boolean; muted?: boolean }) {
@@ -80,11 +84,15 @@ export function Sidebar({ pathname }: { pathname: string }) {
   // The Statistics item is muted when the telemetry store is empty (NFR-CC-04) —
   // an honest "awaiting data" signal that agrees with the tab's own empty state.
   const statisticsAwaiting = useStatisticsAwaiting();
+  // The Workspace tab exists only in workspace mode (S-250, FR-UI-29); a plain repo
+  // renders the unchanged item list.
+  const { mode } = useWorkspace();
+  const items = navItemsFor(mode === "workspace");
   return (
     <nav className={styles.sidebar} aria-label="Views">
       {NAV_GROUPS.map((group) => (
         <ul className={styles.group} key={group}>
-          {NAV_ITEMS.filter((v) => v.group === group).map((v) => (
+          {items.filter((v) => v.group === group).map((v) => (
             <NavLink
               key={v.id}
               item={v}

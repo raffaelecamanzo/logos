@@ -44,7 +44,10 @@ function dashFor(type: string): string {
   return "0";
 }
 
-function EdgeRow({ type }: { type: string }) {
+/** One legend row: the edge's hue + line style beside its name. Exported so the
+ *  app-level service map (S-250) documents its cross-service relation arms in the
+ *  SAME legend grammar, from the same palette, rather than inventing a second one. */
+export function EdgeRow({ type }: { type: string }) {
   return (
     <li className={styles.legendRow}>
       <svg width="22" height="8" aria-hidden="true" className={styles.legendLine}>

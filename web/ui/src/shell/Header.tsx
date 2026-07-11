@@ -13,6 +13,7 @@ import { useEffect, useState } from "react";
 import { Badge, ThemeToggle } from "../components/index.ts";
 import { apiGet } from "../intent.ts";
 import { navigate } from "../router.tsx";
+import { MemberSelector } from "./MemberSelector.tsx";
 import styles from "./Header.module.css";
 
 type ApiState = "loading" | "ok" | "error";
@@ -74,6 +75,9 @@ export function Header() {
         <span className={styles.brandSub}>code intelligence</span>
       </a>
       <div className={styles.spacer} />
+      {/* Workspace mode only — in a single-root serve this renders nothing and the
+          header is byte-for-byte unchanged (FR-UI-29). */}
+      <MemberSelector />
       <span className={styles.status} role="status">
         {state === "loading" && <Badge tone="muted">Connecting…</Badge>}
         {state === "ok" && <Badge tone="green">Read-model connected</Badge>}

@@ -95,6 +95,18 @@ export const IconCoverage = (p: IconProps) => (
   </Svg>
 );
 
+/* The workspace / service-map glyph (S-250, FR-UI-29): three services wired
+   across a boundary — the cross-service axis, distinct from the intra-repo
+   IconGraph's free-form node cloud. */
+export const IconWorkspace = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="3" width="7" height="6" rx="1.5" />
+    <rect x="14" y="15" width="7" height="6" rx="1.5" />
+    <rect x="3" y="15" width="7" height="6" rx="1.5" />
+    <path d="M6.5 9v6M10 6h4.5a3 3 0 0 1 3 3v6" />
+  </Svg>
+);
+
 export const IconConfig = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="12" cy="12" r="3" />

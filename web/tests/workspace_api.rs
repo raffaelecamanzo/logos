@@ -360,3 +360,77 @@ fn only_the_default_member_is_warmed_at_startup() {
     let backing = Backing::Federated(registry);
     assert!(backing.is_federated());
 }
+
+// ── S-250 / FR-UI-29: `?repo=` scopes every existing `/api/v1/*` view ─────────
+//
+// The workspace SPA's member selector rides one optional query param on the
+// ordinary read-model endpoints (the `member::MemberEngine` extractor). These
+// assert the three arms of that resolution: scoped → that member's engine,
+// unknown → an honest 404, single-root → inert (byte-for-byte the pre-workspace
+// response).
+
+/// The member an `/api/v1/*` view answered from, read off the one figure that
+/// needs no language grammar: the answering engine's own store path.
+async fn health_db_path(router: &axum::Router, path: &str) -> String {
+    let resp = router.clone().oneshot(get(path)).await.expect("route responds");
+    let (status, body, headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{path} answers 200: {body}");
+    assert_self_only_csp(&headers, path);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    v["status"]["db_path"].as_str().expect("health carries its store path").to_string()
+}
+
+/// `?repo=<member>` scopes an ordinary view to that member's engine, and an
+/// unscoped request still answers from the warmed default — the selector's server
+/// contract ([FR-UI-29] AC1). Asserted on `/api/v1/health`, whose `status.db_path`
+/// names the answering member's store without needing any language grammar.
+#[tokio::test]
+async fn repo_param_scopes_an_existing_view_to_the_selected_member() {
+    let tmp = workspace();
+    let router = ws_router(&tmp);
+
+    let default = health_db_path(&router, "/api/v1/health").await;
+    let api = health_db_path(&router, "/api/v1/health?repo=api").await;
+    let web = health_db_path(&router, "/api/v1/health?repo=web").await;
+
+    assert_eq!(default, api, "an unscoped view answers from the warmed default member (api)");
+    assert_ne!(api, web, "switching the member switches the answering engine");
+    assert!(api.contains("/api/"), "?repo=api reads the api member's store: {api}");
+    assert!(web.contains("/web/"), "?repo=web reads the web member's store: {web}");
+
+    // A blank `?repo=` is "unscoped", never a member named "" (the SPA omits the
+    // param in single-root mode, but a hand-built URL must not 404 on it).
+    assert_eq!(health_db_path(&router, "/api/v1/health?repo=").await, default);
+}
+
+/// A `?repo=` naming a member this workspace does not have is an honest `404` —
+/// a view is never quietly served a *different* member's figures ([NFR-RA-05]).
+#[tokio::test]
+async fn an_unknown_repo_is_an_honest_404_on_the_scoped_views() {
+    let tmp = workspace();
+    let router = ws_router(&tmp);
+    for path in ["/api/v1/health", "/api/v1/overview", "/api/v1/coverage", "/api/v1/graph"] {
+        let uri = format!("{path}?repo=nope");
+        let resp = router.clone().oneshot(get(&uri)).await.expect("route responds");
+        let (status, body, headers) = body_string(resp).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri} is 404 for an unknown member: {body}");
+        assert!(body.contains("no workspace member `nope`"), "{uri} names the member: {body}");
+        assert_self_only_csp(&headers, &uri);
+    }
+}
+
+/// In single-root mode `?repo=` is **inert**: the one engine IS the root, so the
+/// response is what the unscoped request answers — the param never 404s a plain
+/// repo ([FR-UI-29] AC4, [ADR-52]). The SPA renders no selector there and never
+/// sends it; this is the server-side half of that guarantee.
+#[tokio::test]
+async fn single_root_ignores_the_repo_param() {
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path(), "src/lib.rs", "pub fn f() {}\n");
+    let engine = Arc::new(Engine::start(tmp.path()).expect("engine starts"));
+    let router = web::router(engine);
+
+    let plain = health_db_path(&router, "/api/v1/health").await;
+    let scoped = health_db_path(&router, "/api/v1/health?repo=anything").await;
+    assert_eq!(plain, scoped, "a single-root serve answers the same engine, `?repo=` or not");
+}

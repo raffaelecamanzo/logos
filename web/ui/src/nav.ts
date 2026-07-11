@@ -43,5 +43,27 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "config", label: "Config", path: "/config", group: "C" },
 ];
 
+/**
+ * The workspace-only tabs (S-250, CR-061, FR-UI-29). Appended to the sidebar **only
+ * in workspace mode** — a single-root serve has no cross-service axis, so offering
+ * a service map there would be a fabricated surface, and the sidebar must stay
+ * byte-for-byte what it has always been.
+ *
+ * One tab, three panels (service map / cross-service coverage / cross-service
+ * impact): they share one member roster and one binding set, so splitting them
+ * across three sidebar items would mean three probes of the same read-models.
+ */
+export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
+  { id: "workspace", label: "Workspace", path: "/workspace", group: "A" },
+];
+
 /** The sidebar groups in render order. */
 export const NAV_GROUPS: readonly NavGroup[] = ["A", "B", "C"];
+
+/**
+ * The navigable views for the current serve: the unchanged {@link NAV_ITEMS} in
+ * single-root mode, plus {@link WORKSPACE_NAV_ITEMS} in workspace mode.
+ */
+export function navItemsFor(isWorkspace: boolean): readonly NavItem[] {
+  return isWorkspace ? [...NAV_ITEMS, ...WORKSPACE_NAV_ITEMS] : NAV_ITEMS;
+}

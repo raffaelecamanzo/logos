@@ -64,6 +64,8 @@ use logos_core::model::EdgeKind;
 use logos_core::models::navigation::{GraphGranularity, GraphLayer};
 use logos_core::Engine;
 
+use crate::member::MemberEngine;
+
 mod api_v1;
 // The chat and wiki-**generation** surfaces are the LLM egress carve-out
 // (CR-078, ADR-60): they hold the only edges to chat-agent / wiki-agent /
@@ -74,6 +76,11 @@ mod api_v1;
 pub mod chat;
 pub mod components;
 mod markdown;
+// The per-request member scope (S-250, FR-UI-29): the `?repo=` → `Engine`
+// extractor every `/api/v1/*` handler resolves its engine through, so the
+// workspace SPA's member selector scopes every existing view. Inert (and
+// byte-for-byte unchanged) on the single-root path.
+mod member;
 mod query;
 pub mod spa;
 mod wiki;
@@ -1229,7 +1236,7 @@ fn parse_policy_file(raw: Option<&String>) -> Option<PolicyFile> {
 /// leaves the file byte-identical — no partial write (S-096, NFR-RA-07). Save
 /// runs **no** pipeline; applying is the separate [`config_apply`] step.
 async fn config_save(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let Some(file) = parse_policy_file(form.get("file")) else {
@@ -1269,7 +1276,7 @@ fn config_write_status(e: &anyhow::Error) -> StatusCode {
 /// as honest `500` error text, never a blank or stale figure; the async progress
 /// panel is the S-100 consumer's concern.
 async fn config_apply(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let Some(file) = parse_policy_file(form.get("file")) else {
@@ -1292,7 +1299,7 @@ async fn config_apply(
 /// checked-in `config.toml` (it goes to `secrets.toml`). Error mapping mirrors
 /// [`config_save`]: an invalid existing store is a `422`, an I/O fault a `500`.
 async fn config_save_secret(
-    State(engine): State<Arc<Engine>>,
+    MemberEngine(engine): MemberEngine,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let api_key = form.get("api_key").cloned().unwrap_or_default();

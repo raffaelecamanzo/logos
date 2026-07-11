@@ -10,6 +10,11 @@
  * accepts urlencoded form bodies on these three routes ([ADR-31]); the migration
  * only re-homes the client, it does not touch the endpoints or their guard.
  *
+ * Member scope (S-250, FR-UI-29): in workspace mode every request here — reads AND
+ * writes — carries the selected member (`?repo=`). The write side is the load-bearing
+ * half: the editor reads the selected member's policy, so its Save/Apply must write
+ * back to THAT member, never over the workspace default's file.
+ *
  * Honesty-at-the-boundary: a non-2xx write throws a {@link ConfigMutateError}
  * carrying the server's status + verbatim detail text, so the view renders the
  * real validation fault (a `422` names the bad key/glob/range) rather than a
@@ -20,6 +25,7 @@
 
 import { apiFetch } from "./client.ts";
 import { apiMutate } from "../intent.ts";
+import { withMemberScope } from "../workspace/scope.ts";
 import type {
   ConfigApplyOutcome,
   ConfigReadModel,
@@ -75,7 +81,7 @@ export function fetchConfig(): Promise<ConfigReadModel> {
  * **no** pipeline; applying is the separate {@link applyConfig} step.
  */
 export async function saveConfig(file: PolicyFile, content: string): Promise<ConfigWriteOutcome> {
-  const res = await apiMutate("/config/save", {
+  const res = await apiMutate(withMemberScope("/config/save"), {
     headers: FORM_HEADERS,
     body: formBody({ file, content }),
     credentials: "same-origin",
@@ -91,7 +97,7 @@ export async function saveConfig(file: PolicyFile, content: string): Promise<Con
  * {@link ConfigApplyOutcome}; throws {@link ConfigMutateError} on failure.
  */
 export async function applyConfig(file: PolicyFile): Promise<ConfigApplyOutcome> {
-  const res = await apiMutate("/config/apply", {
+  const res = await apiMutate(withMemberScope("/config/apply"), {
     headers: FORM_HEADERS,
     body: formBody({ file }),
     credentials: "same-origin",
@@ -109,7 +115,7 @@ export async function applyConfig(file: PolicyFile): Promise<ConfigApplyOutcome>
  * in principle carry key material. Throws {@link ConfigMutateError} on a non-2xx.
  */
 export async function saveSecret(apiKey: string): Promise<SecretWriteOutcome | null> {
-  const res = await apiMutate("/config/secret", {
+  const res = await apiMutate(withMemberScope("/config/secret"), {
     headers: FORM_HEADERS,
     body: formBody({ api_key: apiKey }),
     credentials: "same-origin",
@@ -146,7 +152,7 @@ export async function saveSecret(apiKey: string): Promise<SecretWriteOutcome | n
  * fabricated `CONSISTENT` ([NFR-RA-05]).
  */
 export async function verifyGraph(): Promise<VerifyReport> {
-  const res = await apiMutate("/api/v1/verify", { credentials: "same-origin" });
+  const res = await apiMutate(withMemberScope("/api/v1/verify"), { credentials: "same-origin" });
   if (!res.ok) throw new ConfigMutateError(res.status, await detailOf(res));
   return (await res.json()) as VerifyReport;
 }

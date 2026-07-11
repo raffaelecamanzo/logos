@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { setScopedMember } from "../workspace/scope.ts";
 import { apiUrl, fetchGraph, runQuery } from "./client.ts";
 
 describe("apiUrl", () => {
@@ -46,5 +47,48 @@ describe("typed endpoint helpers (over a stubbed same-origin fetch)", () => {
     const calls = stubFetch();
     await runQuery({ verb: "impact-of", target: "Engine" });
     expect(calls()[0]).toBe("/api/v1/query?verb=impact-of&target=Engine");
+  });
+});
+
+// ── The workspace member scope (S-250, CR-061, FR-UI-29) ─────────────────────
+// The selector reaches every existing view through this one builder: the active
+// member rides as `?repo=`. Single-root leaves the scope null, so every URL in the
+// blocks above stays byte-for-byte what it was.
+
+describe("the member scope on /api/v1 reads", () => {
+  afterEach(() => setScopedMember(null));
+
+  it("appends the active member to every ordinary read", () => {
+    setScopedMember("api");
+    expect(apiUrl("health")).toBe("/api/v1/health?repo=api");
+    expect(apiUrl("graph", { cap: 250 })).toBe("/api/v1/graph?repo=api&cap=250");
+  });
+
+  it("appends NOTHING when unscoped — the single-root URL is byte-identical", () => {
+    setScopedMember(null);
+    expect(apiUrl("health")).toBe("/api/v1/health");
+    expect(apiUrl("graph", { cap: 250 })).toBe("/api/v1/graph?cap=250");
+  });
+
+  it("treats a blank member as unscoped rather than sending an empty ?repo=", () => {
+    setScopedMember("   ");
+    expect(apiUrl("health")).toBe("/api/v1/health");
+  });
+
+  it("never auto-scopes the workspace fan-out — the service map is app-level by design", () => {
+    setScopedMember("api");
+    // `?repo=` on a fan-out NARROWS it; auto-applying the shell scope there would
+    // silently reduce the app-level service map to one member's slice.
+    expect(apiUrl("workspace/status")).toBe("/api/v1/workspace/status");
+    expect(apiUrl("workspace/route-providers")).toBe("/api/v1/workspace/route-providers");
+    // …but an explicitly-passed member still wins (the impact view scopes its seed).
+    expect(apiUrl("workspace/impact", { symbol: "f", repo: "web" })).toBe(
+      "/api/v1/workspace/impact?symbol=f&repo=web",
+    );
+  });
+
+  it("an explicit repo param overrides the ambient scope", () => {
+    setScopedMember("api");
+    expect(apiUrl("node", { symbol: "f", repo: "web" })).toBe("/api/v1/node?repo=web&symbol=f");
   });
 });
