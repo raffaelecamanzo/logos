@@ -216,6 +216,27 @@ impl<E: MemberEngine> EngineRegistry<E> {
         Ok(engine)
     }
 
+    /// The **default member's** engine ([FR-WS-05]): `[workspace] default`,
+    /// falling back to the first member in discovery order. The shared
+    /// single-root tools run against this member under the federated backing, so
+    /// the default-member *policy* lives here in the core, not in the surfaces
+    /// (NFR-MA-02) — one definition every adapter (MCP, CLI, web) shares.
+    ///
+    /// # Errors
+    /// The workspace has no members, or the resolved member's engine fails to
+    /// start.
+    ///
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    pub fn default_engine(&self) -> Result<Arc<E>> {
+        let member = self
+            .federation
+            .default
+            .clone()
+            .or_else(|| self.federation.members.first().map(|m| m.name.clone()))
+            .context("the workspace has no members to answer a single-root query")?;
+        self.engine_for(&member)
+    }
+
     /// Run `f` over **every** member, tagging each result with its member — the
     /// repo-qualified cross-service fan-out ([FR-WS-03]).
     ///
@@ -686,6 +707,34 @@ mod tests {
         let registry = lazy(&["a"]);
         let err = registry.engine_for("nope").unwrap_err();
         assert!(err.to_string().contains("no such workspace member"));
+    }
+
+    /// `default_engine` prefers `[workspace] default`, else the first member —
+    /// the default-member policy the shared single-root tools run against
+    /// ([FR-WS-05]).
+    #[test]
+    fn default_engine_prefers_declared_default_then_first_member() {
+        // No declared default → the first member in discovery order.
+        let registry = lazy(&["a", "b", "c"]);
+        registry.default_engine().unwrap();
+        assert_eq!(registry.resident_members(), ["a"], "no default → first member");
+
+        // A declared default wins over discovery order.
+        let mut federation = fed(&["a", "b", "c"]);
+        federation.default = Some("b".to_string());
+        let registry = EngineRegistry::<SpyEngine>::new(federation, RegistryMode::Lazy);
+        registry.default_engine().unwrap();
+        assert_eq!(registry.resident_members(), ["b"], "declared default wins");
+    }
+
+    /// `default_engine` on a member-less workspace errors rather than panicking.
+    #[test]
+    fn default_engine_errors_on_an_empty_workspace() {
+        let registry = EngineRegistry::<SpyEngine>::new(fed(&[]), RegistryMode::Lazy);
+        assert!(
+            registry.default_engine().is_err(),
+            "a workspace with no members has no engine to answer"
+        );
     }
 
     // ── the single-root invariant via Backing (FR-WS-03 / ADR-52) ──────────

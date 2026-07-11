@@ -162,6 +162,10 @@ pub fn xservice_callers(
         query: symbol.to_string(),
         scope: repo.map(str::to_string),
         members: fan(registry, repo, |engine| engine.callers(symbol, limit)),
+        // The cross-service tier matches on the canonical symbol *string* alone
+        // (not member+symbol): a `LogosSymbol` is a database-portable identity
+        // and bridge edges are already exactly-one resolved cross-member, so a
+        // provider symbol identifies its consumers unambiguously.
         cross_service: edges
             .iter()
             .filter(|edge| edge.to.symbol.as_str() == symbol)

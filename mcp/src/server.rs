@@ -106,21 +106,13 @@ impl LogosMcp {
         self.run_result(tool, move |engine| Ok(call(engine))).await
     }
 
-    /// The single-root engine, or a federated workspace's **default member**
-    /// engine (the shared tools' target, FR-WS-05): `[workspace] default`,
-    /// falling back to the first member. Errors if the workspace has no member.
+    /// The engine the shared (single-root) tools run against: the one engine
+    /// under [`Backing::Single`], or the federated workspace's default member
+    /// (the default-member policy lives in the core, [`EngineRegistry::default_engine`]).
     fn default_engine(backing: &Backing<Engine>) -> anyhow::Result<Arc<Engine>> {
         match backing {
             Backing::Single(engine) => Ok(Arc::clone(engine)),
-            Backing::Federated(registry) => {
-                let member = registry
-                    .federation()
-                    .default
-                    .clone()
-                    .or_else(|| registry.members().first().map(|m| m.name.clone()))
-                    .context("the workspace has no members to answer a single-root tool")?;
-                registry.engine_for(&member)
-            }
+            Backing::Federated(registry) => registry.default_engine(),
         }
     }
 
