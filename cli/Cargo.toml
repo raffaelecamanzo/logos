@@ -4,7 +4,7 @@
 # <tap>/logos`, FR-IN-05), and the installer URL from it. The directory stays
 # `cli/` (the adapter role, ADR-01); only the package identity is `logos`.
 name    = "logos"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 description = "Logos — structural code intelligence for AI-assisted development"
 license.workspace = true
