@@ -650,6 +650,53 @@ mod tests {
         assert_eq!(cov.bound_ratio, 1.0 / 3.0, "1 bound of 3 counted (bound+ambiguous+unbound)");
     }
 
+    /// A `ProtoService`/`GqlType` surface node carries no portable HTTP key in
+    /// this story ([FR-WS-07]+ deferred) — mixed alongside genuine
+    /// `ApiOperation`/`Route` nodes, it must be silently excluded from both
+    /// `consumer_refs` and `providers`, not misclassified or double-counted.
+    #[test]
+    fn proto_and_graphql_nodes_are_silently_excluded_not_misclassified() {
+        reset();
+        set_member(
+            "api",
+            vec![
+                op("GET /users/{id}", "local op_get"),
+                ContractNode {
+                    kind: NodeKind::ProtoService,
+                    name: "user.UserService".to_string(),
+                    symbol: LogosSymbol::parse("local svc").unwrap(),
+                },
+            ],
+        );
+        set_member(
+            "web",
+            vec![
+                route("GET /users/{id}", "local route_get"),
+                ContractNode {
+                    kind: NodeKind::GqlType,
+                    name: "User".to_string(),
+                    symbol: LogosSymbol::parse("local gqltype").unwrap(),
+                },
+            ],
+        );
+
+        let with_proto_graphql = cross_service_coverage(&registry(&["api", "web"]));
+
+        reset();
+        set_member("api", vec![op("GET /users/{id}", "local op_get")]);
+        set_member("web", vec![route("GET /users/{id}", "local route_get")]);
+        let without = cross_service_coverage(&registry(&["api", "web"]));
+
+        assert_eq!(
+            with_proto_graphql.references, without.references,
+            "a ProtoService/GqlType node must not add, remove, or alter any classified reference"
+        );
+        assert_eq!(with_proto_graphql.bound, 1);
+        assert_eq!(with_proto_graphql.ambiguous, 0);
+        assert_eq!(with_proto_graphql.unbound, 0);
+        assert_eq!(with_proto_graphql.no_provider_in_workspace, 0);
+    }
+
     /// The emitted reference set is deterministic (sorted by endpoint)
     /// regardless of member fan-out order ([NFR-RA-06]).
     #[test]
