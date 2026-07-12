@@ -28,6 +28,8 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`serve`](#serve) | ✅ | MCP server over stdio and/or the localhost web UI (`--ui`, requires a `--features ui` build) |
 | [`xservice`](#xservice-workspace-federation-queries) | ✅ | Cross-service queries over a workspace: `route-providers` / `callers` / `impact` / `search` (`--repo` to scope) |
 | [`workspace status`](#workspace-status) | ✅ | Per-member freshness + the 3-state cross-service coverage summary |
+| [`workspace reachability`](#workspace-reachability) | ✅ | App-wide cross-service dead-code union view — advisory, never a gate input |
+| [`workspace check`](#workspace-check) | ✅ | Evaluate workspace governance rules over cross-service bindings — advisory, always exits 0 |
 | [`scan`](#scan) | ✅ | Full architecture-quality scan |
 | [`check`](#check) | ✅ | Architecture-rules compliance check |
 | [`gate`](#gate) | ✅ | CI quality gate on the signal |
@@ -479,11 +481,17 @@ output is a single machine-clean line.
 just declared contracts, through a pluggable arm contract (each arm normalizes a
 call to a portable key and refuses anything non-static — zero approximate binds).
 The HTTP client-call arm is live in `route-providers` (above). The gRPC
-stub-call arm (binding `package.Service/Method` FQNs) and the message-broker
-publish/subscribe arm (fan-out on a shared topic) are captured and covered at the
-ledger tier but their live cross-service edges are not yet surfaced through
-`route-providers` — that wiring is a scheduled follow-up. No schema migration is
-involved in any arm.
+stub-call arm binds `package.Service/Method` FQNs at the ledger tier. The
+message-broker publish/subscribe arm is now **first-class**: a forward-only
+migration (schema version 17) admits `Topic` / `Producer` / `Consumer` nodes and
+`Publishes` / `Subscribes` edges, so a publish in one member binds every
+subscribe on the same topic across members, and the coupling renders as an
+explicit topic hop (`A → topic → B`) in the workspace service map rather than an
+opaque line. A per-repo topic is visible before any cross-repo match; a graph
+with no broker topics is byte-for-byte unaffected by the migration. **Migration
+17 is forward-only and irreversible** — a store opened by a Sprint-57-or-later
+binary advances `PRAGMA user_version` 16 → 17 and cannot be reopened by an older
+binary.
 
 ### `workspace status`
 
@@ -498,6 +506,48 @@ cross-service coverage summary** — every cross-boundary reference classified
 `ambiguous`, `schema-mismatch`). The coverage tier is **advisory only** — it is
 bucketed separately (`no-provider-in-workspace` never depresses the bound-ratio)
 and never feeds any member's quality gate ([ADR-53](../specs/architecture/decisions/ADR-53.md)).
+
+### `workspace reachability`
+
+```bash
+logos workspace reachability [--json]
+```
+
+The **app-wide cross-service reachability union view** — a separate, explicitly
+labeled union of every member's `Calls` / `RoutesTo` adjacency plus the bridge's
+cross-service invocation edges folded in as extra live roots. It answers the one
+question a per-repo dead-code verdict structurally cannot: *is this callable dead
+only because the thing that calls it lives in another repo?* A handler reachable
+only via a matched cross-service call is reported live in this view.
+
+The composition is **additive and monotone toward live** — a missing invocation
+edge never marks anything dead, and a node whose per-repo verdict is `NULL`
+(not-computed) stays `NULL`. The view is **advisory**: it is never a gate input
+and never alters a member's own dead-code verdict, and every claim carries a
+**coverage rider** stating how much of the invocation graph bound. On a real
+workspace the promotion set may be legitimately empty (a language that captures a
+broker subscribe and one that computes dead-code reachability are, today, disjoint
+sets) — an honest empty is reported with its rider, never a fabricated claim.
+
+### `workspace check`
+
+```bash
+logos workspace check [--json]
+```
+
+Evaluate the **workspace governance rule family** declared under `[governance]`
+in `logos.workspace.toml` over the cross-service bridge bindings — for example
+"no `edge`-layer service may call a `core`-layer service", or "this deprecated
+endpoint has no cross-service callers". Rules quantify over real bridge matches,
+never a fabricated edge set.
+
+Governance is reported at the **workspace level** and is **advisory by design**:
+it is a separate family from the per-repo rules ([`check`](#check)), it never
+alters any member's per-repo quality gate, and `workspace check` **always exits
+0** — a violation is *reported*, not *gated*. With no `[governance]` rules
+declared, there is no output at all (`null` under `--json`) — an honest empty,
+never a fabricated passing report. Rule targets match by glob on symbol, with an
+optional member scope.
 
 ---
 

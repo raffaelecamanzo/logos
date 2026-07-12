@@ -470,6 +470,20 @@ honest empty state naming the producing command:
 - **Group B — analyse:** Files & Risk `/files`, Rule findings `/gaps`, Coverage `/coverage`.
 - **Group C — configure:** Statistics `/statistics`, Config `/config`.
 
+**Workspace mode.** When `logos serve --ui` starts at a workspace parent (a
+`logos.workspace.toml` is discovered up-tree), the app shell renders a **member
+selector** that scopes every view to one member (the member is part of each
+view's cache key, so switching re-fetches). Alongside the per-member views it
+exposes the cross-service surfaces: an **app-level service map** — the ECharts
+graph canvas drawing services as nodes and cross-service bindings as edges,
+including first-class **topic hops** (`A → topic → B`) once broker coupling is
+promoted — a **cross-service coverage dashboard** (bound / ambiguous /
+unbound-with-reasons), and a cross-service impact view. In a plain single repo
+(no manifest) **no selector is rendered and the UI is byte-for-byte unchanged**;
+`--standalone` forces single-repo focus even under a workspace parent. Workspace
+read-models are served under `/api/v1/workspace/*`; the single-root `/api/v1/*`
+surface and the self-only CSP are untouched.
+
 The **Files & Risk** view (`/files`) is the merge of the former Hotspots and
 Commits views into one risk-ranked per-file table — commits, churn (`+/−`), age,
 co-change, defect density, complexity, and a coverage cell — with `?untested`
