@@ -65,32 +65,44 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// Flagged for the Sprint 55 human review as a deliberate tool-family addition,
 /// per the S-284 precedent above.
 ///
-/// S-258/CR-061 raised 880→890 (+8 measured) for the FR-WS-13 workspace
-/// governance twin. Two additions, both delegation-only.
+/// Sprint 57/CR-061 raises 880→900 for the two workspace twins added by the
+/// sprint's parallel sessions. Measured against the Sprint 56 base of 857, the
+/// whole sprint costs +38, landing the adapter at 895.
 ///
-/// `workspace_check` (~10 lines) is an attribute, a signature, and ONE
-/// `logos_core::federation::workspace_governance` call. The whole rule family
-/// (manifest schema, glob compilation, boundary + no-cross-service-callers
-/// evaluation, the honest-empty `Option`) lives in `logos-core`; the surface
-/// decides nothing.
+/// The two sessions ran in parallel and each measured only its own branch, so
+/// neither saw the other's growth: S-257 added `workspace_reachability` (+9,
+/// which fit inside the then-880 budget and correctly did not raise it), and
+/// S-258 added `workspace_check` + `run_xservice_result` (+31) and raised the
+/// budget to 890 — enough for its own branch (888) but not for the merge of
+/// both (895). The sprint review re-derived the figure over merged HEAD; the
+/// 900 below is that measurement plus the usual small headroom, not a number
+/// bumped until the test went green.
 ///
-/// `run_xservice_result` (net ~+8 after `run_xservice` collapses onto it) is the
-/// fallible twin of the registry delegator, mirroring the `run`/`run_result` pair
-/// that already exists directly above it. It is the ADR-14 error-mapping seam,
-/// not policy: `workspace_check` compiles user-authored globs, and a malformed
-/// rule must surface as a structured MCP error rather than silently matching
-/// nothing (a rule that quietly never fires would report a false all-clear).
+/// All three additions are delegation-only, so there is no logic to trim:
 ///
-/// No logic to trim — the same "honest, delegation-only addition" the S-284
-/// precedent blesses. Flagged for the Sprint 57 human review.
+/// `workspace_reachability` and `workspace_check` are each an attribute, a
+/// signature, and ONE `logos_core::federation` call. The union-view walk and the
+/// whole workspace rule family (manifest schema, glob compilation, the boundary
+/// and no-cross-service-callers evaluation, the honest-empty `Option`) live in
+/// `logos-core`; the surface decides nothing.
+///
+/// `run_xservice_result` is the fallible twin of the registry delegator,
+/// mirroring the `run`/`run_result` pair that already exists directly above it.
+/// It is the ADR-14 error-mapping seam, not policy: `workspace_check` compiles
+/// user-authored globs, and a malformed rule must surface as a structured MCP
+/// error rather than silently matching nothing (a rule that quietly never fires
+/// would report a false all-clear).
+///
+/// The same "honest, delegation-only addition" the S-284 precedent blesses.
+/// Flagged for the Sprint 57 human review as a deliberate governance decision.
 #[test]
 fn mcp_surface_line_budget() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 890,
-        "mcp adapter exceeds the 890 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 900,
+        "mcp adapter exceeds the 900 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }
