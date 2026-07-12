@@ -34,11 +34,37 @@
 //! the invocation-arm ones ([FR-WS-08]–[FR-WS-10]). A superset of roots is a
 //! superset of *live*, so this is the monotone-toward-live choice; and it needs no
 //! per-arm knowledge, so a newly-registered arm reaches the union view with no
-//! edit here. Note that today's HTTP providers are framework `Route` nodes, which
-//! the per-repo walk **already** roots (the exported-is-live bias, [ADR-56] Notes)
-//! — so they promote nothing. The promotions arrive with the provider-side arms
-//! whose endpoint is an ordinary callable (a broker *subscribe* handler, S-256).
-//! That is the view being correct and inert, not the view being wrong.
+//! edit here.
+//!
+//! # Why the promotion set is empty on every real workspace today
+//!
+//! The composition is correct and its roots **do** resolve — since S-256 the broker
+//! arm emits bridge edges whose provider endpoint is the real subscribing method,
+//! an ordinary callable (not a promoted marker node). What still cannot happen is
+//! the *promotion itself*, and the reason is a *language-capability* gap, not a
+//! missing arm:
+//!
+//! - A node is a promotion candidate only if its per-repo verdict is
+//!   `is_dead = Some(true)` (see [`member_view`]). Everything else is skipped.
+//! - `is_dead` is only computed for a file whose language declares the
+//!   `reachability` capability ([CR-043], [`crate::annotate`]); otherwise it is
+//!   `NULL`. Today **`rust` is the only such language**.
+//! - Capturing a broker *subscribe* requires the language to ship a `brokers.scm`
+//!   query. Today **`java` is the only such language**.
+//!
+//! The two sets are **disjoint**, so no node can be both broker-rooted and
+//! dead-verdicted, and the promotion bucket is provably empty on a real index.
+//! (Behind that sits a second gate: the canonical Spring listener is `public`, and
+//! java's `public-modifier` export convention makes an exported node a per-repo
+//! live root — `is_dead = Some(false)` — so even a reachability-capable java would
+//! only promote a *package-private* listener.)
+//!
+//! This is the view being correct and inert, not the view being wrong — but the
+//! inertness is a property of the **plugin capability matrix**, so it is pinned
+//! there by `federation::reach::tests::the_broker_promotion_path_is_still_blocked_
+//! by_the_capability_matrix`, which fails the day a language becomes both
+//! broker-capable and reachability-capable. That is the moment to write the
+//! real-path promotion E2E [FR-WS-12] AC1 ultimately wants.
 //!
 //! # Advisory, never a gate input ([ADR-56])
 //!

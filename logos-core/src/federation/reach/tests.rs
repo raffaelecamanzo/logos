@@ -682,3 +682,49 @@ fn the_verdict_wire_spellings_are_stable() {
     );
     assert_eq!(serde_json::to_value(AppWideVerdict::Dead).unwrap(), "dead");
 }
+
+/// **The tripwire for [FR-WS-12] AC1's real-path proof.**
+///
+/// Every promotion test above drives a *fake* engine over a surface the test
+/// types by hand. That is deliberate — but it means nothing in the suite proves
+/// a promotion can happen on a real index, and the reason it cannot is not
+/// stated anywhere the compiler or CI can see it.
+///
+/// A node is promotable only when it is (a) rooted by a bridge edge and (b)
+/// verdicted `is_dead = Some(true)` per-repo. Since S-256 the broker arm roots
+/// real subscriber methods, so (a) is satisfied — but a broker subscribe is only
+/// *captured* by a language shipping a `brokers.scm` query, and `is_dead` is only
+/// *computed* for a language declaring the `reachability` capability ([CR-043]).
+/// Those two sets are disjoint today (`java` brokers, `rust` reachability), so
+/// the promotion set is empty on every real workspace — for a reason that has
+/// nothing to do with this module being wrong.
+///
+/// This test pins that disjointness against the **live plugin manifests**, not a
+/// prose claim. The day a language declares both, it fails — and that is exactly
+/// the day someone must write the real-path promotion E2E ([FR-WS-12] AC1) that
+/// the fakes above only simulate.
+#[test]
+fn the_broker_promotion_path_is_still_blocked_by_the_capability_matrix() {
+    let registry = crate::plugin::LanguageRegistry::load(std::env::temp_dir())
+        .expect("embedded grammars load");
+
+    let both: Vec<&str> = registry
+        .iter()
+        .filter(|p| {
+            p.capabilities().iter().any(|c| c == "brokers") && p.supports_reachability()
+        })
+        .map(|p| p.name())
+        .collect();
+
+    assert!(
+        both.is_empty(),
+        "{both:?} now declares BOTH the `brokers` capability and `reachability`, so a \
+         subscriber handler can finally be dead per-repo AND rooted by a cross-service \
+         publish — the union view's promotion path is reachable on a real index for the \
+         first time. Write the real-path promotion E2E that FR-WS-12 AC1 wants (index a \
+         2-repo workspace, publish in one member, an uncalled package-private subscriber \
+         in the other, assert it lands in `live_via_cross_service`), then delete this test. \
+         NB: an `exported` listener is already a per-repo live root, so the fixture's \
+         subscriber must not be exported under its language's export convention."
+    );
+}

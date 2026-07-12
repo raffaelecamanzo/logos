@@ -196,20 +196,25 @@ fn the_union_view_is_advisory_riderd_and_never_exceeds_the_per_repo_dead_set() {
     );
     assert!(view.skipped_members.is_empty(), "no member degraded");
 
-    // Today the resolved root promotes nothing, and that is the view being
-    // *correct*, not broken: every provider endpoint the bridge currently emits is
-    // either a framework `Route` — which the per-repo walk already roots (ADR-56's
-    // own Notes) — or a `ProtoService` schema node, which is not a callable. The
-    // root resolved (above); it simply had nothing dead to lift.
+    // The resolved root promotes nothing *in this fixture*, and that is the view
+    // being correct, not broken: both provider endpoints here are framework `Route`
+    // nodes, which the per-repo walk already roots (ADR-56's own Notes), so there was
+    // nothing dead to lift.
     //
-    // Pinned as a test rather than left as a claim in a notes file. When S-256
-    // lands the broker subscribe side (a provider endpoint that IS an ordinary
-    // callable), this assertion is what fails — telling that engineer, precisely
-    // then, to write the real-path promotion E2E that AC1 ultimately wants.
+    // This assertion is scoped to THIS fixture and nothing more. It was originally
+    // written as a tripwire meant to fail once S-256 landed a callable provider
+    // endpoint (the broker subscribe side) — but it cannot serve that purpose: the
+    // fixture is yaml + rust, and neither ships a `brokers.scm`, so no broker edge
+    // can ever reach it. S-256 has since landed, the roots DO now resolve to real
+    // subscriber methods, and this still passes.
+    //
+    // The real guard on the promotion path lives where the blocker actually is — the
+    // plugin capability matrix — in
+    // `federation::reach::tests::the_broker_promotion_path_is_still_blocked_by_the_capability_matrix`.
     assert!(
         view.live_via_cross_service.is_empty(),
-        "no promotion is possible until a provider endpoint is an ordinary callable \
-         (S-256); if this fires, write the real-path promotion test: {:?}",
+        "this fixture's providers are all framework routes (already per-repo live roots), \
+         so it can promote nothing: {:?}",
         view.live_via_cross_service
     );
 
