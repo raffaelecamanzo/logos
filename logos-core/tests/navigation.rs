@@ -396,6 +396,116 @@ fn status_reports_an_unindexed_graph_without_building_one() {
     assert_eq!(again.node_count, 0, "status never triggers the auto-index");
 }
 
+// ── CR-085 / FR-IX-12 / FR-NV-07: index-time source/test LOC roll-up ──────────
+
+#[test]
+fn status_reports_the_source_test_loc_rollup_after_a_full_index() {
+    // A full index buckets the physical-line sum into source/test (test via the
+    // FR-AN-05 path conventions) and status surfaces total/source/test with
+    // `total == source + test`, `total` equal to the existing `indexed_loc`
+    // physical-line total, and the `tests/` file's lines in the test bucket.
+    let tmp = TempDir::new().unwrap();
+    let src = "pub fn alpha() {}\npub fn beta() {}\npub fn gamma() {}\n";
+    let test = "#[test]\nfn it_works() {}\n#[test]\nfn it_also_works() {}\n";
+    write(tmp.path(), "src/lib.rs", src);
+    write(tmp.path(), "tests/integration.rs", test);
+    let engine = indexed_engine(&tmp);
+
+    let status = engine.status();
+    let total = status
+        .total_line_count
+        .expect("the roll-up is present after a full index");
+    let source = status.source_line_count.expect("source is present");
+    let test_loc = status.test_line_count.expect("test is present");
+
+    // Physical-line counts are whole-file `.lines()` sums (blank/comment lines
+    // included) — the same quantity `index` records as `indexed_loc`.
+    let expected_total = (src.lines().count() + test.lines().count()) as u64;
+    let expected_test = test.lines().count() as u64;
+    assert_eq!(
+        total, expected_total,
+        "total is the whole-file physical-line sum over the admitted set"
+    );
+    assert_eq!(
+        test_loc, expected_test,
+        "the tests/ file's lines attribute to the test bucket (FR-AN-05)"
+    );
+    assert_eq!(
+        source,
+        expected_total - expected_test,
+        "source is derived as total - test, never counted independently"
+    );
+    assert_eq!(
+        total,
+        source + test_loc,
+        "the FR-IX-12 invariant total == source + test holds"
+    );
+
+    // The total equals the persisted `indexed_loc` physical-line total.
+    let indexed_loc: u64 = engine
+        .runtime()
+        .expect("runtime present")
+        .submit_read(|s| s.project_metadata(logos_core::perf::INDEXED_LOC_KEY))
+        .expect("read commits")
+        .and_then(|raw| raw.parse().ok())
+        .expect("indexed_loc recorded by the full index");
+    assert_eq!(
+        total, indexed_loc,
+        "total == the existing indexed_loc physical-line total"
+    );
+}
+
+#[test]
+fn the_loc_rollup_is_absent_until_computed_and_only_index_writes_it() {
+    // NFR-CC-04 / FR-IX-12 / ADR-28: with no persisted roll-up the counts are
+    // absent (never a fabricated 0); the roll-up is written only by the index
+    // pipeline, so neither reading status nor a no-op sync computes or persists
+    // it (no write on read).
+    let tmp = fixture();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    // (a) A never-indexed graph has neither key → all three counts absent.
+    let unindexed = engine.status();
+    assert_eq!(unindexed.total_line_count, None, "never a fabricated 0");
+    assert_eq!(unindexed.source_line_count, None);
+    assert_eq!(unindexed.test_line_count, None);
+
+    // (b) Simulate a graph indexed before this feature: `indexed_loc` was
+    // recorded but the test bucket never was. The roll-up must still read as
+    // absent — the total is NOT fabricated from `indexed_loc` alone.
+    engine
+        .runtime()
+        .expect("runtime present")
+        .submit_write(|w| w.set_project_metadata(logos_core::perf::INDEXED_LOC_KEY, "4200"))
+        .expect("metadata write commits");
+    let legacy = engine.status();
+    assert_eq!(
+        legacy.total_line_count, None,
+        "an indexed_loc without the test bucket is an absent roll-up (NFR-CC-04)"
+    );
+    assert_eq!(legacy.source_line_count, None);
+    assert_eq!(legacy.test_line_count, None);
+
+    // (c) Neither reading status (twice) nor a no-op sync backfills the test
+    // bucket — the roll-up is index-write only (ADR-28, FR-IX-12).
+    let _ = engine.status();
+    let _ = engine.sync(&[]);
+    let test_loc = engine
+        .runtime()
+        .expect("runtime present")
+        .submit_read(|s| s.project_metadata(logos_core::perf::TEST_LOC_KEY))
+        .expect("read commits");
+    assert_eq!(
+        test_loc, None,
+        "no write on read: status and a no-op sync never persist the roll-up"
+    );
+    assert_eq!(
+        engine.status().total_line_count,
+        None,
+        "the roll-up stays absent after the read-only calls"
+    );
+}
+
 // ── FR-NV-09 / UAT-NV-08: graceful unknown-symbol handling ───────────────────
 
 #[test]

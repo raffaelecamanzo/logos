@@ -36,8 +36,30 @@ pub const ENVELOPE_LOC: u64 = 100_000;
 /// records the LOC it ingested, so [`status`](crate::Engine::status) can emit the
 /// same [NFR-PE-09] advisory without re-reading the tree.
 ///
+/// It doubles as the **total** of the source/test physical-LOC roll-up
+/// ([FR-IX-12]): the roll-up's total is that same ingested-LOC sum, never
+/// re-counted, so the invariant `total = source + test` holds by construction.
+///
 /// [NFR-PE-09]: ../../../docs/specs/requirements/NFR-PE-09.md
+/// [FR-IX-12]: ../../../docs/specs/requirements/FR-IX-12.md
 pub const INDEXED_LOC_KEY: &str = "indexed_loc";
+
+/// The `project_metadata` key under which a full [`index`](crate::pipeline::index)
+/// records the **test** portion of the physical-LOC roll-up ([FR-IX-12]) — the
+/// ingested-LOC sum restricted to files matched by the [FR-AN-05] test-path
+/// conventions ([`crate::navigate::is_test_path`]).
+///
+/// Only the test bucket is persisted: [`status`](crate::Engine::status) reads the
+/// total from [`INDEXED_LOC_KEY`] and derives `source = total − test`, so the
+/// source figure is never counted independently. This key's **presence** is the
+/// roll-up's presence marker — a graph indexed before this feature carries
+/// `indexed_loc` but no `test_loc`, so `status` reports the counts as absent
+/// rather than a fabricated `0` ([NFR-CC-04]).
+///
+/// [FR-IX-12]: ../../../docs/specs/requirements/FR-IX-12.md
+/// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+pub const TEST_LOC_KEY: &str = "test_loc";
 
 /// The one-line advisory emitted when an indexed repository *materially* exceeds
 /// the performance envelope ([NFR-PE-09]) — `None` inside it.
