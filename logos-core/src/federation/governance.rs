@@ -526,6 +526,7 @@ mod tests {
             relation: "route".to_string(),
             from: endpoint(from_member, from_sym),
             to: endpoint(to_member, to_sym),
+            intake: crate::federation::bridge::BridgeIntake::Invocation,
         }
     }
 
