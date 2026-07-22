@@ -1693,4 +1693,209 @@ mod tests {
             "no FK violations after the migration-17 rebuild"
         );
     }
+
+    /// A populated database created **before** migration 18 (at v17, carrying a
+    /// graph plus a ledger with a resolved code ref and two **non-colliding**
+    /// broker rows — a publish and a subscribe on *different* topics, i.e. no
+    /// relay) upgrades to v18 forward-only with no data loss (S-290, CR-080,
+    /// FR-DB-01, FR-WS-11, NFR-MA-06): `PRAGMA user_version` advances by exactly
+    /// one, and the graph is byte-for-byte unaffected — every node, edge, shingle,
+    /// and ledger row survives with its id and every column verbatim, and (since
+    /// only the ledger is rebuilt) the FTS index is never disturbed. Afterwards
+    /// the widened key admits a **relay** (a publish and a subscribe agreeing on
+    /// all four shipped key columns, differing only by relation) as two rows,
+    /// while still deduping a true duplicate and a duplicate NULL-payload code ref
+    /// — proving the `COALESCE(payload, '')` normalisation preserves the old
+    /// dedup for NULL payloads.
+    #[test]
+    fn migration_18_widens_ledger_unique_preserving_a_no_relay_graph_byte_for_byte() {
+        let mut conn = contract_conn();
+
+        // Stop at v17 and populate a small graph plus a ledger with a resolved
+        // code ref and two broker rows on DIFFERENT topics (a publisher and a
+        // listener — never a relay), the byte-for-byte-unaffected acceptance case.
+        apply_migrations_from(&mut conn, &MIGRATIONS[..17]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path) VALUES (1, 'a.rs'), (2, 'Svc.java');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local a'), (2, 'local b');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, exported,
+                                cyclomatic_complexity, is_test, body) VALUES
+                 (10, 1, 7,  'caller',   1, 1, 3,    0, NULL),
+                 (20, 2, 19, 'Overview', 2, 0, NULL, 0, 'the body prose');
+             INSERT INTO edges (source, target, kind, payload) VALUES (20, 10, 11, 'doc-ref');
+             INSERT INTO shingles (node_id, hash) VALUES (10, 111), (10, 222);
+             -- A resolved plain code ref (payload NULL, and a non-NULL alias + line
+             -- so the verbatim snapshot exercises those copied columns) and two
+             -- non-colliding broker rows: publish 'orders', subscribe 'events'.
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload) VALUES
+                 (1, 'local a', 'helper', 'h', 1, 2,  42, 1, NULL),
+                 (2, 'method Svc#emit',   'orders', NULL, 3, 14, 7, 0, 'broker-publish'),
+                 (2, 'method Svc#listen', 'events', NULL, 3, 14, 9, 0, 'broker-subscribe');",
+        )
+        .unwrap();
+
+        // Snapshot the full ledger before the migration for a verbatim diff.
+        let ledger_before = read_ledger(&conn);
+
+        // Upgrade across the v17 → v18 bump under the production FK contract.
+        apply_migrations_from(&mut conn, &MIGRATIONS[..18]).unwrap();
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            18,
+            "PRAGMA user_version advances by exactly one (17 → 18)"
+        );
+
+        // Byte-for-byte: every row, id, and column of every table survives.
+        let (nodes, edges, shingles, refs): (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM nodes), (SELECT count(*) FROM edges), \
+                        (SELECT count(*) FROM shingles), (SELECT count(*) FROM unresolved_refs)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (nodes, edges, shingles, refs),
+            (2, 1, 2, 3),
+            "a no-relay graph is byte-for-byte unaffected: every row survives v18"
+        );
+        // The ledger is identical column-for-column (id, keys, resolved, payload).
+        assert_eq!(
+            read_ledger(&conn),
+            ledger_before,
+            "every ledger row survives migration 18 verbatim (no loss, no addition)"
+        );
+        // The graph nodes/edges are byte-identical — proven here by their
+        // annotation columns and payloads carrying through untouched.
+        let (exported, cc, body): (i64, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT exported, cyclomatic_complexity, body FROM nodes WHERE id = 10",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (exported, cc, body),
+            (1, Some(3), None),
+            "node annotation columns carry over verbatim (nodes never rebuilt)"
+        );
+        let edge_payload: Option<String> = conn
+            .query_row("SELECT payload FROM edges WHERE source = 20", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(edge_payload, Some("doc-ref".to_string()), "edge payload untouched");
+
+        // Only the ledger was rebuilt, so the FTS external-content index was never
+        // disturbed — it still finds the pre-migration name and doc-body phrase.
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent (nodes never touched by migration 18, NFR-RA-09)");
+        let (by_name, by_body): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM nodes_fts WHERE nodes_fts MATCH 'caller'), \
+                        (SELECT count(*) FROM nodes_fts WHERE nodes_fts MATCH 'prose')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((by_name, by_body), (1, 1), "FTS still finds the pre-migration name and body");
+
+        // The widened key admits a RELAY: a publish and a subscribe that agree on
+        // all four shipped key columns and differ ONLY by relation now coexist —
+        // exactly the row pair the relation-blind key used to collapse.
+        conn.execute(
+            "INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, resolved, payload) \
+             VALUES (2, 'method Svc#relay', 'trades', 3, 14, 0, 'broker-publish')",
+            [],
+        )
+        .expect("the relay's publish inserts");
+        conn.execute(
+            "INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, resolved, payload) \
+             VALUES (2, 'method Svc#relay', 'trades', 3, 14, 0, 'broker-subscribe')",
+            [],
+        )
+        .expect("the relay's subscribe now survives alongside its publish (CR-080)");
+        let relay_rows: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM unresolved_refs WHERE source_symbol = 'method Svc#relay'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(relay_rows, 2, "a relay keeps BOTH its publish and its subscribe leg");
+
+        // A true duplicate (same key, same relation) is still rejected by the
+        // widened UNIQUE — the relation is an added key column, not a bypass.
+        assert!(
+            conn.execute(
+                "INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, resolved, payload) \
+                 VALUES (2, 'method Svc#relay', 'trades', 3, 14, 0, 'broker-publish')",
+                [],
+            )
+            .is_err(),
+            "an exact-relation duplicate is still deduped by the widened key"
+        );
+
+        // NULL-payload dedup is preserved byte-for-byte: 'local a' → 'helper' is
+        // already in the ledger with a NULL payload, so a second NULL-payload row
+        // on the same four key columns is rejected (COALESCE folds NULL to '').
+        assert!(
+            conn.execute(
+                "INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, resolved, payload) \
+                 VALUES (1, 'local a', 'helper', 1, 2, 0, NULL)",
+                [],
+            )
+            .is_err(),
+            "a duplicate NULL-payload code ref is still deduped (COALESCE(payload,'') normalisation)"
+        );
+
+        assert_eq!(
+            foreign_key_violations(&conn),
+            0,
+            "no FK violations after the migration-18 ledger rebuild"
+        );
+    }
+
+    /// One ledger row projected for a verbatim cross-migration diff — **every**
+    /// column the migration copies: `(id, file_id, source_symbol, target, alias,
+    /// form, kind, line, resolved, payload)`.
+    type LedgerRow = (
+        i64,
+        Option<i64>,
+        String,
+        String,
+        Option<String>,
+        i64,
+        i64,
+        Option<i64>,
+        i64,
+        Option<String>,
+    );
+
+    /// The full ledger as [`LedgerRow`] tuples ordered by id — a verbatim,
+    /// all-columns snapshot for byte-for-byte diffing across a migration.
+    fn read_ledger(conn: &Connection) -> Vec<LedgerRow> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, file_id, source_symbol, target, alias, form, kind, line, \
+                        resolved, payload \
+                 FROM unresolved_refs ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    }
 }
