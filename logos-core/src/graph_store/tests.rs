@@ -1110,6 +1110,42 @@ fn ledger_insert_is_idempotent_over_the_uniqueness_rule() {
     assert_eq!(rows[0].line, Some(3), "the first row's line is kept");
 }
 
+/// A broker **relay**'s two rows — a publish and a subscribe on the same topic,
+/// agreeing on all four shipped key columns and differing only by relation — both
+/// survive the *production* upsert after migration 18 ([CR-080]), while a true
+/// exact-relation duplicate still collapses. This unit-tests the relation-aware
+/// `ON CONFLICT(source_symbol, target, form, kind, COALESCE(payload, '')) DO
+/// NOTHING` path directly at the store layer (the end-to-end promotion is proven
+/// in `tests/broker_topic_promotion.rs`).
+///
+/// [CR-080]: ../../../docs/requests/CR-080-broker-relay-ledger-dedup.md
+#[test]
+fn ledger_keeps_both_relay_legs_but_still_dedups_an_exact_relation_duplicate() {
+    let mut store = mem();
+    store
+        .write_batch(|w| {
+            w.insert_unresolved_ref(&broker_ref("local relay", "orders", "broker-publish"))?;
+            w.insert_unresolved_ref(&broker_ref("local relay", "orders", "broker-subscribe"))?;
+            // Same key AND same relation as the first row — a true duplicate that
+            // the widened key must still collapse.
+            w.insert_unresolved_ref(&broker_ref("local relay", "orders", "broker-publish"))
+        })
+        .unwrap();
+
+    let mut payloads: Vec<String> = store
+        .unresolved_refs()
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| r.payload)
+        .collect();
+    payloads.sort();
+    assert_eq!(
+        payloads,
+        ["broker-publish", "broker-subscribe"],
+        "the relay keeps both legs; the exact-relation duplicate is deduped"
+    );
+}
+
 #[test]
 fn ledger_rows_replace_per_file_and_cascade_on_file_delete() {
     let mut store = mem();
