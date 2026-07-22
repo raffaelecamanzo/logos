@@ -1724,12 +1724,13 @@ mod tests {
                  (20, 2, 19, 'Overview', 2, 0, NULL, 0, 'the body prose');
              INSERT INTO edges (source, target, kind, payload) VALUES (20, 10, 11, 'doc-ref');
              INSERT INTO shingles (node_id, hash) VALUES (10, 111), (10, 222);
-             -- A resolved plain code ref (payload NULL) and two non-colliding
-             -- broker rows: publish 'orders', subscribe 'events'.
-             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, resolved, payload) VALUES
-                 (1, 'local a', 'helper', NULL, 1, 2,  1, NULL),
-                 (2, 'method Svc#emit',   'orders', NULL, 3, 14, 0, 'broker-publish'),
-                 (2, 'method Svc#listen', 'events', NULL, 3, 14, 0, 'broker-subscribe');",
+             -- A resolved plain code ref (payload NULL, and a non-NULL alias + line
+             -- so the verbatim snapshot exercises those copied columns) and two
+             -- non-colliding broker rows: publish 'orders', subscribe 'events'.
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload) VALUES
+                 (1, 'local a', 'helper', 'h', 1, 2,  42, 1, NULL),
+                 (2, 'method Svc#emit',   'orders', NULL, 3, 14, 7, 0, 'broker-publish'),
+                 (2, 'method Svc#listen', 'events', NULL, 3, 14, 9, 0, 'broker-subscribe');",
         )
         .unwrap();
 
@@ -1853,16 +1854,29 @@ mod tests {
         );
     }
 
-    /// One ledger row projected for a verbatim cross-migration diff:
-    /// `(id, source_symbol, target, form, kind, resolved, payload)`.
-    type LedgerRow = (i64, String, String, i64, i64, i64, Option<String>);
+    /// One ledger row projected for a verbatim cross-migration diff — **every**
+    /// column the migration copies: `(id, file_id, source_symbol, target, alias,
+    /// form, kind, line, resolved, payload)`.
+    type LedgerRow = (
+        i64,
+        Option<i64>,
+        String,
+        String,
+        Option<String>,
+        i64,
+        i64,
+        Option<i64>,
+        i64,
+        Option<String>,
+    );
 
-    /// The full ledger as [`LedgerRow`] tuples ordered by id — a verbatim
-    /// snapshot for byte-for-byte diffing across a migration.
+    /// The full ledger as [`LedgerRow`] tuples ordered by id — a verbatim,
+    /// all-columns snapshot for byte-for-byte diffing across a migration.
     fn read_ledger(conn: &Connection) -> Vec<LedgerRow> {
         let mut stmt = conn
             .prepare(
-                "SELECT id, source_symbol, target, form, kind, resolved, payload \
+                "SELECT id, file_id, source_symbol, target, alias, form, kind, line, \
+                        resolved, payload \
                  FROM unresolved_refs ORDER BY id",
             )
             .unwrap();
@@ -1875,6 +1889,9 @@ mod tests {
                 r.get(4)?,
                 r.get(5)?,
                 r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
             ))
         })
         .unwrap()
