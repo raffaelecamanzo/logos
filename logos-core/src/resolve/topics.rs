@@ -266,12 +266,14 @@ fn topic_symbol(ctx: &SymbolContext, key: &str) -> Result<LogosSymbol> {
 /// and silently lose a real broker fact. Mirrors the framework pass's `route/` /
 /// `component/` pseudo-namespace convention.
 ///
-/// Defensive *today*, load-bearing *soon*: the ledger's `UNIQUE (source_symbol,
-/// target, form, kind)` key excludes the relation `payload`, so a relay's two rows
-/// collide **before** this pass ever sees them and only the publish survives (pinned
-/// by `a_relay_method_loses_its_subscribe_to_the_relation_blind_ledger_key` in
-/// `tests/broker_topic_promotion.rs`). The moment migration 18 widens that key, the
-/// relay's consumer arrives here — and this namespace is what keeps it distinct.
+/// Load-bearing since migration 18 ([CR-080]): the ledger's uniqueness key now
+/// includes the relation discriminator, so a relay's publish and subscribe rows
+/// both reach this pass (asserted by
+/// `a_relay_method_keeps_both_its_publish_and_subscribe_after_migration_18` in
+/// `tests/broker_topic_promotion.rs`). This role namespace is what keeps the
+/// relay's producer and consumer distinct once both arrive.
+///
+/// [CR-080]: ../../../docs/requests/CR-080-broker-relay-ledger-dedup.md
 fn site_symbol(enclosing: &LogosSymbol, kind: NodeKind, key: &str) -> Result<LogosSymbol> {
     let role = match kind {
         NodeKind::Producer => "producer",

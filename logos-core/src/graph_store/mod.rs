@@ -3045,12 +3045,20 @@ impl BatchWriter<'_> {
 
     // ── Reference-ledger primitives (S-011, [ADR-10]) ────────────────────────
 
-    /// Insert a reference-ledger row, idempotently over the
-    /// `(source_symbol, target, form, kind)` uniqueness rule.
+    /// Insert a reference-ledger row, idempotently over the relation-aware
+    /// `(source_symbol, target, form, kind, COALESCE(payload, ''))` uniqueness
+    /// rule (migration 18, [CR-080]).
     ///
     /// A duplicate (the same function calling the same path twice, or a
     /// captured edge re-captured on a later sync) is a no-op — the first row's
-    /// `line` is kept.
+    /// `line` is kept. Two rows that agree on the four shipped key columns but
+    /// carry a **different relation** (`payload`) are distinct couplings and both
+    /// survive: a broker *relay* keeps its publish and its subscribe rather than
+    /// collapsing one onto the other. `payload` is normalised through `COALESCE`
+    /// because SQLite treats each bare `NULL` as distinct in a UNIQUE key, so a
+    /// raw-`payload` key would stop deduping ordinary (`payload = NULL`) code refs.
+    ///
+    /// [CR-080]: ../../../docs/requests/CR-080-broker-relay-ledger-dedup.md
     ///
     /// # Errors
     /// Returns an error if a CHECK/FK constraint fires or I/O fails.
@@ -3060,7 +3068,7 @@ impl BatchWriter<'_> {
                 "INSERT INTO unresolved_refs \
                  (file_id, source_symbol, target, alias, form, kind, line, payload) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
-                 ON CONFLICT(source_symbol, target, form, kind) DO NOTHING",
+                 ON CONFLICT(source_symbol, target, form, kind, COALESCE(payload, '')) DO NOTHING",
                 rusqlite::params![
                     r.file_id,
                     r.source_symbol,

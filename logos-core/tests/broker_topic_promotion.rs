@@ -341,46 +341,41 @@ class OrderService {
 }
 
 /// A **relay** — one method that subscribes to a topic and re-publishes on it — is
-/// promoted only as a **producer** today. Its subscribe is lost *before* this pass
-/// ever sees it, to a **pre-existing defect in the reference ledger's uniqueness
-/// rule**, and this test pins that honest, defective behaviour rather than the
-/// behaviour we want.
+/// promoted as **both** a producer and a consumer of that topic. This is the
+/// inversion of the S-256 defect test: migration 18 ([CR-080], [S-290]) widened
+/// the reference ledger's uniqueness rule to be relation-aware, so the relay's two
+/// rows both reach the ledger and both promote.
 ///
-/// # The defect (pre-existing; NOT introduced by S-256)
-/// `unresolved_refs` is keyed `UNIQUE (source_symbol, target, form, kind)` and
-/// `insert_unresolved_ref` inserts `ON CONFLICT(…) DO NOTHING` over exactly that
-/// key. The relation token lives in `payload`, which is **not in the key**. A
-/// relay's publish and subscribe coincide on all four key columns
+/// # The fix (migration 18, CR-080/S-290)
+/// `unresolved_refs` was keyed `UNIQUE (source_symbol, target, form, kind)` and
+/// `insert_unresolved_ref` inserted `ON CONFLICT(…) DO NOTHING` over exactly that
+/// key. The relation token lives in `payload`, which was **not in the key**. A
+/// relay's publish and subscribe coincide on all four old key columns
 /// (`(relay(), "orders", Method, ArtifactRef)`) and differ *only* in relation, so
-/// the second row inserted is silently dropped and never reaches the ledger.
+/// the second row inserted was silently dropped and never reached the ledger.
+/// Migration 18 added the relation discriminator to the key
+/// (`COALESCE(payload, '')`), so both rows now survive to disk.
 ///
 /// S-254 fixed precisely this relation-blindness one layer up — its
 /// [`dedup_sort_refs`] carries the relation in its key, and its extraction test
 /// `a_relay_method_keeps_both_its_publish_and_subscribe_on_one_topic` proves both
-/// refs survive into `Facts` — but the **store** constraint was not widened with
-/// it. So the arm loses the subscribe on the way to disk.
+/// refs survive into `Facts`. With the store constraint now widened to match, the
+/// arm keeps both legs all the way to disk — restoring S-254's cross-member
+/// fan-out ([FR-WS-10]): a relay can be bound *as a subscriber* by another
+/// member's publish, because its subscribe is in the ledger the bridge indexes.
 ///
-/// The blast radius is narrow: the four key columns collide only when *one*
-/// declaration publishes and subscribes on the *same* topic. A different method or
-/// a different topic yields a different key and both rows persist (proven by
+/// The blast radius was always narrow: the four old key columns collide only when
+/// *one* declaration publishes and subscribes on the *same* topic. A different
+/// method or a different topic already yielded a different key and both rows
+/// persisted (proven by
 /// [`broker_coupling_is_promoted_to_topic_producer_and_consumer_nodes`], which has
 /// a publisher and a listener on different topics and promotes both sides).
 ///
-/// It also silently degrades S-254's own cross-member fan-out ([FR-WS-10]): a relay
-/// can never be bound *as a subscriber* by another member's publish, because its
-/// subscribe is not in the ledger the bridge indexes. That was invisible until
-/// S-256 wired the provider side into the live edge stream.
-///
-/// **Fixing it requires a forward-only migration 18** widening the ledger's UNIQUE
-/// to include `payload` — out of scope here ([ADR-55] scopes CR-061 to the single
-/// migration 17), and irreversible once shipped ([NFR-MA-06]). Filed as a
-/// follow-up; this test will need inverting when that lands.
-///
 /// [FR-WS-10]: ../../docs/specs/requirements/FR-WS-10.md
-/// [ADR-55]: ../../docs/specs/architecture/decisions/ADR-55.md
-/// [NFR-MA-06]: ../../docs/specs/requirements/NFR-MA-06.md
+/// [CR-080]: ../../docs/requests/CR-080-broker-relay-ledger-dedup.md
+/// [S-290]: ../../docs/planning/journal.md#s-290-relation-aware-reference-ledger-dedup-for-broker-relays-migration-18
 #[test]
-fn a_relay_method_loses_its_subscribe_to_the_relation_blind_ledger_key() {
+fn a_relay_method_keeps_both_its_publish_and_subscribe_after_migration_18() {
     let tmp = TempDir::new().unwrap();
     write(
         tmp.path(),
@@ -402,9 +397,10 @@ class Relay {
     let rt = engine.runtime().unwrap();
     engine.index();
 
-    // Extraction emits BOTH refs (S-254 proves it) — but only one survives the
-    // ledger's relation-blind UNIQUE key, so only one side is promotable.
-    let broker_rows: Vec<String> = rt
+    // Extraction emits BOTH refs (S-254 proves it), and with migration 18's
+    // relation-aware key BOTH now survive to the ledger — the relay is no longer
+    // collapsed to a lone producer.
+    let mut broker_rows: Vec<String> = rt
         .submit_read(|store| {
             Ok(store
                 .unresolved_refs()?
@@ -414,27 +410,30 @@ class Relay {
                 .collect())
         })
         .expect("read runs");
+    broker_rows.sort();
     assert_eq!(
         broker_rows,
-        ["broker-publish"],
-        "THE DEFECT: the relay's `broker-subscribe` row is dropped by \
-         `ON CONFLICT(source_symbol, target, form, kind) DO NOTHING` — the relation \
-         `payload` is not in the ledger's UNIQUE key. Requires migration 18 to fix. \
-         If this assertion starts failing with BOTH rows present, the migration has \
-         landed: invert this test to assert the relay promotes a producer AND a consumer."
+        ["broker-publish", "broker-subscribe"],
+        "migration 18 (CR-080): the relay's `broker-subscribe` row now survives \
+         alongside its `broker-publish` — the relation discriminator is part of the \
+         ledger's UNIQUE key, so `ON CONFLICT(…) DO NOTHING` no longer collapses them."
     );
 
-    // The pass promotes exactly what the ledger honestly holds — the topic and the
-    // producer. It never invents the consumer whose row it cannot see (NFR-RA-05).
+    // Both legs promote: one topic identity, with a producer AND a consumer hung
+    // off it — the relay's consuming side is no longer invisible (NFR-CC-04).
     assert_eq!(names_of(rt, NodeKind::Topic), ["orders"], "one topic identity");
     assert_eq!(names_of(rt, NodeKind::Producer), ["orders"]);
-    assert!(
-        names_of(rt, NodeKind::Consumer).is_empty(),
-        "the subscribe never reached the ledger, so no consumer is promoted — and \
-         none is fabricated"
+    assert_eq!(
+        names_of(rt, NodeKind::Consumer),
+        ["orders"],
+        "the relay's subscribe now reaches the ledger, so its consumer is promoted"
     );
     assert_eq!(edges_of(rt, EdgeKind::Publishes).len(), 1);
-    assert_eq!(edges_of(rt, EdgeKind::Subscribes).len(), 0);
+    assert_eq!(
+        edges_of(rt, EdgeKind::Subscribes).len(),
+        1,
+        "the relay promotes a Subscribes edge as well as a Publishes edge"
+    );
 }
 
 /// Two declarations publishing the same topic meet on **one** topic node — the

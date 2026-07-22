@@ -50,6 +50,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (15, MIGRATION_15),
     (16, MIGRATION_16),
     (17, MIGRATION_17),
+    (18, MIGRATION_18),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -1799,12 +1800,100 @@ CREATE VIEW annotations AS
     FROM nodes;
 ";
 
+/// Migration 18 — make the reference-ledger uniqueness key **relation-aware**
+/// ([CR-080], [FR-DB-01], [FR-WS-11]).
+///
+/// The ledger's shipped `UNIQUE (source_symbol, target, form, kind)` key omits
+/// the relation discriminator (`payload`), so a **relay** — one declaration that
+/// both subscribes to and re-publishes on the *same* broker topic — produces two
+/// rows that agree on all four keyed columns and differ only in relation
+/// (`broker-publish` vs `broker-subscribe`). The upsert collapsed the second onto
+/// the first, silently dropping the relay's subscribe before ledger promotion
+/// ([resolution-engine]) ever saw it ([S-256]'s pinned defect). This migration
+/// widens the key with the relation, restoring both legs.
+///
+/// SQLite cannot drop a table-level `UNIQUE` constraint in place, so — following
+/// the referenced-table-safe copy-rebuild of migrations 14/16/17 — the ledger is
+/// stashed, dropped, and recreated **without** the four-column table constraint,
+/// then a `UNIQUE INDEX` over `(source_symbol, target, form, kind,
+/// COALESCE(payload, ''))` re-establishes uniqueness with the relation folded in.
+/// The `COALESCE` is load-bearing: SQLite treats each bare `NULL` as *distinct*
+/// in a UNIQUE key, so keying on the raw `payload` would stop deduping ordinary
+/// code refs (whose `payload` is `NULL`) and break [`super::SqliteGraphStore`]'s
+/// documented insert idempotency. Normalising `NULL` to `''` keeps NULL-payload
+/// dedup byte-for-byte identical to the pre-migration key while letting two rows
+/// that differ *only* by a present relation coexist.
+///
+/// `unresolved_refs` carries **no** foreign key to `nodes` (only to `files`), so
+/// this rebuild touches the ledger and nothing else: `nodes`, `edges`,
+/// `shingles`, the FTS index, and the `annotations` view are never dropped, which
+/// makes a no-relay graph's node/edge identity trivially byte-for-byte
+/// unaffected. Every existing row was already deduped under the *narrower* key, so
+/// each is unique under the wider one too — the copy-back preserves every row and
+/// adds none. The `kind` CHECK is recreated identical to migration 17 (still
+/// `EdgeKind::ALL`, 1..=17); this migration widens uniqueness, not the ontology.
+///
+/// [CR-080]: ../../../../docs/requests/CR-080-broker-relay-ledger-dedup.md
+/// [FR-DB-01]: ../../../../docs/specs/requirements/FR-DB-01.md
+/// [FR-WS-11]: ../../../../docs/specs/requirements/FR-WS-11.md
+/// [resolution-engine]: ../../../../docs/specs/architecture/components/resolution-engine.md
+/// [S-256]: ../../../../docs/planning/journal.md#s-256-promote-broker-coupling-to-first-class-topics
+const MIGRATION_18: &str = "\
+-- Stash the ledger's full column set (CTAS: no FKs/constraints) so the rebuild
+-- preserves every row, id, and column verbatim. No other table is touched, so
+-- the FTS index and the nodes/edges graph stay byte-for-byte identical.
+CREATE TABLE unresolved_refs_stash AS
+    SELECT id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload
+    FROM unresolved_refs;
+
+-- Drop the ledger to shed its four-column table-level UNIQUE constraint (SQLite
+-- cannot ALTER a constraint in place). unresolved_refs carries no FK to nodes,
+-- so this drop cascades nothing.
+DROP TABLE unresolved_refs;
+
+-- Recreate the ledger with the migration-17 column set and kind CHECK
+-- (EdgeKind::ALL, 1..=17) verbatim, but WITHOUT the four-column UNIQUE — the
+-- relation-aware uniqueness moves to the expression index below.
+CREATE TABLE unresolved_refs (
+    id            INTEGER PRIMARY KEY,
+    file_id       INTEGER REFERENCES files(id) ON DELETE CASCADE,
+    source_symbol TEXT NOT NULL,
+    target        TEXT NOT NULL,
+    alias         TEXT,
+    form          INTEGER NOT NULL CHECK (form IN (1,2,3,4)),
+    kind          INTEGER NOT NULL CHECK (kind IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17)),
+    line          INTEGER,
+    resolved      INTEGER NOT NULL DEFAULT 0 CHECK (resolved IN (0,1)),
+    payload       TEXT
+) STRICT;
+
+-- Copy every stashed row back with its id verbatim. Existing rows were unique
+-- under the narrower key, so none collides under the wider one — nothing is lost.
+INSERT INTO unresolved_refs
+       (id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload)
+    SELECT id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload
+    FROM unresolved_refs_stash;
+
+DROP TABLE unresolved_refs_stash;
+
+-- Recreate the migration-1/3 secondary indexes.
+CREATE INDEX idx_unresolved_refs_file     ON unresolved_refs(file_id);
+CREATE INDEX idx_unresolved_refs_resolved ON unresolved_refs(resolved);
+
+-- The relation-aware uniqueness: the four shipped key columns plus the relation
+-- discriminator, with NULL payloads normalised to '' so NULL-payload dedup is
+-- byte-for-byte identical to the old key while a relay's publish and subscribe —
+-- same source/target/form/kind, different relation — no longer collide.
+CREATE UNIQUE INDEX idx_unresolved_refs_identity
+    ON unresolved_refs(source_symbol, target, form, kind, COALESCE(payload, ''));
+";
+
 #[cfg(test)]
 mod tests {
     use super::{
         MIGRATION_1, MIGRATION_10, MIGRATION_11, MIGRATION_12, MIGRATION_13, MIGRATION_14,
-        MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_2, MIGRATION_3, MIGRATION_4,
-        MIGRATION_8,
+        MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_18, MIGRATION_2, MIGRATION_3,
+        MIGRATION_4, MIGRATION_8,
     };
     use crate::model::{EdgeKind, NodeKind, RefForm};
 
@@ -1826,10 +1915,11 @@ mod tests {
     /// The on-disk CHECK lists of the **latest** schema state must be exactly
     /// the model's frozen discriminants — no missing, extra, or reordered
     /// values. Guards against silent schema / model drift in BOTH directions
-    /// (FR-DB-01). The authoritative `nodes.kind`/`edges.kind`/
-    /// `unresolved_refs.kind` CHECKs all now live in the migration-17 rebuild
-    /// (the CR-061 broker-kind widening) — the first `kind IN (` is `nodes.kind`,
-    /// the second `edges.kind`, the third `unresolved_refs.kind`.
+    /// (FR-DB-01). The authoritative `nodes.kind`/`edges.kind` CHECKs live in the
+    /// migration-17 rebuild (the CR-061 broker-kind widening) — its first
+    /// `kind IN (` is `nodes.kind`, its second `edges.kind`. The authoritative
+    /// `unresolved_refs.kind` CHECK now lives in migration 18's ledger rebuild
+    /// (CR-080's relation-aware key), the sole `kind IN (` there.
     #[test]
     fn schema_check_matches_model_ontology() {
         let node_model: Vec<i32> = NodeKind::ALL.iter().map(|k| k.as_i32()).collect();
@@ -1844,12 +1934,13 @@ mod tests {
             edge_model,
             "edges.kind CHECK (migration 17 rebuild) must equal EdgeKind::ALL discriminants"
         );
-        // The ledger's kind CHECK (the third `kind IN (` in migration 17) widens
-        // in lockstep — an unindexed workspace-relative topic binding must persist.
+        // The ledger's kind CHECK (the sole `kind IN (` in migration 18's rebuild)
+        // widens in lockstep — an unindexed workspace-relative topic binding must
+        // persist. Migration 18 carries the latest ledger table definition.
         assert_eq!(
-            check_discriminants(MIGRATION_17, "kind IN (", 2),
+            check_discriminants(MIGRATION_18, "kind IN (", 0),
             edge_model,
-            "unresolved_refs.kind CHECK (migration 17) must equal EdgeKind::ALL discriminants"
+            "unresolved_refs.kind CHECK (migration 18) must equal EdgeKind::ALL discriminants"
         );
     }
 
@@ -2101,6 +2192,64 @@ mod tests {
                 && MIGRATION_17.contains("CREATE VIEW annotations")
                 && MIGRATION_17.contains("clone_group"),
             "migration 17 must recreate the annotations view with clone_group (migration-16 shape)"
+        );
+    }
+
+    /// Migration 18 makes the reference-ledger uniqueness key **relation-aware**
+    /// (CR-080, FR-DB-01, FR-WS-11): it rebuilds `unresolved_refs` to shed the
+    /// shipped four-column table constraint and re-establishes uniqueness through
+    /// a `UNIQUE INDEX` folding in the relation discriminator, NULL-normalised.
+    /// The load-bearing invariants: only the ledger is rebuilt (no `nodes`/`edges`/
+    /// `shingles` drop, no FTS/view churn — so a no-relay graph is byte-for-byte
+    /// unaffected); the widened key adds the discriminator via `COALESCE(payload,
+    /// '')`; the four-column table `UNIQUE` is gone; and the `kind` CHECK is
+    /// byte-identical to migration 17's ledger CHECK (uniqueness widened, ontology
+    /// unchanged).
+    #[test]
+    fn migration_18_widens_the_ledger_unique_to_be_relation_aware() {
+        // Only the ledger is rebuilt — the graph tables and their sync machinery
+        // are never touched, which is what keeps a no-relay graph byte-identical.
+        assert!(
+            MIGRATION_18.contains("DROP TABLE unresolved_refs")
+                && MIGRATION_18.contains("CREATE TABLE unresolved_refs_stash"),
+            "migration 18 must stash and rebuild the unresolved_refs ledger"
+        );
+        assert!(
+            !MIGRATION_18.contains("TABLE nodes")
+                && !MIGRATION_18.contains("TABLE edges")
+                && !MIGRATION_18.contains("TABLE shingles")
+                && !MIGRATION_18.contains("nodes_fts")
+                && !MIGRATION_18.contains("VIEW annotations"),
+            "migration 18 must touch only the ledger (no nodes/edges/shingles/FTS/view churn)"
+        );
+
+        // The relation-aware uniqueness: the four shipped key columns plus the
+        // NULL-normalised relation discriminator, as a UNIQUE INDEX (a table-level
+        // UNIQUE cannot carry an expression).
+        assert!(
+            MIGRATION_18.contains(
+                "CREATE UNIQUE INDEX idx_unresolved_refs_identity\n    \
+                 ON unresolved_refs(source_symbol, target, form, kind, COALESCE(payload, ''))"
+            ),
+            "migration 18 must key uniqueness on the relation discriminator (COALESCE(payload,''))"
+        );
+        // The shipped four-column table-level UNIQUE is retired by the rebuild.
+        assert!(
+            !MIGRATION_18.contains("UNIQUE (source_symbol, target, form, kind)"),
+            "migration 18's rebuilt ledger must drop the relation-blind table UNIQUE"
+        );
+
+        // Uniqueness widened, ontology unchanged: the kind CHECK stays EdgeKind::ALL.
+        assert_eq!(
+            check_discriminants(MIGRATION_18, "kind IN (", 0),
+            (1..=17).collect::<Vec<i32>>(),
+            "migration 18 unresolved_refs.kind is byte-identical to migration 17 (1..=17)"
+        );
+        // The secondary indexes are recreated alongside the identity index.
+        assert!(
+            MIGRATION_18.contains("CREATE INDEX idx_unresolved_refs_file")
+                && MIGRATION_18.contains("CREATE INDEX idx_unresolved_refs_resolved"),
+            "migration 18 must recreate the ledger's secondary indexes"
         );
     }
 
@@ -2455,20 +2604,26 @@ mod tests {
         );
     }
 
-    /// The **latest** `unresolved_refs.kind` CHECK now lives in migration 17's
-    /// rebuild (the third `kind IN (` there, after nodes/edges) and must equal
-    /// the model's `EdgeKind::ALL` — the same exact drift guard the
-    /// nodes/edges CHECKs carry, now that the ledger retries broker-topic
-    /// bindings too (CR-061/ADR-55, FR-WS-11). The migration-10 and migration-14
-    /// ledger CHECKs are frozen at the kinds current when each shipped and are
-    /// no longer authoritative.
+    /// The **latest** `unresolved_refs.kind` CHECK now lives in migration 18's
+    /// ledger rebuild (its sole `kind IN (`) and must equal the model's
+    /// `EdgeKind::ALL` — the same exact drift guard the nodes/edges CHECKs carry,
+    /// now that CR-080's relation-aware key rebuilds the ledger after migration 17
+    /// first taught it the broker-topic bindings (CR-061/ADR-55, FR-WS-11). The
+    /// migration-10, migration-14, and migration-17 ledger CHECKs are frozen at
+    /// the kinds current when each shipped and are no longer authoritative.
     #[test]
     fn latest_unresolved_refs_kind_check_matches_edge_ontology() {
         let edge_model: Vec<i32> = EdgeKind::ALL.iter().map(|k| k.as_i32()).collect();
         assert_eq!(
-            check_discriminants(MIGRATION_17, "kind IN (", 2),
+            check_discriminants(MIGRATION_18, "kind IN (", 0),
             edge_model,
-            "unresolved_refs.kind CHECK (migration 17 rebuild) must equal EdgeKind::ALL"
+            "unresolved_refs.kind CHECK (migration 18 rebuild) must equal EdgeKind::ALL"
+        );
+        // Migration 17's ledger CHECK is frozen at its shipped value (1..=17).
+        assert_eq!(
+            check_discriminants(MIGRATION_17, "kind IN (", 2),
+            (1..=17).collect::<Vec<i32>>(),
+            "MIGRATION_17 unresolved_refs.kind is frozen at 1..=17"
         );
         // Migration 10's ledger CHECK is frozen at its shipped value (1..=13).
         assert_eq!(
