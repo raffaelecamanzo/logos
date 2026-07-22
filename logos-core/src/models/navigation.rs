@@ -280,6 +280,20 @@ pub struct StatusInfo {
     pub refs_unresolved: u64,
     /// The resolution bound-ratio (FR-RS-04); `1.0` for an empty ledger.
     pub resolution_coverage: f64,
+    /// Total physical lines of code across the admitted file set, from the
+    /// index-time roll-up ([FR-IX-12], [CR-085]) — the same quantity the
+    /// beyond-envelope advisory ([NFR-PE-09]) uses, refreshed on full `index`.
+    /// `None` when no full index has computed the roll-up for this graph: an
+    /// honest absent, never a fabricated `0` ([NFR-CC-04]). Invariant:
+    /// `total = source + test` whenever all three are `Some`.
+    pub total_line_count: Option<u64>,
+    /// Source (non-test) physical LOC, derived as `total − test` — never counted
+    /// independently ([FR-IX-12]). `None` in lock-step with [`Self::total_line_count`].
+    pub source_line_count: Option<u64>,
+    /// Test physical LOC: the roll-up total restricted to files matched by the
+    /// [FR-AN-05] test-path conventions. `None` in lock-step with
+    /// [`Self::total_line_count`].
+    pub test_line_count: Option<u64>,
     /// The freshness/staleness statement (ADR-11 best-effort contract).
     pub freshness: String,
     /// Degradation channel (ADR-14).

@@ -155,14 +155,29 @@ pub fn index(
         load_files(runtime, &candidates, &mut warnings, &mut files_failed)
     });
 
-    // The LOC this index ingests, for the beyond-envelope advisory (NFR-PE-09).
-    // Counted over the admitted, successfully-loaded set — the same denominator
-    // the latency budgets are tuned against — and recorded under
+    // The LOC this index ingests, for the beyond-envelope advisory (NFR-PE-09)
+    // and, as of CR-085/FR-IX-12, the total of the source/test physical-LOC
+    // roll-up. Counted over the admitted, successfully-loaded set — the same
+    // denominator the latency budgets are tuned against — and recorded under
     // `INDEXED_LOC_KEY` below so `status` can repeat the advisory cheaply.
-    let indexed_loc: u64 = loaded
-        .iter()
-        .map(|l| l.source.lines().count() as u64)
-        .sum();
+    //
+    // The same pass buckets the physical-line sum into a test portion: a file
+    // matched by the FR-AN-05 test-path conventions (the shared
+    // `is_test_path` heuristic annotation already uses) attributes its lines to
+    // `test_loc`; `source = total − test` is derived by `status`, never counted
+    // here, so `total = source + test` holds by construction (FR-IX-12). The
+    // split is a pure function of this completed full index — a read-only
+    // navigation or a no-op `sync` never reaches this code, so no roll-up is
+    // computed or persisted off the index path (ADR-28).
+    let mut indexed_loc: u64 = 0;
+    let mut test_loc: u64 = 0;
+    for l in &loaded {
+        let lines = l.source.lines().count() as u64;
+        indexed_loc += lines;
+        if crate::navigate::is_test_path(&l.rel) {
+            test_loc += lines;
+        }
+    }
 
     // swe-skills typed-node enrichment (S-039, FR-DG-07): auto-detected from the
     // discovered convention files (overridable in config). A full index sees the
@@ -226,10 +241,11 @@ pub fn index(
         record_admission_fingerprint(runtime, &fingerprint)?;
     }
 
-    // Persist the ingested LOC and, if the repo materially exceeds the
-    // performance envelope, surface the one-line advisory on this result
-    // (NFR-PE-09) — degradation channel only, never a failure (ADR-14).
-    record_indexed_loc(runtime, indexed_loc)?;
+    // Persist the ingested LOC and its test bucket (the source/test roll-up,
+    // FR-IX-12) and, if the repo materially exceeds the performance envelope,
+    // surface the one-line advisory on this result (NFR-PE-09) — degradation
+    // channel only, never a failure (ADR-14).
+    record_loc_rollup(runtime, indexed_loc, test_loc)?;
     if let Some(advisory) = crate::perf::envelope_advisory(indexed_loc) {
         warnings.push(advisory);
     }
@@ -1022,14 +1038,28 @@ fn record_admission_fingerprint(runtime: &Runtime, fingerprint: &str) -> Result<
     runtime.submit_write(move |w| w.set_project_metadata(CONFIG_FINGERPRINT_KEY, &fingerprint))
 }
 
-/// Record the LOC ingested by this index in `project_metadata`, so `status`
-/// can emit the [NFR-PE-09] beyond-envelope advisory without re-reading the
-/// tree ([`crate::perf::INDEXED_LOC_KEY`]).
+/// Record the source/test physical-LOC roll-up ([FR-IX-12]) in
+/// `project_metadata`: the total ingested LOC under
+/// [`crate::perf::INDEXED_LOC_KEY`] (so `status` can emit the [NFR-PE-09]
+/// beyond-envelope advisory without re-reading the tree) and its test portion
+/// under [`crate::perf::TEST_LOC_KEY`] (so `status` can derive
+/// `source = total − test`).
 ///
+/// Both keys are written in the **same** single-writer batch so a reader never
+/// observes a half-written roll-up: either both are present (the roll-up was
+/// computed) or, on a graph indexed before this feature, only `indexed_loc` is,
+/// which `status` treats as an absent roll-up ([NFR-CC-04]).
+///
+/// [FR-IX-12]: ../../../docs/specs/requirements/FR-IX-12.md
 /// [NFR-PE-09]: ../../../docs/specs/requirements/NFR-PE-09.md
-fn record_indexed_loc(runtime: &Runtime, indexed_loc: u64) -> Result<()> {
-    let value = indexed_loc.to_string();
-    runtime.submit_write(move |w| w.set_project_metadata(crate::perf::INDEXED_LOC_KEY, &value))
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn record_loc_rollup(runtime: &Runtime, indexed_loc: u64, test_loc: u64) -> Result<()> {
+    let total = indexed_loc.to_string();
+    let test = test_loc.to_string();
+    runtime.submit_write(move |w| {
+        w.set_project_metadata(crate::perf::INDEXED_LOC_KEY, &total)?;
+        w.set_project_metadata(crate::perf::TEST_LOC_KEY, &test)
+    })
 }
 
 /// Advance the persisted monotonic graph revision after a completed `index` or a
