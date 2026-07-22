@@ -198,6 +198,10 @@ fn a_handler_reachable_only_via_a_cross_service_call_is_live() {
 /// "enumerate every intake kind" guarantee cannot silently rot ([CR-083] §7).
 #[test]
 fn only_invocation_intake_edges_seed_live_roots() {
+    // Every `BridgeIntake` variant must appear in this array AND in the match
+    // below: the wildcard-free `match` fails to compile until a new variant is
+    // classified, and that forced edit is the reminder to add it here too so its
+    // seeding behaviour is actually driven through `app_wide_reachability`.
     for intake in [BridgeIntake::Invocation, BridgeIntake::ContractSurface] {
         let seeds_root = match intake {
             BridgeIntake::Invocation => true,
