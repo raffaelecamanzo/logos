@@ -375,6 +375,7 @@ where
 /// on no evidence.
 ///
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [CR-083]: ../../../docs/requests/CR-083-reachability-invocation-edge-roots.md
 fn union_roots(edges: &[BridgeEdge]) -> HashMap<&str, Vec<&LogosSymbol>> {
     let mut roots: HashMap<&str, Vec<&LogosSymbol>> = HashMap::new();
