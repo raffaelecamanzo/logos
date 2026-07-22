@@ -62,15 +62,17 @@
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 //! [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use anyhow::Result;
 
 use crate::extract::symbol::{descriptor_for, SymbolContext};
-use crate::graph_store::{NewNode, NodeRow, UnresolvedRefRow};
+use crate::graph_store::{NodeRow, UnresolvedRefRow};
 use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeId, NodeKind};
 use crate::runtime::Runtime;
+
+use super::promote::{self, Promoted, PromotedEdge};
 
 /// What one promotion run did — surfaced for tracing, not for the gated signal.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -378,110 +380,52 @@ fn is_topic_owned(kind: EdgeKind) -> bool {
     )
 }
 
-/// Reconcile the graph's promoted broker nodes to `desired` in one writer batch:
-/// delete stale nodes, insert missing ones (id-stable for survivors), and
-/// re-prove every promoted edge.
+/// Reconcile the graph's promoted broker nodes to `desired`: a thin adapter
+/// over the shared [`promote::reconcile`] primitive (CR-082).
+///
+/// The broker edges name their target [`Topic`](NodeKind::Topic) by **symbol**
+/// (see [`DesiredEdge`]) because it may be created in this very batch, so this
+/// pass's `resolve_edge` looks the target up in the batch symbol→id map and
+/// drops the edge rather than fabricating a node when it is absent
+/// ([NFR-RA-05]). Ownership ([`is_topic_owned`]: `Contains`/`Publishes`/
+/// `Subscribes`) scopes the edge-level reconciliation to this pass's own kinds.
 fn commit(
     runtime: &Runtime,
     existing: &[&NodeRow],
     edges: &[crate::graph_store::EdgeRow],
     desired: BTreeMap<String, DesiredNode>,
 ) -> Result<()> {
-    let existing_by_symbol: HashMap<&str, NodeId> =
-        existing.iter().map(|n| (n.symbol.as_str(), n.id)).collect();
-
-    let stale: Vec<NodeId> = existing
-        .iter()
-        .filter(|n| !desired.contains_key(n.symbol.as_str()))
-        .map(|n| n.id)
-        .collect();
-
-    // Edges currently incident to *surviving* promoted nodes, restricted to the
-    // kinds this pass owns — the candidates for edge-level reconciliation. (Edges
-    // on stale nodes cascade away with the node delete below.)
-    let surviving: HashSet<NodeId> = existing
-        .iter()
-        .filter(|n| desired.contains_key(n.symbol.as_str()))
-        .map(|n| n.id)
-        .collect();
-    let current_edges: Vec<(NodeId, NodeId, EdgeKind)> = edges
-        .iter()
-        .filter(|e| is_topic_owned(e.kind))
-        .filter(|e| surviving.contains(&e.source) || surviving.contains(&e.target))
-        .map(|e| (e.source, e.target, e.kind))
-        .collect();
-
-    // The work list, moved into the writer closure. `desired` is a BTreeMap, so
-    // the commit order is the symbol order — deterministic ([NFR-RA-06]).
-    let plan: Vec<(Option<NodeId>, DesiredNode)> = desired
+    let desired: Vec<Promoted<DesiredEdge>> = desired
         .into_values()
-        .map(|d| (existing_by_symbol.get(d.symbol.as_str()).copied(), d))
+        .map(|d| Promoted {
+            symbol: d.symbol,
+            kind: d.kind,
+            name: d.name,
+            file_id: d.file_id,
+            start_line: d.start_line,
+            end_line: d.end_line,
+            edges: d.edges,
+        })
         .collect();
 
-    runtime.submit_write(move |w| {
-        // 1) Retire stale promoted nodes (their edges cascade).
-        for id in &stale {
-            w.delete_node(*id)?;
-        }
-
-        // 2) Ensure every desired node exists, remembering its id **by symbol** —
-        //    a `Publishes`/`Subscribes` edge names a topic that may have been
-        //    created moments ago in this very batch.
-        let mut id_by_symbol: HashMap<&str, NodeId> = HashMap::with_capacity(plan.len());
-        for (existing_id, item) in &plan {
-            let id = match existing_id {
-                Some(id) => *id,
-                None => {
-                    let symbol_id = w.upsert_symbol(&item.symbol)?;
-                    w.insert_node(&NewNode {
-                        file_id: item.file_id,
-                        start_line: item.start_line,
-                        end_line: item.end_line,
-                        ..NewNode::plain(symbol_id, item.kind, &item.name)
-                    })?
-                }
-            };
-            id_by_symbol.insert(item.symbol.as_str(), id);
-        }
-
-        // 3) Edge reconciliation: the full desired edge set, with both endpoints
-        //    resolved. A broker edge whose topic somehow has no id is dropped
-        //    rather than pointed at a fabricated node.
-        let mut want: HashSet<(NodeId, NodeId, EdgeKind)> = HashSet::new();
-        for (_, item) in &plan {
-            let Some(&self_id) = id_by_symbol.get(item.symbol.as_str()) else {
-                continue;
-            };
-            for e in &item.edges {
-                let resolved = match e {
-                    DesiredEdge::ContainedBy(parent) => Some((*parent, self_id, EdgeKind::Contains)),
-                    DesiredEdge::Publishes(topic) => id_by_symbol
-                        .get(topic.as_str())
-                        .map(|&t| (self_id, t, EdgeKind::Publishes)),
-                    DesiredEdge::Subscribes(topic) => id_by_symbol
-                        .get(topic.as_str())
-                        .map(|&t| (self_id, t, EdgeKind::Subscribes)),
-                };
-                if let Some(edge) = resolved {
-                    want.insert(edge);
-                }
+    promote::reconcile(
+        runtime,
+        existing,
+        edges,
+        desired,
+        is_topic_owned,
+        |self_id, edge, ids| match edge {
+            DesiredEdge::ContainedBy(parent) => {
+                Some(PromotedEdge::new(*parent, self_id, EdgeKind::Contains))
             }
-        }
-        // Stale edges on surviving promoted nodes (a site that no longer publishes
-        // the topic it used to).
-        for (source, target, kind) in &current_edges {
-            if !want.contains(&(*source, *target, *kind)) {
-                w.delete_edge(*source, *target, *kind)?;
-            }
-        }
-        // Missing desired edges (idempotent for the survivors').
-        let mut ordered: Vec<&(NodeId, NodeId, EdgeKind)> = want.iter().collect();
-        ordered.sort_by_key(|(s, t, k)| (*s, *t, k.as_i32()));
-        for (source, target, kind) in ordered {
-            w.insert_edge_if_absent(*source, *target, *kind)?;
-        }
-        Ok(())
-    })
+            DesiredEdge::Publishes(topic) => ids
+                .get(topic.as_str())
+                .map(|&t| PromotedEdge::new(self_id, t, EdgeKind::Publishes)),
+            DesiredEdge::Subscribes(topic) => ids
+                .get(topic.as_str())
+                .map(|&t| PromotedEdge::new(self_id, t, EdgeKind::Subscribes)),
+        },
+    )
 }
 
 #[cfg(test)]

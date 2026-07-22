@@ -58,6 +58,10 @@ pub(crate) mod route_template;
 /// it is honestly unbindable (base-url-runtime / path-not-composed). The one
 /// arm-specific piece of the pluggable invocation-arm contract. See its module docs.
 pub(crate) mod http_client_call;
+/// The shared promotion-commit primitive (S-292, CR-082, ADR-54): the one
+/// reconcile-and-commit algorithm the `framework` and `topics` passes both run,
+/// parameterised over how a desired edge names its endpoints. See its module docs.
+mod promote;
 /// The broker-topic promotion pass (S-256, CR-061, FR-WS-11, ADR-55): promotes the
 /// ledger-only broker publish/subscribe references S-254 captured to first-class
 /// `topic`/`producer`/`consumer` nodes joined by `publishes`/`subscribes` edges —

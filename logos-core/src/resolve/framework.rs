@@ -78,13 +78,14 @@ use tree_sitter::{Node, Parser, QueryCursor, StreamingIterator};
 
 use crate::config::BindingPolicy;
 use crate::extract::symbol::{build_symbol, descriptor_for, path_segments, SymbolContext};
-use crate::graph_store::{NewNode, NodeRow, UnresolvedRefRow};
+use crate::graph_store::{NodeRow, UnresolvedRefRow};
 use crate::model::{EdgeKind, NodeId, NodeKind, RefForm};
 use crate::models::pipeline::FrameworkStats;
 use crate::plugin::{LanguagePlugin, LanguageRegistry};
 use crate::runtime::Runtime;
 
 use super::binder;
+use super::promote::{self, Promoted, PromotedEdge};
 
 /// Method-router / method-attribute names recognised as HTTP registrations
 /// (the union of Axum's `routing::*` constructors and Actix's method macros).
@@ -1035,111 +1036,54 @@ fn is_framework_owned(kind: EdgeKind) -> bool {
     )
 }
 
-/// Reconcile the graph's promoted nodes to `desired` in one writer batch:
-/// delete stale nodes, insert missing ones (id-stable for survivors), and
-/// re-prove every promoted edge.
+/// Reconcile the graph's promoted route/component nodes to `desired`: a thin
+/// adapter over the shared [`promote::reconcile`] primitive (CR-082).
+///
+/// The framework pass's edges carry already-bound [`NodeId`] targets (the
+/// binder resolved them before the desired set was assembled), so its
+/// `resolve_edge` never consults the batch symbol map and never drops an edge.
+/// Ownership ([`is_framework_owned`]: `Contains`/`RoutesTo`/`References`) scopes
+/// the edge-level reconciliation to this pass's own kinds — a foreign edge such
+/// as the resolution engine's `ArtifactBinding` from an OpenAPI `ApiOperation`
+/// to a route handler (S-069, CR-011) is left to its owning pass ([NFR-RA-05]).
 fn commit(
     runtime: &Runtime,
     existing: &[&NodeRow],
     edges: &[crate::graph_store::EdgeRow],
     desired: HashMap<String, DesiredNode>,
 ) -> Result<()> {
-    let existing_by_symbol: HashMap<&str, NodeId> =
-        existing.iter().map(|n| (n.symbol.as_str(), n.id)).collect();
-
-    // Stale promoted nodes: in the graph, not in the desired set.
-    let stale: Vec<NodeId> = existing
-        .iter()
-        .filter(|n| !desired.contains_key(n.symbol.as_str()))
-        .map(|n| n.id)
-        .collect();
-
-    // Edges currently incident to *surviving* promoted nodes — candidates for
-    // edge-level reconciliation. (Edges incident to stale nodes are cascaded
-    // away by the node delete in step 1; any of them also caught here merely
-    // produce a harmless 0-row delete.)
-    //
-    // Restricted to the edge kinds this pass *owns* ([`is_framework_owned`]):
-    // `Contains`/`RoutesTo`/`References`. A foreign edge another pass created and
-    // owns — notably the resolution engine's `ArtifactBinding` from an OpenAPI
-    // `ApiOperation` to a route handler (S-069, CR-011) — is incident to a route
-    // node but is **not** in this pass's desired `want` set, so reconciling over
-    // it would delete the binding the resolution pass just proved. Scoping the
-    // candidate set to the framework's own kinds leaves foreign edges to their
-    // owning pass (resolution flips them via the ledger; a node delete cascades
-    // them) ([NFR-RA-05], the never-clobber companion of never-fabricate).
-    let surviving: HashSet<NodeId> = existing
-        .iter()
-        .filter(|n| desired.contains_key(n.symbol.as_str()))
-        .map(|n| n.id)
-        .collect();
-    let current_edges: Vec<(NodeId, NodeId, EdgeKind)> = edges
-        .iter()
-        .filter(|e| is_framework_owned(e.kind))
-        .filter(|e| surviving.contains(&e.source) || surviving.contains(&e.target))
-        .map(|e| (e.source, e.target, e.kind))
-        .collect();
-
-    // The owned work list moved into the writer closure (it runs on the
-    // writer thread), with each entry's existing id resolved up front; sorted
-    // on the symbol string so the commit order is deterministic (NFR-RA-06).
-    let mut plan: Vec<(Option<NodeId>, DesiredNode)> = desired
+    let desired: Vec<Promoted<DesiredEdge>> = desired
         .into_values()
-        .map(|d| (existing_by_symbol.get(d.symbol.as_str()).copied(), d))
+        .map(|d| Promoted {
+            symbol: d.symbol,
+            kind: d.kind,
+            name: d.name,
+            // A framework node always has an anchoring file.
+            file_id: Some(d.file_id),
+            start_line: d.start_line,
+            end_line: d.end_line,
+            edges: d.edges,
+        })
         .collect();
-    plan.sort_by(|(_, a), (_, b)| a.symbol.as_str().cmp(b.symbol.as_str()));
 
-    runtime.submit_write(move |w| {
-        // 1) Retire stale promoted nodes (their edges cascade).
-        for id in &stale {
-            w.delete_node(*id)?;
-        }
-
-        // 2) Ensure every desired node exists, collecting its id.
-        let mut id_of: Vec<NodeId> = Vec::with_capacity(plan.len());
-        for (existing_id, item) in &plan {
-            let id = match existing_id {
-                Some(id) => *id,
-                None => {
-                    let symbol_id = w.upsert_symbol(&item.symbol)?;
-                    w.insert_node(&NewNode {
-                        file_id: Some(item.file_id),
-                        start_line: item.start_line,
-                        end_line: item.end_line,
-                        ..NewNode::plain(symbol_id, item.kind, &item.name)
-                    })?
+    promote::reconcile(
+        runtime,
+        existing,
+        edges,
+        desired,
+        is_framework_owned,
+        |self_id, edge, _ids| {
+            Some(match *edge {
+                DesiredEdge::ContainedBy(module) => {
+                    PromotedEdge::new(module, self_id, EdgeKind::Contains)
                 }
-            };
-            id_of.push(id);
-        }
-
-        // 3) Edge reconciliation: the full desired edge set, with self ids
-        //    resolved.
-        let mut want: HashSet<(NodeId, NodeId, EdgeKind)> = HashSet::new();
-        for ((_, item), self_id) in plan.iter().zip(&id_of) {
-            for e in &item.edges {
-                want.insert(match e {
-                    DesiredEdge::ContainedBy(module) => (*module, *self_id, EdgeKind::Contains),
-                    DesiredEdge::RoutesTo(handler) => (*self_id, *handler, EdgeKind::RoutesTo),
-                    DesiredEdge::References(ty) => (*self_id, *ty, EdgeKind::References),
-                });
-            }
-        }
-        // Stale edges on surviving promoted nodes (e.g. a handler binding
-        // that is no longer provable, NFR-RA-05).
-        for (source, target, kind) in &current_edges {
-            if !want.contains(&(*source, *target, *kind)) {
-                w.delete_edge(*source, *target, *kind)?;
-            }
-        }
-        // Missing desired edges (idempotent for the survivors').
-        let mut ordered: Vec<&(NodeId, NodeId, EdgeKind)> = want.iter().collect();
-        ordered.sort_by_key(|(s, t, k)| (*s, *t, k.as_i32()));
-        for (source, target, kind) in ordered {
-            w.insert_edge_if_absent(*source, *target, *kind)?;
-        }
-        Ok(())
-    })
+                DesiredEdge::RoutesTo(handler) => {
+                    PromotedEdge::new(self_id, handler, EdgeKind::RoutesTo)
+                }
+                DesiredEdge::References(ty) => PromotedEdge::new(self_id, ty, EdgeKind::References),
+            })
+        },
+    )
 }
 
 #[cfg(test)]
