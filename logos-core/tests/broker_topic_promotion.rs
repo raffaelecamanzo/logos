@@ -436,6 +436,72 @@ class Relay {
     );
 }
 
+/// [S-254]'s fan-out for a **relay hub between two *different* topics** ([FR-WS-10],
+/// [CR-080] §3.3(a)): one declaration that subscribes to topic `in` and re-publishes
+/// on topic `out` keeps **both** legs — a consumer of `in` and a producer of `out`.
+///
+/// Unlike the same-topic relay (which the relation-blind key used to collapse), a
+/// two-topic hub's rows already differ in their `target` column, so they never
+/// collided under the old key and migration 18 does not change their persistence.
+/// This is therefore a **regression guard**: it pins that the relation-aware key
+/// leaves genuine multi-topic fan-out fully promoted, closing the AC4 case the
+/// same-topic relay test does not exercise.
+///
+/// [S-254]: ../../docs/planning/journal.md#s-254-message-broker-publish-subscribe-arm-ledger-only
+/// [FR-WS-10]: ../../docs/specs/requirements/FR-WS-10.md
+/// [CR-080]: ../../docs/requests/CR-080-broker-relay-ledger-dedup.md
+#[test]
+fn a_relay_hub_between_two_topics_keeps_both_legs() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/Hub.java",
+        r#"
+package com.acme;
+class Hub {
+    private KafkaTemplate<String, String> kafkaTemplate;
+
+    @KafkaListener(topics = "in")
+    public void relay(String msg) {
+        kafkaTemplate.send("out", msg);
+    }
+}
+"#,
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.index();
+
+    // Both topic identities exist, and the single relaying declaration is a
+    // consumer of the inbound topic AND a producer of the outbound one.
+    assert_eq!(names_of(rt, NodeKind::Topic), ["in", "out"], "both topic identities");
+    assert_eq!(
+        names_of(rt, NodeKind::Consumer),
+        ["in"],
+        "the relay subscribes to the inbound topic"
+    );
+    assert_eq!(
+        names_of(rt, NodeKind::Producer),
+        ["out"],
+        "the relay re-publishes on the outbound topic"
+    );
+
+    // Neither leg is lost: one Subscribes (to `in`) and one Publishes (to `out`),
+    // each hung off the same relaying method.
+    let kinds = kinds_by_id(rt);
+    let publishes = edges_of(rt, EdgeKind::Publishes);
+    let subscribes = edges_of(rt, EdgeKind::Subscribes);
+    assert_eq!(publishes.len(), 1, "one publishes edge: {publishes:?}");
+    assert_eq!(subscribes.len(), 1, "one subscribes edge: {subscribes:?}");
+    for (source, want_source) in [
+        (publishes[0].0, NodeKind::Producer),
+        (subscribes[0].0, NodeKind::Consumer),
+    ] {
+        assert_eq!(kinds.get(&source), Some(&want_source));
+    }
+}
+
 /// Two declarations publishing the same topic meet on **one** topic node — the
 /// repo-scoped identity a cross-member bind later keys on ([FR-WS-11]). Were the
 /// topic file-scoped, two files would fork it and the shared identity would be lost.
