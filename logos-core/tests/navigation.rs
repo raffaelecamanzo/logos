@@ -506,6 +506,58 @@ fn the_loc_rollup_is_absent_until_computed_and_only_index_writes_it() {
     );
 }
 
+#[test]
+fn a_no_op_sync_leaves_a_computed_loc_rollup_unchanged() {
+    // FR-IX-12 / ADR-28 regression guard: once a full index has computed the
+    // roll-up, a no-op `sync` must neither recompute nor clear it — the counts
+    // stay byte-identical and present. (The presence of `test_loc` is the roll-up
+    // marker, so a sync that recomputed `indexed_loc` without re-writing
+    // `test_loc` would silently make a healthy roll-up read as absent; this pins
+    // that it does not.)
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/lib.rs", "pub fn alpha() {}\npub fn beta() {}\n");
+    write(tmp.path(), "tests/it.rs", "#[test]\nfn t() {}\n");
+    let engine = indexed_engine(&tmp);
+
+    let before = engine.status();
+    let (t0, s0, x0) = (
+        before.total_line_count,
+        before.source_line_count,
+        before.test_line_count,
+    );
+    assert!(
+        t0.is_some() && s0.is_some() && x0.is_some(),
+        "a full index computed the roll-up"
+    );
+
+    // A no-op sync (nothing changed on disk) must not touch the roll-up.
+    let _ = engine.sync(&[]);
+
+    let after = engine.status();
+    assert_eq!(after.total_line_count, t0, "total unchanged by a no-op sync");
+    assert_eq!(after.source_line_count, s0, "source unchanged by a no-op sync");
+    assert_eq!(after.test_line_count, x0, "test unchanged by a no-op sync");
+}
+
+#[test]
+fn a_source_only_repo_reports_a_present_zero_test_bucket() {
+    // FR-IX-12 / NFR-CC-04: an indexed repo with no test files reports an honest
+    // present `test == Some(0)` (with total == source) — NOT an absent roll-up.
+    // The whole absent-vs-zero design hinges on `record_loc_rollup` persisting
+    // `test_loc = "0"` even when the test bucket is empty; a regression that
+    // skipped that write would make an all-source repo read as absent.
+    let tmp = fixture(); // the standard two-file crate: src/ only, no tests
+    let engine = indexed_engine(&tmp);
+
+    let status = engine.status();
+    let total = status.total_line_count.expect("roll-up present");
+    let source = status.source_line_count.expect("source present");
+    let test_loc = status.test_line_count.expect("test bucket present, not absent");
+    assert_eq!(test_loc, 0, "no test files → an honest zero, not absent");
+    assert_eq!(source, total, "with no test lines, source == total");
+    assert!(total > 0, "the source fixture has physical lines");
+}
+
 // ── FR-NV-09 / UAT-NV-08: graceful unknown-symbol handling ───────────────────
 
 #[test]
