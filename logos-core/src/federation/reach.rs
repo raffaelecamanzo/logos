@@ -13,7 +13,8 @@
 //!
 //! - The per-repo verdict already **is** reachability from the per-repo roots
 //!   over `Calls`/`RoutesTo` ([`crate::annotate`], [FR-AN-01]).
-//! - A [`BridgeEdge`](super::BridgeEdge) contributes **roots**, never adjacency.
+//! - An **invocation** [`BridgeEdge`](super::BridgeEdge) contributes **roots**,
+//!   never adjacency.
 //! - Reachability from `per-repo roots ∪ bridge roots` therefore equals
 //!   `per-repo live set ∪ closure(bridge roots)` over the *same* adjacency.
 //!
@@ -28,13 +29,24 @@
 //! not yet extracted the caller) can only fail to promote — it can never demote a
 //! live handler to dead ([FR-WS-12], [NFR-RA-05]).
 //!
-//! # Every provider endpoint is a root
+//! # Only an invocation edge is a root ([FR-WS-12], [CR-083])
 //!
-//! The view roots the provider (`to`) endpoint of **every** bridge edge, not just
-//! the invocation-arm ones ([FR-WS-08]–[FR-WS-10]). A superset of roots is a
-//! superset of *live*, so this is the monotone-toward-live choice; and it needs no
-//! per-arm knowledge, so a newly-registered arm reaches the union view with no
-//! edit here.
+//! The view roots the provider (`to`) endpoint of every **invocation** bridge edge
+//! ([FR-WS-08]–[FR-WS-10]) — a captured call, stub call, or publish/subscribe —
+//! and skips **contract-surface** edges (an OpenAPI operation *describing* an
+//! endpoint). Only a call reaches its provider; a spec that merely mentions a
+//! callable does not, so rooting a contract-surface edge would be "documented"
+//! masquerading as "reached", the false-live class [NFR-CC-04] forbids. The intake
+//! discriminator ([`BridgeIntake`](super::bridge::BridgeIntake)) is a property of
+//! the edge, so a newly-registered *invocation* arm reaches the union view with no
+//! edit here — only a contract-surface arm is (correctly) excluded.
+//!
+//! This is a **no-op on today's data**: the only contract-surface providers are
+//! already-live `Route`s or non-callable `ProtoService`s, so filtering them
+//! promotes exactly what the unfiltered view did. The filter closes the latent
+//! hazard rather than changing any current output ([CR-083]).
+//!
+//! [CR-083]: ../../../docs/requests/CR-083-reachability-invocation-edge-roots.md
 //!
 //! # Why the promotion set is empty on every real workspace today
 //!
@@ -347,14 +359,30 @@ where
 }
 
 /// The extra live roots the bridge contributes, grouped by the member that owns
-/// them: the **provider** (`to`) endpoint of every cross-service edge ([ADR-56]).
+/// them: the **provider** (`to`) endpoint of every **invocation** edge
+/// ([FR-WS-12], [CR-083]).
+///
+/// Only invocation edges ([FR-WS-08]–[FR-WS-10]) seed roots — an actual call
+/// reaches its provider. A contract-surface edge (an OpenAPI operation
+/// *describing* an endpoint) is skipped: documentation is not reachability, and
+/// rooting it would mark a callable live merely because a spec file mentions it
+/// ([NFR-CC-04]). Today this is a no-op — the only contract-surface providers are
+/// already-live `Route`s or non-callable `ProtoService`s — but the filter closes
+/// the latent false-live path for any future contract-surface arm.
 ///
 /// The consumer (`from`) side is deliberately *not* a root — a call site is not an
 /// entry point, and rooting it would promote the caller's own dead neighbourhood
 /// on no evidence.
+///
+/// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [CR-083]: ../../../docs/requests/CR-083-reachability-invocation-edge-roots.md
 fn union_roots(edges: &[BridgeEdge]) -> HashMap<&str, Vec<&LogosSymbol>> {
     let mut roots: HashMap<&str, Vec<&LogosSymbol>> = HashMap::new();
     for edge in edges {
+        if !edge.intake.seeds_reachability_root() {
+            continue; // a contract-surface edge describes, it does not reach ([CR-083])
+        }
         roots
             .entry(edge.to.member.as_str())
             .or_default()

@@ -86,6 +86,51 @@ pub struct BridgeEndpoint {
     pub symbol: LogosSymbol,
 }
 
+/// How a bridge edge entered the overlay — its **intake discriminator**
+/// ([FR-WS-08]–[FR-WS-10], [FR-WS-12], [CR-083]).
+///
+/// An *invocation* edge models a captured **call site** — an HTTP client call
+/// ([FR-WS-08]), a gRPC stub call ([FR-WS-09]), or a broker publish/subscribe
+/// ([FR-WS-10]) — read from a member's `unresolved_refs` ledger. A
+/// *contract-surface* edge is a declared **contract** match — an OpenAPI
+/// [`ApiOperation`](NodeKind::ApiOperation) binding a framework
+/// [`Route`](NodeKind::Route) — that *describes* an endpoint without modelling a
+/// call to it.
+///
+/// The distinction is exactly what the app-wide reachability view roots on: only
+/// an invocation edge seeds a live root ([FR-WS-12]), because only a call reaches
+/// its provider. A contract-surface edge documents, and documentation is not
+/// reachability — rooting it would mark a callable live purely because a spec file
+/// mentions it, the false-live class [NFR-CC-04] exists to prevent ([CR-083]).
+///
+/// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+/// [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
+/// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [CR-083]: ../../../docs/requests/CR-083-reachability-invocation-edge-roots.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BridgeIntake {
+    /// A captured invocation ([FR-WS-08]/[FR-WS-09]/[FR-WS-10]) — an actual call,
+    /// stub call, publish, or subscribe. The **only** intake that seeds an
+    /// app-wide reachability live root ([FR-WS-12]).
+    Invocation,
+    /// A declared contract-surface match (an OpenAPI operation → framework route).
+    /// Drawn on the service map and carried by the contract bridge, but never a
+    /// reachability live root ([CR-083]).
+    ContractSurface,
+}
+
+impl BridgeIntake {
+    /// `true` for the invocation arms ([FR-WS-08]–[FR-WS-10]) — the only intake
+    /// whose provider endpoint the app-wide reachability view seeds as a live root
+    /// ([FR-WS-12], [CR-083]).
+    pub fn seeds_reachability_root(self) -> bool {
+        matches!(self, BridgeIntake::Invocation)
+    }
+}
+
 /// A cross-service link computed by the bridge — an in-memory overlay edge whose
 /// endpoints are `(member, symbol)` pairs ([FR-WS-04], [ADR-52]).
 ///
@@ -105,6 +150,12 @@ pub struct BridgeEdge {
     pub from: BridgeEndpoint,
     /// The provider endpoint the link points to (e.g. the framework `Route`).
     pub to: BridgeEndpoint,
+    /// How the edge entered the overlay — the intake discriminator that decides
+    /// whether it seeds an app-wide reachability live root ([FR-WS-12], [CR-083]).
+    /// An **additive** wire field: the prior fields (`relation`, `from`, `to`) are
+    /// serialized unchanged, so `xservice route-providers` stays
+    /// backward-compatible.
+    pub intake: BridgeIntake,
 }
 
 /// A contract-surface node read from one member — the minimal view the bridge
@@ -783,7 +834,7 @@ where
     E: MemberEngine + MemberContracts,
 {
     let mut providers: HashMap<PortableKey, Vec<BridgeEndpoint>> = HashMap::new();
-    let mut consumers: Vec<(PortableKey, BridgeEndpoint)> = Vec::new();
+    let mut consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake)> = Vec::new();
 
     for (member, surface) in read_members(registry, "contract surface", |e| e.contract_surface()) {
         for node in surface {
@@ -796,7 +847,11 @@ where
             };
             match role {
                 Role::Provider => providers.entry(key).or_default().push(endpoint),
-                Role::Consumer => consumers.push((key, endpoint)),
+                // A contract-surface consumer is a *declared* endpoint (an OpenAPI
+                // operation) — it describes a contract, it does not call one, so its
+                // edge is contract-surface intake and never seeds a reachability
+                // root ([CR-083]).
+                Role::Consumer => consumers.push((key, endpoint, BridgeIntake::ContractSurface)),
             }
         }
     }
@@ -845,7 +900,10 @@ where
                     else {
                         continue; // an unkeyable / not-yet-registered arm contributes nothing
                     };
-                    consumers.push((key, endpoint));
+                    // A ledger reference is a captured call site ([FR-WS-08]/
+                    // [FR-WS-09]) — an invocation edge that seeds a reachability
+                    // root ([CR-083]).
+                    consumers.push((key, endpoint, BridgeIntake::Invocation));
                 }
             }
         }
@@ -888,7 +946,7 @@ where
 /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
 pub(super) fn match_indexed(
     mut providers: HashMap<PortableKey, Vec<BridgeEndpoint>>,
-    consumers: Vec<(PortableKey, BridgeEndpoint)>,
+    consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake)>,
 ) -> Vec<BridgeEdge> {
     // Deterministic candidate order regardless of member fan-out order.
     for endpoints in providers.values_mut() {
@@ -896,7 +954,11 @@ pub(super) fn match_indexed(
     }
 
     let mut edges = Vec::new();
-    for (key, consumer) in consumers {
+    // The intake rides with each consumer so the emitted edge records *how* the
+    // binding was captured — an invocation call site vs a declared contract
+    // surface ([CR-083]). The match discipline is unchanged; only the edge's
+    // provenance is carried through.
+    for (key, consumer, intake) in consumers {
         let Some(candidates) = providers.get(&key) else {
             continue; // no provider anywhere in the workspace — no edge
         };
@@ -917,6 +979,7 @@ pub(super) fn match_indexed(
                     relation: key.relation().to_string(),
                     from: consumer,
                     to: only.clone(),
+                    intake,
                 });
             }
             MatchDiscipline::FanOut => {
@@ -932,6 +995,7 @@ pub(super) fn match_indexed(
                         relation: key.relation().to_string(),
                         from: consumer.clone(),
                         to: provider.clone(),
+                        intake,
                     });
                 }
             }
@@ -1491,7 +1555,13 @@ mod tests {
         for (key, endpoint) in providers {
             index.entry(key.clone()).or_default().push(endpoint.clone());
         }
-        match_indexed(index, consumers)
+        // These match-core tests model invocation-arm consumers (gRPC/broker call
+        // sites); the intake does not change the match discipline they exercise.
+        let tagged = consumers
+            .into_iter()
+            .map(|(key, endpoint)| (key, endpoint, BridgeIntake::Invocation))
+            .collect();
+        match_indexed(index, tagged)
     }
 
     /// A freshly-registered **exactly-one** namespace (gRPC — nothing classifies
@@ -1568,7 +1638,10 @@ mod tests {
     #[test]
     fn a_namespace_with_no_provider_contributes_no_edge() {
         let key = pkey(BridgeNamespace::Grpc, "pkg.Svc/Method");
-        let edges = match_indexed(HashMap::new(), vec![(key, ep("api", "local stub"))]);
+        let edges = match_indexed(
+            HashMap::new(),
+            vec![(key, ep("api", "local stub"), BridgeIntake::Invocation)],
+        );
         assert!(edges.is_empty(), "no provider anywhere → no edge: {edges:?}");
     }
 
@@ -2167,5 +2240,122 @@ mod tests {
         // (already-sorted) edge sequence.
         let again = ContractBridge::new().edges(&registry(&["web", "api", "billing"]));
         assert_eq!(*edges, *again, "the union of the two intakes is stably sorted");
+    }
+
+    // ── S-293 / CR-083: the bridge-edge intake discriminator ──────────────────
+
+    /// CR-083 risk mitigation (§7): every arm carries the **expected intake
+    /// discriminator** through the live bridge. An OpenAPI operation → framework
+    /// route is a *contract-surface* edge (a spec describing an endpoint); an HTTP
+    /// client call, a gRPC stub call, and a broker publish/subscribe are all
+    /// *invocation* edges (captured call sites). Table-driven so a mis-tagged arm
+    /// fails here rather than silently dropping — or fabricating — a reachability
+    /// root downstream. The relation alone cannot witness this: an OpenAPI match
+    /// and an HTTP client call both file under `route`, so the discriminator is the
+    /// only thing that tells them apart.
+    #[test]
+    fn every_arm_carries_the_expected_intake_discriminator() {
+        fn openapi_operation_to_route() -> Vec<BridgeEdge> {
+            reset();
+            set_member("api", 0, vec![op("GET /users/{user_id}", "local op_get")]);
+            set_member("web", 0, vec![route("GET /users/{id}", "local route_get")]);
+            (*ContractBridge::new().edges(&registry(&["api", "web"]))).clone()
+        }
+        fn http_client_call() -> Vec<BridgeEdge> {
+            reset();
+            set_member("web", 0, vec![]);
+            set_consumers("web", vec![http_call("GET /users/{id}", "local get_user_call")]);
+            set_member("api", 0, vec![route("GET /users/{userId}", "local route_get")]);
+            (*ContractBridge::new().edges(&registry(&["web", "api"]))).clone()
+        }
+        fn grpc_stub_call() -> Vec<BridgeEdge> {
+            reset();
+            set_member(
+                "svc",
+                0,
+                vec![proto_service("example.v1.UserService/GetUser", "local svc_getuser")],
+            );
+            set_consumers(
+                "api",
+                vec![grpc_consumer("example.v1.UserService/GetUser", "local stub_getuser")],
+            );
+            (*ContractBridge::new().edges(&registry(&["api", "svc"]))).clone()
+        }
+        fn broker_publish_subscribe() -> Vec<BridgeEdge> {
+            reset();
+            set_member("api", 0, vec![]);
+            set_consumers("api", vec![broker_publish("orders", "local emit_order")]);
+            set_member("billing", 0, vec![]);
+            set_consumers("billing", vec![broker_subscribe("orders", "local on_order")]);
+            (*ContractBridge::new().edges(&registry(&["api", "billing"]))).clone()
+        }
+
+        // (label, one-binding workspace builder, expected intake).
+        type IntakeCase = (&'static str, fn() -> Vec<BridgeEdge>, BridgeIntake);
+        let cases: [IntakeCase; 4] = [
+            (
+                "OpenAPI operation → route",
+                openapi_operation_to_route,
+                BridgeIntake::ContractSurface,
+            ),
+            ("HTTP client call", http_client_call, BridgeIntake::Invocation),
+            ("gRPC stub call", grpc_stub_call, BridgeIntake::Invocation),
+            (
+                "broker publish/subscribe",
+                broker_publish_subscribe,
+                BridgeIntake::Invocation,
+            ),
+        ];
+
+        for (label, build, expected) in cases {
+            let edges = build();
+            assert_eq!(edges.len(), 1, "{label}: exactly one binding is produced: {edges:?}");
+            assert_eq!(
+                edges[0].intake, expected,
+                "{label}: the edge must carry the {expected:?} intake discriminator"
+            );
+        }
+    }
+
+    /// CR-083 AC: the intake discriminator is an **additive** wire field. The prior
+    /// `xservice route-providers` fields (`relation`, `from`, `to`) serialize
+    /// exactly as before, and `intake` rides alongside with a stable kebab-case
+    /// spelling — so an existing consumer reading the prior three keys is
+    /// unaffected.
+    #[test]
+    fn bridge_edge_serialization_is_backward_compatible() {
+        let edge = BridgeEdge {
+            relation: "route".to_string(),
+            from: ep("api", "local op_get"),
+            to: ep("web", "local route_get"),
+            intake: BridgeIntake::ContractSurface,
+        };
+        let value = serde_json::to_value(&edge).unwrap();
+
+        // Prior fields — unchanged shape and content.
+        assert_eq!(value["relation"], "route");
+        assert_eq!(value["from"]["member"], "api");
+        assert_eq!(value["from"]["symbol"], "local op_get");
+        assert_eq!(value["to"]["member"], "web");
+        assert_eq!(value["to"]["symbol"], "local route_get");
+
+        // The additive field, with its stable wire spelling.
+        assert_eq!(value["intake"], "contract-surface");
+        assert_eq!(
+            serde_json::to_value(BridgeIntake::Invocation).unwrap(),
+            "invocation",
+            "the invocation spelling is part of the wire contract"
+        );
+
+        // Exactly the prior three keys plus the one additive key — nothing else
+        // leaked onto the wire.
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("a bridge edge serializes to a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["from", "intake", "relation", "to"]);
     }
 }

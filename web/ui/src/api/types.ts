@@ -981,6 +981,13 @@ export interface BridgeEndpoint {
   symbol: string;
 }
 
+/** How a bridge edge entered the overlay (CR-083). An `invocation` edge is a
+ *  captured call site (HTTP client call, gRPC stub call, broker publish/subscribe,
+ *  FR-WS-08–FR-WS-10); a `contract-surface` edge is a declared contract match (an
+ *  OpenAPI operation → framework route). Only invocation edges seed app-wide
+ *  reachability roots (FR-WS-12). */
+export type BridgeIntake = "invocation" | "contract-surface";
+
 /** A cross-service link the bridge resolved: a consumer bound to exactly one
  *  provider in another member (`relation` is the arm — `route`, `grpc-call`,
  *  `broker-topic`). Never persisted, never fabricated (FR-WS-04). */
@@ -988,6 +995,9 @@ export interface BridgeEdge {
   relation: string;
   from: BridgeEndpoint;
   to: BridgeEndpoint;
+  /** The intake discriminator (CR-083). Optional: an additive wire field the
+   *  service map does not read — it renders all bridge edges regardless. */
+  intake?: BridgeIntake;
 }
 
 /** Why a cross-boundary reference did not bind (mirrors `UnboundReason`, ADR-53). */

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use super::*;
-use crate::federation::bridge::{BridgeEndpoint, ContractNode};
+use crate::federation::bridge::{BridgeEndpoint, BridgeIntake, ContractNode};
 use crate::federation::registry::RegistryMode;
 use crate::federation::{Federation, Member};
 use crate::graph_store::NodeRow;
@@ -119,9 +119,16 @@ fn callable(name: &str, symbol: &str, is_dead: Option<bool>) -> ReachNode {
     }
 }
 
-/// A cross-service edge whose provider (`to`) endpoint is `(member, symbol)` —
-/// the only part of the edge the union view roots on.
+/// A cross-service **invocation** edge whose provider (`to`) endpoint is
+/// `(member, symbol)` — the only part of the edge the union view roots on. An
+/// invocation edge seeds a live root; that is the default the promotion tests want.
 fn edge_to(member: &str, symbol: &str) -> BridgeEdge {
+    edge_with_intake(member, symbol, BridgeIntake::Invocation)
+}
+
+/// A cross-service edge to `(member, symbol)` with an explicit intake — the knob
+/// the root-seeding filter turns on ([CR-083]).
+fn edge_with_intake(member: &str, symbol: &str, intake: BridgeIntake) -> BridgeEdge {
     BridgeEdge {
         relation: "broker-topic".to_string(),
         from: BridgeEndpoint {
@@ -132,6 +139,7 @@ fn edge_to(member: &str, symbol: &str) -> BridgeEdge {
             member: member.to_string(),
             symbol: sym(symbol),
         },
+        intake,
     }
 }
 
@@ -177,6 +185,66 @@ fn a_handler_reachable_only_via_a_cross_service_call_is_live() {
         ["orphan"],
         "a callable no cross-service root reaches stays dead"
     );
+}
+
+/// CR-083 / FR-WS-12: `union_roots` seeds live roots from **invocation** edges
+/// only. Table-driven over *every* `BridgeIntake` kind: an invocation edge to a
+/// dead callable promotes it (and its transitive callees), while a
+/// contract-surface edge to the **same** provider promotes nothing — the per-repo
+/// dead set is left exactly as it was.
+///
+/// The `match intake { … }` is exhaustive with no wildcard: a new intake variant
+/// fails to compile here until its expected seeding behaviour is stated, so the
+/// "enumerate every intake kind" guarantee cannot silently rot ([CR-083] §7).
+#[test]
+fn only_invocation_intake_edges_seed_live_roots() {
+    // Every `BridgeIntake` variant must appear in this array AND in the match
+    // below: the wildcard-free `match` fails to compile until a new variant is
+    // classified, and that forced edit is the reminder to add it here too so its
+    // seeding behaviour is actually driven through `app_wide_reachability`.
+    for intake in [BridgeIntake::Invocation, BridgeIntake::ContractSurface] {
+        let seeds_root = match intake {
+            BridgeIntake::Invocation => true,
+            BridgeIntake::ContractSurface => false,
+        };
+
+        reset();
+        set_surface("orders", orders_surface());
+        let view = app_wide_reachability(
+            &registry(&["orders"]),
+            &[edge_with_intake("orders", "local on_order", intake)],
+        );
+
+        if seeds_root {
+            assert_eq!(
+                names(&view.live_via_cross_service),
+                ["on_order", "render"],
+                "{intake:?} is an invocation edge — its provider AND its transitive \
+                 callees must be promoted"
+            );
+            assert_eq!(
+                names(&view.dead),
+                ["orphan"],
+                "{intake:?}: only the callable no root reaches stays dead"
+            );
+            assert_eq!(view.members[0].extra_roots, 1, "{intake:?}: one seeded root");
+        } else {
+            assert!(
+                view.live_via_cross_service.is_empty(),
+                "{intake:?} is a contract-surface edge — it must promote NOTHING \
+                 (documented is not reached)"
+            );
+            assert_eq!(
+                names(&view.dead),
+                ["on_order", "orphan", "render"],
+                "{intake:?}: the per-repo dead set is unchanged — no root was seeded"
+            );
+            assert_eq!(
+                view.members[0].extra_roots, 0,
+                "{intake:?}: a contract-surface edge seeds no root"
+            );
+        }
+    }
 }
 
 /// FR-WS-12 acceptance: a handler with **no** matched inbound edge is never

@@ -80,7 +80,8 @@ use crate::config::ConfigError;
 use crate::workspace::{is_git_root, resolve_root};
 
 pub use bridge::{
-    BridgeEdge, BridgeEndpoint, ContractBridge, ContractNode, InvocationRef, MemberContracts,
+    BridgeEdge, BridgeEndpoint, BridgeIntake, ContractBridge, ContractNode, InvocationRef,
+    MemberContracts,
 };
 pub use coverage::{
     cross_service_coverage, CoverageState, CrossServiceCoverage, ReferenceCoverage, UnboundReason,

@@ -25,8 +25,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use logos_core::federation::{
-    app_wide_reachability, AppWideVerdict, ContractBridge, EngineRegistry, Federation, Member,
-    RegistryMode, UNION_VIEW,
+    app_wide_reachability, AppWideVerdict, BridgeIntake, ContractBridge, EngineRegistry, Federation,
+    Member, MemberContracts, RegistryMode, UNION_VIEW,
 };
 use logos_core::model::NodeKind;
 use logos_core::Engine;
@@ -175,14 +175,21 @@ fn the_union_view_is_advisory_riderd_and_never_exceeds_the_per_repo_dead_set() {
         );
     }
 
-    // ── The one real integration seam ───────────────────────────────────────
-    // A `BridgeEndpoint`'s symbol comes from the *contract surface* read; the
-    // reachability surface's symbols come from `all_nodes`. `walk_union` matches
-    // the two by symbol. If those spellings ever diverge, EVERY root silently
-    // becomes unresolved, the view goes permanently inert — and every other
-    // assertion in this file still passes green (the dead set would still equal
-    // the per-repo dead set, monotonicity would still hold, the rider would still
-    // be attached). This is the assertion that makes the feature falsifiable.
+    // ── The one real integration seam (CR-083) ──────────────────────────────
+    // The sole cross-service edge here is an OpenAPI operation → framework route:
+    // a CONTRACT-SURFACE edge (a spec *describing* web's endpoint), not a captured
+    // invocation. Post-CR-083 `union_roots` declines to seed a contract-surface
+    // edge as a reachability root — a spec that mentions a callable does not reach
+    // it ([FR-WS-12]) — so web resolves ZERO extra roots. That is the filter
+    // working, not a regression: the provider is web's already-live framework
+    // route, so no dead node was reachable via this edge either way (the promotion
+    // set is byte-for-byte identical, empty, before and after the filter).
+    assert_eq!(
+        edges[0].intake,
+        BridgeIntake::ContractSurface,
+        "an OpenAPI operation → framework route is a contract-surface edge, not an \
+         invocation — this fixture's yaml+rust grammars ship no invocation arm"
+    );
     let web_tally = view
         .members
         .iter()
@@ -190,30 +197,43 @@ fn the_union_view_is_advisory_riderd_and_never_exceeds_the_per_repo_dead_set() {
         .expect("web has a tally");
     assert_eq!(
         (web_tally.extra_roots, web_tally.unresolved_roots),
-        (1, 0),
-        "the bridge's provider endpoint must RESOLVE against web's reachability \
-         surface — BridgeEndpoint.symbol and NodeRow.symbol are the same spelling"
+        (0, 0),
+        "a contract-surface edge seeds no reachability root ([CR-083]) — web resolves \
+         neither a resolved nor an unresolved root from it"
     );
     assert!(view.skipped_members.is_empty(), "no member degraded");
 
-    // The resolved root promotes nothing *in this fixture*, and that is the view
-    // being correct, not broken: both provider endpoints here are framework `Route`
-    // nodes, which the per-repo walk already roots (ADR-56's own Notes), so there was
-    // nothing dead to lift.
-    //
-    // This assertion is scoped to THIS fixture and nothing more. It was originally
-    // written as a tripwire meant to fail once S-256 landed a callable provider
-    // endpoint (the broker subscribe side) — but it cannot serve that purpose: the
-    // fixture is yaml + rust, and neither ships a `brokers.scm`, so no broker edge
-    // can ever reach it. S-256 has since landed, the roots DO now resolve to real
-    // subscriber methods, and this still passes.
-    //
-    // The real guard on the promotion path lives where the blocker actually is — the
-    // plugin capability matrix — in
+    // The symbol-spelling seam CR-083 must NOT break. A `BridgeEndpoint`'s symbol
+    // comes from the *contract surface* read; the reachability surface's symbols
+    // from `all_nodes`. `walk_union` matches the two by symbol — so were an
+    // invocation edge present, a spelling divergence would make every root silently
+    // unresolved and the view permanently inert, with every other assertion here
+    // still green. The fixture's only edge no longer seeds a root, so we assert the
+    // same-spelling invariant DIRECTLY against web's reachability surface: this is
+    // the check that keeps the feature falsifiable on the real path.
+    let web_surface = registry
+        .engine_for("web")
+        .expect("web engine starts")
+        .reachability_surface()
+        .expect("web reachability surface reads");
+    assert!(
+        web_surface
+            .nodes
+            .iter()
+            .any(|n| n.symbol == edges[0].to.symbol),
+        "the bridge provider endpoint's symbol must resolve against web's \
+         reachability surface — BridgeEndpoint.symbol and NodeRow.symbol share a spelling"
+    );
+
+    // Nothing is promoted — the view being correct, not broken. Even before CR-083
+    // (when this contract-surface edge DID seed a root) the provider was web's
+    // framework `Route`, which the per-repo walk already roots (ADR-56's own Notes),
+    // so there was never anything dead to lift. The real guard on the promotion path
+    // lives where the blocker actually is — the plugin capability matrix — in
     // `federation::reach::tests::the_broker_promotion_path_is_still_blocked_by_the_capability_matrix`.
     assert!(
         view.live_via_cross_service.is_empty(),
-        "this fixture's providers are all framework routes (already per-repo live roots), \
+        "this fixture's only provider is a framework route (already a per-repo live root), \
          so it can promote nothing: {:?}",
         view.live_via_cross_service
     );

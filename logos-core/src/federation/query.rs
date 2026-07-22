@@ -383,6 +383,7 @@ mod tests {
             relation: "route".to_string(),
             from: endpoint(from_member, from_symbol),
             to: endpoint(to_member, to_symbol),
+            intake: crate::federation::bridge::BridgeIntake::Invocation,
         }
     }
 
