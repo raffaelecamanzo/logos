@@ -187,6 +187,14 @@ fn route_providers_are_repo_qualified_and_repo_scopes() {
     assert_eq!(edge["relation"], "route");
     assert_eq!(edge["from"]["member"], "api", "the consumer endpoint is repo-qualified");
     assert_eq!(edge["to"]["member"], "web", "the provider endpoint is repo-qualified");
+    // CR-083: the intake discriminator rides the real `route-providers` command
+    // envelope (additive field, backward-compatible). This fixture's binding is an
+    // OpenAPI operation → framework route — a contract-surface edge, not an
+    // invocation — proving the discriminator is correct end-to-end on the wire.
+    assert_eq!(
+        edge["intake"], "contract-surface",
+        "an OpenAPI operation → route surfaces as a contract-surface edge"
+    );
 
     // `--repo web`: routes provided BY web → the one edge.
     let scoped_web = logos_json(tmp.path(), &["xservice", "route-providers", "--repo", "web"]);
