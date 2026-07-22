@@ -748,33 +748,42 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
         (a, b) => a.or(b),
     };
 
+    // The physical-LOC metadata (NFR-PE-09 advisory + the CR-085/FR-IX-12
+    // source/test roll-up): read BOTH keys in one store access so `status` can
+    // never straddle two index generations. A full index commits both keys in a
+    // single write batch (`record_loc_rollup`); two separate reads could land one
+    // key before that commit and the other after, mixing generations and breaking
+    // the `total = source + test` invariant. One `submit_read` on one connection
+    // closes that window. A pure read — `status` never writes on read (ADR-28).
+    let mut warnings = Vec::new();
+    let (indexed_loc, test_loc) = runtime.submit_read(|store| {
+        Ok((
+            store.project_metadata(crate::perf::INDEXED_LOC_KEY)?,
+            store.project_metadata(crate::perf::TEST_LOC_KEY)?,
+        ))
+    })?;
+    let indexed_loc = indexed_loc.and_then(|raw| raw.parse::<u64>().ok());
+    let test_loc = test_loc.and_then(|raw| raw.parse::<u64>().ok());
+
     // The beyond-envelope advisory (NFR-PE-09): `index` recorded the LOC it
     // ingested; if the repo materially exceeds the performance envelope, repeat
     // the same one-line advisory `index` emits — honest expectations, never an
     // error (ADR-14). A repo never indexed (no recorded LOC) is silent.
-    let mut warnings = Vec::new();
-    let indexed_loc = runtime
-        .submit_read(|store| store.project_metadata(crate::perf::INDEXED_LOC_KEY))?
-        .and_then(|raw| raw.parse::<u64>().ok());
     if let Some(advisory) = indexed_loc.and_then(crate::perf::envelope_advisory) {
         warnings.push(advisory);
     }
 
-    // The source/test physical-LOC roll-up (CR-085, FR-IX-12): a pure read of
-    // the index-time metadata — status never writes on read (ADR-28). The total
-    // is the ingested-LOC sum above; the persisted `test_loc` bucket is the
-    // roll-up's presence marker, so the counts are reported only when BOTH keys
-    // are present (a graph indexed before this feature has `indexed_loc` but no
-    // `test_loc`). Source is derived as `total − test`, never counted
-    // independently, so `total = source + test` holds by construction; an absent
-    // roll-up reports all three as `None`, never a fabricated `0` (NFR-CC-04).
-    let test_loc = runtime
-        .submit_read(|store| store.project_metadata(crate::perf::TEST_LOC_KEY))?
-        .and_then(|raw| raw.parse::<u64>().ok());
+    // The source/test physical-LOC roll-up (CR-085, FR-IX-12). The total is the
+    // ingested-LOC sum; the persisted `test_loc` bucket is the roll-up's presence
+    // marker, so the counts are reported only when BOTH keys are present (a graph
+    // indexed before this feature has `indexed_loc` but no `test_loc`). Source is
+    // derived as `total − test`, never counted independently; an absent roll-up
+    // reports all three as `None`, never a fabricated `0` (NFR-CC-04).
     let (total_line_count, source_line_count, test_line_count) = match (indexed_loc, test_loc) {
         (Some(total), Some(test)) => {
-            // `test` is a subset of `total` by construction; saturating_sub keeps
-            // the invariant non-negative even against a corrupted stored value.
+            // `test ≤ total` within one index generation, so `total = source + test`
+            // holds; `saturating_sub` only guards against an underflow panic on a
+            // torn or corrupted stored value.
             (Some(total), Some(total.saturating_sub(test)), Some(test))
         }
         _ => (None, None, None),
