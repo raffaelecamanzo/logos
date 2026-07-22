@@ -270,6 +270,58 @@ fn reconcile_inserts_in_symbol_order_and_drops_unresolved_targets() {
     );
 }
 
+/// The fileless-identity-node path: a repo-scoped node with `file_id: None`
+/// (a broker `Topic` — the reason `Promoted::file_id` is `Option` rather than a
+/// bare id) inserts and persists with no anchoring file, and a symbol-keyed edge
+/// to it resolves inside the same batch (the topics-pass keying strategy).
+#[test]
+fn reconcile_inserts_a_fileless_identity_node_and_links_to_it_by_symbol() {
+    let (_tmp, rt) = runtime();
+    let file = seed_file(&rt, "src/fixture.rs");
+
+    let desired = vec![
+        // The fileless repo-scoped identity node (topics-style `Topic`).
+        Promoted {
+            symbol: sym("topic_orders"),
+            kind: NodeKind::Topic,
+            name: "topic_orders".to_string(),
+            file_id: None,
+            start_line: None,
+            end_line: None,
+            edges: vec![],
+        },
+        // A file-anchored producer that names the topic by symbol.
+        Promoted {
+            symbol: sym("producer_site"),
+            kind: NodeKind::Producer,
+            name: "producer_site".to_string(),
+            file_id: Some(file),
+            start_line: Some(3),
+            end_line: Some(3),
+            edges: vec![TestEdge::RouteTo("local topic_orders".to_string())],
+        },
+    ];
+
+    reconcile(&rt, &[], &all_edges(&rt), desired, owned, resolve).expect("reconcile");
+
+    let nodes = all_nodes(&rt);
+    let topic = nodes
+        .iter()
+        .find(|n| n.name == "topic_orders")
+        .expect("the fileless identity node is inserted");
+    assert_eq!(topic.kind, NodeKind::Topic);
+    assert!(
+        topic.file_path.is_none(),
+        "a repo-scoped identity node persists with no anchoring file (file_id None)"
+    );
+
+    let producer = id_of(&nodes, "producer_site").expect("the producer is inserted");
+    assert!(
+        has_edge(&all_edges(&rt), producer, topic.id, EdgeKind::RoutesTo),
+        "a symbol-keyed edge to the fileless node resolves inside the batch"
+    );
+}
+
 /// Idempotency: reconciling twice to the same desired set is a no-op on the
 /// second run — identical node ids and identical edge set.
 #[test]
