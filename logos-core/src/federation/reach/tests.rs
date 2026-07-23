@@ -5,7 +5,9 @@
 //! so the union composition — promotion, monotonicity, tri-state preservation,
 //! the coverage rider — is exercised over surfaces the test states exactly. The
 //! real engine path (a 2-repo workspace, real index) is proven end-to-end in
-//! `tests/xservice_reachability.rs`.
+//! `tests/xservice_reachability.rs` (the union view over real engines) and
+//! `tests/xservice_reachability_broker_promotion.rs` (the real-path promotion of a
+//! dead broker subscriber, S-291 / [FR-WS-12] AC1).
 //!
 //! [FR-WS-12]: ../../../../docs/specs/requirements/FR-WS-12.md
 //! [ADR-56]: ../../../../docs/specs/architecture/decisions/ADR-56.md
