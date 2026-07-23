@@ -259,7 +259,7 @@ mod rust_capture_tests {
     #[test]
     fn bus_publish_and_subscribe_capture_static_topics_only() {
         let src = r#"
-const TOPIC: &str = "shipments";
+const TOPIC: &str = "never-captured";
 
 fn on_order(bus: &Bus) {
     bus.subscribe("orders");
@@ -267,6 +267,12 @@ fn on_order(bus: &Bus) {
 
 fn emit(bus: &Bus, payload: &str) {
     bus.publish("orders", payload);
+}
+
+// The `send` producer verb, on a distinct topic — exercises the second half of
+// the `#any-of? "publish" "send"` predicate and a second static publish topic.
+fn ship(bus: &Bus, payload: &str) {
+    bus.send("shipments", payload);
 }
 
 fn emit_dynamic(bus: &Bus, payload: &str) {
@@ -283,8 +289,9 @@ fn emit_dynamic(bus: &Bus, payload: &str) {
         );
         assert_eq!(
             targets(&facts, ArtifactRelation::BrokerPublish),
-            vec!["orders".to_string()],
-            "only the static-topic publish is captured; publish(TOPIC, …) is not: {:?}",
+            vec!["orders".to_string(), "shipments".to_string()],
+            "both the `publish` and the `send` static-topic producers are captured; \
+             publish(TOPIC, …) is not: {:?}",
             facts.refs
         );
 
@@ -311,16 +318,22 @@ fn emit_dynamic(bus: &Bus, payload: &str) {
             "the subscribe is sourced from its handler fn: {}",
             sub.source.as_str()
         );
-        let publish = facts
-            .refs
-            .iter()
-            .find(|r| r.relation == Some(ArtifactRelation::BrokerPublish))
-            .unwrap();
-        assert!(
-            publish.source.as_str().contains("emit"),
-            "the publish is sourced from its publishing fn: {}",
-            publish.source.as_str()
-        );
+        // Each producer ref is attributed to its own enclosing fn — the `publish`
+        // site to `emit`, the `send` site to `ship`.
+        for (topic, enclosing) in [("orders", "emit"), ("shipments", "ship")] {
+            let publish = facts
+                .refs
+                .iter()
+                .find(|r| {
+                    r.relation == Some(ArtifactRelation::BrokerPublish) && r.target == topic
+                })
+                .unwrap_or_else(|| panic!("a publish ref for `{topic}` exists: {:?}", facts.refs));
+            assert!(
+                publish.source.as_str().contains(enclosing),
+                "the `{topic}` publish is sourced from its publishing fn `{enclosing}`: {}",
+                publish.source.as_str()
+            );
+        }
     }
 
     /// The rdkafka slice form `consumer.subscribe(&["a", "b"])` captures each
@@ -339,6 +352,21 @@ fn consume(consumer: &Consumer) {
             "each topic in the subscribe slice binds: {:?}",
             facts.refs
         );
+        // The slice form routes the topic node through a different tree shape
+        // (reference_expression → array_expression) than the scalar form, so its
+        // enclosing-symbol attribution is asserted explicitly: every slice topic is
+        // sourced from the handler `consume`, not the file module.
+        for r in facts
+            .refs
+            .iter()
+            .filter(|r| r.relation == Some(ArtifactRelation::BrokerSubscribe))
+        {
+            assert!(
+                r.source.as_str().contains("consume"),
+                "the slice subscribe is sourced from its handler fn: {}",
+                r.source.as_str()
+            );
+        }
     }
 }
 
