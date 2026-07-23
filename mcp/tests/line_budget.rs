@@ -24,7 +24,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
     total
 }
 
-/// Budget: ≤ 880 non-blank lines of Rust across the whole MCP adapter
+/// Budget: ≤ 920 non-blank lines of Rust across the whole MCP adapter
 /// (NFR-MA-02 thick-core/thin-surface invariant).
 ///
 /// Derivation (combined S-020, S-022, S-048, S-051, S-053 re-base): 28 `#[tool]`
@@ -95,14 +95,28 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 ///
 /// The same "honest, delegation-only addition" the S-284 precedent blesses.
 /// Flagged for the Sprint 57 human review as a deliberate governance decision.
+///
+/// S-294/CR-084 raises 900→920 for the `workspace_reachability` payload filter.
+/// Measured against the Sprint 57 base of 895, the change costs +18, landing the
+/// adapter at 913; 920 is that measurement plus the usual small headroom, not a
+/// number bumped until the test went green (CR-084 §4.4 owns and blesses the raise
+/// where the growth happens, per the S-256/S-258 budget-drift lesson).
+///
+/// The addition is delegation-only, so there is no logic to trim: the tool gains a
+/// typed `XserviceReachabilityParams` (`repo`/`all`) and constructs a
+/// `federation::ReachabilityScope` from the two parsed flags before delegating to
+/// ONE `federation::app_wide_reachability(..).bound(scope)` call. The scoped,
+/// promotions-only projection — the member filter, the honest-empty `dead: None`
+/// suppression, and the `all → !promotions_only` inversion — all live in
+/// `logos_core::federation::reach`; the surface only parses and delegates.
 #[test]
 fn mcp_surface_line_budget() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 900,
-        "mcp adapter exceeds the 900 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 920,
+        "mcp adapter exceeds the 920 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

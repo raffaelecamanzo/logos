@@ -118,12 +118,20 @@ fn adapter_lines() -> usize {
 /// new surface), and the budget is set to 745 to fit with headroom. Future
 /// logic-creep in ANY `cli/src/*.rs` now counts. Flagged for the Sprint 55 human
 /// review. Do not raise the number without a story-level justification.
+///
+/// S-294/CR-084 745→760 for the `workspace reachability` payload filter: the
+/// `Reachability` command variant gains `--repo`/`--all` `#[arg]` declarations and
+/// its dispatch arm builds a `federation::ReachabilityScope` before delegating to
+/// the same one `app_wide_reachability(..).bound(scope)` call (+6 measured, landing
+/// at 751). The scoped, promotions-only projection lives entirely in
+/// `logos_core::federation::reach` (verified by `logos check`); the adapter only
+/// declares the flags and delegates. CR-084 §4.4 owns and blesses this raise.
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 745,
-        "cli adapter exceeds the 745 production-LOC budget (NFR-MA-02): \
+        lines <= 760,
+        "cli adapter exceeds the 760 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

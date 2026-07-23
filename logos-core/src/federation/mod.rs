@@ -91,8 +91,9 @@ pub use manifest::{
     Governance, Link, NoCrossServiceCallers, ServiceBoundary, ServiceLayer, MANIFEST_FILENAME,
 };
 pub use reach::{
-    app_wide_reachability, AppWideReachability, AppWideVerdict, CoverageRider, MemberReachability,
-    ReachNode, ReachabilityClaim, ReachabilitySurface, UNION_VIEW,
+    app_wide_reachability, AppWideReachability, AppWideVerdict, BoundedReachability, CoverageRider,
+    MemberReachability, ReachNode, ReachabilityClaim, ReachabilityScope, ReachabilitySurface,
+    UNION_VIEW,
 };
 pub use query::{
     workspace_status, xservice_callers, xservice_impact, xservice_route_providers, xservice_search,

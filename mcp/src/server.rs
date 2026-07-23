@@ -752,6 +752,19 @@ pub struct XserviceRepoParams {
     pub repo: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct XserviceReachabilityParams {
+    /// Scope the union view to one workspace member (its workspace-relative name);
+    /// omit to project every member.
+    pub repo: Option<String>,
+    /// Return the full per-repo-dead set instead of only the (usually tiny)
+    /// cross-service promotions. Default false: the response carries only promoted
+    /// nodes and states `promotions_only`, so a bounded reply is never misread as
+    /// the complete dead-set (NFR-CC-04).
+    pub all: Option<bool>,
+}
+
 // ── The xservice cross-service tools (FR-WS-05) ─────────────────────────────
 // Registered ONLY on the federated backing, so single-root `tools/list` never
 // sees them. Each is a thin delegator to one thick-core `query::*` read-model.
@@ -822,11 +835,17 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "App-wide cross-service dead code (FR-WS-12): reachability over the union of every member's call graph plus the bridge's cross-service edges as extra live roots. Reports callables their own repo calls dead that a cross-service call keeps alive, and the ones still dead app-wide. Additive and monotone toward live — a missing invocation edge never marks anything dead. ADVISORY ONLY: never a gate input, and it never alters a repo's own dead-code verdict. Every claim carries a coverage rider stating how much of the invocation graph bound."
+        description = "App-wide cross-service dead code (FR-WS-12): reachability over the union of every member's call graph plus the bridge's cross-service edges as extra live roots. Reports callables their own repo calls dead that a cross-service call keeps alive, and the ones still dead app-wide. Additive and monotone toward live — a missing invocation edge never marks anything dead. ADVISORY ONLY: never a gate input, and it never alters a repo's own dead-code verdict. Every claim carries a coverage rider stating how much of the invocation graph bound. `repo` scopes the view to one member. By default the payload is bounded to only the cross-service promotions (the usually-tiny interesting set) and states `promotions_only`; pass `all: true` for the full per-repo-dead set. Every applied bound is stated in the response, so a bounded reply is never the complete dead-set (NFR-CC-04)."
     )]
-    async fn workspace_reachability(&self) -> Result<CallToolResult, ErrorData> {
-        self.run_xservice("workspace_reachability", federation::app_wide_reachability)
-            .await
+    async fn workspace_reachability(
+        &self,
+        Parameters(p): Parameters<XserviceReachabilityParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let scope = federation::ReachabilityScope::new(p.repo, p.all.unwrap_or(false));
+        self.run_xservice("workspace_reachability", move |reg, edges| {
+            federation::app_wide_reachability(reg, edges).bound(scope)
+        })
+        .await
     }
 
     #[tool(
