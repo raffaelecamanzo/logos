@@ -79,8 +79,11 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     // Languages sized by node count.
     expect(screen.getByText("rust")).toBeInTheDocument();
     expect(screen.getByText(/1 grammar\(s\) skipped/i)).toBeInTheDocument();
-    // Graph compact counts.
+    // Graph compact counts — Files/Nodes/Edges/Resolution are unchanged by CR-085.
+    expect(screen.getByText("42")).toBeInTheDocument();
     expect(screen.getByText("1200")).toBeInTheDocument();
+    expect(screen.getByText("3400")).toBeInTheDocument();
+    expect(screen.getByText("80.0% (80 of 100 refs)")).toBeInTheDocument();
     // Graph card LOC figures (CR-085): total/source/test from the read-model,
     // plus a last-full-index caption.
     expect(screen.getByText("54321")).toBeInTheDocument();
@@ -136,7 +139,10 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     stub(m);
     render(<DashboardView />);
     // The rest of the Graph card (Files/Nodes/Edges/Resolution) is unchanged.
-    expect(await screen.findByText("1200")).toBeInTheDocument();
+    expect(await screen.findByText("42")).toBeInTheDocument();
+    expect(screen.getByText("1200")).toBeInTheDocument();
+    expect(screen.getByText("3400")).toBeInTheDocument();
+    expect(screen.getByText("80.0% (80 of 100 refs)")).toBeInTheDocument();
     expect(screen.getByText(/not yet computed/i)).toBeInTheDocument();
     // Never a fabricated `0` LOC figure.
     expect(screen.queryByText("0")).not.toBeInTheDocument();
