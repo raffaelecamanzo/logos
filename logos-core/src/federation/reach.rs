@@ -296,6 +296,87 @@ pub struct AppWideReachability {
     pub dead: Vec<ReachabilityClaim>,
 }
 
+/// The bounds applied to a [`BoundedReachability`] projection ([CR-084],
+/// [NFR-CC-04]).
+///
+/// This value is both the **input** that parameterises the projection and the
+/// label **echoed** back on the payload, so the stated bound can never drift from
+/// the applied one. A reader sees exactly which member the view was scoped to and
+/// whether the per-repo-dead set was suppressed — a filtered response can never be
+/// misread as the complete dead-set.
+///
+/// [CR-084]: ../../../docs/requests/CR-084-reachability-payload-filter.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReachabilityScope {
+    /// The member the view was scoped to (`--repo`), or `None` to project every
+    /// member.
+    pub repo: Option<String>,
+    /// `true` (the default) when only the cross-service promotions are carried and
+    /// the per-repo-dead set is **suppressed** — not computed empty. `--all` sets it
+    /// `false` and populates [`BoundedReachability::dead`].
+    pub promotions_only: bool,
+}
+
+impl ReachabilityScope {
+    /// Build a scope from the two parsed surface flags: an optional `--repo` member
+    /// and the `--all` escape hatch. Keeping the `all → !promotions_only` inversion
+    /// here — not in the MCP/CLI surface — is what lets those surfaces stay pure
+    /// param-parse delegators ([NFR-MA-02]).
+    ///
+    /// [NFR-MA-02]: ../../../docs/specs/requirements/NFR-MA-02.md
+    pub fn new(repo: Option<String>, all: bool) -> Self {
+        Self {
+            repo,
+            promotions_only: !all,
+        }
+    }
+}
+
+/// A scoped, honestly-bounded projection of the app-wide reachability view for a
+/// read surface ([CR-084], [FR-WS-12]).
+///
+/// The unbounded [`AppWideReachability`] carries every per-repo-dead callable of
+/// every member — an estimated ~500 KB of JSON for a large workspace, the payload
+/// class MCP tools are size-limited for. This projection bounds it with an
+/// **honest filter**, never a silent cap: [`scope`](Self::scope) states every
+/// applied bound, and [`dead`](Self::dead) is `None` (serialised `null`) when
+/// suppressed — distinct from `Some([])` ("computed, genuinely empty") — so a
+/// bounded response can never be read as the complete dead-set ([NFR-CC-04]).
+///
+/// [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BoundedReachability {
+    /// The view label ([`UNION_VIEW`]) — this is the union, not a member's gated
+    /// signal.
+    pub view: &'static str,
+    /// Always `true`: advisory, never a gate input ([ADR-56]).
+    pub advisory: bool,
+    /// The bounds applied to this projection — the honest label carried with the
+    /// payload so no filter is silent ([NFR-CC-04]).
+    pub scope: ReachabilityScope,
+    /// The coverage rider the whole view rests on. Workspace-wide, unaffected by
+    /// `scope`: it describes the invocation graph the view bound over, not the
+    /// projection applied to the payload.
+    pub coverage: CoverageRider,
+    /// Per-member tallies, restricted to the scoped member when a `--repo` bound is
+    /// applied. Sorted.
+    pub members: Vec<MemberReachability>,
+    /// Members the view could **not** read ([ADR-53]) — always reported
+    /// workspace-wide: a degraded member is context a scope must not hide.
+    pub skipped_members: Vec<String>,
+    /// The promotions: dead per-repo, live across the union — the usually-tiny
+    /// interesting set, always carried (never suppressed). Restricted to the scoped
+    /// member when a `--repo` bound is applied.
+    pub live_via_cross_service: Vec<ReachabilityClaim>,
+    /// The app-wide dead set, restricted to the scoped member when a `--repo` bound
+    /// is applied. `None` — serialised `null` — when
+    /// [`promotions_only`](ReachabilityScope::promotions_only) suppressed it, which
+    /// is deliberately distinct from `Some(vec![])` ("`--all`, and genuinely no dead
+    /// node"): the honest-empty distinction that keeps a bounded reply from reading
+    /// as a complete, empty dead-set ([NFR-CC-04]).
+    pub dead: Option<Vec<ReachabilityClaim>>,
+}
+
 /// Compute the app-wide cross-service reachability union view over `registry`'s
 /// members and the bridge `edges` ([FR-WS-12], [ADR-56]).
 ///
@@ -355,6 +436,51 @@ where
         skipped_members,
         live_via_cross_service,
         dead,
+    }
+}
+
+impl AppWideReachability {
+    /// Project this full view onto a [`BoundedReachability`] for a read surface,
+    /// applying — and stating — the [`ReachabilityScope`] bounds ([CR-084]).
+    ///
+    /// The projection is a **filter, never a cap**: a `--repo` scope drops other
+    /// members' tallies and claims, and the promotions-only default suppresses the
+    /// per-repo-dead set to `None`. The promotions are always carried in full (the
+    /// usually-tiny interesting set), and every bound applied is echoed in
+    /// [`BoundedReachability::scope`], so no bounded payload can be read as the
+    /// complete dead-set ([NFR-CC-04]).
+    pub fn bound(self, scope: ReachabilityScope) -> BoundedReachability {
+        // Borrows `scope.repo` immutably; its last use is the `dead` branch below,
+        // after which `scope` is free to move into the payload it labels.
+        let in_scope = |member: &str| match &scope.repo {
+            Some(repo) => member == repo,
+            None => true,
+        };
+        let members = self
+            .members
+            .into_iter()
+            .filter(|m| in_scope(&m.member))
+            .collect();
+        let live_via_cross_service = self
+            .live_via_cross_service
+            .into_iter()
+            .filter(|c| in_scope(&c.member))
+            .collect();
+        // `None` (suppressed), not `Some(vec![])` (computed empty) — the whole point
+        // of the promotions-only default is that the dead set was never emitted.
+        let dead = (!scope.promotions_only)
+            .then(|| self.dead.into_iter().filter(|c| in_scope(&c.member)).collect());
+
+        BoundedReachability {
+            view: self.view,
+            advisory: self.advisory,
+            coverage: self.coverage,
+            members,
+            skipped_members: self.skipped_members,
+            live_via_cross_service,
+            dead,
+            scope,
+        }
     }
 }
 

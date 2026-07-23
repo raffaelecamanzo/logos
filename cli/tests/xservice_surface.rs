@@ -333,17 +333,23 @@ fn impact_stitches_across_bridge_edges() {
     assert_eq!(cross[0]["via"]["from"]["member"], "api");
 }
 
-/// S-257 acceptance through the real binary: `workspace reachability` emits the
-/// app-wide union view — explicitly labeled advisory, with a coverage rider on
+/// S-257 acceptance through the real binary: `workspace reachability --all` emits
+/// the app-wide union view — explicitly labeled advisory, with a coverage rider on
 /// every claim, and a dead set that never exceeds what each repo already called
-/// dead ([FR-WS-12], [ADR-56]).
+/// dead ([FR-WS-12], [ADR-56]). `--all` is required for the full dead set: the
+/// default is bounded to promotions only (S-294, [CR-084], exercised below).
 #[test]
 fn workspace_reachability_is_labeled_advisory_and_riders_every_claim() {
     let tmp = workspace();
-    let view = logos_json(tmp.path(), &["workspace", "reachability"]);
+    let view = logos_json(tmp.path(), &["workspace", "reachability", "--all"]);
 
     assert_eq!(view["view"], "cross-service-union", "the view is explicitly labeled");
     assert_eq!(view["advisory"], true, "never a gate input (ADR-56)");
+
+    // Every applied bound is stated: `--all` unscoped ⇒ the full dead set, no member
+    // filter — so this response IS the complete dead-set and says so ([NFR-CC-04]).
+    assert_eq!(view["scope"]["promotions_only"], false, "--all populates the dead set");
+    assert!(view["scope"]["repo"].is_null(), "no member scope applied");
 
     // The rider the whole view rests on — the same coverage `workspace status`
     // reports, so a reachability claim can never be read without it.
@@ -388,6 +394,65 @@ fn workspace_reachability_is_labeled_advisory_and_riders_every_claim() {
             tally["member"]
         );
     }
+}
+
+/// CR-084 default through the real binary: `workspace reachability` (no `--all`) is
+/// bounded to the cross-service promotions and STATES `promotions_only`, with the
+/// per-repo-dead set suppressed to `null` — never `[]` — so a reader can never
+/// mistake the bounded reply for a complete, empty dead-set ([NFR-CC-04]). The view
+/// stays labeled, advisory, and carries the same coverage rider.
+#[test]
+fn workspace_reachability_default_is_promotions_only_and_states_the_bound() {
+    let tmp = workspace();
+    let view = logos_json(tmp.path(), &["workspace", "reachability"]);
+
+    assert_eq!(view["view"], "cross-service-union", "still the labeled union view");
+    assert_eq!(view["advisory"], true, "still advisory (ADR-56)");
+    assert_eq!(view["scope"]["promotions_only"], true, "the default states its bound");
+    assert!(view["scope"]["repo"].is_null(), "no member scope by default");
+    assert!(
+        view["dead"].is_null(),
+        "the per-repo-dead set is SUPPRESSED to null, not emitted as [] that would read \
+         as a complete, empty dead-set (NFR-CC-04): {}",
+        view["dead"]
+    );
+    // The promotions are always carried (empty on this contract-surface-only fixture
+    // per CR-083 — but present as an array, never suppressed).
+    assert!(
+        view["live_via_cross_service"].as_array().is_some(),
+        "the promotions bucket is always carried: {}",
+        view["live_via_cross_service"]
+    );
+    // The coverage rider still rides the bounded payload — same numbers as `--all`.
+    assert_eq!(view["coverage"]["bound"], 1, "the GET operation bound its route");
+    assert_eq!(view["coverage"]["members_read"], 2);
+}
+
+/// CR-084 `--repo` through the real binary: a member scope restricts every bucket to
+/// that member and states the scope. `web` owns the dead `orphan`; scoping to `api`
+/// (which has no per-repo dead callable) filters it out — a filter, never a cap.
+#[test]
+fn workspace_reachability_repo_scopes_to_one_member() {
+    let tmp = workspace();
+
+    let web = logos_json(tmp.path(), &["workspace", "reachability", "--all", "--repo", "web"]);
+    assert_eq!(web["scope"]["repo"], "web", "the member scope is stated");
+    for member in web["members"].as_array().expect("members array") {
+        assert_eq!(member["member"], "web", "only the scoped member's tally is carried");
+    }
+    let web_dead = web["dead"].as_array().expect("dead array under --all");
+    assert!(
+        web_dead.iter().any(|c| c["name"] == "orphan" && c["member"] == "web"),
+        "web's dead `orphan` is in scope: {web_dead:?}"
+    );
+
+    let api = logos_json(tmp.path(), &["workspace", "reachability", "--all", "--repo", "api"]);
+    assert_eq!(api["scope"]["repo"], "api");
+    let api_dead = api["dead"].as_array().expect("dead array under --all");
+    assert!(
+        !api_dead.iter().any(|c| c["name"] == "orphan"),
+        "orphan belongs to web, so an api scope filters it out: {api_dead:?}"
+    );
 }
 
 // ── Workspace governance over cross-service bindings (S-258, FR-WS-13) ──────

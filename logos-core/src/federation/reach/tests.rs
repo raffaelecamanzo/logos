@@ -801,3 +801,121 @@ fn at_least_one_language_is_both_broker_capturing_and_reachability_capable() {
         "Rust is the language S-291 gave both capabilities: {both:?}"
     );
 }
+
+// ── bound: the scoped, promotions-only payload projection (S-294, CR-084) ────
+//
+// The full view computed above is honest but unbounded (~500 KB on a large
+// workspace). `bound` projects it onto the read surface with an explicit filter —
+// a member scope and a promotions-only default — that STATES every applied bound,
+// so a filtered reply can never be misread as the complete dead-set (NFR-CC-04).
+
+/// CR-084 default: the promotions-only projection suppresses the per-repo-dead set
+/// to `None` (serialised `null`), not an empty vec, and states `promotions_only` —
+/// so a bounded reply can never read as a complete, empty dead-set (NFR-CC-04). The
+/// promotions (the interesting, usually-tiny set) are always carried in full.
+#[test]
+fn bound_promotions_only_default_suppresses_the_dead_set() {
+    reset();
+    set_surface("orders", orders_surface());
+    let view = app_wide_reachability(
+        &registry(&["orders"]),
+        &[edge_to("orders", "local on_order")],
+    );
+    // Precondition: the unbounded view has BOTH a promotion and a dead node, so the
+    // suppression below is meaningful rather than vacuous.
+    assert!(!view.live_via_cross_service.is_empty(), "on_order/render promote");
+    assert!(!view.dead.is_empty(), "orphan stays dead app-wide");
+
+    let bounded = view.bound(ReachabilityScope::new(None, false));
+
+    assert!(bounded.scope.promotions_only, "the default states its bound");
+    assert_eq!(bounded.scope.repo, None, "no member scope applied");
+    assert!(
+        bounded.dead.is_none(),
+        "promotions-only SUPPRESSES the dead set to null — not Some([]) that could read \
+         as a complete, empty dead-set (NFR-CC-04): {:?}",
+        bounded.dead
+    );
+    assert_eq!(
+        names(&bounded.live_via_cross_service),
+        ["on_order", "render"],
+        "the promotions are carried in full"
+    );
+    assert_eq!(bounded.view, UNION_VIEW);
+    assert!(bounded.advisory, "the projection is still advisory (ADR-56)");
+}
+
+/// CR-084 `--all`: the full per-repo-dead set is returned (as `Some`, never `null`),
+/// and every claim — dead and promoted — still carries the coverage rider it rests
+/// on (FR-WS-05, NFR-CC-04).
+#[test]
+fn bound_all_returns_the_full_per_repo_dead_set_with_the_rider() {
+    reset();
+    set_surface("orders", orders_surface());
+    let view = app_wide_reachability(
+        &registry(&["orders"]),
+        &[edge_to("orders", "local on_order")],
+    );
+    let full_dead: Vec<String> = view.dead.iter().map(|c| c.name.clone()).collect();
+    let rider = view.coverage;
+
+    let bounded = view.bound(ReachabilityScope::new(None, true));
+
+    assert!(!bounded.scope.promotions_only, "--all states promotions_only = false");
+    let dead = bounded.dead.expect("--all populates the dead set, never null");
+    assert_eq!(
+        names(&dead).iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        full_dead,
+        "the full per-repo-dead set, unfiltered"
+    );
+    for claim in dead.iter().chain(bounded.live_via_cross_service.iter()) {
+        assert_eq!(
+            claim.coverage, rider,
+            "claim {} must carry the coverage rider under --all",
+            claim.name
+        );
+    }
+}
+
+/// CR-084 `--repo`: a member scope drops every OTHER member's tally, promotions, and
+/// dead claims — a filter, never a cap. The scope is echoed so the reader sees the
+/// bound; an out-of-scope dead node is filtered out, not lost from a global count.
+#[test]
+fn bound_repo_scopes_every_bucket_to_one_member() {
+    reset();
+    set_surface("orders", orders_surface());
+    set_surface(
+        "billing",
+        ReachabilitySurface {
+            nodes: vec![callable("unused", "local unused", Some(true))],
+            edges: Vec::new(),
+        },
+    );
+    let view = app_wide_reachability(
+        &registry(&["orders", "billing"]),
+        &[edge_to("orders", "local on_order")],
+    );
+
+    let bounded = view.bound(ReachabilityScope::new(Some("orders".to_string()), true));
+
+    assert_eq!(bounded.scope.repo.as_deref(), Some("orders"), "the scope is stated");
+    assert_eq!(
+        bounded.members.iter().map(|m| m.member.as_str()).collect::<Vec<_>>(),
+        ["orders"],
+        "a --repo scope drops every other member's tally"
+    );
+    let dead = bounded.dead.expect("--all populates dead");
+    assert!(
+        dead.iter().all(|c| c.member == "orders"),
+        "the dead set is scoped to the member: {:?}",
+        names(&dead)
+    );
+    assert!(
+        bounded.live_via_cross_service.iter().all(|c| c.member == "orders"),
+        "the promotions are scoped to the member too"
+    );
+    assert!(
+        !names(&dead).contains(&"unused"),
+        "billing's dead `unused` is filtered out by the scope, not counted"
+    );
+}

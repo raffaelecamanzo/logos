@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use logos_core::federation::{
     app_wide_reachability, discover, query, workspace_governance, ContractBridge, EngineRegistry,
-    RegistryMode,
+    ReachabilityScope, RegistryMode,
 };
 use logos_core::{model::NodeKind, Engine};
 
@@ -88,7 +88,19 @@ pub(crate) enum WorkspaceCommands {
     /// call graph plus the bridge's edges as extra live roots. Advisory only —
     /// never a gate input, never alters a repo's own dead-code verdict. Every
     /// claim carries a coverage rider.
-    Reachability,
+    ///
+    /// By default the payload is bounded to only the cross-service promotions and
+    /// states every applied bound, so a bounded reply is never read as the complete
+    /// dead-set ([NFR-CC-04]).
+    Reachability {
+        /// Scope the union view to one workspace member (its workspace-relative name).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Return the full per-repo-dead set instead of only the cross-service
+        /// promotions (the default).
+        #[arg(long)]
+        all: bool,
+    },
     /// Evaluate the workspace governance rules (`[governance]` in
     /// logos.workspace.toml) over the cross-service bridge bindings (FR-WS-13).
     ///
@@ -179,10 +191,11 @@ pub(crate) fn run_workspace(command: WorkspaceCommands, root: &Path, out: &Outpu
     let registry = registry(root)?;
     match command {
         WorkspaceCommands::Status => out.print(&query::workspace_status(&registry))?,
-        WorkspaceCommands::Reachability => {
+        WorkspaceCommands::Reachability { repo, all } => {
             let bridge = ContractBridge::new();
             let edges = query::edges(&bridge, &registry);
-            out.print(&app_wide_reachability(&registry, &edges))?;
+            let scope = ReachabilityScope::new(repo, all);
+            out.print(&app_wide_reachability(&registry, &edges).bound(scope))?;
         }
         WorkspaceCommands::Check => {
             let bridge = ContractBridge::new();
