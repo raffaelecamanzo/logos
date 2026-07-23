@@ -48,35 +48,35 @@
 //!
 //! [CR-083]: ../../../docs/requests/CR-083-reachability-invocation-edge-roots.md
 //!
-//! # Why the promotion set is empty on every real workspace today
+//! # The promotion path is reachable on a real index (S-291, [CR-081])
 //!
 //! The composition is correct and its roots **do** resolve — since S-256 the broker
 //! arm emits bridge edges whose provider endpoint is the real subscribing method,
-//! an ordinary callable (not a promoted marker node). What still cannot happen is
-//! the *promotion itself*, and the reason is a *language-capability* gap, not a
-//! missing arm:
+//! an ordinary callable (not a promoted marker node). Promotion additionally needs
+//! a node that is both broker-rooted and dead-verdicted per-repo:
 //!
 //! - A node is a promotion candidate only if its per-repo verdict is
 //!   `is_dead = Some(true)` (see [`member_view`]). Everything else is skipped.
 //! - `is_dead` is only computed for a file whose language declares the
 //!   `reachability` capability ([CR-043], [`crate::annotate`]); otherwise it is
-//!   `NULL`. Today **`rust` is the only such language**.
+//!   `NULL`.
 //! - Capturing a broker *subscribe* requires the language to ship a `brokers.scm`
-//!   query. Today **`java` is the only such language**.
+//!   query.
 //!
-//! The two sets are **disjoint**, so no node can be both broker-rooted and
-//! dead-verdicted, and the promotion bucket is provably empty on a real index.
-//! (Behind that sits a second gate: the canonical Spring listener is `public`, and
-//! java's `public-modifier` export convention makes an exported node a per-repo
-//! live root — `is_dead = Some(false)` — so even a reachability-capable java would
-//! only promote a *package-private* listener.)
+//! Those two capability sets were **disjoint** until S-291 (`java` had brokers,
+//! `rust` had reachability), which is why the promotion bucket was provably empty
+//! on every real index. S-291 ([CR-081]) gives **Rust** the `brokers` capability,
+//! so a Rust subscriber handler can now be dead per-repo AND rooted by a
+//! cross-service publish. Because Rust's `visibility-modifier` export convention
+//! makes only a non-`pub` handler a non-root, the promotion lifts precisely a
+//! *package-private, uncalled* subscriber reached solely across the member boundary.
 //!
-//! This is the view being correct and inert, not the view being wrong — but the
-//! inertness is a property of the **plugin capability matrix**, so it is pinned
-//! there by `federation::reach::tests::the_broker_promotion_path_is_still_blocked_
-//! by_the_capability_matrix`, which fails the day a language becomes both
-//! broker-capable and reachability-capable. That is the moment to write the
-//! real-path promotion E2E [FR-WS-12] AC1 ultimately wants.
+//! That the intersection is non-empty is asserted directly against the live plugin
+//! manifests by `federation::reach::tests::at_least_one_language_is_both_broker_
+//! capturing_and_reachability_capable` (the inversion of the former
+//! `..._is_still_blocked_by_the_capability_matrix` tripwire), and the real-path
+//! promotion it unblocks is proven end-to-end in
+//! `tests/xservice_reachability_broker_promotion.rs` ([FR-WS-12] AC1).
 //!
 //! # Advisory, never a gate input ([ADR-56])
 //!

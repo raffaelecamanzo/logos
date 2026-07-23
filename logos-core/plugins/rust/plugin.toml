@@ -34,8 +34,11 @@ abi_version = 15
 # requires. `symbols` captures declarations (S-007); `references` captures
 # call paths, method calls, and `use` imports for the resolution pass (S-011);
 # `frameworks` captures Axum/Actix route- and component-promotion anchors for
-# the framework pass (S-012, FR-FW-01..04).
-capabilities = ["symbols", "references", "frameworks", "invocations"]
+# the framework pass (S-012, FR-FW-01..04); `brokers` captures message-broker
+# publish/subscribe sites keyed by topic (S-291, FR-WS-10) — Rust also declares
+# `reachability` below, so it is the first language to satisfy both halves of
+# the app-wide reachability promotion path (CR-081, FR-WS-12 AC1).
+capabilities = ["symbols", "references", "frameworks", "invocations", "brokers"]
 
 # Keywords that increment cyclomatic complexity for this language. Declarative
 # so it becomes tunable via a descriptor override once descriptor shadowing lands
@@ -83,3 +86,7 @@ symbols = "queries/symbols.scm"
 references = "queries/references.scm"
 frameworks = "queries/frameworks.scm"
 invocations = "queries/invocations.scm"
+# Message-broker publish/subscribe invocation arm (S-291, FR-WS-10): generic
+# message-bus `publish`/`send`/`subscribe` method calls, keyed by a static
+# string-literal topic.
+brokers = "queries/brokers.scm"

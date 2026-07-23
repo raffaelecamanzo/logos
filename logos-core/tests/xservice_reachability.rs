@@ -225,12 +225,14 @@ fn the_union_view_is_advisory_riderd_and_never_exceeds_the_per_repo_dead_set() {
          reachability surface — BridgeEndpoint.symbol and NodeRow.symbol share a spelling"
     );
 
-    // Nothing is promoted — the view being correct, not broken. Even before CR-083
-    // (when this contract-surface edge DID seed a root) the provider was web's
-    // framework `Route`, which the per-repo walk already roots (ADR-56's own Notes),
-    // so there was never anything dead to lift. The real guard on the promotion path
-    // lives where the blocker actually is — the plugin capability matrix — in
-    // `federation::reach::tests::the_broker_promotion_path_is_still_blocked_by_the_capability_matrix`.
+    // Nothing is promoted in THIS fixture — the view being correct, not broken. Even
+    // before CR-083 (when this contract-surface edge DID seed a root) the provider was
+    // web's framework `Route`, which the per-repo walk already roots (ADR-56's own
+    // Notes), so there was never anything dead to lift here. The real-path promotion
+    // (a dead broker subscriber lifted across a cross-member edge) is proven in
+    // `tests/xservice_reachability_broker_promotion.rs` (S-291, [FR-WS-12] AC1); the
+    // capability-matrix intersection it rests on is pinned by
+    // `federation::reach::tests::at_least_one_language_is_both_broker_capturing_and_reachability_capable`.
     assert!(
         view.live_via_cross_service.is_empty(),
         "this fixture's only provider is a framework route (already a per-repo live root), \
