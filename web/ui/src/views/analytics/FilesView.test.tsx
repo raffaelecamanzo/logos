@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FilesModel } from "../../api/types.ts";
 import { FilesView } from "./FilesView.tsx";
 
-const STATUS = { indexed: true, file_count: 9, node_count: 99, edge_count: 80, db_path: ".logos/graph.db", db_size_bytes: 12288, last_full_index_at: "1719600000", last_sync_at: null, graph_revision: 7, refs_total: 120, refs_resolved: 118, refs_unresolved: 2, resolution_coverage: 0.983, freshness: "fresh", warnings: [] };
+const STATUS = { indexed: true, file_count: 9, node_count: 99, edge_count: 80, db_path: ".logos/graph.db", db_size_bytes: 12288, last_full_index_at: "1719600000", last_sync_at: null, graph_revision: 7, refs_total: 120, refs_resolved: 118, refs_unresolved: 2, resolution_coverage: 0.983, total_line_count: null, source_line_count: null, test_line_count: null, freshness: "fresh", warnings: [] };
 
 function model(over: Partial<FilesModel["hotspots"]> = {}): FilesModel {
   return {

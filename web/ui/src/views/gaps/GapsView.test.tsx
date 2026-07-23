@@ -30,6 +30,9 @@ const INDEXED = {
   refs_resolved: 10,
   refs_unresolved: 0,
   resolution_coverage: 1,
+  total_line_count: null,
+  source_line_count: null,
+  test_line_count: null,
   freshness: "fresh",
   warnings: [],
 };

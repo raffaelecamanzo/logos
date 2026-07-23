@@ -20,6 +20,9 @@ const OVERVIEW: OverviewModel = {
     refs_resolved: 80,
     refs_unresolved: 20,
     resolution_coverage: 0.8,
+    total_line_count: 54_321,
+    source_line_count: 43_210,
+    test_line_count: 11_111,
     freshness: "internal-citation",
     warnings: [],
   },
@@ -76,8 +79,17 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     // Languages sized by node count.
     expect(screen.getByText("rust")).toBeInTheDocument();
     expect(screen.getByText(/1 grammar\(s\) skipped/i)).toBeInTheDocument();
-    // Graph compact counts.
+    // Graph compact counts — Files/Nodes/Edges/Resolution are unchanged by CR-085.
+    expect(screen.getByText("42")).toBeInTheDocument();
     expect(screen.getByText("1200")).toBeInTheDocument();
+    expect(screen.getByText("3400")).toBeInTheDocument();
+    expect(screen.getByText("80.0% (80 of 100 refs)")).toBeInTheDocument();
+    // Graph card LOC figures (CR-085): total/source/test from the read-model,
+    // plus a last-full-index caption.
+    expect(screen.getByText("54321")).toBeInTheDocument();
+    expect(screen.getByText("43210")).toBeInTheDocument();
+    expect(screen.getByText("11111")).toBeInTheDocument();
+    expect(screen.getByText(/reflect the last full index/i)).toBeInTheDocument();
     // Project Overview snippet (markdown reduced to prose).
     expect(screen.getByText(/Logos is a structural code-intelligence engine/i)).toBeInTheDocument();
     // Rule findings widget: the passing (green) state names the checked-rule count.
@@ -117,6 +129,23 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     expect(screen.getByText(/No languages indexed/i)).toBeInTheDocument();
     // No fabricated percentage when there is no coverage / no signal.
     expect(screen.queryByText(/%$/)).not.toBeInTheDocument();
+  });
+
+  it("Graph card LOC rows show an honest empty state when the roll-up is absent, never a fabricated 0 (CR-085, NFR-CC-04)", async () => {
+    const m = clone();
+    m.status.total_line_count = null;
+    m.status.source_line_count = null;
+    m.status.test_line_count = null;
+    stub(m);
+    render(<DashboardView />);
+    // The rest of the Graph card (Files/Nodes/Edges/Resolution) is unchanged.
+    expect(await screen.findByText("42")).toBeInTheDocument();
+    expect(screen.getByText("1200")).toBeInTheDocument();
+    expect(screen.getByText("3400")).toBeInTheDocument();
+    expect(screen.getByText("80.0% (80 of 100 refs)")).toBeInTheDocument();
+    expect(screen.getByText(/not yet computed/i)).toBeInTheDocument();
+    // Never a fabricated `0` LOC figure.
+    expect(screen.queryByText("0")).not.toBeInTheDocument();
   });
 
   it("Rule findings widget — green passing state when rules pass with zero violations", async () => {

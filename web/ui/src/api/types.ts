@@ -223,6 +223,16 @@ export interface StatusInfo {
   refs_unresolved: number;
   /** 0..1 fraction of references resolved. */
   resolution_coverage: number;
+  /** Total physical LOC from the last full index's roll-up (FR-IX-12, CR-085);
+   *  `null` when no full index has computed it yet — render an honest empty
+   *  state, never a fabricated `0` (NFR-CC-04). */
+  total_line_count: number | null;
+  /** Source (non-test) physical LOC, `total_line_count − test_line_count`.
+   *  `null` in lock-step with `total_line_count`. */
+  source_line_count: number | null;
+  /** Test physical LOC (FR-AN-05 test-path conventions). `null` in lock-step
+   *  with `total_line_count`. */
+  test_line_count: number | null;
   /** The ADR-11 freshness citation prose (internal — not user-facing here). */
   freshness: string;
   warnings: string[];
