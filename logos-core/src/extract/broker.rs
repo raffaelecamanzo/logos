@@ -223,6 +223,153 @@ mod tests {
     }
 }
 
+// The end-to-end `.scm` capture over real Rust source runs only when the Rust
+// grammar is compiled in (S-291): Rust is the language that declares BOTH the
+// `brokers` capability and `reachability`, so its capture is what makes the
+// app-wide reachability promotion path reachable on a real index ([CR-081],
+// [FR-WS-12] AC1).
+#[cfg(all(test, feature = "lang-rust"))]
+mod rust_capture_tests {
+    use super::*;
+    use crate::extract::{extract, FileInput, SymbolContext};
+    use crate::plugin::LanguageRegistry;
+
+    fn extract_rust(src: &str) -> Facts {
+        let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+        let plugin = registry.for_extension("rs").expect("rust plugin present");
+        extract(&FileInput::new("svc.rs", src), plugin, &SymbolContext::default())
+    }
+
+    fn targets(facts: &Facts, relation: ArtifactRelation) -> Vec<String> {
+        let mut t: Vec<String> = facts
+            .refs
+            .iter()
+            .filter(|r| r.relation == Some(relation))
+            .map(|r| r.target.clone())
+            .collect();
+        t.sort();
+        t
+    }
+
+    /// A `bus.subscribe("orders")` consumer and a `bus.publish("orders", …)`
+    /// producer are each captured as a topic-keyed broker reference, under the
+    /// correct relation, attributed to their enclosing function. A dynamic
+    /// (non-literal) topic captures nothing — honestly unbound, never guessed
+    /// ([FR-WS-10], [NFR-RA-05]).
+    #[test]
+    fn bus_publish_and_subscribe_capture_static_topics_only() {
+        let src = r#"
+const TOPIC: &str = "never-captured";
+
+fn on_order(bus: &Bus) {
+    bus.subscribe("orders");
+}
+
+fn emit(bus: &Bus, payload: &str) {
+    bus.publish("orders", payload);
+}
+
+// The `send` producer verb, on a distinct topic — exercises the second half of
+// the `#any-of? "publish" "send"` predicate and a second static publish topic.
+fn ship(bus: &Bus, payload: &str) {
+    bus.send("shipments", payload);
+}
+
+fn emit_dynamic(bus: &Bus, payload: &str) {
+    bus.publish(TOPIC, payload);
+}
+"#;
+        let facts = extract_rust(src);
+
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["orders".to_string()],
+            "the bus.subscribe topic is captured as a subscribe ref: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["orders".to_string(), "shipments".to_string()],
+            "both the `publish` and the `send` static-topic producers are captured; \
+             publish(TOPIC, …) is not: {:?}",
+            facts.refs
+        );
+
+        // Both refs are ledger-only artifact→artifact facts under the arm tokens.
+        for r in facts.refs.iter().filter(|r| {
+            matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )
+        }) {
+            assert_eq!(r.kind, crate::model::EdgeKind::ArtifactRef);
+            assert_eq!(r.form, RefForm::Method);
+        }
+
+        // The subscribe ref is attributed to its handler fn, the publish ref to
+        // the publishing fn — not the file module.
+        let sub = facts
+            .refs
+            .iter()
+            .find(|r| r.relation == Some(ArtifactRelation::BrokerSubscribe))
+            .unwrap();
+        assert!(
+            sub.source.as_str().contains("on_order"),
+            "the subscribe is sourced from its handler fn: {}",
+            sub.source.as_str()
+        );
+        // Each producer ref is attributed to its own enclosing fn — the `publish`
+        // site to `emit`, the `send` site to `ship`.
+        for (topic, enclosing) in [("orders", "emit"), ("shipments", "ship")] {
+            let publish = facts
+                .refs
+                .iter()
+                .find(|r| {
+                    r.relation == Some(ArtifactRelation::BrokerPublish) && r.target == topic
+                })
+                .unwrap_or_else(|| panic!("a publish ref for `{topic}` exists: {:?}", facts.refs));
+            assert!(
+                publish.source.as_str().contains(enclosing),
+                "the `{topic}` publish is sourced from its publishing fn `{enclosing}`: {}",
+                publish.source.as_str()
+            );
+        }
+    }
+
+    /// The rdkafka slice form `consumer.subscribe(&["a", "b"])` captures each
+    /// topic in the borrowed array, attributed to the enclosing handler.
+    #[test]
+    fn rdkafka_slice_subscribe_captures_every_topic() {
+        let src = r#"
+fn consume(consumer: &Consumer) {
+    consumer.subscribe(&["orders", "shipments"]);
+}
+"#;
+        let facts = extract_rust(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["orders".to_string(), "shipments".to_string()],
+            "each topic in the subscribe slice binds: {:?}",
+            facts.refs
+        );
+        // The slice form routes the topic node through a different tree shape
+        // (reference_expression → array_expression) than the scalar form, so its
+        // enclosing-symbol attribution is asserted explicitly: every slice topic is
+        // sourced from the handler `consume`, not the file module.
+        for r in facts
+            .refs
+            .iter()
+            .filter(|r| r.relation == Some(ArtifactRelation::BrokerSubscribe))
+        {
+            assert!(
+                r.source.as_str().contains("consume"),
+                "the slice subscribe is sourced from its handler fn: {}",
+                r.source.as_str()
+            );
+        }
+    }
+}
+
 // The end-to-end `.scm` capture over real Java source runs only when the Java
 // grammar is compiled in (the default feature set); the interpreter logic above
 // compiles unconditionally.

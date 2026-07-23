@@ -5,7 +5,9 @@
 //! so the union composition — promotion, monotonicity, tri-state preservation,
 //! the coverage rider — is exercised over surfaces the test states exactly. The
 //! real engine path (a 2-repo workspace, real index) is proven end-to-end in
-//! `tests/xservice_reachability.rs`.
+//! `tests/xservice_reachability.rs` (the union view over real engines) and
+//! `tests/xservice_reachability_broker_promotion.rs` (the real-path promotion of a
+//! dead broker subscriber, S-291 / [FR-WS-12] AC1).
 //!
 //! [FR-WS-12]: ../../../../docs/specs/requirements/FR-WS-12.md
 //! [ADR-56]: ../../../../docs/specs/architecture/decisions/ADR-56.md
@@ -751,28 +753,31 @@ fn the_verdict_wire_spellings_are_stable() {
     assert_eq!(serde_json::to_value(AppWideVerdict::Dead).unwrap(), "dead");
 }
 
-/// **The tripwire for [FR-WS-12] AC1's real-path proof.**
-///
-/// Every promotion test above drives a *fake* engine over a surface the test
-/// types by hand. That is deliberate — but it means nothing in the suite proves
-/// a promotion can happen on a real index, and the reason it cannot is not
-/// stated anywhere the compiler or CI can see it.
+/// **[FR-WS-12] AC1's capability-matrix half, asserted directly.**
 ///
 /// A node is promotable only when it is (a) rooted by a bridge edge and (b)
 /// verdicted `is_dead = Some(true)` per-repo. Since S-256 the broker arm roots
 /// real subscriber methods, so (a) is satisfied — but a broker subscribe is only
 /// *captured* by a language shipping a `brokers.scm` query, and `is_dead` is only
 /// *computed* for a language declaring the `reachability` capability ([CR-043]).
-/// Those two sets are disjoint today (`java` brokers, `rust` reachability), so
-/// the promotion set is empty on every real workspace — for a reason that has
-/// nothing to do with this module being wrong.
 ///
-/// This test pins that disjointness against the **live plugin manifests**, not a
-/// prose claim. The day a language declares both, it fails — and that is exactly
-/// the day someone must write the real-path promotion E2E ([FR-WS-12] AC1) that
-/// the fakes above only simulate.
+/// Those two sets were disjoint until S-291 (`java` brokers, `rust` reachability),
+/// which is why the promotion set was provably empty on every real workspace. S-291
+/// ([CR-081]) gives Rust the `brokers` capability, so Rust now declares **both** —
+/// a Rust subscriber handler can be dead per-repo AND rooted by a cross-service
+/// publish, opening the union view's promotion path on a real index.
+///
+/// This test pins the intersection against the **live plugin manifests**, not a
+/// prose claim: it is the inversion of the former
+/// `the_broker_promotion_path_is_still_blocked_by_the_capability_matrix` tripwire.
+/// The real-path promotion it unblocks is proven end-to-end in
+/// `tests/xservice_reachability_broker_promotion.rs` ([FR-WS-12] AC1). Were the
+/// intersection to empty again (a descriptor edit dropping `brokers` or
+/// `reachability` from every language), that E2E would go silently inert while
+/// every fake-surface promotion test above still passed — so this direct check is
+/// the guard that keeps the real path falsifiable.
 #[test]
-fn the_broker_promotion_path_is_still_blocked_by_the_capability_matrix() {
+fn at_least_one_language_is_both_broker_capturing_and_reachability_capable() {
     let registry = crate::plugin::LanguageRegistry::load(std::env::temp_dir())
         .expect("embedded grammars load");
 
@@ -785,14 +790,14 @@ fn the_broker_promotion_path_is_still_blocked_by_the_capability_matrix() {
         .collect();
 
     assert!(
-        both.is_empty(),
-        "{both:?} now declares BOTH the `brokers` capability and `reachability`, so a \
-         subscriber handler can finally be dead per-repo AND rooted by a cross-service \
-         publish — the union view's promotion path is reachable on a real index for the \
-         first time. Write the real-path promotion E2E that FR-WS-12 AC1 wants (index a \
-         2-repo workspace, publish in one member, an uncalled package-private subscriber \
-         in the other, assert it lands in `live_via_cross_service`), then delete this test. \
-         NB: an `exported` listener is already a per-repo live root, so the fixture's \
-         subscriber must not be exported under its language's export convention."
+        !both.is_empty(),
+        "the capability-matrix intersection (broker-subscribe-capturing ∩ \
+         reachability-capable) must be non-empty for the app-wide reachability \
+         promotion path to be reachable on a real index ([FR-WS-12] AC1, [CR-081]); \
+         no language declares BOTH `brokers` and `reachability`"
+    );
+    assert!(
+        both.contains(&"rust"),
+        "Rust is the language S-291 gave both capabilities: {both:?}"
     );
 }

@@ -784,6 +784,15 @@ fn rust_entry() -> GrammarEntry {
                 label: "rust/queries/invocations.scm",
                 source: include_str!("../../plugins/rust/queries/invocations.scm"),
             },
+            // The message-broker publish/subscribe invocation arm (S-291,
+            // [FR-WS-10]): a per-language `.scm` is the entire capture surface.
+            // Rust ships it alongside `reachability = true`, closing the
+            // capability-matrix gap ([CR-081], [FR-WS-12] AC1).
+            EmbeddedQuery {
+                relative_path: "queries/brokers.scm",
+                label: "rust/queries/brokers.scm",
+                source: include_str!("../../plugins/rust/queries/brokers.scm"),
+            },
         ],
     }
 }
