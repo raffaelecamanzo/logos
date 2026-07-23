@@ -195,6 +195,15 @@ it across processes to detect a stale cache), and the freshness posture
 (navigation serves the latest committed snapshot; it never reconciles per
 call).
 
+The read-model also carries a source/test **lines-of-code roll-up**:
+`total_line_count`, `source_line_count`, and `test_line_count` (with
+`total == source + test`). Like `indexed_loc`, the roll-up is computed at
+**full-`index`** time and may lag after an incremental `sync` until the next
+full index; when it has not been computed the three fields are `null` (never a
+fabricated `0`). The same three fields ride the MCP `status` tool and the web
+`/api/v1/overview` bundle, and surface on the Dashboard Graph card (see
+[Dashboard](usage.md)).
+
 ## Navigation
 
 ### `search`
@@ -511,6 +520,8 @@ and never feeds any member's quality gate ([ADR-53](../specs/architecture/decisi
 
 ```bash
 logos workspace reachability [--json]
+logos workspace reachability --repo <member> [--json]   # scope to one member
+logos workspace reachability --all [--json]              # include the full per-repo-dead set
 ```
 
 The **app-wide cross-service reachability union view** — a separate, explicitly
@@ -519,6 +530,17 @@ cross-service invocation edges folded in as extra live roots. It answers the one
 question a per-repo dead-code verdict structurally cannot: *is this callable dead
 only because the thing that calls it lives in another repo?* A handler reachable
 only via a matched cross-service call is reported live in this view.
+
+**Scope and default.** By default the response carries only the **promotions**
+(nodes the union view flips from per-repo-dead to app-wide-live) — the payload a
+consumer almost always wants, kept well within the surface budget. The full
+per-repo-dead set is large and is suppressed unless you pass `--all`; `--repo
+<member>` narrows either view to a single workspace member. The response states
+**every** applied bound explicitly under `scope` (`scope.repo`,
+`scope.promotions_only`) so a filtered reply can never be mistaken for the
+complete dead-set. The projection is a filter, never a silent cap: a suppressed
+dead set serialises as `null`, never as an empty `[]` that would read as "nothing
+is dead".
 
 The composition is **additive and monotone toward live** — a missing invocation
 edge never marks anything dead, and a node whose per-repo verdict is `NULL`

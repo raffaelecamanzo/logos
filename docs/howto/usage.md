@@ -509,8 +509,13 @@ generated" empty state rather than a fabricated overview. One widget slot holds
 the **Rule findings** card projecting `check_rules` (FR-GV-02): it reads **green**
 when there are zero rule violations, **red** when there are findings, and a muted
 **onboarding** state when no `.logos/rules.toml` exists — with a link into the
-Rule findings view (`/gaps`). Loading the Dashboard writes nothing to any
-store.
+Rule findings view (`/gaps`). The **Graph card** lists Files / Nodes / Edges /
+Resolution and, below them, the source/test **lines-of-code roll-up** — Total,
+Source, and Test LOC — mirrored from the `status` read-model's
+`total_line_count` / `source_line_count` / `test_line_count`, with a caption
+noting the figures reflect the last full index. When the roll-up has not been
+computed the card renders an honest empty state for those rows rather than a
+fabricated `0`. Loading the Dashboard writes nothing to any store.
 
 **The `/api/v1/*` data API.** The SPA reads every view's data from a same-origin
 JSON read-model API under `/api/v1/*` — one read-only endpoint per view's data,
