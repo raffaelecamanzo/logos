@@ -209,9 +209,18 @@ function LanguagesCard({
   );
 }
 
-/** *Graph (compact)* — structural counts + resolution coverage from `status`. */
+/** *Graph (compact)* — structural counts + resolution coverage from `status`,
+ *  plus the CR-085 total/source/test physical-LOC roll-up. The roll-up is
+ *  computed only at full-index time ([FR-IX-12]); on a graph where it is not
+ *  yet computed, all three figures are `null` in lock-step, so the rows
+ *  degrade to a single honest empty state rather than a fabricated `0`
+ *  ([NFR-CC-04]). */
 function GraphCard({ status }: { status: StatusInfo }) {
   const resolution = `${(status.resolution_coverage * 100).toFixed(1)}% (${status.refs_resolved} of ${status.refs_total} refs)`;
+  const locComputed =
+    status.total_line_count !== null &&
+    status.source_line_count !== null &&
+    status.test_line_count !== null;
   return (
     <Card title="Graph">
       <dl className={styles.statList}>
@@ -223,8 +232,23 @@ function GraphCard({ status }: { status: StatusInfo }) {
         <dd className="mono num">{status.edge_count}</dd>
         <dt>Resolution</dt>
         <dd className="mono">{resolution}</dd>
+        {locComputed && (
+          <>
+            <dt>Total LOC</dt>
+            <dd className="mono num">{status.total_line_count}</dd>
+            <dt>Source LOC</dt>
+            <dd className="mono num">{status.source_line_count}</dd>
+            <dt>Test LOC</dt>
+            <dd className="mono num">{status.test_line_count}</dd>
+          </>
+        )}
       </dl>
       <p className="muted">A partial resolution figure is expected — many references resolve lazily.</p>
+      {locComputed ? (
+        <p className="muted">LOC figures reflect the last full index.</p>
+      ) : (
+        <EmptyState message="LOC figures not yet computed — run a full" command="logos index" />
+      )}
     </Card>
   );
 }
