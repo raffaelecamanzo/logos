@@ -26,9 +26,19 @@
 ; consumer — narrowed to a leading static-string-literal topic. This mirrors the
 ; Java template-send capture (a method-name predicate + a first-argument string
 ; literal) and stays honest: a bare `channel.send(struct)` carries no string
-; topic and never matches, and the real Rust source tree carries no
+; topic and never matches, and the real Logos source tree carries no
 ; `.send("literal")` / `.publish("literal")` / `.subscribe("literal")` site, so
 ; the capture adds no spurious broker node when Logos indexes itself.
+;
+; Scope of that no-false-positive claim: it is measured against Logos's OWN tree,
+; not every project Logos may index. On an arbitrary codebase a non-broker
+; `.send("literal")` (e.g. a `Sender<&str>` channel) or `.subscribe("literal")`
+; could match. The blast radius is bounded on two axes: (1) the broker fan-out and
+; the app-wide reachability view it feeds are advisory, never a gate input
+; ([ADR-56]) — a spurious topic node cannot move any member's dead-code signal; and
+; (2) a lone publish with no cross-member subscriber on the same static topic
+; produces no bridge edge and no promotion. A future arm may narrow the producer
+; verbs or gate on a receiver-type heuristic if advisory noise is reported.
 ;
 ; Droppable on disk at `.logos/plugins/rust/queries/brokers.scm` ([FR-PL-04]).
 
