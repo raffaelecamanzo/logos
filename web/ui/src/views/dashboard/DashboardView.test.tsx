@@ -89,7 +89,13 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     expect(screen.getByText("54321")).toBeInTheDocument();
     expect(screen.getByText("43210")).toBeInTheDocument();
     expect(screen.getByText("11111")).toBeInTheDocument();
+    // Full LOC labels (the compact "Total LOC" wording was expanded on reorder).
+    expect(screen.getByText(/Total Lines of Code/i)).toBeInTheDocument();
+    expect(screen.getByText(/Source Lines of Code/i)).toBeInTheDocument();
+    expect(screen.getByText(/Test Lines of Code/i)).toBeInTheDocument();
+    // Both footnotes render; the resolution caveat moved into the `**` footnote.
     expect(screen.getByText(/reflect the last full index/i)).toBeInTheDocument();
+    expect(screen.getByText(/partial resolution figure is expected/i)).toBeInTheDocument();
     // Project Overview snippet (markdown reduced to prose).
     expect(screen.getByText(/Logos is a structural code-intelligence engine/i)).toBeInTheDocument();
     // Rule findings widget: the passing (green) state names the checked-rule count.

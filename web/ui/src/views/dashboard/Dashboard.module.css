@@ -94,3 +94,19 @@
   text-align: right;
   color: var(--text-1);
 }
+
+/* ── Graph card footnotes ─────────────────────────────────────────────────────
+   Tight caption block: smaller than body text and with no inter-line gap, so the
+   `*`/`**` references read as a compact legend rather than two spaced paragraphs. */
+.footnotes {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+  color: var(--text-2);
+}
+.footnotes p {
+  margin: 0;
+}
+.footnoteMark {
+  color: var(--text-2);
+}

@@ -226,27 +226,36 @@ function GraphCard({ status }: { status: StatusInfo }) {
       <dl className={styles.statList}>
         <dt>Files</dt>
         <dd className="mono num">{status.file_count}</dd>
+        {locComputed && (
+          <>
+            <dt>
+              Total Lines of Code <sup className={styles.footnoteMark}>*</sup>
+            </dt>
+            <dd className="mono num">{status.total_line_count}</dd>
+            <dt>
+              Source Lines of Code <sup className={styles.footnoteMark}>*</sup>
+            </dt>
+            <dd className="mono num">{status.source_line_count}</dd>
+            <dt>
+              Test Lines of Code <sup className={styles.footnoteMark}>*</sup>
+            </dt>
+            <dd className="mono num">{status.test_line_count}</dd>
+          </>
+        )}
         <dt>Nodes</dt>
         <dd className="mono num">{status.node_count}</dd>
         <dt>Edges</dt>
         <dd className="mono num">{status.edge_count}</dd>
-        <dt>Resolution</dt>
+        <dt>
+          Resolution <sup className={styles.footnoteMark}>**</sup>
+        </dt>
         <dd className="mono">{resolution}</dd>
-        {locComputed && (
-          <>
-            <dt>Total LOC</dt>
-            <dd className="mono num">{status.total_line_count}</dd>
-            <dt>Source LOC</dt>
-            <dd className="mono num">{status.source_line_count}</dd>
-            <dt>Test LOC</dt>
-            <dd className="mono num">{status.test_line_count}</dd>
-          </>
-        )}
       </dl>
-      <p className="muted">A partial resolution figure is expected — many references resolve lazily.</p>
-      {locComputed ? (
-        <p className="muted">LOC figures reflect the last full index.</p>
-      ) : (
+      <div className={styles.footnotes}>
+        {locComputed && <p>* LOC figures reflect the last full index</p>}
+        <p>** A partial resolution figure is expected, many references resolve lazily</p>
+      </div>
+      {!locComputed && (
         <EmptyState message="LOC figures not yet computed — run a full" command="logos index" />
       )}
     </Card>
