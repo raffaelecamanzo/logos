@@ -1146,6 +1146,55 @@ fn ledger_keeps_both_relay_legs_but_still_dedups_an_exact_relation_duplicate() {
     );
 }
 
+/// The migration-18 `COALESCE(payload, '')` key must treat a **NULL-payload** row
+/// (an ordinary code ref) and a **relation-bearing** row that agree on all four
+/// shipped key columns `(source_symbol, target, form, kind)` as *distinct*
+/// couplings, while still collapsing two NULL-payload rows onto one. This pins the
+/// residual raised in the S-290 review: widening the key must never silently drop a
+/// plain code ref that happens to share the four legacy columns with a relation
+/// ref, and must not stop deduping ordinary `payload = NULL` refs — the
+/// pre-migration behaviour the `COALESCE` normalisation preserves. The prior test
+/// covers two *present* relations; this one pins the `NULL`-vs-present boundary the
+/// review flagged, which no live capture path currently exercises.
+///
+/// [CR-080]: ../../../docs/requests/CR-080-broker-relay-ledger-dedup.md
+#[test]
+fn ledger_null_payload_coexists_with_a_relation_yet_two_null_payloads_dedup() {
+    let mut store = mem();
+    store
+        .write_batch(|w| {
+            // A relation-bearing row and a NULL-payload row that agree on every
+            // shipped key column (source/target/form/kind) — distinct couplings,
+            // both kept because '' (the COALESCE of NULL) ≠ 'broker-publish'.
+            w.insert_unresolved_ref(&broker_ref("local relay", "orders", "broker-publish"))?;
+            w.insert_unresolved_ref(&NewUnresolvedRef {
+                payload: None,
+                ..broker_ref("local relay", "orders", "broker-publish")
+            })?;
+            // A second NULL-payload row with the same key is a true duplicate:
+            // COALESCE folds NULL → '' so it collapses onto the first NULL row.
+            w.insert_unresolved_ref(&NewUnresolvedRef {
+                line: Some(42),
+                payload: None,
+                ..broker_ref("local relay", "orders", "broker-publish")
+            })
+        })
+        .unwrap();
+
+    let mut payloads: Vec<Option<String>> = store
+        .unresolved_refs()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.payload)
+        .collect();
+    payloads.sort();
+    assert_eq!(
+        payloads,
+        [None, Some("broker-publish".to_string())],
+        "the NULL-payload code ref and the relation ref coexist; the duplicate NULL row dedups"
+    );
+}
+
 #[test]
 fn ledger_rows_replace_per_file_and_cascade_on_file_delete() {
     let mut store = mem();
