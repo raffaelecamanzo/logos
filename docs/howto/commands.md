@@ -403,7 +403,8 @@ build time and embedded in the binary, so a page load fetches nothing from the
 network, and it binds `127.0.0.1` only with a self-only CSP on every response. It
 is read-only except the intent-guarded mutating routes — the config-write/apply
 routes (`/config/save`, `/config/apply`, `/config/secret`) and the Chat routes
-(`/chat`, `/chat/clear`); every other non-GET request is answered `405`. Combined
+(`/chat` and the per-conversation delete `/api/v1/chat/threads/{id}/delete`);
+every other non-GET request is answered `405`. Combined
 `--mcp --ui` runs both on one engine and one watcher: stdout stays JSON-RPC-clean
 for the MCP host while the web surface logs to stderr.
 

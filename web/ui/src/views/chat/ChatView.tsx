@@ -6,8 +6,10 @@
  * assistant-ui provides the thread, the composer, message rendering, and the
  * copy / stop / regenerate affordances; this file supplies the Logos-specific
  * surface around it — the configure-first state, the first-use consent gate
- * (NFR-SE-07), Clear-history (FR-UI-20), and the CUSTOM assistant-turn components
- * that re-implement the bespoke surface over assistant-ui's primitives:
+ * (NFR-SE-07), the conversation-history rail with its confirm-gated per-conversation
+ * delete (S-210/S-211, FR-UI-26, FR-UI-20 — there is no global clear-all), and the
+ * CUSTOM assistant-turn components that re-implement the bespoke surface over
+ * assistant-ui's primitives:
  *   - the planner's plan list,
  *   - the subagent-activity chips,
  *   - the honest budget-halt notice and the honest provider error ([FR-UI-24],
@@ -83,15 +85,16 @@ function ConfigureFirst() {
   );
 }
 
-/** The configured chat surface: the conversation-history rail (S-210), the consent
- *  banner, the assistant-ui thread, and the Clear-history control. */
+/** The configured chat surface: the conversation-history rail (S-210/S-211), the
+ *  consent banner, and the assistant-ui thread. There is no global Clear-history —
+ *  deletion is per conversation, in the rail (S-211, [FR-UI-26], [ADR-47]). */
 function ChatConfigured({ chat }: { chat: ChatPolicy }) {
   const [consented, setConsented] = useState<boolean>(() => hasConsent());
   // The rail collapses behind a toggle below ~1023px (S-210 AC-3); `railOpen`
   // drives that toggle. At ≥1024px the rail is always shown (CSS), so this state
   // is inert there — it only gates the narrow-viewport disclosure.
   const [railOpen, setRailOpen] = useState(false);
-  const { runtime, clearHistory, clearing, clearMessage, threads, activeThreadId, selectThread, newChat, threadsError } =
+  const { runtime, threads, activeThreadId, selectThread, newChat, deleteThread, threadsError } =
     useChatRuntime(consented);
 
   const acceptConsent = useCallback(() => {
@@ -99,10 +102,9 @@ function ChatConfigured({ chat }: { chat: ChatPolicy }) {
     setConsented(true);
   }, []);
 
-  const onClear = useCallback(() => {
-    if (!window.confirm("Clear all chat history and its memory? This cannot be undone.")) return;
-    void clearHistory();
-  }, [clearHistory]);
+  // Deleting keeps the rail OPEN (unlike select / new chat): the user is managing
+  // the list and usually deletes more than one row.
+  const onDelete = useCallback((id: number) => void deleteThread(id), [deleteThread]);
 
   // Selecting or starting a conversation closes the narrow-viewport rail so the
   // restored thread is in view (a no-op at ≥1024px, where the rail stays open).
@@ -142,6 +144,7 @@ function ChatConfigured({ chat }: { chat: ChatPolicy }) {
             activeThreadId={activeThreadId}
             onSelect={onSelect}
             onNewChat={onNewChat}
+            onDelete={onDelete}
             error={threadsError}
           />
         </aside>
@@ -158,15 +161,6 @@ function ChatConfigured({ chat }: { chat: ChatPolicy }) {
               <Composer consented={consented} />
             </ThreadPrimitive.Root>
           </AssistantRuntimeProvider>
-
-          <div className={styles.historyActions}>
-            <Button variant="ghost" onClick={onClear} disabled={clearing}>
-              Clear history
-            </Button>
-            <span className={styles.clearResult} role="status" aria-live="polite">
-              {clearMessage}
-            </span>
-          </div>
         </div>
       </div>
     </div>

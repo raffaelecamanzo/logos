@@ -17,13 +17,13 @@
  * custom components in `ChatView.tsx`. The answer text is mirrored into the
  * message's text content so assistant-ui's Copy affordance copies it.
  *
- * Regenerate (FR-UI-20): the backend exposes only append-turn and clear-all — no
- * "replace the last turn" primitive, and the SSE stream returns no thread id, so
- * the SPA cannot re-address a server thread. Regenerate is therefore a
- * presentation-level REPLACE over the conversation model this surface owns: the
- * prior assistant turn is dropped and the user message is re-run, never appending
- * a duplicate assistant turn (no orphaned memory in the conversation model). See
- * [ADR-45] for the full rationale.
+ * Regenerate (FR-UI-20): the backend's only write verbs are append-turn and
+ * per-thread delete (S-209/S-211) — there is no "replace the last turn" primitive,
+ * so the SPA cannot re-address an individual persisted message. Regenerate is
+ * therefore a presentation-level REPLACE over the conversation model this surface
+ * owns: the prior assistant turn is dropped and the user message is re-run, never
+ * appending a duplicate assistant turn (no orphaned memory in the conversation
+ * model). See [ADR-45] for the full rationale.
  *
  * The masked chat key never reaches this layer (NFR-SE-07): the adapter only ever
  * sends the user message over the SSE `POST` — the key material is structurally
@@ -39,7 +39,7 @@ import {
 } from "@assistant-ui/react";
 
 import {
-  clearChatHistory,
+  deleteChatThread,
   fetchThreadMessages,
   fetchThreads,
   streamChatTurn,
@@ -161,14 +161,10 @@ function readStoredThreadId(): number | null {
   }
 }
 
-/** The shape returned to `ChatView`: the assistant-ui runtime, the multi-thread
- *  rail state (S-210), and the Clear-history control (neither an assistant-ui
- *  concern). */
+/** The shape returned to `ChatView`: the assistant-ui runtime plus the multi-thread
+ *  rail state and actions (S-210/S-211 — not an assistant-ui concern). */
 export interface ChatRuntime {
   runtime: ReturnType<typeof useExternalStoreRuntime>;
-  clearHistory: () => Promise<void>;
-  clearing: boolean;
-  clearMessage: string;
   /** The conversation list, most-recent-first (S-209 `GET /chat/threads`). */
   threads: ThreadSummary[];
   /** The open conversation's id, or `null` for an unsent "+ New chat". */
@@ -177,7 +173,11 @@ export interface ChatRuntime {
   selectThread: (id: number) => Promise<void>;
   /** Reset the composer to a fresh, not-yet-persisted conversation (no empty rows). */
   newChat: () => void;
-  /** An honest note when the thread list could not be read, else `null`. */
+  /** Delete ONE conversation and its per-thread memory (S-211; the caller confirms
+   *  first — this issues the guarded write). */
+  deleteThread: (id: number) => Promise<void>;
+  /** An honest note when the thread list could not be read or a delete failed,
+   *  else `null`. */
   threadsError: string | null;
 }
 
@@ -190,8 +190,6 @@ export interface ChatRuntime {
 export function useChatRuntime(consented: boolean): ChatRuntime {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isRunning, setIsRunning] = useState(false);
-  const [clearing, setClearing] = useState(false);
-  const [clearMessage, setClearMessage] = useState("");
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   // Seeded from the prior session's selection so the persistence effect writes it
   // back (never wipes it) on mount; the restore effect then hydrates its history.
@@ -488,24 +486,45 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
     setIsRunning(false);
   }, []);
 
-  const clearHistory = useCallback(async () => {
-    setClearing(true);
-    setClearMessage("Clearing…");
-    try {
-      const resp = await clearChatHistory();
-      if (!resp.ok) {
-        setClearMessage(`Could not clear history (status ${resp.status}).`);
+  // Per-conversation delete (S-211, [FR-UI-26], [FR-UI-20], [ADR-47]) — the granular
+  // replacement for the retired global Clear-history. The CONFIRMATION is the rail's
+  // (`ThreadList`); by the time this runs the user has already confirmed, so it goes
+  // straight to the intent-guarded `POST …/{id}/delete` whose FK cascade wipes that
+  // thread's messages AND its per-thread memory server-side.
+  //
+  // Honest outcomes, mirroring the S-209 handler: `204` deleted and `404` already
+  // gone are BOTH success for the user's intent ("this conversation should not
+  // exist") — the row leaves the rail either way. Anything else keeps the row and
+  // says so ([NFR-CC-04]), never a silent disappearance of a conversation that is
+  // still on disk.
+  const deleteThread = useCallback(
+    async (id: number) => {
+      let resp: Response;
+      try {
+        resp = await deleteChatThread(id);
+      } catch (e) {
+        setThreadsError(
+          `Could not delete that conversation: ${e instanceof Error ? e.message : String(e)}`,
+        );
         return;
       }
-      abortRef.current?.abort();
-      setMessages([]);
-      setClearMessage("History cleared.");
-    } catch (e) {
-      setClearMessage(`Could not clear history: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setClearing(false);
-    }
-  }, []);
+      if (!resp.ok && resp.status !== 404) {
+        setThreadsError(`Could not delete that conversation (status ${resp.status}).`);
+        return;
+      }
+      // Deleting the OPEN conversation leaves the surface pointing at a thread that
+      // no longer exists — reset to a fresh composer (which also aborts any turn
+      // still streaming into it and drops the stored selection). Deleting any other
+      // conversation leaves the current transcript untouched.
+      if (activeThreadIdRef.current === id) newChat();
+      // Drop the row on the delete's own authority, then re-read for the
+      // authoritative order — so the rail is right even if that refresh faults.
+      setThreads((prev) => prev.filter((t) => t.id !== id));
+      setThreadsError(null);
+      await loadThreads();
+    },
+    [newChat, loadThreads],
+  );
 
   const adapter: ExternalStoreAdapter<ChatMessage> = {
     messages,
@@ -520,13 +539,11 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
 
   return {
     runtime: useExternalStoreRuntime(adapter),
-    clearHistory,
-    clearing,
-    clearMessage,
     threads,
     activeThreadId,
     selectThread,
     newChat,
+    deleteThread,
     threadsError,
   };
 }

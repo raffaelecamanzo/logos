@@ -12,10 +12,11 @@ vi.mock("./client.ts", () => ({
 
 import { apiMutate } from "../intent.ts";
 import { apiFetch } from "./client.ts";
+import * as chatClient from "./chatClient.ts";
 import {
-  CHAT_CLEAR_ROUTE,
   CHAT_ROUTE,
-  clearChatHistory,
+  chatThreadDeleteRoute,
+  deleteChatThread,
   fetchChatConfig,
   fetchThreadMessages,
   fetchThreads,
@@ -63,10 +64,28 @@ describe("fetchThreadMessages", () => {
   });
 });
 
-describe("clearChatHistory", () => {
-  it("POSTs the clear route over the intent seam", async () => {
-    await clearChatHistory();
-    expect(mockMutate).toHaveBeenCalledWith(CHAT_CLEAR_ROUTE, {});
+describe("deleteChatThread (S-211, FR-UI-26)", () => {
+  it("POSTs the per-thread delete route over the intent seam", async () => {
+    await deleteChatThread(42);
+    expect(mockMutate).toHaveBeenCalledWith("/api/v1/chat/threads/42/delete", {});
+  });
+
+  it("addresses exactly the named conversation (never a global wipe)", () => {
+    expect(chatThreadDeleteRoute(7)).toBe("/api/v1/chat/threads/7/delete");
+    expect(chatThreadDeleteRoute(8)).toBe("/api/v1/chat/threads/8/delete");
+  });
+
+  it("returns the raw response so 204 / 404 / fault stay distinguishable", async () => {
+    mockMutate.mockResolvedValueOnce({ ok: false, status: 404 } as Response);
+    await expect(deleteChatThread(9)).resolves.toMatchObject({ status: 404 });
+  });
+});
+
+describe("the retired global clear (S-211, ADR-47)", () => {
+  it("exports no clear-all helper or route — per-conversation delete is the only path", () => {
+    const surface = chatClient as unknown as Record<string, unknown>;
+    expect(surface.clearChatHistory).toBeUndefined();
+    expect(surface.CHAT_CLEAR_ROUTE).toBeUndefined();
   });
 });
 

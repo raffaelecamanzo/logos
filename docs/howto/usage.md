@@ -440,7 +440,8 @@ env var moves it), rejects non-loopback `Host` headers with `403`, and stamps a
 self-only `Content-Security-Policy` on every response. Every non-GET request is
 answered `405` **except** a `POST` to one of a small, enumerated set of mutating
 routes — the config-write/apply routes (`/config/save`, `/config/apply`,
-`/config/secret`) and the Chat routes (`/chat`, `/chat/clear`); those — and only
+`/config/secret`), the Chat turn route (`/chat`), and the per-conversation
+delete (`/api/v1/chat/threads/{id}/delete`); those — and only
 those — are additionally gated by a same-origin + per-session intent (CSRF)
 guard, so a request missing the `x-logos-intent` token or arriving cross-origin
 is rejected `403` before any handler runs. The whole React app — its hashed
@@ -846,9 +847,14 @@ first turn, gitignored, never in the default binary).
    budget tree ([configuration.md](configuration.md#the-budget-tree)) — the
    tool-call ceiling, the per-subagent cap, and the replan limit are shown as a
    note on the empty log.
-5. **Clear history.** The **Clear history** control wipes the conversation **and**
-   its per-turn agent memory from `.logos/chat.db` (it asks for confirmation
-   first). This is irreversible.
+5. **Delete a conversation.** Each row in the history rail carries a **delete**
+   affordance. Clicking it *arms* an inline confirmation naming what will go
+   ("Delete this conversation and its memory?"); only **Delete** in that panel
+   removes anything, and **Cancel** leaves the conversation untouched. A confirmed
+   delete removes that conversation **and** its per-thread agent memory from
+   `.logos/chat.db` by cascade — no orphaned memory. Deletion is always **per
+   conversation**: there is no clear-all, and the old global "Clear history"
+   control (and its route) no longer exist. This is irreversible.
 
 **Honest states (never a fabricated answer):**
 
@@ -868,16 +874,18 @@ first turn, gitignored, never in the default binary).
 
 **One honest limitation:**
 
-- **Multi-turn continuity in the UI is partial.** Cross-turn working memory is
-  stored per thread in `.logos/chat.db`, but the stream does not yet surface the
-  server-created thread id, so each turn from the UI currently starts a fresh
-  thread (and the in-app log starts empty on load). The memory capability is
-  present at the store level; threading it through successive UI turns is not yet
-  complete.
+- **A restored conversation replays your questions, not the answers.** Selecting a
+  past conversation rehydrates it from `.logos/chat.db`, but the turn path records
+  only your **user** messages there — the assistant's final answer is kept in the
+  per-turn agent scratchpad instead. Cross-turn working memory is intact (a
+  follow-up still sees prior context), and the live turn you are watching is
+  complete; it is the *restored* transcript that currently shows the questions
+  alone.
 
 Every route is **read-only except the explicit, intent-guarded mutating
 routes**: the config-write/apply routes (`/config/save`, `/config/apply`,
-`/config/secret`), the Chat routes (`/chat`, `/chat/clear`), and the Wiki
+`/config/secret`), the Chat routes (`/chat` and the per-conversation delete
+`/api/v1/chat/threads/{id}/delete`), and the Wiki
 generation trigger (`/wiki/generate`). Serving any read
 page — the Dashboard, Health, the analytics views, the Wiki, the Chat tab itself
 — reads the latest persisted snapshot through dedicated read-model accessors and
@@ -886,7 +894,7 @@ and never perturbs the evolution trend it plots. The writes the surface can make
 are: a validated config **Save** (to `config.toml` / `rules.toml`) and the chat
 **Save key** (to `secrets.toml`); an explicit **Apply** (which reconciles the
 graph / re-evaluates the gate exactly as the corresponding CLI path would); and a
-Chat turn or **Clear history** (which write only the Chat conversation store
+Chat turn or a **conversation delete** (which write only the Chat conversation store
 `chat.db`, never the graph); and a **Wiki generation** run (which writes only
 generated pages to `wiki.db` via the `wiki write` contract, never the graph) —
 all deliberate, acknowledged, and bounded to those enumerated routes. Otherwise
