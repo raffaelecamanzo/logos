@@ -1430,20 +1430,20 @@ struct ThreadSummary {
 /// `GET /api/v1/chat/threads` → the conversation list (S-209, [FR-UI-26],
 /// [ADR-47], [ADR-28]): every persisted thread as a [`ThreadSummary`],
 /// most-recent-first (the store's `ORDER BY updated_at DESC, id DESC`). A pure
-/// loopback, same-origin read carrying no secret ([NFR-SE-07]); the blocking
-/// SQLite read runs on the pool ([ADR-03]), a store fault is an honest `500`
-/// ([NFR-CC-04]). Member-scoped like every read (S-250): the list is that
-/// member's `.logos/chat.db`.
+/// loopback, same-origin read carrying no secret ([NFR-SE-07]). Runs the blocking
+/// SQLite read on the pool through the [`bridge`] ([ADR-03]) — like every other
+/// read handler — so it also flows through the [ADR-13] `surface=web` telemetry
+/// chokepoint; a store fault is an honest `500` ([NFR-CC-04]). Member-scoped
+/// (S-250): the list is that member's `.logos/chat.db`.
 #[cfg(feature = "agents")]
 async fn chat_threads(MemberEngine(engine): MemberEngine) -> Response {
-    let root = engine.root().to_path_buf();
-    let result = tokio::task::spawn_blocking(move || {
-        let store = chat_agent::ChatStore::open(&root)?;
+    let result = bridge(engine, "chat_threads", move |e| {
+        let store = chat_agent::ChatStore::open(e.root())?;
         store.list_threads()
     })
     .await;
     match result {
-        Ok(Ok(threads)) => {
+        Ok(threads) => {
             let summaries: Vec<ThreadSummary> = threads
                 .into_iter()
                 .map(|t| ThreadSummary {
@@ -1454,12 +1454,7 @@ async fn chat_threads(MemberEngine(engine): MemberEngine) -> Response {
                 .collect();
             Json(summaries).into_response()
         }
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
-        Err(_join) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "the chat thread-list task failed unexpectedly",
-        )
-            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
     }
 }
 
@@ -1468,16 +1463,15 @@ async fn chat_threads(MemberEngine(engine): MemberEngine) -> Response {
 /// with its tool traces — the [`ChatMessage`](chat_agent::ChatMessage)s the rail
 /// hydrates on select. A GET carrying no secret ([NFR-SE-07]); a request for a
 /// thread that does not exist is an honest `404` (distinct from an empty-but-real
-/// thread), never a misleading empty `200` ([NFR-CC-04]). The blocking read runs
-/// on the pool ([ADR-03]); a store fault is a `500`.
+/// thread), never a misleading empty `200` ([NFR-CC-04]). Runs on the pool through
+/// the [`bridge`] ([ADR-03], [ADR-13] telemetry); a store fault is a `500`.
 #[cfg(feature = "agents")]
 async fn chat_thread_messages(
     MemberEngine(engine): MemberEngine,
     axum::extract::Path(thread_id): axum::extract::Path<i64>,
 ) -> Response {
-    let root = engine.root().to_path_buf();
-    let result = tokio::task::spawn_blocking(move || {
-        let store = chat_agent::ChatStore::open(&root)?;
+    let result = bridge(engine, "chat_thread_messages", move |e| {
+        let store = chat_agent::ChatStore::open(e.root())?;
         // Distinguish "no such thread" (→ 404) from "a real thread with no
         // messages" (→ an honest empty list) — `messages` alone cannot.
         match store.thread(thread_id)? {
@@ -1487,14 +1481,9 @@ async fn chat_thread_messages(
     })
     .await;
     match result {
-        Ok(Ok(Some(messages))) => Json(messages).into_response(),
-        Ok(Ok(None)) => (StatusCode::NOT_FOUND, "no chat thread with that id").into_response(),
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
-        Err(_join) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "the chat messages task failed unexpectedly",
-        )
-            .into_response(),
+        Ok(Some(messages)) => Json(messages).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no chat thread with that id").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
     }
 }
 
@@ -1508,28 +1497,22 @@ async fn chat_thread_messages(
 /// intentional by [`intent_guard`] (a forged or intent-less delete never reaches
 /// here, [NFR-SE-06]). A hit is `204 No Content`; a miss (`delete_thread ==
 /// false`, no thread had that id) is an idempotent `404`; a store fault is an
-/// honest `500` ([NFR-CC-04]). The blocking SQLite work runs on the pool
-/// ([ADR-03]).
+/// honest `500` ([NFR-CC-04]). The blocking SQLite work runs on the pool through
+/// the [`bridge`] ([ADR-03], [ADR-13] telemetry), exactly like the other handlers.
 #[cfg(feature = "agents")]
 async fn chat_thread_delete(
     MemberEngine(engine): MemberEngine,
     axum::extract::Path(thread_id): axum::extract::Path<i64>,
 ) -> Response {
-    let root = engine.root().to_path_buf();
-    let result = tokio::task::spawn_blocking(move || {
-        let mut store = chat_agent::ChatStore::open(&root)?;
+    let result = bridge(engine, "chat_thread_delete", move |e| {
+        let mut store = chat_agent::ChatStore::open(e.root())?;
         store.delete_thread(thread_id)
     })
     .await;
     match result {
-        Ok(Ok(true)) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Ok(false)) => (StatusCode::NOT_FOUND, "no chat thread with that id").into_response(),
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
-        Err(_join) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "the chat thread-delete task failed unexpectedly",
-        )
-            .into_response(),
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no chat thread with that id").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
     }
 }
 
