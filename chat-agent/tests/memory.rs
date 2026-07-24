@@ -31,6 +31,23 @@ use tempfile::TempDir;
 /// grounded observation per subagent.
 struct ScriptedExecutor {
     calls_per_step: usize,
+    synth_answer: String,
+}
+
+impl ScriptedExecutor {
+    fn new(calls_per_step: usize) -> Self {
+        Self {
+            calls_per_step,
+            synth_answer: "the synthesized grounded answer".to_string(),
+        }
+    }
+
+    fn with_answer(calls_per_step: usize, answer: &str) -> Self {
+        Self {
+            calls_per_step,
+            synth_answer: answer.to_string(),
+        }
+    }
 }
 
 impl StepExecutor for ScriptedExecutor {
@@ -41,7 +58,14 @@ impl StepExecutor for ScriptedExecutor {
     ) -> impl std::future::Future<Output = Result<StepObservation, StepError>> + Send {
         let calls = self.calls_per_step;
         let role = step.role;
+        let synth_answer = self.synth_answer.clone();
         async move {
+            // The tool-less Synthesizer composes the terminal answer ([CR-086]): it
+            // charges no budget and streams its prose as the answer.
+            if role == StepRole::Synthesizer {
+                ctx.emit_answer_delta(&synth_answer);
+                return Ok(StepObservation::new(synth_answer));
+            }
             for _ in 0..calls {
                 ctx.charge_tool_call()?;
             }
@@ -56,8 +80,9 @@ fn plan_json(role: &str, instruction: &str) -> String {
     format!(r#"{{"action":"plan","steps":[{{"role":"{role}","instruction":"{instruction}"}}]}}"#)
 }
 
-fn final_json(answer: &str) -> String {
-    format!(r#"{{"action":"final","answer":"{answer}"}}"#)
+/// A `final` decision — a control marker only, carrying no answer prose ([CR-086]).
+fn final_json(grounded: bool) -> String {
+    format!(r#"{{"action":"final","grounded":{grounded}}}"#)
 }
 
 /// A multi-step turn records its plan and each subagent's observation in the
@@ -80,11 +105,11 @@ async fn a_multi_step_turn_records_plan_and_observations_for_the_synthesizer() {
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "find callers of Engine")),
         MockTurn::text(plan_json("governance_analyst", "scan the Engine module")),
-        MockTurn::text(final_json("Engine has 3 callers and a clean scan.")),
+        MockTurn::text(final_json(true)),
     ]);
     let orchestrator = Orchestrator::new(
         planner,
-        ScriptedExecutor { calls_per_step: 1 },
+        ScriptedExecutor::with_answer(1, "Engine has 3 callers and a clean scan."),
         BudgetTree::new(24, 8, 3),
     );
 
@@ -156,7 +181,7 @@ async fn an_honest_budget_halt_is_recorded_in_the_scratchpad() {
         MockCompletionModel::new([MockTurn::text(plan_json("graph_navigator", "deep dive"))]);
     let orchestrator = Orchestrator::new(
         planner,
-        ScriptedExecutor { calls_per_step: 2 },
+        ScriptedExecutor::new(2),
         BudgetTree::new(1, 8, 3),
     );
 

@@ -48,9 +48,12 @@ fn plan_json(role: &str, instruction: &str) -> String {
     format!(r#"{{"action":"plan","steps":[{{"role":"{role}","instruction":"{instruction}"}}]}}"#)
 }
 
-/// JSON the mock planner returns for a `final` decision.
-fn final_json(answer: &str) -> String {
-    format!(r#"{{"action":"final","answer":"{answer}"}}"#)
+/// JSON the mock planner returns for a `final` decision — a control marker only,
+/// carrying no answer prose ([CR-086], [FR-UI-30]). The terminal answer is composed
+/// by the tool-less streaming Synthesizer, so a turn that finalizes over the roster
+/// now needs the Synthesizer role backed with a scripted answer turn.
+fn final_json(grounded: bool) -> String {
+    format!(r#"{{"action":"final","grounded":{grounded}}}"#)
 }
 
 /// The distinct subagent roles observed during a turn, in order.
@@ -81,7 +84,7 @@ async fn source_reader_cannot_call_a_graph_tool() {
     // The planner routes one step to the Source-Reader, then finalizes.
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("source_reader", "find where beta is defined")),
-        MockTurn::text(final_json("beta is defined in src/lib.rs.")),
+        MockTurn::text(final_json(true)),
     ]);
     // …but the Source-Reader's model first tries `search`, a GRAPH tool outside its
     // sandboxed source domain. The misroute is refused without charge and fed back
@@ -97,7 +100,8 @@ async fn source_reader_cannot_call_a_graph_tool() {
             graph_navigator: MockCompletionModel::new([]),
             governance_analyst: MockCompletionModel::new([]),
             source_reader: source,
-            synthesizer: MockCompletionModel::new([]),
+            // The `final` reroute composes the answer through the Synthesizer ([CR-086]).
+            synthesizer: MockCompletionModel::new([MockTurn::text("beta is defined in src/lib.rs.")]),
         },
     );
     let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 8, 3));
@@ -124,7 +128,7 @@ async fn graph_navigator_cannot_call_a_source_tool() {
 
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "read the source")),
-        MockTurn::text(final_json("the graph shows alpha calls beta.")),
+        MockTurn::text(final_json(true)),
     ]);
     // The Graph-Navigator tries `read`, a SOURCE tool outside its graph domain; the
     // misroute is refused without charge, fed back, and the subagent then answers.
@@ -139,7 +143,7 @@ async fn graph_navigator_cannot_call_a_source_tool() {
             graph_navigator: graph,
             governance_analyst: MockCompletionModel::new([]),
             source_reader: MockCompletionModel::new([]),
-            synthesizer: MockCompletionModel::new([]),
+            synthesizer: MockCompletionModel::new([MockTurn::text("the graph shows alpha calls beta.")]),
         },
     );
     let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 8, 3));
@@ -160,16 +164,14 @@ async fn a_compound_question_routes_to_each_subagent_and_synthesizes_grounded() 
     let dir = tempfile::tempdir().expect("tempdir");
     let (engine, sandbox) = fixture(dir.path());
 
-    // A compound plan: a graph step, then a source step, then synthesis —
-    // exercising routing to three distinct subagents and the tool-less
-    // Synthesizer, then a final grounded answer.
+    // A compound plan: a graph step, then a source step, then a grounded finalize —
+    // exercising routing to two distinct tool-bearing subagents and the terminal
+    // reroute through the tool-less Synthesizer ([CR-086]). The planner no longer
+    // plans a synthesizer step or carries answer prose: the finalize IS the synthesis.
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "find callers of beta")),
         MockTurn::text(plan_json("source_reader", "read src/lib.rs")),
-        MockTurn::text(plan_json("synthesizer", "compose the final answer")),
-        MockTurn::text(final_json(
-            "beta is called by alpha; the source confirms the alpha->beta->gamma chain."
-        )),
+        MockTurn::text(final_json(true)),
     ]);
 
     // Distinct models per role so request counts prove which subagent ran.
@@ -182,8 +184,9 @@ async fn a_compound_question_routes_to_each_subagent_and_synthesizes_grounded() 
         MockTurn::tool_call("s1", "read", serde_json::json!({ "path": "src/lib.rs" })),
         MockTurn::text("source shows alpha calls beta calls gamma."),
     ]);
+    // The Synthesizer composes the terminal answer over the turn's scratchpad.
     let synthesizer = MockCompletionModel::new([MockTurn::text(
-        "Grounded synthesis: alpha → beta → gamma, confirmed by graph and source.",
+        "beta is called by alpha; the source confirms the alpha->beta->gamma chain.",
     )]);
     let roster = SubagentRoster::with_models(
         engine,
@@ -212,23 +215,18 @@ async fn a_compound_question_routes_to_each_subagent_and_synthesizes_grounded() 
         ),
     );
 
-    // ≥2 distinct subagents were dispatched, in plan order.
+    // ≥2 distinct subagents were dispatched, in plan order. The Synthesizer runs via
+    // the `final` reroute — it streams AnswerDelta/FinalAnswer, not a StepObserved —
+    // so it does not appear among the observed step roles.
     let roles = observed_roles(&sink);
-    assert_eq!(
-        roles,
-        vec![
-            StepRole::GraphNavigator,
-            StepRole::SourceReader,
-            StepRole::Synthesizer
-        ],
-    );
+    assert_eq!(roles, vec![StepRole::GraphNavigator, StepRole::SourceReader]);
 
     // Each step reached the CORRECT subagent's model (routing): the graph and
     // source models each served a tool round + a summary round; the synthesizer
-    // served one round; the unrouted governance model served none.
+    // served one round (the reroute); the unrouted governance model served none.
     assert_eq!(graph.request_count(), 2, "graph navigator ran (tool + summary)");
     assert_eq!(source.request_count(), 2, "source reader ran (tool + summary)");
-    assert_eq!(synthesizer.request_count(), 1, "synthesizer ran once");
+    assert_eq!(synthesizer.request_count(), 1, "synthesizer composed the final answer once");
     assert_eq!(governance.request_count(), 0, "governance was not routed to");
 
     // Exactly the two real tool calls (callers + read) were charged; the
@@ -261,10 +259,15 @@ async fn the_synthesizer_streams_the_answer_token_by_token() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (engine, sandbox) = fixture(dir.path());
 
+    // A grounding step, then a grounded finalize — the `final` reroute streams the
+    // Synthesizer's answer token by token ([CR-086], [FR-UI-19]).
     let planner = MockCompletionModel::new([
-        MockTurn::text(plan_json("synthesizer", "compose the final answer")),
-        MockTurn::text(final_json("Engine has three callers.")),
+        MockTurn::text(plan_json("graph_navigator", "gather the callers")),
+        MockTurn::text(final_json(true)),
     ]);
+    // A plain-text grounding observation (no tool call → no charge), so the scratchpad
+    // is non-empty when the grounded final reroutes to synthesis.
+    let graph = MockCompletionModel::new([MockTurn::text("beta is called by alpha (from the graph).")]);
     // The synthesizer streams its answer in four chunks (the token-by-token path).
     let chunks = ["Engine ", "has ", "three ", "callers."];
     let synthesizer = MockCompletionModel::new([MockTurn::text_chunks(chunks)]);
@@ -272,7 +275,7 @@ async fn the_synthesizer_streams_the_answer_token_by_token() {
         engine,
         sandbox,
         RoleModels {
-            graph_navigator: MockCompletionModel::new([]),
+            graph_navigator: graph,
             governance_analyst: MockCompletionModel::new([]),
             source_reader: MockCompletionModel::new([]),
             synthesizer: synthesizer.clone(),
@@ -298,7 +301,7 @@ async fn the_synthesizer_streams_the_answer_token_by_token() {
         .position(|e| matches!(e, OrchestratorEvent::FinalAnswer { .. }))
         .expect("a final answer is emitted");
     assert!(last_delta < final_at, "every token streams before the final answer: {events:?}");
-    // The planner's terminal answer is the authoritative full text.
+    // The terminal FinalAnswer carries the authoritative full text.
     assert_eq!(outcome, TurnOutcome::Answered("Engine has three callers.".to_string()));
     assert_eq!(synthesizer.request_count(), 1, "the synthesizer streamed once");
 }
@@ -308,13 +311,11 @@ async fn the_synthesizer_makes_no_tool_calls() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (engine, sandbox) = fixture(dir.path());
 
-    // A turn whose single step is the tool-less Synthesizer.
-    let planner = MockCompletionModel::new([
-        MockTurn::text(plan_json("synthesizer", "answer from what you have")),
-        MockTurn::text(final_json("a synthesized answer")),
-    ]);
+    // A conversational (grounded == false) turn answers directly via the Synthesizer
+    // reroute over an empty scratchpad — no plan, no tool step ([CR-086], [FR-UI-30]).
+    let planner = MockCompletionModel::new([MockTurn::text(final_json(false))]);
     let synthesizer = MockCompletionModel::new([MockTurn::text(
-        "Synthesized from the (empty) scratchpad — nothing to ground yet.",
+        "Synthesized directly — a conversational reply that grounds no codebase claim.",
     )]);
     let roster = SubagentRoster::with_models(
         engine,
@@ -329,13 +330,28 @@ async fn the_synthesizer_makes_no_tool_calls() {
     let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 8, 3));
 
     let sink = CapturingSink::new();
-    let outcome = orchestrator.run("q", &sink).await.expect("completes");
+    let outcome = orchestrator.run("hello", &sink).await.expect("completes");
 
-    assert_eq!(outcome, TurnOutcome::Answered("a synthesized answer".to_string()));
+    assert_eq!(
+        outcome,
+        TurnOutcome::Answered(
+            "Synthesized directly — a conversational reply that grounds no codebase claim."
+                .to_string()
+        )
+    );
     assert_eq!(synthesizer.request_count(), 1, "the synthesizer ran");
-    // Tool-less: it charged zero tool calls.
+    // Tool-less: it charged zero tool calls — and no tool-bearing step ran at all.
     assert_eq!(orchestrator.budget().global_used(), 0);
-    assert!(observed_roles(&sink).contains(&StepRole::Synthesizer));
+    assert!(
+        !observed_roles(&sink).contains(&StepRole::Synthesizer),
+        "the Synthesizer runs via the reroute (AnswerDelta/FinalAnswer), not as an observed step"
+    );
+    assert!(
+        sink.events()
+            .iter()
+            .any(|e| matches!(e, OrchestratorEvent::FinalAnswer { .. })),
+        "the Synthesizer composed a direct answer"
+    );
 }
 
 // ── S-182: budget-aware preambles reduce tool-call count on a broad step ──────
@@ -369,7 +385,7 @@ async fn a_single_context_call_answers_breadth_for_fewer_charges_than_several_se
     // The un-hinted-style baseline: three separate narrow lookups cover the breadth.
     let planner_narrow = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", broad_question)),
-        MockTurn::text(final_json("alpha, beta, and gamma form a call chain.")),
+        MockTurn::text(final_json(true)),
     ]);
     let graph_narrow = MockCompletionModel::new([
         MockTurn::tool_call("n1", "search", serde_json::json!({ "query": "alpha" })),
@@ -384,7 +400,9 @@ async fn a_single_context_call_answers_breadth_for_fewer_charges_than_several_se
             graph_navigator: graph_narrow.clone(),
             governance_analyst: MockCompletionModel::new([]),
             source_reader: MockCompletionModel::new([]),
-            synthesizer: MockCompletionModel::new([]),
+            synthesizer: MockCompletionModel::new([MockTurn::text(
+                "alpha, beta, and gamma form a call chain.",
+            )]),
         },
     );
     let orchestrator_narrow =
@@ -400,7 +418,7 @@ async fn a_single_context_call_answers_breadth_for_fewer_charges_than_several_se
     // The budget-aware path: one `context` call covers the same breadth.
     let planner_context = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", broad_question)),
-        MockTurn::text(final_json("alpha, beta, and gamma form a call chain.")),
+        MockTurn::text(final_json(true)),
     ]);
     let graph_context = MockCompletionModel::new([
         MockTurn::tool_call("c1", "context", serde_json::json!({ "task": broad_question })),
@@ -413,7 +431,9 @@ async fn a_single_context_call_answers_breadth_for_fewer_charges_than_several_se
             graph_navigator: graph_context.clone(),
             governance_analyst: MockCompletionModel::new([]),
             source_reader: MockCompletionModel::new([]),
-            synthesizer: MockCompletionModel::new([]),
+            synthesizer: MockCompletionModel::new([MockTurn::text(
+                "alpha, beta, and gamma form a call chain.",
+            )]),
         },
     );
     let orchestrator_context =
@@ -441,7 +461,7 @@ async fn governance_analyst_runs_a_governance_tool() {
 
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("governance_analyst", "scan the module")),
-        MockTurn::text(final_json("the module scans clean")),
+        MockTurn::text(final_json(true)),
     ]);
     let governance = MockCompletionModel::new([
         MockTurn::tool_call("gov1", "scan", serde_json::json!({})),
@@ -454,7 +474,7 @@ async fn governance_analyst_runs_a_governance_tool() {
             graph_navigator: MockCompletionModel::new([]),
             governance_analyst: governance.clone(),
             source_reader: MockCompletionModel::new([]),
-            synthesizer: MockCompletionModel::new([]),
+            synthesizer: MockCompletionModel::new([MockTurn::text("the module scans clean")]),
         },
     );
     let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 8, 3));
@@ -483,7 +503,7 @@ async fn a_subagent_reaching_its_cap_soft_closes_without_overcharging_global() {
     // bounded observation comes back.
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "exhaust your tool budget")),
-        MockTurn::text(final_json("beta is called by alpha (bounded, from the graph).")),
+        MockTurn::text(final_json(true)),
     ]);
     // The Graph-Navigator asks for TWO in-domain tool calls; the per-subagent cap
     // is 1, so the second is refused — triggering the soft close-out. Its third
@@ -500,7 +520,9 @@ async fn a_subagent_reaching_its_cap_soft_closes_without_overcharging_global() {
             graph_navigator: graph.clone(),
             governance_analyst: MockCompletionModel::new([]),
             source_reader: MockCompletionModel::new([]),
-            synthesizer: MockCompletionModel::new([]),
+            synthesizer: MockCompletionModel::new([MockTurn::text(
+                "beta is called by alpha (bounded, from the graph).",
+            )]),
         },
     );
     // Global ceiling high (24), per-subagent cap 1 → the per-subagent bound binds

@@ -73,8 +73,19 @@ impl PlanStep {
 ///
 /// ```json
 /// { "action": "plan",  "steps": [ { "role": "graph_navigator", "instruction": "…" } ] }
-/// { "action": "final", "answer": "…the grounded answer…" }
+/// { "action": "final", "grounded": true }
 /// ```
+///
+/// The `final` decision **carries no prose** ([CR-086], [FR-UI-30]): a multi-line
+/// markdown/mermaid answer cannot survive a strict-JSON string field (its literal
+/// newlines are control characters RFC 8259 rejects), so the terminal answer is
+/// always composed by the tool-less streaming Synthesizer instead ([ADR-41]). The
+/// decision is a small control signal: `grounded` marks whether the answer is
+/// codebase-grounded (requires ≥1 gathered observation, [NFR-CC-04]) or purely
+/// conversational (a greeting / meta-question — answered directly, no tools).
+///
+/// [CR-086]: ../../../docs/requests/CR-086-chat-planner-answer-synthesizer-reroute.md
+/// [FR-UI-30]: ../../../docs/specs/requirements/FR-UI-30.md
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum PlannerDecision {
@@ -83,10 +94,13 @@ pub enum PlannerDecision {
         /// The ordered steps to execute this round.
         steps: Vec<PlanStep>,
     },
-    /// The turn is complete; carries the final grounded answer.
+    /// The turn is complete; the tool-less streaming Synthesizer composes the
+    /// user-facing answer over the turn's scratchpad ([CR-086], [FR-UI-30]).
     Final {
-        /// The synthesized answer to return to the user.
-        answer: String,
+        /// Whether the answer is codebase-grounded (`true` — the orchestrator
+        /// forces ≥1 grounding step over an empty scratchpad, [NFR-CC-04]) or
+        /// purely conversational (`false` — answered directly with no tools).
+        grounded: bool,
     },
 }
 
@@ -127,14 +141,15 @@ mod tests {
     }
 
     #[test]
-    fn planner_decision_parses_a_final_answer() {
-        let decision: PlannerDecision =
-            serde_json::from_str(r#"{ "action": "final", "answer": "grounded" }"#).unwrap();
-        assert_eq!(
-            decision,
-            PlannerDecision::Final {
-                answer: "grounded".to_string()
-            }
-        );
+    fn planner_decision_parses_a_final_grounded_marker() {
+        // The `final` decision carries a `grounded` control marker, never prose
+        // ([CR-086], [FR-UI-30]) — the answer flows through the Synthesizer.
+        let grounded: PlannerDecision =
+            serde_json::from_str(r#"{ "action": "final", "grounded": true }"#).unwrap();
+        assert_eq!(grounded, PlannerDecision::Final { grounded: true });
+
+        let conversational: PlannerDecision =
+            serde_json::from_str(r#"{ "action": "final", "grounded": false }"#).unwrap();
+        assert_eq!(conversational, PlannerDecision::Final { grounded: false });
     }
 }

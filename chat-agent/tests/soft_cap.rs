@@ -35,7 +35,7 @@ use agent_core::rig::completion::{
 use agent_core::rig::message::{Message, ToolCall, ToolFunction, UserContent};
 use agent_core::rig::streaming::StreamingCompletionResponse;
 use agent_core::rig::OneOrMany;
-use agent_core::{MockCompletionModel, MockTurn, Sandbox};
+use agent_core::{MockCompletionModel, MockRawResponse, MockTurn, Sandbox};
 use chat_agent::orchestrator::{
     BudgetBound, BudgetTree, CapturingSink, Orchestrator, OrchestratorEvent, RoleModels,
     SubagentRoster, TurnOutcome,
@@ -63,8 +63,11 @@ fn plan_json(role: &str, instruction: &str) -> String {
     format!(r#"{{"action":"plan","steps":[{{"role":"{role}","instruction":"{instruction}"}}]}}"#)
 }
 
-fn final_json(answer: &str) -> String {
-    format!(r#"{{"action":"final","answer":"{answer}"}}"#)
+/// A `final` decision — a control marker only, carrying no answer prose ([CR-086]).
+/// The terminal answer is composed by the Synthesizer, so a finalizing turn needs
+/// the Synthesizer role backed with a streamable answer (its [`WellFormedModel::summary`]).
+fn final_json(grounded: bool) -> String {
+    format!(r#"{{"action":"final","grounded":{grounded}}}"#)
 }
 
 /// The `StepObserved` summaries recorded during a turn, in order.
@@ -207,7 +210,10 @@ fn conversation_is_well_formed(history: &OneOrMany<Message>) -> bool {
 
 impl CompletionModel for WellFormedModel {
     type Response = Raw;
-    type StreamingResponse = Raw;
+    // The Synthesizer role streams its answer through this model ([CR-086] reroute).
+    // `stream` delegates to a scripted `MockCompletionModel`, whose streaming raw
+    // type is `MockRawResponse` — so this associated type matches the delegate.
+    type StreamingResponse = MockRawResponse;
     type Client = ();
 
     fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
@@ -278,11 +284,17 @@ impl CompletionModel for WellFormedModel {
 
     async fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
-        // The tool-bearing subagent loop never streams (only the Synthesizer does),
-        // and this model backs the Graph-Navigator — so a stream call is a test bug.
-        unreachable!("WellFormedModel backs a tool-bearing subagent and is never streamed")
+        // Only the tool-less Synthesizer streams — the tool-bearing roles drive their
+        // loop through `completion`. Since the `final` reroute now composes every
+        // terminal answer via the Synthesizer ([CR-086]), the role backed by this
+        // model streams its `summary` as the answer. Delegate to a scripted
+        // `MockCompletionModel` so the streaming machinery is exercised for real.
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        MockCompletionModel::new([MockTurn::text(self.summary.clone())])
+            .stream(request)
+            .await
     }
 }
 
@@ -297,9 +309,7 @@ async fn a_broad_step_reaching_its_cap_soft_closes_well_formed_and_the_turn_answ
     // observation the soft-capped subagent returns.
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "map the whole call graph")),
-        MockTurn::text(final_json(
-            "The system centers on the alpha->beta->gamma chain (bounded, partial).",
-        )),
+        MockTurn::text(final_json(true)),
     ]);
 
     // The Graph-Navigator eagerly fans out: it requests FOUR in-domain tool calls,
@@ -342,7 +352,11 @@ async fn a_broad_step_reaching_its_cap_soft_closes_well_formed_and_the_turn_answ
             graph_navigator: graph.clone(),
             governance_analyst: WellFormedModel::new([], String::new()),
             source_reader: WellFormedModel::new([], String::new()),
-            synthesizer: WellFormedModel::new([], String::new()),
+            // The `final` reroute streams the Synthesizer's answer ([CR-086]).
+            synthesizer: WellFormedModel::new(
+                [],
+                "The system centers on the alpha->beta->gamma chain (bounded, partial).",
+            ),
         },
     );
     // Global ceiling ample (24), per-subagent cap 3 → the cap binds first, softly.
@@ -401,7 +415,7 @@ async fn a_capped_step_with_an_empty_closing_summary_reports_no_summary_produced
 
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "explore")),
-        MockTurn::text(final_json("done, though the step summarized nothing")),
+        MockTurn::text(final_json(true)),
     ]);
     // Cap 1: one dispatch, the second refused → soft close; the closing round
     // returns empty text (summary = "").
@@ -419,7 +433,7 @@ async fn a_capped_step_with_an_empty_closing_summary_reports_no_summary_produced
             graph_navigator: graph,
             governance_analyst: WellFormedModel::new([], String::new()),
             source_reader: WellFormedModel::new([], String::new()),
-            synthesizer: WellFormedModel::new([], String::new()),
+            synthesizer: WellFormedModel::new([], "done, though the step summarized nothing"),
         },
     );
     let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 1, 3));
@@ -455,7 +469,7 @@ async fn a_stray_tool_call_on_the_closing_round_is_ignored_and_uncharged() {
 
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "explore")),
-        MockTurn::text(final_json("done")),
+        MockTurn::text(final_json(true)),
     ]);
     // Cap 1: one real dispatch, the second refused → soft close. The closing round
     // emits BOTH a stray tool call and text; the tool call must be ignored.
@@ -474,7 +488,7 @@ async fn a_stray_tool_call_on_the_closing_round_is_ignored_and_uncharged() {
             graph_navigator: graph,
             governance_analyst: WellFormedModel::new([], String::new()),
             source_reader: WellFormedModel::new([], String::new()),
-            synthesizer: WellFormedModel::new([], String::new()),
+            synthesizer: WellFormedModel::new([], "done"),
         },
     );
     let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 1, 3));

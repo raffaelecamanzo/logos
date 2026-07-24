@@ -24,12 +24,37 @@ use chat_agent::orchestrator::{
     PlanStep, Planner, StepContext, StepError, StepExecutor, StepObservation, StepRole, TurnOutcome,
 };
 
-/// A scripted stand-in for the S-174 subagent roster. Each step charges
+/// A scripted stand-in for the S-174 subagent roster. A tool-bearing step charges
 /// `calls_per_step` tool calls through the [`StepContext`] (exercising the budget
 /// tree) and returns a summary; a budget refusal propagates as
-/// [`StepError::Budget`] — never a fabricated observation ([NFR-CC-04]).
+/// [`StepError::Budget`] — never a fabricated observation ([NFR-CC-04]). A
+/// **Synthesizer** step is tool-free ([CR-086]): it charges no budget, streams
+/// `synth_answer` as an `AnswerDelta`, and returns it as the observation — standing
+/// in for the reroute that now composes every terminal answer through the
+/// Synthesizer rather than the planner's `final` decision.
 struct ScriptedExecutor {
     calls_per_step: usize,
+    synth_answer: String,
+}
+
+impl ScriptedExecutor {
+    /// A step executor charging `calls_per_step` per tool-bearing step, with a
+    /// default Synthesizer answer (for turns whose exact answer text is not asserted).
+    fn new(calls_per_step: usize) -> Self {
+        Self {
+            calls_per_step,
+            synth_answer: "the synthesized grounded answer".to_string(),
+        }
+    }
+
+    /// As [`new`](Self::new) but with the exact answer the Synthesizer composes —
+    /// for turns that assert the terminal answer text.
+    fn with_answer(calls_per_step: usize, answer: &str) -> Self {
+        Self {
+            calls_per_step,
+            synth_answer: answer.to_string(),
+        }
+    }
 }
 
 impl StepExecutor for ScriptedExecutor {
@@ -40,7 +65,14 @@ impl StepExecutor for ScriptedExecutor {
     ) -> impl std::future::Future<Output = Result<StepObservation, StepError>> + Send {
         let calls = self.calls_per_step;
         let role = step.role;
+        let synth_answer = self.synth_answer.clone();
         async move {
+            // The tool-less Synthesizer composes the user-facing answer: it charges
+            // no budget and streams its prose as the answer ([CR-086], [FR-UI-19]).
+            if role == StepRole::Synthesizer {
+                ctx.emit_answer_delta(&synth_answer);
+                return Ok(StepObservation::new(synth_answer));
+            }
             for _ in 0..calls {
                 // Honest charge: a refused call halts the step at the bound, the
                 // tool is never invoked, no result is fabricated.
@@ -58,9 +90,11 @@ fn plan_json(role: &str, instruction: &str) -> String {
     format!(r#"{{"action":"plan","steps":[{{"role":"{role}","instruction":"{instruction}"}}]}}"#)
 }
 
-/// JSON the mock planner returns for a `final` decision.
-fn final_json(answer: &str) -> String {
-    format!(r#"{{"action":"final","answer":"{answer}"}}"#)
+/// JSON the mock planner returns for a `final` decision — a control marker only,
+/// carrying no answer prose ([CR-086], [FR-UI-30]). `grounded` marks a codebase
+/// answer (forces ≥1 grounding step) vs a conversational one (answered directly).
+fn final_json(grounded: bool) -> String {
+    format!(r#"{{"action":"final","grounded":{grounded}}}"#)
 }
 
 /// JSON the mock planner returns for a `plan` decision with **no** steps — a plan
@@ -77,11 +111,11 @@ async fn plan_act_observe_replan_runs_to_a_final_answer() {
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "find callers of Engine")),
         MockTurn::text(plan_json("governance_analyst", "scan the Engine module")),
-        MockTurn::text(final_json("Engine has 3 callers and a clean scan.")),
+        MockTurn::text(final_json(true)),
     ]);
     let orchestrator = Orchestrator::new(
         planner.clone(),
-        ScriptedExecutor { calls_per_step: 1 },
+        ScriptedExecutor::with_answer(1, "Engine has 3 callers and a clean scan."),
         BudgetTree::new(24, 8, 3),
     );
 
@@ -91,6 +125,8 @@ async fn plan_act_observe_replan_runs_to_a_final_answer() {
         .await
         .expect("the orchestrated turn completes");
 
+    // The terminal answer is now composed by the Synthesizer over the scratchpad,
+    // not carried in the planner's `final` decision ([CR-086]).
     assert_eq!(
         outcome,
         TurnOutcome::Answered("Engine has 3 callers and a clean scan.".to_string()),
@@ -119,7 +155,7 @@ async fn global_ceiling_halts_first_and_reports_the_bound() {
         MockCompletionModel::new([MockTurn::text(plan_json("graph_navigator", "deep dive"))]);
     let orchestrator = Orchestrator::new(
         planner,
-        ScriptedExecutor { calls_per_step: 2 },
+        ScriptedExecutor::new(2),
         BudgetTree::new(1, 8, 3),
     );
 
@@ -144,7 +180,7 @@ async fn per_subagent_cap_halts_first_and_reports_the_bound() {
         MockCompletionModel::new([MockTurn::text(plan_json("source_reader", "read everything"))]);
     let orchestrator = Orchestrator::new(
         planner,
-        ScriptedExecutor { calls_per_step: 2 },
+        ScriptedExecutor::new(2),
         BudgetTree::new(24, 1, 3),
     );
 
@@ -173,7 +209,7 @@ async fn max_replans_halts_first_and_reports_the_bound() {
     ]);
     let orchestrator = Orchestrator::new(
         planner,
-        ScriptedExecutor { calls_per_step: 0 },
+        ScriptedExecutor::new(0),
         BudgetTree::new(24, 8, 1),
     );
 
@@ -205,7 +241,7 @@ async fn max_replans_zero_is_a_single_plan_pass() {
     ]);
     let orchestrator = Orchestrator::new(
         planner,
-        ScriptedExecutor { calls_per_step: 0 },
+        ScriptedExecutor::new(0),
         BudgetTree::new(24, 8, 0),
     );
 
@@ -221,7 +257,7 @@ async fn a_planner_provider_error_surfaces_honestly() {
     let planner = MockCompletionModel::new([]);
     let orchestrator = Orchestrator::new(
         planner,
-        ScriptedExecutor { calls_per_step: 0 },
+        ScriptedExecutor::new(0),
         BudgetTree::new(24, 8, 3),
     );
 
@@ -245,11 +281,11 @@ async fn a_planner_provider_error_surfaces_honestly() {
 async fn emits_plan_and_step_transition_events_in_order() {
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "find Engine")),
-        MockTurn::text(final_json("done")),
+        MockTurn::text(final_json(true)),
     ]);
     let orchestrator = Orchestrator::new(
         planner,
-        ScriptedExecutor { calls_per_step: 1 },
+        ScriptedExecutor::with_answer(1, "done"),
         BudgetTree::new(24, 8, 3),
     );
 
@@ -257,8 +293,15 @@ async fn emits_plan_and_step_transition_events_in_order() {
     orchestrator.run("compound question", &sink).await.unwrap();
 
     let events = sink.events();
-    // The exact transition sequence for a one-step plan that then finalizes.
-    assert_eq!(events.len(), 4, "plan, step-started, step-observed, final: {events:?}");
+    // The transition sequence for a one-step plan that then finalizes. The terminal
+    // answer now streams from the Synthesizer as AnswerDelta token(s) plus the
+    // authoritative FinalAnswer ([CR-086], [FR-UI-19]) — the reroute adds the
+    // AnswerDelta the buffered planner-answer path never emitted.
+    assert_eq!(
+        events.len(),
+        5,
+        "plan, step-started, step-observed, answer-delta, final: {events:?}"
+    );
     assert!(matches!(
         events[0],
         OrchestratorEvent::Plan { round: 0, .. }
@@ -281,6 +324,10 @@ async fn emits_plan_and_step_transition_events_in_order() {
     ));
     assert!(matches!(
         &events[3],
+        OrchestratorEvent::AnswerDelta { delta } if delta == "done"
+    ));
+    assert!(matches!(
+        &events[4],
         OrchestratorEvent::FinalAnswer { answer } if answer == "done"
     ));
 }
@@ -327,7 +374,7 @@ async fn an_unparseable_planner_reply_surfaces_as_a_plan_parse_error() {
     let planner = MockCompletionModel::new([MockTurn::text("I'm not sure how to answer that.")]);
     let orchestrator = Orchestrator::new(
         planner,
-        ScriptedExecutor { calls_per_step: 0 },
+        ScriptedExecutor::new(0),
         BudgetTree::new(24, 8, 3),
     );
 
@@ -350,11 +397,14 @@ async fn an_unparseable_planner_reply_surfaces_as_a_plan_parse_error() {
 async fn with_planner_runs_a_custom_preamble_planner() {
     // The with_planner / with_preamble construction path (the seam S-174 uses to
     // inject a per-role-configured planner) runs a turn end-to-end.
-    let model = MockCompletionModel::new([MockTurn::text(final_json("custom-preamble answer"))]);
+    // A conversational (grounded == false) final answers directly via the
+    // Synthesizer over an empty scratchpad — the simplest end-to-end path for the
+    // custom-preamble construction seam.
+    let model = MockCompletionModel::new([MockTurn::text(final_json(false))]);
     let planner = Planner::with_preamble(model, "You are a bespoke Logos planner.");
     let orchestrator = Orchestrator::with_planner(
         planner,
-        ScriptedExecutor { calls_per_step: 0 },
+        ScriptedExecutor::with_answer(0, "custom-preamble answer"),
         BudgetTree::new(24, 8, 3),
     );
 
@@ -373,11 +423,11 @@ async fn max_replans_zero_still_answers_when_the_first_plan_finalizes() {
     // replan check is designed to preserve (a pre-check halt would break it).
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "round 0")),
-        MockTurn::text(final_json("answered within a single plan pass")),
+        MockTurn::text(final_json(true)),
     ]);
     let orchestrator = Orchestrator::new(
         planner,
-        ScriptedExecutor { calls_per_step: 1 },
+        ScriptedExecutor::with_answer(1, "answered within a single plan pass"),
         BudgetTree::new(24, 8, 0),
     );
 
@@ -386,6 +436,131 @@ async fn max_replans_zero_still_answers_when_the_first_plan_finalizes() {
     assert_eq!(
         outcome,
         TurnOutcome::Answered("answered within a single plan pass".to_string())
+    );
+}
+
+#[tokio::test]
+async fn a_grounded_final_over_an_empty_scratchpad_forces_a_grounding_step() {
+    // The planner prematurely finalizes a codebase-grounded answer with no
+    // observations gathered. The orchestrator refuses, re-prompts, and only
+    // synthesizes the answer after a grounding step has actually run — never
+    // answering a codebase claim from model knowledge ([FR-UI-30], [NFR-CC-04]).
+    let planner = MockCompletionModel::new([
+        // Premature: grounded final over an empty scratchpad.
+        MockTurn::text(final_json(true)),
+        // The corrected plan the forced-grounding re-prompt elicits.
+        MockTurn::text(plan_json("graph_navigator", "gather grounding on Engine")),
+        // Now grounded over a non-empty scratchpad — accepted, routed to synthesis.
+        MockTurn::text(final_json(true)),
+    ]);
+    let orchestrator = Orchestrator::new(
+        planner.clone(),
+        ScriptedExecutor::with_answer(1, "grounded answer after a forced step"),
+        BudgetTree::new(24, 8, 3),
+    );
+
+    let sink = CapturingSink::new();
+    let outcome = orchestrator
+        .run("what does Engine do?", &sink)
+        .await
+        .expect("the turn completes after a forced grounding step");
+    assert_eq!(
+        outcome,
+        TurnOutcome::Answered("grounded answer after a forced step".to_string())
+    );
+    // Three planner turns: the premature final, the corrected plan, the accepted final.
+    assert_eq!(planner.request_count(), 3, "the premature final was re-prompted");
+
+    let events = sink.events();
+    let grounded_at = events.iter().position(|e| {
+        matches!(
+            e,
+            OrchestratorEvent::StepObserved {
+                role: StepRole::GraphNavigator,
+                ..
+            }
+        )
+    });
+    let answered_at = events.iter().position(|e| {
+        matches!(
+            e,
+            OrchestratorEvent::AnswerDelta { .. } | OrchestratorEvent::FinalAnswer { .. }
+        )
+    });
+    assert!(grounded_at.is_some(), "a grounding step was forced: {events:?}");
+    assert!(
+        grounded_at < answered_at,
+        "the grounding step precedes the composed answer: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_conversational_final_answers_directly_with_zero_tools() {
+    // A grounded == false final is a purely conversational turn (a greeting, a
+    // meta-question): it answers directly via the Synthesizer over an empty
+    // scratchpad — no plan, no grounding step, zero tool calls ([FR-UI-30]).
+    let planner = MockCompletionModel::new([MockTurn::text(final_json(false))]);
+    let orchestrator = Orchestrator::new(
+        planner,
+        ScriptedExecutor::with_answer(0, "Hello! Ask me anything about this codebase."),
+        BudgetTree::new(24, 8, 3),
+    );
+
+    let sink = CapturingSink::new();
+    let outcome = orchestrator.run("hello", &sink).await.unwrap();
+    assert_eq!(
+        outcome,
+        TurnOutcome::Answered("Hello! Ask me anything about this codebase.".to_string())
+    );
+
+    let events = sink.events();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, OrchestratorEvent::Plan { .. })),
+        "a conversational turn runs no plan: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            OrchestratorEvent::StepStarted { .. } | OrchestratorEvent::StepObserved { .. }
+        )),
+        "a conversational turn runs no tool step: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, OrchestratorEvent::FinalAnswer { .. })),
+        "the Synthesizer still composed a direct answer: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_planner_that_keeps_finalizing_prematurely_halts_honestly() {
+    // A defiant planner returns a grounded final over an empty scratchpad every
+    // round. The forced-grounding re-prompts are bounded by max_replans; past the
+    // bound the turn halts honestly rather than fabricating an ungrounded codebase
+    // answer ([NFR-CC-04]).
+    let planner = MockCompletionModel::new([
+        MockTurn::text(final_json(true)),
+        MockTurn::text(final_json(true)),
+    ]);
+    let orchestrator = Orchestrator::new(
+        planner,
+        ScriptedExecutor::new(0),
+        // max_replans = 1: one corrective re-prompt allowed, then an honest halt.
+        BudgetTree::new(24, 8, 1),
+    );
+
+    let sink = CapturingSink::new();
+    let outcome = orchestrator.run("what does Engine do?", &sink).await.unwrap();
+    assert_eq!(outcome, TurnOutcome::Halted(BudgetBound::Replans { limit: 1 }));
+    assert!(
+        !sink
+            .events()
+            .iter()
+            .any(|e| matches!(e, OrchestratorEvent::FinalAnswer { .. })),
+        "no ungrounded answer is fabricated past the bound"
     );
 }
 

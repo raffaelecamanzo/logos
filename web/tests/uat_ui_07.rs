@@ -217,9 +217,10 @@ fn plan_json(role: &str, instruction: &str) -> String {
     format!(r#"{{"action":"plan","steps":[{{"role":"{role}","instruction":"{instruction}"}}]}}"#)
 }
 
-/// JSON the mock planner returns for a `final` decision.
-fn final_json(answer: &str) -> String {
-    format!(r#"{{"action":"final","answer":"{answer}"}}"#)
+/// JSON the mock planner returns for a `final` decision — a control marker only,
+/// carrying no answer prose ([CR-086]). The terminal answer is Synthesizer-composed.
+fn final_json(grounded: bool) -> String {
+    format!(r#"{{"action":"final","grounded":{grounded}}}"#)
 }
 
 /// JSON the mock planner returns for a `plan` decision with **no** steps. Such a
@@ -388,13 +389,14 @@ async fn uat_ui_07_steps_3_4_10_compound_turn_streams_two_subagents_grounded_zer
     let (engine, sandbox) = started_engine(dir.path());
     let intent = IntentToken::generate();
 
-    // The compound plan: a graph step, a source step, a synthesizer step, then the
-    // final synthesized answer — four planner turns over the mock.
+    // The compound plan: a graph step, a source step, then a grounded finalize —
+    // three planner turns. The terminal answer is composed by the `final` reroute
+    // through the tool-less Synthesizer ([CR-086]); the planner carries no prose and
+    // no longer plans a synthesizer step.
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "search for beta")),
         MockTurn::text(plan_json("source_reader", "read src/lib.rs")),
-        MockTurn::text(plan_json("synthesizer", "compose the grounded answer")),
-        MockTurn::text(final_json(SYNTH_SENTINEL)),
+        MockTurn::text(final_json(true)),
     ]);
     // Each subagent's model makes one tool round then a summary round; the held
     // clones let the test prove (via request_count) each subagent ran its tool.
@@ -406,7 +408,8 @@ async fn uat_ui_07_steps_3_4_10_compound_turn_streams_two_subagents_grounded_zer
         MockTurn::tool_call("s1", "read", serde_json::json!({ "path": "src/lib.rs" })),
         MockTurn::text("source: read src/lib.rs"),
     ]);
-    let synthesizer = MockCompletionModel::new([MockTurn::text("synthesized from the scratchpad")]);
+    // The reroute streams the Synthesizer's composed answer (SYNTH_SENTINEL).
+    let synthesizer = MockCompletionModel::new([MockTurn::text(SYNTH_SENTINEL)]);
 
     let service: Arc<dyn ChatService> = Arc::new(CompoundChatService {
         engine: Arc::clone(&engine),
@@ -441,14 +444,22 @@ async fn uat_ui_07_steps_3_4_10_compound_turn_streams_two_subagents_grounded_zer
 
     let body = body_string(resp).await;
 
-    // The plan, the two specialized subagents (each observed), the synthesizer,
-    // and the synthesized final answer all streamed, tagged, in order.
-    for marker in ["event: plan", "event: step_started", "event: step_observed", "event: final_answer"] {
+    // The plan, the two specialized subagents (each observed), the streamed answer
+    // tokens, and the synthesized final answer all streamed, tagged, in order.
+    for marker in [
+        "event: plan",
+        "event: step_started",
+        "event: step_observed",
+        "event: answer_delta",
+        "event: final_answer",
+    ] {
         assert!(body.contains(marker), "the stream carries `{marker}`: {body}");
     }
     // ≥2 distinct specialized subagents were dispatched, scoped to the
     // `step_observed` frames (their roles ride that event's JSON, snake_case-tagged)
-    // so a wrong-role observation could not pass on a `step_started` role alone.
+    // so a wrong-role observation could not pass on a `step_started` role alone. The
+    // Synthesizer runs via the `final` reroute (streaming answer_delta/final_answer),
+    // so it is not among the observed step roles ([CR-086]).
     let observed: String = body
         .split("\n\n")
         .filter(|frame| frame.contains("event: step_observed"))
@@ -456,7 +467,6 @@ async fn uat_ui_07_steps_3_4_10_compound_turn_streams_two_subagents_grounded_zer
         .join("\n");
     assert!(observed.contains("\"role\":\"graph_navigator\""), "the Graph-Navigator step was observed: {body}");
     assert!(observed.contains("\"role\":\"source_reader\""), "the Source-Reader step was observed: {body}");
-    assert!(observed.contains("\"role\":\"synthesizer\""), "the Synthesizer step was observed: {body}");
     let plan_at = body.find("event: plan").unwrap();
     let final_at = body.find("event: final_answer").unwrap();
     assert!(plan_at < final_at, "events stream in order (plan before answer)");
@@ -466,11 +476,11 @@ async fn uat_ui_07_steps_3_4_10_compound_turn_streams_two_subagents_grounded_zer
     // each": a tool round + a summary round ⇒ request_count == 2 (the mock is scripted
     // tool-call-then-summary, so 2 is only reachable via the tool cycle; that the tool
     // actually executed and charged the budget is asserted in
-    // `chat-agent/tests/roster.rs`). The Synthesizer is a third, intentionally tool-less
-    // subagent that ran exactly once.
+    // `chat-agent/tests/roster.rs`). The tool-less Synthesizer ran exactly once — via
+    // the `final` reroute that composes the terminal answer.
     assert_eq!(graph.request_count(), 2, "the Graph-Navigator ran its tool then summarized");
     assert_eq!(source.request_count(), 2, "the Source-Reader ran its tool then summarized");
-    assert_eq!(synthesizer.request_count(), 1, "the tool-less Synthesizer ran once");
+    assert_eq!(synthesizer.request_count(), 1, "the tool-less Synthesizer composed the answer once");
 
     // Step 10: the behavioral zero-egress guarantee is that the turn ran on the mock
     // provider — no `reqwest` client is constructed on this path at all — and the

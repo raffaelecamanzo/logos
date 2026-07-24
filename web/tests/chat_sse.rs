@@ -66,13 +66,22 @@ impl ChatService for ScriptedChatService {
         let memory = Arc::new(MemoryStore::open(&self.root).expect("open memory"));
         let turn = memory.next_turn(thread).expect("turn");
 
+        // A grounding step then a grounded finalize: the terminal answer is composed
+        // by the `final` reroute through the tool-less Synthesizer ([CR-086]), which
+        // streams FINAL_SENTINEL as answer_delta + final_answer. The uniform roster
+        // model backs both the grounding step and the Synthesizer from one shared
+        // queue, so its two turns are consumed in order: the grounding observation,
+        // then the synthesized answer.
         let planner = MockCompletionModel::new([
             MockTurn::text(
-                r#"{"action":"plan","steps":[{"role":"synthesizer","instruction":"compose the answer"}]}"#,
+                r#"{"action":"plan","steps":[{"role":"graph_navigator","instruction":"gather grounding"}]}"#,
             ),
-            MockTurn::text(format!(r#"{{"action":"final","answer":"{FINAL_SENTINEL}"}}"#)),
+            MockTurn::text(r#"{"action":"final","grounded":true}"#),
         ]);
-        let subagent = MockCompletionModel::new([MockTurn::text("a grounded synthesis")]);
+        let subagent = MockCompletionModel::new([
+            MockTurn::text("a grounded synthesis"),
+            MockTurn::text(FINAL_SENTINEL),
+        ]);
         let grounding = Arc::new(MemoryGrounding::new(Arc::clone(&memory), thread, turn));
         let roster = SubagentRoster::new(Arc::clone(&self.engine), Arc::clone(&self.sandbox), subagent)
             .with_synthesizer_grounding(grounding);
@@ -364,14 +373,16 @@ async fn chat_post_streams_sse_events_under_csp() {
     let final_at = body.find("event: final_answer").unwrap();
     assert!(plan_at < delta_at, "the plan precedes the streamed answer tokens: {body}");
     assert!(delta_at < final_at, "the answer tokens stream before the final answer: {body}");
-    // The synthesizer's prose streamed token-by-token in the answer_delta events.
+    // The grounding step's observation surfaced (as step_observed), and the
+    // Synthesizer's composed answer streamed token-by-token as answer_delta and is
+    // carried in the terminal final_answer event ([CR-086], [FR-UI-19]).
     assert!(
         body.contains("a grounded synthesis"),
-        "the synthesizer's prose streamed as answer_delta tokens: {body}",
+        "the grounding step's observation was streamed: {body}",
     );
     assert!(
         body.contains(FINAL_SENTINEL),
-        "the streamed answer is the orchestrator's, carried in the final_answer event: {body}",
+        "the Synthesizer-composed answer streamed and is carried in the final_answer event: {body}",
     );
 }
 
