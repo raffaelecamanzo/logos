@@ -11,11 +11,14 @@
 //!    (the rolled-up "module self-loops" the SRS §7.4 trap warns about — drop
 //!    them and Q ≈ 0 always). Normalized `(Q+0.5)/1.5` clamped to [0,1];
 //!    `m == 0` → `1/3`.
-//! 2. **Acyclicity** ([FR-QM-02], [ADR-30]) — count of `tarjan_scc`
-//!    components with `len > 1` (multi-node mutual-recursion cycles only; a
-//!    singleton self-loop / self-recursion is **not** counted — metric-
-//!    semantics v4, [CR-022]); normalized `1/(1+cycles)`. **The same SCC set
-//!    feeds Depth's condensation** so the gate and the `max_cycles` rule can
+//! 2. **Acyclicity** ([FR-QM-02], [ADR-61], extends [ADR-30]) — count of
+//!    `tarjan_scc` components with `len > 1` **whose members span more than one
+//!    directory** (a cross-module dependency cycle); a singleton self-loop /
+//!    self-recursion (metric-semantics v4, [CR-022]) and a multi-node SCC
+//!    confined to a single directory (metric-semantics v5, [CR-087]) both count
+//!    zero; normalized `1/(1+cycles)`. **The same SCC set feeds Depth's
+//!    condensation** — Depth collapses the *full* set while Acyclicity counts
+//!    only the cross-module subset — so the gate and the `max_cycles` rule can
 //!    never disagree.
 //! 3. **Depth** ([FR-QM-03]) — longest path (vertex count) over the SCC
 //!    condensation: a whole cycle collapses to one layer, so a pure tangle
@@ -36,7 +39,7 @@
 //!    no class-like container exists.
 //! 10. **Uniqueness** ([FR-QM-13]) — `1 − near-clone ratio`.
 //!
-//! # Aggregation (metric-semantics v4, [FR-QM-06], [FR-QM-14], [ADR-12], [ADR-21])
+//! # Aggregation (metric-semantics v5, [FR-QM-06], [FR-QM-14], [ADR-12], [ADR-21])
 //!
 //! `signal = exp((Σ ln nᵢ)/k) · 10000` over the **applicable** dimensions in
 //! **canonical order** (the five original metrics, then nesting, conciseness,
@@ -186,6 +189,14 @@ const ORIGINAL_METRIC_COUNT: usize = 5;
 ///   `acyclicity.raw`, so a v3 baseline is incomparable and the first
 ///   post-upgrade gate auto-re-baselines ([FR-GV-10]) — exactly as the prior
 ///   semantics bumps did.
+/// - **v5** — Acyclicity counts only cross-module cycles ([CR-087], [ADR-61],
+///   S-298): a multi-node `tarjan_scc` component counts only when its members
+///   span **more than one directory** (the `directory_of` partition Modularity
+///   uses); an SCC confined to a single directory — idiomatic intra-module
+///   mutual recursion — now contributes zero, extending the v4 self-recursion
+///   narrowing to the module boundary. The narrowed count is the single source
+///   the `max_cycles` rule and the DSM read, so a v4 baseline is incomparable
+///   and the first post-upgrade gate auto-re-baselines ([FR-GV-10]).
 ///
 /// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
 /// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
@@ -199,7 +210,9 @@ const ORIGINAL_METRIC_COUNT: usize = 5;
 /// [ADR-30]: ../../../docs/specs/architecture/decisions/ADR-30.md
 /// [BR-25]: ../../../docs/specs/software-spec.md#311-quality-metrics
 /// [S-045]: ../../../docs/planning/journal.md#s-045-metric-thresholds-budgets-and-worst-offender-reporting
-pub const METRIC_SEMANTICS_VERSION: i64 = 4;
+/// [CR-087]: ../../../docs/requests/CR-087-acyclicity-cross-module-cycle-boundary.md
+/// [ADR-61]: ../../../docs/specs/architecture/decisions/ADR-61.md
+pub const METRIC_SEMANTICS_VERSION: i64 = 5;
 
 /// Compute the five metrics and the aggregate signal over the **production
 /// scope** of a hydrated dependency view — pure, no I/O ([FR-QM-01]..[FR-QM-06],
@@ -260,9 +273,12 @@ pub fn compute(
     // equality, redundancy.
     let modularity = modularity(&graph, &dirs);
     // One SCC run feeds both Acyclicity and Depth (FR-QM-02: gate and rule —
-    // and the two metrics — agree on the same cycle set).
+    // and the two metrics — agree on the same cycle set). Acyclicity narrows
+    // the *counted* subset to cross-module SCCs (>1 directory, ADR-61) via the
+    // same `dirs` partition Modularity reads; Depth still collapses the full
+    // condensation, so its longest path is unaffected (ADR-61 CRA-03).
     let sccs = tarjan_scc(&graph);
-    let acyclicity = acyclicity(&sccs);
+    let acyclicity = acyclicity(&sccs, &dirs);
     let depth = depth(&graph, &sccs);
     let equality = equality(&production);
     let redundancy = redundancy(&production);
@@ -789,21 +805,46 @@ fn modularity(graph: &DiGraph<(), ()>, dirs: &[String]) -> MetricValue {
     }
 }
 
-/// Acyclicity — cycle count from the shared SCC set ([FR-QM-02], [ADR-30]).
+/// Acyclicity — cross-module cycle count from the shared SCC set ([FR-QM-02],
+/// [ADR-61], extends [ADR-30]).
 ///
-/// A cycle is an SCC with `len > 1` — mutual recursion between two or more
-/// distinct units. A singleton vertex with a self-loop (self-recursion) is a
-/// unit depending on **itself**, not a dependency cycle *between* units, so it
-/// contributes zero ([CR-022] / [ADR-30], metric-semantics v4). A self-loop
-/// *inside* a multi-vertex SCC is still counted once — the SCC is the unit the
-/// `max_cycles` rule and the DSM consume, and they read this single
-/// `acyclicity.raw` source so they can never disagree.
+/// A cycle is an SCC with `len > 1` **whose members span more than one
+/// directory** — a dependency cycle *between distinct modules* (the
+/// `directory_of` partition [`modularity`] already uses, threaded in as `dirs`).
+/// Two narrowings compose here:
+///
+/// - A singleton vertex with a self-loop (self-recursion) is a unit depending on
+///   **itself**, so it contributes zero ([CR-022] / [ADR-30], metric-semantics
+///   v4).
+/// - A multi-node SCC confined to a **single directory** (idiomatic intra-module
+///   mutual recursion — recursive-descent walkers, name resolvers) is control
+///   flow, not a layering tangle, so it too contributes zero (metric-semantics
+///   v5, [CR-087] / [ADR-61]).
+///
+/// A self-loop *inside* a counted cross-module SCC is still counted once — the
+/// SCC is the unit the `max_cycles` rule and the DSM consume, and they read this
+/// single (narrowed) `acyclicity.raw` source so they can never disagree.
+///
+/// `dirs` is indexed by `graph` vertex index, exactly as the [`tarjan_scc`]
+/// `NodeIndex`es in `sccs` are, so `dirs[vertex.index()]` is the vertex's
+/// directory.
 ///
 /// [FR-QM-02]: ../../../docs/specs/requirements/FR-QM-02.md
 /// [ADR-30]: ../../../docs/specs/architecture/decisions/ADR-30.md
+/// [ADR-61]: ../../../docs/specs/architecture/decisions/ADR-61.md
 /// [CR-022]: ../../../docs/requests/CR-022-acyclicity-self-recursion-exclusion.md
-fn acyclicity(sccs: &[Vec<NodeIndex>]) -> MetricValue {
-    let cycles = sccs.iter().filter(|scc| scc.len() > 1).count() as u64;
+/// [CR-087]: ../../../docs/requests/CR-087-acyclicity-cross-module-cycle-boundary.md
+fn acyclicity(sccs: &[Vec<NodeIndex>], dirs: &[String]) -> MetricValue {
+    let cycles = sccs
+        .iter()
+        .filter(|scc| scc.len() > 1)
+        .filter(|scc| {
+            // Spans >1 directory ⇔ some member's directory differs from the
+            // first member's. Order-independent, allocation-free, deterministic.
+            let first = dirs[scc[0].index()].as_str();
+            scc.iter().any(|&vertex| dirs[vertex.index()].as_str() != first)
+        })
+        .count() as u64;
     MetricValue {
         raw: cycles as f64,
         normalized: 1.0 / (1.0 + cycles as f64),
@@ -923,7 +964,7 @@ fn redundancy(functions: &[&FunctionMetricRow]) -> MetricValue {
 }
 
 /// The applicable-dimension geometric-mean aggregate, rounded to the 0–10000
-/// integer signal (metric-semantics v4, [FR-QM-06], [FR-QM-14], [ADR-12],
+/// integer signal (metric-semantics v5, [FR-QM-06], [FR-QM-14], [ADR-12],
 /// [ADR-21], [ADR-08]).
 ///
 /// `original` are the five original metrics in canonical order; `new_dims` are
