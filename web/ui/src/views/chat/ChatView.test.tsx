@@ -503,6 +503,53 @@ describe("ChatView — per-conversation delete (S-211, FR-UI-26, AC-1)", () => {
     expect(deleteButton("Conv B")).toHaveAttribute("aria-expanded", "true");
     expect(deleteButton("Conv A")).toHaveAttribute("aria-expanded", "false");
   });
+
+  it("a stale rail refresh cannot resurrect a conversation deleted while a turn settled", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchMessages.mockResolvedValue([
+      persisted("user", "hi", 1),
+      persisted("assistant", "hello", 2),
+    ]);
+    // The settling turn's rail refresh is held open by hand: its snapshot was taken
+    // BEFORE the delete landed, and it resolves AFTER — the out-of-order arrival a
+    // real network produces on its own.
+    let releaseStale: (list: ThreadSummary[]) => void = () => {};
+    const stale = new Promise<ThreadSummary[]>((resolve) => {
+      releaseStale = resolve;
+    });
+    mockFetchThreads.mockReset();
+    mockFetchThreads
+      .mockResolvedValueOnce([thread(5, "Conv A", 300), thread(3, "Conv B", 100)]) // mount
+      .mockReturnValueOnce(stale) // the settling turn's reconcile — held open
+      .mockResolvedValue([thread(3, "Conv B", 100)]); // the truth: Conv A is gone
+    const pending = pendingSseResponse(['event: answer_delta\ndata: {"delta":"…"}\n\n']);
+    mockStreamTurn.mockResolvedValueOnce(pending.response);
+
+    render(<ChatView />);
+    await acceptConsent(user);
+    await user.click(await screen.findByRole("button", { name: "Conv B" }));
+    await screen.findByText("hello");
+    await ask(user, "a question");
+    await screen.findByRole("button", { name: "Stop" });
+
+    // The turn ends, so its trailing reconcile issues the (now doomed) list read.
+    pending.close();
+    await waitFor(() => expect(mockFetchThreads).toHaveBeenCalledTimes(2));
+
+    // Meanwhile the user deletes the OTHER conversation; its own refresh is current.
+    await user.click(deleteButton("Conv A"));
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Conv A" })).not.toBeInTheDocument(),
+    );
+
+    // Only now does the pre-delete snapshot arrive. It must not repaint Conv A —
+    // the rail would otherwise lie about a conversation that is gone server-side.
+    releaseStale([thread(5, "Conv A", 300), thread(3, "Conv B", 100)]);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Conv B" })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Conv A" })).not.toBeInTheDocument();
+  });
 });
 
 describe("ChatView — secret masking (NFR-SE-07)", () => {
