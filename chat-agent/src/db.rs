@@ -557,9 +557,10 @@ impl ChatStore {
 }
 
 /// The longest an auto-derived conversation title may run, in characters (not
-/// bytes — titles must never split a multi-byte grapheme). The canonical cap the
-/// store and every caller share ([FR-UI-26] "truncated"); the web adapter no
-/// longer keeps its own copy.
+/// bytes — the cut lands on a `char` / UTF-8 scalar boundary so a multi-byte
+/// title is never sliced into invalid UTF-8). The canonical cap the store and
+/// every caller share ([FR-UI-26] "truncated"); the web adapter no longer keeps
+/// its own copy.
 pub const THREAD_TITLE_MAX: usize = 60;
 
 /// Derive a stable, single-line conversation title from a conversation's first
