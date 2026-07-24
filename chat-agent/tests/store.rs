@@ -212,6 +212,17 @@ fn delete_thread_cascades_leaving_no_orphans() {
         let doomed = seed(&mut store, "doomed");
         let survivor = seed(&mut store, "survivor");
 
+        // Prove `seed` actually populated the DOOMED thread's memory tiers before
+        // the delete, so the post-delete zero-counts below assert a real cascade
+        // rather than a thread that never had child rows in the first place.
+        {
+            let pre = rusqlite::Connection::open(&path).unwrap();
+            let n = |sql: &str| -> i64 { pre.query_row(sql, [doomed], |r| r.get(0)).unwrap() };
+            assert_eq!(n("SELECT COUNT(*) FROM chat_messages WHERE thread_id = ?1"), 2);
+            assert_eq!(n("SELECT COUNT(*) FROM chat_scratchpad WHERE thread_id = ?1"), 1);
+            assert_eq!(n("SELECT COUNT(*) FROM chat_working_memory WHERE thread_id = ?1"), 1);
+        }
+
         let removed = store.delete_thread(doomed).unwrap();
         assert!(removed, "delete_thread reports the thread was removed");
         (doomed, survivor)
@@ -362,11 +373,25 @@ fn title_from_first_message_honors_the_truncation_contract() {
         "a whitespace-only message must still yield a non-empty title"
     );
 
-    // An over-long message is capped at THREAD_TITLE_MAX *characters*.
+    // An over-long message is truncated to exactly THREAD_TITLE_MAX *characters*
+    // — pinning the content, not just the length, guards against an off-by-one or
+    // wrong-prefix bug in the char take.
     let long = "x".repeat(THREAD_TITLE_MAX * 3);
-    assert!(
-        title_from_first_message(&long).chars().count() <= THREAD_TITLE_MAX,
-        "a long title is capped at THREAD_TITLE_MAX characters"
+    assert_eq!(
+        title_from_first_message(&long),
+        "x".repeat(THREAD_TITLE_MAX),
+        "a long title is the first THREAD_TITLE_MAX characters, verbatim"
+    );
+
+    // Exact boundary: a message of exactly THREAD_TITLE_MAX chars is kept whole;
+    // one char longer loses exactly the final char.
+    let exact = "a".repeat(THREAD_TITLE_MAX);
+    assert_eq!(title_from_first_message(&exact), exact, "exactly MAX chars is kept whole");
+    let over_by_one = "a".repeat(THREAD_TITLE_MAX + 1);
+    assert_eq!(
+        title_from_first_message(&over_by_one),
+        "a".repeat(THREAD_TITLE_MAX),
+        "MAX+1 chars truncates to exactly MAX"
     );
 
     // A multi-byte message over the cap must truncate on a char boundary — no
