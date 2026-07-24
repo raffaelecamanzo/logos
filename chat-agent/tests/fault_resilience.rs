@@ -41,7 +41,7 @@ use agent_core::rig::completion::{
 use agent_core::rig::message::{Message, ToolCall, ToolFunction, UserContent};
 use agent_core::rig::streaming::StreamingCompletionResponse;
 use agent_core::rig::OneOrMany;
-use agent_core::{MockCompletionModel, MockTurn, Sandbox};
+use agent_core::{MockCompletionModel, MockRawResponse, MockTurn, Sandbox};
 use chat_agent::orchestrator::{
     BudgetTree, CapturingSink, Orchestrator, OrchestratorError, OrchestratorEvent, RoleModels,
     SubagentRoster, TurnOutcome,
@@ -69,8 +69,11 @@ fn plan_json(role: &str, instruction: &str) -> String {
     format!(r#"{{"action":"plan","steps":[{{"role":"{role}","instruction":"{instruction}"}}]}}"#)
 }
 
-fn final_json(answer: &str) -> String {
-    format!(r#"{{"action":"final","answer":"{answer}"}}"#)
+/// A `final` decision — a control marker only, carrying no answer prose ([CR-086]).
+/// The terminal answer is Synthesizer-composed, so a finalizing turn needs the
+/// Synthesizer role backed with a streamable answer (see [`roster_with`]).
+fn final_json(grounded: bool) -> String {
+    format!(r#"{{"action":"final","grounded":{grounded}}}"#)
 }
 
 /// The `StepObserved` summaries recorded during a turn, in order.
@@ -225,7 +228,10 @@ fn conversation_is_well_formed(history: &OneOrMany<Message>) -> bool {
 
 impl CompletionModel for FaultModel {
     type Response = Raw;
-    type StreamingResponse = Raw;
+    // The Synthesizer role streams its answer through this model ([CR-086] reroute);
+    // `stream` delegates to a scripted `MockCompletionModel` whose streaming raw type
+    // is `MockRawResponse`, so this associated type matches the delegate.
+    type StreamingResponse = MockRawResponse;
     type Client = ();
 
     fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
@@ -298,11 +304,17 @@ impl CompletionModel for FaultModel {
 
     async fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
-        // Only the tool-less Synthesizer streams; this model backs tool-bearing
-        // subagents, so a stream call is a test bug.
-        unreachable!("FaultModel backs a tool-bearing subagent and is never streamed")
+        // Only the tool-less Synthesizer streams; the tool-bearing roles drive their
+        // loop through `completion`. Since the `final` reroute composes every terminal
+        // answer via the Synthesizer ([CR-086]), the Synthesizer-backing instance
+        // streams its `closing_summary` as the answer. Delegate to a scripted
+        // `MockCompletionModel` so real streaming machinery is exercised.
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        MockCompletionModel::new([MockTurn::text(self.closing_summary.clone())])
+            .stream(request)
+            .await
     }
 }
 
@@ -318,7 +330,10 @@ fn roster_with(
         graph_navigator: FaultModel::idle(),
         governance_analyst: FaultModel::idle(),
         source_reader: FaultModel::idle(),
-        synthesizer: FaultModel::idle(),
+        // The `final` reroute streams the Synthesizer's answer ([CR-086]); back it
+        // with a non-empty closing summary so the terminal synthesis has prose to
+        // stream. Tests here assert the outcome is `Answered`, not its exact text.
+        synthesizer: FaultModel::new([], "The synthesized grounded answer."),
     };
     match role {
         "graph_navigator" => models.graph_navigator = model,
@@ -340,7 +355,7 @@ async fn a_tool_error_becomes_an_observation_and_the_subagent_adapts_next_round(
     // (self-corrected) observation.
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("source_reader", "what files define the call chain?")),
-        MockTurn::text(final_json("The chain lives in src/lib.rs.")),
+        MockTurn::text(final_json(true)),
     ]);
     // The Source-Reader first reads a MISSING path (a real `DispatchError::Tool`),
     // then adapts — globs for the real files — then answers.
@@ -448,7 +463,7 @@ async fn a_successful_dispatch_resets_the_consecutive_error_streak() {
 
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("source_reader", "survey the sources")),
-        MockTurn::text(final_json("surveyed, with some read failures along the way")),
+        MockTurn::text(final_json(true)),
     ]);
     // FOUR tool errors, but never THREE in a row: a successful `glob` sits between
     // two error pairs. With the cap at 3 consecutive, the reset means the streak
@@ -497,7 +512,7 @@ async fn an_out_of_domain_request_is_refused_as_an_observation_listing_the_tools
 
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "map beta")),
-        MockTurn::text(final_json("beta sits mid-chain.")),
+        MockTurn::text(final_json(true)),
     ]);
     // The Graph-Navigator misroutes to `read` (a SOURCE tool outside its domain);
     // the refusal is fed back as an observation, then it adapts with a text answer.
@@ -543,7 +558,7 @@ async fn exceeding_the_consecutive_error_cap_soft_closes_well_formed_and_bounded
 
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("source_reader", "read the docs")),
-        MockTurn::text(final_json("Bounded: the docs could not be read.")),
+        MockTurn::text(final_json(true)),
     ]);
     // Three consecutive `read` failures (missing paths) hit the cap → soft close.
     let source = FaultModel::new(
@@ -593,7 +608,7 @@ async fn a_pure_tool_not_found_loop_charges_no_budget_yet_still_terminates_via_t
 
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "explore beta")),
-        MockTurn::text(final_json("Bounded: the navigator kept misrouting.")),
+        MockTurn::text(final_json(true)),
     ]);
     // The Graph-Navigator relentlessly requests `read` — a SOURCE tool outside its
     // domain. Each is refused with NO budget charge, so the budget bounds can never
@@ -658,7 +673,7 @@ async fn the_error_cap_soft_close_answers_a_dangling_sibling_tool_use_from_the_s
 
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "explore beta")),
-        MockTurn::text(final_json("Bounded: the navigator kept misrouting.")),
+        MockTurn::text(final_json(true)),
     ]);
     // Two single misroutes drive the streak to 2, then a round emitting TWO
     // out-of-domain `read` calls: the first trips the cap at 3 → the second is left
@@ -712,7 +727,7 @@ async fn an_empty_error_cap_close_out_reports_no_summary_produced_never_fabricat
 
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("source_reader", "read the docs")),
-        MockTurn::text(final_json("done, though the step summarized nothing")),
+        MockTurn::text(final_json(true)),
     ]);
     // Three consecutive `read` failures trip the cap; the closing round returns
     // empty text (summary = ""), driving the honest "no summary produced" branch.

@@ -66,9 +66,10 @@ fn plan_json_two(role_a: &str, instr_a: &str, role_b: &str, instr_b: &str) -> St
     )
 }
 
-/// JSON a mock planner returns for a `final` decision.
-fn final_json(answer: &str) -> String {
-    format!(r#"{{"action":"final","answer":"{answer}"}}"#)
+/// JSON a mock planner returns for a `final` decision — a control marker only,
+/// carrying no answer prose ([CR-086]). The terminal answer is Synthesizer-composed.
+fn final_json(grounded: bool) -> String {
+    format!(r#"{{"action":"final","grounded":{grounded}}}"#)
 }
 
 /// The `StepObserved` summaries recorded during a turn, in order.
@@ -172,11 +173,14 @@ async fn a_recoverable_fault_degrades_to_an_unavailable_observation_and_the_turn
             "source_reader",
             "read the entrypoint",
         )),
-        MockTurn::text(final_json("Answered from the source read despite the graph outage.")),
+        MockTurn::text(final_json(true)),
     ]);
     let executor = ScriptedExecutor::new([
         Outcome::Unavailable("the provider errored after retries".to_string()),
         Outcome::Observe("src/lib.rs defines the entrypoint".to_string()),
+        // The Synthesizer step the `final` reroute now runs over the scratchpad
+        // ([CR-086]) — its prose is the terminal answer.
+        Outcome::Observe("Answered from the source read despite the graph outage.".to_string()),
     ]);
     let orchestrator = Orchestrator::new(planner, executor, BudgetTree::new(24, 8, 3));
 
@@ -376,7 +380,7 @@ async fn a_structural_fault_stays_turn_fatal_and_does_not_degrade() {
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "do it")),
         // A second turn the planner never reaches — the structural fault aborts first.
-        MockTurn::text(final_json("this must never be returned")),
+        MockTurn::text(final_json(true)),
     ]);
     let executor =
         ScriptedExecutor::new([Outcome::Failed("could not load the subagent's tools".to_string())]);
@@ -447,6 +451,33 @@ fn roster_with(
     SubagentRoster::with_models(engine, sandbox, models)
 }
 
+/// As [`roster_with`] but also backs the **Synthesizer** with a single scripted
+/// answer turn. The terminal answer now flows through the Synthesizer ([CR-086]),
+/// so a turn that degrades a tool-bearing step and then finalizes needs the
+/// Synthesizer to compose the answer — the degradation proof (the `[unavailable — …]`
+/// observation) is unchanged; this just lets the turn reach a final answer.
+fn roster_with_and_synth(
+    engine: Arc<Engine>,
+    sandbox: Arc<Sandbox>,
+    role: &str,
+    model: MockCompletionModel,
+    synth_answer: &str,
+) -> SubagentRoster<MockCompletionModel> {
+    let mut models = RoleModels {
+        graph_navigator: MockCompletionModel::new([]),
+        governance_analyst: MockCompletionModel::new([]),
+        source_reader: MockCompletionModel::new([]),
+        synthesizer: MockCompletionModel::new([MockTurn::text(synth_answer)]),
+    };
+    match role {
+        "graph_navigator" => models.graph_navigator = model,
+        "governance_analyst" => models.governance_analyst = model,
+        "source_reader" => models.source_reader = model,
+        other => panic!("unexpected role {other}"),
+    }
+    SubagentRoster::with_models(engine, sandbox, models)
+}
+
 #[tokio::test]
 async fn the_roster_reclassifies_a_provider_fault_surviving_retries_to_unavailable() {
     // Site (a): the tool-bearing subagent's main completion faults after the retry
@@ -458,9 +489,15 @@ async fn the_roster_reclassifies_a_provider_fault_surviving_retries_to_unavailab
 
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("source_reader", "read the sources")),
-        MockTurn::text(final_json("Answered best-effort despite the provider outage.")),
+        MockTurn::text(final_json(true)),
     ]);
-    let roster = roster_with(engine, sandbox, "source_reader", MockCompletionModel::new([]));
+    let roster = roster_with_and_synth(
+        engine,
+        sandbox,
+        "source_reader",
+        MockCompletionModel::new([]),
+        "Answered best-effort despite the provider outage.",
+    );
     let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 8, 3));
 
     let sink = CapturingSink::new();
@@ -490,11 +527,17 @@ async fn the_roster_reclassifies_a_neither_tool_nor_text_reply_to_unavailable() 
 
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("graph_navigator", "map beta")),
-        MockTurn::text(final_json("Answered despite the empty subagent reply.")),
+        MockTurn::text(final_json(true)),
     ]);
     // A single empty-text turn: no tool call, no prose.
     let graph = MockCompletionModel::new([MockTurn::text("")]);
-    let roster = roster_with(engine, sandbox, "graph_navigator", graph);
+    let roster = roster_with_and_synth(
+        engine,
+        sandbox,
+        "graph_navigator",
+        graph,
+        "Answered despite the empty subagent reply.",
+    );
     let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 8, 3));
 
     let sink = CapturingSink::new();
@@ -525,7 +568,7 @@ async fn the_roster_reclassifies_a_bounded_summarization_provider_fault_to_unava
 
     let planner = MockCompletionModel::new([
         MockTurn::text(plan_json("source_reader", "survey the sources")),
-        MockTurn::text(final_json("Answered despite the bounded-summarization outage.")),
+        MockTurn::text(final_json(true)),
     ]);
     // Two `glob` calls: the first dispatches (cap = 1), the second trips the cap and
     // enters close_and_summarize; its tool-free closing completion is the 3rd call —
@@ -534,7 +577,13 @@ async fn the_roster_reclassifies_a_bounded_summarization_provider_fault_to_unava
         MockTurn::tool_call("g1", "glob", serde_json::json!({ "pattern": "src/**/*.rs" })),
         MockTurn::tool_call("g2", "glob", serde_json::json!({ "pattern": "src/**/*.rs" })),
     ]);
-    let roster = roster_with(engine, sandbox, "source_reader", source);
+    let roster = roster_with_and_synth(
+        engine,
+        sandbox,
+        "source_reader",
+        source,
+        "Answered despite the bounded-summarization outage.",
+    );
     // Global ceiling generous (24) so the per-subagent cap (1) is what binds first.
     let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 1, 3));
 

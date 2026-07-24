@@ -164,10 +164,11 @@ fn fixture(dir: &std::path::Path) -> (Arc<Engine>, Arc<Sandbox>) {
     (engine, sandbox)
 }
 
-fn two_step_plan() -> String {
+fn one_graph_step_plan() -> String {
+    // A single grounding step; the terminal answer is composed by the `final`
+    // reroute through the Synthesizer, not a planned synthesizer step ([CR-086]).
     r#"{"action":"plan","steps":[
-        {"role":"graph_navigator","instruction":"gather the facts"},
-        {"role":"synthesizer","instruction":"compose the final answer"}
+        {"role":"graph_navigator","instruction":"gather the facts"}
     ]}"#
     .to_string()
 }
@@ -188,10 +189,11 @@ async fn synthesizer_is_grounded_on_the_persisted_scratchpad() {
     let memory = Arc::new(MemoryStore::open(dir.path()).unwrap());
     let turn = memory.next_turn(thread).unwrap();
 
-    // The planner lays out a graph step then a synthesis step, then finalises.
+    // The planner lays out a grounding step, then finalizes (grounded) — the reroute
+    // composes the answer through the Synthesizer ([CR-086]).
     let planner = MockCompletionModel::new([
-        MockTurn::text(two_step_plan()),
-        MockTurn::text(r#"{"action":"final","answer":"grounded answer"}"#),
+        MockTurn::text(one_graph_step_plan()),
+        MockTurn::text(r#"{"action":"final","grounded":true}"#),
     ]);
 
     // The Graph-Navigator replies with a distinctive grounded observation (no tool
@@ -229,14 +231,17 @@ async fn synthesizer_is_grounded_on_the_persisted_scratchpad() {
             .await
             .expect("the grounded turn completes")
     };
+    // The terminal answer is the Synthesizer's composed prose, streamed via the
+    // reroute ([CR-086]).
     assert_eq!(
         outcome,
-        TurnOutcome::Answered("grounded answer".to_string())
+        TurnOutcome::Answered("the synthesized answer".to_string())
     );
     assert!(scratchpad.first_error().is_none(), "no scratchpad write failed");
 
-    // Fan-out reached the streaming sink: it saw the plan, both step observations,
-    // and the final answer.
+    // Fan-out reached the streaming sink: it saw the grounding step's observation.
+    // The Synthesizer runs via the `final` reroute (AnswerDelta/FinalAnswer), so it
+    // is not among the observed step roles.
     let observed_roles: Vec<StepRole> = events
         .events()
         .into_iter()
@@ -247,8 +252,8 @@ async fn synthesizer_is_grounded_on_the_persisted_scratchpad() {
         .collect();
     assert_eq!(
         observed_roles,
-        vec![StepRole::GraphNavigator, StepRole::Synthesizer],
-        "the streaming sink observed both steps",
+        vec![StepRole::GraphNavigator],
+        "the streaming sink observed the grounding step",
     );
 
     // Fan-out reached the persisting sink: the graph observation is in chat.db.

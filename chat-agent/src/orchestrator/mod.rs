@@ -72,6 +72,23 @@ fn has_usable_observation(scratchpad: &[(PlanStep, StepObservation)]) -> bool {
         .any(|(_, obs)| !obs.summary.trim_start().starts_with(UNAVAILABLE_MARKER))
 }
 
+/// The corrective directive the orchestrator re-prompts the planner with when it
+/// finalizes a **codebase-grounded** answer over an **empty scratchpad** — a
+/// premature-finalize protocol violation ([FR-UI-30], [NFR-CC-04]). It forces at
+/// least one grounding step before an answer is composed, rather than answering a
+/// codebase claim from the model's prior knowledge. The re-prompts are bounded by
+/// the turn's `max_replans`; a planner that keeps finalizing prematurely past the
+/// bound halts honestly rather than fabricating an answer.
+///
+/// [FR-UI-30]: ../../docs/specs/requirements/FR-UI-30.md
+const GROUNDING_CORRECTION: &str = "\
+You marked this a codebase-grounded final, but no observations have been gathered \
+yet. A codebase answer must be grounded in at least one subagent observation — it \
+is never given from prior knowledge alone. Produce a plan with at least one \
+grounding step (e.g. graph_navigator, governance_analyst, or source_reader) before \
+you finalize. If the question is purely conversational and makes no codebase claim, \
+finalize with \"grounded\": false instead.";
+
 /// Forwards the Synthesizer's streamed answer chunks to the orchestrator's event
 /// sink as [`OrchestratorEvent::AnswerDelta`] ([FR-UI-19]). It borrows the turn's
 /// `&impl EventSink`, so wiring it onto a Synthesizer step's [`StepContext`]
@@ -215,15 +232,51 @@ where
         // Plans fully executed so far: 0 while running the initial plan, ≥1 once
         // the planner is replanning. Bounded by `max_replans`.
         let mut plans_executed: u32 = 0;
+        // Forced-grounding re-prompts issued for a premature codebase `final` (a
+        // `grounded` final over an empty scratchpad, [FR-UI-30]). Bounded by
+        // `max_replans` so a defiant planner can never loop unbounded.
+        let mut grounding_retries: u32 = 0;
+        // A corrective directive to append to the NEXT planner prompt, set when a
+        // premature codebase `final` is refused. Consumed (cleared) each round.
+        let mut correction: Option<&str> = None;
 
         loop {
-            let decision = self.planner.decide(request, &scratchpad).await?;
+            let decision = self.planner.decide(request, &scratchpad, correction.take()).await?;
             let steps = match decision {
-                PlannerDecision::Final { answer } => {
-                    sink.emit(OrchestratorEvent::FinalAnswer {
-                        answer: answer.clone(),
-                    });
-                    return Ok(TurnOutcome::Answered(answer));
+                // The turn is finalized. The planner's decision carries no prose
+                // ([CR-086], [FR-UI-30]) — the tool-less streaming Synthesizer
+                // composes the user-facing answer over the turn's scratchpad,
+                // reusing the same finalize machinery a budget halt does.
+                PlannerDecision::Final { grounded } => {
+                    // Grounding gate ([NFR-CC-04], [FR-UI-30]): a codebase-grounded
+                    // answer over an EMPTY scratchpad is a premature finalize — the
+                    // planner never gathered anything, so force at least one grounding
+                    // step rather than answering a codebase claim from model knowledge.
+                    // The gate is on emptiness, not usability: a scratchpad holding only
+                    // degraded `[unavailable — …]` notes ([CR-060] Layer 3) already
+                    // attempted grounding, so it is not re-forced — the tool-less
+                    // Synthesizer then honestly reports the shortfall rather than
+                    // fabricating (the hard-halt terminal's stricter `has_usable_observation`
+                    // gate covers the bounded case). A conversational (`grounded == false`)
+                    // final answers directly, no tools, no observations required.
+                    if grounded && scratchpad.is_empty() {
+                        if grounding_retries >= self.budget.max_replans() {
+                            // The planner kept finalizing prematurely past the
+                            // correction bound — halt honestly, never fabricate.
+                            let bound = BudgetBound::Replans {
+                                limit: self.budget.max_replans(),
+                            };
+                            sink.emit(OrchestratorEvent::Halted {
+                                round: plans_executed,
+                                bound,
+                            });
+                            return Ok(TurnOutcome::Halted(bound));
+                        }
+                        grounding_retries += 1;
+                        correction = Some(GROUNDING_CORRECTION);
+                        continue;
+                    }
+                    return self.finalize_via_synthesizer(request, sink).await;
                 }
                 PlannerDecision::Plan { steps } => steps,
             };
@@ -376,18 +429,13 @@ where
         // One tool-free Synthesizer pass over the scratchpad. In production the
         // roster injects the rendered scratchpad as the Synthesizer's grounding
         // (S-175); the step instruction only frames the bounded intent.
-        let synth_step = PlanStep::new(
-            StepRole::Synthesizer,
-            "The turn was bounded by its budget before it could finish. Using only the \
-             observations gathered so far, compose the best-effort grounded answer to the \
+        let instruction = "The turn was bounded by its budget before it could finish. Using only \
+             the observations gathered so far, compose the best-effort grounded answer to the \
              user's question and make clear it may be incomplete. Ground every claim in those \
-             observations; never invent facts.",
-        );
-        let forwarder = AnswerForwarder(sink);
-        let ctx = StepContext::with_answer_sink(&self.budget, &forwarder);
-        match self.executor.execute(&synth_step, &ctx).await {
-            Ok(observation) => {
-                let answer = format!("{marker}\n{}", observation.summary);
+             observations; never invent facts.";
+        match self.synthesize_answer(instruction, sink).await {
+            Ok(summary) => {
+                let answer = format!("{marker}\n{summary}");
                 sink.emit(OrchestratorEvent::FinalAnswer {
                     answer: answer.clone(),
                 });
@@ -400,5 +448,90 @@ where
                 Ok(TurnOutcome::Halted(bound))
             }
         }
+    }
+
+    /// Compose the turn's terminal answer by rerouting the planner's `final`
+    /// decision through the tool-less **streaming Synthesizer** ([CR-086],
+    /// [FR-UI-30], [ADR-41]).
+    ///
+    /// The planner's `final` decision carries **no prose** — a multi-line
+    /// markdown/mermaid answer cannot survive a strict-JSON string field — so the
+    /// answer is always Synthesizer-composed and streamed as
+    /// [`AnswerDelta`](OrchestratorEvent::AnswerDelta) tokens plus a terminal
+    /// [`FinalAnswer`](OrchestratorEvent::FinalAnswer), the same event contract a
+    /// `plan`-routed Synthesizer step and a budget-halt finalize use ([FR-UI-19]).
+    /// It reuses the [`synthesize_answer`](Self::synthesize_answer) machinery the
+    /// budget-halt finalize shares — minus the bounded marker and the empty-halt
+    /// gate: a conversational (`grounded == false`) turn legitimately synthesizes a
+    /// direct answer over an empty scratchpad, and the grounding gate in
+    /// [`run`](Self::run) has already forced ≥1 observation for a codebase answer.
+    ///
+    /// A synthesis failure is an honest [`OrchestratorError::Step`] naming the
+    /// synthesis stage ([S-199]) — never a fabricated answer ([NFR-CC-04]).
+    async fn finalize_via_synthesizer(
+        &self,
+        request: &str,
+        sink: &impl EventSink,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        // The rendered scratchpad omits the raw user question (it holds the plan and
+        // observations); a conversational turn has no observations at all — so the
+        // request is carried in the instruction, the one place the Synthesizer can
+        // read what it is answering.
+        let instruction = format!(
+            "Compose the final, grounded answer to the user's question in clear prose \
+             (markdown is fine). Ground every claim about the codebase in the observations \
+             gathered this turn; if they are insufficient, say so honestly rather than \
+             inventing facts. The user's question was:\n{request}"
+        );
+        match self.synthesize_answer(&instruction, sink).await {
+            Ok(answer) => {
+                sink.emit(OrchestratorEvent::FinalAnswer {
+                    answer: answer.clone(),
+                });
+                Ok(TurnOutcome::Answered(answer))
+            }
+            Err(err) => Err(synthesis_error(err)),
+        }
+    }
+
+    /// Run one tool-free [`Synthesizer`](StepRole::Synthesizer) pass, streaming the
+    /// answer's tokens through the [`AnswerForwarder`] as
+    /// [`AnswerDelta`](OrchestratorEvent::AnswerDelta) events ([FR-UI-19]) and
+    /// returning the accumulated answer text.
+    ///
+    /// The shared finalize primitive: both the planner-`final` reroute
+    /// ([`finalize_via_synthesizer`](Self::finalize_via_synthesizer)) and the
+    /// budget-halt finalize ([`finalize_on_hard_halt`](Self::finalize_on_hard_halt))
+    /// drive the answer through here — the Synthesizer charges no budget, so it runs
+    /// even with the global ceiling spent. `instruction` frames the synthesis intent;
+    /// in production the roster injects the rendered per-turn scratchpad as the
+    /// authoritative grounding (S-175). Neither the terminal `FinalAnswer` nor any
+    /// caller-specific marker is emitted here — the caller owns that, so the bounded
+    /// path can prefix its marker and this path can stream raw.
+    async fn synthesize_answer(
+        &self,
+        instruction: &str,
+        sink: &impl EventSink,
+    ) -> Result<String, StepError> {
+        let synth_step = PlanStep::new(StepRole::Synthesizer, instruction);
+        let forwarder = AnswerForwarder(sink);
+        let ctx = StepContext::with_answer_sink(&self.budget, &forwarder);
+        let observation = self.executor.execute(&synth_step, &ctx).await?;
+        Ok(observation.summary)
+    }
+}
+
+/// Map a Synthesizer [`StepError`] to an honest [`OrchestratorError::Step`] naming
+/// the synthesis stage ([S-199], [NFR-CC-04]). `run_synthesizer` surfaces only
+/// [`StepError::Failed`], but a bound or route-around fault is mapped through the
+/// same stage naming for completeness.
+fn synthesis_error(err: StepError) -> OrchestratorError {
+    let message = match err {
+        StepError::Failed(message) | StepError::Unavailable(message) => message,
+        StepError::Budget(bound) => format!("the synthesizer was bounded: {bound}"),
+    };
+    OrchestratorError::Step {
+        role: StepRole::Synthesizer,
+        message,
     }
 }
