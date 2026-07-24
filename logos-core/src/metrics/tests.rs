@@ -499,6 +499,38 @@ fn the_depth_rework_leaves_the_acyclicity_source_untouched() {
     assert_eq!(snap.depth.raw, 2.0, "the condensed module chain is two layers");
 }
 
+/// Depth folds file-less nodes into the same `<unbound>` pseudo-directory
+/// Modularity and Acyclicity use ([FR-QM-03], [ADR-62]): the v5 rollup made
+/// Depth partition-dependent, so pin the unbound case symmetrically to
+/// Acyclicity's `unbound_directory_membership_follows_the_partition`.
+#[test]
+fn depth_folds_unbound_nodes_into_one_module() {
+    let chain = [edge(1, 2, EdgeKind::Calls)];
+
+    // All-unbound: both file-less → one `<unbound>` module → depth 1.
+    let all_unbound = [
+        node(1, "a", NodeKind::Function, None),
+        node(2, "b", NodeKind::Function, None),
+    ];
+    let snap = run(&all_unbound, &chain, &[]);
+    assert_eq!(
+        snap.depth.raw, 1.0,
+        "two file-less nodes share the <unbound> pseudo-directory → one module layer"
+    );
+
+    // Mixed: file-less `a` (<unbound>) → bound `b` (src) crosses two modules →
+    // two condensed layers.
+    let mixed = [
+        node(1, "a", NodeKind::Function, None),
+        node(2, "b", NodeKind::Function, Some("src/b.rs")),
+    ];
+    let snap = run(&mixed, &chain, &[]);
+    assert_eq!(
+        snap.depth.raw, 2.0,
+        "an <unbound> → src edge crosses two modules → two layers"
+    );
+}
+
 // ── FR-QM-04 / UAT-QM-04: equality tracks complexity concentration ──────────
 
 /// One god-function among trivial ones scores lower equality than an even
