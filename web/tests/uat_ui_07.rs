@@ -45,8 +45,8 @@
 //!   (`uat_ui_07_step6b_memory_persists_across_restart_then_clear_wipes_it`);
 //! - step 8 — a non-chat `POST` is `405` and a forged/intent-less chat `POST` is
 //!   `403` (`uat_ui_07_step8_non_chat_and_forged_chat_writes_are_rejected`);
-//! - step 9 — Clear-history returns the surface to an empty state
-//!   (`uat_ui_07_step9_clear_history_returns_an_empty_state`).
+//! - step 9 — per-thread delete supersedes the retired global Clear-history
+//!   (`uat_ui_07_step9_per_thread_delete_supersedes_global_clear`).
 //!
 //! The **structural** halves of step 10 — the default-feature no-HTTP-client scan
 //! ([NFR-SE-01]) and the ui-vs-default `rig`/`reqwest` boundary — are guarded by
@@ -75,7 +75,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 use web::chat::{spawn_turn, ChatService, ChatStream};
 use web::{
-    router_with_chat, router_with_intent, IntentToken, CHAT_CLEAR_ROUTE, CHAT_POST_ROUTE,
+    router_with_chat, router_with_intent, IntentToken, CHAT_POST_ROUTE, CHAT_THREADS_ROUTE,
     INTENT_HEADER,
 };
 
@@ -803,17 +803,20 @@ async fn uat_ui_07_step8_non_chat_and_forged_chat_writes_are_rejected() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN, "an intent-less chat POST is rejected");
 }
 
-// ── Step 9: Clear-history returns an empty state ──────────────────────────────
+// ── Step 9: per-thread delete supersedes the global Clear-history ─────────────
 
-/// Step 9: the guarded `POST /chat/clear` empties the conversation store and
-/// returns the surface to an empty state ([FR-UI-18], [FR-UI-20]).
+/// Step 9 (re-expressed for the CR-053 / [ADR-47] per-conversation model): the
+/// guarded `POST /api/v1/chat/threads/{id}/delete` removes exactly that
+/// conversation **and** its per-thread memory (S-208 cascade), and the global
+/// `POST /chat/clear` route is **gone** — a POST to it is `405`, not a wipe
+/// ([FR-UI-18], [FR-UI-20], [FR-UI-26]).
 #[tokio::test]
-async fn uat_ui_07_step9_clear_history_returns_an_empty_state() {
+async fn uat_ui_07_step9_per_thread_delete_supersedes_global_clear() {
     let dir = configured_root();
     let root = dir.path().to_path_buf();
 
-    // Seed a conversation.
-    {
+    // Seed a conversation with per-thread memory.
+    let thread = {
         let mut store = ChatStore::open(&root).expect("open chat store");
         let thread = store.create_thread("seeded").expect("thread");
         store.append_message(thread, ChatRole::User, "hello", &[]).expect("append");
@@ -822,31 +825,56 @@ async fn uat_ui_07_step9_clear_history_returns_an_empty_state() {
             .set_working_memory(thread, "a prior-turn summary")
             .expect("seed working memory");
         assert!(!store.is_empty().expect("count"), "history is seeded");
-    }
+        thread
+    };
 
     let engine = Arc::new(Engine::open(&root));
     let intent = IntentToken::generate();
     let router = router_with_intent(engine, intent.clone());
+
+    // The old global clear route is retired — a guarded POST to it is 405, so it
+    // cannot wipe anything.
+    let stale = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/chat/clear")
+                .header(header::HOST, HOST)
+                .header(header::ORIGIN, ORIGIN)
+                .header(INTENT_HEADER, intent.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stale.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "the global /chat/clear route is gone (405, never a wipe)",
+    );
+
+    // The per-thread delete removes exactly that conversation.
     let req = Request::builder()
         .method(Method::POST)
-        .uri(CHAT_CLEAR_ROUTE)
+        .uri(format!("{CHAT_THREADS_ROUTE}/{thread}/delete"))
         .header(header::HOST, HOST)
         .header(header::ORIGIN, ORIGIN)
         .header(INTENT_HEADER, intent.as_str())
         .body(Body::empty())
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "Clear-history succeeds");
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "per-thread delete succeeds");
 
     assert!(
         ChatStore::open(&root).expect("reopen").is_empty().expect("count"),
-        "the conversation store is empty after Clear-history",
+        "the conversation is gone after the per-thread delete",
     );
-    // The clear handler cascades to per-thread memory too (S-175 FK cascade),
-    // proven here through the HTTP route, not only the store API (step 6b).
+    // The delete cascades to per-thread memory too (S-175 FK cascade), proven here
+    // through the HTTP route, not only the store API (step 6b).
     assert!(
         MemoryStore::open(&root).expect("reopen memory").is_empty().expect("count"),
-        "per-thread memory is wiped by the Clear-history route",
+        "per-thread memory is wiped by the delete route",
     );
 }
 

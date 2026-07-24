@@ -292,17 +292,18 @@ pub const CONFIG_POST_ROUTES: &[&str] =
 /// [`chat-agent`]: ../../../docs/specs/architecture/components/chat-agent.md
 pub const CHAT_POST_ROUTE: &str = "/chat";
 
-/// The enumerated Clear-history `POST` route (S-171, [FR-UI-18], [FR-UI-20]): the
-/// Chat view's other mutating action, wiping the conversation **and** its
-/// per-thread memory. One `DELETE FROM chat_threads` cascades through messages,
-/// scratchpad, and working memory (the S-168/S-175 FK contract), so a single
-/// call clears both. Like every mutating `POST` it is admitted by
-/// [`method_guard`] and gated by [`intent_guard`] (same-origin + per-session
-/// token).
+/// The GET thread-list read route (S-209, [FR-UI-26], [ADR-47], [ADR-28]): the
+/// conversation-history rail's data seam — every persisted conversation
+/// (`id`, `title`, `updated_at`), most-recent-first. A pure loopback, same-origin
+/// GET carrying no secret ([NFR-SE-07]); the per-thread messages read hangs off
+/// the `{id}` sub-path, and the per-thread **delete** is the one mutating verb
+/// under this tree (a `POST` to `…/{id}/delete`, gated by [`intent_guard`]).
 ///
-/// [FR-UI-18]: ../../../docs/specs/requirements/FR-UI-18.md
-/// [FR-UI-20]: ../../../docs/specs/requirements/FR-UI-20.md
-pub const CHAT_CLEAR_ROUTE: &str = "/chat/clear";
+/// [FR-UI-26]: ../../../docs/specs/requirements/FR-UI-26.md
+/// [ADR-47]: ../../../docs/specs/architecture/decisions/ADR-47.md
+/// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+/// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
+pub const CHAT_THREADS_ROUTE: &str = "/api/v1/chat/threads";
 
 /// The enumerated wiki-generation trigger `POST` route (S-178, [FR-WK-18],
 /// [FR-UI-19], [NFR-SE-06]): the Wiki tab posts here on open to launch a
@@ -787,11 +788,17 @@ fn build_router(state: WebState) -> Router {
         // consults. A GET to `/chat` is a browser navigation to the SPA's Chat
         // client route, so it serves the SPA shell (the POST carries the turn).
         .route(CHAT_POST_ROUTE, get(spa_shell).post(chat_turn))
-        // S-171 / FR-UI-20: Clear-history wipes the conversation AND its
-        // per-thread memory (the `chat_threads` delete cascades, S-168/S-175).
-        // Intent-guarded like every mutating POST; kept in lock-step with
-        // `method_guard` below.
-        .route(CHAT_CLEAR_ROUTE, post(chat_clear))
+        // ── The conversation-history read/delete API (S-209, FR-UI-26, ADR-47).
+        // Two GET reads over the read-only seam — the thread list (id, title,
+        // updated_at, most-recent-first) and one thread's ordered messages
+        // (ADR-28) — plus the per-thread delete that supersedes the global clear:
+        // a `POST` to `…/{id}/delete` (DELETE is `405` under `method_guard`, so
+        // the mutation rides a POST verb) backed by `ChatStore::delete_thread`
+        // (S-208), intent-guarded like every mutating POST and kept in lock-step
+        // with `post_route_admitted` below.
+        .route(CHAT_THREADS_ROUTE, get(chat_threads))
+        .route("/api/v1/chat/threads/:id", get(chat_thread_messages))
+        .route("/api/v1/chat/threads/:id/delete", post(chat_thread_delete))
         // ── The wiki-generation trigger (S-178, FR-WK-18, FR-UI-19, ADR-42): the
         // Wiki tab POSTs here on open. Under the single-run lock it launches a
         // background wiki-agent pass and, with `Accept: text/event-stream`, streams
@@ -1016,15 +1023,15 @@ async fn host_guard(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-/// Method guard (FR-UI-03 as revised, ADR-31, S-170/S-171/S-206): the surface is
+/// Method guard (FR-UI-03 as revised, ADR-31, S-170/S-209/S-206): the surface is
 /// GET-only **except** a `POST` to one of the enumerated [`CONFIG_POST_ROUTES`],
-/// the [`CHAT_POST_ROUTE`] (a turn), the [`CHAT_CLEAR_ROUTE`] (Clear-history), the
-/// [`WIKI_GENERATE_ROUTE`] (the Wiki-tab generation trigger), or the
-/// [`VERIFY_POST_ROUTE`] (the deep graph-consistency check). Every other
-/// method — and a `POST` to any other path — is answered `405` before any handler
-/// runs, so relaxing the read-only posture stays bounded to exactly the
-/// config-write/apply seam, the two chat routes, the wiki-generation trigger, and
-/// the verify route (NFR-SE-06).
+/// the [`CHAT_POST_ROUTE`] (a turn), a per-thread delete under
+/// [`CHAT_THREADS_ROUTE`] (`…/{id}/delete`, S-209), the [`WIKI_GENERATE_ROUTE`]
+/// (the Wiki-tab generation trigger), or the [`VERIFY_POST_ROUTE`] (the deep
+/// graph-consistency check). Every other method — and a `POST` to any other
+/// path — is answered `405` before any handler runs, so relaxing the read-only
+/// posture stays bounded to exactly the config-write/apply seam, the two chat
+/// routes, the wiki-generation trigger, and the verify route (NFR-SE-06).
 /// The admitted `POST`s are gated again by [`intent_guard`] for same-origin +
 /// intent-token defense.
 async fn method_guard(req: Request, next: Next) -> Response {
@@ -1052,10 +1059,26 @@ fn post_route_admitted(path: &str) -> bool {
         return true;
     }
     #[cfg(feature = "agents")]
-    if path == CHAT_POST_ROUTE || path == CHAT_CLEAR_ROUTE || path == WIKI_GENERATE_ROUTE {
+    if path == CHAT_POST_ROUTE || is_chat_thread_delete_route(path) || path == WIKI_GENERATE_ROUTE {
         return true;
     }
     false
+}
+
+/// Does `path` name the per-thread delete route (`/api/v1/chat/threads/{id}/delete`
+/// with an integer `{id}`)? This is the one mutating verb under
+/// [`CHAT_THREADS_ROUTE`] (S-209, [ADR-47]) — it replaced the global `/chat/clear`
+/// in the [`post_route_admitted`] allow-list. The `{id}` segment must parse as the
+/// `i64` rowid the handler extracts, so a malformed or extra-segment path is not
+/// admitted here (it stays `405`), never silently reaching the handler.
+///
+/// [ADR-47]: ../../../docs/specs/architecture/decisions/ADR-47.md
+#[cfg(feature = "agents")]
+fn is_chat_thread_delete_route(path: &str) -> bool {
+    path.strip_prefix(CHAT_THREADS_ROUTE)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .and_then(|rest| rest.strip_suffix("/delete"))
+        .is_some_and(|id| id.parse::<i64>().is_ok())
 }
 
 /// Same-origin + per-session intent (CSRF) guard for the mutating surface
@@ -1387,30 +1410,109 @@ async fn config_save_secret(
     }
 }
 
-/// `POST /chat/clear` → Clear-history (S-171, [FR-UI-18], [FR-UI-20]): wipe every
-/// conversation **and** its per-thread memory. A single
-/// [`ChatStore::clear_history`](chat_agent::ChatStore::clear_history)
-/// (`DELETE FROM chat_threads`) cascades through messages, scratchpad, and
-/// working memory (the S-168/S-175 FK contract), so no orphaned memory survives.
-/// Already proven same-origin + intentional by the guards. The blocking SQLite
-/// work runs on the pool ([ADR-03]); a store fault is an honest `500`, never a
-/// silent success ([NFR-CC-04]). Returns the number of threads removed.
+/// One conversation's list-row (S-209, [FR-UI-26], [ADR-47]): the exact
+/// contract the history rail reads — `id`, `title`, `updated_at`, and nothing
+/// else. Deliberately narrower than the store's [`ChatThread`](chat_agent::ChatThread)
+/// (it drops `created_at`) so the thread-list payload carries only what the rail
+/// renders and no secret ever rides it ([NFR-SE-07]).
 #[cfg(feature = "agents")]
-async fn chat_clear(MemberEngine(engine): MemberEngine) -> Response {
-    let root = engine.root().to_path_buf();
-    let result = tokio::task::spawn_blocking(move || {
-        let mut store = chat_agent::ChatStore::open(&root)?;
-        store.clear_history()
+#[derive(serde::Serialize)]
+struct ThreadSummary {
+    /// The thread rowid (stable for the life of the store).
+    id: i64,
+    /// The auto-derived conversation title (S-208).
+    title: String,
+    /// Unix-seconds time of the most recent appended message (or creation) — the
+    /// most-recent-first sort key.
+    updated_at: i64,
+}
+
+/// `GET /api/v1/chat/threads` → the conversation list (S-209, [FR-UI-26],
+/// [ADR-47], [ADR-28]): every persisted thread as a [`ThreadSummary`],
+/// most-recent-first (the store's `ORDER BY updated_at DESC, id DESC`). A pure
+/// loopback, same-origin read carrying no secret ([NFR-SE-07]). Runs the blocking
+/// SQLite read on the pool through the [`bridge`] ([ADR-03]) — like every other
+/// read handler — so it also flows through the [ADR-13] `surface=web` telemetry
+/// chokepoint; a store fault is an honest `500` ([NFR-CC-04]). Member-scoped
+/// (S-250): the list is that member's `.logos/chat.db`.
+#[cfg(feature = "agents")]
+async fn chat_threads(MemberEngine(engine): MemberEngine) -> Response {
+    let result = bridge(engine, "chat_threads", move |e| {
+        let store = chat_agent::ChatStore::open(e.root())?;
+        store.list_threads()
     })
     .await;
     match result {
-        Ok(Ok(removed)) => Json(removed).into_response(),
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
-        Err(_join) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "the clear-history task failed unexpectedly",
-        )
-            .into_response(),
+        Ok(threads) => {
+            let summaries: Vec<ThreadSummary> = threads
+                .into_iter()
+                .map(|t| ThreadSummary {
+                    id: t.id,
+                    title: t.title,
+                    updated_at: t.updated_at,
+                })
+                .collect();
+            Json(summaries).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
+    }
+}
+
+/// `GET /api/v1/chat/threads/{id}` → one thread's ordered transcript (S-209,
+/// [FR-UI-26], [ADR-47], [ADR-28]): every message in stored `ordinal` order, each
+/// with its tool traces — the [`ChatMessage`](chat_agent::ChatMessage)s the rail
+/// hydrates on select. A GET carrying no secret ([NFR-SE-07]); a request for a
+/// thread that does not exist is an honest `404` (distinct from an empty-but-real
+/// thread), never a misleading empty `200` ([NFR-CC-04]). Runs on the pool through
+/// the [`bridge`] ([ADR-03], [ADR-13] telemetry); a store fault is a `500`.
+#[cfg(feature = "agents")]
+async fn chat_thread_messages(
+    MemberEngine(engine): MemberEngine,
+    axum::extract::Path(thread_id): axum::extract::Path<i64>,
+) -> Response {
+    let result = bridge(engine, "chat_thread_messages", move |e| {
+        let store = chat_agent::ChatStore::open(e.root())?;
+        // Distinguish "no such thread" (→ 404) from "a real thread with no
+        // messages" (→ an honest empty list) — `messages` alone cannot.
+        match store.thread(thread_id)? {
+            Some(_) => store.messages(thread_id).map(Some),
+            None => Ok(None),
+        }
+    })
+    .await;
+    match result {
+        Ok(Some(messages)) => Json(messages).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no chat thread with that id").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
+    }
+}
+
+/// `POST /api/v1/chat/threads/{id}/delete` → per-thread delete (S-209,
+/// [FR-UI-26], [FR-UI-20], [ADR-47], [ADR-31]): the granular deletion that
+/// supersedes the global Clear-history. Backed by
+/// [`ChatStore::delete_thread`](chat_agent::ChatStore::delete_thread) (S-208) —
+/// one `DELETE FROM chat_threads WHERE id=?` whose live cascade wipes that
+/// thread's messages, scratchpad, and working memory (the S-168/S-175 FK
+/// contract), so no orphaned memory survives. Already proven same-origin +
+/// intentional by [`intent_guard`] (a forged or intent-less delete never reaches
+/// here, [NFR-SE-06]). A hit is `204 No Content`; a miss (`delete_thread ==
+/// false`, no thread had that id) is an idempotent `404`; a store fault is an
+/// honest `500` ([NFR-CC-04]). The blocking SQLite work runs on the pool through
+/// the [`bridge`] ([ADR-03], [ADR-13] telemetry), exactly like the other handlers.
+#[cfg(feature = "agents")]
+async fn chat_thread_delete(
+    MemberEngine(engine): MemberEngine,
+    axum::extract::Path(thread_id): axum::extract::Path<i64>,
+) -> Response {
+    let result = bridge(engine, "chat_thread_delete", move |e| {
+        let mut store = chat_agent::ChatStore::open(e.root())?;
+        store.delete_thread(thread_id)
+    })
+    .await;
+    match result {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no chat thread with that id").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
     }
 }
 

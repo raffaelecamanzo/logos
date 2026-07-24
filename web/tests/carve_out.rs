@@ -510,7 +510,14 @@ async fn post_to_non_config_route_is_405() {
 #[cfg(not(feature = "agents"))]
 #[tokio::test]
 async fn chat_and_wiki_generation_posts_are_405_without_agents() {
-    for path in [web::CHAT_POST_ROUTE, web::CHAT_CLEAR_ROUTE, web::WIKI_GENERATE_ROUTE] {
+    // The per-thread delete (`…/threads/{id}/delete`, S-209) replaced the global
+    // `/chat/clear` in the mutating allow-list; under no-`agents` it is neither
+    // mounted nor admitted, so a well-formed POST to it is still `405`.
+    for path in [
+        web::CHAT_POST_ROUTE,
+        "/api/v1/chat/threads/1/delete",
+        web::WIKI_GENERATE_ROUTE,
+    ] {
         let (_dir, router, intent) = mutating_router();
         // A fully valid mutating POST — same-origin + intent token — so the only
         // possible rejection is `method_guard`'s 405 (an unmounted, unadmitted
