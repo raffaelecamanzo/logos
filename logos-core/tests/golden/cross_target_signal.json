@@ -1,6 +1,6 @@
 {
   "schema": "logos.golden-signal/v1",
-  "aggregate_signal": 7470,
+  "aggregate_signal": 7660,
   "metrics": [
     {
       "name": "modularity",
@@ -14,8 +14,8 @@
     },
     {
       "name": "depth",
-      "raw": "3.000000",
-      "normalized": "0.727273"
+      "raw": "1.000000",
+      "normalized": "0.888889"
     },
     {
       "name": "equality",
