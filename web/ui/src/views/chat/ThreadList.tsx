@@ -15,7 +15,7 @@
  * conversation switch or outlive the rail.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "../../components/index.ts";
 import type { ThreadSummary } from "./chatModel.ts";
@@ -52,6 +52,14 @@ export function ThreadList({
   // pending at a time, so opening a second confirm closes the first — the user is
   // never looking at two armed destructive actions.
   const [confirmingId, setConfirmingId] = useState<number | null>(null);
+
+  // Switching conversation ("+ New chat" or selecting another) disarms any pending
+  // confirm. An armed destructive prompt is intent bound to a MOMENT, not just to a
+  // row: it must not lie in wait behind a context switch for a user who returns to
+  // the rail later (e.g. via the narrow-viewport toggle) and clicks it through
+  // without re-establishing that intent. The rail is not unmounted by either action,
+  // so nothing else would clear it.
+  useEffect(() => setConfirmingId(null), [activeThreadId]);
 
   return (
     <nav className={styles.rail} aria-label="Conversations">

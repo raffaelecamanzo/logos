@@ -504,6 +504,48 @@ describe("ChatView — per-conversation delete (S-211, FR-UI-26, AC-1)", () => {
     expect(deleteButton("Conv A")).toHaveAttribute("aria-expanded", "false");
   });
 
+  it("disarms a pending confirm when the conversation is switched", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(5, "Conv A", 300), thread(3, "Conv B", 100)]);
+    mockFetchMessages.mockResolvedValue([persisted("user", "q", 1), persisted("assistant", "a", 2)]);
+    render(<ChatView />);
+    await screen.findByRole("button", { name: "Conv B" });
+
+    // Arm the delete on Conv A, then move to Conv B without answering it.
+    await user.click(deleteButton("Conv A"));
+    expect(await screen.findByRole("button", { name: "Delete" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Conv B" }));
+    await screen.findByText("a");
+
+    // The armed prompt does not lie in wait behind the switch.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument(),
+    );
+    expect(deleteButton("Conv A")).toHaveAttribute("aria-expanded", "false");
+    expect(mockDeleteThread).not.toHaveBeenCalled();
+  });
+
+  it("disarms a pending confirm when + New chat is started", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(5, "Conv A", 300)]);
+    mockFetchMessages.mockResolvedValue([persisted("user", "q", 1), persisted("assistant", "a", 2)]);
+    render(<ChatView />);
+    // Open a conversation first, so "+ New chat" is a real switch (active → null).
+    await user.click(await screen.findByRole("button", { name: "Conv A" }));
+    await screen.findByText("a");
+
+    await user.click(deleteButton("Conv A"));
+    expect(await screen.findByRole("button", { name: "Delete" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "+ New chat" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument(),
+    );
+    expect(mockDeleteThread).not.toHaveBeenCalled();
+  });
+
   it("a stale rail refresh cannot resurrect a conversation deleted while a turn settled", async () => {
     const user = userEvent.setup();
     mockFetchConfig.mockResolvedValue(configuredModel());
