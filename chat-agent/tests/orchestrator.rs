@@ -346,6 +346,22 @@ impl StepExecutor for FailingExecutor {
     }
 }
 
+/// A step executor that returns a **recoverable** `StepError::Unavailable` for any
+/// step — used to pin that a Synthesizer fault on the `final` reroute is turn-fatal
+/// (mapped to an honest synthesis-stage error), NOT degraded to an observation the
+/// way a tool-bearing step's `Unavailable` is in the main loop ([CR-086], [NFR-CC-04]).
+struct UnavailableExecutor;
+
+impl StepExecutor for UnavailableExecutor {
+    async fn execute(
+        &self,
+        _step: &PlanStep,
+        _ctx: &StepContext<'_>,
+    ) -> Result<StepObservation, StepError> {
+        Err(StepError::Unavailable("provider down".to_string()))
+    }
+}
+
 #[tokio::test]
 async fn a_step_failure_surfaces_as_an_orchestrator_error() {
     let planner = MockCompletionModel::new([MockTurn::text(plan_json("graph_navigator", "do it"))]);
@@ -561,6 +577,66 @@ async fn a_planner_that_keeps_finalizing_prematurely_halts_honestly() {
             .iter()
             .any(|e| matches!(e, OrchestratorEvent::FinalAnswer { .. })),
         "no ungrounded answer is fabricated past the bound"
+    );
+}
+
+#[tokio::test]
+async fn a_synthesis_failure_on_the_final_reroute_is_an_honest_synthesis_error() {
+    // The `final` reroute composes the terminal answer through the Synthesizer; if
+    // that synthesis FAILS, the turn surfaces an honest OrchestratorError::Step at
+    // the "synthesis" stage — never a fabricated answer ([CR-086], [NFR-CC-04]).
+    // A conversational (grounded == false) final reaches finalize_via_synthesizer
+    // directly, so the FailingExecutor's fault is the reroute's synthesis fault.
+    let planner = MockCompletionModel::new([MockTurn::text(final_json(false))]);
+    let orchestrator = Orchestrator::new(planner, FailingExecutor, BudgetTree::new(24, 8, 3));
+
+    let sink = CapturingSink::new();
+    let err = orchestrator
+        .run("hello", &sink)
+        .await
+        .expect_err("a synthesis failure is an honest error, never a fabricated answer");
+    assert!(
+        matches!(&err, OrchestratorError::Step { role, .. } if *role == StepRole::Synthesizer),
+        "the reroute's synthesis failure surfaces as a Synthesizer step error: {err:?}"
+    );
+    assert_eq!(err.stage(), "synthesis", "the fault is named at the synthesis stage");
+    assert!(
+        !sink
+            .events()
+            .iter()
+            .any(|e| matches!(e, OrchestratorEvent::FinalAnswer { .. })),
+        "no answer is fabricated on a synthesis failure"
+    );
+}
+
+#[tokio::test]
+async fn a_recoverable_synthesizer_fault_on_the_reroute_is_turn_fatal_not_degraded() {
+    // Pins the divergent branch of `synthesis_error`: a `StepError::Unavailable` from
+    // the Synthesizer on the `final` reroute is turn-fatal (an honest synthesis-stage
+    // error), NOT degraded to a `[unavailable — …]` observation the way a tool-bearing
+    // step's recoverable fault is in the main loop — there is nothing to degrade to
+    // when the answer composer itself is down ([CR-086], [CR-060], [NFR-CC-04]).
+    let planner = MockCompletionModel::new([MockTurn::text(final_json(false))]);
+    let orchestrator = Orchestrator::new(planner, UnavailableExecutor, BudgetTree::new(24, 8, 3));
+
+    let sink = CapturingSink::new();
+    let err = orchestrator
+        .run("hello", &sink)
+        .await
+        .expect_err("a recoverable Synthesizer fault on the reroute is turn-fatal");
+    assert!(
+        matches!(&err, OrchestratorError::Step { role, .. } if *role == StepRole::Synthesizer),
+        "the recoverable synth fault is mapped to a fatal Synthesizer step error: {err:?}"
+    );
+    assert_eq!(err.stage(), "synthesis");
+    // Not degraded: no fabricated answer, and no halt (a genuine fault, not a bound).
+    assert!(
+        !sink.events().iter().any(|e| matches!(
+            e,
+            OrchestratorEvent::FinalAnswer { .. } | OrchestratorEvent::Halted { .. }
+        )),
+        "a synthesis fault neither fabricates an answer nor degrades to a halt: {:?}",
+        sink.events()
     );
 }
 
