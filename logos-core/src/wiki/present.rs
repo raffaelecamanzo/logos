@@ -762,6 +762,7 @@ fn link_edit(
     }
 }
 
+#[cfg(feature = "lang-markdown")]
 pub(crate) fn rewrite_refs(
     body: &str,
     base_dir: &str,
