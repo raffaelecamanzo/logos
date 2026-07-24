@@ -270,6 +270,61 @@ fn only_cross_directory_multi_node_sccs_count() {
     assert_eq!(snap.acyclicity.normalized, 1.0, "a DAG has no cycles");
 }
 
+/// Two independent cross-directory SCCs count as two cycles → normalized
+/// `1/(1+2) = 1/3`, exercising the narrowed `.count()` over more than one
+/// counted SCC (not just the count-of-1 path).
+#[test]
+fn multiple_cross_directory_sccs_count_each() {
+    let nodes = [
+        node(1, "a", NodeKind::Function, Some("alpha/a.rs")),
+        node(2, "b", NodeKind::Function, Some("beta/b.rs")),
+        node(3, "c", NodeKind::Function, Some("gamma/c.rs")),
+        node(4, "d", NodeKind::Function, Some("delta/d.rs")),
+    ];
+    // Two disjoint cross-directory mutual recursions: {a,b} and {c,d}.
+    let edges = [
+        edge(1, 2, EdgeKind::Calls),
+        edge(2, 1, EdgeKind::Calls),
+        edge(3, 4, EdgeKind::Calls),
+        edge(4, 3, EdgeKind::Calls),
+    ];
+    let snap = run(&nodes, &edges, &[]);
+    assert_eq!(snap.acyclicity.raw, 2.0, "two cross-directory SCCs are two cycles");
+    assert_eq!(snap.acyclicity.normalized, 1.0 / 3.0, "1/(1+2) (FR-QM-02)");
+}
+
+/// The cross-directory predicate reads the `directory_of` partition, so a
+/// file-less node lands in the `<unbound>` pseudo-directory (as it does for
+/// Modularity). An SCC mixing an unbound node with a bound one therefore spans
+/// two directories and **counts**; an all-unbound SCC shares one pseudo-directory
+/// and does not — pinning the partition-dependent behavior the v5 narrowing
+/// introduces ([ADR-61]).
+#[test]
+fn unbound_directory_membership_follows_the_partition() {
+    // Mixed: `a` is file-less (`<unbound>`), `b` is in `src` → two directories.
+    let mixed_nodes = [
+        node(1, "a", NodeKind::Function, None),
+        node(2, "b", NodeKind::Function, Some("src/b.rs")),
+    ];
+    let mutual = [edge(1, 2, EdgeKind::Calls), edge(2, 1, EdgeKind::Calls)];
+    let snap = run(&mixed_nodes, &mutual, &[]);
+    assert_eq!(
+        snap.acyclicity.raw, 1.0,
+        "an unbound↔bound SCC spans <unbound> and src → a cross-module cycle"
+    );
+
+    // All-unbound: both file-less → one `<unbound>` pseudo-directory → uncounted.
+    let unbound_nodes = [
+        node(1, "a", NodeKind::Function, None),
+        node(2, "b", NodeKind::Function, None),
+    ];
+    let snap = run(&unbound_nodes, &mutual, &[]);
+    assert_eq!(
+        snap.acyclicity.raw, 0.0,
+        "an all-unbound SCC shares one pseudo-directory → not a cross-module cycle"
+    );
+}
+
 /// The metric-semantics version pins at 5 ([CR-087], [ADR-61]): narrowing
 /// Acyclicity to cross-module cycles is a semantics change, so the constant
 /// advanced 4 → 5, and the first post-upgrade gate auto-re-baselines
