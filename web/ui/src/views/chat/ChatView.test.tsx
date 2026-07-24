@@ -465,6 +465,21 @@ describe("ChatView — conversation-history rail (S-210, FR-UI-26)", () => {
     // rail still shows exactly the one server-side conversation.
     expect(mockStreamTurn).not.toHaveBeenCalled();
     expect(screen.getAllByRole("button", { name: "Conv A" })).toHaveLength(1);
+    // The stored selection is cleared, so a reload lands on a fresh composer.
+    await waitFor(() => expect(window.localStorage.getItem("logos.chat.activeThread")).toBeNull());
+  });
+
+  it("marks the open conversation with aria-current", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(5, "Conv A", 300), thread(3, "Conv B", 100)]);
+    mockFetchMessages.mockResolvedValue([persisted("user", "q", 1), persisted("assistant", "a", 2)]);
+    render(<ChatView />);
+    await user.click(await screen.findByRole("button", { name: "Conv A" }));
+    await screen.findByText("a");
+    // The rail reflects which conversation is active; the others do not.
+    expect(screen.getByRole("button", { name: "Conv A" })).toHaveAttribute("aria-current", "true");
+    expect(screen.getByRole("button", { name: "Conv B" })).not.toHaveAttribute("aria-current");
   });
 
   it("persists the conversation on first send and continues it with its thread id", async () => {
@@ -539,6 +554,105 @@ describe("ChatView — conversation-history rail (S-210, FR-UI-26)", () => {
       "aria-expanded",
       "true",
     );
+  });
+});
+
+describe("ChatView — rail honest error paths (S-210)", () => {
+  it("shows an honest note when the conversation list fails to load", async () => {
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockRejectedValue(new ApiError("chat/threads", 500));
+    render(<ChatView />);
+    // The rail degrades to an honest note (not a silently empty list), and the chat
+    // surface still mounts.
+    expect(await screen.findByText(/Could not load your conversations/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "+ New chat" })).toBeInTheDocument();
+  });
+
+  it("keeps the open conversation and notes a fault when a restore faults (non-404)", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(5, "Conv A", 300), thread(3, "Conv B", 100)]);
+    mockFetchMessages.mockImplementation((id: number) =>
+      id === 5
+        ? Promise.resolve([persisted("user", "kept question", 1), persisted("assistant", "kept answer", 2)])
+        : Promise.reject(new ApiError(`chat/threads/${id}`, 500)),
+    );
+    render(<ChatView />);
+    await user.click(await screen.findByRole("button", { name: "Conv A" }));
+    expect(await screen.findByText("kept answer")).toBeInTheDocument();
+
+    // Selecting a conversation whose transcript faults (non-404) keeps the current
+    // view intact and surfaces an honest note — never a blank/broken surface.
+    await user.click(screen.getByRole("button", { name: "Conv B" }));
+    expect(await screen.findByText(/Could not open that conversation/)).toBeInTheDocument();
+    expect(screen.getByText("kept answer")).toBeInTheDocument();
+  });
+
+  it("notes an unrefreshable rail after a first send without silently forking", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    // Mount empty; the post-turn refresh (which would learn the new thread id) fails.
+    mockFetchThreads.mockReset();
+    mockFetchThreads.mockResolvedValueOnce([]); // mount
+    mockFetchThreads.mockRejectedValue(new ApiError("chat/threads", 500)); // post-turn
+    mockStreamTurn.mockResolvedValue(sseResponse(['event: final_answer\ndata: {"answer":"saved"}\n\n']));
+    render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "first question");
+    expect(await screen.findByText("saved")).toBeInTheDocument();
+    // The turn is durable, but the id could not be learned — an honest note rather
+    // than a silent state that would fork a second thread on the next send.
+    expect(await screen.findByText(/could not refresh/)).toBeInTheDocument();
+  });
+});
+
+describe("ChatView — multi-thread integrity (review-fix regressions)", () => {
+  it("does not fork a second thread: a follow-up continues the adopted conversation", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockReset();
+    mockFetchThreads.mockResolvedValueOnce([]); // mount
+    mockFetchThreads.mockResolvedValue([thread(9, "first question", 400)]); // post-send (thread 9 created)
+    mockStreamTurn
+      .mockResolvedValueOnce(sseResponse(['event: final_answer\ndata: {"answer":"a1"}\n\n']))
+      .mockResolvedValueOnce(sseResponse(['event: final_answer\ndata: {"answer":"a2"}\n\n']));
+    render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "first question");
+    await screen.findByText("a1");
+    // Adoption completes before the composer re-enables, so the follow-up carries
+    // the adopted id — never a null that would create a duplicate thread.
+    await ask(user, "second question");
+    await screen.findByText("a2");
+    expect(mockStreamTurn.mock.calls[0][1]).toBeNull();
+    expect(mockStreamTurn.mock.calls[1][1]).toBe(9);
+  });
+
+  it("+ New chat during a streaming turn is not hijacked back to the old thread", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    // Start on an existing conversation (thread 9), then stream a pending turn on it.
+    mockFetchThreads.mockResolvedValue([thread(9, "Conv 9", 400)]);
+    mockFetchMessages.mockResolvedValue([persisted("user", "hi", 1), persisted("assistant", "hello", 2)]);
+    const pending = pendingSseResponse(['event: answer_delta\ndata: {"delta":"thinking"}\n\n']);
+    mockStreamTurn.mockResolvedValueOnce(pending.response);
+    render(<ChatView />);
+    await acceptConsent(user);
+    await user.click(await screen.findByRole("button", { name: "Conv 9" }));
+    await screen.findByText("hello");
+    await ask(user, "a follow-up");
+    await screen.findByRole("button", { name: "Stop" }); // the turn is in flight on thread 9
+
+    // Mid-stream, the user starts a fresh conversation, then the aborted turn settles.
+    await user.click(screen.getByRole("button", { name: "+ New chat" }));
+    pending.close();
+
+    // The fresh session must NOT be rebound to thread 9 by the aborted turn's
+    // reconcile: the next send creates a new conversation (thread id null).
+    mockStreamTurn.mockResolvedValueOnce(sseResponse(['event: final_answer\ndata: {"answer":"fresh"}\n\n']));
+    await ask(user, "brand new");
+    await screen.findByText("fresh");
+    expect(mockStreamTurn.mock.calls[mockStreamTurn.mock.calls.length - 1][1]).toBeNull();
   });
 });
 
