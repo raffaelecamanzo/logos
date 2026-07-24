@@ -611,8 +611,10 @@ fn gate_saves_a_baseline_then_fails_on_a_deliberate_regression() {
     );
     assert_eq!(unchanged.baseline_signal, saved.signal);
 
-    // Deliberate regression: introduce a dependency cycle + dead code, which
-    // degrades acyclicity (1 cycle) and redundancy.
+    // Deliberate regression: introduce dead code (an unreachable intra-file
+    // mutual recursion). Under metric-semantics v5 the intra-module `tangle_a`/
+    // `tangle_b` cycle is NOT an acyclicity cycle (ADR-61), but both functions
+    // are unreachable, so Redundancy degrades and moves the aggregate down.
     write(
         tmp.path(),
         "src/lib.rs",
@@ -639,7 +641,7 @@ fn tangle_b() {
         regressed
             .regressions
             .iter()
-            .any(|r| r.metric == "acyclicity"),
+            .any(|r| r.metric == "redundancy"),
         "the report names which metric moved (FR-GV-05): {:?}",
         regressed.regressions
     );
@@ -1114,7 +1116,10 @@ fn scan_reflects_an_out_of_band_edit_via_reconcile() {
     );
 
     // The out-of-band edit, with NO watcher running (ADR-11's fitness
-    // function): introduce a cycle that must move the signal.
+    // function): introduce unreachable code that must move the signal. The
+    // intra-file `tangle_a`/`tangle_b` mutual recursion is idiomatic
+    // intra-module recursion — NOT an acyclicity cycle under metric-semantics v5
+    // (ADR-61) — but both functions are dead, so Redundancy drops the signal.
     write(
         tmp.path(),
         "src/lib.rs",
@@ -1144,8 +1149,8 @@ fn tangle_b() {
         after.signal
     );
     assert!(
-        (after.metrics.acyclicity.raw - 1.0).abs() < f64::EPSILON,
-        "the new cycle is scored"
+        after.metrics.acyclicity.raw.abs() < f64::EPSILON,
+        "an intra-module (single-directory) cycle is not counted (v5, ADR-61)"
     );
 }
 
@@ -2134,26 +2139,45 @@ fn absent_require_documented_contract_enforces_nothing() {
     );
 }
 
-/// FR-QM-02 / FR-GV-11 / CR-022 / ADR-30: the `max_cycles` rule consumes the
-/// SAME `acyclicity.raw` the metric scores (single source), so the metric and
-/// the rule can never disagree — and under metric-semantics v4 both exclude
-/// self-recursion. A fixture with one genuine 2-node mutual recursion plus a
-/// self-recursive function scores exactly one cycle in the metric, and the rule
-/// reports that same single count; a self-recursion-only fixture scores zero in
-/// both, so the `max_cycles = 0` budget passes.
+/// FR-QM-02 / FR-GV-05 / CR-087 / ADR-61: the `max_cycles` rule and the DSM
+/// consume the SAME (narrowed) `acyclicity.raw` the metric scores (single
+/// source), so the metric and the rule can never disagree — and under
+/// metric-semantics v5 the counted set is cross-module cycles only. A fixture
+/// with one genuine cross-directory mutual recursion (`alpha::ping` ↔
+/// `beta::pong`), one idiomatic intra-directory mutual recursion (`foo`/`bar` in
+/// one file), and a self-recursive `walk` scores exactly one cycle in the
+/// metric, and the rule reports that same single count. Dropping the
+/// cross-directory recursion — keeping only the intra-module and self-recursion
+/// — scores zero in both, so the `max_cycles = 0` budget passes.
 #[test]
-fn max_cycles_rule_agrees_with_acyclicity_metric_excluding_self_recursion() {
+fn max_cycles_rule_agrees_with_acyclicity_metric_counting_only_cross_module_cycles() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), ".logos/rules.toml", "[constraints]\nmax_cycles = 0\n");
+    // `alpha` and `beta` are sibling directories (mod.rs modules), so the
+    // ping ↔ pong mutual recursion spans two directories — a cross-module cycle.
+    write(tmp.path(), "src/lib.rs", "pub mod alpha;\npub mod beta;\n");
     write(
         tmp.path(),
-        "src/lib.rs",
+        "src/alpha/mod.rs",
+        "use crate::beta::pong;\n\npub fn ping() {\n    pong();\n}\n",
+    );
+    write(
+        tmp.path(),
+        "src/beta/mod.rs",
+        "use crate::alpha::ping;\n\npub fn pong() {\n    ping();\n}\n",
+    );
+    // Intra-directory mutual recursion (`foo` ↔ `bar`) and a self-recursion
+    // (`walk`), both confined to a single directory — neither is a cross-module
+    // cycle, so neither counts (metric-semantics v5, ADR-61).
+    write(
+        tmp.path(),
+        "src/intra.rs",
         "\
-pub fn ping() {
-    pong();
+pub fn foo() {
+    bar();
 }
-pub fn pong() {
-    ping();
+pub fn bar() {
+    foo();
 }
 pub fn walk() {
     walk();
@@ -2162,13 +2186,14 @@ pub fn walk() {
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    // The metric: exactly one cycle — the `ping`/`pong` multi-node SCC. `walk`'s
-    // self-loop is a singleton SCC and excluded under v4 (CR-022 / ADR-30).
+    // The metric: exactly one cycle — the cross-directory `ping`/`pong` SCC. The
+    // intra-directory `foo`/`bar` SCC and `walk`'s self-loop both contribute 0.
     let scan = engine.scan(true).expect("scan runs");
     let metric_cycles = scan.metrics.acyclicity.raw;
     assert_eq!(
         metric_cycles, 1.0,
-        "one multi-node SCC counts; the self-recursion does not (v4)"
+        "only the cross-directory SCC counts; intra-module recursion and \
+         self-recursion do not (v5, ADR-61)"
     );
 
     // The rule reads the same `acyclicity.raw`, so it reports the same count.
@@ -2177,7 +2202,7 @@ pub fn walk() {
         .violations
         .iter()
         .find(|v| v.rule == "max_cycles")
-        .expect("max_cycles = 0 is violated by the one genuine cycle");
+        .expect("max_cycles = 0 is violated by the one cross-module cycle");
     assert!(
         violation
             .message
@@ -2186,29 +2211,24 @@ pub fn walk() {
         violation.message
     );
 
-    // Negative control: drop the mutual recursion, keep only self-recursion →
-    // the metric scores zero and the rule agrees by passing the same budget.
+    // Negative control: drop the cross-directory recursion (collapse `beta::pong`
+    // to a leaf), leaving only the intra-module `foo`/`bar` cycle and `walk`'s
+    // self-loop → the metric scores zero and the rule agrees by passing.
     write(
         tmp.path(),
-        "src/lib.rs",
-        "\
-pub fn walk() {
-    walk();
-}
-pub fn step() {
-    walk();
-}
-",
+        "src/beta/mod.rs",
+        "pub fn pong() {}\n",
     );
     let scan = engine.scan(true).expect("scan runs");
     assert_eq!(
         scan.metrics.acyclicity.raw, 0.0,
-        "self-recursion alone is not a cycle (v4)"
+        "no cross-module cycle remains; intra-module recursion and \
+         self-recursion are not counted (v5)"
     );
     let report = engine.check_rules(None, true).expect("check_rules runs");
     assert!(
         !report.violations.iter().any(|v| v.rule == "max_cycles"),
-        "max_cycles = 0 passes when the only recursion is a self-loop: {:?}",
+        "max_cycles = 0 passes when only intra-module/self recursion remains: {:?}",
         report.violations
     );
 }

@@ -181,30 +181,41 @@ fn modularity_assigns_unbound_nodes_a_community() {
 
 // ── FR-QM-02 / UAT-QM-02: acyclicity counts SCCs ─────────────────────────────
 
-/// One two-vertex cycle → cycles = 1 → normalized exactly 1/2 (UAT-QM-02).
+/// One two-vertex cycle **spanning two directories** → cycles = 1 → normalized
+/// exactly 1/2 (UAT-QM-02, metric-semantics v5): a cross-module mutual-dependency
+/// cycle is the architectural tangle Acyclicity polices.
 #[test]
-fn one_cycle_scores_acyclicity_one_half() {
+fn one_cross_directory_cycle_scores_acyclicity_one_half() {
     let nodes = [
-        node(1, "a", NodeKind::Function, Some("src/a.rs")),
-        node(2, "b", NodeKind::Function, Some("src/b.rs")),
+        node(1, "a", NodeKind::Function, Some("alpha/a.rs")),
+        node(2, "b", NodeKind::Function, Some("beta/b.rs")),
     ];
     let edges = [edge(1, 2, EdgeKind::Calls), edge(2, 1, EdgeKind::Calls)];
     let snap = run(&nodes, &edges, &[]);
-    assert_eq!(snap.acyclicity.raw, 1.0, "one SCC of len 2 is one cycle");
+    assert_eq!(
+        snap.acyclicity.raw, 1.0,
+        "one cross-directory SCC of len 2 is one cycle"
+    );
     assert_eq!(snap.acyclicity.normalized, 0.5, "1/(1+1) (FR-QM-02)");
 }
 
-/// Self-recursion is **not** a dependency cycle: a singleton self-loop counts
-/// 0, only multi-node SCCs count, and a self-loop *inside* a multi-node SCC is
-/// counted once (the SCC is the unit). Metric-semantics v4 ([FR-QM-02],
-/// [ADR-30], CR-022); a DAG still scores 1.0.
+/// Only **cross-module** cycles count (metric-semantics v5, [FR-QM-02],
+/// [ADR-61], [CR-087]; extends [ADR-30]/[CR-022]). Three things contribute 0 —
+/// a singleton self-loop (self-recursion), a multi-node SCC confined to one
+/// directory (idiomatic intra-module recursion), and a DAG — while a multi-node
+/// SCC spanning two directories counts, and a self-loop *inside* a counted
+/// cross-module SCC is counted once (the SCC is the unit).
 ///
 /// [ADR-30]: ../../../docs/specs/architecture/decisions/ADR-30.md
+/// [ADR-61]: ../../../docs/specs/architecture/decisions/ADR-61.md
+/// [CR-087]: ../../../docs/requests/CR-087-acyclicity-cross-module-cycle-boundary.md
 #[test]
-fn self_recursion_excluded_only_multi_node_sccs_count() {
+fn only_cross_directory_multi_node_sccs_count() {
+    // `a`/`b` share directory `src`; `c` lives in a sibling directory `util`.
     let nodes = [
         node(1, "a", NodeKind::Function, Some("src/a.rs")),
         node(2, "b", NodeKind::Function, Some("src/b.rs")),
+        node(3, "c", NodeKind::Function, Some("util/c.rs")),
     ];
 
     // Case 1 — a singleton self-loop (self-recursion) plus a forward edge: the
@@ -213,27 +224,43 @@ fn self_recursion_excluded_only_multi_node_sccs_count() {
     let snap = run(&nodes, &with_self_loop, &[]);
     assert_eq!(
         snap.acyclicity.raw, 0.0,
-        "self-recursion is not a cycle (multi-node SCCs only, FR-QM-02 v4)"
+        "self-recursion is not a cycle (FR-QM-02 v4)"
     );
     assert_eq!(snap.acyclicity.normalized, 1.0);
 
-    // Case 2 — a 2-node mutual-recursion SCC `{a, b}` contributes exactly 1.
-    let mutual = [edge(1, 2, EdgeKind::Calls), edge(2, 1, EdgeKind::Calls)];
-    let snap = run(&nodes, &mutual, &[]);
-    assert_eq!(snap.acyclicity.raw, 1.0, "one multi-node SCC is one cycle");
-    assert_eq!(snap.acyclicity.normalized, 0.5);
+    // Case 2 — a 2-node mutual-recursion SCC `{a, b}` **within one directory**
+    // (`src`) is idiomatic intra-module recursion → counts 0 (metric-semantics
+    // v5); the graph scores a perfect 1.0.
+    let intra_module = [edge(1, 2, EdgeKind::Calls), edge(2, 1, EdgeKind::Calls)];
+    let snap = run(&nodes, &intra_module, &[]);
+    assert_eq!(
+        snap.acyclicity.raw, 0.0,
+        "a single-directory multi-node cycle is not a cross-module tangle (v5)"
+    );
+    assert_eq!(snap.acyclicity.normalized, 1.0);
 
-    // Case 3 — a self-loop *inside* a multi-node SCC is counted once, not twice:
-    // `{a, b}` is mutual-recursive and `a` also self-recurses → still raw 1.
-    let mutual_with_inner_self_loop = [
-        edge(1, 2, EdgeKind::Calls),
-        edge(2, 1, EdgeKind::Calls),
-        edge(1, 1, EdgeKind::Calls),
-    ];
-    let snap = run(&nodes, &mutual_with_inner_self_loop, &[]);
+    // Case 3 — a 2-node mutual-recursion SCC `{a, c}` **spanning `src` and
+    // `util`** is a cross-module cycle → counts exactly 1.
+    let cross_module = [edge(1, 3, EdgeKind::Calls), edge(3, 1, EdgeKind::Calls)];
+    let snap = run(&nodes, &cross_module, &[]);
     assert_eq!(
         snap.acyclicity.raw, 1.0,
-        "a self-loop inside a multi-node SCC is counted once (the SCC is the unit)"
+        "a cross-directory multi-node SCC is one cycle (v5)"
+    );
+    assert_eq!(snap.acyclicity.normalized, 0.5);
+
+    // Case 4 — a self-loop *inside* a counted cross-module SCC is counted once,
+    // not twice: `{a, c}` is cross-directory mutual recursion and `a` also
+    // self-recurses → still raw 1.
+    let cross_module_with_inner_self_loop = [
+        edge(1, 3, EdgeKind::Calls),
+        edge(3, 1, EdgeKind::Calls),
+        edge(1, 1, EdgeKind::Calls),
+    ];
+    let snap = run(&nodes, &cross_module_with_inner_self_loop, &[]);
+    assert_eq!(
+        snap.acyclicity.raw, 1.0,
+        "a self-loop inside a cross-module SCC is counted once (the SCC is the unit)"
     );
 
     // A DAG still scores a perfect 1.0.
@@ -241,6 +268,15 @@ fn self_recursion_excluded_only_multi_node_sccs_count() {
     let snap = run(&nodes, &dag, &[]);
     assert_eq!(snap.acyclicity.raw, 0.0);
     assert_eq!(snap.acyclicity.normalized, 1.0, "a DAG has no cycles");
+}
+
+/// The metric-semantics version pins at 5 ([CR-087], [ADR-61]): narrowing
+/// Acyclicity to cross-module cycles is a semantics change, so the constant
+/// advanced 4 → 5, and the first post-upgrade gate auto-re-baselines
+/// ([FR-GV-10]) exactly as the v2/v3/v4 bumps did.
+#[test]
+fn metric_semantics_version_is_v5() {
+    assert_eq!(super::METRIC_SEMANTICS_VERSION, 5);
 }
 
 // ── FR-QM-03 / UAT-QM-03: depth over the condensation ────────────────────────
@@ -470,7 +506,7 @@ fn identical_input_yields_an_identical_pinned_signal() {
     ];
     let edges = [
         edge(1, 2, EdgeKind::Calls),
-        edge(2, 1, EdgeKind::Calls), // one alpha-internal cycle
+        edge(2, 1, EdgeKind::Calls), // one alpha-internal cycle (intra-module, uncounted v5)
         edge(3, 4, EdgeKind::Calls),
         edge(1, 3, EdgeKind::Imports), // one crossing
     ];
@@ -489,21 +525,22 @@ fn identical_input_yields_an_identical_pinned_signal() {
         second.modularity.raw.to_bits()
     );
 
-    // The golden pin, hand-derived under metric-semantics v3 (CR-005, ADR-21):
-    // the original five — modularity Q = 0.21875 (norm 23/48), cycles = 1
-    // (norm 1/2), depth = 3 (norm 8/11), Gini(2,2,3,5) = 10/48 (norm 38/48),
-    // redundancy ratio 1/4 (norm 3/4) — plus three always-applicable new
-    // dimensions that are all a clean 1.0 here (no deep nesting, no brain
-    // methods, no near-clones; depth/line/clone inputs all absent). Cohesion and
-    // Focus drop out (the fixture has no Class/Struct container, ADR-21), so the
-    // mean spans EIGHT dimensions:
-    //   exp(ln(23/48·1/2·8/11·38/48·3/4·1·1·1)/8)·10000 ≈ 7531.
+    // The golden pin, hand-derived under metric-semantics v5 (CR-087, ADR-61):
+    // the original five — modularity Q = 0.21875 (norm 23/48), cycles = 0
+    // (norm 1.0 — the alpha-internal a↔b SCC is intra-module, uncounted v5),
+    // depth = 3 (norm 8/11), Gini(2,2,3,5) = 10/48 (norm 38/48), redundancy
+    // ratio 1/4 (norm 3/4) — plus three always-applicable new dimensions that
+    // are all a clean 1.0 here (no deep nesting, no brain methods, no
+    // near-clones; depth/line/clone inputs all absent). Cohesion and Focus drop
+    // out (the fixture has no Class/Struct container, ADR-21), so the mean spans
+    // EIGHT dimensions:
+    //   exp(ln(23/48·1·8/11·38/48·3/4·1·1·1)/8)·10000 ≈ 8212.
     // Recomputing this exact integer on every target is the ADR-08 fitness
     // function; a change here is a determinism regression, not test churn. The
-    // value rose from the v2 five-dimension pin (6353) because the three 1.0
-    // dimensions raise the geometric mean — a metric-semantics bump, not a
-    // regression (the gate auto-re-baselines, FR-GV-10).
-    assert_eq!(first.aggregate_signal, Some(7531));
+    // value rose from the v4 pin (7531) because narrowing Acyclicity to
+    // cross-module cycles lifted its normalized 1/2 → 1.0 — a metric-semantics
+    // bump, not a regression (the gate auto-re-baselines, FR-GV-10).
+    assert_eq!(first.aggregate_signal, Some(8212));
     // The applicable-dimension provenance: Cohesion/Focus are n/a here.
     assert!(
         first.cohesion.is_none(),
