@@ -19,6 +19,122 @@
   gap: var(--space-4);
 }
 
+/* ── Two-pane layout: history rail + conversation (S-210, FR-UI-26) ─────────── */
+/* Desktop (≥1024px): a fixed-width rail column beside the conversation. The
+   narrow-viewport toggle is display:none here, so it occupies no grid cell and
+   the rail is always shown. */
+.layout {
+  display: grid;
+  grid-template-columns: 15rem 1fr;
+  gap: var(--space-4);
+  align-items: start;
+}
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+/* ── History rail (ThreadList) ─────────────────────────────────────────────── */
+.railToggle {
+  display: none; /* shown only below the breakpoint (see the media query) */
+  align-items: center;
+  gap: var(--space-2);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-1);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+}
+.railToggle:hover {
+  border-color: var(--color-accent);
+}
+.railPane {
+  min-width: 0;
+}
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.newChat {
+  align-self: stretch;
+}
+.threadList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.threadItem {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-1);
+  padding: var(--space-2);
+  cursor: pointer;
+  /* One line per conversation — the auto-title, ellipsised when long. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.threadItem:hover {
+  background: var(--surface-2);
+  border-color: var(--border-subtle);
+}
+.threadActive {
+  background: var(--surface-2);
+  border-color: var(--card-accent);
+  font-weight: var(--weight-semibold);
+}
+.railEmpty,
+.railError {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  line-height: var(--leading-base);
+}
+.railError {
+  color: var(--color-accent);
+}
+
+/* Tablet & below (≤1023px): the rail collapses behind a toggle, mirroring the
+   AppShell sidebar behaviour (frontend-design §4.12 / §7). The layout stacks to a
+   single column; the toggle appears; the rail shows only when opened. */
+@media (max-width: 1023px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+  .railToggle {
+    display: inline-flex;
+    justify-self: start;
+  }
+  .railPane {
+    display: none;
+  }
+  .railPaneOpen {
+    display: block;
+  }
+}
+
 /* ── Consent banner (NFR-SE-07) ───────────────────────────────────────────── */
 .consent p {
   margin: 0 0 var(--space-2);

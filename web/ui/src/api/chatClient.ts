@@ -17,7 +17,11 @@
 import { apiFetch } from "./client.ts";
 import { apiMutate } from "../intent.ts";
 import { withMemberScope } from "../workspace/scope.ts";
-import type { ChatConfigReadModel } from "../views/chat/chatModel.ts";
+import type {
+  ChatConfigReadModel,
+  PersistedChatMessage,
+  ThreadSummary,
+} from "../views/chat/chatModel.ts";
 
 /** The intent-guarded chat-turn route (mirrors `web::CHAT_POST_ROUTE`). */
 export const CHAT_ROUTE = "/chat";
@@ -39,13 +43,46 @@ export function fetchChatConfig(): Promise<ChatConfigReadModel> {
  * `signal` ties the turn's lifetime to the caller (unmount / a superseding turn →
  * abort → the server cancels the in-flight turn, [FR-UI-19]). The body is the
  * form-encoded user message, byte-identical to the no-JS POST.
+ *
+ * `threadId` (S-210, [FR-UI-26], [ADR-47]) appends the turn to an existing
+ * conversation; `null` (a fresh "+ New chat") omits the `thread` field entirely, so
+ * the server creates the thread on this first send — the byte-identical single-thread
+ * body when no conversation is active. The thread the server (auto-)selected is not
+ * returned on the SSE stream; the caller re-reads {@link fetchThreads} to learn a
+ * newly-created id.
  */
-export function streamChatTurn(question: string, signal?: AbortSignal): Promise<Response> {
+export function streamChatTurn(
+  question: string,
+  threadId: number | null,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const body =
+    threadId == null
+      ? `q=${encodeURIComponent(question)}`
+      : `q=${encodeURIComponent(question)}&thread=${encodeURIComponent(threadId)}`;
   return apiMutate(withMemberScope(CHAT_ROUTE), {
     headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "text/event-stream" },
-    body: `q=${encodeURIComponent(question)}`,
+    body,
     signal,
   });
+}
+
+/**
+ * `GET /api/v1/chat/threads` → the conversation list, most-recent-first (S-209
+ * producer contract, [FR-UI-26], [ADR-47]). A pure same-origin read carrying no
+ * secret ([NFR-SE-07]); member-scoped like every `/api/v1` read.
+ */
+export function fetchThreads(): Promise<ThreadSummary[]> {
+  return apiFetch<ThreadSummary[]>("chat/threads");
+}
+
+/**
+ * `GET /api/v1/chat/threads/{id}` → one thread's ordered transcript (S-209), the
+ * messages the rail hydrates on select-to-restore. An unknown id is an honest
+ * `404` ({@link apiFetch} throws `ApiError`), never a misleading empty `200`.
+ */
+export function fetchThreadMessages(id: number): Promise<PersistedChatMessage[]> {
+  return apiFetch<PersistedChatMessage[]>(`chat/threads/${id}`);
 }
 
 /**

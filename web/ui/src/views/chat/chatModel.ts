@@ -69,6 +69,39 @@ export interface ChatConfigReadModel {
   chat_key: { present: boolean; last4?: string | null };
 }
 
+// ── Thread read API (S-209 producer contract; S-210 consumer) ─────────────────
+// The wire shapes the merged S-209 read endpoints serialize. Pure mirrors — no
+// React, no fetch — so the rail's ordering/hydration logic stays testable off a
+// plain fixture. No secret ever rides these payloads ([NFR-SE-07]).
+
+/** One conversation in the rail list (mirrors `web::ThreadSummary`,
+ *  `GET /api/v1/chat/threads`): the rowid, the S-208 auto-title, and the
+ *  most-recent-first `updated_at` sort key (Unix seconds). */
+export interface ThreadSummary {
+  id: number;
+  title: string;
+  updated_at: number;
+}
+
+/** A persisted tool trace on a restored message (mirrors `chat_agent::ToolTrace`). */
+export interface PersistedToolTrace {
+  tool_name: string;
+  arguments: string;
+  result: string;
+  is_error: boolean;
+}
+
+/** One stored message in a restored transcript (mirrors `chat_agent::ChatMessage`,
+ *  `GET /api/v1/chat/threads/{id}`). `role` is the snake_case wire token; the rail
+ *  renders `user`/`assistant` and skips the internal `system`/`tool` rows. */
+export interface PersistedChatMessage {
+  id: number;
+  role: "user" | "assistant" | "system" | "tool";
+  content: string;
+  created_at: number;
+  tool_traces: PersistedToolTrace[];
+}
+
 /** The native Anthropic endpoint host disclosed for the `anthropic` provider —
  *  mirrors the server view's `host_of(DEFAULT_ANTHROPIC_BASE_URL)` (web/src/views/chat.rs). */
 export const ANTHROPIC_HOST = "api.anthropic.com";

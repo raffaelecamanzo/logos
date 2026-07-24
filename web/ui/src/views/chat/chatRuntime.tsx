@@ -38,12 +38,20 @@ import {
   type ThreadMessageLike,
 } from "@assistant-ui/react";
 
-import { clearChatHistory, streamChatTurn } from "../../api/chatClient.ts";
+import {
+  clearChatHistory,
+  fetchThreadMessages,
+  fetchThreads,
+  streamChatTurn,
+} from "../../api/chatClient.ts";
+import { ApiError } from "../../api/client.ts";
 import {
   applyFrame,
   initialTurn,
   readSseStream,
   turnEndedEmpty,
+  type PersistedChatMessage,
+  type ThreadSummary,
   type TurnState,
 } from "./chatModel.ts";
 
@@ -100,13 +108,77 @@ function appendText(message: AppendMessage): string {
     .trim();
 }
 
-/** The shape returned to `ChatView`: the assistant-ui runtime plus the
- *  Clear-history control (which is not an assistant-ui concern). */
+/**
+ * Fold a restored server transcript (`GET /api/v1/chat/threads/{id}`) into the
+ * conversation model this surface owns (S-210, [FR-UI-26], [ADR-47]).
+ *
+ * The store persists only the DURABLE messages — the user text and the final
+ * assistant answer — while the plan / subagent-activity side-channel is ephemeral
+ * SSE (never written to `chat_messages`). So a restored assistant turn renders
+ * answer-only and `finalized` (its Copy/Regenerate actions still work); the
+ * internal `system`/`tool` rows are not part of the surface and are skipped. Local
+ * ids are re-allocated via `nextId` so restored turns share one monotonic id space
+ * with subsequently-sent turns — never colliding with server rowids.
+ */
+export function foldPersistedMessages(
+  persisted: PersistedChatMessage[],
+  nextId: () => number,
+): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  let lastUserId = 0;
+  for (const m of persisted) {
+    if (m.role === "user") {
+      const id = nextId();
+      lastUserId = id;
+      out.push({ kind: "user", id, text: m.content });
+    } else if (m.role === "assistant") {
+      out.push({
+        kind: "assistant",
+        id: nextId(),
+        parentId: lastUserId,
+        turn: { ...initialTurn(), answer: m.content, finalized: true },
+      });
+    }
+    // `system` / `tool` rows are internal — not part of the rendered surface.
+  }
+  return out;
+}
+
+/** The localStorage key remembering the open conversation so the selection is
+ *  restored across a `serve --ui` restart / reload (S-210 AC-1). */
+export const ACTIVE_THREAD_KEY = "logos.chat.activeThread";
+
+/** The last-open conversation id remembered from a prior session, or `null` when
+ *  none / storage is blocked. Read once to seed the runtime so the persistence
+ *  effect never wipes it before the restore runs (fail SAFE to a fresh composer). */
+function readStoredThreadId(): number | null {
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_THREAD_KEY);
+    const id = raw != null && raw !== "" ? Number(raw) : Number.NaN;
+    return Number.isFinite(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The shape returned to `ChatView`: the assistant-ui runtime, the multi-thread
+ *  rail state (S-210), and the Clear-history control (neither an assistant-ui
+ *  concern). */
 export interface ChatRuntime {
   runtime: ReturnType<typeof useExternalStoreRuntime>;
   clearHistory: () => Promise<void>;
   clearing: boolean;
   clearMessage: string;
+  /** The conversation list, most-recent-first (S-209 `GET /chat/threads`). */
+  threads: ThreadSummary[];
+  /** The open conversation's id, or `null` for an unsent "+ New chat". */
+  activeThreadId: number | null;
+  /** Restore a conversation's full history into the surface (select-to-restore). */
+  selectThread: (id: number) => Promise<void>;
+  /** Reset the composer to a fresh, not-yet-persisted conversation (no empty rows). */
+  newChat: () => void;
+  /** An honest note when the thread list could not be read, else `null`. */
+  threadsError: string | null;
 }
 
 /**
@@ -120,6 +192,11 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
   const [isRunning, setIsRunning] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [clearMessage, setClearMessage] = useState("");
+  const [threads, setThreads] = useState<ThreadSummary[]>([]);
+  // Seeded from the prior session's selection so the persistence effect writes it
+  // back (never wipes it) on mount; the restore effect then hydrates its history.
+  const [activeThreadId, setActiveThreadId] = useState<number | null>(readStoredThreadId);
+  const [threadsError, setThreadsError] = useState<string | null>(null);
 
   const idRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
@@ -128,11 +205,40 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
   messagesRef.current = messages;
   const consentRef = useRef(consented);
   consentRef.current = consented;
+  // The open conversation, read inside async callbacks (a turn sends it as the
+  // `thread` field; adoption after a first send checks it) without re-binding them.
+  const activeThreadIdRef = useRef(activeThreadId);
+  activeThreadIdRef.current = activeThreadId;
 
   // A turn's lifetime is tied to the mounted view: leaving the tab / unmounting
   // aborts the in-flight turn, so the server cancels it ([FR-UI-19]). Without this
   // the streamed `fetch` would outlive the view.
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  // Persist the open conversation so the selection is restored across a
+  // `serve --ui` restart / reload (S-210 AC-1). Best-effort — storage-blocked is
+  // non-fatal (the conversation itself is durable server-side).
+  useEffect(() => {
+    try {
+      if (activeThreadId == null) window.localStorage.removeItem(ACTIVE_THREAD_KEY);
+      else window.localStorage.setItem(ACTIVE_THREAD_KEY, String(activeThreadId));
+    } catch {
+      /* non-fatal: the list still restores the conversation on the next load */
+    }
+  }, [activeThreadId]);
+
+  // Read the conversation list (most-recent-first, S-209). An honest error note on
+  // failure rather than a silently empty rail ([NFR-CC-04]).
+  const loadThreads = useCallback(async () => {
+    try {
+      setThreads(await fetchThreads());
+      setThreadsError(null);
+    } catch (e) {
+      setThreadsError(
+        `Could not load your conversations: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }, []);
 
   // Route a streamed update to one assistant turn (functional set — no stale
   // closure as frames arrive).
@@ -153,7 +259,7 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
       const controller = new AbortController();
       abortRef.current = controller;
       try {
-        const resp = await streamChatTurn(question, controller.signal);
+        const resp = await streamChatTurn(question, activeThreadIdRef.current, controller.signal);
         if (!resp.ok || !resp.body) {
           updateTurn(turnId, (t) => ({
             ...t,
@@ -179,7 +285,28 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
     [updateTurn],
   );
 
-  // Append a fresh user turn + its assistant placeholder, then stream the answer.
+  // After a turn settles, refresh the rail (updated_at re-orders the list, the
+  // first send auto-titles the new thread) and, if this was a fresh "+ New chat"
+  // (no active id), adopt the just-persisted conversation. The server creates the
+  // thread on a `thread`-less first send but returns no id on the SSE stream
+  // (S-209), so the newly-written thread — the most-recent `updated_at` — is the
+  // top of the refreshed most-recent-first list (S-210 first-send persistence).
+  const adoptAfterTurn = useCallback(async () => {
+    let list: ThreadSummary[];
+    try {
+      list = await fetchThreads();
+    } catch {
+      return; // the turn itself succeeded; leave the rail as-is rather than error
+    }
+    setThreads(list);
+    setThreadsError(null);
+    if (activeThreadIdRef.current == null && list.length > 0) {
+      setActiveThreadId(list[0].id);
+    }
+  }, []);
+
+  // Append a fresh user turn + its assistant placeholder, then stream the answer;
+  // reconcile the rail once the turn settles.
   const startTurn = useCallback(
     (question: string) => {
       const userId = ++idRef.current;
@@ -189,9 +316,9 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
         { kind: "user", id: userId, text: question },
         { kind: "assistant", id: turnId, parentId: userId, turn: initialTurn() },
       ]);
-      void runTurn(turnId, question);
+      void runTurn(turnId, question).then(adoptAfterTurn);
     },
-    [runTurn],
+    [runTurn, adoptAfterTurn],
   );
 
   const onNew = useCallback(
@@ -233,9 +360,60 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
         { kind: "assistant", id: turnId, parentId: userMsg.id, turn: initialTurn() },
       ]);
       await runTurn(turnId, userMsg.text);
+      await adoptAfterTurn();
     },
-    [runTurn],
+    [runTurn, adoptAfterTurn],
   );
+
+  // "+ New chat" (S-210 AC-2): reset the composer to a fresh, not-yet-persisted
+  // conversation. No thread is created until the first send (the server only
+  // creates a thread on a `thread`-less turn), so the rail grows no empty row.
+  const newChat = useCallback(() => {
+    abortRef.current?.abort();
+    setMessages([]);
+    setActiveThreadId(null);
+    setIsRunning(false);
+  }, []);
+
+  // Select-to-restore (S-210 AC-1): hydrate a conversation's full transcript into
+  // the surface and mark it active. A deleted/unknown id is an honest `404` — fall
+  // back to a fresh composer rather than a broken view; a transport fault leaves
+  // the current view intact with an honest note.
+  const selectThread = useCallback(
+    async (id: number) => {
+      abortRef.current?.abort();
+      try {
+        const persisted = await fetchThreadMessages(id);
+        setMessages(foldPersistedMessages(persisted, () => ++idRef.current));
+        setActiveThreadId(id);
+        setThreadsError(null);
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) {
+          newChat();
+          void loadThreads(); // the list is stale — drop the vanished row
+          return;
+        }
+        setThreadsError(
+          `Could not open that conversation: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    },
+    [newChat, loadThreads],
+  );
+
+  // On mount: load the rail, then restore the last-open conversation across a
+  // `serve --ui` restart (S-210 AC-1) from the seeded selection. A stored id that
+  // no longer exists resolves to a fresh composer via `selectThread`'s 404 path.
+  useEffect(() => {
+    const seeded = activeThreadIdRef.current; // the prior session's selection, or null
+    void (async () => {
+      await loadThreads();
+      if (seeded != null) await selectThread(seeded);
+    })();
+    // Mount-only: the callbacks are stable and re-running would refetch on every
+    // render. Restore is a one-shot bootstrap off the seeded id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Stop (FR-UI-19): abort the in-flight turn (the server cancels it, the
   // existing client-disconnect cancellation now user-triggered) and mark the turn
@@ -282,5 +460,15 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
     unstable_capabilities: { copy: true },
   };
 
-  return { runtime: useExternalStoreRuntime(adapter), clearHistory, clearing, clearMessage };
+  return {
+    runtime: useExternalStoreRuntime(adapter),
+    clearHistory,
+    clearing,
+    clearMessage,
+    threads,
+    activeThreadId,
+    selectThread,
+    newChat,
+    threadsError,
+  };
 }
