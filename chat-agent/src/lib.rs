@@ -49,7 +49,10 @@ pub mod db;
 pub mod memory;
 pub mod orchestrator;
 
-pub use db::{db_path, latest_version, ChatMessage, ChatRole, ChatStore, ChatThread, ToolTrace};
+pub use db::{
+    db_path, latest_version, title_from_first_message, ChatMessage, ChatRole, ChatStore,
+    ChatThread, ToolTrace, THREAD_TITLE_MAX,
+};
 pub use memory::{MemoryGrounding, MemoryStore, ScratchpadEntry, ScratchpadSink};
 pub use orchestrator::{
     BudgetBound, BudgetTree, CapturingSink, EventSink, FanOut, Orchestrator, OrchestratorError,
