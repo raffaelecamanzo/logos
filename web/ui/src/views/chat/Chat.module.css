@@ -79,9 +79,23 @@
   flex-direction: column;
   gap: var(--space-1);
 }
+/* One conversation: the title button and its delete affordance side by side, with
+   the confirm panel disclosed beneath the pair (S-211, FR-UI-26). */
+.threadRow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.threadLine {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
 .threadItem {
   display: block;
-  width: 100%;
+  /* The title takes the row; the delete affordance keeps its intrinsic width. */
+  flex: 1 1 auto;
+  min-width: 0;
   text-align: left;
   font: inherit;
   font-size: var(--text-sm);
@@ -104,6 +118,67 @@
   background: var(--surface-2);
   border-color: var(--card-accent);
   font-weight: var(--weight-semibold);
+}
+/* The delete affordance: calm and muted until hovered/focused — a destructive
+   action should not shout from every row, but must be reachable by keyboard. */
+.threadDelete {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: 1;
+  color: var(--text-2);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-1);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+.threadDelete:hover,
+.threadDelete:focus-visible {
+  color: var(--color-accent);
+  background: var(--surface-2);
+  border-color: var(--border-subtle);
+}
+/* The confirm step (S-211 AC-1): an inline panel naming what is about to go, so a
+   destructive click is never one click. */
+.threadConfirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--color-accent);
+  border-radius: var(--radius-1);
+}
+.threadConfirmText {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  line-height: var(--leading-base);
+}
+.threadConfirmActions {
+  display: flex;
+  gap: var(--space-2);
+}
+.threadConfirmDelete,
+.threadConfirmCancel {
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-1);
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+.threadConfirmDelete {
+  color: var(--ink-on-red);
+  background: var(--color-accent);
+}
+.threadConfirmCancel {
+  color: var(--text-1);
+  background: var(--surface-1);
+  border-color: var(--border-subtle);
 }
 .railEmpty,
 .railError {
@@ -459,13 +534,5 @@
   border-color: var(--border-subtle);
 }
 
-/* ── Clear-history ────────────────────────────────────────────────────────── */
-.historyActions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-}
-.clearResult {
-  font-size: var(--text-sm);
-  color: var(--text-2);
-}
+/* The global Clear-history block was removed by S-211 (CR-053 / ADR-47): deletion
+   is per conversation, styled with the rail above. */

@@ -1,13 +1,18 @@
 /*
  * The Chat tab's data-access layer (S-190, CR-049, FR-UI-18, FR-UI-19, NFR-SE-06).
  *
- * The first MUTATING SPA surface: a chat turn and Clear-history both ride the
- * intent-guarded `POST` seam (`apiMutate`, `src/intent.ts`) so they carry the
- * same-origin + per-session intent token the server's guard requires — the
+ * The first MUTATING SPA surface: a chat turn and the per-conversation delete both
+ * ride the intent-guarded `POST` seam (`apiMutate`, `src/intent.ts`) so they carry
+ * the same-origin + per-session intent token the server's guard requires — the
  * streaming turn consumes SSE over that `POST` via `fetch` (not a `GET`
  * EventSource, which cannot set the custom intent header). The config-state read is
  * a plain `/api/v1` GET. The SSE turn contract is UNCHANGED ([chat-agent]); this is
  * a re-homed client.
+ *
+ * S-211 ([CR-053], [FR-UI-26], [ADR-47]) retired the global clear-history helper
+ * along with the route itself (S-209 removed it server-side — a POST to it is now
+ * `405`): per-conversation delete is the sole deletion path. The retired route
+ * literal must not reappear in this module — `web/tests/uat_ui_08.rs` locks that.
  *
  * Lives in its own module (not the shared `client.ts`) so the parallel Config
  * migration (S-191) and this one do not collide on the data layer — the only shared
@@ -25,8 +30,10 @@ import type {
 
 /** The intent-guarded chat-turn route (mirrors `web::CHAT_POST_ROUTE`). */
 export const CHAT_ROUTE = "/chat";
-/** The intent-guarded Clear-history route (mirrors `web::CHAT_CLEAR_ROUTE`). */
-export const CHAT_CLEAR_ROUTE = "/chat/clear";
+/** The conversation-history route tree (mirrors `web::CHAT_THREADS_ROUTE`): GET for
+ *  the list and one thread's transcript, and the one mutating verb beneath it —
+ *  `POST …/{id}/delete` ({@link chatThreadDeleteRoute}). */
+export const CHAT_THREADS_ROUTE = "/api/v1/chat/threads";
 
 /**
  * `GET /api/v1/config` → the chat-relevant slice of the config read-model: the
@@ -85,10 +92,23 @@ export function fetchThreadMessages(id: number): Promise<PersistedChatMessage[]>
   return apiFetch<PersistedChatMessage[]>(`chat/threads/${id}`);
 }
 
+/** The per-thread delete path for `id` (mirrors the server's `…/{id}/delete`, the
+ *  only `POST` admitted under {@link CHAT_THREADS_ROUTE}). */
+export function chatThreadDeleteRoute(id: number): string {
+  return `${CHAT_THREADS_ROUTE}/${id}/delete`;
+}
+
 /**
- * `POST /chat/clear` → wipe the conversation AND its per-thread memory ([FR-UI-20]).
- * Intent-guarded like the turn.
+ * `POST /api/v1/chat/threads/{id}/delete` → delete ONE conversation and its
+ * per-thread memory by cascade (S-209 producer contract, [FR-UI-26], [FR-UI-20],
+ * [ADR-47]). The per-conversation replacement for the retired global clear.
+ *
+ * Intent-guarded like the turn ([ADR-31]) — a forged or intent-less delete never
+ * reaches the handler ([NFR-SE-06]). The caller confirms first; this helper only
+ * carries the request. The response is returned raw so the caller can distinguish
+ * the server's three honest outcomes: `204` deleted, `404` already gone (an
+ * idempotent no-op), anything else a fault to surface.
  */
-export function clearChatHistory(): Promise<Response> {
-  return apiMutate(withMemberScope(CHAT_CLEAR_ROUTE), {});
+export function deleteChatThread(id: number): Promise<Response> {
+  return apiMutate(withMemberScope(chatThreadDeleteRoute(id)), {});
 }

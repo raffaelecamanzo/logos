@@ -41,8 +41,9 @@
 //!   which one, never fabricating an answer
 //!   (`uat_ui_07_step6_budget_tree_halts_at_each_bound` +
 //!   `uat_ui_07_step6_a_budget_halt_streams_an_honest_halted_event`);
-//! - step 6b — per-thread memory survives a restart and Clear-history wipes it
-//!   (`uat_ui_07_step6b_memory_persists_across_restart_then_clear_wipes_it`);
+//! - step 6b — per-thread memory survives a restart and the per-conversation
+//!   delete wipes it
+//!   (`uat_ui_07_step6b_memory_persists_across_restart_then_delete_wipes_it`);
 //! - step 8 — a non-chat `POST` is `405` and a forged/intent-less chat `POST` is
 //!   `403` (`uat_ui_07_step8_non_chat_and_forged_chat_writes_are_rejected`);
 //! - step 9 — per-thread delete supersedes the retired global Clear-history
@@ -725,14 +726,20 @@ async fn uat_ui_07_step6_a_budget_halt_streams_an_honest_halted_event() {
     }
 }
 
-// ── Step 6b: memory persists across a restart; Clear-history wipes it ──────────
+// ── Step 6b: memory persists across a restart; the per-conversation delete wipes it ──
 
-/// Step 6b: per-thread working memory + the conversation survive a simulated
+/// Step 6b (re-expressed for the [CR-053] / [ADR-47] per-conversation model,
+/// S-211): per-thread working memory + the conversation survive a simulated
 /// `serve --ui` restart (stores dropped and re-opened from the same files), so a
-/// follow-up sees prior context; then Clear-history wipes both via the live FK
-/// cascade ([FR-UI-20], [S-168], [S-175]).
+/// follow-up sees prior context; then **deleting that conversation** — the granular
+/// action that replaced the global Clear-history — wipes both via the live FK
+/// cascade ([FR-UI-20], [FR-UI-26], [S-168], [S-175]).
+///
+/// The delete is exercised here at the STORE seam (the restart half is a store
+/// concern); the same cascade over the guarded HTTP route is step 9 below, and the
+/// "other conversations are untouched" half is `uat_ui_08.rs`.
 #[test]
-fn uat_ui_07_step6b_memory_persists_across_restart_then_clear_wipes_it() {
+fn uat_ui_07_step6b_memory_persists_across_restart_then_delete_wipes_it() {
     let dir = fixture_root();
     let root = dir.path();
 
@@ -756,14 +763,15 @@ fn uat_ui_07_step6b_memory_persists_across_restart_then_clear_wipes_it() {
         "working memory survived the restart (a follow-up sees prior context)",
     );
     assert_eq!(chat.messages(thread).unwrap().len(), 2, "the prior transcript persisted too");
+    drop(chat);
 
-    // Clear-history (one DELETE FROM chat_threads) wipes the conversation and its
-    // per-thread memory via the FK cascade.
+    // The per-conversation delete (one DELETE FROM chat_threads WHERE id=?) wipes
+    // that conversation and its per-thread memory via the FK cascade.
     let mut chat = ChatStore::open(root).unwrap();
-    assert_eq!(chat.clear_history().unwrap(), 1, "the one thread is removed");
+    assert!(chat.delete_thread(thread).unwrap(), "the conversation is removed");
     let memory = MemoryStore::open(root).unwrap();
     assert!(memory.working_memory(thread).unwrap().is_none(), "memory cascaded away");
-    assert!(memory.is_empty().unwrap(), "no orphaned memory survives Clear-history");
+    assert!(memory.is_empty().unwrap(), "no orphaned memory survives the delete");
     assert!(ChatStore::open(root).unwrap().is_empty().unwrap(), "the conversation is wiped");
 }
 
