@@ -964,7 +964,7 @@ fn redundancy(functions: &[&FunctionMetricRow]) -> MetricValue {
 }
 
 /// The applicable-dimension geometric-mean aggregate, rounded to the 0–10000
-/// integer signal (metric-semantics v4, [FR-QM-06], [FR-QM-14], [ADR-12],
+/// integer signal (metric-semantics v5, [FR-QM-06], [FR-QM-14], [ADR-12],
 /// [ADR-21], [ADR-08]).
 ///
 /// `original` are the five original metrics in canonical order; `new_dims` are
