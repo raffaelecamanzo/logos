@@ -16,13 +16,16 @@
 //!    directory** (a cross-module dependency cycle); a singleton self-loop /
 //!    self-recursion (metric-semantics v4, [CR-022]) and a multi-node SCC
 //!    confined to a single directory (metric-semantics v5, [CR-087]) both count
-//!    zero; normalized `1/(1+cycles)`. **The same SCC set feeds Depth's
-//!    condensation** — Depth collapses the *full* set while Acyclicity counts
-//!    only the cross-module subset — so the gate and the `max_cycles` rule can
-//!    never disagree.
-//! 3. **Depth** ([FR-QM-03]) — longest path (vertex count) over the SCC
-//!    condensation: a whole cycle collapses to one layer, so a pure tangle
-//!    scores depth 1. Normalized `1/(1+depth/8)`.
+//!    zero; normalized `1/(1+cycles)`. The narrowed count is the single source
+//!    the DSM and the `max_cycles` rule read, so the gate and the rule can never
+//!    disagree.
+//! 3. **Depth** ([FR-QM-03], [ADR-62], [CR-088]) — longest path (vertex count)
+//!    over the SCC condensation of the **module-rollup graph** (the same
+//!    `directory_of` partition Modularity uses, metric-semantics v5): symbols
+//!    roll up to their directory, so a long call chain inside a single directory
+//!    scores depth 1 and a dependency cycle among directories collapses to one
+//!    layer. It measures architectural layering, not intra-file call length.
+//!    Normalized `1/(1+depth/8)`.
 //! 4. **Equality** ([FR-QM-04]) — `1 − Gini` of per-function cyclomatic
 //!    complexity; `n==0`, `n==1`, or `Σx==0` → 1.0.
 //! 5. **Redundancy** ([FR-QM-05]) — `1 − redundant/total` where a function is
@@ -189,14 +192,21 @@ const ORIGINAL_METRIC_COUNT: usize = 5;
 ///   `acyclicity.raw`, so a v3 baseline is incomparable and the first
 ///   post-upgrade gate auto-re-baselines ([FR-GV-10]) — exactly as the prior
 ///   semantics bumps did.
-/// - **v5** — Acyclicity counts only cross-module cycles ([CR-087], [ADR-61],
-///   S-298): a multi-node `tarjan_scc` component counts only when its members
-///   span **more than one directory** (the `directory_of` partition Modularity
-///   uses); an SCC confined to a single directory — idiomatic intra-module
-///   mutual recursion — now contributes zero, extending the v4 self-recursion
-///   narrowing to the module boundary. The narrowed count is the single source
-///   the `max_cycles` rule and the DSM read, so a v4 baseline is incomparable
-///   and the first post-upgrade gate auto-re-baselines ([FR-GV-10]).
+/// - **v5** — the metric semantics move to the **module-rollup graph** for both
+///   cross-module dimensions ([CR-087]/[CR-088], [ADR-61]/[ADR-62], S-298/S-299);
+///   a v4 baseline is incomparable, so the first post-upgrade gate
+///   auto-re-baselines ([FR-GV-10]):
+///   - *Acyclicity* counts only cross-module cycles: a multi-node `tarjan_scc`
+///     component counts only when its members span **more than one directory**
+///     (the `directory_of` partition Modularity uses); an SCC confined to a
+///     single directory — idiomatic intra-module mutual recursion — now
+///     contributes zero, extending the v4 self-recursion narrowing to the module
+///     boundary. The narrowed count is the single source the `max_cycles` rule
+///     and the DSM read.
+///   - *Depth* is measured over the SCC condensation of that same module-rollup
+///     graph rather than the symbol-level call graph: a long call chain confined
+///     to one directory rolls up to a single module vertex (depth 1) instead of
+///     reporting intra-file call length as architectural layering.
 ///
 /// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
 /// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
@@ -211,7 +221,9 @@ const ORIGINAL_METRIC_COUNT: usize = 5;
 /// [BR-25]: ../../../docs/specs/software-spec.md#311-quality-metrics
 /// [S-045]: ../../../docs/planning/journal.md#s-045-metric-thresholds-budgets-and-worst-offender-reporting
 /// [CR-087]: ../../../docs/requests/CR-087-acyclicity-cross-module-cycle-boundary.md
+/// [CR-088]: ../../../docs/requests/CR-088-depth-module-granularity.md
 /// [ADR-61]: ../../../docs/specs/architecture/decisions/ADR-61.md
+/// [ADR-62]: ../../../docs/specs/architecture/decisions/ADR-62.md
 pub const METRIC_SEMANTICS_VERSION: i64 = 5;
 
 /// Compute the five metrics and the aggregate signal over the **production
@@ -272,14 +284,14 @@ pub fn compute(
     // Canonical metric order (ADR-08): modularity, acyclicity, depth,
     // equality, redundancy.
     let modularity = modularity(&graph, &dirs);
-    // One SCC run feeds both Acyclicity and Depth (FR-QM-02: gate and rule —
-    // and the two metrics — agree on the same cycle set). Acyclicity narrows
-    // the *counted* subset to cross-module SCCs (>1 directory, ADR-61) via the
-    // same `dirs` partition Modularity reads; Depth still collapses the full
-    // condensation, so its longest path is unaffected (ADR-61 CRA-03).
+    // Acyclicity counts cross-module SCCs (>1 directory, ADR-61) over the
+    // symbol-level SCC set — the single narrowed source the DSM and the
+    // `max_cycles` rule read. Depth measures architectural layering over its own
+    // module-rollup condensation (CR-088, ADR-62), reading the same `dirs`
+    // partition Modularity uses; the two dimensions no longer share an SCC set.
     let sccs = tarjan_scc(&graph);
     let acyclicity = acyclicity(&sccs, &dirs);
-    let depth = depth(&graph, &sccs);
+    let depth = depth(&graph, &dirs);
     let equality = equality(&production);
     let redundancy = redundancy(&production);
 
@@ -851,16 +863,92 @@ fn acyclicity(sccs: &[Vec<NodeIndex>], dirs: &[String]) -> MetricValue {
     }
 }
 
-/// Depth — longest path (in vertices) over the SCC condensation ([FR-QM-03]).
+/// Depth — longest path (in vertices) over the SCC condensation of the
+/// **module-rollup graph** ([FR-QM-03], [ADR-62], [CR-088], metric-semantics v5).
 ///
-/// Reuses the Acyclicity SCC set: each SCC condenses to one vertex, so a whole
-/// cycle collapses to depth 1. `tarjan_scc` returns components in reverse
-/// topological order — every condensed successor of component `i` sits at an
-/// index `< i` — so a single forward sweep is the longest-path DP. All
-/// arithmetic is integral; only the final normalization divides in f64.
+/// Depth measures *architectural layering*, not intra-file call length: the
+/// symbol graph is first rolled up to one vertex per directory — the same
+/// `directory_of` partition [`modularity`] and [`acyclicity`] read, threaded in
+/// as `dirs` — with cross-directory dependencies as the inter-module edges. The
+/// longest path over that module graph's SCC condensation is the depth:
+///
+/// - a long call chain confined to one directory rolls up to a single module
+///   vertex and scores depth 1 (the intra-file recursion CR-088 stops reporting
+///   as layering);
+/// - a dependency cycle among directories collapses to one condensed layer and
+///   also scores 1;
+/// - a linear chain of `L` directories scores `L`.
+///
+/// `tarjan_scc` returns components in reverse topological order, so a single
+/// forward sweep over the condensed successor sets is the longest-path DP
+/// ([`longest_condensed_path`]). All arithmetic is integral; only the final
+/// normalization divides in f64.
 ///
 /// [FR-QM-03]: ../../../docs/specs/requirements/FR-QM-03.md
-fn depth(graph: &DiGraph<(), ()>, sccs: &[Vec<NodeIndex>]) -> MetricValue {
+/// [ADR-62]: ../../../docs/specs/architecture/decisions/ADR-62.md
+/// [CR-088]: ../../../docs/requests/CR-088-depth-module-granularity.md
+fn depth(graph: &DiGraph<(), ()>, dirs: &[String]) -> MetricValue {
+    let modules = module_rollup(graph, dirs);
+    let sccs = tarjan_scc(&modules);
+    let depth = longest_condensed_path(&modules, &sccs);
+    MetricValue {
+        raw: depth as f64,
+        normalized: 1.0 / (1.0 + depth as f64 / 8.0),
+    }
+}
+
+/// Roll the symbol-level metric graph up to its **module (directory) graph**:
+/// one vertex per distinct directory in `dirs`, one edge per *cross-directory*
+/// dependency ([ADR-62], [CR-088]). Intra-directory edges would be module
+/// self-loops that cannot lengthen any path, so they are dropped; parallel
+/// inter-module edges are deduplicated (the longest path is unchanged by them,
+/// and the compact graph keeps the condensation bounded by the directory-pair
+/// count rather than the symbol-edge count).
+///
+/// `dirs` is indexed by `graph` vertex index (as produced by [`metric_graph`]),
+/// the same partition [`modularity`] reads — so Depth and Modularity share one
+/// rollup by construction. Module vertices are created in first-appearance order
+/// over the deterministic vertex order, so the rebuilt graph is reproducible
+/// ([NFR-RA-06]).
+///
+/// [ADR-62]: ../../../docs/specs/architecture/decisions/ADR-62.md
+/// [CR-088]: ../../../docs/requests/CR-088-depth-module-granularity.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn module_rollup(graph: &DiGraph<(), ()>, dirs: &[String]) -> DiGraph<(), ()> {
+    let mut module_of: HashMap<&str, NodeIndex> = HashMap::with_capacity(dirs.len());
+    let mut modules = DiGraph::<(), ()>::new();
+    for dir in dirs {
+        module_of
+            .entry(dir.as_str())
+            .or_insert_with(|| modules.add_node(()));
+    }
+
+    let mut seen: HashSet<(NodeIndex, NodeIndex)> = HashSet::new();
+    for edge in graph.edge_references() {
+        let src = dirs[edge.source().index()].as_str();
+        let dst = dirs[edge.target().index()].as_str();
+        if src == dst {
+            continue; // intra-directory edge — a module self-loop, no effect on depth
+        }
+        let (src, dst) = (module_of[src], module_of[dst]);
+        if seen.insert((src, dst)) {
+            modules.add_edge(src, dst, ());
+        }
+    }
+    modules
+}
+
+/// Longest path (in condensed vertices) over the SCC condensation of `graph`,
+/// given its [`tarjan_scc`] component set. Each SCC collapses to one vertex, so a
+/// whole cycle contributes a single layer. `tarjan_scc` yields components in
+/// reverse topological order — every condensed successor of component `i` sits
+/// at an index `< i` — so one forward sweep over the condensed successor sets is
+/// the longest-path DP ([FR-QM-03]); the [`BTreeSet`] successor sets keep the
+/// reduction deterministic ([ADR-08]).
+///
+/// [FR-QM-03]: ../../../docs/specs/requirements/FR-QM-03.md
+/// [ADR-08]: ../../../docs/specs/architecture/decisions/ADR-08.md
+fn longest_condensed_path(graph: &DiGraph<(), ()>, sccs: &[Vec<NodeIndex>]) -> u64 {
     let mut scc_of = vec![0_usize; graph.node_count()];
     for (component, members) in sccs.iter().enumerate() {
         for &vertex in members {
@@ -888,12 +976,7 @@ fn depth(graph: &DiGraph<(), ()>, sccs: &[Vec<NodeIndex>]) -> MetricValue {
             .unwrap_or(0);
         longest[component] = 1 + best;
     }
-    let depth = longest.iter().copied().max().unwrap_or(0);
-
-    MetricValue {
-        raw: depth as f64,
-        normalized: 1.0 / (1.0 + depth as f64 / 8.0),
-    }
+    longest.iter().copied().max().unwrap_or(0)
 }
 
 /// Equality — `1 − Gini` of per-function cyclomatic complexity ([FR-QM-04]).

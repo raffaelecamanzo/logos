@@ -334,63 +334,169 @@ fn metric_semantics_version_is_v5() {
     assert_eq!(super::METRIC_SEMANTICS_VERSION, 5);
 }
 
-// ── FR-QM-03 / UAT-QM-03: depth over the condensation ────────────────────────
+// ── FR-QM-03 / UAT-QM-03: depth over the module-rollup condensation ───────────
 
-/// A linear chain of 3 vertices scores depth 3 → 1/(1+3/8) = 8/11.
+/// A linear chain of L=3 **directories** scores depth 3 → 1/(1+3/8) = 8/11
+/// ([FR-QM-03], [UAT-QM-03], [CR-088]): Depth counts *module* layers, so each
+/// directory in the dependency chain is one layer.
 #[test]
-fn linear_chain_depth_is_its_vertex_count() {
+fn a_linear_chain_of_directories_scores_its_directory_count() {
     let nodes = [
-        node(1, "a", NodeKind::Function, Some("src/a.rs")),
-        node(2, "b", NodeKind::Function, Some("src/b.rs")),
-        node(3, "c", NodeKind::Function, Some("src/c.rs")),
+        node(1, "a", NodeKind::Function, Some("alpha/a.rs")),
+        node(2, "b", NodeKind::Function, Some("beta/b.rs")),
+        node(3, "c", NodeKind::Function, Some("gamma/c.rs")),
     ];
     let edges = [edge(1, 2, EdgeKind::Calls), edge(2, 3, EdgeKind::Calls)];
     let snap = run(&nodes, &edges, &[]);
-    assert_eq!(snap.depth.raw, 3.0, "a → b → c is three layers");
+    assert_eq!(
+        snap.depth.raw, 3.0,
+        "alpha → beta → gamma is three module layers"
+    );
     assert_eq!(snap.depth.normalized, 1.0 / (1.0 + 3.0 / 8.0));
 }
 
-/// A pure cycle condenses to a single vertex → depth 1 (UAT-QM-03: the tangle
-/// collapses to one layer, it does not fake depth).
+/// A long call chain confined to a **single directory** rolls up to one module
+/// vertex → depth 1 ([FR-QM-03], [UAT-QM-03], [CR-088], [ADR-62]): intra-module
+/// call length is no longer reported as architectural layering — the CR-088
+/// motivating case (a 14-deep chain inside one UI file scored 1, not 14).
 #[test]
-fn a_pure_cycle_collapses_to_depth_one() {
-    let nodes = [
-        node(1, "a", NodeKind::Function, Some("src/a.rs")),
-        node(2, "b", NodeKind::Function, Some("src/b.rs")),
-        node(3, "c", NodeKind::Function, Some("src/c.rs")),
-    ];
-    let edges = [
-        edge(1, 2, EdgeKind::Calls),
-        edge(2, 3, EdgeKind::Calls),
-        edge(3, 1, EdgeKind::Calls),
-    ];
-    let snap = run(&nodes, &edges, &[]);
-    assert_eq!(
-        snap.depth.raw, 1.0,
-        "the whole cycle is one condensed layer"
-    );
-}
-
-/// A chain *through* a cycle: d → (a↔b) → c condenses to 3 layers.
-#[test]
-fn depth_chains_through_a_condensed_cycle() {
+fn a_long_chain_within_one_directory_scores_depth_one() {
+    // Five files, all under `src`, in a strict call chain a → b → c → d → e: at
+    // the symbol level this is depth 5, but every vertex rolls up to `src`.
     let nodes = [
         node(1, "a", NodeKind::Function, Some("src/a.rs")),
         node(2, "b", NodeKind::Function, Some("src/b.rs")),
         node(3, "c", NodeKind::Function, Some("src/c.rs")),
         node(4, "d", NodeKind::Function, Some("src/d.rs")),
+        node(5, "e", NodeKind::Function, Some("src/e.rs")),
     ];
     let edges = [
-        edge(1, 2, EdgeKind::Calls), // a ↔ b: one SCC
+        edge(1, 2, EdgeKind::Calls),
+        edge(2, 3, EdgeKind::Calls),
+        edge(3, 4, EdgeKind::Calls),
+        edge(4, 5, EdgeKind::Calls),
+    ];
+    let snap = run(&nodes, &edges, &[]);
+    assert_eq!(
+        snap.depth.raw, 1.0,
+        "a 5-deep call chain inside one directory is one module layer (CR-088)"
+    );
+    assert_eq!(snap.depth.normalized, 1.0 / (1.0 + 1.0 / 8.0));
+}
+
+/// A dependency cycle **among directories** condenses to a single vertex →
+/// depth 1 ([UAT-QM-03]): the module tangle collapses to one layer, it does not
+/// fake depth.
+#[test]
+fn a_cycle_among_directories_collapses_to_depth_one() {
+    let nodes = [
+        node(1, "a", NodeKind::Function, Some("alpha/a.rs")),
+        node(2, "b", NodeKind::Function, Some("beta/b.rs")),
+        node(3, "c", NodeKind::Function, Some("gamma/c.rs")),
+    ];
+    let edges = [
+        edge(1, 2, EdgeKind::Calls),
+        edge(2, 3, EdgeKind::Calls),
+        edge(3, 1, EdgeKind::Calls), // alpha → beta → gamma → alpha: one module cycle
+    ];
+    let snap = run(&nodes, &edges, &[]);
+    assert_eq!(
+        snap.depth.raw, 1.0,
+        "the whole directory cycle is one condensed layer"
+    );
+}
+
+/// A chain *through* a condensed directory cycle: delta → (alpha ↔ beta) → gamma
+/// condenses to three module layers.
+#[test]
+fn depth_chains_through_a_condensed_directory_cycle() {
+    let nodes = [
+        node(1, "a", NodeKind::Function, Some("alpha/a.rs")),
+        node(2, "b", NodeKind::Function, Some("beta/b.rs")),
+        node(3, "c", NodeKind::Function, Some("gamma/c.rs")),
+        node(4, "d", NodeKind::Function, Some("delta/d.rs")),
+    ];
+    let edges = [
+        edge(1, 2, EdgeKind::Calls), // alpha ↔ beta: one module SCC
         edge(2, 1, EdgeKind::Calls),
-        edge(4, 1, EdgeKind::Calls), // d → SCC
-        edge(2, 3, EdgeKind::Calls), // SCC → c
+        edge(4, 1, EdgeKind::Calls), // delta → SCC
+        edge(2, 3, EdgeKind::Calls), // SCC → gamma
     ];
     let snap = run(&nodes, &edges, &[]);
     assert_eq!(
         snap.depth.raw, 3.0,
-        "d → (ab) → c is three condensed layers"
+        "delta → (alpha·beta) → gamma is three condensed module layers"
     );
+}
+
+/// Depth reads the **same `directory_of` partition Modularity does** ([FR-QM-01],
+/// [FR-QM-03], [ADR-62]): grouping the identical symbol chain into one directory
+/// leaves depth = 1 and modularity high (every edge intra-module), while
+/// splitting the same chain across directories raises depth to the directory
+/// count and drops modularity (every edge now crosses). Both dimensions move
+/// together precisely because they roll up on one shared partition.
+#[test]
+fn depth_and_modularity_share_the_directory_partition() {
+    let chain = [edge(1, 2, EdgeKind::Calls), edge(2, 3, EdgeKind::Calls)];
+
+    // Same three functions, same chain — grouped into one directory …
+    let one_dir = [
+        node(1, "a", NodeKind::Function, Some("src/a.rs")),
+        node(2, "b", NodeKind::Function, Some("src/b.rs")),
+        node(3, "c", NodeKind::Function, Some("src/c.rs")),
+    ];
+    // … and split across three directories.
+    let three_dirs = [
+        node(1, "a", NodeKind::Function, Some("alpha/a.rs")),
+        node(2, "b", NodeKind::Function, Some("beta/b.rs")),
+        node(3, "c", NodeKind::Function, Some("gamma/c.rs")),
+    ];
+
+    let grouped = run(&one_dir, &chain, &[]);
+    let split = run(&three_dirs, &chain, &[]);
+
+    // Depth rolls up by directory: one module → 1, three modules → 3.
+    assert_eq!(grouped.depth.raw, 1.0, "one directory → one module layer");
+    assert_eq!(split.depth.raw, 3.0, "three directories → three module layers");
+    // Modularity reads the same partition: intra-module edges are community
+    // internal (higher Q), crossing edges are not.
+    assert!(
+        grouped.modularity.normalized > split.modularity.normalized,
+        "the shared partition lifts modularity when the chain stays in one \
+         directory ({}) vs crossing three ({})",
+        grouped.modularity.normalized,
+        split.modularity.normalized
+    );
+}
+
+/// The Depth rework does not touch the source the DSM and the `max_cycles` rule
+/// read ([FR-QM-02], S-299 criterion 2): those consume `acyclicity.raw`,
+/// computed from the *symbol-level* SCC set — independent of Depth's module
+/// condensation. A fixture with a cross-module cycle plus an extending edge
+/// scores its cycle count on Acyclicity regardless of how the chain rolls up.
+#[test]
+fn the_depth_rework_leaves_the_acyclicity_source_untouched() {
+    let nodes = [
+        node(1, "a", NodeKind::Function, Some("alpha/a.rs")),
+        node(2, "b", NodeKind::Function, Some("beta/b.rs")),
+        node(3, "c", NodeKind::Function, Some("gamma/c.rs")),
+    ];
+    // alpha ↔ beta is one cross-module cycle; beta → gamma extends the chain.
+    let edges = [
+        edge(1, 2, EdgeKind::Calls),
+        edge(2, 1, EdgeKind::Calls),
+        edge(2, 3, EdgeKind::Calls),
+    ];
+    let snap = run(&nodes, &edges, &[]);
+    // acyclicity.raw — the single value the DSM and max_cycles read — counts the
+    // one cross-module SCC, unchanged by the Depth rework.
+    assert_eq!(
+        snap.acyclicity.raw, 1.0,
+        "the cross-module alpha↔beta SCC is one cycle (the DSM/max_cycles source)"
+    );
+    // Depth condenses that same alpha↔beta cycle to one layer and adds gamma:
+    // (alpha·beta) → gamma is two condensed module layers.
+    assert_eq!(snap.depth.raw, 2.0, "the condensed module chain is two layers");
 }
 
 // ── FR-QM-04 / UAT-QM-04: equality tracks complexity concentration ──────────
@@ -580,22 +686,25 @@ fn identical_input_yields_an_identical_pinned_signal() {
         second.modularity.raw.to_bits()
     );
 
-    // The golden pin, hand-derived under metric-semantics v5 (CR-087, ADR-61):
-    // the original five — modularity Q = 0.21875 (norm 23/48), cycles = 0
-    // (norm 1.0 — the alpha-internal a↔b SCC is intra-module, uncounted v5),
-    // depth = 3 (norm 8/11), Gini(2,2,3,5) = 10/48 (norm 38/48), redundancy
-    // ratio 1/4 (norm 3/4) — plus three always-applicable new dimensions that
-    // are all a clean 1.0 here (no deep nesting, no brain methods, no
-    // near-clones; depth/line/clone inputs all absent). Cohesion and Focus drop
-    // out (the fixture has no Class/Struct container, ADR-21), so the mean spans
-    // EIGHT dimensions:
-    //   exp(ln(23/48·1·8/11·38/48·3/4·1·1·1)/8)·10000 ≈ 8212.
+    // The golden pin, hand-derived under metric-semantics v5 (CR-087/CR-088,
+    // ADR-61/ADR-62): the original five — modularity Q = 0.21875 (norm 23/48),
+    // cycles = 0 (norm 1.0 — the alpha-internal a↔b SCC is intra-module,
+    // uncounted v5), depth = 2 (norm 4/5 — the module rollup is alpha → beta,
+    // two layers, from the single alpha→beta crossing; the alpha-internal chain
+    // no longer lengthens it, CR-088), Gini(2,2,3,5) = 10/48 (norm 38/48),
+    // redundancy ratio 1/4 (norm 3/4) — plus three always-applicable new
+    // dimensions that are all a clean 1.0 here (no deep nesting, no brain
+    // methods, no near-clones; depth/line/clone inputs all absent). Cohesion and
+    // Focus drop out (the fixture has no Class/Struct container, ADR-21), so the
+    // mean spans EIGHT dimensions:
+    //   exp(ln(23/48·1·4/5·38/48·3/4·1·1·1)/8)·10000 ≈ 8311.
     // Recomputing this exact integer on every target is the ADR-08 fitness
     // function; a change here is a determinism regression, not test churn. The
-    // value rose from the v4 pin (7531) because narrowing Acyclicity to
-    // cross-module cycles lifted its normalized 1/2 → 1.0 — a metric-semantics
-    // bump, not a regression (the gate auto-re-baselines, FR-GV-10).
-    assert_eq!(first.aggregate_signal, Some(8212));
+    // value rose from the intermediate v5 pin (8212) because rolling Depth up to
+    // the module graph lifted its normalized 8/11 → 4/5 (depth 3 → 2) — a
+    // metric-semantics change, not a regression (the gate auto-re-baselines,
+    // FR-GV-10).
+    assert_eq!(first.aggregate_signal, Some(8311));
     // The applicable-dimension provenance: Cohesion/Focus are n/a here.
     assert!(
         first.cohesion.is_none(),
