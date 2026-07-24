@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Method, Request, Response, StatusCode};
-use chat_agent::{ChatRole, ChatStore};
+use chat_agent::{ChatRole, ChatStore, ToolTrace};
 use http_body_util::BodyExt;
 use logos_core::Engine;
 use tempfile::TempDir;
@@ -145,7 +145,7 @@ async fn list_returns_threads_most_recent_first() {
 #[tokio::test]
 async fn reads_are_get_only_and_carry_no_secret() {
     let (dir, engine, intent) = fixture();
-    seed_threads(dir.path(), &["alpha", "beta"]);
+    let ids = seed_threads(dir.path(), &["alpha", "beta"]);
     let router = router_with_intent(engine, intent.clone());
 
     // GET-only: a POST to the list route is not an admitted mutating route → 405.
@@ -155,6 +155,23 @@ async fn reads_are_get_only_and_carry_no_secret() {
         .await
         .unwrap();
     assert_eq!(posted.status(), StatusCode::METHOD_NOT_ALLOWED, "the list route is GET-only");
+
+    // The `{id}` messages route (no `/delete` suffix) is a read too: a well-formed
+    // POST to it is not admitted by `is_chat_thread_delete_route` → 405.
+    let posted_msg = router
+        .clone()
+        .oneshot(post(
+            &format!("{CHAT_THREADS_ROUTE}/{}", ids[0]),
+            Some(intent.as_str()),
+            Some(ORIGIN),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        posted_msg.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "the per-thread messages route is GET-only (only `…/{{id}}/delete` is a POST)",
+    );
 
     // No secret rides the read payload.
     let text = body_text(router.oneshot(get(CHAT_THREADS_ROUTE)).await.unwrap()).await;
@@ -168,15 +185,25 @@ async fn reads_are_get_only_and_carry_no_secret() {
 
 // ── The messages endpoint ───────────────────────────────────────────────────
 
-/// `GET /api/v1/chat/threads/{id}` returns the thread's messages in stored order.
+/// `GET /api/v1/chat/threads/{id}` returns the thread's messages in stored order,
+/// as the exact producer-contract shape (incl. `tool_traces`), and carries no
+/// secret on the richer transcript payload either.
 #[tokio::test]
 async fn messages_returns_ordered_transcript() {
     let (dir, engine, intent) = fixture();
+    let trace = ToolTrace {
+        tool_name: "graph_search".to_string(),
+        arguments: "{\"q\":\"binder\"}".to_string(),
+        result: "found binder.rs".to_string(),
+        is_error: false,
+    };
     let thread = {
         let mut store = ChatStore::open(dir.path()).unwrap();
         let thread = store.create_thread("ordered").unwrap();
         store.append_message(thread, ChatRole::User, "first question", &[]).unwrap();
-        store.append_message(thread, ChatRole::Assistant, "first answer", &[]).unwrap();
+        store
+            .append_message(thread, ChatRole::Assistant, "first answer", std::slice::from_ref(&trace))
+            .unwrap();
         store.append_message(thread, ChatRole::User, "second question", &[]).unwrap();
         thread
     };
@@ -184,7 +211,16 @@ async fn messages_returns_ordered_transcript() {
     let router = router_with_intent(engine, intent);
     let resp = router.oneshot(get(&format!("{CHAT_THREADS_ROUTE}/{thread}"))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
+    let text = body_text(resp).await;
+    // The transcript is the richer payload (content + tool traces) — the more
+    // likely secret-leak vector, so scan it too (NFR-SE-07).
+    for marker in ["secret", "api_key", "apikey", "last4", "sk-"] {
+        assert!(
+            !text.to_ascii_lowercase().contains(marker),
+            "the transcript payload must carry no secret (found {marker:?})",
+        );
+    }
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
     let rows = json.as_array().expect("messages are a JSON array");
 
     let contents: Vec<&str> = rows.iter().map(|m| m["content"].as_str().unwrap()).collect();
@@ -195,6 +231,38 @@ async fn messages_returns_ordered_transcript() {
     );
     let roles: Vec<&str> = rows.iter().map(|m| m["role"].as_str().unwrap()).collect();
     assert_eq!(roles, ["user", "assistant", "user"], "each message's role is preserved");
+
+    // The message object's exact serialized contract (what S-210/S-211 hydrate from).
+    let mut keys: Vec<&String> = rows[0].as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["content", "created_at", "id", "role", "tool_traces"],
+        "each message carries exactly the producer-contract fields",
+    );
+    // The tool-trace sub-shape the assistant turn surfaces.
+    let mut trace_keys: Vec<&String> =
+        rows[1]["tool_traces"][0].as_object().unwrap().keys().collect();
+    trace_keys.sort();
+    assert_eq!(
+        trace_keys,
+        ["arguments", "is_error", "result", "tool_name"],
+        "a tool trace carries exactly the contract fields",
+    );
+}
+
+/// A real thread with no appended messages returns an honest empty `200` array —
+/// the branch the `thread()` existence check exists to distinguish from a `404`.
+#[tokio::test]
+async fn messages_for_empty_thread_is_empty_ok() {
+    let (dir, engine, intent) = fixture();
+    let thread = ChatStore::open(dir.path()).unwrap().create_thread("empty").unwrap();
+
+    let router = router_with_intent(engine, intent);
+    let resp = router.oneshot(get(&format!("{CHAT_THREADS_ROUTE}/{thread}"))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "a real-but-empty thread is 200, not 404");
+    let json = body_json(resp).await;
+    assert_eq!(json.as_array().map(|a| a.len()), Some(0), "the transcript is an empty array");
 }
 
 /// A request for a thread that does not exist is an honest `404`, never a
