@@ -712,6 +712,30 @@ fn link_visible_text(itext: &str, link_start: usize, dest_start: usize) -> Optio
     (text_start <= close).then(|| itext.get(text_start..close)).flatten()
 }
 
+/// Resolve a single `inline_link` node to its edit, if any — the `decide_link`
+/// dispatch lifted out of [`rewrite_refs`]'s walk so the loop body stays shallow
+/// (keeps the transform under the architecture nesting ceiling).
+#[cfg(feature = "lang-markdown")]
+fn link_edit(
+    n: tree_sitter::Node,
+    itext: &str,
+    istart: usize,
+    base_dir: &str,
+    current_slug: &str,
+    current_sectioned: bool,
+    manifest: &Manifest,
+) -> Option<(usize, usize, String)> {
+    let (ds, de) = link_destination_span(n)?;
+    match decide_link(&itext[ds..de], base_dir, current_slug, current_sectioned, manifest) {
+        LinkRewrite::Keep => None,
+        LinkRewrite::Dest(new) => Some((istart + ds, istart + de, new)),
+        LinkRewrite::Delink => {
+            let text = link_visible_text(itext, n.start_byte(), ds)?;
+            Some((istart + n.start_byte(), istart + n.end_byte(), text.to_string()))
+        }
+    }
+}
+
 /// Rewrite one presented body's in-body Markdown **link targets** against the
 /// resolution `manifest` ([FR-WK-25], [ADR-58]) — touching only link *destinations*,
 /// never prose:
@@ -737,31 +761,6 @@ fn link_visible_text(itext: &str, link_start: usize, dest_start: usize) -> Optio
 /// ([NFR-SE-01]); an unchanged input yields byte-identical output ([NFR-RA-06]). Links
 /// and images inside code spans and fenced code are untouched because they are not
 /// `inline_link`/`image` nodes in the grammar.
-#[cfg(feature = "lang-markdown")]
-/// Resolve a single `inline_link` node to its edit, if any — the `decide_link`
-/// dispatch lifted out of [`rewrite_refs`]'s walk so the loop body stays shallow
-/// (keeps the transform under the architecture nesting ceiling).
-#[cfg(feature = "lang-markdown")]
-fn link_edit(
-    n: tree_sitter::Node,
-    itext: &str,
-    istart: usize,
-    base_dir: &str,
-    current_slug: &str,
-    current_sectioned: bool,
-    manifest: &Manifest,
-) -> Option<(usize, usize, String)> {
-    let (ds, de) = link_destination_span(n)?;
-    match decide_link(&itext[ds..de], base_dir, current_slug, current_sectioned, manifest) {
-        LinkRewrite::Keep => None,
-        LinkRewrite::Dest(new) => Some((istart + ds, istart + de, new)),
-        LinkRewrite::Delink => {
-            let text = link_visible_text(itext, n.start_byte(), ds)?;
-            Some((istart + n.start_byte(), istart + n.end_byte(), text.to_string()))
-        }
-    }
-}
-
 #[cfg(feature = "lang-markdown")]
 pub(crate) fn rewrite_refs(
     body: &str,
