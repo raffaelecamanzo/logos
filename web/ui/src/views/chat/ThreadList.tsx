@@ -67,12 +67,23 @@ export function ThreadList({
         + New chat
       </Button>
 
-      {error ? (
+      {/* The note sits BESIDE the list, not instead of it. Two different things can
+          go wrong: the list could not be READ (there is nothing to show, so the note
+          stands alone), or an ACTION on an existing list failed (a delete) — and in
+          that second case replacing the rail with the note would hide every
+          conversation the user still has, a worse lie than the failure itself. */}
+      {error && (
         <p className={styles.railError} role="status">
           {error}
         </p>
-      ) : threads.length === 0 ? (
-        <p className={styles.railEmpty}>No conversations yet — your chats will appear here.</p>
+      )}
+
+      {threads.length === 0 ? (
+        // Silent when a read failed: "no conversations yet" would be a claim we
+        // cannot make — we do not know what is there ([NFR-CC-04]).
+        !error && (
+          <p className={styles.railEmpty}>No conversations yet — your chats will appear here.</p>
+        )
       ) : (
         <ul className={styles.threadList}>
           {threads.map((t) => {

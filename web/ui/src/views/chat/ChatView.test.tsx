@@ -470,6 +470,76 @@ describe("ChatView — per-conversation delete (S-211, FR-UI-26, AC-1)", () => {
     expect(mockDeleteThread).toHaveBeenCalledWith(5);
   });
 
+  it("keeps the row and says so honestly when the delete transport fails", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(5, "Conv A", 300)]);
+    // A rejected promise, not a non-ok Response: the request never reached a status.
+    mockDeleteThread.mockRejectedValue(new Error("network down"));
+    render(<ChatView />);
+    await screen.findByRole("button", { name: "Conv A" });
+
+    await user.click(deleteButton("Conv A"));
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+
+    // The cause is surfaced verbatim, and the conversation stays — a transport fault
+    // is not evidence the server deleted anything.
+    expect(
+      await screen.findByText(/Could not delete that conversation: network down/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Conv A" })).toBeInTheDocument();
+  });
+
+  it("keeps the deleted row gone when the post-delete rail refresh fails", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockReset();
+    mockFetchThreads.mockResolvedValueOnce([thread(5, "Conv A", 300), thread(3, "Conv B", 100)]);
+    // The delete succeeds, but the refresh that would re-read the order faults.
+    mockFetchThreads.mockRejectedValue(new ApiError("chat/threads", 500));
+    render(<ChatView />);
+    await screen.findByRole("button", { name: "Conv B" });
+
+    await user.click(deleteButton("Conv B"));
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+
+    // The delete's own authority stands: the row does not come back just because the
+    // refresh failed, and the refresh failure is reported honestly rather than hidden.
+    expect(await screen.findByText(/Could not load your conversations/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Conv B" })).not.toBeInTheDocument();
+  });
+
+  it("deleting the open conversation mid-stream aborts the turn and cannot be hijacked", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockReset();
+    mockFetchThreads.mockResolvedValueOnce([thread(9, "Conv 9", 400)]);
+    mockFetchThreads.mockResolvedValue([]); // after the delete the server has none
+    mockFetchMessages.mockResolvedValue([
+      persisted("user", "hi", 1),
+      persisted("assistant", "hello", 2),
+    ]);
+    const pending = pendingSseResponse(['event: answer_delta\ndata: {"delta":"thinking"}\n\n']);
+    mockStreamTurn.mockResolvedValueOnce(pending.response);
+    render(<ChatView />);
+    await acceptConsent(user);
+    await user.click(await screen.findByRole("button", { name: "Conv 9" }));
+    await screen.findByText("hello");
+    await ask(user, "a follow-up");
+    await screen.findByRole("button", { name: "Stop" }); // in flight on thread 9
+
+    // Delete the conversation the turn is streaming into, then let it settle.
+    await user.click(deleteButton("Conv 9"));
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+    pending.close();
+
+    // The surface resets to a fresh composer and the settling turn cannot rebind the
+    // deleted thread: no streamed content survives and the selection is dropped.
+    await waitFor(() => expect(screen.queryByText("thinking")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    await waitFor(() => expect(window.localStorage.getItem("logos.chat.activeThread")).toBeNull());
+  });
+
   it("treats an already-gone conversation (404) as deleted, not as a fault", async () => {
     const user = userEvent.setup();
     mockFetchConfig.mockResolvedValue(configuredModel());
