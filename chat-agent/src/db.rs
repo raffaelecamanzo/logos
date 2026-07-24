@@ -306,6 +306,46 @@ impl ChatStore {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Create a new conversation **auto-titled** from its first user message
+    /// ([FR-UI-26], [ADR-47] decision (3)): the title is
+    /// [`title_from_first_message`]'s truncation of `first_user_message`, set
+    /// **once** at creation. Nothing — not [`append_message`](Self::append_message),
+    /// not a later turn — ever rewrites it, so the auto-title is stable for the
+    /// life of the conversation (the [FR-UI-26](../../docs/specs/requirements/FR-UI-26.md)
+    /// "auto-titled from its first user message" contract). Returns the new id.
+    ///
+    /// This is the canonical derivation the web adapter creates threads through;
+    /// [`create_thread`](Self::create_thread) with an explicit title stays for
+    /// callers (and tests) that supply their own.
+    ///
+    /// # Errors
+    /// Returns an error if the insert fails.
+    pub fn create_thread_from_message(&mut self, first_user_message: &str) -> Result<i64> {
+        self.create_thread(&title_from_first_message(first_user_message))
+    }
+
+    /// **Delete one conversation** ([FR-UI-26], [ADR-47] decision (2)): a single
+    /// `DELETE FROM chat_threads WHERE id=?` whose live `ON DELETE CASCADE`
+    /// (migration 1 + 2, with `foreign_keys = ON` on every handle) transitively
+    /// wipes that thread's `chat_messages` (and their `chat_tool_traces`),
+    /// `chat_scratchpad`, and `chat_working_memory` — no orphan rows survive
+    /// ([FR-UI-20] per-thread memory cascade). Returns `true` if a thread was
+    /// removed, `false` if no thread had that id (an idempotent no-op the delete
+    /// API can map to a 404).
+    ///
+    /// The global [`clear_history`](Self::clear_history) is retained ([ADR-47]),
+    /// but per-thread delete is the sole in-UI deletion path ([FR-UI-26]).
+    ///
+    /// # Errors
+    /// Returns an error if the delete fails.
+    pub fn delete_thread(&mut self, thread_id: i64) -> Result<bool> {
+        let removed = self
+            .conn
+            .execute("DELETE FROM chat_threads WHERE id = ?1", [thread_id])
+            .with_context(|| format!("deleting chat thread {thread_id}"))?;
+        Ok(removed > 0)
+    }
+
     /// Append a message (and its tool traces) to a thread in **one**
     /// transaction, bumping the thread's `updated_at`. Returns the new message
     /// id. The `ordinal` is assigned as the thread's current max + 1, so message
@@ -513,6 +553,51 @@ impl ChatStore {
             .query_row("SELECT COUNT(*) FROM chat_threads", [], |row| row.get(0))
             .context("counting chat threads")?;
         Ok(threads == 0)
+    }
+}
+
+/// The longest an auto-derived conversation title may run, in characters (not
+/// bytes — titles must never split a multi-byte grapheme). The canonical cap the
+/// store and every caller share ([FR-UI-26] "truncated"); the web adapter no
+/// longer keeps its own copy.
+pub const THREAD_TITLE_MAX: usize = 60;
+
+/// Derive a stable, single-line conversation title from a conversation's first
+/// user message ([FR-UI-26], [ADR-47] decision (3)).
+///
+/// This is the one canonical place the truncation rule lives — [`ChatStore::
+/// create_thread_from_message`] and the web adapter both route through it, so the
+/// title a conversation is born with is identical no matter who creates it.
+///
+/// The contract the tests in `tests/store.rs` pin:
+/// - a normal message becomes its (trimmed) text, at most [`THREAD_TITLE_MAX`]
+///   characters — and truncation happens on a **character** boundary so a
+///   multi-byte message (e.g. `"日本語…"`) never panics or yields invalid UTF-8;
+/// - a message with no usable text (empty, or only whitespace) falls back to a
+///   non-empty placeholder rather than an empty title (`chat_threads.title` is
+///   `NOT NULL` and the rail must render *something*);
+/// - the result is single-line (a multi-line paste is titled by its first line),
+///   so the rail row never wraps.
+///
+/// # Design note (why this is a deliberate choice, not boilerplate)
+/// "Truncated first user message" leaves several real decisions: whole message
+/// vs. first line only; trim leading/trailing whitespace or not; hard character
+/// cut vs. break on a word boundary vs. append an ellipsis; and what an
+/// empty/whitespace-only message should title to. Each shapes what the history
+/// rail actually reads.
+#[must_use]
+pub fn title_from_first_message(first_user_message: &str) -> String {
+    // First line only (a multi-line paste is titled by its first line), trimmed,
+    // then a **character** truncation to `THREAD_TITLE_MAX` — never a byte slice,
+    // which would panic on / corrupt a multi-byte title. A blank or
+    // whitespace-only message falls back to a non-empty placeholder because
+    // `chat_threads.title` is `NOT NULL` and the history rail must render a row.
+    let line = first_user_message.lines().next().unwrap_or("").trim();
+    let title: String = line.chars().take(THREAD_TITLE_MAX).collect();
+    if title.is_empty() {
+        "New chat".to_string()
+    } else {
+        title
     }
 }
 

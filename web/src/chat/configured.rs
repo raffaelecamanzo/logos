@@ -45,9 +45,6 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::{run_orchestrated, unbounded_chat_channel, ChatFrame, ChatService, ChatStream};
 
-/// The longest a thread title derived from the first user message may run.
-const THREAD_TITLE_MAX: usize = 60;
-
 /// The production chat service over the live [`Engine`] and the on-disk `[chat]`
 /// policy + `secrets.toml` key ([FR-CF-06]).
 pub(crate) struct ConfiguredChatService {
@@ -115,7 +112,7 @@ fn build_setup(root: &Path, thread_id: Option<i64>, question: &str) -> Result<Ch
     let thread_id = match thread_id {
         Some(id) => id,
         None => store
-            .create_thread(&thread_title(question))
+            .create_thread_from_message(question)
             .map_err(|e| format!("could not create a chat thread: {e}"))?,
     };
     store
@@ -288,16 +285,4 @@ async fn launch<M>(
         .with_synthesizer_grounding(grounding);
     let orchestrator = Orchestrator::new(model, roster, budget);
     run_orchestrated(orchestrator, question, memory, thread_id, turn, tx).await;
-}
-
-/// A single-line thread title from the first user message, truncated on a char
-/// boundary to [`THREAD_TITLE_MAX`].
-fn thread_title(question: &str) -> String {
-    let line = question.lines().next().unwrap_or("").trim();
-    let title: String = line.chars().take(THREAD_TITLE_MAX).collect();
-    if title.is_empty() {
-        "New chat".to_string()
-    } else {
-        title
-    }
 }
