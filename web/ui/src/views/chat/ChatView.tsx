@@ -36,6 +36,7 @@ import { fetchChatConfig } from "../../api/chatClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import { Button, Callout } from "../../components/index.ts";
 import { MarkdownAnswer } from "./MarkdownAnswer.tsx";
+import { ThreadList } from "./ThreadList.tsx";
 import { useChatRuntime } from "./chatRuntime.tsx";
 import {
   endpointHost,
@@ -82,11 +83,16 @@ function ConfigureFirst() {
   );
 }
 
-/** The configured chat surface: the consent banner, the assistant-ui thread, and
- *  the Clear-history control. */
+/** The configured chat surface: the conversation-history rail (S-210), the consent
+ *  banner, the assistant-ui thread, and the Clear-history control. */
 function ChatConfigured({ chat }: { chat: ChatPolicy }) {
   const [consented, setConsented] = useState<boolean>(() => hasConsent());
-  const { runtime, clearHistory, clearing, clearMessage } = useChatRuntime(consented);
+  // The rail collapses behind a toggle below ~1023px (S-210 AC-3); `railOpen`
+  // drives that toggle. At ≥1024px the rail is always shown (CSS), so this state
+  // is inert there — it only gates the narrow-viewport disclosure.
+  const [railOpen, setRailOpen] = useState(false);
+  const { runtime, clearHistory, clearing, clearMessage, threads, activeThreadId, selectThread, newChat, threadsError } =
+    useChatRuntime(consented);
 
   const acceptConsent = useCallback(() => {
     rememberConsent();
@@ -98,29 +104,70 @@ function ChatConfigured({ chat }: { chat: ChatPolicy }) {
     void clearHistory();
   }, [clearHistory]);
 
+  // Selecting or starting a conversation closes the narrow-viewport rail so the
+  // restored thread is in view (a no-op at ≥1024px, where the rail stays open).
+  const onSelect = useCallback(
+    (id: number) => {
+      void selectThread(id);
+      setRailOpen(false);
+    },
+    [selectThread],
+  );
+  const onNewChat = useCallback(() => {
+    newChat();
+    setRailOpen(false);
+  }, [newChat]);
+
   return (
     <div className={styles.chat}>
       {!consented && <ConsentBanner chat={chat} onAccept={acceptConsent} />}
 
-      <AssistantRuntimeProvider runtime={runtime}>
-        <ThreadPrimitive.Root className={styles.threadRoot}>
-          <ThreadPrimitive.Viewport className={styles.log}>
-            <ThreadPrimitive.Empty>
-              <EmptyHint chat={chat} />
-            </ThreadPrimitive.Empty>
-            <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
-          </ThreadPrimitive.Viewport>
-          <Composer consented={consented} />
-        </ThreadPrimitive.Root>
-      </AssistantRuntimeProvider>
+      <div className={styles.layout}>
+        <button
+          type="button"
+          className={styles.railToggle}
+          aria-expanded={railOpen}
+          aria-controls="chat-rail"
+          onClick={() => setRailOpen((open) => !open)}
+        >
+          {railOpen ? "Hide conversations" : "Conversations"}
+        </button>
 
-      <div className={styles.historyActions}>
-        <Button variant="ghost" onClick={onClear} disabled={clearing}>
-          Clear history
-        </Button>
-        <span className={styles.clearResult} role="status" aria-live="polite">
-          {clearMessage}
-        </span>
+        <aside
+          id="chat-rail"
+          className={railOpen ? `${styles.railPane} ${styles.railPaneOpen}` : styles.railPane}
+        >
+          <ThreadList
+            threads={threads}
+            activeThreadId={activeThreadId}
+            onSelect={onSelect}
+            onNewChat={onNewChat}
+            error={threadsError}
+          />
+        </aside>
+
+        <div className={styles.main}>
+          <AssistantRuntimeProvider runtime={runtime}>
+            <ThreadPrimitive.Root className={styles.threadRoot}>
+              <ThreadPrimitive.Viewport className={styles.log}>
+                <ThreadPrimitive.Empty>
+                  <EmptyHint chat={chat} />
+                </ThreadPrimitive.Empty>
+                <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
+              </ThreadPrimitive.Viewport>
+              <Composer consented={consented} />
+            </ThreadPrimitive.Root>
+          </AssistantRuntimeProvider>
+
+          <div className={styles.historyActions}>
+            <Button variant="ghost" onClick={onClear} disabled={clearing}>
+              Clear history
+            </Button>
+            <span className={styles.clearResult} role="status" aria-live="polite">
+              {clearMessage}
+            </span>
+          </div>
+        </div>
       </div>
     </div>
   );

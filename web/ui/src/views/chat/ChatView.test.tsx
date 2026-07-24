@@ -12,15 +12,35 @@ vi.mock("../../api/chatClient.ts", () => ({
   fetchChatConfig: vi.fn(),
   streamChatTurn: vi.fn(),
   clearChatHistory: vi.fn(),
+  fetchThreads: vi.fn(),
+  fetchThreadMessages: vi.fn(),
 }));
 
-import { clearChatHistory, fetchChatConfig, streamChatTurn } from "../../api/chatClient.ts";
-import type { ChatConfigReadModel } from "./chatModel.ts";
+import {
+  clearChatHistory,
+  fetchChatConfig,
+  fetchThreadMessages,
+  fetchThreads,
+  streamChatTurn,
+} from "../../api/chatClient.ts";
+import { ApiError } from "../../api/client.ts";
+import type { ChatConfigReadModel, PersistedChatMessage, ThreadSummary } from "./chatModel.ts";
 import { ChatView } from "./ChatView.tsx";
 
 const mockFetchConfig = vi.mocked(fetchChatConfig);
 const mockStreamTurn = vi.mocked(streamChatTurn);
 const mockClear = vi.mocked(clearChatHistory);
+const mockFetchThreads = vi.mocked(fetchThreads);
+const mockFetchMessages = vi.mocked(fetchThreadMessages);
+
+/** A thread-list summary over the S-209 wire shape. */
+function thread(id: number, title: string, updatedAt: number): ThreadSummary {
+  return { id, title, updated_at: updatedAt };
+}
+/** A persisted transcript row over the S-209 messages wire shape. */
+function persisted(role: PersistedChatMessage["role"], content: string, id = 1): PersistedChatMessage {
+  return { id, role, content, created_at: 0, tool_traces: [] };
+}
 
 /** A configured read-model carrying a MASKED key whose last-4 must NEVER render. */
 const MASKED_LAST4 = "SECRET4";
@@ -79,6 +99,10 @@ function pendingSseResponse(initialChunks: string[]): { response: Response; clos
 beforeEach(() => {
   window.localStorage.clear();
   vi.clearAllMocks();
+  // Default: an empty rail with no stored selection, so the single-thread S-200
+  // suites are unaffected. Rail suites override these per test.
+  mockFetchThreads.mockResolvedValue([]);
+  mockFetchMessages.mockResolvedValue([]);
 });
 afterEach(() => {
   cleanup();
@@ -154,8 +178,9 @@ describe("ChatView — a streamed turn", () => {
     expect(screen.getByText("what is risky?")).toBeInTheDocument();
     expect(container.textContent).toContain("Plan");
     expect(container.textContent).toContain("Graph-Navigator");
-    // The streamed message is the byte-identical form-encoded body (NFR-SE-06 path).
-    expect(mockStreamTurn).toHaveBeenCalledWith("what is risky?", expect.anything());
+    // The streamed message is the byte-identical form-encoded body (NFR-SE-06 path);
+    // a fresh conversation carries no thread id (null → the server creates it).
+    expect(mockStreamTurn).toHaveBeenCalledWith("what is risky?", null, expect.anything());
   });
 
   it("renders the answer as markdown with a copyable code block", async () => {
@@ -383,5 +408,264 @@ describe("ChatView — runtime adapter unit", () => {
     await screen.findByText("ok");
     const [question] = mockStreamTurn.mock.calls[0];
     expect(question).toBe("the question");
+  });
+});
+
+describe("ChatView — conversation-history rail (S-210, FR-UI-26)", () => {
+  it("lists conversations most-recent-first over GET /chat/threads", async () => {
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([
+      thread(5, "Newest conversation", 300),
+      thread(3, "Older conversation", 100),
+    ]);
+    render(<ChatView />);
+    // The rail renders the server's most-recent-first order verbatim.
+    const newest = await screen.findByRole("button", { name: "Newest conversation" });
+    const older = screen.getByRole("button", { name: "Older conversation" });
+    expect(newest).toBeInTheDocument();
+    expect(older).toBeInTheDocument();
+    // DOM order mirrors list order (most-recent first).
+    expect(newest.compareDocumentPosition(older) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("select-to-restore hydrates a thread's full history via the messages endpoint", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(5, "Conv A", 300)]);
+    mockFetchMessages.mockResolvedValue([
+      persisted("user", "a restored question", 1),
+      persisted("assistant", "a restored answer", 2),
+    ]);
+    render(<ChatView />);
+    await user.click(await screen.findByRole("button", { name: "Conv A" }));
+    // The restored transcript renders (user text + the final assistant answer).
+    expect(await screen.findByText("a restored question")).toBeInTheDocument();
+    expect(screen.getByText("a restored answer")).toBeInTheDocument();
+    expect(mockFetchMessages).toHaveBeenCalledWith(5);
+  });
+
+  it("+ New chat resets the composer and creates no empty row until first send", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(5, "Conv A", 300)]);
+    mockFetchMessages.mockResolvedValue([
+      persisted("user", "old question", 1),
+      persisted("assistant", "old answer", 2),
+    ]);
+    render(<ChatView />);
+    // Restore a conversation, then reset with "+ New chat".
+    await user.click(await screen.findByRole("button", { name: "Conv A" }));
+    expect(await screen.findByText("old answer")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "+ New chat" }));
+    // The log is cleared to a fresh composer…
+    await waitFor(() => expect(screen.queryByText("old answer")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    // …and no turn was streamed and no new thread was created (no empty rows): the
+    // rail still shows exactly the one server-side conversation.
+    expect(mockStreamTurn).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("button", { name: "Conv A" })).toHaveLength(1);
+    // The stored selection is cleared, so a reload lands on a fresh composer.
+    await waitFor(() => expect(window.localStorage.getItem("logos.chat.activeThread")).toBeNull());
+  });
+
+  it("marks the open conversation with aria-current", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(5, "Conv A", 300), thread(3, "Conv B", 100)]);
+    mockFetchMessages.mockResolvedValue([persisted("user", "q", 1), persisted("assistant", "a", 2)]);
+    render(<ChatView />);
+    await user.click(await screen.findByRole("button", { name: "Conv A" }));
+    await screen.findByText("a");
+    // The rail reflects which conversation is active; the others do not.
+    expect(screen.getByRole("button", { name: "Conv A" })).toHaveAttribute("aria-current", "true");
+    expect(screen.getByRole("button", { name: "Conv B" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("persists the conversation on first send and continues it with its thread id", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    // Mount sees no conversations; after the first send the server has created one,
+    // which the rail discovers as the most-recent (top) thread (S-209 returns no id
+    // on the SSE stream).
+    mockFetchThreads.mockReset();
+    mockFetchThreads.mockResolvedValueOnce([]); // mount
+    mockFetchThreads.mockResolvedValue([thread(9, "first question", 400)]); // after send
+    mockStreamTurn
+      .mockResolvedValueOnce(sseResponse(['event: final_answer\ndata: {"answer":"first answer"}\n\n']))
+      .mockResolvedValueOnce(sseResponse(['event: final_answer\ndata: {"answer":"second answer"}\n\n']));
+    render(<ChatView />);
+    await acceptConsent(user);
+
+    await ask(user, "first question");
+    expect(await screen.findByText("first answer")).toBeInTheDocument();
+    // The first send carried no thread id (a fresh conversation).
+    expect(mockStreamTurn.mock.calls[0][1]).toBeNull();
+    // The just-created conversation is adopted and appears in the rail.
+    expect(await screen.findByRole("button", { name: "first question" })).toBeInTheDocument();
+
+    await ask(user, "second turn");
+    await screen.findByText("second answer");
+    // The follow-up turn continues the SAME server thread (id 9), not a new one.
+    expect(mockStreamTurn.mock.calls[1][1]).toBe(9);
+  });
+
+  it("restores the last-open conversation across a reload (persisted selection)", async () => {
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(7, "Persisted conv", 500)]);
+    mockFetchMessages.mockResolvedValue([
+      persisted("user", "remembered question", 1),
+      persisted("assistant", "remembered answer", 2),
+    ]);
+    // A prior session left thread 7 open.
+    window.localStorage.setItem("logos.chat.activeThread", "7");
+    render(<ChatView />);
+    // On mount the runtime re-hydrates the stored selection with no user action.
+    expect(await screen.findByText("remembered answer")).toBeInTheDocument();
+    expect(screen.getByText("remembered question")).toBeInTheDocument();
+    expect(mockFetchMessages).toHaveBeenCalledWith(7);
+  });
+
+  it("falls back to a fresh composer when the stored selection was deleted (404)", async () => {
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([]);
+    mockFetchMessages.mockRejectedValue(new ApiError("chat/threads/7", 404));
+    window.localStorage.setItem("logos.chat.activeThread", "7");
+    render(<ChatView />);
+    // No crash, no restored history — an honest empty composer.
+    expect(await screen.findByRole("button", { name: "Send" })).toBeInTheDocument();
+    // The stale stored selection is cleared.
+    await waitFor(() => expect(window.localStorage.getItem("logos.chat.activeThread")).toBeNull());
+  });
+
+  it("collapses the rail behind a toggle (responsive disclosure, AC-3)", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(5, "Conv A", 300)]);
+    render(<ChatView />);
+    // The toggle controls the rail region and starts collapsed on narrow viewports.
+    const toggle = await screen.findByRole("button", { name: "Conversations" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveAttribute("aria-controls", "chat-rail");
+
+    await user.click(toggle);
+    // Toggling discloses the rail (aria-expanded flips; the label reflects state).
+    expect(await screen.findByRole("button", { name: "Hide conversations" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+  });
+});
+
+describe("ChatView — rail honest error paths (S-210)", () => {
+  it("shows an honest note when the conversation list fails to load", async () => {
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockRejectedValue(new ApiError("chat/threads", 500));
+    render(<ChatView />);
+    // The rail degrades to an honest note (not a silently empty list), and the chat
+    // surface still mounts.
+    expect(await screen.findByText(/Could not load your conversations/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "+ New chat" })).toBeInTheDocument();
+  });
+
+  it("keeps the open conversation and notes a fault when a restore faults (non-404)", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(5, "Conv A", 300), thread(3, "Conv B", 100)]);
+    mockFetchMessages.mockImplementation((id: number) =>
+      id === 5
+        ? Promise.resolve([persisted("user", "kept question", 1), persisted("assistant", "kept answer", 2)])
+        : Promise.reject(new ApiError(`chat/threads/${id}`, 500)),
+    );
+    render(<ChatView />);
+    await user.click(await screen.findByRole("button", { name: "Conv A" }));
+    expect(await screen.findByText("kept answer")).toBeInTheDocument();
+
+    // Selecting a conversation whose transcript faults (non-404) keeps the current
+    // view intact and surfaces an honest note — never a blank/broken surface.
+    await user.click(screen.getByRole("button", { name: "Conv B" }));
+    expect(await screen.findByText(/Could not open that conversation/)).toBeInTheDocument();
+    expect(screen.getByText("kept answer")).toBeInTheDocument();
+  });
+
+  it("notes an unrefreshable rail after a first send without silently forking", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    // Mount empty; the post-turn refresh (which would learn the new thread id) fails.
+    mockFetchThreads.mockReset();
+    mockFetchThreads.mockResolvedValueOnce([]); // mount
+    mockFetchThreads.mockRejectedValue(new ApiError("chat/threads", 500)); // post-turn
+    mockStreamTurn.mockResolvedValue(sseResponse(['event: final_answer\ndata: {"answer":"saved"}\n\n']));
+    render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "first question");
+    expect(await screen.findByText("saved")).toBeInTheDocument();
+    // The turn is durable, but the id could not be learned — an honest note rather
+    // than a silent state that would fork a second thread on the next send.
+    expect(await screen.findByText(/could not refresh/)).toBeInTheDocument();
+  });
+});
+
+describe("ChatView — multi-thread integrity (review-fix regressions)", () => {
+  it("does not fork a second thread: a follow-up continues the adopted conversation", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockReset();
+    mockFetchThreads.mockResolvedValueOnce([]); // mount
+    mockFetchThreads.mockResolvedValue([thread(9, "first question", 400)]); // post-send (thread 9 created)
+    mockStreamTurn
+      .mockResolvedValueOnce(sseResponse(['event: final_answer\ndata: {"answer":"a1"}\n\n']))
+      .mockResolvedValueOnce(sseResponse(['event: final_answer\ndata: {"answer":"a2"}\n\n']));
+    render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "first question");
+    await screen.findByText("a1");
+    // Adoption completes before the composer re-enables, so the follow-up carries
+    // the adopted id — never a null that would create a duplicate thread.
+    await ask(user, "second question");
+    await screen.findByText("a2");
+    expect(mockStreamTurn.mock.calls[0][1]).toBeNull();
+    expect(mockStreamTurn.mock.calls[1][1]).toBe(9);
+  });
+
+  it("+ New chat during a streaming turn is not hijacked back to the old thread", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    // Start on an existing conversation (thread 9), then stream a pending turn on it.
+    mockFetchThreads.mockResolvedValue([thread(9, "Conv 9", 400)]);
+    mockFetchMessages.mockResolvedValue([persisted("user", "hi", 1), persisted("assistant", "hello", 2)]);
+    const pending = pendingSseResponse(['event: answer_delta\ndata: {"delta":"thinking"}\n\n']);
+    mockStreamTurn.mockResolvedValueOnce(pending.response);
+    render(<ChatView />);
+    await acceptConsent(user);
+    await user.click(await screen.findByRole("button", { name: "Conv 9" }));
+    await screen.findByText("hello");
+    await ask(user, "a follow-up");
+    await screen.findByRole("button", { name: "Stop" }); // the turn is in flight on thread 9
+
+    // Mid-stream, the user starts a fresh conversation, then the aborted turn settles.
+    await user.click(screen.getByRole("button", { name: "+ New chat" }));
+    pending.close();
+
+    // The fresh session must NOT be rebound to thread 9 by the aborted turn's
+    // reconcile: the next send creates a new conversation (thread id null).
+    mockStreamTurn.mockResolvedValueOnce(sseResponse(['event: final_answer\ndata: {"answer":"fresh"}\n\n']));
+    await ask(user, "brand new");
+    await screen.findByText("fresh");
+    expect(mockStreamTurn.mock.calls[mockStreamTurn.mock.calls.length - 1][1]).toBeNull();
+  });
+});
+
+describe("ChatView — single-thread behaviour unchanged (S-200 regression)", () => {
+  it("streams a turn with no active thread exactly as before", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockStreamTurn.mockResolvedValue(sseResponse(['event: final_answer\ndata: {"answer":"unchanged"}\n\n']));
+    render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "still works?");
+    expect(await screen.findByText("unchanged")).toBeInTheDocument();
+    // The S-200 body is byte-identical: `q` only, no thread id (null).
+    expect(mockStreamTurn).toHaveBeenCalledWith("still works?", null, expect.anything());
   });
 });

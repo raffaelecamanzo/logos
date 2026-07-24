@@ -17,6 +17,8 @@ import {
   CHAT_ROUTE,
   clearChatHistory,
   fetchChatConfig,
+  fetchThreadMessages,
+  fetchThreads,
   streamChatTurn,
 } from "./chatClient.ts";
 
@@ -28,12 +30,36 @@ afterEach(() => vi.clearAllMocks());
 describe("streamChatTurn", () => {
   it("POSTs the form-encoded question with the SSE Accept header over the intent seam", async () => {
     const ctrl = new AbortController();
-    await streamChatTurn("what is risky?", ctrl.signal);
+    await streamChatTurn("what is risky?", null, ctrl.signal);
     expect(mockMutate).toHaveBeenCalledWith(CHAT_ROUTE, {
       headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "text/event-stream" },
       body: "q=what%20is%20risky%3F",
       signal: ctrl.signal,
     });
+  });
+
+  it("omits the thread field for a fresh conversation (byte-identical single-thread body)", async () => {
+    await streamChatTurn("hi", null);
+    expect(mockMutate.mock.calls[0][1]?.body).toBe("q=hi");
+  });
+
+  it("appends the active thread id when continuing a conversation", async () => {
+    await streamChatTurn("more", 7);
+    expect(mockMutate.mock.calls[0][1]?.body).toBe("q=more&thread=7");
+  });
+});
+
+describe("fetchThreads", () => {
+  it("GETs the same-origin thread list (S-209 read API, no re-added route)", async () => {
+    await fetchThreads();
+    expect(mockFetch).toHaveBeenCalledWith("chat/threads");
+  });
+});
+
+describe("fetchThreadMessages", () => {
+  it("GETs one thread's transcript by id", async () => {
+    await fetchThreadMessages(42);
+    expect(mockFetch).toHaveBeenCalledWith("chat/threads/42");
   });
 });
 
