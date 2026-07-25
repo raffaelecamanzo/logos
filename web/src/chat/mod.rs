@@ -321,7 +321,12 @@ pub(crate) async fn run_orchestrated<M, E>(
 ///
 /// Only [`TurnOutcome::Answered`] yields one. A whitespace-only answer is treated as
 /// no answer: an empty assistant row is not a transcript entry, it is a blank turn a
-/// restore would replay.
+/// restore would replay. That last case is **defense in depth** rather than a live
+/// path — `run_synthesizer` already refuses a blank synthesis upstream ("the
+/// synthesizer produced no answer"), so a blank `Answered` cannot currently reach
+/// here; the guard keeps transcript honesty a local property of this function instead
+/// of an inherited invariant from another crate. It is covered by the unit test below
+/// (no orchestrator can produce the input).
 fn durable_answer(outcome: Result<TurnOutcome, OrchestratorError>) -> Option<String> {
     match outcome {
         Ok(TurnOutcome::Answered(answer)) if !answer.trim().is_empty() => Some(answer),
@@ -391,4 +396,44 @@ pub(crate) fn sse_body(
     stream: ChatStream,
 ) -> impl Stream<Item = Result<sse::Event, std::convert::Infallible>> {
     stream.map(|frame| Ok(frame_to_event(frame)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chat_agent::{BudgetBound, StepRole};
+
+    /// `durable_answer` records a turn's answer only when the turn genuinely produced
+    /// one ([FR-UI-26] AC-2, [NFR-CC-04]). The blank case is unreachable through the
+    /// orchestrator (`run_synthesizer` rejects a blank synthesis first), so this is the
+    /// only place that guard can be exercised — without it, a future upstream change
+    /// could put an empty assistant row in a conversation with nothing to catch it.
+    #[test]
+    fn durable_answer_records_only_a_genuine_answer() {
+        assert_eq!(
+            durable_answer(Ok(TurnOutcome::Answered("the answer".to_string()))),
+            Some("the answer".to_string()),
+            "a genuine answer is made durable",
+        );
+        assert_eq!(
+            durable_answer(Ok(TurnOutcome::Answered("   \n\t ".to_string()))),
+            None,
+            "a whitespace-only answer is not a transcript entry",
+        );
+        assert_eq!(
+            durable_answer(Ok(TurnOutcome::Halted(BudgetBound::GlobalToolCalls {
+                limit: 8
+            }))),
+            None,
+            "an honest budget halt persists no answer",
+        );
+        assert_eq!(
+            durable_answer(Err(OrchestratorError::Step {
+                role: StepRole::Synthesizer,
+                message: "the synthesizer provider failed".to_string(),
+            })),
+            None,
+            "a faulted turn persists no answer — nothing is fabricated",
+        );
+    }
 }
