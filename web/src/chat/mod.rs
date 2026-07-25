@@ -12,7 +12,12 @@
 //!   [`Orchestrator::run`](chat_agent::Orchestrator::run);
 //! - the tool-less Synthesizer is grounded on that persisted memory via
 //!   [`MemoryGrounding`] — so [S-175]'s "the Synthesizer uses the scratchpad in
-//!   the final answer" holds in production, not just as an available seam.
+//!   the final answer" holds in production, not just as an available seam;
+//! - a turn that genuinely [`Answered`](chat_agent::TurnOutcome::Answered) also
+//!   appends that answer to the conversation's durable `chat_messages` transcript,
+//!   beside the user's question ([FR-UI-26] AC-2) — the scratchpad is per-turn and
+//!   invisible to the rail, so without this a restored conversation replayed the
+//!   questions and none of the answers.
 //!
 //! # Why SSE rides the intent-guarded `POST`, not a `GET` `EventSource`
 //! A streaming chat turn **mutates** (consent-gated outbound egress + scratchpad
@@ -37,6 +42,7 @@
 //! [S-170]: ../../../docs/planning/journal.md#s-170-sse-streaming-and-intent-guarded-chat-post-routes
 //! [S-175]: ../../../docs/planning/journal.md#s-175-multi-step-agent-memory-store-scratchpad-and-working-memory
 //! [FR-UI-19]: ../../../docs/specs/requirements/FR-UI-19.md
+//! [FR-UI-26]: ../../../docs/specs/requirements/FR-UI-26.md
 //! [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 //! [`chat-agent`]: ../../../docs/specs/architecture/components/chat-agent.md
@@ -45,13 +51,15 @@ mod configured;
 
 pub(crate) use configured::ConfiguredChatService;
 
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::response::sse;
 use chat_agent::{
-    EventSink, FanOut, MemoryStore, Orchestrator, OrchestratorEvent, ScratchpadSink, StepExecutor,
+    ChatRole, ChatStore, EventSink, FanOut, MemoryStore, Orchestrator, OrchestratorError,
+    OrchestratorEvent, ScratchpadSink, StepExecutor, TurnOutcome,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -173,6 +181,35 @@ impl EventSink for SseSink {
     }
 }
 
+/// Where one turn's memory and durable transcript are written: the project root
+/// holding `.logos/chat.db`, the conversation the turn appends to, and its
+/// per-thread turn ordinal (the scratchpad's scope).
+///
+/// Carried as one value so the turn machinery keeps a readable signature and the
+/// two write destinations — the per-turn scratchpad and the conversation's
+/// `chat_messages` transcript — can never be addressed with mismatched ids.
+#[derive(Debug, Clone)]
+pub struct TurnTarget {
+    /// The project root whose `.logos/chat.db` holds the conversation store.
+    pub root: PathBuf,
+    /// The conversation the turn appends to.
+    pub thread_id: i64,
+    /// The per-thread turn ordinal scoping this turn's scratchpad.
+    pub turn: i64,
+}
+
+impl TurnTarget {
+    /// The target for `turn` of `thread_id` under `root`.
+    #[must_use]
+    pub fn new(root: PathBuf, thread_id: i64, turn: i64) -> Self {
+        Self {
+            root,
+            thread_id,
+            turn,
+        }
+    }
+}
+
 /// Spawn an orchestrated turn and return its live [`ChatStream`] — the shared
 /// machinery both [`ChatService`] impls drive ([S-170]).
 ///
@@ -185,8 +222,7 @@ pub fn spawn_turn<M, E>(
     orchestrator: Orchestrator<M, E>,
     question: String,
     memory: Arc<MemoryStore>,
-    thread_id: i64,
-    turn: i64,
+    target: TurnTarget,
 ) -> ChatStream
 where
     M: CompletionModel + Clone + Send + Sync + 'static,
@@ -197,14 +233,7 @@ where
     // off the executor thread before building the orchestrator — see
     // `ConfiguredChatService`.)
     let (tx, rx) = unbounded_chat_channel();
-    let handle = tokio::spawn(run_orchestrated(
-        orchestrator,
-        question,
-        memory,
-        thread_id,
-        turn,
-        tx,
-    ));
+    let handle = tokio::spawn(run_orchestrated(orchestrator, question, memory, target, tx));
     ChatStream::from_spawn(rx, handle)
 }
 
@@ -224,16 +253,20 @@ pub(crate) fn unbounded_chat_channel() -> (
 
 /// Drive one orchestrated turn to completion, fanning every event to the streaming
 /// [`SseSink`] **and** the persisting [`ScratchpadSink`] (the S-170 composition),
-/// then surfacing an honest fault or a failed-to-persist note ([NFR-CC-04]). The
+/// then appending a genuine final answer to the conversation's durable transcript
+/// and surfacing an honest fault or a failed-to-persist note ([NFR-CC-04]). The
 /// shared task body for both [`spawn_turn`] (tests) and the production
-/// [`ConfiguredChatService`], which run it after their own (possibly blocking)
-/// setup.
+/// [`ConfiguredChatService`], which run it after their own (possibly blocking) setup.
+///
+/// The durable append lives **here**, not in either caller, so the mock-provider
+/// path and the real provider path persist a turn through the *same* code — what
+/// makes the `chat_messages` round-trip an honest regression gate rather than a
+/// test fixture ([FR-UI-26] AC-2).
 pub(crate) async fn run_orchestrated<M, E>(
     orchestrator: Orchestrator<M, E>,
     question: String,
     memory: Arc<MemoryStore>,
-    thread_id: i64,
-    turn: i64,
+    target: TurnTarget,
     tx: mpsc::UnboundedSender<ChatFrame>,
 ) where
     M: CompletionModel + Clone + Send + Sync + 'static,
@@ -242,11 +275,12 @@ pub(crate) async fn run_orchestrated<M, E>(
     // The scratchpad sink persists the turn's events to chat.db as they stream
     // (S-175); the SSE sink relays them to the client. The fan-out drives both
     // without the orchestrator loop knowing either exists.
-    let scratchpad = ScratchpadSink::new(&memory, thread_id, turn);
+    let scratchpad = ScratchpadSink::new(&memory, target.thread_id, target.turn);
     let sse = SseSink::new(tx.clone());
     let fan = FanOut::new(vec![&sse, &scratchpad]);
 
-    if let Err(err) = orchestrator.run(&question, &fan).await {
+    let outcome = orchestrator.run(&question, &fan).await;
+    if let Err(err) = &outcome {
         // A provider/parse/subagent fault — honest, never a fabricated answer. The
         // frame names the turn STAGE (planner / subagent / synthesis) and carries
         // the classified, source-chained cause from the orchestrator ([S-199],
@@ -262,8 +296,57 @@ pub(crate) async fn run_orchestrated<M, E>(
             "the turn streamed but its scratchpad failed to persist: {err}"
         )));
     }
+    // The turn's ANSWER joins the user's question in the conversation's durable
+    // transcript ([FR-UI-26] AC-2) — but ONLY for a turn that genuinely produced
+    // one. `Answered` is exactly the outcome that emitted the terminal
+    // `FinalAnswer` (its `String` is that event's authoritative full text, so the
+    // S-297 streaming Synthesizer needs no delta accumulation here); a bare
+    // `Halted` and an `Err` fault carry no answer and persist nothing rather than
+    // leave a fabricated assistant row behind ([NFR-CC-04]). A failed append is
+    // reported for the same reason the scratchpad's is — the client is told its
+    // answer did not reach the transcript.
+    if let Some(answer) = durable_answer(outcome) {
+        if let Err(err) = append_assistant_answer(&target, answer).await {
+            let _ = tx.send(ChatFrame::Error(format!(
+                "the turn answered but the answer failed to persist to the conversation: {err}"
+            )));
+        }
+    }
     // `tx` (and the clone held by `sse`) drop here → the receiver ends → the SSE
     // stream closes cleanly on completion / honest halt.
+}
+
+/// The answer a turn's outcome makes durable, or `None` when there is nothing
+/// honest to record ([NFR-CC-04]).
+///
+/// Only [`TurnOutcome::Answered`] yields one. A whitespace-only answer is treated as
+/// no answer: an empty assistant row is not a transcript entry, it is a blank turn a
+/// restore would replay.
+fn durable_answer(outcome: Result<TurnOutcome, OrchestratorError>) -> Option<String> {
+    match outcome {
+        Ok(TurnOutcome::Answered(answer)) if !answer.trim().is_empty() => Some(answer),
+        Ok(TurnOutcome::Answered(_) | TurnOutcome::Halted(_)) | Err(_) => None,
+    }
+}
+
+/// Append `answer` to `target`'s conversation as the durable assistant message
+/// ([FR-UI-26] AC-2), beside the user question the turn's setup recorded.
+///
+/// Opening `chat.db` and committing the append are synchronous SQLite work, so they
+/// run on the blocking pool like every other engine touch on this surface
+/// ([ADR-03]) rather than on the async I/O thread. A fresh short-lived handle (WAL
+/// admits it) keeps the store's `&mut self` write contract without holding a second
+/// connection open for the turn's lifetime.
+async fn append_assistant_answer(target: &TurnTarget, answer: String) -> anyhow::Result<()> {
+    let root = target.root.clone();
+    let thread_id = target.thread_id;
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut store = ChatStore::open(&root)?;
+        store.append_message(thread_id, ChatRole::Assistant, &answer, &[])?;
+        Ok(())
+    })
+    .await
+    .map_err(|_join| anyhow::anyhow!("the answer-persistence task failed unexpectedly"))?
 }
 
 /// The SSE `event:` name for an [`OrchestratorEvent`] — mirrors its serde tag

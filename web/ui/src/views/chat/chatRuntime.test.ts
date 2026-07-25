@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { convertMessage, foldPersistedMessages, type ChatMessage } from "./chatRuntime.tsx";
+import {
+  convertMessage,
+  findRerunIndex,
+  foldPersistedMessages,
+  type ChatMessage,
+} from "./chatRuntime.tsx";
 import { initialTurn, type PersistedChatMessage, type TurnState } from "./chatModel.ts";
 
 /** A folded turn with overrides over a fresh turn. */
@@ -97,5 +102,37 @@ describe("foldPersistedMessages", () => {
     );
     // Local ids, not the DB rowids — so subsequently-sent turns never collide.
     expect(out.map((m) => m.id)).toEqual([11, 12]);
+  });
+});
+
+describe("findRerunIndex (regenerate targeting, FR-UI-20)", () => {
+  /** A user + assistant exchange, then a second user turn. */
+  const convo: ChatMessage[] = [
+    { kind: "user", id: 1, text: "first" },
+    { kind: "assistant", id: 2, parentId: 1, turn: turn({ answer: "a" }) },
+    { kind: "user", id: 3, text: "second" },
+    { kind: "assistant", id: 4, parentId: 3, turn: turn({ answer: "b" }) },
+  ];
+
+  it("re-runs exactly the named parent message", () => {
+    expect(findRerunIndex(convo, "1")).toBe(0);
+    expect(findRerunIndex(convo, "3")).toBe(2);
+  });
+
+  it("falls back to the LAST user message when no parent is named", () => {
+    expect(findRerunIndex(convo, null)).toBe(2);
+  });
+
+  it("falls back to the last user message when the named parent is gone", () => {
+    // A regenerate whose parent was dropped (e.g. an earlier replace) still targets
+    // a real message rather than doing nothing.
+    expect(findRerunIndex(convo, "99")).toBe(2);
+  });
+
+  it("reports -1 when there is no user message to re-run", () => {
+    expect(findRerunIndex([], null)).toBe(-1);
+    expect(
+      findRerunIndex([{ kind: "assistant", id: 9, parentId: 0, turn: turn({}) }], "0"),
+    ).toBe(-1);
   });
 });

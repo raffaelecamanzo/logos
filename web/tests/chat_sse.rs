@@ -33,14 +33,14 @@ use agent_core::{MockCompletionModel, MockTurn, Sandbox};
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use chat_agent::{
-    BudgetTree, ChatStore, MemoryGrounding, MemoryStore, Orchestrator, PlanStep, StepContext,
-    StepError, StepExecutor, StepObservation, SubagentRoster,
+    BudgetTree, ChatRole, ChatStore, MemoryGrounding, MemoryStore, Orchestrator, PlanStep,
+    StepContext, StepError, StepExecutor, StepObservation, SubagentRoster,
 };
 use http_body_util::BodyExt;
 use logos_core::Engine;
 use tempfile::TempDir;
 use tower::ServiceExt;
-use web::chat::{spawn_turn, ChatService, ChatStream};
+use web::chat::{spawn_turn, ChatService, ChatStream, TurnTarget};
 use web::{router_with_chat, IntentToken, CHAT_POST_ROUTE, INTENT_HEADER};
 
 const ORIGIN: &str = "http://127.0.0.1:4983";
@@ -86,7 +86,12 @@ impl ChatService for ScriptedChatService {
         let roster = SubagentRoster::new(Arc::clone(&self.engine), Arc::clone(&self.sandbox), subagent)
             .with_synthesizer_grounding(grounding);
         let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 8, 3));
-        spawn_turn(orchestrator, question, memory, thread, turn)
+        spawn_turn(
+            orchestrator,
+            question,
+            memory,
+            TurnTarget::new(self.root.clone(), thread, turn),
+        )
     }
 }
 
@@ -144,7 +149,12 @@ impl ChatService for HangingChatService {
             dropped: Arc::clone(&self.dropped),
         };
         let orchestrator = Orchestrator::new(planner, executor, BudgetTree::new(24, 8, 3));
-        spawn_turn(orchestrator, question, memory, thread, turn)
+        spawn_turn(
+            orchestrator,
+            question,
+            memory,
+            TurnTarget::new(self.root.clone(), thread, turn),
+        )
     }
 }
 
@@ -170,7 +180,12 @@ impl ChatService for ErroringChatService {
         let subagent = MockCompletionModel::new([]);
         let roster = SubagentRoster::new(Arc::clone(&self.engine), Arc::clone(&self.sandbox), subagent);
         let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 8, 3));
-        spawn_turn(orchestrator, question, memory, thread, turn)
+        spawn_turn(
+            orchestrator,
+            question,
+            memory,
+            TurnTarget::new(self.root.clone(), thread, turn),
+        )
     }
 }
 
@@ -206,7 +221,12 @@ impl ChatService for HaltingChatService {
         let subagent = MockCompletionModel::new([MockTurn::text("a partial synthesis")]);
         let roster = SubagentRoster::new(Arc::clone(&self.engine), Arc::clone(&self.sandbox), subagent);
         let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 8, 0));
-        spawn_turn(orchestrator, question, memory, thread, turn)
+        spawn_turn(
+            orchestrator,
+            question,
+            memory,
+            TurnTarget::new(self.root.clone(), thread, turn),
+        )
     }
 }
 
@@ -539,6 +559,87 @@ async fn buffered_fallback_reports_a_halt_honestly() {
     assert!(
         body.contains("halted honestly"),
         "the buffered fallback reports the honest halt, not a fabricated answer: {body}",
+    );
+}
+
+// ── Durable transcript (FR-UI-26 AC-2, NFR-CC-04) ─────────────────────────────
+
+/// Every assistant row `root`'s single conversation holds — the durable half of the
+/// transcript a restore replays.
+fn persisted_answers(root: &std::path::Path) -> Vec<String> {
+    let store = ChatStore::open(root).expect("open chat store");
+    let threads = store.list_threads().expect("list threads");
+    threads
+        .iter()
+        .flat_map(|t| store.messages(t.id).expect("messages"))
+        .filter(|m| m.role == ChatRole::Assistant)
+        .map(|m| m.content)
+        .collect()
+}
+
+/// A turn that genuinely answers has its answer appended to the conversation's
+/// durable transcript, so a later restore replays it ([FR-UI-26] AC-2). The shared
+/// turn machinery owns this write, which is why the mock-provider path proves it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_answered_turn_persists_its_answer_to_the_transcript() {
+    let (dir, router, intent) = scripted_router();
+    let req = chat_post(Some(intent.as_str()), Some(ORIGIN), true, "q=what+is+risky");
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(body.contains(FINAL_SENTINEL), "the turn answered: {body}");
+
+    assert_eq!(
+        persisted_answers(dir.path()),
+        vec![FINAL_SENTINEL.to_string()],
+        "the answered turn left exactly its synthesized answer in the transcript",
+    );
+}
+
+/// An honest budget halt persists **no** assistant row: the conversation records
+/// only what genuinely happened, so a restore can never replay a fabricated answer
+/// under a question the turn never answered ([NFR-CC-04], [FR-UI-26] AC-2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_honest_halt_persists_no_assistant_answer() {
+    let (dir, router, intent) = router_with_service(|engine, sandbox, root| {
+        Arc::new(HaltingChatService {
+            engine,
+            sandbox,
+            root,
+        })
+    });
+    let req = chat_post(Some(intent.as_str()), Some(ORIGIN), true, "q=halt+me");
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(body.contains("event: halted"), "the turn halted honestly: {body}");
+
+    assert!(
+        persisted_answers(dir.path()).is_empty(),
+        "an honest halt writes no assistant message to the conversation",
+    );
+}
+
+/// A faulted turn persists **no** assistant row either — the honest `error` frame is
+/// the whole outcome, and nothing is invented to fill the transcript ([NFR-CC-04]).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_faulted_turn_persists_no_assistant_answer() {
+    let (dir, router, intent) = router_with_service(|engine, sandbox, root| {
+        Arc::new(ErroringChatService {
+            engine,
+            sandbox,
+            root,
+        })
+    });
+    let req = chat_post(Some(intent.as_str()), Some(ORIGIN), true, "q=cause+a+fault");
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(body.contains("event: error"), "the turn faulted honestly: {body}");
+
+    assert!(
+        persisted_answers(dir.path()).is_empty(),
+        "a faulted turn writes no assistant message to the conversation",
     );
 }
 

@@ -43,7 +43,9 @@ use logos_core::config::{load_config_from_root, load_secrets_from_root, ChatProv
 use logos_core::Engine;
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{run_orchestrated, unbounded_chat_channel, ChatFrame, ChatService, ChatStream};
+use super::{
+    run_orchestrated, unbounded_chat_channel, ChatFrame, ChatService, ChatStream, TurnTarget,
+};
 
 /// The production chat service over the live [`Engine`] and the on-disk `[chat]`
 /// policy + `secrets.toml` key ([FR-CF-06]).
@@ -115,6 +117,9 @@ fn build_setup(root: &Path, thread_id: Option<i64>, question: &str) -> Result<Ch
             .create_thread_from_message(question)
             .map_err(|e| format!("could not create a chat thread: {e}"))?,
     };
+    // The question is durable from the start; its ANSWER is appended by
+    // `run_orchestrated` once the turn genuinely produces one, so a restored
+    // conversation replays both halves ([FR-UI-26] AC-2).
     store
         .append_message(thread_id, ChatRole::User, question, &[])
         .map_err(|e| format!("could not record the user message: {e}"))?;
@@ -163,6 +168,8 @@ impl ChatService for ConfiguredChatService {
         let root = engine.root().to_path_buf();
         let setup_question = question.clone();
 
+        let turn_root = root.clone();
+
         let handle = tokio::spawn(async move {
             // Blocking config/store/sandbox setup off the async executor thread
             // ([ADR-03]); a configure-first or setup fault is an honest single
@@ -201,6 +208,10 @@ impl ChatService for ConfiguredChatService {
             } = setup;
             let grounding: Arc<dyn SynthesizerGrounding> =
                 Arc::new(MemoryGrounding::new(Arc::clone(&memory), thread_id, turn));
+            // Where this turn's scratchpad AND its durable answer are written
+            // ([FR-UI-26] AC-2) — the same `.logos/chat.db` the setup recorded the
+            // user's question in.
+            let target = TurnTarget::new(turn_root, thread_id, turn);
 
             // Resolve the provider config, then run the deterministic pre-send
             // preflight ([S-199], [FR-UI-24]): a model is set, the key is present,
@@ -231,7 +242,7 @@ impl ChatService for ConfiguredChatService {
                 ChatProvider::Anthropic => match anthropic_completion_model(&cfg, retry) {
                     Ok(model) => {
                         launch(engine, sandbox, model, grounding, budget, temperature,
-                            max_tokens, question, memory, thread_id, turn, tx).await
+                            max_tokens, question, memory, target, tx).await
                     }
                     Err(e) => {
                         let _ = tx.send(ChatFrame::Error(format!(
@@ -242,7 +253,7 @@ impl ChatService for ConfiguredChatService {
                 ChatProvider::OpenAi => match openai_compatible_completion_model(&cfg, retry) {
                     Ok(model) => {
                         launch(engine, sandbox, model, grounding, budget, temperature,
-                            max_tokens, question, memory, thread_id, turn, tx).await
+                            max_tokens, question, memory, target, tx).await
                     }
                     Err(e) => {
                         let _ = tx.send(ChatFrame::Error(format!(
@@ -273,8 +284,7 @@ async fn launch<M>(
     max_tokens: Option<u64>,
     question: String,
     memory: Arc<MemoryStore>,
-    thread_id: i64,
-    turn: i64,
+    target: TurnTarget,
     tx: UnboundedSender<ChatFrame>,
 ) where
     M: CompletionModel + Clone + Send + Sync + 'static,
@@ -284,5 +294,5 @@ async fn launch<M>(
         .with_max_tokens(max_tokens)
         .with_synthesizer_grounding(grounding);
     let orchestrator = Orchestrator::new(model, roster, budget);
-    run_orchestrated(orchestrator, question, memory, thread_id, turn, tx).await;
+    run_orchestrated(orchestrator, question, memory, target, tx).await;
 }

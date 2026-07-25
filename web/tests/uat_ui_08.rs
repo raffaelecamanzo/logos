@@ -21,7 +21,9 @@
 //! - step 1 — the rail lists conversations most-recent-first, auto-titled from the
 //!   first user message (`uat_ui_08_step1_rail_lists_conversations_most_recent_first`);
 //! - step 2 — selecting a conversation restores its ordered transcript
-//!   (`uat_ui_08_step2_select_restores_the_ordered_transcript`);
+//!   (`uat_ui_08_step2_select_restores_the_ordered_transcript`), and a live turn
+//!   persists **both** halves of the exchange so there is a full transcript to
+//!   restore (`uat_ui_08_step2b_a_live_turn_persists_both_the_question_and_the_answer`);
 //! - step 3 — "+ New chat" creates no row until the first send, after which the
 //!   conversation appears auto-titled at the top
 //!   (`uat_ui_08_step3_a_conversation_is_persisted_only_on_its_first_send`);
@@ -78,7 +80,7 @@ use http_body_util::BodyExt;
 use logos_core::Engine;
 use tempfile::TempDir;
 use tower::ServiceExt;
-use web::chat::{spawn_turn, ChatService, ChatStream};
+use web::chat::{spawn_turn, ChatService, ChatStream, TurnTarget};
 use web::{
     router_with_chat, router_with_intent, IntentToken, CHAT_POST_ROUTE, CHAT_THREADS_ROUTE,
     INTENT_HEADER,
@@ -146,7 +148,12 @@ impl ChatService for HistoryChatService {
             },
         );
         let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 8, 3));
-        spawn_turn(orchestrator, question, memory, thread, turn)
+        spawn_turn(
+            orchestrator,
+            question,
+            memory,
+            TurnTarget::new(self.root.clone(), thread, turn),
+        )
     }
 }
 
@@ -308,15 +315,13 @@ async fn uat_ui_08_step1_rail_lists_conversations_most_recent_first() {
 /// transcript from `GET /api/v1/chat/threads/{id}` — the messages the rail
 /// hydrates — and that thread is then the one a turn appends to ([FR-UI-26]).
 ///
-/// The transcript is seeded through the store rather than by a live turn, and
-/// deliberately so: the current turn path (`web::chat::configured`) records the
-/// **user** message but never appends the assistant's final answer to
-/// `chat_messages` — the answer lands in the per-turn `chat_scratchpad` instead. So
-/// this asserts the READ contract the rail depends on (faithful, ordered, both
-/// roles) over a transcript that has both. The producer-side gap — a restored
-/// conversation currently replays only the questions — is recorded in this task's
-/// implementation notes for the sprint review; it lives in the merged S-208/S-209
-/// layer, not in this story's SPA surface.
+/// The transcript is seeded through the store rather than by a live turn: this step
+/// asserts the READ contract the rail depends on (faithful, ordered, both roles)
+/// over a transcript that already has both roles, independent of how they got
+/// there. That a live turn now WRITES both halves — the question at setup and the
+/// answer once the turn genuinely produces one — is the producer-side assertion in
+/// `uat_ui_08_step2b_a_live_turn_persists_both_the_question_and_the_answer` (HF-1;
+/// before it, a restored conversation replayed only the questions).
 #[tokio::test]
 async fn uat_ui_08_step2_select_restores_the_ordered_transcript() {
     let dir = configured_root();
@@ -359,6 +364,79 @@ async fn uat_ui_08_step2_select_restores_the_ordered_transcript() {
             ("user", "a follow-up"),
         ],
         "the earlier conversation restores its full history in order",
+    );
+}
+
+// ── Step 2b: a live turn persists BOTH halves of the exchange (HF-1) ──────────
+
+/// Step 2 (producer half, HF-1 regression): a **real** mock-provider turn leaves
+/// **both** the user's question and the assistant's final answer in the
+/// conversation, so `GET /api/v1/chat/threads/{id}` — the single source the rail
+/// restores from — replays the whole exchange rather than half of it ([FR-UI-26]
+/// AC-2).
+///
+/// The sprint-59 regression this locks: the turn's setup recorded the question while
+/// the answer went **only** to the per-turn `chat_scratchpad`, which this read does
+/// not expose — so a restored conversation showed the questions with no answers
+/// under them. Asserted through the guarded `POST` → `GET` round trip over the live
+/// router, with the answer text pinned to the orchestrator's synthesized sentinel so
+/// a fabricated or truncated row cannot pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uat_ui_08_step2b_a_live_turn_persists_both_the_question_and_the_answer() {
+    let dir = configured_root();
+    let root = dir.path().to_path_buf();
+    let engine = Arc::new(Engine::start(&root).expect("engine starts"));
+    let sandbox = Arc::new(Sandbox::new(&root, std::iter::empty()).expect("sandbox"));
+    let intent = IntentToken::generate();
+    let service: Arc<dyn ChatService> = Arc::new(HistoryChatService {
+        engine: Arc::clone(&engine),
+        sandbox,
+        root: root.clone(),
+    });
+    let router = router_with_chat(Arc::clone(&engine), intent.clone(), service);
+
+    // One genuine turn over the mock provider (zero real egress).
+    let resp = router
+        .clone()
+        .oneshot(chat_turn(intent.as_str(), "what+is+risky", None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stream = body_string(resp).await;
+    assert!(
+        stream.contains(SYNTH_SENTINEL),
+        "the turn streamed the synthesized answer offline: {stream}",
+    );
+    assert!(
+        !stream.contains("event: error"),
+        "the turn completed with no honest fault to report: {stream}",
+    );
+
+    let threads = ChatStore::open(&root).unwrap().list_threads().unwrap();
+    assert_eq!(threads.len(), 1, "the send created exactly one conversation");
+    let created = threads[0].id;
+
+    // The rail's restore read — a fresh store handle, as after a reload/restart.
+    let resp = router
+        .oneshot(get(&format!("{CHAT_THREADS_ROUTE}/{created}")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let messages = body_json(resp).await;
+    let rows = messages.as_array().expect("the transcript is a JSON array");
+    let ordered: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|m| {
+            (
+                m["role"].as_str().expect("role"),
+                m["content"].as_str().expect("content"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ordered,
+        vec![("user", "what is risky"), ("assistant", SYNTH_SENTINEL)],
+        "a restored conversation replays the question AND the answer, in order",
     );
 }
 
