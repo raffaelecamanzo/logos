@@ -872,15 +872,14 @@ first turn, gitignored, never in the default binary).
   set — and on a problem returns an **actionable message** naming the specific
   misconfiguration rather than letting the request fail opaquely downstream.
 
-**One honest limitation:**
-
-- **A restored conversation replays your questions, not the answers.** Selecting a
-  past conversation rehydrates it from `.logos/chat.db`, but the turn path records
-  only your **user** messages there — the assistant's final answer is kept in the
-  per-turn agent scratchpad instead. Cross-turn working memory is intact (a
-  follow-up still sees prior context), and the live turn you are watching is
-  complete; it is the *restored* transcript that currently shows the questions
-  alone.
+**Restoring a conversation.** Selecting a past conversation rehydrates its full
+transcript from `.logos/chat.db` — both your **user** questions and the assistant's
+final **answers**, in send order. Each turn's answer is persisted to the conversation
+when (and only when) the turn actually produced one; a turn that halted honestly or
+faulted persists no assistant message, so the restored transcript never shows an
+answer the assistant did not give. The ephemeral plan / subagent-activity side-channel
+(streamed live over SSE) is not part of the durable transcript — a restored assistant
+turn shows the answer with **Copy**/**Regenerate**, not the intermediate step chatter.
 
 Every route is **read-only except the explicit, intent-guarded mutating
 routes**: the config-write/apply routes (`/config/save`, `/config/apply`,
