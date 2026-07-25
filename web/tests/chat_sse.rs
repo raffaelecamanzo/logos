@@ -95,6 +95,43 @@ impl ChatService for ScriptedChatService {
     }
 }
 
+/// A [`ChatService`] that runs the same scripted turn as [`ScriptedChatService`] but
+/// aims its [`TurnTarget`] at a conversation that does **not** exist — so the turn
+/// answers and then its durable append necessarily fails, exercising the
+/// honest-report path rather than a swallowed write ([NFR-CC-04], [FR-UI-26] AC-2).
+struct MistargetedChatService {
+    engine: Arc<Engine>,
+    sandbox: Arc<Sandbox>,
+    root: std::path::PathBuf,
+    /// A thread id no `chat_threads` row carries.
+    missing_thread: i64,
+}
+
+impl ChatService for MistargetedChatService {
+    fn start_turn(&self, question: String, _thread_id: Option<i64>) -> ChatStream {
+        let memory = Arc::new(MemoryStore::open(&self.root).expect("open memory"));
+        let planner = MockCompletionModel::new([
+            MockTurn::text(
+                r#"{"action":"plan","steps":[{"role":"graph_navigator","instruction":"gather grounding"}]}"#,
+            ),
+            MockTurn::text(r#"{"action":"final","grounded":true}"#),
+        ]);
+        let subagent = MockCompletionModel::new([
+            MockTurn::text("a grounded synthesis"),
+            MockTurn::text(FINAL_SENTINEL),
+        ]);
+        let roster =
+            SubagentRoster::new(Arc::clone(&self.engine), Arc::clone(&self.sandbox), subagent);
+        let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 8, 3));
+        spawn_turn(
+            orchestrator,
+            question,
+            memory,
+            TurnTarget::new(self.root.clone(), self.missing_thread, 0),
+        )
+    }
+}
+
 /// A [`StepExecutor`] whose step never completes, and which flips `dropped` when
 /// its in-flight future is dropped — so a test can prove a client disconnect
 /// aborts the running turn ([FR-UI-19]).
@@ -640,6 +677,44 @@ async fn a_faulted_turn_persists_no_assistant_answer() {
     assert!(
         persisted_answers(dir.path()).is_empty(),
         "a faulted turn writes no assistant message to the conversation",
+    );
+}
+
+/// A failed durable append is **reported**, not swallowed: the client still receives
+/// the answer it was streamed, plus an honest `error` frame naming the failure — so a
+/// user is never told a conversation was saved when it was not ([NFR-CC-04],
+/// [FR-UI-26] AC-2).
+///
+/// The turn targets a conversation that does not exist, so the per-turn scratchpad
+/// write fails for the same reason and its own honest note appears alongside; the
+/// assertion below is on the transcript-specific message, which only the durable
+/// append can produce.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_answer_persist_streams_an_honest_error() {
+    let (dir, router, intent) = router_with_service(|engine, sandbox, root| {
+        Arc::new(MistargetedChatService {
+            engine,
+            sandbox,
+            root,
+            missing_thread: 999_999,
+        })
+    });
+    let req = chat_post(Some(intent.as_str()), Some(ORIGIN), true, "q=what+is+risky");
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+
+    assert!(
+        body.contains(FINAL_SENTINEL),
+        "the answer the turn produced still reached the client: {body}",
+    );
+    assert!(
+        body.contains("failed to persist to the conversation"),
+        "the failed durable append is reported honestly, never swallowed: {body}",
+    );
+    assert!(
+        persisted_answers(dir.path()).is_empty(),
+        "nothing was invented in place of the answer that could not be stored",
     );
 }
 
