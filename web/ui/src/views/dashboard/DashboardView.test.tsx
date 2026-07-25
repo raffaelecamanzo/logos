@@ -73,22 +73,23 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     expect(await screen.findByText(/reflects the last index/i)).toBeInTheDocument();
     // Quality index: BR-34 band + raw signal + PASS badge.
     expect(screen.getByText("Excellent")).toBeInTheDocument();
-    expect(screen.getAllByText("8600 / 10000").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("8,600 / 10,000").length).toBeGreaterThanOrEqual(1);
     // Code coverage roll-up reprojects basis points to a percent.
     expect(screen.getAllByText("72.0%").length).toBeGreaterThanOrEqual(1);
     // Languages sized by node count.
     expect(screen.getByText("rust")).toBeInTheDocument();
     expect(screen.getByText(/1 grammar\(s\) skipped/i)).toBeInTheDocument();
-    // Graph compact counts — Files/Nodes/Edges/Resolution are unchanged by CR-085.
+    // Graph compact counts — grouped for readability; Files/Nodes/Edges/Resolution
+    // otherwise unchanged by CR-085.
     expect(screen.getByText("42")).toBeInTheDocument();
-    expect(screen.getByText("1200")).toBeInTheDocument();
-    expect(screen.getByText("3400")).toBeInTheDocument();
+    expect(screen.getByText("1,200")).toBeInTheDocument();
+    expect(screen.getByText("3,400")).toBeInTheDocument();
     expect(screen.getByText("80.0% (80 of 100 refs)")).toBeInTheDocument();
     // Graph card LOC figures (CR-085): total/source/test from the read-model,
-    // plus a last-full-index caption.
-    expect(screen.getByText("54321")).toBeInTheDocument();
-    expect(screen.getByText("43210")).toBeInTheDocument();
-    expect(screen.getByText("11111")).toBeInTheDocument();
+    // digit-grouped, plus a last-full-index caption.
+    expect(screen.getByText("54,321")).toBeInTheDocument();
+    expect(screen.getByText("43,210")).toBeInTheDocument();
+    expect(screen.getByText("11,111")).toBeInTheDocument();
     // Full LOC labels (the compact "Total LOC" wording was expanded on reorder).
     expect(screen.getByText(/Total Lines of Code/i)).toBeInTheDocument();
     expect(screen.getByText(/Source Lines of Code/i)).toBeInTheDocument();
@@ -146,8 +147,8 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     render(<DashboardView />);
     // The rest of the Graph card (Files/Nodes/Edges/Resolution) is unchanged.
     expect(await screen.findByText("42")).toBeInTheDocument();
-    expect(screen.getByText("1200")).toBeInTheDocument();
-    expect(screen.getByText("3400")).toBeInTheDocument();
+    expect(screen.getByText("1,200")).toBeInTheDocument();
+    expect(screen.getByText("3,400")).toBeInTheDocument();
     expect(screen.getByText("80.0% (80 of 100 refs)")).toBeInTheDocument();
     expect(screen.getByText(/not yet computed/i)).toBeInTheDocument();
     // Never a fabricated `0` LOC figure.

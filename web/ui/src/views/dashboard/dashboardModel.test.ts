@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { StatusInfo } from "../../api/types.ts";
 import {
   bandOf,
+  fmtInt,
   freshnessStatement,
   humanizeAge,
   pctBp,
@@ -43,6 +44,16 @@ describe("bandOf — BR-34 advisory quality bands", () => {
     expect(bandOf(8499)).toEqual({ label: "Good", tone: "good" });
     expect(bandOf(8500)).toEqual({ label: "Excellent", tone: "excellent" });
     expect(bandOf(10_000)).toEqual({ label: "Excellent", tone: "excellent" });
+  });
+});
+
+describe("fmtInt — integer digit-grouping", () => {
+  it("groups thousands and leaves sub-1000 figures unchanged", () => {
+    expect(fmtInt(0)).toBe("0");
+    expect(fmtInt(42)).toBe("42");
+    expect(fmtInt(1000)).toBe("1,000");
+    expect(fmtInt(54_321)).toBe("54,321");
+    expect(fmtInt(1_234_567)).toBe("1,234,567");
   });
 });
 

@@ -31,6 +31,15 @@ export function bandOf(signal: number): Band {
   return { label: "Excellent", tone: "excellent" };
 }
 
+// ── Integer grouping (display-only) ──────────────────────────────────────────
+
+/** Group an integer figure's digits for display (e.g. `54321` → `54,321`). The
+ *  read-model counts are plain integers; this is a presentation projection only,
+ *  matching the Statistics tab's `num` formatter so the two tabs read alike. */
+export function fmtInt(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
 // ── Basis-point reprojection (web/src/views/mod.rs::pct_bp) ───────────────────
 
 /** Reproject basis points (0–10000) to a one-decimal percent string, clamped. */

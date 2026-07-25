@@ -28,7 +28,7 @@ import type {
   WikiPage,
 } from "../../api/types.ts";
 import { Badge, Callout, Card, EmptyState, ScoreBar } from "../../components/index.ts";
-import { bandOf, freshnessStatement, pctBp, snippetOf } from "./dashboardModel.ts";
+import { bandOf, fmtInt, freshnessStatement, pctBp, snippetOf } from "./dashboardModel.ts";
 import styles from "./Dashboard.module.css";
 
 /** Current wall-clock as unix seconds — the reference the freshness line humanises
@@ -97,10 +97,15 @@ function QualityCard({ gate }: { gate: GateResult }) {
         <>
           <div className={styles.heroFigure}>
             <span className={styles.heroBand}>{bandOf(gate.signal).label}</span>
-            <span className={`${styles.heroRaw} mono num`}>{gate.signal} / 10000</span>
+            <span className={`${styles.heroRaw} mono num`}>{fmtInt(gate.signal)} / {fmtInt(10_000)}</span>
             <Badge tone={gate.passed ? "green" : "red"}>{gate.passed ? "PASS" : "FAIL"}</Badge>
           </div>
-          <ScoreBar value={gate.signal} max={10_000} tone={bandOf(gate.signal).tone} label={`${gate.signal} / 10000`} />
+          <ScoreBar
+            value={gate.signal}
+            max={10_000}
+            tone={bandOf(gate.signal).tone}
+            label={`${fmtInt(gate.signal)} / ${fmtInt(10_000)}`}
+          />
         </>
       )}
       <DetailLink href="/health" label="Health" />
@@ -198,8 +203,8 @@ function LanguagesCard({
       {composition.languages.map((l) => (
         <div className={styles.langRow} key={l.language}>
           <span className={`${styles.langName} mono`}>{l.language}</span>
-          <ScoreBar value={l.nodes} max={max} tone="magnitude" label={String(l.nodes)} />
-          <span className={`${styles.langCount} mono num`}>{l.nodes}</span>
+          <ScoreBar value={l.nodes} max={max} tone="magnitude" label={fmtInt(l.nodes)} />
+          <span className={`${styles.langCount} mono num`}>{fmtInt(l.nodes)}</span>
         </div>
       ))}
       {languages.skipped.length > 0 && (
@@ -216,46 +221,56 @@ function LanguagesCard({
  *  degrade to a single honest empty state rather than a fabricated `0`
  *  ([NFR-CC-04]). */
 function GraphCard({ status }: { status: StatusInfo }) {
-  const resolution = `${(status.resolution_coverage * 100).toFixed(1)}% (${status.refs_resolved} of ${status.refs_total} refs)`;
-  const locComputed =
+  const resolution = `${(status.resolution_coverage * 100).toFixed(1)}% (${fmtInt(status.refs_resolved)} of ${fmtInt(status.refs_total)} refs)`;
+  // Bind the LOC roll-up as a narrowed object so the figures are `number` (not
+  // `number | null`) at the render site — the three fields are null in lock-step
+  // ([FR-IX-12]), so either all three are present or the rows degrade to the
+  // honest empty state below.
+  const loc =
     status.total_line_count !== null &&
     status.source_line_count !== null &&
-    status.test_line_count !== null;
+    status.test_line_count !== null
+      ? {
+          total: status.total_line_count,
+          source: status.source_line_count,
+          test: status.test_line_count,
+        }
+      : null;
   return (
     <Card title="Graph">
       <dl className={styles.statList}>
         <dt>Files</dt>
-        <dd className="mono num">{status.file_count}</dd>
-        {locComputed && (
+        <dd className="mono num">{fmtInt(status.file_count)}</dd>
+        {loc !== null && (
           <>
             <dt>
               Total Lines of Code <sup className={styles.footnoteMark}>*</sup>
             </dt>
-            <dd className="mono num">{status.total_line_count}</dd>
+            <dd className="mono num">{fmtInt(loc.total)}</dd>
             <dt>
               Source Lines of Code <sup className={styles.footnoteMark}>*</sup>
             </dt>
-            <dd className="mono num">{status.source_line_count}</dd>
+            <dd className="mono num">{fmtInt(loc.source)}</dd>
             <dt>
               Test Lines of Code <sup className={styles.footnoteMark}>*</sup>
             </dt>
-            <dd className="mono num">{status.test_line_count}</dd>
+            <dd className="mono num">{fmtInt(loc.test)}</dd>
           </>
         )}
         <dt>Nodes</dt>
-        <dd className="mono num">{status.node_count}</dd>
+        <dd className="mono num">{fmtInt(status.node_count)}</dd>
         <dt>Edges</dt>
-        <dd className="mono num">{status.edge_count}</dd>
+        <dd className="mono num">{fmtInt(status.edge_count)}</dd>
         <dt>
           Resolution <sup className={styles.footnoteMark}>**</sup>
         </dt>
         <dd className="mono">{resolution}</dd>
       </dl>
       <div className={styles.footnotes}>
-        {locComputed && <p>* LOC figures reflect the last full index</p>}
+        {loc !== null && <p>* LOC figures reflect the last full index</p>}
         <p>** A partial resolution figure is expected, many references resolve lazily</p>
       </div>
-      {!locComputed && (
+      {loc === null && (
         <EmptyState message="LOC figures not yet computed — run a full" command="logos index" />
       )}
     </Card>
@@ -277,11 +292,11 @@ function ActivityCard({ stats }: { stats: StatsInfo }) {
         <dt>Window</dt>
         <dd className="mono">{stats.window_days} days</dd>
         <dt>Calls</dt>
-        <dd className="mono num">{stats.calls_total}</dd>
+        <dd className="mono num">{fmtInt(stats.calls_total)}</dd>
         <dt>Latency p50/p95</dt>
-        <dd className="mono num">{stats.latency_p50_ms} / {stats.latency_p95_ms} ms</dd>
+        <dd className="mono num">{fmtInt(stats.latency_p50_ms)} / {fmtInt(stats.latency_p95_ms)} ms</dd>
         <dt>Reads saved (est)</dt>
-        <dd className="mono num">{stats.reads_saved_estimate}</dd>
+        <dd className="mono num">{fmtInt(stats.reads_saved_estimate)}</dd>
       </dl>
     </Card>
   );
