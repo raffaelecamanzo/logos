@@ -492,6 +492,7 @@ async fn uat_ui_08_step3_a_conversation_is_persisted_only_on_its_first_send() {
     // A follow-up carrying that id continues the SAME conversation (the rail's
     // adopt-then-continue contract), never forking a second row.
     let resp = router
+        .clone()
         .oneshot(chat_turn(intent.as_str(), "and+who+calls+it", Some(created)))
         .await
         .unwrap();
@@ -502,6 +503,38 @@ async fn uat_ui_08_step3_a_conversation_is_persisted_only_on_its_first_send() {
     assert_eq!(
         threads[0].title, "what is risky",
         "the auto-title is set once and never rewritten by a later turn",
+    );
+
+    // Both turns are durable, in order, both halves each (HF-1). Ordinals matter here:
+    // each turn's question is appended synchronously in setup while its answer is
+    // appended after the run completes, so a mis-assigned ordinal would interleave the
+    // two turns — the restore would replay a conversation that never happened.
+    let resp = router
+        .oneshot(get(&format!("{CHAT_THREADS_ROUTE}/{created}")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let messages = body_json(resp).await;
+    let ordered: Vec<(&str, &str)> = messages
+        .as_array()
+        .expect("the transcript is a JSON array")
+        .iter()
+        .map(|m| {
+            (
+                m["role"].as_str().expect("role"),
+                m["content"].as_str().expect("content"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ordered,
+        vec![
+            ("user", "what is risky"),
+            ("assistant", SYNTH_SENTINEL),
+            ("user", "and who calls it"),
+            ("assistant", SYNTH_SENTINEL),
+        ],
+        "two sequential turns restore as two complete exchanges, in send order",
     );
 }
 
