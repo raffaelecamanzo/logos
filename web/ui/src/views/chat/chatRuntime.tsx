@@ -419,6 +419,20 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
   const consentRef = useRef(consented);
   consentRef.current = consented;
 
+  // The trailing half of a dispatched turn, shared by send and regenerate: reconcile
+  // the rail only while this turn is STILL the current one in the SAME conversation —
+  // otherwise the user superseded it (regenerate / "+ New chat" / select) and the
+  // fresh conversation must be left untouched — then settle the composer. Both
+  // dispatch paths go through this one implementation, so the supersede protocol
+  // cannot drift between them.
+  const settleTurn = useCallback(
+    async (session: number, controller: AbortController, reconcile: () => Promise<void>) => {
+      if (sessionRef.current === session && abortRef.current === controller) await reconcile();
+      if (abortRef.current === controller) setIsRunning(false);
+    },
+    [sessionRef, abortRef, setIsRunning],
+  );
+
   // Append a fresh user turn + its assistant placeholder, stream the answer, then
   // reconcile the rail — keeping the turn "settling" (composer disabled) until a
   // first send's new thread is adopted, so a second send can never fork a duplicate
@@ -442,24 +456,18 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
       ]);
       void (async () => {
         const controller = await runTurn(turnId, question);
-        // Still this conversation and still the current turn? Reconcile (and adopt).
-        // Otherwise the user superseded it — leave the fresh session untouched.
-        if (sessionRef.current === session && abortRef.current === controller) {
-          await reconcileThreads(createdNewThread, knownIds);
-        }
-        if (abortRef.current === controller) setIsRunning(false);
+        await settleTurn(session, controller, () => reconcileThreads(createdNewThread, knownIds));
       })();
     },
     [
       idRef,
       activeThreadIdRef,
       sessionRef,
-      abortRef,
       knownThreadIds,
       setMessages,
       runTurn,
       reconcileThreads,
-      setIsRunning,
+      settleTurn,
     ],
   );
 
@@ -494,10 +502,7 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
       // session so a concurrent "+ New chat"/select suppresses the trailing refresh.
       const session = sessionRef.current;
       const controller = await runTurn(turnId, userMsg.text);
-      if (sessionRef.current === session && abortRef.current === controller) {
-        await reconcileThreads(false, null);
-      }
-      if (abortRef.current === controller) setIsRunning(false);
+      await settleTurn(session, controller, () => reconcileThreads(false, null));
     },
     [
       messagesRef,
@@ -507,7 +512,7 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
       setMessages,
       runTurn,
       reconcileThreads,
-      setIsRunning,
+      settleTurn,
     ],
   );
 
