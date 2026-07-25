@@ -74,7 +74,7 @@ use http_body_util::BodyExt;
 use logos_core::Engine;
 use tempfile::TempDir;
 use tower::ServiceExt;
-use web::chat::{spawn_turn, ChatService, ChatStream};
+use web::chat::{spawn_turn, ChatService, ChatStream, TurnTarget};
 use web::{
     router_with_chat, router_with_intent, IntentToken, CHAT_POST_ROUTE, CHAT_THREADS_ROUTE,
     INTENT_HEADER,
@@ -124,7 +124,12 @@ impl ChatService for CompoundChatService {
         )
         .with_synthesizer_grounding(grounding);
         let orchestrator = Orchestrator::new(self.planner.clone(), roster, BudgetTree::new(24, 8, 3));
-        spawn_turn(orchestrator, question, memory, thread, turn)
+        spawn_turn(
+            orchestrator,
+            question,
+            memory,
+            TurnTarget::new(self.root.clone(), thread, turn),
+        )
     }
 }
 
@@ -167,7 +172,12 @@ impl ChatService for SandboxEscapeChatService {
             },
         );
         let orchestrator = Orchestrator::new(planner, roster, BudgetTree::new(24, 8, 3));
-        spawn_turn(orchestrator, question, memory, thread, turn)
+        spawn_turn(
+            orchestrator,
+            question,
+            memory,
+            TurnTarget::new(self.root.clone(), thread, turn),
+        )
     }
 }
 
@@ -656,7 +666,12 @@ async fn uat_ui_07_step6_a_budget_halt_streams_an_honest_halted_event() {
                 ChargingExecutor { calls_per_step: self.calls_per_step },
                 BudgetTree::new(g, sub, replans),
             );
-            spawn_turn(orchestrator, question, memory, thread, turn)
+            spawn_turn(
+            orchestrator,
+            question,
+            memory,
+            TurnTarget::new(self.root.clone(), thread, turn),
+        )
         }
     }
 

@@ -28,9 +28,29 @@
  * The masked chat key never reaches this layer (NFR-SE-07): the adapter only ever
  * sends the user message over the SSE `POST` — the key material is structurally
  * absent from every code path here.
+ *
+ * How the hook is composed: `useChatRuntime` accumulated three separable concerns
+ * across S-200/S-210/S-211, so each now owns its own state and the top-level hook is
+ * the composition of them —
+ *
+ * - `useActiveThread` — the OPEN conversation's id and its `localStorage` mirror;
+ * - `useTurnStream` — the message array and one streamed turn's lifecycle;
+ * - `useThreadRail` (`./useThreadRail.ts`) — the conversation rail: the list, its
+ *   read sequencing, first-send adoption, and per-conversation delete;
+ *
+ * leaving `useChatRuntime` with only what genuinely spans them: turn dispatch (send,
+ * regenerate, select-to-restore), the mount bootstrap, and the assistant-ui adapter.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type MutableRefObject,
+  type SetStateAction,
+} from "react";
 import {
   useExternalStoreRuntime,
   type AppendMessage,
@@ -38,12 +58,7 @@ import {
   type ThreadMessageLike,
 } from "@assistant-ui/react";
 
-import {
-  deleteChatThread,
-  fetchThreadMessages,
-  fetchThreads,
-  streamChatTurn,
-} from "../../api/chatClient.ts";
+import { fetchThreadMessages, streamChatTurn } from "../../api/chatClient.ts";
 import { ApiError } from "../../api/client.ts";
 import {
   applyFrame,
@@ -54,6 +69,7 @@ import {
   type ThreadSummary,
   type TurnState,
 } from "./chatModel.ts";
+import { useThreadRail } from "./useThreadRail.ts";
 
 /** A conversation entry: a user turn, or an assistant turn folded from its SSE
  *  frames. `id` keys React rows and routes streamed updates; an assistant turn
@@ -181,59 +197,25 @@ export interface ChatRuntime {
   threadsError: string | null;
 }
 
-/**
- * Build the assistant-ui runtime over the SSE client. `consented` gates the first
- * outbound call (NFR-SE-07): until the user accepts the consent disclosure the
- * composer is disabled (`isDisabled`) and `onNew` is a hard no-op (defense in
- * depth).
- */
-export function useChatRuntime(consented: boolean): ChatRuntime {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [isRunning, setIsRunning] = useState(false);
-  const [threads, setThreads] = useState<ThreadSummary[]>([]);
-  // Seeded from the prior session's selection so the persistence effect writes it
-  // back (never wipes it) on mount; the restore effect then hydrates its history.
-  const [activeThreadId, setActiveThreadId] = useState<number | null>(readStoredThreadId);
-  const [threadsError, setThreadsError] = useState<string | null>(null);
+/** The open conversation plus the ref async callbacks read it through (S-210 AC-1). */
+interface ActiveThread {
+  activeThreadId: number | null;
+  /** The open conversation, read inside async callbacks without re-binding them. */
+  activeThreadIdRef: MutableRefObject<number | null>;
+  setActiveThreadId: (id: number | null) => void;
+}
 
-  const idRef = useRef(0);
-  const abortRef = useRef<AbortController | null>(null);
-  // Latest snapshots read by callbacks without re-binding them every render.
-  const messagesRef = useRef(messages);
-  messagesRef.current = messages;
-  const consentRef = useRef(consented);
-  consentRef.current = consented;
-  // The open conversation, read inside async callbacks (a turn sends it as the
-  // `thread` field; adoption after a first send checks it) without re-binding them.
+/**
+ * Own the OPEN conversation's id and its `localStorage` mirror (S-210 AC-1).
+ *
+ * Seeded from the prior session's selection so the persistence effect writes it back
+ * (never wipes it) on mount; `useChatRuntime`'s restore effect then hydrates its
+ * history.
+ */
+function useActiveThread(): ActiveThread {
+  const [activeThreadId, setActiveThreadId] = useState<number | null>(readStoredThreadId);
   const activeThreadIdRef = useRef(activeThreadId);
   activeThreadIdRef.current = activeThreadId;
-  // Latest rail list, read at send time to diff the just-created thread.
-  const threadsRef = useRef(threads);
-  threadsRef.current = threads;
-  // A monotonic "conversation session" generation, bumped whenever the open
-  // conversation changes out from under an in-flight turn ("+ New chat" or a
-  // select). A turn's trailing reconcile checks its captured session is still
-  // current before adopting — so a superseded turn never rebinds the fresh one.
-  const sessionRef = useRef(0);
-  // A monotonic RAIL-LIST generation, the `sessionRef` idea applied to `threads`.
-  // Three call sites read the list concurrently (mount/restore, a turn's trailing
-  // reconcile, and a delete's refresh) and HTTP responses can resolve out of the
-  // order they were issued. Without sequencing, a reconcile whose `fetchThreads`
-  // started BEFORE a delete landed could resolve after it and overwrite the list
-  // with its stale pre-delete snapshot — resurrecting a conversation that is gone
-  // server-side (the rail would lie until the user clicked the ghost row and hit
-  // its 404). Each reader takes a ticket via `nextThreadsGen` and applies its
-  // result only while that ticket is still the newest: last STARTED read wins.
-  const threadsGenRef = useRef(0);
-
-  // Take the next rail-list ticket. Also called by a mutation that already knows
-  // the truth (the delete), so any read still in flight is superseded outright.
-  const nextThreadsGen = useCallback(() => (threadsGenRef.current += 1), []);
-
-  // A turn's lifetime is tied to the mounted view: leaving the tab / unmounting
-  // aborts the in-flight turn, so the server cancels it ([FR-UI-19]). Without this
-  // the streamed `fetch` would outlive the view.
-  useEffect(() => () => abortRef.current?.abort(), []);
 
   // Persist the open conversation so the selection is restored across a
   // `serve --ui` restart / reload (S-210 AC-1). Best-effort — storage-blocked is
@@ -247,24 +229,59 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
     }
   }, [activeThreadId]);
 
-  // Read the conversation list (most-recent-first, S-209). An honest error note on
-  // failure rather than a silently empty rail ([NFR-CC-04]).
-  const loadThreads = useCallback(async () => {
-    const gen = nextThreadsGen();
-    try {
-      const list = await fetchThreads();
-      // A newer read (or a delete) started while this one was in flight — it knows
-      // more than we do, so drop this result rather than overwrite it.
-      if (threadsGenRef.current !== gen) return;
-      setThreads(list);
-      setThreadsError(null);
-    } catch (e) {
-      if (threadsGenRef.current !== gen) return;
-      setThreadsError(
-        `Could not load your conversations: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-  }, [nextThreadsGen]);
+  return { activeThreadId, activeThreadIdRef, setActiveThreadId };
+}
+
+/** The conversation surface's own state: the message array and one turn's SSE
+ *  lifecycle. The refs are part of the contract — `useChatRuntime` composes turn
+ *  dispatch (send / regenerate / select) over them, and each guards a
+ *  supersede-check that a plain state read could not (a stale closure would see the
+ *  wrong turn). */
+interface TurnStream {
+  messages: ChatMessage[];
+  isRunning: boolean;
+  setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
+  setIsRunning: (running: boolean) => void;
+  /** Latest message snapshot, read by callbacks without re-binding them. */
+  messagesRef: MutableRefObject<ChatMessage[]>;
+  /** The monotonic local id allocator shared by sent and restored turns. */
+  idRef: MutableRefObject<number>;
+  /** The in-flight turn's controller — the identity a trailing reconcile checks. */
+  abortRef: MutableRefObject<AbortController | null>;
+  /** The "conversation session" generation a superseded turn compares against. */
+  sessionRef: MutableRefObject<number>;
+  runTurn: (turnId: number, question: string) => Promise<AbortController>;
+  newChat: () => void;
+  onCancel: () => Promise<void>;
+}
+
+/**
+ * Own the conversation surface: the message array, the streamed turn's lifecycle,
+ * and the two resets that end one (Stop, "+ New chat").
+ *
+ * The open conversation arrives from [`useActiveThread`]: a turn sends that id as
+ * its `thread` field, and "+ New chat" resets BOTH halves — the transcript and the
+ * open-conversation id — in one action.
+ */
+function useTurnStream({ activeThreadIdRef, setActiveThreadId }: ActiveThread): TurnStream {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isRunning, setIsRunning] = useState(false);
+
+  const idRef = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
+  // Latest snapshot read by callbacks without re-binding them every render.
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  // A monotonic "conversation session" generation, bumped whenever the open
+  // conversation changes out from under an in-flight turn ("+ New chat" or a
+  // select). A turn's trailing reconcile checks its captured session is still
+  // current before adopting — so a superseded turn never rebinds the fresh one.
+  const sessionRef = useRef(0);
+
+  // A turn's lifetime is tied to the mounted view: leaving the tab / unmounting
+  // aborts the in-flight turn, so the server cancels it ([FR-UI-19]). Without this
+  // the streamed `fetch` would outlive the view.
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   // Route a streamed update to one assistant turn (functional set — no stale
   // closure as frames arrive).
@@ -313,53 +330,107 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
       }
       return controller;
     },
-    [updateTurn],
+    [updateTurn, activeThreadIdRef],
   );
 
-  // After a turn settles, refresh the rail (updated_at re-orders the list; the first
-  // send auto-titles the new thread). For a genuine new-conversation send, adopt the
-  // just-created thread — identified precisely as the id ABSENT from the pre-send
-  // set (`knownIds`), never "top of list": the server creates the thread in setup
-  // even if the turn then faults, so a new id always exists, and diffing never
-  // adopts an unrelated existing conversation. The SSE stream carries no thread id
-  // (S-209), so this list re-read is how the SPA learns it (S-210 first-send
-  // persistence).
-  const reconcileThreads = useCallback(
-    async (createdNewThread: boolean, knownIds: ReadonlySet<number> | null) => {
-      const gen = nextThreadsGen();
-      let list: ThreadSummary[];
-      try {
-        list = await fetchThreads();
-      } catch {
-        // The turn itself succeeded and is durable server-side; a rail-refresh
-        // failure is non-fatal. But for a brand-new conversation we could not learn
-        // its id — say so honestly so the user reopens it from the list, rather than
-        // the next send silently forking a second thread against a still-null id.
-        if (createdNewThread && threadsGenRef.current === gen) {
-          setThreadsError(
-            "Your conversation was saved, but the history list could not refresh — reopen it from the rail.",
-          );
-        }
-        return;
-      }
-      // Only RENDER this list while it is still the newest read: a delete (or a
-      // later read) that landed while this was in flight knows more, and painting
-      // our older snapshot over it would resurrect a deleted conversation.
-      if (threadsGenRef.current === gen) {
-        setThreads(list);
-        setThreadsError(null);
-      }
-      // ADOPTION is not subject to that guard. It answers "which id did MY send
-      // create?" — a question a concurrent delete of some other conversation cannot
-      // change, and the id is absent from `knownIds` in a stale and a fresh list
-      // alike. Skipping it would leave `activeThreadId` null and let the next send
-      // fork a duplicate thread — the exact S-210 regression this diffing prevents.
-      if (createdNewThread && knownIds && activeThreadIdRef.current == null) {
-        const created = list.find((t) => !knownIds.has(t.id));
-        if (created) setActiveThreadId(created.id);
-      }
+  // "+ New chat" (S-210 AC-2): reset the composer to a fresh, not-yet-persisted
+  // conversation. No thread is created until the first send (the server only
+  // creates a thread on a `thread`-less turn), so the rail grows no empty row.
+  // Bumping the session supersedes any in-flight turn's trailing reconcile, so a
+  // streaming turn can never rebind this fresh conversation back to its thread.
+  const newChat = useCallback(() => {
+    sessionRef.current += 1;
+    abortRef.current?.abort();
+    setMessages([]);
+    setActiveThreadId(null);
+    setIsRunning(false);
+  }, [setActiveThreadId]);
+
+  // Stop (FR-UI-19): abort the in-flight turn (the server cancels it, the
+  // existing client-disconnect cancellation now user-triggered) and mark the turn
+  // ended so its Copy/Regenerate actions appear over what streamed.
+  const onCancel = useCallback(async () => {
+    abortRef.current?.abort();
+    setMessages((prev) =>
+      prev.map((m, i) =>
+        i === prev.length - 1 && m.kind === "assistant"
+          ? { ...m, turn: { ...m.turn, streaming: false, finalized: true } }
+          : m,
+      ),
+    );
+    setIsRunning(false);
+  }, []);
+
+  return {
+    messages,
+    isRunning,
+    setMessages,
+    setIsRunning,
+    messagesRef,
+    idRef,
+    abortRef,
+    sessionRef,
+    runTurn,
+    newChat,
+    onCancel,
+  };
+}
+
+
+/** The index of the user message a regenerate re-runs: the named `parentId` while it
+ *  is still present, else the LAST user message; `-1` when the conversation holds no
+ *  user message at all (nothing to re-run). */
+export function findRerunIndex(messages: readonly ChatMessage[], parentId: string | null): number {
+  if (parentId != null) {
+    const named = messages.findIndex((m) => m.kind === "user" && String(m.id) === parentId);
+    if (named !== -1) return named;
+  }
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].kind === "user") return i;
+  }
+  return -1;
+}
+
+/**
+ * Build the assistant-ui runtime over the SSE client. `consented` gates the first
+ * outbound call (NFR-SE-07): until the user accepts the consent disclosure the
+ * composer is disabled (`isDisabled`) and `onNew` is a hard no-op (defense in
+ * depth).
+ *
+ * This is the COMPOSITION layer: the open conversation ([`useActiveThread`]), the
+ * message surface ([`useTurnStream`]), and the conversation rail
+ * ([`useThreadRail`](./useThreadRail.ts)) each own their own state, and the turn
+ * dispatch below is what spans them — a send/regenerate streams into the surface and
+ * then reconciles the rail, a select hydrates the surface from the rail's row.
+ */
+export function useChatRuntime(consented: boolean): ChatRuntime {
+  const active = useActiveThread();
+  const { activeThreadId, activeThreadIdRef, setActiveThreadId } = active;
+  const stream = useTurnStream(active);
+  const { messagesRef, idRef, abortRef, sessionRef } = stream;
+  const { setMessages, setIsRunning, runTurn, newChat } = stream;
+  const rail = useThreadRail({
+    activeThreadIdRef,
+    adoptThread: setActiveThreadId,
+    resetSurface: newChat,
+  });
+  const { knownThreadIds, loadThreads, reconcileThreads, setThreadsError } = rail;
+
+  const consentRef = useRef(consented);
+  consentRef.current = consented;
+
+  // The trailing half of a dispatched turn, shared by send and regenerate: reconcile
+  // the rail only while this turn is STILL the current one in the SAME conversation —
+  // otherwise the user superseded it (regenerate / "+ New chat" / select) and the
+  // fresh conversation must be left untouched — then settle the composer. Both
+  // dispatch paths go through this one implementation, so the supersede protocol
+  // cannot drift between them.
+  const settleTurn = useCallback(
+    async (session: number, controller: AbortController, reconcile: () => Promise<void>) => {
+      if (sessionRef.current === session && abortRef.current === controller) await reconcile();
+      if (abortRef.current === controller) setIsRunning(false);
     },
-    [nextThreadsGen],
+    [sessionRef, abortRef, setIsRunning],
   );
 
   // Append a fresh user turn + its assistant placeholder, stream the answer, then
@@ -375,7 +446,7 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
       // reconcile if the user moves on — "+ New chat" / select — while it streams).
       const createdNewThread = activeThreadIdRef.current == null;
       const knownIds: ReadonlySet<number> | null = createdNewThread
-        ? new Set(threadsRef.current.map((t) => t.id))
+        ? knownThreadIds()
         : null;
       const session = ++sessionRef.current;
       setMessages((prev) => [
@@ -385,15 +456,19 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
       ]);
       void (async () => {
         const controller = await runTurn(turnId, question);
-        // Still this conversation and still the current turn? Reconcile (and adopt).
-        // Otherwise the user superseded it — leave the fresh session untouched.
-        if (sessionRef.current === session && abortRef.current === controller) {
-          await reconcileThreads(createdNewThread, knownIds);
-        }
-        if (abortRef.current === controller) setIsRunning(false);
+        await settleTurn(session, controller, () => reconcileThreads(createdNewThread, knownIds));
       })();
     },
-    [runTurn, reconcileThreads],
+    [
+      idRef,
+      activeThreadIdRef,
+      sessionRef,
+      knownThreadIds,
+      setMessages,
+      runTurn,
+      reconcileThreads,
+      settleTurn,
+    ],
   );
 
   const onNew = useCallback(
@@ -413,18 +488,7 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
       if (!consentRef.current) return;
       abortRef.current?.abort(); // supersede any in-flight turn
       const cur = messagesRef.current;
-      let userIdx = -1;
-      if (parentId != null) {
-        userIdx = cur.findIndex((m) => m.kind === "user" && String(m.id) === parentId);
-      }
-      if (userIdx === -1) {
-        for (let i = cur.length - 1; i >= 0; i--) {
-          if (cur[i].kind === "user") {
-            userIdx = i;
-            break;
-          }
-        }
-      }
+      const userIdx = findRerunIndex(cur, parentId);
       if (userIdx === -1) return;
       const userMsg = cur[userIdx] as Extract<ChatMessage, { kind: "user" }>;
       const turnId = ++idRef.current;
@@ -438,26 +502,19 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
       // session so a concurrent "+ New chat"/select suppresses the trailing refresh.
       const session = sessionRef.current;
       const controller = await runTurn(turnId, userMsg.text);
-      if (sessionRef.current === session && abortRef.current === controller) {
-        await reconcileThreads(false, null);
-      }
-      if (abortRef.current === controller) setIsRunning(false);
+      await settleTurn(session, controller, () => reconcileThreads(false, null));
     },
-    [runTurn, reconcileThreads],
+    [
+      messagesRef,
+      idRef,
+      sessionRef,
+      abortRef,
+      setMessages,
+      runTurn,
+      reconcileThreads,
+      settleTurn,
+    ],
   );
-
-  // "+ New chat" (S-210 AC-2): reset the composer to a fresh, not-yet-persisted
-  // conversation. No thread is created until the first send (the server only
-  // creates a thread on a `thread`-less turn), so the rail grows no empty row.
-  // Bumping the session supersedes any in-flight turn's trailing reconcile, so a
-  // streaming turn can never rebind this fresh conversation back to its thread.
-  const newChat = useCallback(() => {
-    sessionRef.current += 1;
-    abortRef.current?.abort();
-    setMessages([]);
-    setActiveThreadId(null);
-    setIsRunning(false);
-  }, []);
 
   // Select-to-restore (S-210 AC-1): hydrate a conversation's full transcript into
   // the surface and mark it active. A deleted/unknown id is an honest `404` — fall
@@ -485,7 +542,17 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
         );
       }
     },
-    [newChat, loadThreads],
+    [
+      idRef,
+      sessionRef,
+      abortRef,
+      setMessages,
+      setIsRunning,
+      setActiveThreadId,
+      setThreadsError,
+      newChat,
+      loadThreads,
+    ],
   );
 
   // On mount: load the rail, then restore the last-open conversation across a
@@ -502,82 +569,24 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Stop (FR-UI-19): abort the in-flight turn (the server cancels it, the
-  // existing client-disconnect cancellation now user-triggered) and mark the turn
-  // ended so its Copy/Regenerate actions appear over what streamed.
-  const onCancel = useCallback(async () => {
-    abortRef.current?.abort();
-    setMessages((prev) =>
-      prev.map((m, i) =>
-        i === prev.length - 1 && m.kind === "assistant"
-          ? { ...m, turn: { ...m.turn, streaming: false, finalized: true } }
-          : m,
-      ),
-    );
-    setIsRunning(false);
-  }, []);
-
-  // Per-conversation delete (S-211, [FR-UI-26], [FR-UI-20], [ADR-47]) — the granular
-  // replacement for the retired global Clear-history. The CONFIRMATION is the rail's
-  // (`ThreadList`); by the time this runs the user has already confirmed, so it goes
-  // straight to the intent-guarded `POST …/{id}/delete` whose FK cascade wipes that
-  // thread's messages AND its per-thread memory server-side.
-  //
-  // Honest outcomes, mirroring the S-209 handler: `204` deleted and `404` already
-  // gone are BOTH success for the user's intent ("this conversation should not
-  // exist") — the row leaves the rail either way. Anything else keeps the row and
-  // says so ([NFR-CC-04]), never a silent disappearance of a conversation that is
-  // still on disk.
-  const deleteThread = useCallback(
-    async (id: number) => {
-      let resp: Response;
-      try {
-        resp = await deleteChatThread(id);
-      } catch (e) {
-        setThreadsError(
-          `Could not delete that conversation: ${e instanceof Error ? e.message : String(e)}`,
-        );
-        return;
-      }
-      if (!resp.ok && resp.status !== 404) {
-        setThreadsError(`Could not delete that conversation (status ${resp.status}).`);
-        return;
-      }
-      // Deleting the OPEN conversation leaves the surface pointing at a thread that
-      // no longer exists — reset to a fresh composer (which also aborts any turn
-      // still streaming into it and drops the stored selection). Deleting any other
-      // conversation leaves the current transcript untouched.
-      if (activeThreadIdRef.current === id) newChat();
-      // Drop the row on the delete's own authority, then re-read for the
-      // authoritative order — so the rail is right even if that refresh faults.
-      // Take a ticket FIRST: any list read already in flight was issued before we
-      // knew this conversation was gone, so its result must not paint the row back.
-      nextThreadsGen();
-      setThreads((prev) => prev.filter((t) => t.id !== id));
-      setThreadsError(null);
-      await loadThreads();
-    },
-    [newChat, loadThreads, nextThreadsGen],
-  );
-
   const adapter: ExternalStoreAdapter<ChatMessage> = {
-    messages,
-    isRunning,
+    messages: stream.messages,
+    isRunning: stream.isRunning,
     isDisabled: !consented,
     convertMessage,
     onNew,
     onReload,
-    onCancel,
+    onCancel: stream.onCancel,
     unstable_capabilities: { copy: true },
   };
 
   return {
     runtime: useExternalStoreRuntime(adapter),
-    threads,
+    threads: rail.threads,
     activeThreadId,
     selectThread,
     newChat,
-    deleteThread,
-    threadsError,
+    deleteThread: rail.deleteThread,
+    threadsError: rail.threadsError,
   };
 }
