@@ -1142,6 +1142,29 @@ describe("ChatView — the Activity disclosure (S-301, FR-UI-31)", () => {
     expect(fold(container)!.open).toBe(true);
   });
 
+  it("leaves the fold open when the user stops a turn before any answer arrived", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    // Stop marks the turn `finalized` on abort (`onCancel`) whether or not anything
+    // arrived — so `finalized` alone would collapse the trail at the exact moment
+    // the user stopped to look at it. A turn that produced no answer, halt or error
+    // keeps its activity open (NFR-CC-04).
+    const pending = pendingSseResponse([
+      'event: plan\ndata: {"round":0,"steps":[{"role":"source_reader","instruction":"read it"}]}\n\n',
+      'event: step_started\ndata: {"index":0,"role":"source_reader","instruction":"read it"}\n\n',
+    ]);
+    mockStreamTurn.mockResolvedValue(pending.response);
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "q");
+    await waitFor(() => expect(container.textContent).toContain("Source-Reader"));
+
+    await user.click(await screen.findByRole("button", { name: "Stop" }));
+    expect(await screen.findByRole("button", { name: "Send" })).toBeInTheDocument();
+    expect(fold(container)!.open).toBe(true);
+    pending.close();
+  });
+
   it("says so when an observed step reported no result, rather than showing a blank", async () => {
     const user = userEvent.setup();
     mockFetchConfig.mockResolvedValue(configuredModel());

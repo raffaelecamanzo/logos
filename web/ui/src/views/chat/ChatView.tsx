@@ -57,6 +57,8 @@ import {
   isConfigured,
   rememberConsent,
   roleLabel,
+  turnEndedEmpty,
+  type ActivityChip,
   type ChatConfigReadModel,
   type ChatPolicy,
   type TurnState,
@@ -268,9 +270,17 @@ function AssistantMessage() {
  * has one derivation instead of two competing sources of truth: it is open while
  * the turn is in flight, auto-collapses once the answer is `finalized`, and once
  * the user has toggled it their choice wins for the rest of the turn's life
- * (`userOpen`). A halt or an error never finalizes an answer, so there is nothing
- * to collapse into — the activity stays open as the honest record of how far the
- * turn got ([NFR-CC-04]).
+ * (`userOpen`).
+ *
+ * It collapses onto an ANSWER, so a turn that produced none stays open — the
+ * activity is then the only honest record of how far the turn got ([NFR-CC-04]).
+ * That covers three states the bare `finalized` bit cannot tell apart: a halt and
+ * an error never set `finalized` at all, but **Stop** does — `onCancel`
+ * (`chatRuntime.tsx`) marks the turn finalized on abort whether or not anything
+ * arrived, and collapsing the trail at the exact moment the user stopped to look
+ * at it is the wrong answer. `turnEndedEmpty` is the reducer's existing name for
+ * "closed without producing anything", the same predicate the surface already uses
+ * to own up to an empty turn.
  *
  * A turn with neither a plan nor a step renders NOTHING: the plan/activity
  * side-channel is ephemeral SSE and is never persisted, so a restored answer-only
@@ -281,7 +291,7 @@ function AssistantMessage() {
  */
 function ActivityDisclosure({ turn }: { turn: TurnState }) {
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
-  const open = userOpen ?? !turn.finalized;
+  const open = userOpen ?? (!turn.finalized || turnEndedEmpty(turn));
   // Intercept the summary's activation so the native `open` flip can never race
   // the derived state. Enter/Space on a focused summary dispatch a click too, so
   // the disclosure stays keyboard-operable.
