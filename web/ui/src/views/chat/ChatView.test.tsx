@@ -1142,6 +1142,30 @@ describe("ChatView — the Activity disclosure (S-301, FR-UI-31)", () => {
     expect(fold(container)!.open).toBe(true);
   });
 
+  it("adopts an externally-driven open flip so the next click still closes the fold", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([...STREAMING_FRAMES, 'event: final_answer\ndata: {"answer":"done"}\n\n']),
+    );
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "who calls it?");
+    expect(await screen.findByText("done")).toBeInTheDocument();
+    const activity = fold(container)!;
+    expect(activity.open).toBe(false);
+
+    // Stand in for a find-in-page auto-expand: the browser sets `open` directly,
+    // with no click on the summary. Without the `onToggle` sync the component would
+    // still believe the fold is closed, and the click below would be spent
+    // re-deriving `open: true` instead of closing it.
+    activity.open = true;
+    await waitFor(() => expect(activity.open).toBe(true));
+
+    await user.click(activity.querySelector("summary")!);
+    expect(activity.open).toBe(false);
+  });
+
   it("renders no fold for a plan that carries zero steps", async () => {
     const user = userEvent.setup();
     mockFetchConfig.mockResolvedValue(configuredModel());

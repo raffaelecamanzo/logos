@@ -302,10 +302,20 @@ function ActivityDisclosure({ turn }: { turn: TurnState }) {
     event.preventDefault();
     setUserOpen(!open);
   };
+  // A click is not the only way `open` can flip: a find-in-page hit inside
+  // collapsed content auto-expands a <details> with no click on the summary at all.
+  // React does not re-assert an unchanged prop, so that drift would stick — and the
+  // user's next click would be spent silently correcting it instead of closing the
+  // fold. Adopt any externally-driven flip. React's OWN attribute writes also fire
+  // `toggle`, which is why this is guarded: by then the attribute already equals
+  // `open`, so the derived value is never mistaken for a user choice.
+  const syncNativeToggle = (event: { currentTarget: HTMLDetailsElement }) => {
+    if (event.currentTarget.open !== open) setUserOpen(event.currentTarget.open);
+  };
 
   if (planStepCount(turn.plan) === 0 && turn.chips.length === 0) return null;
   return (
-    <details className={styles.activity} open={open}>
+    <details className={styles.activity} open={open} onToggle={syncNativeToggle}>
       <summary className={styles.activitySummary} onClick={toggle}>
         <span className={styles.activityLabel}>Activity</span>
         <span className={styles.activityMeta}>{activityMeta(turn)}</span>
