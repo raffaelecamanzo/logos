@@ -988,3 +988,176 @@ describe("ChatView — transcript column structure (S-300, FR-UI-31)", () => {
     expect(bubble?.textContent).toContain("where does the column start?");
   });
 });
+
+describe("ChatView — the Activity disclosure (S-301, FR-UI-31)", () => {
+  // S-301 folded the separate plan list and the subagent pills into ONE native
+  // <details> disclosure whose steps carry their FULL observed result as rendered
+  // markdown (the `title=` hover tooltip is gone). The fold is the only <details>
+  // an assistant turn renders, so `querySelector("details")` is an unambiguous
+  // handle — this suite runs with `css: false`, so class names never reach the DOM
+  // and the element/attribute structure is what can be asserted here.
+
+  /** The turn's Activity fold, or `null` when the turn renders none. */
+  function fold(container: HTMLElement): HTMLDetailsElement | null {
+    return container.querySelector("details");
+  }
+
+  /** The frames of a turn that plans two steps, observes the first with a markdown
+   *  result, and leaves the second running. */
+  const STREAMING_FRAMES = [
+    'event: plan\ndata: {"round":0,"steps":[{"role":"graph_navigator","instruction":"map callers"},{"role":"synthesizer","instruction":"write it up"}]}\n\n',
+    'event: step_started\ndata: {"index":0,"role":"graph_navigator","instruction":"map callers"}\n\n',
+    'event: step_observed\ndata: {"index":0,"role":"graph_navigator","summary":"found **3 callers** in `web/src`"}\n\n',
+    'event: step_started\ndata: {"index":1,"role":"synthesizer","instruction":"write it up"}\n\n',
+  ];
+
+  it("holds the plan and every subagent step in one fold, open while the turn streams", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    const pending = pendingSseResponse(STREAMING_FRAMES);
+    mockStreamTurn.mockResolvedValue(pending.response);
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "who calls it?");
+
+    // The last frame's step is the sync point: once it is on screen the whole
+    // side-channel has been folded in.
+    await waitFor(() => expect(container.textContent).toContain("Synthesizer"));
+
+    // Exactly ONE disclosure carries the whole side-channel — no second fold, and
+    // no plan list left rendering beside it.
+    expect(container.querySelectorAll("details")).toHaveLength(1);
+    const activity = fold(container)!;
+    expect(activity.open).toBe(true);
+    expect(activity.querySelector("summary")?.textContent).toContain("Activity");
+    // The plan and BOTH steps live inside the fold, not around it.
+    expect(activity.textContent).toContain("Plan");
+    expect(activity.textContent).toContain("Graph-Navigator");
+    expect(activity.textContent).toContain("map callers");
+    expect(activity.textContent).toContain("write it up");
+    pending.close();
+  });
+
+  it("renders each observed result as markdown, with no hover tooltip", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    const pending = pendingSseResponse(STREAMING_FRAMES);
+    mockStreamTurn.mockResolvedValue(pending.response);
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "who calls it?");
+    await waitFor(() => expect(container.textContent).toContain("3 callers"));
+
+    const activity = fold(container)!;
+    // Markdown STRUCTURE, not the raw source: the result went through the same
+    // react-markdown renderer the answer uses (never dangerouslySetInnerHTML).
+    expect(activity.querySelector("strong")?.textContent).toBe("3 callers");
+    expect(activity.querySelector("code")?.textContent).toBe("web/src");
+    expect(activity.textContent).not.toContain("**3 callers**");
+    // The result is readable in place — nothing inside the fold hides it behind a
+    // native `title=` hover tooltip any more.
+    expect(activity.querySelector("[title]")).toBeNull();
+    pending.close();
+  });
+
+  it("auto-collapses when the answer is finalized, keeping its content to re-open", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([...STREAMING_FRAMES, 'event: final_answer\ndata: {"answer":"the answer"}\n\n']),
+    );
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "who calls it?");
+    expect(await screen.findByText("the answer")).toBeInTheDocument();
+
+    const activity = fold(container)!;
+    expect(activity.open).toBe(false);
+    // Collapsed, not discarded: re-opening shows the same plan and results.
+    expect(activity.textContent).toContain("3 callers");
+  });
+
+  it("re-opens on click and then stays open across later transcript updates", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockStreamTurn.mockResolvedValueOnce(
+      sseResponse([...STREAMING_FRAMES, 'event: final_answer\ndata: {"answer":"first"}\n\n']),
+    );
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "who calls it?");
+    expect(await screen.findByText("first")).toBeInTheDocument();
+    expect(fold(container)!.open).toBe(false);
+
+    await user.click(fold(container)!.querySelector("summary")!);
+    expect(fold(container)!.open).toBe(true);
+
+    // A second turn re-renders the transcript; the user's choice outlives it (the
+    // fold is persistent once re-opened, not re-collapsed on every update).
+    mockStreamTurn.mockResolvedValueOnce(
+      sseResponse(['event: final_answer\ndata: {"answer":"second"}\n\n']),
+    );
+    await ask(user, "and now?");
+    expect(await screen.findByText("second")).toBeInTheDocument();
+    expect(fold(container)!.open).toBe(true);
+  });
+
+  it("renders no fold at all for a restored answer-only turn", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(7, "Restored", 100)]);
+    // The store persists only the durable user + final-answer rows: the
+    // plan/activity side-channel is ephemeral SSE, so a restored turn has neither.
+    mockFetchMessages.mockResolvedValue([
+      persisted("user", "old question", 1),
+      persisted("assistant", "old answer", 2),
+    ]);
+    const { container } = render(<ChatView />);
+    await user.click(await screen.findByRole("button", { name: "Restored" }));
+    expect(await screen.findByText("old answer")).toBeInTheDocument();
+
+    // No empty Activity fold, and no stray "Activity" label either.
+    expect(fold(container)).toBeNull();
+    expect(screen.queryByText("Activity")).not.toBeInTheDocument();
+  });
+
+  it("leaves the fold open on a halted turn and still names the bound honestly", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    // A halt never finalizes an answer, so there is nothing to collapse INTO: the
+    // activity stays open as the honest record of how far the turn got (NFR-CC-04).
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([
+        'event: plan\ndata: {"round":0,"steps":[{"role":"source_reader","instruction":"read it"}]}\n\n',
+        'event: step_started\ndata: {"index":0,"role":"source_reader","instruction":"read it"}\n\n',
+        'event: halted\ndata: {"round":1,"bound":{"bound":"global_tool_calls","limit":24}}\n\n',
+      ]),
+    );
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "q");
+    expect(
+      await screen.findByText(/global per-turn tool-call ceiling was reached \(24 calls\)/),
+    ).toBeInTheDocument();
+    expect(fold(container)!.open).toBe(true);
+  });
+
+  it("says so when an observed step reported no result, rather than showing a blank", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([
+        'event: step_started\ndata: {"index":0,"role":"source_reader","instruction":"read it"}\n\n',
+        // A malformed `summary` is dropped by the reducer rather than guessed at,
+        // so the step is done with nothing observed — an honest empty, not a gap.
+        'event: step_observed\ndata: {"index":0,"role":"source_reader","summary":42}\n\n',
+        'event: final_answer\ndata: {"answer":"done anyway"}\n\n',
+      ]),
+    );
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "q");
+    expect(await screen.findByText("done anyway")).toBeInTheDocument();
+    expect(fold(container)!.textContent).toContain("no result");
+  });
+});

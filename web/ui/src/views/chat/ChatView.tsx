@@ -11,8 +11,7 @@
  * delete (S-210/S-211, FR-UI-26, FR-UI-20 — there is no global clear-all), and the
  * CUSTOM assistant-turn components that re-implement the bespoke surface over
  * assistant-ui's primitives:
- *   - the planner's plan list,
- *   - the subagent-activity chips,
+ *   - the "Activity" disclosure — the planner's plan and every subagent step,
  *   - the honest budget-halt notice and the honest provider error ([FR-UI-24],
  *     rendered verbatim from the SSE `error` frame), never a fabricated answer
  *     ([NFR-CC-04]),
@@ -21,8 +20,11 @@
  * S-300 ([FR-UI-31]) realigned the transcript to the base assistant-ui column
  * grammar: both roles now sit in ONE centred readable measure — the assistant
  * turn a flat full-width left-aligned block (no card fill, no red top rule, no
- * shadow), the user turn a bubble right-aligned inside that same column. That is
- * a presentation change only; the SSE contract, the runtime adapter, and the
+ * shadow), the user turn a bubble right-aligned inside that same column. S-301
+ * (same FR) then folded the separate plan list and the subagent-activity pills
+ * into ONE native "Activity" disclosure whose steps carry their full observed
+ * result as rendered markdown, replacing the native hover tooltip. Both are
+ * presentation changes only; the SSE contract, the runtime adapter, and the
  * orchestrator are untouched.
  *
  * Everything renders through the S-193 design tokens (`Chat.module.css`); no
@@ -33,6 +35,7 @@
  */
 
 import { useCallback, useState } from "react";
+import type { MouseEvent } from "react";
 import {
   ActionBarPrimitive,
   AssistantRuntimeProvider,
@@ -222,19 +225,18 @@ function UserMessage() {
   );
 }
 
-/** An assistant turn: the plan, the subagent-activity chips, the streamed markdown
- *  answer, an honest halt or error, and the copy/regenerate action bar. A
- *  full-width block flush with the LEFT edge of the same column the user turn
- *  sits in — not a card (S-300, [FR-UI-31]). The folded turn rides on
- *  `metadata.custom.turn`; data is rendered as React-escaped text or through
- *  `react-markdown` (which never injects raw HTML). */
+/** An assistant turn: the Activity disclosure, the streamed markdown answer, an
+ *  honest halt or error, and the copy/regenerate action bar. A full-width block
+ *  flush with the LEFT edge of the same column the user turn sits in — not a card
+ *  (S-300, [FR-UI-31]). The folded turn rides on `metadata.custom.turn`; data is
+ *  rendered as React-escaped text or through `react-markdown` (which never injects
+ *  raw HTML). */
 function AssistantMessage() {
   const turn = useMessage((m) => m.metadata.custom.turn as TurnState | undefined);
   if (!turn) return null;
   return (
     <MessagePrimitive.Root className={styles.assistant}>
-      <PlanList plan={turn.plan} />
-      <ActivityChips turn={turn} />
+      <ActivityDisclosure turn={turn} />
       <div className={styles.answer}>
         {!turn.answer && !turn.halt && !turn.error && (
           <p className={styles.working} role="status">
@@ -255,37 +257,119 @@ function AssistantMessage() {
   );
 }
 
-/** The planner's plan (a replan supersedes the prior plan). */
-function PlanList({ plan }: { plan: TurnState["plan"] }) {
-  if (!plan) return null;
+/**
+ * The turn's single "Activity" disclosure (S-301, [FR-UI-31]): the planner's plan
+ * AND every subagent step — role, instruction, and the FULL observed result as
+ * rendered markdown — inside one native `<details>` fold. It replaces the separate
+ * plan list plus the pill-with-`title=`-hover-tooltip pair, so the grounding is
+ * read in place rather than on mouse-over.
+ *
+ * The fold is CONTROLLED rather than left to the native toggle, so the open state
+ * has one derivation instead of two competing sources of truth: it is open while
+ * the turn is in flight, auto-collapses once the answer is `finalized`, and once
+ * the user has toggled it their choice wins for the rest of the turn's life
+ * (`userOpen`). A halt or an error never finalizes an answer, so there is nothing
+ * to collapse into — the activity stays open as the honest record of how far the
+ * turn got ([NFR-CC-04]).
+ *
+ * A turn with neither a plan nor a step renders NOTHING: the plan/activity
+ * side-channel is ephemeral SSE and is never persisted, so a restored answer-only
+ * turn must not grow an empty fold.
+ *
+ * This is presentation only — it reads the same `TurnState` the reducer already
+ * folded; the SSE contract, the orchestrator, and the budget tree are untouched.
+ */
+function ActivityDisclosure({ turn }: { turn: TurnState }) {
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const open = userOpen ?? !turn.finalized;
+  // Intercept the summary's activation so the native `open` flip can never race
+  // the derived state. Enter/Space on a focused summary dispatch a click too, so
+  // the disclosure stays keyboard-operable.
+  const toggle = (event: MouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    setUserOpen(!open);
+  };
+
+  if (!turn.plan && turn.chips.length === 0) return null;
   return (
-    <ol className={styles.plan}>
-      <li className={styles.planCaption}>{plan.round > 0 ? "Revised plan" : "Plan"}</li>
-      {plan.steps.map((s, i) => (
-        <li key={i} className={styles.planStep}>
-          {roleLabel(s.role)}: {s.instruction}
-        </li>
-      ))}
-    </ol>
+    <details className={styles.activity} open={open}>
+      <summary className={styles.activitySummary} onClick={toggle}>
+        <span className={styles.activityLabel}>Activity</span>
+        <span className={styles.activityMeta}>{activityMeta(turn)}</span>
+      </summary>
+      <div className={styles.activityBody}>
+        <PlanList plan={turn.plan} />
+        <ActivitySteps chips={turn.chips} />
+      </div>
+    </details>
   );
 }
 
-/** The subagent-activity chips, in start order (running → done). */
-function ActivityChips({ turn }: { turn: TurnState }) {
-  if (turn.chips.length === 0) return null;
+/** The collapsed fold's one-line census, so the user knows what is inside before
+ *  opening it: how far the observed steps have got, or — before the first step
+ *  starts — how many the planner intends. */
+function activityMeta(turn: TurnState): string {
+  const total = turn.chips.length;
+  if (total === 0) {
+    const planned = turn.plan?.steps.length ?? 0;
+    return planned === 1 ? "1 planned step" : `${planned} planned steps`;
+  }
+  const done = turn.chips.filter((c) => c.done).length;
+  if (done < total) return `${done} of ${total} steps`;
+  return total === 1 ? "1 step" : `${total} steps`;
+}
+
+/** The planner's plan, inside the fold (a replan supersedes the prior plan). */
+function PlanList({ plan }: { plan: TurnState["plan"] }) {
+  if (!plan) return null;
   return (
-    <div className={styles.chips}>
-      {turn.chips.map((c) => (
-        <span
-          key={c.index}
-          className={`${styles.chip} ${c.done ? styles.chipDone : styles.chipRunning}`}
-          title={c.summary}
-        >
-          {c.done ? "✓" : "▸"} {roleLabel(c.role)}
-          {c.instruction ? `: ${c.instruction}` : ""}
-        </span>
-      ))}
+    <div className={styles.plan}>
+      <p className={styles.activityCaption}>{plan.round > 0 ? "Revised plan" : "Plan"}</p>
+      <ol className={styles.planSteps}>
+        {plan.steps.map((s, i) => (
+          <li key={i} className={styles.planStep}>
+            <span className={styles.activityRole}>{roleLabel(s.role)}</span> {s.instruction}
+          </li>
+        ))}
+      </ol>
     </div>
+  );
+}
+
+/** The subagent steps, in start order (running → done), each with its full observed
+ *  result rendered as markdown through the same renderer the answer uses. A step
+ *  that finished with nothing observed says so rather than leaving a blank
+ *  ([NFR-CC-04]); the status glyph is `aria-hidden` and paired with a text
+ *  equivalent, so the state never rides on colour alone. */
+function ActivitySteps({ chips }: { chips: TurnState["chips"] }) {
+  if (chips.length === 0) return null;
+  return (
+    <ol className={styles.activitySteps}>
+      {chips.map((c) => (
+        <li key={c.index} className={styles.activityStep}>
+          <p className={styles.activityStepHead}>
+            <span
+              className={c.done ? styles.activityDone : styles.activityRunning}
+              aria-hidden="true"
+            >
+              {c.done ? "✓" : "▸"}
+            </span>
+            <span className="sr-only">{c.done ? "done:" : "running:"}</span>
+            <span className={styles.activityRole}>{roleLabel(c.role)}</span>
+            {c.instruction ? (
+              <span className={styles.activityInstruction}>{c.instruction}</span>
+            ) : null}
+          </p>
+          {c.summary ? (
+            <div className={styles.activityResult}>
+              <MarkdownAnswer text={c.summary} />
+            </div>
+          ) : c.done ? (
+            <p className={styles.activityEmpty}>This step reported no result.</p>
+          ) : null}
+        </li>
+      ))}
+    </ol>
   );
 }
 

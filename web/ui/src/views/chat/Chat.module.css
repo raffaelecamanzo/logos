@@ -296,50 +296,129 @@
   gap: var(--space-3);
 }
 
-/* ── Plan ─────────────────────────────────────────────────────────────────── */
-.plan {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
+/* ── Activity disclosure (S-301, FR-UI-31) ───────────────────────────────────
+   ONE native <details> fold holding the plan AND every subagent step with its
+   full observed result as rendered markdown — replacing the separate plan list
+   and the pill-plus-native-hover-tooltip pair. It is context, not the answer, so
+   it stays quiet: a hairline-bordered block with no fill of its own, leaving the
+   finalized answer the loudest thing in the turn. The keyboard focus ring on the
+   summary is the global :focus-visible ring (`styles/base.css`). */
+.activity {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  padding: var(--space-2) var(--space-3);
 }
-.planCaption {
+/* Deliberately NOT `display: flex`: changing a summary's display drops its native
+   disclosure marker (the triangle that says "this opens"), and the fold's whole
+   point is that the activity is reachable. The children are inline instead, spaced
+   by a margin. */
+.activitySummary {
+  cursor: pointer;
   font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
   color: var(--text-2);
 }
-.planStep {
-  font-size: var(--text-sm);
+.activityLabel {
   color: var(--text-1);
-  padding-left: var(--space-3);
 }
-
-/* ── Subagent-activity chips ──────────────────────────────────────────────── */
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-.chip {
+/* The census reads as data, not as a section label: mono, and out of the
+   summary's uppercase label voice. */
+.activityMeta {
+  margin-left: var(--space-2);
   font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--border-subtle);
-  background: var(--surface-2);
+  font-weight: var(--weight-regular);
+  letter-spacing: normal;
+  text-transform: none;
   color: var(--text-2);
 }
-.chipRunning {
-  border-color: var(--color-accent-warm);
+.activityBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-top: var(--space-3);
+}
+.activityCaption {
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+/* ── Plan (inside the fold) ───────────────────────────────────────────────── */
+.plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+/* A real numbered list: the plan is ordered, and the markers carry that for free.
+   Left as a block list (not a flex column) so the ::marker renders in every
+   browser; step spacing comes from the item margin instead. */
+.planSteps {
+  margin: 0;
+  padding-left: var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.planStep {
+  margin-block: var(--space-1);
+}
+
+/* ── Subagent steps (inside the fold) ─────────────────────────────────────── */
+.activitySteps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+/* Each step is a rule-marked run: the hairline on the left ties a possibly long
+   markdown result back to the head it belongs to. */
+.activityStep {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border-subtle);
+}
+.activityStepHead {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--text-sm);
+}
+.activityRole {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
   color: var(--text-1);
 }
-.chipDone {
-  border-color: var(--color-pass);
+.activityInstruction {
+  color: var(--text-2);
+}
+/* The status glyph. Shape (▸ vs ✓) carries the state as well as hue, and an
+   sr-only text equivalent sits beside it, so neither colour nor sight is the sole
+   channel. */
+.activityRunning {
+  color: var(--color-accent-warm);
+}
+.activityDone {
+  color: var(--color-pass);
+}
+.activityResult {
+  font-size: var(--text-sm);
   color: var(--text-1);
+}
+.activityEmpty {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
 }
 
 /* ── Answer ───────────────────────────────────────────────────────────────── */
