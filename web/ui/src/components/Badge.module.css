@@ -27,7 +27,7 @@
   color: var(--ink-on-warm);
 }
 
-/* green — near-black ink on green (5.7:1). */
+/* green — near-black ink on green (5.42:1). */
 .green {
   background: var(--so-green);
   color: var(--ink-on-warm);
