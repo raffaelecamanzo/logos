@@ -657,6 +657,13 @@ fn color_token(body: &str) -> Option<String> {
 /// body. A declaration that is not a `var(…)` (a keyword, or a literal) is skipped
 /// rather than ending the scan, so a rule that declares a fallback before its token
 /// — `color: inherit; color: var(--text-1)` — still resolves.
+///
+/// The value must be a single unadorned `var(…)`: a SHORTHAND that merely contains
+/// one (`background: var(--x) no-repeat`) is skipped, not parsed. That never came up
+/// while this only read `color`, which is never a shorthand, but `background` is —
+/// so a caller that starts matching compound backgrounds must widen this first. It
+/// fails loudly rather than silently (both call sites `panic!` on `None`), so the
+/// failure mode is a confusing message, never a wrong token measured as if right.
 fn var_token(body: &str, property: &str) -> Option<String> {
     for decl in body.split(';') {
         let Some((name, value)) = decl.split_once(':') else { continue };
