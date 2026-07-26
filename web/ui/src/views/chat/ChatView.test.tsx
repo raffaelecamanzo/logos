@@ -1142,6 +1142,27 @@ describe("ChatView — the Activity disclosure (S-301, FR-UI-31)", () => {
     expect(fold(container)!.open).toBe(true);
   });
 
+  it("renders no fold for a plan that carries zero steps", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    // `applyFrame` guards a malformed `steps` into `[]` rather than dropping the
+    // frame, so `turn.plan` is PRESENT but carries nothing. Testing for the plan
+    // object would open a fold onto a caption and an empty list — an empty Activity
+    // fold, which the AC forbids.
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([
+        'event: plan\ndata: {"round":0,"steps":"not-an-array"}\n\n',
+        'event: final_answer\ndata: {"answer":"answered anyway"}\n\n',
+      ]),
+    );
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "q");
+    expect(await screen.findByText("answered anyway")).toBeInTheDocument();
+    expect(fold(container)).toBeNull();
+    expect(screen.queryByText("Activity")).not.toBeInTheDocument();
+  });
+
   it("leaves the fold open when the user stops a turn before any answer arrived", async () => {
     const user = userEvent.setup();
     mockFetchConfig.mockResolvedValue(configuredModel());

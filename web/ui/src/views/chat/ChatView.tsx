@@ -284,7 +284,10 @@ function AssistantMessage() {
  *
  * A turn with neither a plan nor a step renders NOTHING: the plan/activity
  * side-channel is ephemeral SSE and is never persisted, so a restored answer-only
- * turn must not grow an empty fold.
+ * turn must not grow an empty fold. The gate counts plan STEPS rather than testing
+ * for a plan object, because a malformed `plan` frame is reduced to a present
+ * plan with zero steps (`applyFrame` guards a non-array `steps` into `[]`) — which
+ * would otherwise open onto a caption and an empty list.
  *
  * This is presentation only — it reads the same `TurnState` the reducer already
  * folded; the SSE contract, the orchestrator, and the budget tree are untouched.
@@ -300,7 +303,7 @@ function ActivityDisclosure({ turn }: { turn: TurnState }) {
     setUserOpen(!open);
   };
 
-  if (!turn.plan && turn.chips.length === 0) return null;
+  if (planStepCount(turn.plan) === 0 && turn.chips.length === 0) return null;
   return (
     <details className={styles.activity} open={open}>
       <summary className={styles.activitySummary} onClick={toggle}>
@@ -315,13 +318,19 @@ function ActivityDisclosure({ turn }: { turn: TurnState }) {
   );
 }
 
+/** How many steps a plan actually carries — `0` for no plan AND for a malformed
+ *  plan the reducer guarded into zero steps, which the fold treats alike. */
+function planStepCount(plan: TurnState["plan"]): number {
+  return plan?.steps.length ?? 0;
+}
+
 /** The collapsed fold's one-line census, so the user knows what is inside before
  *  opening it: how far the observed steps have got, or — before the first step
  *  starts — how many the planner intends. */
 function activityMeta(turn: TurnState): string {
   const total = turn.chips.length;
   if (total === 0) {
-    const planned = turn.plan?.steps.length ?? 0;
+    const planned = planStepCount(turn.plan);
     return planned === 1 ? "1 planned step" : `${planned} planned steps`;
   }
   const done = turn.chips.filter((c) => c.done).length;
@@ -329,9 +338,10 @@ function activityMeta(turn: TurnState): string {
   return total === 1 ? "1 step" : `${total} steps`;
 }
 
-/** The planner's plan, inside the fold (a replan supersedes the prior plan). */
+/** The planner's plan, inside the fold (a replan supersedes the prior plan). A plan
+ *  with no steps renders nothing rather than a caption over an empty list. */
 function PlanList({ plan }: { plan: TurnState["plan"] }) {
-  if (!plan) return null;
+  if (!plan || plan.steps.length === 0) return null;
   return (
     <div className={styles.plan}>
       <p className={styles.activityCaption}>{plan.round > 0 ? "Revised plan" : "Plan"}</p>
