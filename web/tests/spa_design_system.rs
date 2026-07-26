@@ -504,7 +504,12 @@ fn chat_transcript_text_on_the_page_surface_clears_wcag_aa_in_both_themes() {
     let base = declarations(&block_after(&tokens, ":root"));
     let light = declarations(&block_after(&tokens, ":root[data-theme=\"light\"]"));
 
-    for selector in [".halt, .error", ".markdown a"] {
+    // Every rule in the transcript that declares its own ink. The Activity glyphs
+    // (S-301) are here because they were the sprint's near-miss: added INSIDE the
+    // unfilled column a story after this invariant was established, they took the
+    // signal hues as `color:` — `--color-pass` is 2.99:1 on the light page surface,
+    // under even the 3:1 non-text floor. A signal hue belongs on a fill or an edge.
+    for selector in [".halt, .error", ".markdown a", ".activityRunning", ".activityDone"] {
         let token = color_token(&rule_body(&css, selector))
             .unwrap_or_else(|| panic!("`{selector}` declares a `color: var(--…)`"));
         for (theme, map) in [

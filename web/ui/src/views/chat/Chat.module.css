@@ -402,14 +402,23 @@
 .activityInstruction {
   color: var(--text-2);
 }
-/* The status glyph. Shape (▸ vs ✓) carries the state as well as hue, and an
-   sr-only text equivalent sits beside it, so neither colour nor sight is the sole
-   channel. */
+/* The status glyph. Shape (▸ vs ✓) carries the state, an sr-only text equivalent
+   sits beside it, and the ink weight separates the two — so neither colour nor
+   sight is the sole channel.
+
+   The ink is NOT the signal hue, for the reason S-300 established one section
+   below: the fold has no fill of its own, so this glyph renders straight onto
+   `--surface-0`, where the signal hues do not clear AA as text — `--color-pass`
+   is 2.99:1 there in the light theme (below even the 3:1 non-text floor) and
+   `--color-accent-warm` is 3.48:1. Nowhere else in the SPA is a signal hue used
+   as `color:`; it is a fill (`Badge`, `ScoreBar`) or a border edge (`Callout`,
+   `Toast`, `.halt`/`.error`), both of which are contrast-guarded as affordances.
+   Locked by `spa_design_system::chat_transcript_text_on_the_page_surface_…`. */
 .activityRunning {
-  color: var(--color-accent-warm);
+  color: var(--text-2);
 }
 .activityDone {
-  color: var(--color-pass);
+  color: var(--text-1);
 }
 .activityResult {
   font-size: var(--text-sm);
