@@ -520,15 +520,21 @@ fn rule_body(css: &str, selector: &str) -> String {
         .unwrap_or_else(|| panic!("rule `{selector}` not found in the stylesheet"))
 }
 
-/// The `--token` named by the first `color: var(--token)` declaration in a rule body.
+/// The `--token` named by the first `color: var(--token)` declaration in a rule
+/// body. A `color:` declaration that is not a `var(…)` (a keyword, or a literal)
+/// is skipped rather than ending the scan, so a rule that declares a fallback
+/// before its token — `color: inherit; color: var(--text-1)` — still resolves.
 fn color_token(body: &str) -> Option<String> {
     for decl in body.split(';') {
         let Some((name, value)) = decl.split_once(':') else { continue };
         if name.trim() != "color" {
             continue;
         }
-        let inner = value.trim().strip_prefix("var(")?.strip_suffix(')')?;
-        return Some(inner.split(',').next()?.trim().to_string());
+        let Some(inner) = value.trim().strip_prefix("var(").and_then(|v| v.strip_suffix(')'))
+        else {
+            continue;
+        };
+        return inner.split(',').next().map(|n| n.trim().to_string());
     }
     None
 }
