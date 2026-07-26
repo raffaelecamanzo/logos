@@ -402,6 +402,59 @@ fn chat_assistant_turn_carries_no_card_chrome() {
     }
 }
 
+/// The chat Mermaid viewer's zoom ladder is CSS, not an inline transform (S-302,
+/// [FR-UI-32], NFR-SE-06): the served `default-src 'self'` policy has no `style-src`
+/// escape hatch, so a `style="transform: scale(…)"` attribute would be blocked
+/// exactly as Mermaid's own injected `<style>` is.
+///
+/// This lives here rather than in Vitest because the SPA tests run with `css: false`,
+/// where the CSS-module proxy fabricates ANY key it is asked for — so a component
+/// asking for a `.zoomNN` class that does not exist is unfalsifiable there. Reading
+/// the stylesheet is the only way to prove each rung actually carries a scale.
+#[test]
+fn chat_mermaid_zoom_ladder_is_declared_as_css_classes() {
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    // Every rung the component can select must exist and scale.
+    for step in [50, 67, 80, 100, 125, 150, 200, 250, 300] {
+        let body = rule_body(&css, &format!(".zoom{step}"));
+        assert!(
+            body.contains("transform:") && body.contains("scale("),
+            ".zoom{step} must carry a `transform: scale(...)` — the zoom ladder is \
+             CSS-only because an inline style attribute is CSP-blocked (NFR-SE-06)",
+        );
+    }
+    // Distinct rungs must scale DIFFERENTLY, or zoom ships dead while every test
+    // that only reads the percent label stays green.
+    let scales: std::collections::BTreeSet<String> = [50, 67, 80, 100, 125, 150, 200, 250, 300]
+        .iter()
+        .map(|s| rule_body(&css, &format!(".zoom{s}")).replace(char::is_whitespace, ""))
+        .collect();
+    assert_eq!(scales.len(), 9, "each zoom rung must declare its own distinct scale");
+}
+
+/// The chat Mermaid fallback must carry the label-centring rule, not just colours
+/// (S-302, CR-034/S-196). Under the self-only CSP Mermaid's injected `<style>` is
+/// stripped, so `getBBox()` collapses during measurement and the centring translate
+/// is never applied — labels stay left-anchored and overflow their node boxes. The
+/// wiki reader learned this the hard way; the chat viewer runs the same bundle under
+/// the same policy, so it needs the same rule.
+#[test]
+fn chat_mermaid_fallback_centers_node_labels_like_the_wiki() {
+    let chat = strip_comments(&read("src/views/chat/Chat.module.css"));
+    assert!(
+        chat.contains("text-anchor: middle"),
+        "Chat.module.css must set `text-anchor: middle` on Mermaid node labels — \
+         without it, CSP-stripped measurement leaves labels overflowing their boxes",
+    );
+    // Pin it to the node-label selectors specifically, not just any occurrence.
+    for selector in [".mermaid .node text", ".mermaid .node tspan"] {
+        assert!(
+            chat.contains(selector),
+            "the chat Mermaid fallback must target `{selector}` (mirrors WikiView.module.css)",
+        );
+    }
+}
+
 #[test]
 fn chat_roles_share_one_centered_readable_measure() {
     let css = strip_comments(&read("src/views/chat/Chat.module.css"));
