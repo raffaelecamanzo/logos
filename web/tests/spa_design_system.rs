@@ -441,18 +441,20 @@ fn chat_mermaid_zoom_ladder_is_declared_as_css_classes() {
 #[test]
 fn chat_mermaid_fallback_centers_node_labels_like_the_wiki() {
     let chat = strip_comments(&read("src/views/chat/Chat.module.css"));
-    assert!(
-        chat.contains("text-anchor: middle"),
-        "Chat.module.css must set `text-anchor: middle` on Mermaid node labels — \
-         without it, CSP-stripped measurement leaves labels overflowing their boxes",
+    // Exact-match the RULE, the way the zoom-ladder guard above does: two
+    // independent `contains` checks over the whole file would also pass with the
+    // centring on some unrelated selector and the node-label selectors carrying
+    // something else — which is the very drift this guard exists to catch.
+    let body = rule_body(
+        &chat,
+        ".mermaidScale :global(.mermaid .node text), .mermaidScale :global(.mermaid .node tspan)",
     );
-    // Pin it to the node-label selectors specifically, not just any occurrence.
-    for selector in [".mermaid .node text", ".mermaid .node tspan"] {
-        assert!(
-            chat.contains(selector),
-            "the chat Mermaid fallback must target `{selector}` (mirrors WikiView.module.css)",
-        );
-    }
+    assert!(
+        body.contains("text-anchor: middle"),
+        "the chat Mermaid fallback must set `text-anchor: middle` on the node-label \
+         selectors themselves (mirrors WikiView.module.css) — without it, CSP-stripped \
+         measurement leaves labels overflowing their boxes",
+    );
 }
 
 #[test]
