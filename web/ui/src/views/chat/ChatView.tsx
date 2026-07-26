@@ -350,7 +350,7 @@ function activityMeta(turn: TurnState): string {
 /** The planner's plan, inside the fold (a replan supersedes the prior plan). A plan
  *  with no steps renders nothing rather than a caption over an empty list. */
 function PlanList({ plan }: { plan: TurnState["plan"] }) {
-  if (!plan || plan.steps.length === 0) return null;
+  if (!plan || planStepCount(plan) === 0) return null;
   return (
     <div className={styles.plan}>
       <p className={styles.activityCaption}>{plan.round > 0 ? "Revised plan" : "Plan"}</p>
