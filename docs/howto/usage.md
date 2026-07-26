@@ -795,7 +795,10 @@ that streams the turn as Server-Sent Events over the unchanged intent-guarded
 per-turn memory are all **untouched** — the surface is rebuilt on assistant-ui
 through a **custom external-store runtime adapter** over the existing SSE client,
 so Logos keeps owning its own message array and renders the planner side-channel
-(plan list, activity chips, budget-halt) as custom components. A **planner**
+(the **Activity** disclosure, budget-halt) as custom components. Both roles sit in
+one centred conversation column at a fixed readable measure — the assistant turn is
+a flat, full-width block with no card fill, and your own turns are right-aligned
+bubbles inside that same column. A **planner**
 decomposes the question, dispatches
 specialized read-only **subagents** over the existing Logos tools, and streams
 back a synthesized answer:
@@ -834,12 +837,26 @@ first turn, gitignored, never in the default binary).
    you click _Start chatting_** to acknowledge — the acknowledgement persists, so
    you grant it once.
 4. **Ask a question.** Type into the composer at the bottom and **Send**. The
-   answer streams in over SSE: the planner's **plan** appears first (a list of
-   steps), then a **subagent-activity chip** per step (running → done, each naming
-   its role), then the synthesized **answer** rendered token-by-token as it
-   arrives. The answer renders as **GitHub-flavoured Markdown** — headings, lists,
+   answer streams in over SSE. The planner's plan and every subagent step live in
+   one **Activity** disclosure above the answer — a native fold that is **open
+   while the turn streams** and **auto-collapses once the answer is finalized**,
+   leaving a one-line summary with a census (`3 steps`). Re-open it and it stays
+   open for the rest of that turn. Expanded, it shows the numbered plan and each
+   step's role, instruction, and **full observed result rendered as markdown** —
+   the grounding is readable in place rather than hidden behind a hover tooltip.
+   A step still running is marked `▸`, a finished one `✓`, each as a small colour
+   chip with a screen-reader text equivalent beside it, so the state never rides
+   on colour alone. A turn with neither a plan nor any activity — a restored
+   answer-only turn, for instance — shows **no** Activity fold at all. A turn you
+   **Stop** before any answer arrives keeps its fold open, as the honest record of
+   how far it got.
+
+   The synthesized **answer** then renders token-by-token as
+   **GitHub-flavoured Markdown** — headings, lists,
    tables, and **fenced code blocks**, each block carrying a **copy** control (the
-   markdown is built as an escaped React tree, no raw HTML, CSP-clean). While a
+   markdown is built as an escaped React tree, no raw HTML, CSP-clean). A
+   ` ```mermaid ` fence renders as an **interactive diagram** rather than source —
+   see [Mermaid diagrams in chat](#mermaid-diagrams-in-chat) below. While a
    turn streams you can **Stop** it (the in-flight request is aborted — and is also
    aborted automatically if you leave the Chat tab mid-stream); a finished turn
    offers **Copy** (the whole answer) and **Regenerate** (drops the prior assistant
@@ -880,6 +897,34 @@ faulted persists no assistant message, so the restored transcript never shows an
 answer the assistant did not give. The ephemeral plan / subagent-activity side-channel
 (streamed live over SSE) is not part of the durable transcript — a restored assistant
 turn shows the answer with **Copy**/**Regenerate**, not the intermediate step chatter.
+This is also why a restored turn grows no empty **Activity** fold: there is no
+side-channel left to show, so none is rendered.
+
+#### Mermaid diagrams in chat
+
+A ` ```mermaid ` fence in an answer renders as a **visual diagram**, not as source.
+It reuses the same vendored, embedded offline bundle and theme-aware render seam as
+the Wiki tab — **no new dependency, no external origin, and the self-only CSP is
+unchanged** — so it works fully offline. Because the answer body and the Activity
+step results go through one markdown renderer, diagrams render on **both** surfaces.
+
+Each diagram carries:
+
+- **Zoom in / out / reset.** Zoom is a CSS-class ladder rather than an inline
+  `style` attribute, because the served policy is `default-src 'self'` with no
+  `style-src` override — an inline transform would be blocked exactly as Mermaid's
+  own injected `<style>` is.
+- **A Diagram / Source toggle.** Flip to the raw fence source and back.
+- **Copy** — copies the **raw fence source** in *both* modes, matching the copy
+  control on ordinary fenced code blocks.
+
+Diagram colours follow the app's light/dark toggle through
+`themeVariables`, with a token-driven CSS fallback for the rules the CSP strips.
+If the bundle is unavailable or the diagram does not parse, the **escaped source
+stays visible** with an explanatory note — never a blank space and never a silent
+failure ([FR-UI-32](../specs/requirements/FR-UI-32.md)).
+
+Non-mermaid code blocks are unaffected and keep their existing copy control.
 
 Every route is **read-only except the explicit, intent-guarded mutating
 routes**: the config-write/apply routes (`/config/save`, `/config/apply`,
