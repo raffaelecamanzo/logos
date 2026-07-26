@@ -1,5 +1,6 @@
 /*
- * ChatView (S-200, CR-051, FR-UI-18, FR-UI-19, FR-UI-20, FR-UI-24, ADR-45) — the
+ * ChatView (S-200, S-300, CR-051, CR-089, FR-UI-18, FR-UI-19, FR-UI-20, FR-UI-24,
+ * FR-UI-31, ADR-45) — the
  * Chat tab rebuilt on **assistant-ui** (`@assistant-ui/react`) over a custom
  * runtime adapter on the UNCHANGED intent-guarded SSE stream (`chatRuntime.tsx`).
  *
@@ -16,6 +17,13 @@
  *     rendered verbatim from the SSE `error` frame), never a fabricated answer
  *     ([NFR-CC-04]),
  *   - the answer as streamed markdown with code blocks (`MarkdownAnswer.tsx`).
+ *
+ * S-300 ([FR-UI-31]) realigned the transcript to the base assistant-ui column
+ * grammar: both roles now sit in ONE centred readable measure — the assistant
+ * turn a flat full-width left-aligned block (no card fill, no red top rule, no
+ * shadow), the user turn a bubble right-aligned inside that same column. That is
+ * a presentation change only; the SSE contract, the runtime adapter, and the
+ * orchestrator are untouched.
  *
  * Everything renders through the S-193 design tokens (`Chat.module.css`); no
  * inline `<style>`/`<script>`, no CSS-in-JS, so the byte-identical self-only CSP
@@ -200,19 +208,26 @@ function EmptyHint({ chat }: { chat: ChatPolicy }) {
   );
 }
 
-/** A user turn: the message text, right-aligned. */
+/** A user turn: the message text in a bubble hugging the RIGHT edge of the shared
+ *  conversation column (S-300, [FR-UI-31]). The root spans the column measure so
+ *  both roles share one alignment line; the bubble is the inner element, so it
+ *  right-aligns within the column rather than against the viewport. */
 function UserMessage() {
   return (
     <MessagePrimitive.Root className={styles.user}>
-      <MessagePrimitive.Parts />
+      <div className={styles.userBubble}>
+        <MessagePrimitive.Parts />
+      </div>
     </MessagePrimitive.Root>
   );
 }
 
 /** An assistant turn: the plan, the subagent-activity chips, the streamed markdown
- *  answer, an honest halt or error, and the copy/regenerate action bar. The folded
- *  turn rides on `metadata.custom.turn`; data is rendered as React-escaped text or
- *  through `react-markdown` (which never injects raw HTML). */
+ *  answer, an honest halt or error, and the copy/regenerate action bar. A
+ *  full-width block flush with the LEFT edge of the same column the user turn
+ *  sits in — not a card (S-300, [FR-UI-31]). The folded turn rides on
+ *  `metadata.custom.turn`; data is rendered as React-escaped text or through
+ *  `react-markdown` (which never injects raw HTML). */
 function AssistantMessage() {
   const turn = useMessage((m) => m.metadata.custom.turn as TurnState | undefined);
   if (!turn) return null;
