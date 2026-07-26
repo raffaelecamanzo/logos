@@ -379,7 +379,170 @@ fn theme_bootstrap_is_an_external_classic_head_script() {
     assert!(!js.contains("eval("), "uses no eval (CSP)");
 }
 
+// ── 8. The chat transcript is one aligned conversation column (S-300) ─────────
+//
+// [FR-UI-31] restyled the transcript to the base assistant-ui grammar. The
+// invariants below are pure CSS, and the SPA's Vitest run disables CSS entirely
+// (`css: false` — CSS Modules resolve to empty objects, so class names never
+// reach the jsdom DOM), which makes the authored stylesheet the only place the
+// contract can be checked without a headless browser — the same reasoning that
+// puts the token/contrast checks above in this file.
+
+#[test]
+fn chat_assistant_turn_carries_no_card_chrome() {
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    let assistant = rule_body(&css, ".assistant");
+    for banned in ["box-shadow", "border-top", "background", "--card-accent"] {
+        assert!(
+            !assistant.contains(banned),
+            "the assistant turn must not re-introduce `{banned}`: it is a flat, \
+             left-aligned block in the assistant-ui column grammar, not a card \
+             (FR-UI-31)",
+        );
+    }
+}
+
+#[test]
+fn chat_roles_share_one_centered_readable_measure() {
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    // The measure is declared once, on the thread root, and inherited by the column.
+    assert!(
+        rule_body(&css, ".threadRoot").contains("--chat-measure:"),
+        "the shared conversation measure is declared on .threadRoot",
+    );
+    let column = rule_body(&css, ".empty, .user, .assistant");
+    assert!(
+        column.contains("max-width: var(--chat-measure)") && column.contains("margin-inline: auto"),
+        "the empty hint and BOTH roles are centred on the shared measure",
+    );
+    assert!(
+        rule_body(&css, ".composer").contains("max-width: var(--chat-measure)"),
+        "the composer rides the same measure, so the column is one continuous surface",
+    );
+    // Neither role escapes the column with its own alignment; the user bubble is
+    // right-aligned INSIDE the column, not against the viewport.
+    let user = rule_body(&css, ".user");
+    assert!(!user.contains("align-self"), "the user turn aligns within the column, not against it");
+    assert!(!rule_body(&css, ".assistant").contains("align-self"));
+    assert!(user.contains("justify-content: flex-end"), "the user bubble hugs the column's right edge");
+    assert!(
+        rule_body(&css, ".userBubble").contains("background: var(--surface-2)"),
+        "the bubble treatment moved to the inner .userBubble element",
+    );
+}
+
+#[test]
+fn chat_transcript_has_generous_spacing_and_viewport_padding() {
+    // With the card chrome gone, spacing is what separates one turn from the next.
+    let log = rule_body(&strip_comments(&read("src/views/chat/Chat.module.css")), ".log");
+    assert!(log.contains("gap: var(--space-6)"), "generous inter-turn spacing");
+    assert!(log.contains("padding: var(--space-5) var(--space-4)"), "increased viewport padding");
+}
+
+#[test]
+fn chat_transcript_text_on_the_page_surface_clears_wcag_aa_in_both_themes() {
+    // The realigned turn has no fill of its own, so its text renders directly on
+    // `--surface-0`. Any rule that previously leaned on the card's `--surface-1`
+    // must therefore use ink that clears the 4.5:1 AA body minimum THERE — which
+    // is why the halt/error notices and the answer links carry the signal hue on a
+    // border/underline (a 3:1 UI affordance) rather than in the text colour.
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    let tokens = strip_comments(&read("src/styles/tokens.css"));
+    let base = declarations(&block_after(&tokens, ":root"));
+    let light = declarations(&block_after(&tokens, ":root[data-theme=\"light\"]"));
+
+    for selector in [".halt, .error", ".markdown a"] {
+        let token = color_token(&rule_body(&css, selector))
+            .unwrap_or_else(|| panic!("`{selector}` declares a `color: var(--…)`"));
+        for (theme, map) in [
+            ("dark", theme_map(&base, None)),
+            ("light", theme_map(&base, Some(&light))),
+        ] {
+            let c = contrast(token_rgb(&token, &map, &base), token_rgb("--surface-0", &map, &base));
+            assert!(
+                c >= 4.5,
+                "{theme}: `{selector}` ink ({token}) is {c:.2}:1 on the page surface, below the \
+                 4.5:1 AA body minimum — the transcript has no card fill to sit on, so a signal \
+                 hue must be carried by a border/underline, not by the text colour",
+            );
+        }
+    }
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// Every top-level `selector { body }` pair in a stylesheet, selectors normalised
+/// to single-spaced form (`".empty,\n.user"` → `".empty, .user"`). Comments must
+/// already be stripped. At-rule bodies (`@media`, `@keyframes`) are returned under
+/// the at-rule's own "selector" and are not descended into — the rules asserted on
+/// above are all top-level.
+fn top_level_rules(css: &str) -> Vec<(String, String)> {
+    let bytes = css.as_bytes();
+    let mut out = Vec::new();
+    let (mut i, mut sel_start) = (0usize, 0usize);
+    while i < bytes.len() {
+        if bytes[i] != b'{' {
+            i += 1;
+            continue;
+        }
+        let selector = css[sel_start..i].split_whitespace().collect::<Vec<_>>().join(" ");
+        let body_start = i + 1;
+        let mut depth = 0i32;
+        let mut j = i;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        assert!(
+            j < bytes.len(),
+            "unterminated block for selector `{selector}` — a malformed stylesheet must fail \
+             loudly here, not be absorbed into one giant trailing rule (cf. `block_after`)",
+        );
+        out.push((selector, css[body_start..j].to_string()));
+        i = j + 1;
+        sel_start = i;
+    }
+    out
+}
+
+/// The declaration body of the rule whose FULL selector list is exactly `selector`.
+/// Exact-matching (not substring) is what keeps `.user` off `.userBubble` and the
+/// standalone `.assistant` rule off the grouped `.empty, .user, .assistant` one.
+fn rule_body(css: &str, selector: &str) -> String {
+    top_level_rules(css)
+        .into_iter()
+        .find(|(sel, _)| sel == selector)
+        .map(|(_, body)| body)
+        .unwrap_or_else(|| panic!("rule `{selector}` not found in the stylesheet"))
+}
+
+/// The `--token` named by the first `color: var(--token)` declaration in a rule
+/// body. A `color:` declaration that is not a `var(…)` (a keyword, or a literal)
+/// is skipped rather than ending the scan, so a rule that declares a fallback
+/// before its token — `color: inherit; color: var(--text-1)` — still resolves.
+fn color_token(body: &str) -> Option<String> {
+    for decl in body.split(';') {
+        let Some((name, value)) = decl.split_once(':') else { continue };
+        if name.trim() != "color" {
+            continue;
+        }
+        let Some(inner) = value.trim().strip_prefix("var(").and_then(|v| v.strip_suffix(')'))
+        else {
+            continue;
+        };
+        return inner.split(',').next().map(|n| n.trim().to_string());
+    }
+    None
+}
 
 fn collect_module_css(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };

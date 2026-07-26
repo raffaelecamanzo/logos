@@ -1,10 +1,17 @@
 /*
- * Chat view layout (S-190, S-200, FR-UI-18/19/20/24, FR-UI-23, ADR-44, ADR-45).
+ * Chat view layout (S-190, S-200, S-300, FR-UI-18/19/20/24, FR-UI-23, FR-UI-31,
+ * ADR-44, ADR-45).
  * Zero-runtime CSS Module → external <link> stylesheet (no inline <style>, no
  * CSS-in-JS), so the self-only CSP stays byte-identical. Every value is a design
  * token. The surface is now composed from assistant-ui primitives; these classes
  * skin those primitives (thread/composer/action-bar/message) plus the custom
  * plan / chips / halt / error / markdown components.
+ *
+ * S-300 ([FR-UI-31]) realigned the transcript to the base **assistant-ui column
+ * grammar**: one centred readable measure (`--chat-measure`) shared by both
+ * roles, the empty hint, and the composer; the assistant turn is a flat
+ * full-width block rather than a shadowed card with a red top rule. See the
+ * thread/log section below.
  */
 
 .view {
@@ -226,23 +233,47 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  /* The shared readable measure (S-300, FR-UI-31). Declared ONCE here and
+     inherited by the whole column, so the transcript and the composer can never
+     drift apart. ~46rem keeps a comfortable line length at --text-base rather
+     than letting an answer run the full width of a wide viewport. */
+  --chat-measure: 46rem;
 }
 .log {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  /* Generous inter-turn spacing: with the card chrome gone, the rhythm between
+     turns is what separates them, so it has to do that work on its own. */
+  gap: var(--space-6);
   max-height: 60vh;
   overflow-y: auto;
-  padding: var(--space-1);
+  padding: var(--space-5) var(--space-4);
+}
+
+/* One conversation column (S-300, FR-UI-31). Every child of the log — the empty
+   hint and BOTH roles — is centred on the same measure, so the two roles share
+   one alignment line instead of floating independently. Alignment WITHIN the
+   measure is each role's own business (see `.user` / `.assistant`). */
+.empty,
+.user,
+.assistant {
+  width: 100%;
+  max-width: var(--chat-measure);
+  margin-inline: auto;
 }
 .empty {
   color: var(--text-2);
   line-height: var(--leading-base);
-  margin: 0;
+  margin-block: 0;
 }
 
+/* The user turn: a row spanning the column, with its bubble hugging the column's
+   RIGHT edge — the transcript's only remaining bubble. */
 .user {
-  align-self: flex-end;
+  display: flex;
+  justify-content: flex-end;
+}
+.userBubble {
   max-width: 80%;
   padding: var(--space-2) var(--space-3);
   background: var(--surface-2);
@@ -252,21 +283,17 @@
   overflow-wrap: anywhere;
 }
 
+/* The assistant turn (S-300, FR-UI-31): a full-width block flush with the
+   column's LEFT edge, in the base assistant-ui grammar. The CR-051 card
+   treatment is deliberately gone — no `surface-1` fill, no 1px border, no 3px
+   `--card-accent` top rule, no `--elevation-1` shadow, no `space-5` inset — so
+   the turn reads as part of one conversation rather than as a floating card,
+   and `--so-red` is left to carry signal only. Nothing replaces it: separation
+   comes from the log's inter-turn spacing. */
 .assistant {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  /* Each response reads as a card — the documented chat grammar (frontend-design
-     §4.12: "a white card with the 3px red top rule"). Mirrors the Card component
-     exactly (surface-1, the non-removable 3px signal-red top accent, radius-1,
-     space-5 padding, elevation-1); restores the border lost in the CR-051
-     assistant-ui migration. Full-width, unlike the right-aligned user bubble. */
-  background: var(--surface-1);
-  border: 1px solid var(--border-subtle);
-  border-top: 3px solid var(--card-accent);
-  border-radius: var(--radius-1);
-  padding: var(--space-5);
-  box-shadow: var(--elevation-1);
 }
 
 /* ── Plan ─────────────────────────────────────────────────────────────────── */
@@ -376,15 +403,29 @@
     opacity: 0;
   }
 }
-.halt {
-  margin: 0;
-  color: var(--color-accent-warm);
-  font-size: var(--text-sm);
-}
+/* Honest budget-halt / provider-error notices ([FR-UI-24], [NFR-CC-04]). The
+   wording is the SSE frame's, verbatim; only the presentation changes here.
+   Dropping the card fill (S-300) put these lines directly on `--surface-0`,
+   where signal-coloured BODY text no longer clears the 4.5:1 AA minimum in
+   either theme — so the tone moves to a left signal edge (a 3:1 UI affordance)
+   and the ink to `--text-1`, which clears it.
+
+   The edge is 3px, matching `.threadConfirm` above — this view's grammar for an
+   INLINE, in-flow notice. The 4px edge belongs to the shared `Callout`
+   component (`Callout.module.css`, frontend-design §1.1), which this view uses
+   for its page-level callouts (configure-first, consent) and which these
+   in-turn notices deliberately are not. */
+.halt,
 .error {
   margin: 0;
-  color: var(--color-accent);
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--color-accent-warm);
+  color: var(--text-1);
   font-size: var(--text-sm);
+  line-height: var(--leading-base);
+}
+.error {
+  border-left-color: var(--color-accent);
 }
 
 /* ── Markdown answer (react-markdown; CSP-clean, no injected styles) ───────── */
@@ -405,8 +446,14 @@
   margin: 0 0 var(--space-2);
   line-height: var(--leading-base);
 }
+/* Answer links. On the (now unfilled) page surface `--color-accent` ink falls
+   below 4.5:1 in both themes, so the link takes full-contrast ink and the signal
+   red moves to the underline — which also stops colour being the sole cue. */
 .markdown a {
-  color: var(--color-accent);
+  color: var(--text-1);
+  text-decoration: underline;
+  text-decoration-color: var(--color-accent);
+  text-underline-offset: 2px;
 }
 .inlineCode {
   font-family: var(--font-mono);
@@ -487,6 +534,11 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  /* The composer rides the transcript's measure (S-300), so the column reads as
+     one continuous surface from the last turn down into the input. */
+  width: 100%;
+  max-width: var(--chat-measure);
+  margin-inline: auto;
 }
 .input {
   width: 100%;
