@@ -19,14 +19,24 @@ import styles from "./Chat.module.css";
 export function CopyControl({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
-    if (timer.current) clearTimeout(timer.current);
+  // The clipboard write is async, so a turn replaced by Regenerate can unmount this
+  // control between the click and the resolution — after the cleanup has already run.
+  // Without this latch the continuation would install a fresh timer nothing will ever
+  // clear, and fire state onto an unmounted component.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      if (timer.current) clearTimeout(timer.current);
+    };
   }, []);
 
   const copy = useCallback(() => {
     void navigator.clipboard
       ?.writeText(text)
       .then(() => {
+        if (!alive.current) return;
         setCopied(true);
         if (timer.current) clearTimeout(timer.current);
         timer.current = setTimeout(() => setCopied(false), 1500);
