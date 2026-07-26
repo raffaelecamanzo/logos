@@ -16,6 +16,16 @@ vi.mock("../../api/chatClient.ts", () => ({
   fetchThreadMessages: vi.fn(),
 }));
 
+// The Mermaid render seam is mocked exactly as the wiki tests mock it, so jsdom
+// never loads the 3 MB vendored UMD bundle (S-302). The per-component behaviour of
+// the viewer lives in `MermaidBlock.test.tsx`; the suites here assert only that a
+// diagram reaches BOTH surfaces that render through `MarkdownAnswer`.
+vi.mock("../wiki/mermaid.ts", () => ({
+  renderMermaidIn: vi.fn(() => Promise.resolve()),
+  VENDORED_MERMAID_URL: "/assets/vendor/mermaid.min.js",
+}));
+
+import { renderMermaidIn } from "../wiki/mermaid.ts";
 import {
   deleteChatThread,
   fetchChatConfig,
@@ -32,6 +42,7 @@ const mockStreamTurn = vi.mocked(streamChatTurn);
 const mockDeleteThread = vi.mocked(deleteChatThread);
 const mockFetchThreads = vi.mocked(fetchThreads);
 const mockFetchMessages = vi.mocked(fetchThreadMessages);
+const mockRenderMermaid = vi.mocked(renderMermaidIn);
 
 /** The rail's delete affordance for a conversation (named by its title so a
  *  multi-row list can never be mis-targeted). */
@@ -227,6 +238,62 @@ describe("ChatView — a streamed turn", () => {
     expect(writeText).toHaveBeenCalledWith("fn main() {}");
     // The control reflects the copied state.
     expect(await screen.findByRole("button", { name: "Copy code" })).toHaveTextContent("Copied");
+  });
+
+  it("renders a mermaid fence in the finalized answer as a diagram (S-302, FR-UI-32)", async () => {
+    const user = userEvent.setup();
+    // Stand in for the vendored bundle: paint an SVG into the seam's target.
+    mockRenderMermaid.mockImplementation((container: HTMLElement) => {
+      const el = container.querySelector<HTMLElement>(".mermaid");
+      if (el) {
+        el.innerHTML = "<svg><g class='node'></g></svg>";
+        el.setAttribute("data-processed", "true");
+      }
+      return Promise.resolve();
+    });
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([
+        'event: final_answer\ndata: {"answer":"Shape:\\n\\n```mermaid\\ngraph LR;\\n  a-->b\\n```\\n"}\n\n',
+      ]),
+    );
+    render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "draw it");
+
+    await waitFor(() =>
+      expect(document.querySelector(".mermaid svg")).not.toBeNull(),
+    );
+    // The diagram carries its own controls; the shared Copy control still copies the
+    // raw fence source, not the SVG.
+    expect(screen.getByRole("button", { name: "Zoom in" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show source" })).toBeInTheDocument();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    await user.click(screen.getByRole("button", { name: "Copy code" }));
+    expect(writeText).toHaveBeenCalledWith("graph LR;\n  a-->b");
+  });
+
+  it("renders a mermaid fence inside an Activity step result too (S-301 + S-302)", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([
+        'event: step_started\ndata: {"index":0,"role":"graph_navigator","instruction":"map callers"}\n\n',
+        'event: step_observed\ndata: {"index":0,"role":"graph_navigator","summary":"```mermaid\\ngraph TD;\\n  x-->y\\n```"}\n\n',
+        'event: final_answer\ndata: {"answer":"Done."}\n\n',
+      ]),
+    );
+    render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "who calls it?");
+
+    // The step result renders through the SAME MarkdownAnswer, so the diagram is
+    // drawn inside the Activity fold without a second integration point. The fold
+    // auto-collapses onto the answer, so open it to read the step.
+    await screen.findByText("Done.");
+    await user.click(screen.getByText("Activity"));
+    await waitFor(() => expect(mockRenderMermaid).toHaveBeenCalled());
+    expect(document.querySelector(".mermaid")?.textContent).toContain("graph TD;");
   });
 
   it("renders an honest halt, never a fabricated answer", async () => {

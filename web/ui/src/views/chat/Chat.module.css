@@ -588,6 +588,192 @@
   line-height: var(--leading-snug, var(--leading-base));
 }
 
+/* ── Mermaid diagram viewer (S-302, FR-UI-32, FR-WK-15) ───────────────────────
+   A ```mermaid fence renders as a diagram instead of source. The chrome is the
+   fenced-code-block chrome above (same header, same Copy control) so the two
+   block kinds read as one family; only the body differs. */
+.mermaidBlock {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  overflow: hidden;
+  background: var(--surface-2);
+}
+
+/* Zoom pair + readout, Diagram/Source toggle, Copy — one right-aligned cluster in
+   the block header. */
+.mermaidControls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.mermaidControl {
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  color: var(--text-2);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  padding: 0 var(--space-2);
+  cursor: pointer;
+}
+.mermaidControl:hover:not(:disabled) {
+  color: var(--text-1);
+  border-color: var(--color-accent);
+}
+/* An end-of-ladder step is spent, not broken — dim it and drop the pointer cue
+   rather than hiding it, so the ladder's extent stays legible. */
+.mermaidControl:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.mermaidZoom {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  min-width: 3.5ch;
+  text-align: center;
+}
+
+/* The scroll window the (possibly zoomed-past-its-bounds) diagram sits in. */
+.mermaidViewport {
+  overflow: auto;
+  padding: var(--space-3);
+  background: var(--surface-1);
+}
+
+/* Hand-rolled zoom (FR-UI-32): one class per ladder step, because the served
+   `default-src 'self'` policy (NFR-SE-06) has no `style-src` escape hatch — an
+   inline `style="transform: …"` attribute would be blocked exactly as Mermaid's
+   own injected <style> is. Origin is the top-left corner so zooming in grows into
+   the viewport's scroll area instead of clipping symmetrically. */
+.mermaidScale {
+  transform-origin: top left;
+}
+.zoom50 {
+  transform: scale(0.5);
+}
+.zoom67 {
+  transform: scale(0.67);
+}
+.zoom80 {
+  transform: scale(0.8);
+}
+.zoom100 {
+  transform: scale(1);
+}
+.zoom125 {
+  transform: scale(1.25);
+}
+.zoom150 {
+  transform: scale(1.5);
+}
+.zoom200 {
+  transform: scale(2);
+}
+.zoom250 {
+  transform: scale(2.5);
+}
+.zoom300 {
+  transform: scale(3);
+}
+
+/* Pre-render (and post-failure) fallback: the target holds the ESCAPED diagram
+   source, styled as a readable code block — never a blank (FR-UI-32 progressive
+   enhancement). `data-processed` is Mermaid's own "rendered" latch. */
+.mermaidScale :global(.mermaid:not([data-processed="true"])) {
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-base);
+  color: var(--text-2);
+}
+/* Post-render the target holds an <svg>; drop the source-text chrome. */
+.mermaidScale :global(.mermaid[data-processed="true"]) {
+  white-space: normal;
+}
+.mermaidScale :global(.mermaid svg) {
+  max-width: 100%;
+  height: auto;
+}
+
+/* The honest note that accompanies a restored source (NFR-CC-04): the answer meant
+   to draw something and the viewer says so, rather than presenting the source as
+   if that were the intent. */
+.mermaidFallback {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+
+/*
+ * CSP-safe colour fallback — the wiki's two-layer strategy (S-196, ADR-44,
+ * NFR-SE-06), applied to the chat viewer.
+ *
+ * The shared seam passes `themeVariables` so Mermaid pre-populates its per-render
+ * `<style id="mermaid-XXXX">` block with token-matched colours; in development (no
+ * CSP) that block wins on specificity. In production the self-only policy blocks
+ * it, and without a fallback the SVG falls back to black fill on black text. These
+ * external same-origin rules (a hashed <link>, CSP-safe by construction) are that
+ * fallback, and they are expressed in DESIGN TOKENS — so they follow the
+ * `data-theme` toggle automatically and no raw hex enters this module.
+ *
+ * Specificity is deliberately low (classes + element) so Mermaid's own 1-1-1
+ * (#id + class + element) still wins wherever it is allowed to load.
+ */
+
+/* Node shapes: fill = surface-1, border = border-subtle. */
+.mermaidScale :global(.mermaid .node rect),
+.mermaidScale :global(.mermaid .node circle),
+.mermaidScale :global(.mermaid .node ellipse),
+.mermaidScale :global(.mermaid .node polygon),
+.mermaidScale :global(.mermaid .node path.basic) {
+  fill: var(--surface-1);
+  stroke: var(--border-subtle);
+  stroke-width: 1px;
+}
+
+/* Node, cluster, and title labels: full-contrast ink. */
+.mermaidScale :global(.mermaid .label),
+.mermaidScale :global(.mermaid .label text),
+.mermaidScale :global(.mermaid .label span),
+.mermaidScale :global(.mermaid .cluster-label text),
+.mermaidScale :global(.mermaid .cluster-label span) {
+  fill: var(--text-1);
+  color: var(--text-1);
+}
+
+/* Edges and arrowheads: secondary ink at a light weight. `fill: none` stops a
+   curved edge path falling back to a black-filled area, and the marker variants
+   are all matched so no arrowhead is left on the SVG's black default. */
+.mermaidScale :global(.mermaid .edgePath .path),
+.mermaidScale :global(.mermaid .flowchart-link) {
+  stroke: var(--text-2);
+  stroke-width: 1.25px;
+  fill: none;
+}
+.mermaidScale :global(.mermaid .marker),
+.mermaidScale :global(.mermaid .arrowheadPath),
+.mermaidScale :global(.mermaid marker path),
+.mermaidScale :global(.mermaid defs marker path) {
+  fill: var(--text-2);
+  stroke: var(--text-2);
+  stroke-width: 1px;
+}
+
+/* Edge labels sit on the diagram surface. */
+.mermaidScale :global(.mermaid .edgeLabel) {
+  background-color: var(--surface-1);
+}
+.mermaidScale :global(.mermaid .edgeLabel rect) {
+  fill: var(--surface-1);
+}
+
+/* Cluster (sub-graph) backgrounds one step back from the nodes. */
+.mermaidScale :global(.mermaid .cluster rect) {
+  fill: var(--surface-2);
+  stroke: var(--border-subtle);
+}
+
 /* ── Per-turn action bar (copy / regenerate) ──────────────────────────────── */
 .actions {
   display: flex;
