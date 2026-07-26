@@ -1289,4 +1289,34 @@ describe("ChatView — the Activity disclosure (S-301, FR-UI-31)", () => {
     expect(summaryText(container)).toContain("1 step");
     expect(summaryText(container)).not.toContain("1 of 1");
   });
+
+  it("omits the plan caption when the fold renders but the plan is step-less", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    // The no-fold gate short-circuits on plan AND chips, so it can never reach
+    // PlanList's own guard. Here a step DID run, so the fold renders — and
+    // PlanList's guard is the only thing standing between a malformed plan frame
+    // (reduced to a PRESENT plan with zero steps) and a "Plan" caption sitting
+    // over an empty list inside an otherwise legitimate fold.
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([
+        'event: step_started\ndata: {"index":0,"role":"source_reader","instruction":"read it"}\n\n',
+        'event: step_observed\ndata: {"index":0,"role":"source_reader","summary":"read it all"}\n\n',
+        'event: plan\ndata: {"round":0,"steps":"not-an-array"}\n\n',
+        'event: final_answer\ndata: {"answer":"answered"}\n\n',
+      ]),
+    );
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "q");
+    expect(await screen.findByText("answered")).toBeInTheDocument();
+
+    const activity = fold(container)!;
+    expect(activity).not.toBeNull();
+    // The step is there…
+    expect(activity.textContent).toContain("Source-Reader");
+    expect(activity.textContent).toContain("read it all");
+    // …and the plan section is absent entirely, caption included.
+    expect(activity.textContent).not.toContain("Plan");
+  });
 });
