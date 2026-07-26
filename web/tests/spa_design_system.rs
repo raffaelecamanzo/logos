@@ -502,7 +502,12 @@ fn top_level_rules(css: &str) -> Vec<(String, String)> {
             }
             j += 1;
         }
-        out.push((selector, css[body_start..j.min(css.len())].to_string()));
+        assert!(
+            j < bytes.len(),
+            "unterminated block for selector `{selector}` — a malformed stylesheet must fail \
+             loudly here, not be absorbed into one giant trailing rule (cf. `block_after`)",
+        );
+        out.push((selector, css[body_start..j].to_string()));
         i = j + 1;
         sel_start = i;
     }
