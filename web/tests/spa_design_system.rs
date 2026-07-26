@@ -496,11 +496,16 @@ fn chat_transcript_has_generous_spacing_and_viewport_padding() {
 
 #[test]
 fn chat_transcript_text_on_the_page_surface_clears_wcag_aa_in_both_themes() {
-    // The realigned turn has no fill of its own, so its text renders directly on
-    // `--surface-0`. Any rule that previously leaned on the card's `--surface-1`
-    // must therefore use ink that clears the 4.5:1 AA body minimum THERE — which
-    // is why the halt/error notices and the answer links carry the signal hue on a
-    // border/underline (a 3:1 UI affordance) rather than in the text colour.
+    // Every rule in the transcript that declares its own ink clears the 4.5:1 AA
+    // body minimum against WHATEVER IT ACTUALLY SITS ON. That is two lists, not one,
+    // and the split is the point: the realigned turn has no fill of its own, so most
+    // of its text renders directly on `--surface-0` (list a) — which is why the
+    // halt/error notices and the answer links carry the signal hue on a
+    // border/underline (a 3:1 UI affordance) rather than in the text colour. The
+    // Activity status glyphs are the exception, because HF-1 gave them a chip fill
+    // of their own to sit on (list b); measuring THOSE against the page surface
+    // would measure a background they never touch. The chip geometry that makes
+    // list (b) legitimate is asserted separately, by the test below this one.
     let css = strip_comments(&read("src/views/chat/Chat.module.css"));
     let tokens = strip_comments(&read("src/styles/tokens.css"));
     let base = declarations(&block_after(&tokens, ":root"));
@@ -559,9 +564,17 @@ fn chat_transcript_text_on_the_page_surface_clears_wcag_aa_in_both_themes() {
         }
     }
 
-    // …and they must actually be chips. Without the `Badge` geometry a fill reads
-    // as tinted text on a stray coloured background, which is the affordance the
-    // fill/ink measurement above assumes it is checking.
+}
+
+/// The other half of the fill/ink-pair affordance the contrast guard above measures:
+/// the glyphs must actually be CHIPS. Without the `Badge` geometry a fill reads as
+/// tinted text on a stray coloured background — and the measurement above would go
+/// on passing, because a fill/ink ratio says nothing about whether the fill looks
+/// deliberate. Separate test rather than a third block up there: this is a structural
+/// assertion, not a contrast one, and a failure should say so by name.
+#[test]
+fn chat_activity_status_glyphs_carry_badge_chip_geometry() {
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
     let chip = rule_body(&css, ".activityRunning, .activityDone");
     for decl in [
         "display: inline-flex",
