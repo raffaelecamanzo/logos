@@ -1319,4 +1319,28 @@ describe("ChatView — the Activity disclosure (S-301, FR-UI-31)", () => {
     // …and the plan section is absent entirely, caption included.
     expect(activity.textContent).not.toContain("Plan");
   });
+
+  it("pairs each status glyph with a text equivalent, so state never rides on colour", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    // STREAMING_FRAMES leaves step 0 observed and step 1 running, so both states
+    // are on screen at once.
+    const pending = pendingSseResponse(STREAMING_FRAMES);
+    mockStreamTurn.mockResolvedValue(pending.response);
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "who calls it?");
+    await waitFor(() => expect(container.textContent).toContain("Synthesizer"));
+
+    const activity = fold(container)!;
+    // The glyph differs in SHAPE, not just hue — and it is decorative, so it is
+    // hidden from assistive tech…
+    const glyphs = [...activity.querySelectorAll('[aria-hidden="true"]')].map((g) => g.textContent);
+    expect(glyphs).toEqual(["✓", "▸"]);
+    // …with the state spoken as words instead ([NFR-CC-04]: an honest state, never
+    // one carried by colour alone).
+    const spoken = [...activity.querySelectorAll(".sr-only")].map((s) => s.textContent);
+    expect(spoken).toEqual(["done:", "running:"]);
+    pending.close();
+  });
 });
