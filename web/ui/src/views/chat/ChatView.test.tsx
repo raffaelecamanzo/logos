@@ -1228,4 +1228,65 @@ describe("ChatView — the Activity disclosure (S-301, FR-UI-31)", () => {
     expect(await screen.findByText("done anyway")).toBeInTheDocument();
     expect(fold(container)!.textContent).toContain("no result");
   });
+
+  // The census on the summary is the ONLY thing a collapsed fold says about its
+  // contents, and it has three shapes plus a singular/plural split. Nothing else
+  // in the suite reads it — every other test stops at the word "Activity" — so
+  // without these a reworded or mis-pluralised census ships unnoticed.
+
+  /** The collapsed row's text: the "Activity" label plus its census. */
+  function summaryText(container: HTMLElement): string {
+    return fold(container)!.querySelector("summary")!.textContent ?? "";
+  }
+
+  it("counts the PLANNED steps before the first one starts", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    const pending = pendingSseResponse([STREAMING_FRAMES[0]]); // the plan, nothing started
+    mockStreamTurn.mockResolvedValue(pending.response);
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "who calls it?");
+    await waitFor(() => expect(container.textContent).toContain("Activity"));
+
+    // No step has reported in, so the census speaks in the planner's intent.
+    expect(summaryText(container)).toContain("2 planned steps");
+    pending.close();
+  });
+
+  it("counts observed progress while the steps are still running", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    const pending = pendingSseResponse(STREAMING_FRAMES);
+    mockStreamTurn.mockResolvedValue(pending.response);
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "who calls it?");
+    await waitFor(() => expect(container.textContent).toContain("Synthesizer"));
+
+    // Two steps started, one observed — the fraction, not the total.
+    expect(summaryText(container)).toContain("1 of 2 steps");
+    pending.close();
+  });
+
+  it("drops the fraction once every step has reported, and stays singular for one", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([
+        'event: plan\ndata: {"round":0,"steps":[{"role":"source_reader","instruction":"read it"}]}\n\n',
+        'event: step_started\ndata: {"index":0,"role":"source_reader","instruction":"read it"}\n\n',
+        'event: step_observed\ndata: {"index":0,"role":"source_reader","summary":"read"}\n\n',
+        'event: final_answer\ndata: {"answer":"done"}\n\n',
+      ]),
+    );
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "q");
+    expect(await screen.findByText("done")).toBeInTheDocument();
+
+    // Everything reported, and one step is "1 step" — never "1 of 1 steps".
+    expect(summaryText(container)).toContain("1 step");
+    expect(summaryText(container)).not.toContain("1 of 1");
+  });
 });
