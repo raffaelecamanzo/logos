@@ -34,14 +34,17 @@ function target(): HTMLElement {
   return el;
 }
 
-/** Stand in for a SUCCESSFUL bundle render: replace the target's source with an
- *  SVG and set Mermaid's own `data-processed` latch, as the real bundle does. */
+/** Stand in for a SUCCESSFUL bundle render, faithfully: paint an SVG into EVERY
+ *  unprocessed `.mermaid` in the container and set Mermaid's own `data-processed`
+ *  latch — and, like the real `mermaid.run`, SKIP a node that already carries it.
+ *  Honouring the latch is what makes the component's `removeAttribute` load-bearing
+ *  in tests: without it, deleting that line would leave every test green. */
 function succeed(svg = "<svg><g class='node'></g></svg>") {
   mockRender.mockImplementation((container: HTMLElement) => {
-    const el = container.querySelector<HTMLElement>(".mermaid");
-    if (el) {
-      el.innerHTML = svg;
+    for (const el of container.querySelectorAll<HTMLElement>(".mermaid")) {
+      if (el.getAttribute("data-processed") === "true") continue;
       el.setAttribute("data-processed", "true");
+      el.innerHTML = svg;
     }
     return Promise.resolve();
   });
@@ -54,6 +57,9 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  // Restores the clipboard spies individual tests install. Safe because `beforeEach`
+  // re-installs the seam's default implementation afterwards.
+  vi.restoreAllMocks();
 });
 
 describe("MermaidBlock — the diagram branch (FR-UI-32)", () => {
@@ -108,6 +114,60 @@ describe("MermaidBlock — the diagram branch (FR-UI-32)", () => {
     render(<MarkdownAnswer text={FENCE} />);
     await waitFor(() => expect(screen.getByText(/could not be rendered/)).toBeInTheDocument());
     expect(target().textContent).toBe(DIAGRAM);
+    // Mermaid's latch must be actively CLEARED on the failure path, or the restored
+    // source keeps the rendered-state styling and can never be re-rendered.
+    expect(target().hasAttribute("data-processed")).toBe(false);
+  });
+
+  it("KEEPS a rendered diagram whose own classes merely contain 'error'", async () => {
+    // Mermaid stamps author-chosen names into the SVG: a `classDef errorNode` lands
+    // on a node's class list, and every edge carries `LS-<from> LE-<to>` built from
+    // the raw node ids — so `A --> error_handler` puts "error" in a class attribute
+    // of a perfectly good diagram. Only Mermaid's OWN error graphic counts.
+    succeed(
+      '<svg><g class="node default errorNode"><text>recover</text></g>' +
+        '<path class="flowchart-link LS-A LE-error_handler"></path></svg>',
+    );
+    render(<MarkdownAnswer text={FENCE} />);
+    await waitFor(() => expect(target().querySelector("svg")).not.toBeNull());
+    expect(screen.queryByText(/could not be rendered/)).not.toBeInTheDocument();
+    expect(target().getAttribute("data-processed")).toBe("true");
+  });
+
+  it("does not claim a render failure for an EMPTY mermaid fence", async () => {
+    render(<MarkdownAnswer text={"```mermaid\n```\n"} />);
+    // Nothing to draw and nothing to fall back on, so no render is attempted and no
+    // failure is asserted — the one shape where "source stays visible" would
+    // otherwise degenerate into a blank under a false failure note.
+    await waitFor(() => expect(screen.getByText("mermaid")).toBeInTheDocument());
+    expect(mockRender).not.toHaveBeenCalled();
+    expect(screen.queryByText(/could not be rendered/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the fallback source ESCAPED — markup in a fence never becomes DOM", async () => {
+    const hostile = 'graph LR;\n  a["<img src=x onerror=alert(1)>"]';
+    render(<MarkdownAnswer text={"```mermaid\n" + hostile + "\n```\n"} />);
+    await waitFor(() => expect(screen.getByText(/could not be rendered/)).toBeInTheDocument());
+    expect(document.querySelectorAll("img")).toHaveLength(0);
+    expect(target().textContent).toBe(hostile);
+  });
+
+  it("renders every diagram in a multi-diagram answer, each with its own zoom", async () => {
+    const user = userEvent.setup();
+    succeed();
+    render(
+      <MarkdownAnswer
+        text={"```mermaid\ngraph LR;\n  a-->b\n```\n\n```mermaid\ngraph TD;\n  x-->y\n```\n"}
+      />,
+    );
+    await waitFor(() => expect(document.querySelectorAll(".mermaid svg")).toHaveLength(2));
+
+    // Each block owns its own host and its own zoom state.
+    const zoomIns = screen.getAllByRole("button", { name: "Zoom in" });
+    expect(zoomIns).toHaveLength(2);
+    await user.click(zoomIns[0]);
+    expect(screen.getByText("125%")).toBeInTheDocument();
+    expect(screen.getByText("100%")).toBeInTheDocument();
   });
 });
 
@@ -118,18 +178,27 @@ describe("MermaidBlock — zoom, toggle, and copy (FR-UI-32)", () => {
     render(<MarkdownAnswer text={FENCE} />);
     await waitFor(() => expect(mockRender).toHaveBeenCalled());
 
+    // The readout AND the scale wrapper's class are both asserted: the label alone
+    // would stay green if every step mapped to the same class and zoom shipped dead.
+    // (A deliberate exception to this suite's "no class-name assertions" rule — the
+    // ladder's whole mechanism IS the class, since the CSP forbids an inline style.)
+    const scale = () => target().parentElement!.className;
     expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(scale()).toContain("zoom100");
     // Reset is spent at the default step.
     expect(screen.getByRole("button", { name: "Reset zoom" })).toBeDisabled();
 
     await user.click(screen.getByRole("button", { name: "Zoom in" }));
     expect(screen.getByText("125%")).toBeInTheDocument();
+    expect(scale()).toContain("zoom125");
     await user.click(screen.getByRole("button", { name: "Zoom out" }));
     await user.click(screen.getByRole("button", { name: "Zoom out" }));
     expect(screen.getByText("80%")).toBeInTheDocument();
+    expect(scale()).toContain("zoom80");
 
     await user.click(screen.getByRole("button", { name: "Reset zoom" }));
     expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(scale()).toContain("zoom100");
     expect(screen.getByRole("button", { name: "Reset zoom" })).toBeDisabled();
   });
 
@@ -203,34 +272,46 @@ describe("MermaidBlock — zoom, toggle, and copy (FR-UI-32)", () => {
 });
 
 describe("MermaidBlock — a fence that arrives by streaming deltas", () => {
-  it("shows the partial source, then the diagram once the fence completes", async () => {
+  it("shows the growing source without claiming failure, then renders once it settles", async () => {
     // An answer streams token by token, so react-markdown hands the mermaid branch a
     // GROWING fence: remark treats the unterminated ``` as a code block with whatever
-    // has arrived. The viewer must not blank, and must not stack renders.
+    // has arrived. Each partial is unparseable, so rendering every delta would flash
+    // "could not be rendered" over a diagram that is merely unfinished — and queue one
+    // full mermaid.run() per token. The deltas must coalesce into ONE render.
     succeed();
     const { rerender } = render(<MarkdownAnswer text={"```mermaid\ngraph LR;"} />);
-    await waitFor(() => expect(mockRender).toHaveBeenCalledTimes(1));
-    expect(target()).toBeInTheDocument();
+    // Mid-stream: the partial source is on screen, escaped, with no failure claim.
+    expect(target().textContent).toBe("graph LR;");
+    expect(screen.queryByText(/could not be rendered/)).not.toBeInTheDocument();
 
     rerender(<MarkdownAnswer text={"```mermaid\ngraph LR;\n  a-->b"} />);
-    await waitFor(() => expect(mockRender).toHaveBeenCalledTimes(2));
-
+    expect(target().textContent).toBe("graph LR;\n  a-->b");
     rerender(<MarkdownAnswer text={FENCE} />);
-    await waitFor(() => expect(mockRender).toHaveBeenCalledTimes(3));
-    // Settled on the complete diagram — one SVG, not one per delta.
+
+    await waitFor(() => expect(target().querySelector("svg")).not.toBeNull());
+    // One render for the settled text — not one per delta — and one SVG, not a stack.
+    expect(mockRender).toHaveBeenCalledTimes(1);
     expect(target().querySelectorAll("svg")).toHaveLength(1);
   });
 
-  it("keeps the newest source when a later delta cannot render", async () => {
-    // The seam resolving out of order must not leave a stale diagram claiming to be
-    // the answer: the source restored is always the CURRENT fence text.
-    succeed();
+  it("keeps the newest source when an EARLIER attempt resolves last", async () => {
+    // A genuinely out-of-order resolution: the first attempt is held open, a newer
+    // fence arrives, and only then does the stale attempt resolve. Its continuation is
+    // cancelled, so it must neither paint nor overwrite the newer source.
+    let releaseFirst = () => {};
+    mockRender.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (releaseFirst = () => resolve())),
+    );
     const { rerender } = render(<MarkdownAnswer text={FENCE} />);
-    await waitFor(() => expect(target().querySelector("svg")).not.toBeNull());
+    await waitFor(() => expect(mockRender).toHaveBeenCalledTimes(1));
 
-    mockRender.mockImplementation(() => Promise.resolve());
-    rerender(<MarkdownAnswer text={"```mermaid\ngraph LR;\n  a-->b-->c"} />);
-    await waitFor(() => expect(target().textContent).toBe("graph LR;\n  a-->b-->c"));
+    const newer = "graph LR;\n  a-->b-->c";
+    rerender(<MarkdownAnswer text={"```mermaid\n" + newer + "\n```\n"} />);
+    expect(target().textContent).toBe(newer);
+
+    releaseFirst();
+    await waitFor(() => expect(mockRender).toHaveBeenCalledTimes(2));
+    expect(target().textContent).toBe(newer);
     expect(target().querySelector("svg")).toBeNull();
   });
 });
@@ -264,12 +345,38 @@ describe("MermaidBlock — theme tracking (ADR-44)", () => {
     expect(target().querySelectorAll("svg")).toHaveLength(1);
   });
 
-  it("still renders its diagram with no ThemeProvider above it", async () => {
-    // `MermaidBlock` reads the theme context OPTIONALLY — `useTheme()` would throw
-    // here, and a provider-less mount must not take the answer down with it.
-    succeed();
-    render(<MarkdownAnswer text={FENCE} />);
-    await waitFor(() => expect(target().querySelector("svg")).not.toBeNull());
+});
+
+// `MermaidBlock` reads the theme context OPTIONALLY — `useTheme()` would throw
+// outside a provider, and a provider-less mount must not take the answer down with
+// it. Every test in this file except the theme-toggle one above mounts without a
+// ThemeProvider, so that guard is already witnessed throughout.
+
+describe("CopyControl — the Copy affordance both block kinds share", () => {
+  it("returns to 'Copy' after the acknowledgement window", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    render(<MarkdownAnswer text={"```rust\nfn main() {}\n```\n"} />);
+
+    const button = screen.getByRole("button", { name: "Copy code" });
+    await user.click(button);
+    expect(button.textContent).toBe("Copied");
+    // The acknowledgement is transient (1500 ms) and must clear itself, or the
+    // control claims forever that its CURRENT text is on the clipboard. Exact text,
+    // not `toHaveTextContent`, which would match "Copied" as a substring of itself.
+    await waitFor(() => expect(button.textContent).toBe("Copy"), { timeout: 3000 });
+  });
+
+  it("stays quiet when the clipboard is blocked", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("blocked"));
+    render(<MarkdownAnswer text={"```rust\nfn main() {}\n```\n"} />);
+
+    const button = screen.getByRole("button", { name: "Copy code" });
+    await user.click(button);
+    // A blocked clipboard is not the user's problem to solve — no throw, and no
+    // false "Copied" claim for something that never reached the clipboard.
+    expect(button.textContent).toBe("Copy");
   });
 });
 

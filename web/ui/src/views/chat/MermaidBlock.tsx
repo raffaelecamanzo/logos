@@ -31,11 +31,13 @@
  *     actually happened and restores the escaped source when the render did not
  *     land ([FR-UI-32] progressive enhancement, [NFR-CC-04] honesty).
  *
- * Theming reuses the wiki's two-layer strategy verbatim ([ADR-44]): the seam's
+ * Theming reuses the wiki's two-layer strategy ([ADR-44]): the seam's
  * `themeVariables` bake design-token colours into the SVG in development, and the
  * token-driven `.mermaid*` fallback rules in `Chat.module.css` — served as a hashed
  * external `<link>`, token-only with no raw hex — supply the colours in production
- * where the CSP strips Mermaid's injected `<style>`.
+ * where the CSP strips Mermaid's injected `<style>`. That fallback must stay in step
+ * with `WikiView.module.css`: it carries the label `text-anchor` fix too, which is
+ * layout rather than colour but is stripped by the very same mechanism.
  */
 
 import { useContext, useEffect, useRef, useState } from "react";
@@ -52,18 +54,18 @@ const ZOOM_STEPS = [50, 67, 80, 100, 125, 150, 200, 250, 300] as const;
 /** Index of the 100% step — where a diagram opens and where **Reset** returns. */
 const RESET_STEP = ZOOM_STEPS.indexOf(100);
 
-/** Percent → the `Chat.module.css` class carrying that `transform: scale(...)`. */
-const ZOOM_CLASS: Record<number, string> = {
-  50: styles.zoom50,
-  67: styles.zoom67,
-  80: styles.zoom80,
-  100: styles.zoom100,
-  125: styles.zoom125,
-  150: styles.zoom150,
-  200: styles.zoom200,
-  250: styles.zoom250,
-  300: styles.zoom300,
-};
+/**
+ * How long the fence text must hold still before a render is attempted.
+ *
+ * An answer streams token by token, and per CommonMark an *unterminated*
+ * ` ```mermaid ` fence is already a `language-mermaid` code block — so this
+ * component is handed a syntactically incomplete diagram on every delta. Rendering
+ * each one would parse-fail, paint Mermaid's error graphic, and flash "could not be
+ * rendered" over a diagram that is merely unfinished, while queueing one full
+ * `mermaid.run()` per token. Letting the text settle first shows the growing source
+ * (which is honest) and renders exactly once, when the fence is whole.
+ */
+const RENDER_SETTLE_MS = 120;
 
 /**
  * Did Mermaid actually paint a diagram into `target`?
@@ -73,15 +75,20 @@ const ZOOM_CLASS: Record<number, string> = {
  * An unparseable diagram is the subtle case: Mermaid does not leave the element
  * empty, it paints its own "syntax error" bomb graphic — which is worse than the
  * source, since the source at least tells the user what the answer meant to draw.
- * Both of Mermaid's error markers are checked (the `aria-roledescription` on the
- * error SVG and its `error-icon` / `error-text` children) so either shape counts as
- * a failure.
+ *
+ * The error probe matches Mermaid's OWN graphic **exactly**: `path.error-icon` and
+ * `text.error-text` are the only two error classes the vendored bundle emits, and
+ * only on that graphic. A substring test over class attributes would also match
+ * AUTHOR-chosen names, because Mermaid stamps them into the SVG — a
+ * `classDef errorNode` lands on a node's class list, and every edge carries
+ * `LS-<from> LE-<to>` built from the raw node ids. So `A --> error_handler` alone
+ * would have condemned a perfectly good diagram to render as its own source.
  */
 function renderedCleanly(target: HTMLElement): boolean {
   const svg = target.querySelector("svg");
   if (!svg) return false;
   if (svg.getAttribute("aria-roledescription") === "error") return false;
-  return svg.querySelector('[class*="error"]') === null;
+  return svg.querySelector("path.error-icon, text.error-text") === null;
 }
 
 export function MermaidBlock({ code }: { code: string }) {
@@ -98,6 +105,9 @@ export function MermaidBlock({ code }: { code: string }) {
   // is what re-runs the render after a light/dark toggle so the new themeVariables
   // apply (ADR-44) — the same trigger `WikiPageBody` uses.
   const theme = useContext(ThemeContext)?.theme ?? null;
+  // Serializes render attempts for THIS target — see the effect for why overlapping
+  // attempts cannot simply race.
+  const inFlight = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     if (source) return;
@@ -106,24 +116,48 @@ export function MermaidBlock({ code }: { code: string }) {
     if (!host || !target) return;
     let cancelled = false;
 
-    // Seed the target with the ESCAPED source before every attempt. It is both the
-    // pre-render fallback the user reads while the bundle loads and the clean slate
-    // Mermaid needs in order to re-run — `data-processed` is its own "already
-    // rendered" latch, which a theme toggle or a streamed edit must clear.
-    target.textContent = code;
-    target.removeAttribute("data-processed");
-    setFailed(false);
-
-    void renderMermaidIn(host).then(() => {
-      if (cancelled) return;
-      if (renderedCleanly(target)) return;
+    // Seed the target with the ESCAPED source. It is both the pre-render fallback
+    // the user reads while the bundle loads and the clean slate Mermaid needs in
+    // order to re-run — `data-processed` is its own "already rendered" latch, which
+    // a theme toggle or a streamed edit must clear.
+    const seed = () => {
       target.textContent = code;
       target.removeAttribute("data-processed");
-      setFailed(true);
-    });
+    };
+    seed();
+    setFailed(false);
+
+    // An empty fence has no diagram to draw AND no source to fall back on, so the
+    // only thing a render attempt could produce is a failure note over a blank.
+    const timer = code.trim()
+      ? setTimeout(() => {
+          // Chain onto any attempt still in flight rather than racing it.
+          // `mermaid.run` SKIPS a node that already carries `data-processed`, so an
+          // overlapping second attempt returns having drawn nothing, sees no SVG,
+          // and reports failure — while the first attempt's render lands underneath
+          // it. That left a correctly rendered diagram wearing a permanent "could
+          // not be rendered" note (and, since the latch had been stripped, the
+          // source-text chrome painted over the SVG). React's StrictMode
+          // double-invokes this effect on mount, so it was not a rare interleaving.
+          inFlight.current = inFlight.current
+            .then(async () => {
+              if (cancelled) return;
+              seed();
+              await renderMermaidIn(host);
+              if (cancelled || renderedCleanly(target)) return;
+              seed();
+              setFailed(true);
+            })
+            // The seam swallows load and parse failures, but its bundle-load step
+            // sits outside that guard — keep a rejection from surfacing as an
+            // unhandled one, and keep the chain usable for the next attempt.
+            .catch(() => {});
+        }, RENDER_SETTLE_MS)
+      : undefined;
 
     return () => {
       cancelled = true;
+      if (timer !== undefined) clearTimeout(timer);
     };
   }, [code, source, theme]);
 
@@ -186,7 +220,9 @@ export function MermaidBlock({ code }: { code: string }) {
         <div className={styles.mermaidViewport} ref={hostRef}>
           {/* `mermaid` is a deliberately GLOBAL class name (not a hashed module
               class): it is the selector the shared seam scans for. */}
-          <div className={`${styles.mermaidScale} ${ZOOM_CLASS[zoom]}`}>
+          <div
+            className={`${styles.mermaidScale} ${styles[`zoom${zoom}` as keyof typeof styles]}`}
+          >
             <div className="mermaid" ref={targetRef} />
           </div>
           {failed && (
