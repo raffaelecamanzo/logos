@@ -44,6 +44,21 @@ const mockFetchThreads = vi.mocked(fetchThreads);
 const mockFetchMessages = vi.mocked(fetchThreadMessages);
 const mockRenderMermaid = vi.mocked(renderMermaidIn);
 
+/** Stand in for the vendored Mermaid bundle: paint an SVG into every unprocessed
+ *  `.mermaid` target and set Mermaid's own `data-processed` latch, skipping a target
+ *  that already carries it — as the real `mermaid.run` does. Without this, a test
+ *  asserting a "diagram" would in fact be asserting the escaped-source fallback. */
+function paintDiagrams() {
+  mockRenderMermaid.mockImplementation((container: HTMLElement) => {
+    for (const el of container.querySelectorAll<HTMLElement>(".mermaid")) {
+      if (el.getAttribute("data-processed") === "true") continue;
+      el.setAttribute("data-processed", "true");
+      el.innerHTML = "<svg><g class='node'></g></svg>";
+    }
+    return Promise.resolve();
+  });
+}
+
 /** The rail's delete affordance for a conversation (named by its title so a
  *  multi-row list can never be mis-targeted). */
 function deleteButton(title: string) {
@@ -242,15 +257,7 @@ describe("ChatView — a streamed turn", () => {
 
   it("renders a mermaid fence in the finalized answer as a diagram (S-302, FR-UI-32)", async () => {
     const user = userEvent.setup();
-    // Stand in for the vendored bundle: paint an SVG into the seam's target.
-    mockRenderMermaid.mockImplementation((container: HTMLElement) => {
-      const el = container.querySelector<HTMLElement>(".mermaid");
-      if (el) {
-        el.innerHTML = "<svg><g class='node'></g></svg>";
-        el.setAttribute("data-processed", "true");
-      }
-      return Promise.resolve();
-    });
+    paintDiagrams();
     mockFetchConfig.mockResolvedValue(configuredModel());
     mockStreamTurn.mockResolvedValue(
       sseResponse([
@@ -275,6 +282,7 @@ describe("ChatView — a streamed turn", () => {
 
   it("renders a mermaid fence inside an Activity step result too (S-301 + S-302)", async () => {
     const user = userEvent.setup();
+    paintDiagrams();
     mockFetchConfig.mockResolvedValue(configuredModel());
     mockStreamTurn.mockResolvedValue(
       sseResponse([
@@ -291,9 +299,14 @@ describe("ChatView — a streamed turn", () => {
     // drawn inside the Activity fold without a second integration point. The fold
     // auto-collapses onto the answer, so open it to read the step.
     await screen.findByText("Done.");
+    const fold = screen.getByText("Activity").closest("details")!;
     await user.click(screen.getByText("Activity"));
-    await waitFor(() => expect(mockRenderMermaid).toHaveBeenCalled());
-    expect(document.querySelector(".mermaid")?.textContent).toContain("graph TD;");
+    expect(fold.open).toBe(true);
+    // Assert a DIAGRAM, scoped to the fold — a native <details> keeps its children
+    // mounted even while collapsed, so querying the whole document (or asserting the
+    // fallback source) would pass without the diagram ever reaching this surface.
+    await waitFor(() => expect(fold.querySelector(".mermaid svg")).not.toBeNull());
+    expect(fold.querySelector(".mermaid")?.getAttribute("data-processed")).toBe("true");
   });
 
   it("renders an honest halt, never a fabricated answer", async () => {
