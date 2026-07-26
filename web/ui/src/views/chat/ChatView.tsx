@@ -58,7 +58,6 @@ import {
   rememberConsent,
   roleLabel,
   turnEndedEmpty,
-  type ActivityChip,
   type ChatConfigReadModel,
   type ChatPolicy,
   type TurnState,
