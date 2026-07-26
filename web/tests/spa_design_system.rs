@@ -506,18 +506,16 @@ fn chat_transcript_text_on_the_page_surface_clears_wcag_aa_in_both_themes() {
     let base = declarations(&block_after(&tokens, ":root"));
     let light = declarations(&block_after(&tokens, ":root[data-theme=\"light\"]"));
 
-    // Every rule in the transcript that declares its own ink. The Activity glyphs
-    // (S-301) are here because they were the sprint's near-miss: added INSIDE the
-    // unfilled column a story after this invariant was established, they took the
-    // signal hues as `color:` — `--color-pass` is 2.99:1 on the light page surface,
-    // under even the 3:1 non-text floor. A signal hue belongs on a fill or an edge.
-    for selector in [".halt, .error", ".markdown a", ".activityRunning", ".activityDone"] {
+    let themes = || {
+        [("dark", theme_map(&base, None)), ("light", theme_map(&base, Some(&light)))]
+    };
+
+    // (a) Rules that ink STRAIGHT ONTO the page surface — nothing sits between
+    // their text and `--surface-0`, so they are measured against it.
+    for selector in [".halt, .error", ".markdown a"] {
         let token = color_token(&rule_body(&css, selector))
             .unwrap_or_else(|| panic!("`{selector}` declares a `color: var(--…)`"));
-        for (theme, map) in [
-            ("dark", theme_map(&base, None)),
-            ("light", theme_map(&base, Some(&light))),
-        ] {
+        for (theme, map) in themes() {
             let c = contrast(token_rgb(&token, &map, &base), token_rgb("--surface-0", &map, &base));
             assert!(
                 c >= 4.5,
@@ -526,6 +524,58 @@ fn chat_transcript_text_on_the_page_surface_clears_wcag_aa_in_both_themes() {
                  hue must be carried by a border/underline, not by the text colour",
             );
         }
+    }
+
+    // (b) The Activity status glyphs (S-301) are the sprint's near-miss and the
+    // other resolution of the same rule. Added INSIDE the unfilled column a story
+    // after this invariant was established, they first took the signal hues as
+    // `color:` — `--color-pass` is 2.99:1 on the light page surface, under even the
+    // 3:1 non-text floor. HF-1 put the hue where the house keeps it: a `Badge`-style
+    // chip FILL. So they are measured as fill/ink pairs — carrying them in list (a)
+    // would now be worse than wrong, it would be vacuous, because `--ink-on-warm`
+    // never touches `--surface-0` and would pass on a contrast it does not have.
+    for (selector, fill) in [(".activityRunning", "--so-orange"), (".activityDone", "--so-green")] {
+        let body = rule_body(&css, selector);
+        let ink = color_token(&body)
+            .unwrap_or_else(|| panic!("`{selector}` declares a `color: var(--…)`"));
+        let declared = var_token(&body, "background").unwrap_or_else(|| {
+            panic!(
+                "`{selector}` declares a `background: var(--…)`: the signal hue is this glyph's \
+                 FILL, not its ink — as ink on the unfilled column it does not clear AA",
+            )
+        });
+        assert_eq!(
+            declared, fill,
+            "`{selector}` carries the state's own signal hue as its fill",
+        );
+        for (theme, map) in themes() {
+            let c = contrast(token_rgb(&ink, &map, &base), token_rgb(fill, &map, &base));
+            assert!(
+                c >= 4.5,
+                "{theme}: `{selector}` ink ({ink}) is {c:.2}:1 on its own fill ({fill}), below the \
+                 4.5:1 AA minimum the `Badge` chips hold to — a fill only carries a signal if the \
+                 glyph on it stays legible",
+            );
+        }
+    }
+
+    // …and they must actually be chips. Without the `Badge` geometry a fill reads
+    // as tinted text on a stray coloured background, which is the affordance the
+    // fill/ink measurement above assumes it is checking.
+    let chip = rule_body(&css, ".activityRunning, .activityDone");
+    for decl in [
+        "display: inline-flex",
+        "align-items: center",
+        "border-radius: var(--radius-sm)",
+        "padding: 0.2rem 0.45rem",
+        "border: 1px solid transparent",
+        "line-height: 1",
+    ] {
+        assert!(
+            chip.contains(decl),
+            "the Activity glyphs carry `Badge`'s chip geometry (`{decl}`) so the signal hue reads \
+             as an affordance, not as tinted text",
+        );
     }
 }
 
@@ -585,14 +635,19 @@ fn rule_body(css: &str, selector: &str) -> String {
         .unwrap_or_else(|| panic!("rule `{selector}` not found in the stylesheet"))
 }
 
-/// The `--token` named by the first `color: var(--token)` declaration in a rule
-/// body. A `color:` declaration that is not a `var(…)` (a keyword, or a literal)
-/// is skipped rather than ending the scan, so a rule that declares a fallback
-/// before its token — `color: inherit; color: var(--text-1)` — still resolves.
+/// The `--token` named by the first `color: var(--token)` declaration in a rule body.
 fn color_token(body: &str) -> Option<String> {
+    var_token(body, "color")
+}
+
+/// The `--token` named by the first `<property>: var(--token)` declaration in a rule
+/// body. A declaration that is not a `var(…)` (a keyword, or a literal) is skipped
+/// rather than ending the scan, so a rule that declares a fallback before its token
+/// — `color: inherit; color: var(--text-1)` — still resolves.
+fn var_token(body: &str, property: &str) -> Option<String> {
     for decl in body.split(';') {
         let Some((name, value)) = decl.split_once(':') else { continue };
-        if name.trim() != "color" {
+        if name.trim() != property {
             continue;
         }
         let Some(inner) = value.trim().strip_prefix("var(").and_then(|v| v.strip_suffix(')'))
