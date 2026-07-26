@@ -543,8 +543,11 @@
   border: 1px solid var(--border-subtle);
 }
 
-/* Fenced code block: a header (language + copy) over the verbatim source. */
-.codeBlock {
+/* Fenced code block: a header (language + copy) over the verbatim source. The
+   Mermaid viewer (below) is the same block with a diagram in place of the source, so
+   the two share this chrome from one declaration rather than two that can drift. */
+.codeBlock,
+.mermaidBlock {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-2);
   overflow: hidden;
@@ -565,7 +568,12 @@
   text-transform: uppercase;
   color: var(--text-2);
 }
-.codeCopy {
+/* The block-header controls: the Copy button on every fenced block, and the Mermaid
+   viewer's zoom / toggle buttons. One declaration, so the two block kinds cannot
+   drift apart visually. `:not(:disabled)` on the hover state matters only for the
+   zoom buttons, which clamp at the ends of the ladder; Copy is never disabled. */
+.codeCopy,
+.mermaidControl {
   font-size: var(--text-xs);
   font-family: var(--font-mono);
   color: var(--text-2);
@@ -575,9 +583,16 @@
   padding: 0 var(--space-2);
   cursor: pointer;
 }
-.codeCopy:hover {
+.codeCopy:hover:not(:disabled),
+.mermaidControl:hover:not(:disabled) {
   color: var(--text-1);
   border-color: var(--color-accent);
+}
+/* An end-of-ladder zoom step is spent, not broken — dim it and drop the pointer cue
+   rather than hiding it, so the ladder's extent stays legible. */
+.mermaidControl:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .pre {
   margin: 0;
@@ -589,15 +604,10 @@
 }
 
 /* ── Mermaid diagram viewer (S-302, FR-UI-32, FR-WK-15) ───────────────────────
-   A ```mermaid fence renders as a diagram instead of source. The chrome is the
-   fenced-code-block chrome above (same header, same Copy control) so the two
-   block kinds read as one family; only the body differs. */
-.mermaidBlock {
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  overflow: hidden;
-  background: var(--surface-2);
-}
+   A ```mermaid fence renders as a diagram instead of source. It reuses the
+   fenced-code-block chrome above — `.mermaidBlock` shares `.codeBlock`'s rule and
+   `.mermaidControl` shares `.codeCopy`'s — so the two block kinds read as one
+   family; only the body and these viewer-specific rules differ. */
 
 /* Zoom pair + readout, Diagram/Source toggle, Copy — one right-aligned cluster in
    the block header. */
@@ -605,26 +615,6 @@
   display: flex;
   align-items: center;
   gap: var(--space-1);
-}
-.mermaidControl {
-  font-size: var(--text-xs);
-  font-family: var(--font-mono);
-  color: var(--text-2);
-  background: transparent;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-1);
-  padding: 0 var(--space-2);
-  cursor: pointer;
-}
-.mermaidControl:hover:not(:disabled) {
-  color: var(--text-1);
-  border-color: var(--color-accent);
-}
-/* An end-of-ladder step is spent, not broken — dim it and drop the pointer cue
-   rather than hiding it, so the ladder's extent stays legible. */
-.mermaidControl:disabled {
-  opacity: 0.45;
-  cursor: default;
 }
 .mermaidZoom {
   font-family: var(--font-mono);
@@ -686,10 +676,6 @@
   font-size: var(--text-sm);
   line-height: var(--leading-base);
   color: var(--text-2);
-}
-/* Post-render the target holds an <svg>; drop the source-text chrome. */
-.mermaidScale :global(.mermaid[data-processed="true"]) {
-  white-space: normal;
 }
 .mermaidScale :global(.mermaid svg) {
   max-width: 100%;
@@ -772,6 +758,24 @@
 .mermaidScale :global(.mermaid .cluster rect) {
   fill: var(--surface-2);
   stroke: var(--border-subtle);
+}
+
+/*
+ * Label centring — the one fallback rule here that is LAYOUT, not colour, and the
+ * reason this block must be kept in step with `WikiView.module.css` (CR-034, S-196)
+ * rather than treated as a colour-only mirror.
+ *
+ * Mermaid centres a node label by translating its <g class="label"> left by half the
+ * text's measured width. Under the self-only CSP its injected <style> is stripped, so
+ * those styles are absent DURING measurement: getBBox() collapses to ~0, the
+ * centring translate is never applied, and the <tspan x="0"> stays left-anchored —
+ * labels start mid-box and overflow the right border. Setting text-anchor from this
+ * same-origin external stylesheet (honoured with or without unsafe-inline, unlike a
+ * stripped injected <style>) re-centres every label within its node bounds.
+ */
+.mermaidScale :global(.mermaid .node text),
+.mermaidScale :global(.mermaid .node tspan) {
+  text-anchor: middle;
 }
 
 /* ── Per-turn action bar (copy / regenerate) ──────────────────────────────── */
