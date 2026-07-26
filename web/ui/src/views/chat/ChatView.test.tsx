@@ -952,3 +952,39 @@ describe("ChatView — single-thread behaviour unchanged (S-200 regression)", ()
     expect(mockStreamTurn).toHaveBeenCalledWith("still works?", null, expect.anything());
   });
 });
+
+describe("ChatView — transcript column structure (S-300, FR-UI-31)", () => {
+  it("nests the user turn's text in a bubble element inside the column row", async () => {
+    // S-300 made the user MessagePrimitive.Root the full-measure column row and
+    // moved the bubble treatment onto an inner element, so the bubble hugs the
+    // COLUMN's right edge rather than the viewport's. That separation is a DOM
+    // fact, and it is the only part of the realignment jsdom can see: the CSS
+    // itself is asserted in `web/tests/spa_design_system.rs` (this suite runs
+    // with `css: false`, so class names never reach the DOM). Without this
+    // guard, deleting the wrapper would break the layout in every theme and no
+    // test would notice.
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockStreamTurn.mockResolvedValue(sseResponse(['event: final_answer\ndata: {"answer":"answered"}\n\n']));
+    render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "where does the column start?");
+    const answer = await screen.findByText("answered");
+    const question = screen.getByText("where does the column start?");
+
+    // The viewport is the nearest ancestor holding BOTH turns; its children are
+    // the two message roots.
+    let viewport = question.parentElement;
+    while (viewport && !viewport.contains(answer)) viewport = viewport.parentElement;
+    expect(viewport).not.toBeNull();
+    const userRoot = [...viewport!.children].find((c) => c.contains(question));
+    expect(userRoot).toBeDefined();
+
+    // The row is NOT the bubble: an element sits between the root and the text,
+    // and it carries the whole message.
+    const bubble = userRoot!.firstElementChild;
+    expect(bubble?.tagName).toBe("DIV");
+    expect(bubble).not.toBe(userRoot);
+    expect(bubble?.textContent).toContain("where does the column start?");
+  });
+});
