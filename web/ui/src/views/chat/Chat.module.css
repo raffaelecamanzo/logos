@@ -402,23 +402,49 @@
 .activityInstruction {
   color: var(--text-2);
 }
-/* The status glyph. Shape (▸ vs ✓) carries the state, an sr-only text equivalent
-   sits beside it, and the ink weight separates the two — so neither colour nor
-   sight is the sole channel.
+/* The status glyph, as a chip. Shape (▸ vs ✓) carries the state, an sr-only text
+   equivalent sits beside it, and the hue is a third channel on top — so neither
+   colour nor sight is the sole channel.
 
-   The ink is NOT the signal hue, for the reason S-300 established one section
-   below: the fold has no fill of its own, so this glyph renders straight onto
-   `--surface-0`, where the signal hues do not clear AA as text — `--color-pass`
-   is 2.99:1 there in the light theme (below even the 3:1 non-text floor) and
-   `--color-accent-warm` is 3.48:1. Nowhere else in the SPA is a signal hue used
-   as `color:`; it is a fill (`Badge`, `ScoreBar`) or a border edge (`Callout`,
-   `Toast`, `.halt`/`.error`), both of which are contrast-guarded as affordances.
-   Locked by `spa_design_system::chat_transcript_text_on_the_page_surface_…`. */
+   The hue is the chip's FILL, never its ink, which is the conclusion S-300 drew
+   one section below: the fold has no fill of its own, so anything inked here
+   renders straight onto `--surface-0`, where the signal hues do not clear AA as
+   text — `--color-pass` is 2.99:1 there in the light theme (below even the 3:1
+   non-text floor) and `--color-accent-warm` is 3.48:1. Everywhere else in the SPA
+   a signal hue is a fill (`Badge`, `ScoreBar`) or a border edge (`Callout`,
+   `Toast`, `.halt`/`.error`). These glyphs take the `Badge` idiom verbatim rather
+   than inventing a fourth one: its chip geometry, and its ink pairing —
+   `--ink-on-warm` measures 5.42:1 on `--so-green` and 4.65:1 on `--so-orange`,
+   theme-independently, because the signal hues are theme-independent primitives.
+   Reading the hue therefore never depends on the page surface behind it.
+
+   What the fill does NOT clear is its own edge against the page: green is 2.99:1
+   on the light `--surface-0`. That is deliberate and is not the 1.4.11 case — the
+   chip is not a control, and nothing about the state is identified by finding its
+   boundary. The glyph inside it is, at 5.42:1, and the shape and the sr-only text
+   equivalent say the same thing twice more.
+
+   The geometry is what makes it read as an affordance instead of tinted text, so
+   it is not optional: `line-height: 1` and the tight padding keep the chip on the
+   step head's baseline row beside the role and instruction, without growing the
+   fold. Locked by `spa_design_system::chat_transcript_text_on_the_page_surface_…`,
+   which measures these two as fill/ink PAIRS — not as ink on `--surface-0`. */
+.activityRunning,
+.activityDone {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
 .activityRunning {
-  color: var(--text-2);
+  background: var(--so-orange);
+  color: var(--ink-on-warm);
 }
 .activityDone {
-  color: var(--text-1);
+  background: var(--so-green);
+  color: var(--ink-on-warm);
 }
 .activityResult {
   font-size: var(--text-sm);
