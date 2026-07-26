@@ -407,8 +407,14 @@
    wording is the SSE frame's, verbatim; only the presentation changes here.
    Dropping the card fill (S-300) put these lines directly on `--surface-0`,
    where signal-coloured BODY text no longer clears the 4.5:1 AA minimum in
-   either theme — so the tone moves to a left signal edge (a 3:1 UI affordance,
-   the brand's callout grammar) and the ink to `--text-1`, which clears it. */
+   either theme — so the tone moves to a left signal edge (a 3:1 UI affordance)
+   and the ink to `--text-1`, which clears it.
+
+   The edge is 3px, matching `.threadConfirm` above — this view's grammar for an
+   INLINE, in-flow notice. The 4px edge belongs to the shared `Callout`
+   component (`Callout.module.css`, frontend-design §1.1), which this view uses
+   for its page-level callouts (configure-first, consent) and which these
+   in-turn notices deliberately are not. */
 .halt,
 .error {
   margin: 0;
