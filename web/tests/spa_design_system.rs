@@ -592,6 +592,90 @@ fn chat_activity_status_glyphs_carry_badge_chip_geometry() {
     }
 }
 
+/// The house's signal hues — the tokens that mean something (danger, in-progress,
+/// done) rather than the neutral inks (`--text-1`/`--text-2`, asserted against every
+/// surface in `text_and_signal_contrast_meets_wcag_aa_in_both_themes`) and the
+/// on-fill inks (`--ink-on-*`, asserted against their hues in `badge_ink_meets_…`).
+/// Carrying one of these as `color:` is the decision this module polices.
+const SIGNAL_HUES: &[&str] = &[
+    "--color-accent",
+    "--color-accent-warm",
+    "--color-pass",
+    "--so-red",
+    "--so-orange",
+    "--so-green",
+    "--so-lime",
+    "--so-merlin",
+];
+
+/// Every rule in `Chat.module.css` that inks a SIGNAL HUE, and why that is allowed.
+/// This list is the coverage contract: the test below fails on any signal-hue
+/// `color:` rule missing from it, so a new one cannot be added without a decision.
+///
+/// A rule reaching for a signal hue has three legitimate resolutions, and only the
+/// third leaves the hue in `color:` — which is why this list is short:
+/// - **Move it to a fill** — carry the hue as `background:` under an `--ink-on-*`
+///   ink with `Badge` chip geometry. That is what HF-1 did to `.activityRunning` /
+///   `.activityDone`, and it takes them OUT of this list: they now ink
+///   `--ink-on-warm`, and the fill/ink pair is measured by
+///   `chat_transcript_text_on_the_page_surface_clears_wcag_aa_in_both_themes`.
+/// - **Drop it** — keep `--text-1` and carry the signal on a border/underline, as
+///   `.halt, .error` and `.markdown a` do. Also not in this list, for the same reason.
+/// - **Keep it, as a UI affordance** — chrome outside the unfilled transcript column,
+///   where the hue is a ≥3:1 graphic signal rather than body text. That floor is
+///   asserted for `--color-accent` on `--surface-0` by
+///   `text_and_signal_contrast_meets_wcag_aa_in_both_themes`. These are the entries
+///   below; each one is a deliberate exception, not a default.
+const SIGNAL_INK_COVERAGE: &[(&str, &str)] = &[
+    (".threadDelete:hover, .threadDelete:focus-visible", "UiAffordance: rail icon button"),
+    (".railError", "UiAffordance: rail status line"),
+    (".streaming::after", "UiAffordance: composer caret glyph"),
+];
+
+/// The coverage half of the S-300 invariant, and the guard that would have caught
+/// S-301 on the story that introduced it.
+///
+/// S-300 encoded "a signal hue cannot be ink on the unfilled column" as measurements
+/// over a HARDCODED selector list. S-301 then added `.activityRunning`/`.activityDone`
+/// to the same stylesheet a story later, inking `--color-pass` at 2.99:1 — and the
+/// guard said nothing, because a closed list cannot notice what it does not name.
+/// The fix is to invert it: enumerate the stylesheet and require every signal-hue ink
+/// to be CLASSIFIED, so the omission fails loudly instead of passing silently.
+#[test]
+fn every_signal_hue_ink_in_the_chat_stylesheet_is_classified() {
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    for (selector, body) in top_level_rules(&css) {
+        let Some(token) = color_token(&body) else { continue };
+        if !SIGNAL_HUES.contains(&token.as_str()) {
+            continue;
+        }
+        assert!(
+            SIGNAL_INK_COVERAGE.iter().any(|(sel, _)| *sel == selector),
+            "`{selector}` inks the signal hue `{token}` but is not classified in \
+             `SIGNAL_INK_COVERAGE`. On the unfilled transcript column a signal hue does \
+             not clear 4.5:1 as text — move it to a `background:` fill under an \
+             `--ink-on-*` ink with `Badge` chip geometry, or drop it and carry the signal \
+             on a border/underline. If this rule is chrome OUTSIDE that column it may keep \
+             the hue as a ≥3:1 UI affordance — then add it below with its reason. Pick one \
+             and record it: leaving a rule unclassified is how S-301 shipped at 2.99:1.",
+        );
+    }
+    // …and the contract cannot rot in the other direction either: a classified
+    // selector that no longer inks a signal hue is stale and must be dropped, or the
+    // list slowly becomes a record of what the stylesheet used to look like.
+    for (selector, note) in SIGNAL_INK_COVERAGE {
+        let body = rule_body(&css, selector);
+        let token = color_token(&body).unwrap_or_else(|| {
+            panic!("`{selector}` is classified ({note}) but declares no `color: var(--…)`")
+        });
+        assert!(
+            SIGNAL_HUES.contains(&token.as_str()),
+            "`{selector}` is classified as a signal-hue ink ({note}) but now inks \
+             `{token}`, which is not a signal hue — drop it from `SIGNAL_INK_COVERAGE`",
+        );
+    }
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Every top-level `selector { body }` pair in a stylesheet, selectors normalised
