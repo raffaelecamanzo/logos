@@ -258,10 +258,15 @@ const QUALITY_REPORT_SPEC: HookSpec = HookSpec {
 /// CLI renders and `init` folds into its step list.
 ///
 /// `action` reuses [`EmitAction`] for a uniform CLI JSON shape with the skill
-/// (`"action":"created"|"forced"|"skipped"`). A [`EmitAction::Skipped`] is
-/// disambiguated by `notice`: `None` means "already present" (idempotent
-/// re-run); `Some(reason)` means a foreign/unsafe `.claude/settings.json` was
-/// left untouched.
+/// (`"action":"created"|"forced"|"reconciled"|"skipped"`). A
+/// [`EmitAction::Skipped`] is disambiguated by `notice`: `None` means "already
+/// present" (idempotent re-run); `Some(reason)` means a foreign/unsafe
+/// `.claude/settings.json` was left untouched.
+///
+/// [`EmitAction::Reconciled`] is this materializer's own variant: unlike the
+/// skill, it rewrites a present artifact without `--force` when Logos needs the
+/// shape changed, and a consumer must be able to tell that from the destructive
+/// [`EmitAction::Forced`] ([CR-095]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct HookEmitSummary {
     /// The hook script path, repo-relative.
@@ -295,15 +300,21 @@ enum Merge {
     /// Our managed entry is already present, `force` was not given, and there
     /// was nothing retired left to sweep.
     AlreadyPresent,
-    /// Write this serialized settings document; `forced` distinguishes a
-    /// re-emit (entry was present) from a first install. `swept` names the
-    /// retired scripts whose settings hooks this merge removed, and
-    /// `unsweepable` those whose event shape it did not recognize — the file
+    /// Write this serialized settings document. `action` is the reported outcome,
+    /// resolved **here** rather than from a bool at the call site: three
+    /// different situations reach this arm — a first install, a `--force`
+    /// re-emit, and an unforced rewrite Logos needed (drift reconciliation or a
+    /// retirement sweep) — and only the middle one may claim
+    /// [`EmitAction::Forced`], which promises local edits were overwritten.
+    /// Carrying `forced: bool` conflated the last two ([CR-095]).
+    ///
+    /// `swept` names the retired scripts whose settings hooks this merge removed,
+    /// and `unsweepable` those whose event shape it did not recognize — the file
     /// sweep must skip the latter or it would orphan a surviving entry
     /// ([CR-095]).
     Write {
         json: String,
-        forced: bool,
+        action: EmitAction,
         swept: Vec<&'static str>,
         unsweepable: Vec<&'static str>,
     },
@@ -376,7 +387,7 @@ fn materialize_spec(base: &Path, force: bool, spec: &HookSpec) -> Result<HookEmi
         }
         Merge::Write {
             json,
-            forced,
+            action,
             swept,
             unsweepable,
         } => {
@@ -403,21 +414,12 @@ fn materialize_spec(base: &Path, force: bool, spec: &HookSpec) -> Result<HookEmi
                 script = spec.script_rel,
                 settings = spec.settings_rel,
                 event = spec.event,
-                forced,
+                ?action,
                 retired_removed = removed.len(),
                 retired_skipped = sweep.skipped.len(),
                 "wiki hook materialized"
             );
-            Ok(summary_base(
-                if forced {
-                    EmitAction::Forced
-                } else {
-                    EmitAction::Created
-                },
-                None,
-                removed,
-                sweep.skipped,
-            ))
+            Ok(summary_base(action, None, removed, sweep.skipped))
         }
     }
 }
@@ -675,9 +677,19 @@ fn merge_settings(existing: Option<&str>, force: bool, spec: &HookSpec) -> Merge
     }
     arr.push(hook_entry(spec));
 
+    // Which of the three writes this is. `Forced` claims local edits were
+    // overwritten, so it needs *both* an entry to overwrite and a user who asked
+    // for it; an unforced rewrite of a present entry is a `Reconciled`, which is
+    // what drift healing and the retirement sweep produce ([CR-095]).
+    let action = match (present, force) {
+        (false, _) => EmitAction::Created,
+        (true, true) => EmitAction::Forced,
+        (true, false) => EmitAction::Reconciled,
+    };
+
     Merge::Write {
         json: serialize(&config),
-        forced: present,
+        action,
         swept,
         unsweepable,
     }
@@ -745,12 +757,16 @@ mod tests {
             },
             "permissions": { "allow": ["Bash"] }
         }"#;
-        let Merge::Write { json, forced, swept, .. } =
+        let Merge::Write { json, action, swept, .. } =
             merge_settings(Some(existing), false, &QUALITY_REPORT_SPEC)
         else {
             panic!("expected a write");
         };
-        assert!(!forced, "a first install is not a forced re-emit");
+        assert_eq!(
+            action,
+            EmitAction::Created,
+            "no entry of ours was present, so this is a first install"
+        );
         assert!(swept.is_empty(), "nothing retired to sweep here");
         let value: Value = serde_json::from_str(&json).unwrap();
         let start = value["hooks"]["SessionStart"].as_array().unwrap();
@@ -806,10 +822,10 @@ mod tests {
     /// An absent or empty file starts from `{}` and installs cleanly.
     #[test]
     fn absent_or_empty_settings_installs() {
-        let Merge::Write { forced, .. } = merge_settings(None, false, &QUALITY_REPORT_SPEC) else {
+        let Merge::Write { action, .. } = merge_settings(None, false, &QUALITY_REPORT_SPEC) else {
             panic!("expected a write for an absent file");
         };
-        assert!(!forced);
+        assert_eq!(action, EmitAction::Created);
         assert!(matches!(
             merge_settings(Some("   \n"), false, &QUALITY_REPORT_SPEC),
             Merge::Write { .. }
@@ -884,12 +900,17 @@ mod tests {
                 ] }}
             ] }} }}"#
         );
-        let Merge::Write { json, forced, .. } =
+        let Merge::Write { json, action, .. } =
             merge_settings(Some(&stale), false, &QUALITY_REPORT_SPEC)
         else {
             panic!("a drifted managed entry must be rewritten, not accepted as current");
         };
-        assert!(forced, "rewriting a present-but-drifted entry is a re-emit");
+        assert_eq!(
+            action,
+            EmitAction::Reconciled,
+            "an unforced rewrite Logos initiated is not a `--force` overwrite: no local \
+             edit was discarded and the caller asked for nothing ([CR-095])"
+        );
         let value: Value = serde_json::from_str(&json).unwrap();
         let mine = ours(&value, "SessionStart");
         assert_eq!(mine.len(), 1, "reconciled in place, not duplicated: {value}");
@@ -1298,6 +1319,41 @@ mod tests {
         );
     }
 
+    /// A sweep-driven rewrite reports [`EmitAction::Reconciled`], never
+    /// `Forced` ([CR-095]).
+    ///
+    /// This is the shape of the actual upgrade path — a current `SessionStart`
+    /// entry alongside a retired `SessionEnd` one — and the only variant that
+    /// could describe it before was `forced`, which promises `--force`
+    /// overwrote local edits. Nobody passed `--force` here and nothing of the
+    /// user's was touched, so a consumer acting on `forced` (a CI diff, a
+    /// wrapper warning "Logos replaced your hook") would act on a fiction.
+    #[test]
+    fn a_sweep_driven_rewrite_is_reconciled_not_forced() {
+        let tmp = TempDir::new().unwrap();
+        materialize_quality_report(tmp.path(), false).unwrap();
+
+        // Re-introduce the retired artifacts an older install would have left,
+        // leaving our own entry exactly current.
+        let retired_script = tmp.path().join(".claude/hooks/logos-quality-report.sh");
+        fs::write(&retired_script, RETIRED_SCRIPT_BODY).unwrap();
+        let mut settings: Value =
+            serde_json::from_str(&fs::read_to_string(tmp.path().join(SETTINGS_REL)).unwrap())
+                .unwrap();
+        settings["hooks"]["SessionEnd"] =
+            json!([serde_json::from_str::<Value>(RETIRED_ENTRY).unwrap()]);
+        fs::write(tmp.path().join(SETTINGS_REL), serialize(&settings)).unwrap();
+
+        let summary = materialize_quality_report(tmp.path(), false).unwrap();
+        assert_eq!(
+            summary.action,
+            EmitAction::Reconciled,
+            "an unforced sweep is not a `--force` overwrite: {summary:?}"
+        );
+        assert!(!summary.retired_removed.is_empty(), "the sweep did happen");
+        assert!(!retired_script.exists());
+    }
+
     /// The quality-report merge preserves a foreign SessionStart entry and an
     /// unrelated PostToolUse entry it shares the file with, and refuses an
     /// unparseable `settings.json` ([FR-IN-07] never-clobber).
@@ -1317,12 +1373,12 @@ mod tests {
             },
             "permissions": { "allow": ["Bash"] }
         }"#;
-        let Merge::Write { json, forced, .. } =
+        let Merge::Write { json, action, .. } =
             merge_settings(Some(existing), false, &QUALITY_REPORT_SPEC)
         else {
             panic!("expected a write");
         };
-        assert!(!forced);
+        assert_eq!(action, EmitAction::Created);
         let value: Value = serde_json::from_str(&json).unwrap();
         let start = value["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(start.len(), 2, "the foreign SessionStart entry survives alongside ours");

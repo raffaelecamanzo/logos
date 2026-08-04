@@ -1175,13 +1175,31 @@ emit therefore also **sweeps** the retired SessionEnd entry and its orphaned
 the sweep is bounded by Logos' own ownership marker, and a foreign SessionEnd
 entry sharing that array is left untouched.
 
-The merge is **non-clobbering**: an existing managed entry is left unchanged,
-a foreign/unparseable config is never overwritten, and the merge is idempotent
-(`--force` re-emits it). `logos init -i` installs it **default-on** alongside
+The merge is **non-clobbering**: an existing managed entry that already matches
+is left byte-identical, a foreign/unparseable config is never overwritten, and
+the merge is idempotent. `logos init -i` installs it **default-on** alongside
 the embedded skill. Installing or running the hook performs no LLM call and
 opens no outbound connection inside the binary — the offline boundary holds.
 CLI-only. (The PostToolUse wiki-augmentation hook this command once also
 installed was retired — [CR-070](../requests/CR-070-retire-wiki-augment-hook.md).)
+
+`--json` reports what the emit did as `action`, distinguishing the two ways an
+existing entry can be rewritten:
+
+| `action` | Meaning |
+|---|---|
+| `created` | Nothing of ours was there; the script and the entry were written. |
+| `reconciled` | Our entry was there and Logos rewrote it **without** `--force` — its shape had drifted from the current spec (an older emit's `timeout`, a hand edit), or a retirement needed sweeping. Nothing of yours was discarded. |
+| `forced` | `--force` re-materialized an existing artifact, **overwriting local edits**. Only this value implies a destructive write. |
+| `skipped` | Nothing was written. `notice` disambiguates: absent means "already current"; present means a foreign config was left alone, with the reason. |
+
+`reconciled` exists because `forced` was previously reported for both of the
+middle two cases, telling a consumer local edits had been overwritten when the
+caller had passed no flag and nothing of theirs was touched
+([CR-095](../requests/CR-095-session-start-quality-readout.md) §3.5). The same
+`action` field on [`wiki skill --emit`](#wiki-skill---emit-dir---force) never
+takes `reconciled`: the skill is strictly skip-if-present, so it only ever
+writes on a first install or under `--force`.
 
 There is no headless SessionEnd wiki-autogen hook and no `claude -p`
 invocation anymore ([CR-047](../requests/CR-047-internal-wiki-generation-on-agent-substrate.md)):

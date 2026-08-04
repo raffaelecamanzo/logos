@@ -355,6 +355,14 @@ fn materialize_quality_report_hook(root: &Path) -> Result<InitStep> {
         (EmitAction::Forced, _) => {
             (InitAction::Updated, "quality-report hook re-emitted".to_string())
         }
+        // `init -i` never forces, so this is the variant a re-run on an older
+        // install actually reports: the entry was there but its shape had
+        // drifted, and Logos corrected it ([CR-095]). Naming that distinctly
+        // matters here — "re-emitted" would read as "your edits were replaced".
+        (EmitAction::Reconciled, _) => (
+            InitAction::Updated,
+            "quality-report hook entry reconciled to the current shape".to_string(),
+        ),
         (EmitAction::Skipped, Some(reason)) => (InitAction::Skipped, reason.clone()),
         (EmitAction::Skipped, None) => (
             InitAction::Unchanged,
@@ -387,7 +395,11 @@ fn materialize_skill(root: &Path) -> Result<InitStep> {
     let summary = crate::wiki::materialize_skill(root, false)?;
     let action = match summary.action {
         EmitAction::Created => InitAction::Created,
-        EmitAction::Forced => InitAction::Updated,
+        // The skill's skip-if-present means an unforced re-emit never writes, so
+        // `Reconciled` is unreachable here — mapped alongside `Forced` because
+        // both are writes, rather than left to a catch-all that would silently
+        // absorb a future variant ([CR-095]).
+        EmitAction::Forced | EmitAction::Reconciled => InitAction::Updated,
         EmitAction::Skipped => InitAction::Unchanged,
     };
     let detail = match (summary.action, summary.link_kind, &summary.notice) {

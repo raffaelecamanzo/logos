@@ -21,8 +21,10 @@
 //! [FR-IN-02]: ../../../docs/specs/requirements/FR-IN-02.md
 //! [FR-PL-04]: ../../../docs/specs/requirements/FR-PL-04.md
 //! [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
+//! [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
 //! [ADR-24]: ../../../docs/specs/architecture/decisions/ADR-24.md
 //! [CR-008]: ../../../docs/requests/CR-008-wiki-store-and-serve.md
+//! [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
 
 use std::fs;
 use std::path::Path;
@@ -57,17 +59,36 @@ pub fn rendered_skill() -> String {
     SKILL_TEMPLATE.replace(VERSION_PLACEHOLDER, env!("CARGO_PKG_VERSION"))
 }
 
-/// What materialization did to the skill ([FR-WK-08]).
+/// What materialization did to a Logos-managed artifact — the skill
+/// ([FR-WK-08]) and, sharing the shape for a uniform CLI JSON surface, the
+/// session-start hook ([FR-IN-07]).
+///
+/// The four variants partition on the two questions a consumer actually asks:
+/// *was something already there* and *did the user ask for it to be replaced*.
+/// [`Self::Forced`] answers "yes and yes" and is the only variant that implies
+/// local edits were discarded — so a write neither the user forced nor a fresh
+/// install must not report it ([CR-095]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EmitAction {
-    /// No skill was present; the content + link were written.
+    /// Nothing was present; the artifact was written for the first time.
     Created,
-    /// A skill was already present and `--force` re-materialized the embedded
-    /// content, overwriting local edits.
+    /// An artifact was already present and `--force` re-materialized it,
+    /// **overwriting local edits**.
     Forced,
-    /// A skill was already present and `--force` was not given — left untouched,
-    /// preserving local edits (skip-if-present, [FR-IN-02] idempotence).
+    /// An artifact was already present and was rewritten *without* `--force`,
+    /// because Logos itself needed it changed — a drifted managed entry
+    /// reconciled to the current spec, or a retirement swept ([CR-095]).
+    ///
+    /// Distinct from [`Self::Forced`] because no local edit was discarded and
+    /// the user asked for nothing: reporting `forced` here told a consumer a
+    /// destructive overwrite had happened when none had ([CR-095]). Emitted only
+    /// by the hook materializer — the skill's skip-if-present means an unforced
+    /// re-emit never reaches its write path.
+    Reconciled,
+    /// An artifact was already present and `--force` was not given — left
+    /// untouched, preserving local edits (skip-if-present, [FR-IN-02]
+    /// idempotence).
     Skipped,
 }
 

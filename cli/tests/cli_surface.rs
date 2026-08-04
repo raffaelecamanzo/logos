@@ -1354,6 +1354,33 @@ fn wiki_hook_emit_installs_and_is_idempotent() {
         Some(1),
         "force never duplicates the managed entry"
     );
+
+    // A drifted managed entry is rewritten unforced, and the JSON says
+    // `reconciled` — NOT `forced`, which promises local edits were overwritten
+    // (CR-095 §3.5). Asserted through the binary because `action` is a
+    // serialized contract shared with `wiki skill --emit`.
+    let mut drifted = settings.clone();
+    drifted["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = serde_json::json!(1);
+    fs::write(
+        tmp.path().join(".claude/settings.json"),
+        serde_json::to_string_pretty(&drifted).unwrap(),
+    )
+    .unwrap();
+    let healed = logos(tmp.path(), &["--json", "wiki", "hook", "--emit"]);
+    assert_eq!(exit_code(&healed), 0);
+    let out = String::from_utf8_lossy(&healed.stdout);
+    assert!(out.contains("\"action\":\"reconciled\""), "{out}");
+    assert!(
+        !out.contains("\"action\":\"forced\""),
+        "no --force was passed and no local edit was discarded: {out}"
+    );
+    let settings: serde_json::Value =
+        serde_json::from_slice(&fs::read(tmp.path().join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        settings["hooks"]["SessionStart"][0]["hooks"][0]["timeout"], 30,
+        "the drifted timeout is corrected"
+    );
 }
 
 /// `wiki hook` without `--emit` is a clap usage error (exit 2).
