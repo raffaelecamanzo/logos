@@ -442,18 +442,20 @@ pub(crate) enum WikiCommands {
         #[arg(long)]
         force: bool,
     },
-    /// Install the Claude Code SessionEnd quality-report hook (FR-IN-07,
+    /// Install the Claude Code session-start quality-report hook (FR-IN-07,
     /// ADR-49): a marker-tagged hook script plus a non-clobbering merge into
-    /// the shared `.claude/settings.json` that prints a non-blocking
-    /// signal/baseline/violations readout at session end. The binary stays
-    /// offline (NFR-SE-01). Re-emit with `--force`. CLI-only. (The PostToolUse
-    /// wiki-augmentation hook this once also installed was retired — CR-070.)
+    /// the shared `.claude/settings.json` that surfaces a non-blocking
+    /// signal/baseline/violations readout when a session starts, resumes, or is
+    /// reopened by `/clear`. Also sweeps the retired SessionEnd hook and its
+    /// orphaned script (CR-095). The binary stays offline (NFR-SE-01). Re-emit
+    /// with `--force`. CLI-only. (The PostToolUse wiki-augmentation hook this
+    /// once also installed was retired — CR-070.)
     Hook {
         /// Emit the hook (the only `hook` operation; required so the verb reads
         /// `wiki hook --emit`).
         #[arg(long, required = true)]
         emit: bool,
-        /// Re-emit, replacing an existing managed SessionEnd entry.
+        /// Re-emit, replacing an existing managed SessionStart entry.
         #[arg(long)]
         force: bool,
     },
@@ -534,8 +536,8 @@ pub(crate) fn engine(root: &Path, bootstrap: bool) -> Result<Engine> {
 /// Resolve which init steps run (S-023, FR-IN-02/03, FR-WK-08, FR-IN-07) —
 /// pure surface UX, the step logic itself lives in the core. `-i` enables the
 /// host-integration steps, prompting per step on a TTY; non-TTY takes the safe
-/// defaults (MCP + CLAUDE.md + the wiki skill + the SessionEnd quality-report
-/// hook — yes, that's what `-i` asks for — git hooks no: they rewire
+/// defaults (MCP + CLAUDE.md + the wiki skill + the session-start
+/// quality-report hook — yes, that's what `-i` asks for — git hooks no: they rewire
 /// core.hooksPath, so they stay opt-in via --hooks). The PostToolUse
 /// wiki-augmentation hook `-i` once also installed here was retired (CR-070).
 pub(crate) fn init_options(interactive: bool, hooks: bool) -> InitOptions {
@@ -545,7 +547,7 @@ pub(crate) fn init_options(interactive: bool, hooks: bool) -> InitOptions {
         install_hooks: hooks || (interactive && ask("install git hooks (core.hooksPath)?", false)),
         materialize_skill: interactive && ask("materialize the logos-wiki generation skill?", true),
         install_quality_report_hook: interactive
-            && ask("install the Claude Code SessionEnd quality-report hook?", true),
+            && ask("install the Claude Code session-start quality-report hook?", true),
     }
 }
 

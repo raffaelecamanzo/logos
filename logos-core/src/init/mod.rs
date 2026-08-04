@@ -315,18 +315,25 @@ pub(crate) fn run(root: &Path, options: &InitOptions) -> Result<Vec<InitStep>> {
     Ok(steps)
 }
 
-/// Materialize the Claude Code SessionEnd quality-report hook ([FR-IN-07],
-/// [FR-GV-05], [FR-GV-09], [ADR-49], [CR-055]), default-on under `-i` alongside
-/// the embedded skill. Delegates to the [`crate::wiki`] engine — the sole owner
-/// of the hook artifacts — and maps the [`crate::wiki::HookEmitSummary`] onto an
-/// [`InitStep`] targeting `.claude/settings.json`. Non-clobbering: an
-/// already-present managed entry is `Unchanged`; a foreign settings file is
-/// `Skipped` with the reason, never overwritten.
+/// Materialize the Claude Code session-start quality-report hook ([FR-IN-07],
+/// [FR-GV-02], [FR-GV-05], [ADR-49], [CR-055], [CR-095]), default-on under `-i`
+/// alongside the embedded skill. Delegates to the [`crate::wiki`] engine — the
+/// sole owner of the hook artifacts — and maps the
+/// [`crate::wiki::HookEmitSummary`] onto an [`InitStep`] targeting
+/// `.claude/settings.json`. Non-clobbering: an already-present managed entry is
+/// `Unchanged`; a foreign settings file is `Skipped` with the reason, never
+/// overwritten.
+///
+/// A sweep of the retired SessionEnd hook ([CR-095]) is reported in the step
+/// detail rather than happening silently — it is the one case where `init`
+/// *removes* a line it previously wrote into `.claude/settings.json`, so it
+/// should be visible in the output.
 ///
 /// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
+/// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
 /// [FR-GV-05]: ../../../docs/specs/requirements/FR-GV-05.md
-/// [FR-GV-09]: ../../../docs/specs/requirements/FR-GV-09.md
 /// [ADR-49]: ../../../docs/specs/architecture/decisions/ADR-49.md
+/// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
 fn materialize_quality_report_hook(root: &Path) -> Result<InitStep> {
     use crate::wiki::EmitAction;
     // Merging into a pre-existing settings file is an Updated, not a Created —
@@ -341,7 +348,7 @@ fn materialize_quality_report_hook(root: &Path) -> Result<InitStep> {
             } else {
                 InitAction::Created
             },
-            format!("SessionEnd quality-report hook → {}", summary.script),
+            format!("session-start quality-report hook → {}", summary.script),
         ),
         (EmitAction::Forced, _) => {
             (InitAction::Updated, "quality-report hook re-emitted".to_string())
@@ -352,6 +359,16 @@ fn materialize_quality_report_hook(root: &Path) -> Result<InitStep> {
             "already present — never overwritten; `logos wiki hook --emit --force` refreshes"
                 .to_string(),
         ),
+    };
+    // A sweep can accompany any outcome above (including `Unchanged`, when only
+    // an orphaned script was left on disk), so it is appended, not substituted.
+    let detail = if summary.retired_removed.is_empty() {
+        detail
+    } else {
+        format!(
+            "{detail}; removed the retired SessionEnd quality-report hook ({})",
+            summary.retired_removed.join(", ")
+        )
     };
     Ok(step(&summary.settings, action, detail))
 }

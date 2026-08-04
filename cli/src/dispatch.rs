@@ -204,9 +204,10 @@ fn wiki(command: WikiCommands, root: &Path, out: &Output) -> Result<i32> {
             out.print(&Engine::open(root).wiki_skill_emit(dir.as_deref(), force)?)?;
             Ok(0)
         }
-        // Emits the SessionEnd quality-report hook into the shared
-        // .claude/settings.json (CR-070: the PostToolUse augment hook this
-        // once also emitted is retired).
+        // Emits the session-start quality-report hook into the shared
+        // .claude/settings.json and sweeps the retired SessionEnd entry
+        // (CR-095; CR-070 retired the PostToolUse augment hook this once also
+        // emitted).
         WikiCommands::Hook { emit: _, force } => {
             let engine = Engine::open(root);
             out.print(&engine.wiki_quality_report_hook_emit(force)?)?;

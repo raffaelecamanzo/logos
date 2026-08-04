@@ -1300,7 +1300,7 @@ fn wiki_write_accepts_a_well_formed_body_piped_via_stdin() {
 
 // ── CR-070 / FR-WK-14 retirement: the PostToolUse augmentation hook is gone ──
 
-/// `logos wiki hook --emit` materializes only the marker-tagged SessionEnd
+/// `logos wiki hook --emit` materializes only the marker-tagged session-start
 /// quality-report script + settings entry (exit 0), is idempotent on re-run,
 /// `--force` re-emits without duplicating, and a foreign settings file is
 /// never overwritten (FR-IN-07). Run through the real binary so the offline
@@ -1319,7 +1319,7 @@ fn wiki_hook_emit_installs_and_is_idempotent() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"action\":\"created\""));
     assert!(
         tmp.path()
-            .join(".claude/hooks/logos-quality-report.sh")
+            .join(".claude/hooks/logos-quality-open.sh")
             .exists(),
         "script written"
     );
@@ -1327,7 +1327,7 @@ fn wiki_hook_emit_installs_and_is_idempotent() {
         serde_json::from_slice(&fs::read(tmp.path().join(".claude/settings.json")).unwrap())
             .expect("settings JSON");
     assert_eq!(
-        settings["hooks"]["SessionEnd"].as_array().map(Vec::len),
+        settings["hooks"]["SessionStart"].as_array().map(Vec::len),
         Some(1)
     );
 
@@ -1350,7 +1350,7 @@ fn wiki_hook_emit_installs_and_is_idempotent() {
         serde_json::from_slice(&fs::read(tmp.path().join(".claude/settings.json")).unwrap())
             .unwrap();
     assert_eq!(
-        settings["hooks"]["SessionEnd"].as_array().map(Vec::len),
+        settings["hooks"]["SessionStart"].as_array().map(Vec::len),
         Some(1),
         "force never duplicates the managed entry"
     );
@@ -1363,10 +1363,11 @@ fn wiki_hook_requires_emit() {
     assert_eq!(exit_code(&logos(tmp.path(), &["wiki", "hook"])), 2);
 }
 
-/// [CR-070]: `wiki hook --emit` materializes only the SessionEnd
-/// quality-report hook — a single summary object, not an array — and
-/// produces no augmentation script or PostToolUse entry (the retired
-/// [FR-WK-14] hook).
+/// [CR-070]/[CR-095]: `wiki hook --emit` materializes only the session-start
+/// quality-report hook — still a single summary object, not an array, since
+/// [CR-095] replaced one hook with one hook — and produces no augmentation
+/// script or PostToolUse entry (the retired [FR-WK-14] hook), and no retired
+/// SessionEnd quality-report entry.
 #[test]
 fn wiki_hook_emit_installs_only_the_quality_report_hook() {
     let tmp = TempDir::new().unwrap();
@@ -1383,8 +1384,12 @@ fn wiki_hook_emit_installs_only_the_quality_report_hook() {
         !tmp.path().join(".claude/hooks/logos-wiki-augment.sh").exists(),
         "the retired augmentation script is never materialized"
     );
-    let quality_script = tmp.path().join(".claude/hooks/logos-quality-report.sh");
+    let quality_script = tmp.path().join(".claude/hooks/logos-quality-open.sh");
     assert!(quality_script.exists(), "the quality-report script is written");
+    assert!(
+        !tmp.path().join(".claude/hooks/logos-quality-report.sh").exists(),
+        "the retired SessionEnd script is never materialized (CR-095)"
+    );
     assert!(
         fs::read_to_string(&quality_script)
             .unwrap()
@@ -1398,14 +1403,23 @@ fn wiki_hook_emit_installs_only_the_quality_report_hook() {
         shared["hooks"]["PostToolUse"].is_null(),
         "no PostToolUse entry is installed: {shared}"
     );
-    let shared_end = shared["hooks"]["SessionEnd"]
+    assert!(
+        shared["hooks"]["SessionEnd"].is_null(),
+        "no SessionEnd entry is installed (CR-095): {shared}"
+    );
+    let shared_start = shared["hooks"]["SessionStart"]
         .as_array()
-        .expect("SessionEnd array");
-    assert_eq!(shared_end.len(), 1, "exactly one SessionEnd entry");
-    assert!(shared_end[0]["hooks"][0]["command"]
+        .expect("SessionStart array");
+    assert_eq!(shared_start.len(), 1, "exactly one SessionStart entry");
+    assert!(shared_start[0]["hooks"][0]["command"]
         .as_str()
         .unwrap()
-        .contains("logos-quality-report.sh"));
+        .contains("logos-quality-open.sh"));
+    assert_eq!(shared_start[0]["matcher"], "startup|resume|clear");
+    assert!(
+        shared_start[0]["hooks"][0]["timeout"].is_number(),
+        "the entry declares its own timeout (CR-095): {shared}"
+    );
 
     // No hook writes the per-developer settings.local.json — that file was
     // the retired autogen hook's alone (FR-WK-16 retirement).
@@ -1437,9 +1451,63 @@ fn no_autogen_hook_or_claude_p_reference_remains() {
         !tmp.path().join(".claude/settings.local.json").exists(),
         "no hook ever writes the per-developer settings.local.json"
     );
-    let body = fs::read_to_string(tmp.path().join(".claude/hooks/logos-quality-report.sh")).unwrap();
+    let body = fs::read_to_string(tmp.path().join(".claude/hooks/logos-quality-open.sh")).unwrap();
     assert!(
         !body.contains("claude -p") && !body.contains("logos-wiki-autogen"),
         "the quality-report hook carries no claude -p invocation and no autogen reference"
+    );
+}
+
+// ── CR-095 retirement: the SessionEnd quality-report hook is swept ───────────
+
+/// [CR-095]: `wiki hook --emit` through the real binary sweeps a retired
+/// SessionEnd quality-report entry and its orphaned script, reports the removal
+/// in its `--json` summary, and leaves a foreign SessionEnd entry untouched.
+/// Without the sweep an existing install keeps emitting `SessionEnd hook [...]
+/// failed: Hook cancelled` on every exit and every `/clear`.
+#[test]
+fn wiki_hook_emit_sweeps_the_retired_session_end_hook() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".claude/hooks")).unwrap();
+    let retired_script = tmp.path().join(".claude/hooks/logos-quality-report.sh");
+    fs::write(&retired_script, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(
+        tmp.path().join(".claude/settings.json"),
+        r#"{"hooks":{"SessionEnd":[
+            {"hooks":[{"type":"command","command":"${CLAUDE_PROJECT_DIR}/.claude/hooks/logos-quality-report.sh"}]},
+            {"hooks":[{"type":"command","command":"their-cleanup.sh"}]}
+        ]}}"#,
+    )
+    .unwrap();
+
+    let out = logos(tmp.path(), &["--json", "wiki", "hook", "--emit"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("object JSON");
+    assert_eq!(
+        summary["retired_removed"][0], ".claude/hooks/logos-quality-report.sh",
+        "the sweep is reported, not silent: {summary}"
+    );
+    assert!(!retired_script.exists(), "the orphaned retired script is deleted");
+
+    let shared: serde_json::Value =
+        serde_json::from_slice(&fs::read(tmp.path().join(".claude/settings.json")).unwrap())
+            .expect("settings.json");
+    let end = shared["hooks"]["SessionEnd"].as_array().expect("SessionEnd array");
+    assert_eq!(end.len(), 1, "only the foreign SessionEnd entry remains: {shared}");
+    assert_eq!(end[0]["hooks"][0]["command"], "their-cleanup.sh");
+    assert_eq!(
+        shared["hooks"]["SessionStart"].as_array().map(Vec::len),
+        Some(1),
+        "the replacement is installed: {shared}"
+    );
+
+    // Idempotent: a second emit has nothing left to sweep and claims nothing.
+    let again = logos(tmp.path(), &["--json", "wiki", "hook", "--emit"]);
+    assert_eq!(exit_code(&again), 0);
+    let summary: serde_json::Value = serde_json::from_slice(&again.stdout).expect("object JSON");
+    assert_eq!(
+        summary["retired_removed"].as_array().map(Vec::len),
+        Some(0),
+        "the sweep does not keep claiming a removal it already made: {summary}"
     );
 }

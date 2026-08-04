@@ -2140,25 +2140,28 @@ impl Engine {
         })
     }
 
-    /// Materialize the Claude Code **SessionEnd** quality-report hook
-    /// ([FR-IN-07], [FR-GV-05], [FR-GV-09], [ADR-49], CLI-only surface): a
-    /// marker-tagged hook script plus a non-clobbering merge into the project's
-    /// **shared** `.claude/settings.json`. On session end it prints the current
-    /// quality signal, the blessed baseline, and any rule violations as a
+    /// Materialize the Claude Code **session-start** quality-report hook
+    /// ([FR-IN-07], [FR-GV-02], [FR-GV-05], [ADR-49], [CR-095], CLI-only
+    /// surface): a marker-tagged hook script plus a non-clobbering merge into the
+    /// project's **shared** `.claude/settings.json`, and a sweep of the retired
+    /// SessionEnd entry and its orphaned script. When a session starts, resumes,
+    /// or is reopened by `/clear`, the hook surfaces the current quality signal,
+    /// the blessed baseline and their delta, and any rule violations as a
     /// non-blocking readout — it never propagates `check`/`gate`'s non-zero exit
     /// ([FR-GV-05]); `force` re-emits it.
     ///
     /// Pure local filesystem I/O behind `logos wiki hook --emit [--force]` (the
     /// `init -i` step runs the same engine through [`crate::init`]). Installing
     /// the hook performs **no** LLM call and opens **no** network connection
-    /// ([NFR-SE-01]) — it only shells out to the pure-read `scan`/`gate`/`check`
+    /// ([NFR-SE-01]) — it only shells out to the pure-read `gate`/`check`
     /// commands.
     ///
     /// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
+    /// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
     /// [FR-GV-05]: ../../../docs/specs/requirements/FR-GV-05.md
-    /// [FR-GV-09]: ../../../docs/specs/requirements/FR-GV-09.md
     /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
     /// [ADR-49]: ../../../docs/specs/architecture/decisions/ADR-49.md
+    /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
     pub fn wiki_quality_report_hook_emit(&self, force: bool) -> Result<crate::wiki::HookEmitSummary> {
         crate::observability::traced("wiki_quality_report_hook_emit", || {
             crate::wiki::materialize_quality_report_hook(&self.root, force)

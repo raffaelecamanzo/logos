@@ -610,7 +610,7 @@ fn wiki_skill_emit_honours_an_explicit_dir() {
 
 /// [CR-070] regression: `init -i` installs no PostToolUse augmentation entry
 /// and writes no `logos-wiki-augment.sh` — only the embedded skill and the
-/// [FR-IN-07] SessionEnd quality-report hook install.
+/// [FR-IN-07] session-start quality-report hook install.
 #[test]
 fn init_i_installs_no_augmentation_hook() {
     let tmp = TempDir::new().unwrap();
@@ -653,42 +653,50 @@ fn init_i_installs_no_autogen_hook_and_no_claude_p_reference_remains() {
     );
 }
 
-// ── FR-IN-07 / FR-GV-05 / FR-GV-09 / ADR-49: the SessionEnd quality-report hook ──
+// ── FR-IN-07 / FR-GV-02 / FR-GV-05 / ADR-49 / CR-095: the session-start quality-report hook ──
 
-/// Read the **shared** `.claude/settings.json` SessionEnd array, asserting
-/// exactly one entry wires our quality-report script.
+/// The retired SessionEnd entry as a prior Logos version wrote it (CR-095).
+const RETIRED_SESSION_END_ENTRY: &str = r#"{"hooks":[{"type":"command","command":"${CLAUDE_PROJECT_DIR}/.claude/hooks/logos-quality-report.sh"}]}"#;
+
+/// Read the **shared** `.claude/settings.json` `SessionStart` array, asserting
+/// exactly one entry wires our quality-report script — and that no trace of the
+/// retired SessionEnd hook survives anywhere in the document (CR-095).
 fn assert_one_managed_quality_report_hook(root: &Path) {
-    let settings: serde_json::Value =
-        serde_json::from_str(&read(root, ".claude/settings.json")).expect("settings JSON");
-    let end = settings["hooks"]["SessionEnd"]
+    let raw = read(root, ".claude/settings.json");
+    let settings: serde_json::Value = serde_json::from_str(&raw).expect("settings JSON");
+    let start = settings["hooks"]["SessionStart"]
         .as_array()
-        .expect("SessionEnd array");
-    let ours: Vec<_> = end
+        .expect("SessionStart array");
+    let ours: Vec<_> = start
         .iter()
         .filter(|e| {
             e["hooks"].as_array().is_some_and(|hs| {
                 hs.iter().any(|h| {
                     h["command"]
                         .as_str()
-                        .is_some_and(|c| c.contains("logos-quality-report.sh"))
+                        .is_some_and(|c| c.contains("logos-quality-open.sh"))
                 })
             })
         })
         .collect();
     assert_eq!(ours.len(), 1, "exactly one managed quality-report entry: {settings}");
+    assert!(
+        !raw.contains("logos-quality-report.sh"),
+        "no trace of the retired SessionEnd hook: {raw}"
+    );
 }
 
-/// `init -i` installs the SessionEnd quality-report hook default-on: the
-/// marker-tagged script plus a SessionEnd entry in `.claude/settings.json`
-/// (FR-IN-07, ADR-49).
+/// `init -i` installs the session-start quality-report hook default-on: the
+/// marker-tagged script plus a `SessionStart` entry in `.claude/settings.json`
+/// (FR-IN-07, ADR-49, CR-095).
 #[test]
 fn init_i_installs_the_quality_report_hook() {
     let tmp = TempDir::new().unwrap();
     Engine::init_with(tmp.path(), &interactive()).unwrap();
 
-    let script = tmp.path().join(".claude/hooks/logos-quality-report.sh");
+    let script = tmp.path().join(".claude/hooks/logos-quality-open.sh");
     assert!(script.exists(), "the quality-report hook script is written");
-    let body = read(tmp.path(), ".claude/hooks/logos-quality-report.sh");
+    let body = read(tmp.path(), ".claude/hooks/logos-quality-open.sh");
     assert!(
         body.contains("logos:quality-report:managed"),
         "the script carries its managed marker"
@@ -698,15 +706,29 @@ fn init_i_installs_the_quality_report_hook() {
         body.contains("LOGOS_QUALITY_REPORT_DISABLE"),
         "the script honors the documented off-switch env var"
     );
-    // Report-only: it always exits 0 and runs check + scan (+ gate for baseline).
-    assert!(body.trim_end().ends_with("exit 0"), "always exits 0 — never blocks teardown");
-    assert!(body.contains("logos scan --json") && body.contains("logos check"));
+    // Report-only: it always exits 0 and reads via gate (signal + baseline) and
+    // check (violations) — no reconciling scan pass (CR-095).
+    assert!(body.trim_end().ends_with("exit 0"), "always exits 0 — never blocks a session");
+    assert!(body.contains("logos gate --no-reconcile") && body.contains("logos check --no-reconcile"));
+    assert!(!body.contains("logos scan"), "no reconciling scan in the report path");
+    // The readout rides stdout as SessionStart JSON, the only rendered channel.
+    assert!(body.contains(r#""hookEventName":"SessionStart""#));
+
+    // The entry declares its own timeout and matches the intended sources.
+    let settings: serde_json::Value =
+        serde_json::from_str(&read(tmp.path(), ".claude/settings.json")).expect("settings JSON");
+    let entry = &settings["hooks"]["SessionStart"][0];
+    assert_eq!(entry["matcher"], "startup|resume|clear");
+    assert!(
+        entry["hooks"][0]["timeout"].is_number(),
+        "the entry declares a timeout rather than inheriting a host default: {settings}"
+    );
 
     assert_one_managed_quality_report_hook(tmp.path());
 }
 
 /// Two-run idempotency: a second `init -i` leaves the already-present
-/// quality-report SessionEnd entry unchanged and the shared `settings.json`
+/// quality-report `SessionStart` entry unchanged and the shared `settings.json`
 /// byte-identical (FR-IN-07 idempotent, non-clobbering).
 #[test]
 fn second_init_i_leaves_the_quality_report_hook_unchanged() {
@@ -729,14 +751,14 @@ fn plain_init_does_not_install_the_quality_report_hook() {
     let tmp = TempDir::new().unwrap();
     Engine::init(tmp.path()).unwrap();
     assert!(
-        !tmp.path().join(".claude/hooks/logos-quality-report.sh").exists(),
+        !tmp.path().join(".claude/hooks/logos-quality-open.sh").exists(),
         "no quality-report script without -i"
     );
 }
 
-/// Foreign-settings preservation: `init -i` merges the quality-report SessionEnd
-/// entry into an existing `.claude/settings.json` while preserving a foreign
-/// SessionEnd entry and unrelated keys (FR-IN-07 non-clobbering).
+/// Foreign-settings preservation: `init -i` merges the quality-report
+/// `SessionStart` entry into an existing `.claude/settings.json` while preserving
+/// a foreign `SessionStart` entry and unrelated keys (FR-IN-07 non-clobbering).
 #[test]
 fn init_i_quality_report_preserves_foreign_settings_entries() {
     let tmp = TempDir::new().unwrap();
@@ -744,7 +766,7 @@ fn init_i_quality_report_preserves_foreign_settings_entries() {
     fs::create_dir_all(settings.parent().unwrap()).unwrap();
     fs::write(
         &settings,
-        r#"{"permissions":{"allow":["Bash"]},"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"their-cleanup.sh"}]}]}}"#,
+        r#"{"permissions":{"allow":["Bash"]},"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"their-startup.sh"}]}]}}"#,
     )
     .unwrap();
 
@@ -752,15 +774,45 @@ fn init_i_quality_report_preserves_foreign_settings_entries() {
     let merged: serde_json::Value =
         serde_json::from_str(&read(tmp.path(), ".claude/settings.json")).expect("settings JSON");
 
-    let end = merged["hooks"]["SessionEnd"].as_array().unwrap();
-    assert_eq!(end.len(), 2, "the user's SessionEnd hook survives alongside ours");
-    assert!(end
+    let start = merged["hooks"]["SessionStart"].as_array().unwrap();
+    assert_eq!(start.len(), 2, "the user's SessionStart hook survives alongside ours");
+    assert!(start
         .iter()
-        .any(|e| e["hooks"][0]["command"] == "their-cleanup.sh"));
+        .any(|e| e["hooks"][0]["command"] == "their-startup.sh"));
     assert_eq!(
         merged["permissions"]["allow"][0], "Bash",
         "unrelated keys are preserved verbatim"
     );
+    assert_one_managed_quality_report_hook(tmp.path());
+}
+
+/// CR-095 retirement sweep through `init -i`: a project carrying the retired
+/// SessionEnd entry and its script has both removed, while a foreign SessionEnd
+/// entry sharing that array survives. Without this an existing install keeps
+/// emitting the cancellation error the retirement exists to stop.
+#[test]
+fn init_i_sweeps_the_retired_session_end_quality_report_hook() {
+    let tmp = TempDir::new().unwrap();
+    let hooks = tmp.path().join(".claude/hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let retired_script = hooks.join("logos-quality-report.sh");
+    fs::write(&retired_script, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(
+        tmp.path().join(".claude/settings.json"),
+        format!(
+            r#"{{"hooks":{{"SessionEnd":[{RETIRED_SESSION_END_ENTRY},{{"hooks":[{{"type":"command","command":"their-cleanup.sh"}}]}}]}}}}"#
+        ),
+    )
+    .unwrap();
+
+    Engine::init_with(tmp.path(), &interactive()).unwrap();
+
+    assert!(!retired_script.exists(), "the orphaned retired script is deleted");
+    let merged: serde_json::Value =
+        serde_json::from_str(&read(tmp.path(), ".claude/settings.json")).expect("settings JSON");
+    let end = merged["hooks"]["SessionEnd"].as_array().unwrap();
+    assert_eq!(end.len(), 1, "only the foreign SessionEnd entry remains: {merged}");
+    assert_eq!(end[0]["hooks"][0]["command"], "their-cleanup.sh");
     assert_one_managed_quality_report_hook(tmp.path());
 }
 

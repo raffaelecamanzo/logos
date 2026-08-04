@@ -27,7 +27,7 @@ cadence.
 |---|---|---|
 | **Freshen** | `post-commit` / `post-checkout` / `post-merge` hooks run `logos sync` (`init --hooks`) | a `logos index` step |
 | **Enforce** | the `pre-push` gate runs `logos check` and **blocks the push** (`init --hooks`) | a `logos check` build step |
-| **Report** | the SessionEnd quality-report hook prints signal-vs-baseline to your terminal, always exit 0 (`init -i`) | a non-blocking `logos scan --json` job |
+| **Report** | the session-start quality-report hook surfaces signal-vs-baseline when a session starts, resumes, or is reopened by `/clear`, always exit 0 (`init -i`) | a non-blocking `logos scan --json` job |
 | **Bless** | — (deliberate, manual) | `logos gate --save` on the release branch only |
 
 The `pre-push` gate is a **local pre-flight**, not a substitute for the CI
@@ -180,7 +180,7 @@ like in CI.
 ## See also
 
 - [Commands](commands.md#quality--governance) — full flags for `check`, `scan`, `gate`, `doctor`, `verify`.
-- [`init` reference](commands.md#init--i---hooks) — the git hooks and the SessionEnd quality-report hook that cover the local legs of the loop.
+- [`init` reference](commands.md#init--i---hooks) — the git hooks and the session-start quality-report hook that cover the local legs of the loop.
 - [Usage → Quality and governance](usage.md#quality-and-governance) — the same loop from the day-to-day angle.
 - [Metrics](metrics.md) — how the 0–10000 signal and the versioned baseline are computed.
 - [Error handling](error-handling.md) — exit codes and the fail-soft / fail-loud contract the gate rides on.

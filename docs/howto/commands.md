@@ -47,7 +47,7 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`wiki materialize`](#wiki-materialize) | ✅ | Deterministically present the authored `docs/specs/**` + `docs/howto/**` as wiki pages (SRS mode); no LLM/network |
 | [`wiki delete`](#wiki-delete) | ✅ | Explicitly delete a page by slug (CLI-only) |
 | [`wiki skill --emit`](#wiki-skill---emit-dir---force) | ✅ | Materialize the embedded wiki-generation skill (CLI-only) |
-| [`wiki hook --emit`](#wiki-hook---emit---force) | ✅ | Install the Claude Code SessionEnd quality-report hook (CLI-only) |
+| [`wiki hook --emit`](#wiki-hook---emit---force) | ✅ | Install the Claude Code session-start quality-report hook (CLI-only) |
 
 ---
 
@@ -76,11 +76,14 @@ bootstrap that `logos index` performs.
 (`config.toml`, `rules.toml`), a managed `.logos/.gitignore` block, a
 `logos` entry in the project's `.mcp.json`, a managed usage block in
 `CLAUDE.md`, the embedded `logos-wiki` generation skill, and — default-on —
-the **SessionEnd quality-report** hook
+the **session-start quality-report** hook
 ([FR-IN-07](../specs/requirements/FR-IN-07.md)), merged into the shared
-`.claude/settings.json`, which prints a signal/baseline/violations readout at
-session end. The merge is non-clobbering and the binary stays offline (no LLM
-call, no outbound connection). Each step reports its action (`Created` /
+`.claude/settings.json`, which surfaces a signal/baseline/violations readout
+when a session starts, resumes, or is reopened by `/clear`. The merge is
+non-clobbering and the binary stays offline (no LLM call, no outbound
+connection); it also sweeps the retired SessionEnd quality-report hook
+([CR-095](../requests/CR-095-session-start-quality-readout.md)) if a prior
+install left one behind. Each step reports its action (`Created` /
 `Updated` / `Unchanged` / `Skipped`). On non-TTY (CI, piped input): safe
 defaults, no prompts.
 Wiki prose generation itself now runs in-process (`ui` builds only) when the
@@ -111,7 +114,7 @@ appear automatically.
 
 Together these hooks realize the local legs of the **freshen / enforce / report
 / bless** loop: the freshness hooks *freshen*, the `pre-push` gate *enforces*,
-and the SessionEnd quality-report hook *reports*. The CI leg (and the
+and the session-start quality-report hook *reports*. The CI leg (and the
 release-only *bless* with `logos gate --save`) is documented in
 [CI integration](ci-integration.md).
 
@@ -1095,12 +1098,30 @@ logos wiki hook --emit          # install the Claude Code quality-report hook (n
 logos wiki hook --emit --force  # re-emit, replacing the managed entry
 ```
 
-Installs the **SessionEnd quality-report** hook
+Installs the **session-start quality-report** hook
 ([FR-IN-07](../specs/requirements/FR-IN-07.md)), merged into the shared
-`.claude/settings.json` — at session end it prints the current signal, the
-blessed baseline, and any rule violations as a non-blocking readout; always
-exits 0. Set `LOGOS_QUALITY_REPORT_DISABLE=1` in the environment to silence
-the readout without uninstalling the hook.
+`.claude/settings.json` under `hooks.SessionStart` with the source matcher
+`startup|resume|clear` — when a session starts, resumes, or is reopened by
+`/clear` it surfaces the current signal, the blessed baseline and their delta,
+and any rule violations as a non-blocking readout; always exits 0. The readout
+is emitted as one JSON object on stdout: `systemMessage` for you,
+`hookSpecificOutput.additionalContext` for the agent. Set
+`LOGOS_QUALITY_REPORT_DISABLE=1` in the environment to silence it without
+uninstalling the hook.
+
+**Why session start and not session end.** The readout used to ride a
+SessionEnd hook and never worked, for two reasons in the agent host's contract
+(observed against Claude Code 2.1.220 — undocumented internals a future release
+may change; see [CR-095](../requests/CR-095-session-start-quality-readout.md)):
+a SessionEnd hook's exit-0 output is **discarded** — the host renders it only on
+a *failing* hook, and hook stdio is piped, never inherited — and SessionEnd
+hooks are capped at **1500 ms** against 600 s for every other event, so a
+readout costing seconds was cancelled on every firing and surfaced as
+`SessionEnd hook [...] failed: Hook cancelled`, including on `/clear`. Every
+emit therefore also **sweeps** the retired SessionEnd entry and its orphaned
+`logos-quality-report.sh`, so upgrading stops the error with no hand-editing;
+the sweep is bounded by Logos' own ownership marker, and a foreign SessionEnd
+entry sharing that array is left untouched.
 
 The merge is **non-clobbering**: an existing managed entry is left unchanged,
 a foreign/unparseable config is never overwritten, and the merge is idempotent
