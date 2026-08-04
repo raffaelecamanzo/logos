@@ -199,7 +199,7 @@
 }
 
 /* Tablet & below (≤1023px): the rail collapses behind a toggle, mirroring the
-   AppShell sidebar behaviour (frontend-design §4.12 / §7). The layout stacks to a
+   AppShell sidebar behaviour (frontend-design §4.13 / §7). The layout stacks to a
    single column; the toggle appears; the rail shows only when opened. */
 @media (max-width: 1023px) {
   .layout {
