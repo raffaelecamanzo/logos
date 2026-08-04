@@ -11,6 +11,69 @@ use serde::Serialize;
 use crate::history::{DegradedReason, FileTemporal};
 use crate::models::pipeline::RelationCoverage;
 
+/// The **non-persisting** quality readout for the report tier ([FR-IN-07],
+/// [CR-095]) — what an agent-host session-start hook shows.
+///
+/// Deliberately distinct from [`GateResult`]: `gate` exists to *record* the
+/// signal ([FR-GV-09] — "every gate writes a snapshot, saved or compared"),
+/// while this exists only to *show* it. It therefore writes nothing, so a hook
+/// firing at every session boundary never takes the graph-DB write lock and
+/// never appends to the [FR-GV-06] `evolution` series.
+///
+/// The two halves have deliberately different freshness, and say so rather than
+/// blurring it:
+/// - `signal` / `baseline_signal` are computed **fresh** on every readout (the
+///   deterministic `compute` half of the snapshot path, minus the write).
+/// - `violations` are read from the **persisted** table — the last
+///   [`check_rules`](crate::Engine::check_rules) run's findings. Re-evaluating
+///   them cannot be done read-only: [FR-GV-02]'s evaluator re-materialises the
+///   whole derived policy graph on every run (BR-12), which is a write. So the
+///   readout reports what was last recorded rather than paying a write to look
+///   current, and the rendering says "last recorded" rather than implying live.
+///   No timestamp is offered because none is available: `check_rules` persists
+///   its violations with a `NULL` snapshot id, so there is nothing honest to
+///   stamp them with.
+///
+/// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
+/// [FR-GV-06]: ../../../docs/specs/requirements/FR-GV-06.md
+/// [FR-GV-09]: ../../../docs/specs/requirements/FR-GV-09.md
+/// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
+/// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
+#[derive(Debug, Default, Serialize)]
+pub struct QualityReadout {
+    /// The freshly computed 0–10000 signal; `None` = "n/a" (empty graph,
+    /// ADR-12) — reported as such, never as a zero.
+    pub signal: Option<u32>,
+    /// The blessed baseline signal ([FR-GV-05]); `None` when none is saved.
+    ///
+    /// [FR-GV-05]: ../../../docs/specs/requirements/FR-GV-05.md
+    pub baseline_signal: Option<u32>,
+    /// `signal − baseline_signal`, present only when both are.
+    pub delta: Option<i64>,
+    /// The [FR-RC-03] freshness line, marked assumed-fresh — the readout never
+    /// reconciles (that would be a write).
+    ///
+    /// [FR-RC-03]: ../../../docs/specs/requirements/FR-RC-03.md
+    pub freshness: String,
+    /// Violation messages from the last recorded `check_rules` run, capped by
+    /// the caller.
+    ///
+    /// `None` means **nothing is recorded** — which is genuinely ambiguous, and
+    /// is reported as such rather than resolved by guessing: `check_rules`
+    /// clears and rewrites the table on every run, so an empty table is left
+    /// equally by a clean check and by no check at all. Rendering must say
+    /// "none recorded", never "0 violations", because the latter would assert a
+    /// passing check that may never have happened — the same fabrication the
+    /// readout refuses everywhere else.
+    pub violations: Option<Vec<String>>,
+    /// How many violations the last recorded run found in total, before any
+    /// display cap — so a truncated list can say what it dropped.
+    pub violation_count: Option<usize>,
+    /// Degradations (an unreadable store, an absent graph) — never an error:
+    /// the report tier reports, it never blocks ([FR-GV-05]).
+    pub warnings: Vec<String>,
+}
+
 /// Full architecture-quality scan result (FR-QM-01..06, S-020).
 ///
 /// The 0–10000 signal is the geometric-mean aggregate (ADR-12); `None` is the

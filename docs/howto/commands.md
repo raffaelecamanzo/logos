@@ -33,6 +33,7 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`scan`](#scan) | ✅ | Full architecture-quality scan |
 | [`check`](#check) | ✅ | Architecture-rules compliance check |
 | [`gate`](#gate) | ✅ | CI quality gate on the signal |
+| [`quality-report`](#quality-report---hook-json) | ✅ | Non-blocking quality readout — writes nothing, always exits 0 (CLI-only) |
 | [`evolution`](#evolution) | ✅ | Signal evolution over snapshots |
 | [`dsm`](#dsm) | ✅ | Dependency-structure-matrix clusters |
 | [`doc-gaps`](#doc-gaps) | ✅ | Undocumented exported symbols |
@@ -79,9 +80,12 @@ bootstrap that `logos index` performs.
 the **session-start quality-report** hook
 ([FR-IN-07](../specs/requirements/FR-IN-07.md)), merged into the shared
 `.claude/settings.json`, which surfaces a signal/baseline/violations readout
-when a session starts, resumes, or is reopened by `/clear`. The merge is
-non-clobbering and the binary stays offline (no LLM call, no outbound
-connection); it also sweeps the retired SessionEnd quality-report hook
+when a session starts, resumes, or is reopened by `/clear`. The readout is a
+[`quality-report`](#quality-report---hook-json) — it **writes nothing**, so
+firing at every session boundary leaves your [`evolution`](#evolution) series
+untouched. The merge is non-clobbering and the binary stays offline (no LLM
+call, no outbound connection); it also sweeps the retired SessionEnd
+quality-report hook
 ([CR-095](../requests/CR-095-session-start-quality-readout.md)) if a prior
 install left one behind. Each step reports its action (`Created` /
 `Updated` / `Unchanged` / `Skipped`). On non-TTY (CI, piped input): safe
@@ -650,6 +654,47 @@ informationally. The next gate compares normally. This is what lets you re-tune
 a `[metric_thresholds]` value without a spurious CI failure — see
 [metrics.md](metrics.md#versioned-baseline--automatic-re-baseline-on-semantics-or-threshold-change).
 
+### `quality-report [--hook-json]`
+
+```bash
+logos quality-report              # the non-blocking readout; always exit 0
+logos quality-report --json
+logos quality-report --hook-json  # the agent-host session-start payload
+```
+
+The **report tier**: the current signal, the blessed baseline, their delta, and
+the recorded rule violations. Always exits 0 — it reports, it never gates. Use
+[`gate`](#gate) when you want a verdict and an exit code.
+
+It **writes nothing**, which is the whole reason it exists as its own command.
+Both [`scan`](#scan) and [`gate`](#gate) persist a metric snapshot on every run,
+so a readout on an automatic, frequent trigger — the
+[session-start hook](#wiki-hook---emit---force) fires at startup, at every
+resume and at every `/clear` — would fill your
+[`evolution`](#evolution) series with "someone opened an editor" entries and
+contend for the graph write lock with a running `serve`. `quality-report`
+recomputes the signal through the same deterministic computation `gate` uses and
+simply does not persist it, so the number agrees with the gate's while the series
+stays a record of deliberate movements.
+
+Two consequences worth knowing:
+
+- **Nothing absent is defaulted.** An empty graph reads `signal n/a`, not `0`. No
+  blessed baseline reads `no baseline saved`, not a delta against zero. A baseline
+  scored under a different metric version or threshold set reads
+  `not comparable` with no delta invented.
+- **The violations are as of your last [`check`](#check)**, and say so. Re-evaluating
+  the rules re-materialises the derived policy graph, which is a write — so the
+  readout reports what was last recorded rather than paying a write to look
+  current. An empty findings table reads `none recorded`, never `0 violations`:
+  a clean check and no check at all leave it identically empty, and the readout
+  will not claim a pass that may never have happened. Run
+  [`check`](#check) when you want current findings.
+
+`--hook-json` renders the same read-model as the agent-host session-start payload
+(`systemMessage` + `hookSpecificOutput.additionalContext`). It exists for the
+installed hook script to exec; you would not normally run it by hand.
+
 ### `doctor`
 
 ```bash
@@ -1103,11 +1148,18 @@ Installs the **session-start quality-report** hook
 `.claude/settings.json` under `hooks.SessionStart` with the source matcher
 `startup|resume|clear` — when a session starts, resumes, or is reopened by
 `/clear` it surfaces the current signal, the blessed baseline and their delta,
-and any rule violations as a non-blocking readout; always exits 0. The readout
-is emitted as one JSON object on stdout: `systemMessage` for you,
+and the recorded rule violations as a non-blocking readout; always exits 0. The
+readout is emitted as one JSON object on stdout: `systemMessage` for you,
 `hookSpecificOutput.additionalContext` for the agent. Set
 `LOGOS_QUALITY_REPORT_DISABLE=1` in the environment to silence it without
 uninstalling the hook.
+
+The installed script is a **launcher**: it runs
+[`logos quality-report --hook-json`](#quality-report---hook-json) and passes the
+output through. It builds nothing itself, so there is no shell JSON assembly to
+get wrong, and it swallows the command's failure — a `logos` on `PATH` older
+than the emitted script degrades to silence rather than to a visible failed
+hook.
 
 **Why session start and not session end.** The readout used to ride a
 SessionEnd hook and never worked, for two reasons in the agent host's contract

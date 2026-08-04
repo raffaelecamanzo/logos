@@ -34,8 +34,8 @@ use crate::models::{
     pipeline::{IndexResult, InitResult, SyncResult},
     quality::{
         DocGapsReport, DoctorReport, DsmReport, EvolutionReport, GateResult, HealthInfo,
-        LanguageDescriptor, LanguagesInfo, MetricSnapshot, RulesReport, ScanResult, SessionInfo,
-        SkippedLanguage, StatsInfo, VerifyReport,
+        LanguageDescriptor, LanguagesInfo, MetricSnapshot, QualityReadout, RulesReport, ScanResult,
+        SessionInfo, SkippedLanguage, StatsInfo, VerifyReport,
     },
 };
 use crate::runtime::Runtime;
@@ -1313,6 +1313,65 @@ impl Engine {
         crate::observability::traced("latest_gate", || crate::governance::latest_gate(self))
     }
 
+    /// The **non-persisting** quality readout for the report tier ([FR-IN-07],
+    /// [CR-095]): a freshly computed signal, the blessed baseline and their
+    /// delta, plus the last recorded `check_rules` findings — with **no write**.
+    ///
+    /// Distinct from both neighbours by design. [`gate`](Self::gate) computes the
+    /// same signal but *persists* it ([FR-GV-09]), which is wrong for a hook that
+    /// fires at every session boundary: it would take the graph-DB write lock and
+    /// grow the [FR-GV-06] `evolution` series on every `/clear`.
+    /// [`latest_gate`](Self::latest_gate) writes nothing but reports the *last
+    /// persisted* signal rather than computing one. This computes fresh and
+    /// writes nothing.
+    ///
+    /// It never reconciles (a write), so `freshness` is always assumed-fresh, and
+    /// its violations are the last recorded run's — see [`QualityReadout`] for
+    /// why re-evaluating them read-only is not possible, and why "nothing
+    /// recorded" is reported as ambiguous rather than as a clean bill of health.
+    /// The message list is bounded by the rendering cap
+    /// ([`governance::readout`](crate::governance::readout)); the true total
+    /// always rides `violation_count`, so a truncated list can say what it
+    /// dropped. The cap is not a caller's parameter: it is a property of the
+    /// readout, and letting a surface choose it would let two surfaces disagree
+    /// about the same read-model.
+    ///
+    /// # Errors
+    /// Returns an error on a structural failure (transient engine, store fault,
+    /// invalid `rules.toml`).
+    ///
+    /// [FR-GV-06]: ../../../docs/specs/requirements/FR-GV-06.md
+    /// [FR-GV-09]: ../../../docs/specs/requirements/FR-GV-09.md
+    /// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
+    /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
+    pub fn quality_readout(&self) -> Result<QualityReadout> {
+        crate::observability::traced("quality_readout", || {
+            crate::governance::quality_readout(self, crate::governance::readout::message_cap())
+        })
+    }
+
+    /// The agent-host session-start hook payload ([FR-IN-07], [CR-095]): a
+    /// [`quality_readout`](Self::quality_readout) rendered into the JSON object
+    /// the host consumes — a user-visible `systemMessage` plus agent-visible
+    /// `additionalContext`.
+    ///
+    /// Composed here rather than in the hook script because a malformed payload
+    /// makes the host discard the readout entirely, and correct JSON escaping is
+    /// `serde_json`'s job, not `sed`'s. Writes nothing, per
+    /// [`quality_readout`](Self::quality_readout).
+    ///
+    /// # Errors
+    /// Returns an error on a structural failure (transient engine, store fault,
+    /// invalid `rules.toml`).
+    ///
+    /// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
+    /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
+    pub fn quality_report_hook_payload(&self) -> Result<crate::governance::readout::HookPayload> {
+        Ok(crate::governance::readout::session_start_payload(
+            &self.quality_readout()?,
+        ))
+    }
+
     /// The read-only twin of [`temporal_report`](Self::temporal_report): recompute
     /// the per-file temporal metrics from the **already-mined** facts at the
     /// stored cursor, **without mining and without appending a snapshot**
@@ -2146,15 +2205,15 @@ impl Engine {
     /// project's **shared** `.claude/settings.json`, and a sweep of the retired
     /// SessionEnd entry and its orphaned script. When a session starts, resumes,
     /// or is reopened by `/clear`, the hook surfaces the current quality signal,
-    /// the blessed baseline and their delta, and any rule violations as a
-    /// non-blocking readout — it never propagates `check`/`gate`'s non-zero exit
-    /// ([FR-GV-05]); `force` re-emits it.
+    /// the blessed baseline and their delta, and the last recorded rule
+    /// violations as a non-blocking readout ([FR-GV-05]); `force` re-emits it.
     ///
     /// Pure local filesystem I/O behind `logos wiki hook --emit [--force]` (the
     /// `init -i` step runs the same engine through [`crate::init`]). Installing
     /// the hook performs **no** LLM call and opens **no** network connection
-    /// ([NFR-SE-01]) — it only shells out to the pure-read `gate`/`check`
-    /// commands.
+    /// ([NFR-SE-01]) — it only shells out to `logos quality-report`, whose
+    /// read-model is computed without persisting a snapshot
+    /// ([`Self::quality_readout`]).
     ///
     /// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
     /// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md

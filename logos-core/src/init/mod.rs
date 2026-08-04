@@ -62,9 +62,11 @@ pub struct InitOptions {
     /// (`.agents/skills/logos-wiki/` + `.claude/skills/logos-wiki`),
     /// skip-if-present (FR-IN-02 as modified by CR-008, FR-WK-08).
     pub materialize_skill: bool,
-    /// Install the Claude Code SessionEnd quality-report hook (FR-IN-07,
-    /// ADR-49): a marker-tagged hook script + a non-clobbering merge into
-    /// `.claude/settings.json`, default-on under `-i` alongside the skill.
+    /// Install the Claude Code **session-start** quality-report hook (FR-IN-07,
+    /// ADR-49, CR-095): a marker-tagged hook script + a non-clobbering merge into
+    /// `.claude/settings.json`, default-on under `-i` alongside the skill. Also
+    /// sweeps the retired SessionEnd entry and its orphaned script (CR-095), so
+    /// an upgrade stops the `Hook cancelled` error with no hand-editing.
     /// (The PostToolUse wiki-augmentation hook this once also installed
     /// alongside was retired — CR-070.)
     pub install_quality_report_hook: bool,
@@ -254,8 +256,8 @@ piling on more changes. Run `logos:check_rules` before declaring any task done.
 
 The full quality loop has four moves — **freshen** (index/sync so the graph matches
 the code), **enforce** (`logos check` blocks regressions; the `pre-push` gate runs
-it), **report** (`logos scan` surfaces the 0–10000 signal; the SessionEnd hook prints
-it), and **bless** (`logos gate --save` records a new baseline, at release only). The
+it), **report** (`logos scan` surfaces the 0–10000 signal; the session-start hook
+prints it), and **bless** (`logos gate --save` records a new baseline, at release only). The
 copy-pasteable CI recipe is `docs/howto/ci-integration.md`.
 
 Every tool has a CLI twin (`logos context`, `logos search`, …) with `--json` output.

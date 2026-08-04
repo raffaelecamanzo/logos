@@ -706,13 +706,21 @@ fn init_i_installs_the_quality_report_hook() {
         body.contains("LOGOS_QUALITY_REPORT_DISABLE"),
         "the script honors the documented off-switch env var"
     );
-    // Report-only: it always exits 0 and reads via gate (signal + baseline) and
-    // check (violations) — no reconciling scan pass (CR-095).
+    // Report-only, and a launcher rather than a program: it always exits 0 and
+    // delegates the whole readout to one non-persisting command (CR-095). The
+    // payload's shape is asserted in the emitter's own unit tests, against the
+    // Rust that builds it.
     assert!(body.trim_end().ends_with("exit 0"), "always exits 0 — never blocks a session");
-    assert!(body.contains("logos gate --no-reconcile") && body.contains("logos check --no-reconcile"));
-    assert!(!body.contains("logos scan"), "no reconciling scan in the report path");
-    // The readout rides stdout as SessionStart JSON, the only rendered channel.
-    assert!(body.contains(r#""hookEventName":"SessionStart""#));
+    assert!(
+        body.contains("logos --json quality-report --hook-json"),
+        "the installed script launches the report subcommand: {body}"
+    );
+    for computes in ["logos scan", "logos gate", "logos check"] {
+        assert!(
+            !body.contains(computes),
+            "no second graph command in the report path ({computes}): {body}"
+        );
+    }
 
     // The entry declares its own timeout and matches the intended sources.
     let settings: serde_json::Value =
@@ -796,7 +804,14 @@ fn init_i_sweeps_the_retired_session_end_quality_report_hook() {
     let hooks = tmp.path().join(".claude/hooks");
     fs::create_dir_all(&hooks).unwrap();
     let retired_script = hooks.join("logos-quality-report.sh");
-    fs::write(&retired_script, "#!/bin/sh\nexit 0\n").unwrap();
+    // The managed marker is what licenses the delete: Logos no longer writes this
+    // path, so an unmarked file there is the user's and is kept (asserted in the
+    // emitter's unit tests).
+    fs::write(
+        &retired_script,
+        "#!/bin/sh\n# logos:quality-report:managed — retired\nexit 0\n",
+    )
+    .unwrap();
     fs::write(
         tmp.path().join(".claude/settings.json"),
         format!(

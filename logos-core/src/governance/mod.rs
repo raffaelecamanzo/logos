@@ -69,9 +69,17 @@ use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{
     DocGap, DocGapsReport, DoctorReport, DsmReport, DsmRow, EvolutionPoint, EvolutionReport,
     GateResult, HealthInfo, MetricDelta, MetricRegression, MetricSnapshot, MetricValue,
-    RulesReport, ScanResult, SessionInfo, TemporalTier, VerifyCensus, VerifyReport, Violation,
+    QualityReadout, RulesReport, ScanResult, SessionInfo, TemporalTier, VerifyCensus, VerifyReport,
+    Violation,
 };
 use crate::runtime::Runtime;
+
+/// The report tier's session-start payload rendering ([CR-095]) — a projection of
+/// [`quality_readout`], kept beside it rather than beside the hook materializer
+/// that installs the script consuming it (see the module docs for why).
+///
+/// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
+pub mod readout;
 
 #[cfg(test)]
 mod tests;
@@ -1995,6 +2003,109 @@ pub(crate) fn latest_gate(engine: &Engine) -> Result<GateResult> {
     }
 
     Ok(result)
+}
+
+/// The **non-persisting** quality readout for the report tier ([FR-IN-07],
+/// [CR-095]) — the signal an agent-host session-start hook shows.
+///
+/// Writes nothing, by construction, so a hook firing at every session boundary
+/// (including every `/clear`) never takes the graph-DB write lock and never
+/// appends to the [FR-GV-06] `evolution` series. That is the whole reason this
+/// exists next to [`gate`]: `gate` is the [FR-GV-09] recording path ("every gate
+/// writes a snapshot, saved or compared"), which is correct for `scan`/`gate` and
+/// wrong for a readout that only wants to display.
+///
+/// Three deliberate consequences, each reported rather than hidden:
+/// - **No reconcile.** Reconciling is a write, so `freshness` is always stamped
+///   assumed-fresh ([FR-RC-04]).
+/// - **Signal computed fresh.** The deterministic `compute` half of the snapshot
+///   path is shared verbatim with [`gate`], so the two can never disagree.
+/// - **Violations read from the persisted table**, not re-evaluated: [FR-GV-02]'s
+///   evaluator re-materialises the whole derived policy graph on every run
+///   (BR-12), which is a write. `violations: None` means *nothing is recorded*,
+///   which is irreducibly ambiguous — `check_rules` clears and rewrites the
+///   table per run, so a clean check and no check at all leave it identical.
+///   The readout surfaces that ambiguity rather than resolving it by guessing;
+///   asserting "0 violations" would claim a passing check that may never have
+///   happened.
+///
+/// `message_cap` bounds the returned message list; `violation_count` always
+/// carries the true total so a truncated list can say what it dropped.
+///
+/// # Errors
+/// Returns an error on a structural failure (transient engine, store fault,
+/// invalid `rules.toml`) — the same contract as the other quality reads.
+///
+/// [FR-GV-06]: ../../../docs/specs/requirements/FR-GV-06.md
+/// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
+/// [FR-RC-04]: ../../../docs/specs/requirements/FR-RC-04.md
+/// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
+pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<QualityReadout> {
+    // `false`: reconciling writes, and this path must not.
+    let fresh = reconcile_step(engine, false)?;
+    let runtime = quality_runtime(engine)?;
+    let view = engine.hydrate(Granularity::ExcludeContains)?;
+    // BR-25: score under the effective rules.toml thresholds, exactly as `gate`
+    // does, so the readout's signal is the one the gate would report.
+    let thresholds = effective_thresholds(&load_rules_cached(engine, None)?.rules);
+    let metrics = crate::metrics::compute_snapshot(runtime, &view, thresholds)?;
+
+    let mut warnings = Vec::new();
+    let baseline = runtime.submit_read(|store| store.baseline_snapshot(SCOPE_PROJECT))?;
+    // Only a *comparable* baseline yields a delta. An incomparable one (metric
+    // semantics or thresholds changed since it was saved, FR-GV-10) is reported
+    // with its signal but no delta, and says why — subtracting across a
+    // semantics change would produce a confident, meaningless number.
+    let (baseline_signal, comparable) = match &baseline {
+        None => (None, false),
+        Some(base) if base.metric_version != crate::metrics::METRIC_SEMANTICS_VERSION => {
+            warnings.push(
+                "baseline recorded under different metric semantics — delta omitted \
+                 (re-save with `gate --save`)"
+                    .to_string(),
+            );
+            (base.aggregate_signal.map(|s| s as u32), false)
+        }
+        Some(base) if base.thresholds_hash.as_deref() != Some(metrics.thresholds_hash.as_str()) => {
+            warnings.push(
+                "baseline thresholds differ — delta omitted (re-save with `gate --save`)"
+                    .to_string(),
+            );
+            (base.aggregate_signal.map(|s| s as u32), false)
+        }
+        Some(base) => (base.aggregate_signal.map(|s| s as u32), true),
+    };
+    let delta = match (comparable, metrics.aggregate_signal, baseline_signal) {
+        (true, Some(current), Some(base)) => Some(i64::from(current) - i64::from(base)),
+        _ => None,
+    };
+
+    // The persisted findings of the last `check_rules` run. An empty table is
+    // irreducibly ambiguous — a clean check and no check at all leave it
+    // identical — so it maps to `None` ("nothing recorded") and the rendering
+    // says so, rather than claiming a clean bill of health nobody issued.
+    let rows = runtime.submit_read(|store| store.violations())?;
+    let (violations, violation_count) = if rows.is_empty() {
+        (None, None)
+    } else {
+        let total = rows.len();
+        let messages = rows
+            .into_iter()
+            .take(message_cap)
+            .map(|row| row.message)
+            .collect();
+        (Some(messages), Some(total))
+    };
+
+    Ok(QualityReadout {
+        signal: metrics.aggregate_signal,
+        baseline_signal,
+        delta,
+        freshness: fresh.line(),
+        violations,
+        violation_count,
+        warnings,
+    })
 }
 
 /// `check_rules` — the compliance report ([FR-GV-02]); no metric snapshot

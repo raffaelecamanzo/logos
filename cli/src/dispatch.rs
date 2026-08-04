@@ -89,6 +89,17 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             }
             out.try_query(root, |e| e.scan(!no_reconcile))
         }
+        // The report tier (FR-IN-07, CR-095): always exit 0 — unlike
+        // check/gate below, this reports and never gates. Two renderings of one
+        // read-model; `--hook-json` is the agent-host payload the installed hook
+        // script execs.
+        Commands::QualityReport { hook_json } => {
+            if hook_json {
+                out.try_query(root, |e| e.quality_report_hook_payload())
+            } else {
+                out.try_query(root, |e| e.quality_readout())
+            }
+        }
         // check/gate/doctor/verify project a verdict to exit 1 on failure
         // (FR-GV-03); the verdict field differs (`.passed` vs `.ok`), supplied here.
         Commands::Check { rules, no_reconcile } => out.report_gate(

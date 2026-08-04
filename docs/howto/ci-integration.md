@@ -27,7 +27,7 @@ cadence.
 |---|---|---|
 | **Freshen** | `post-commit` / `post-checkout` / `post-merge` hooks run `logos sync` (`init --hooks`) | a `logos index` step |
 | **Enforce** | the `pre-push` gate runs `logos check` and **blocks the push** (`init --hooks`) | a `logos check` build step |
-| **Report** | the session-start quality-report hook surfaces signal-vs-baseline when a session starts, resumes, or is reopened by `/clear`, always exit 0 (`init -i`) | a non-blocking `logos scan --json` job |
+| **Report** | the session-start quality-report hook runs [`logos quality-report`](commands.md#quality-report---hook-json) — write-free, always exit 0 — when a session starts, resumes, or is reopened by `/clear` (`init -i`) | a non-blocking `logos scan --json` job |
 | **Bless** | — (deliberate, manual) | `logos gate --save` on the release branch only |
 
 The `pre-push` gate is a **local pre-flight**, not a substitute for the CI

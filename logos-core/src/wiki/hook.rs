@@ -67,7 +67,8 @@ use serde_json::{json, Value};
 
 use super::skill::EmitAction;
 
-/// The Claude Code settings file the SessionEnd entry merges into, repo-relative.
+/// The Claude Code settings file the `SessionStart` entry merges into,
+/// repo-relative.
 pub const SETTINGS_REL: &str = ".claude/settings.json";
 
 // ── The session-start quality-report hook ([FR-IN-07], [FR-GV-02], [FR-GV-05], [ADR-49], [CR-055], [CR-095]) ──
@@ -79,10 +80,6 @@ pub const QUALITY_REPORT_HOOK_SCRIPT_REL: &str = ".claude/hooks/logos-quality-op
 /// ([FR-IN-07] — a project-wide readout). Uses the same `${CLAUDE_PROJECT_DIR}`
 /// placeholder convention as the other hooks.
 const QUALITY_REPORT_HOOK_COMMAND: &str = "${CLAUDE_PROJECT_DIR}/.claude/hooks/logos-quality-open.sh";
-
-/// The quality-report hook's idempotency / ownership marker: its unique script
-/// basename, found in the command of an entry we own.
-const QUALITY_REPORT_HOOK_MARKER: &str = "logos-quality-open.sh";
 
 /// Which session starts carry the readout ([FR-IN-07], [CR-095]). The host
 /// matches this against the event's `source` as an **exact-match alternation
@@ -114,70 +111,71 @@ const QUALITY_REPORT_HOOK_TIMEOUT_SECS: u64 = 30;
 struct RetiredHook {
     /// The settings event the retired entry was registered under.
     event: &'static str,
-    /// The retired entry's ownership marker (its unique script basename).
-    marker: &'static str,
-    /// The retired script artifact, repo-relative — deleted when found.
+    /// The **exact** command a prior Logos version wrote, matched verbatim.
+    ///
+    /// Not a substring: the command we wrote is fully known, so loose matching
+    /// buys nothing and costs correctness. `contains("logos-quality-report.sh")`
+    /// would also claim a user's vendored fork
+    /// (`hooks/vendor/logos-quality-report.sh`), a wrapper invoking it
+    /// (`my-wrapper.sh --after logos-quality-report.sh`), and even a reminder
+    /// that merely names the file — and then delete them.
+    command: &'static str,
+    /// The retired script artifact, repo-relative — deleted only when it is a
+    /// regular file carrying [`MANAGED_MARKER`].
     script_rel: &'static str,
 }
 
 /// The retired SessionEnd quality-report hook ([CR-095]).
 const RETIRED_HOOKS: &[RetiredHook] = &[RetiredHook {
     event: "SessionEnd",
-    marker: "logos-quality-report.sh",
+    command: "${CLAUDE_PROJECT_DIR}/.claude/hooks/logos-quality-report.sh",
     script_rel: ".claude/hooks/logos-quality-report.sh",
 }];
 
+/// The tag every Logos-authored hook script carries in its header.
+///
+/// The sweep requires it in a file's contents before deleting: Logos no longer
+/// writes `logos-quality-report.sh`, so that path is unclaimed and a user may
+/// legitimately own it now. Deleting on path alone would destroy their file.
+const MANAGED_MARKER: &str = "logos:quality-report:managed";
+
 /// The marker-tagged session-start quality-report hook script ([FR-IN-07],
-/// [FR-GV-02], [FR-GV-05], [ADR-49], [CR-095]). POSIX `sh`, **report-only** by
-/// construction: it ALWAYS exits 0 (never blocks a session) and emits the
-/// current quality signal, the blessed baseline signal and their delta, plus any
-/// architecture-rule violations.
+/// [ADR-49], [CR-095]). POSIX `sh`, **report-only** by construction: it ALWAYS
+/// exits 0, so it can never block a session.
 ///
-/// It makes **no** network or LLM call ([NFR-SE-01]) — it only shells out to two
-/// pure-read quality commands: `logos gate --no-reconcile` (the signal **and**
-/// the blessed `baseline_signal` in one pass, [FR-GV-05] — which is why no
-/// reconciling `scan` is needed, [FR-GV-09]) and `logos check --no-reconcile`
-/// (rule violations, [FR-GV-02]). Neither exit code is propagated — this is the
-/// non-blocking report tier, distinct from the enforcing `pre-push` gate — and,
-/// critically, neither is read as a *failure signal* either: `gate` exits 1 on a
-/// regression and `check` exits 1 on an error violation, both by design
-/// ([FR-GV-03]), so a run is judged by whether its output carries the expected
-/// field. `LOGOS_QUALITY_REPORT_DISABLE` disables it without uninstalling.
+/// Deliberately a **launcher, not a program** ([CR-095]). It gates on the
+/// off-switch, checks the binary is present, enters the project, and execs
+/// `logos quality-report --hook-json`; the readout and its JSON are built in the
+/// binary by `serde_json`. An earlier revision assembled the payload in shell
+/// and got every escaping edge wrong — raw control bytes produced invalid JSON
+/// (which makes the host discard the whole readout silently), a stderr line
+/// containing `"signal":N` was parsed as the signal and reported as truth, and
+/// `grep`-based field extraction was silently coupled to compact JSON. None of
+/// that is expressible here, because there is no parsing and no escaping left in
+/// the script.
 ///
-/// The readout is emitted as one JSON object on **stdout**: `systemMessage` for
-/// the user, `hookSpecificOutput.additionalContext` for the agent, with
-/// `hookEventName` exactly `SessionStart` ([CR-095]).
-///
-/// [FR-GV-03]: ../../../docs/specs/requirements/FR-GV-03.md
+/// Makes **no** network or LLM call ([NFR-SE-01]) — the one command it runs is a
+/// pure local read that writes nothing ([FR-GV-06]: the report tier must not grow
+/// the evolution series). Deliberately **not** `exec`: the command's failure is
+/// swallowed and the script exits 0 regardless, so a PATH binary too old to know
+/// the subcommand degrades to silence rather than to a visible failed hook
+/// ([FR-GV-05] report tier, distinct from the enforcing `pre-push` gate).
+/// `LOGOS_QUALITY_REPORT_DISABLE` disables it without uninstalling.
 const QUALITY_REPORT_HOOK_SCRIPT: &str = r#"#!/bin/sh
-# logos:quality-report:managed — Claude Code SessionStart quality-report hook (FR-IN-07, FR-GV-02, FR-GV-05, ADR-49, CR-095).
+# logos:quality-report:managed — Claude Code SessionStart quality-report hook (FR-IN-07, ADR-49, CR-095).
 #
-# On session start — a fresh start, a resume, or the session opened by /clear —
-# this emits a NON-BLOCKING quality readout: the current quality signal, the
-# blessed baseline signal and their delta (logos gate), and any
-# architecture-rule violations (logos check). It is REPORT-ONLY by construction:
-# it ALWAYS exits 0, so it can never block a session (this is the report tier,
-# not the enforcing pre-push gate). Logos makes no LLM or network call here
-# (NFR-SE-01): gate and check are pure local reads over the graph.
+# Launches the readout; it does not compute or format it. `logos
+# quality-report --hook-json` emits the whole payload as one JSON object on
+# stdout — systemMessage for the user, hookSpecificOutput.additionalContext for
+# the agent, hookEventName fixed to SessionStart — built with serde_json in the
+# binary. Nothing is parsed or escaped here, deliberately: a malformed payload
+# makes the host discard the readout entirely, and shell is the wrong tool for
+# JSON.
 #
-# Output contract (CR-095): the readout goes to STDOUT as ONE JSON object. The
-# host renders `systemMessage` to the user and hands
-# `hookSpecificOutput.additionalContext` to the agent; `hookEventName` must be
-# exactly SessionStart or the host rejects the whole payload. This is why the
-# readout does NOT ride SessionEnd: that event's exit-0 output is discarded
-# entirely, and its hooks are cancelled at a hardcoded 1500 ms.
-#
-# Exit codes are NOT failure signals here: `gate` exits 1 on a regression and
-# `check` exits 1 on an error violation, both BY DESIGN (FR-GV-03). So each run
-# is judged by whether its OUTPUT carries the expected field, never by its
-# status — reading a regression as a failure would report a healthy graph as
-# missing, which is the inverse of the honesty this readout exists for.
-#
-# Honest degradation: another logos process (e.g. a running MCP server) can hold
-# the graph-DB write lock, so a read may fail with "database is locked". This
-# hook CAPTURES that instead of swallowing it, and reports "graph busy —
-# skipped" rather than mis-rendering a healthy, indexed project as un-indexed
-# with a zeroed readout.
+# Report-only: this script always exits 0, so a session is never blocked. The
+# command writes nothing — no metric snapshot, no graph write lock — so firing
+# at every session start, resume and /clear leaves the evolution series
+# untouched.
 #
 #   off-switch: export LOGOS_QUALITY_REPORT_DISABLE=1
 #
@@ -189,109 +187,19 @@ const QUALITY_REPORT_HOOK_SCRIPT: &str = r#"#!/bin/sh
 # Best-effort: a missing binary is nothing to report.
 command -v logos >/dev/null 2>&1 || exit 0
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-cd "$PROJECT_DIR" 2>/dev/null || exit 0
+# Report on the project the host named; its own cwd is not dependable.
+cd "${CLAUDE_PROJECT_DIR:-$(pwd)}" 2>/dev/null || exit 0
 
-# Escape a string for a JSON string literal. Backslash before quote (order
-# matters), tabs folded to spaces, then real newlines folded to a two-character
-# \n by awk. Deliberately not sed for the newline step: BSD sed interprets
-# neither \001 nor \t in a pattern, so a sed-based fold silently no-ops on macOS.
-json_escape() {
-  tr '\t' ' ' \
-    | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
-    | awk 'NR > 1 { printf "%s", "\\n" } { printf "%s", $0 }'
-}
+# Deliberately NOT `exec`: the hook script and the binary on PATH can be
+# different vintages (a script emitted by a new `logos wiki hook --emit` while
+# an older release is still PATH-promoted, which is the normal state mid-
+# upgrade). An older binary does not know this subcommand and would exit 2 with
+# a clap usage error on stderr — which the host surfaces to the user as a failed
+# hook, turning a missing readout into a visible defect. Swallowing it keeps the
+# report tier's contract: it reports when it can and is silent when it cannot,
+# but it is never itself the problem.
+logos --json quality-report --hook-json 2>/dev/null || exit 0
 
-# Emit the single JSON object: $1 = one-line user-visible summary, $2 = the full
-# readout handed to the agent as session context.
-emit() {
-  printf '{"systemMessage":"%s","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
-    "$(printf '%s' "$1" | json_escape)" \
-    "$(printf '%s' "$2" | json_escape)"
-}
-
-# --- signal + blessed baseline: one `gate` pass (FR-GV-05) ------------------
-# `gate --no-reconcile` yields BOTH `signal` and `baseline_signal`, so the
-# report needs no reconciling `scan` pass at all. stdout+stderr share one
-# capture so an error message is classified rather than swallowed.
-gate_out=$(logos gate --no-reconcile --json 2>&1)
-signal=$(printf '%s' "$gate_out" | grep -oE '"signal":[0-9]+' | head -1 | grep -oE '[0-9]+')
-if [ -z "$signal" ]; then
-  # No signal in the output — a real read failure, NOT a regression (a regressed
-  # gate still reports its signal and merely exits 1). Distinguish a TRANSIENT
-  # lock, another logos process holding the DB, from a genuinely absent or
-  # uninitialized graph, so the readout never lies.
-  if printf '%s' "$gate_out" | grep -qi 'database is locked'; then
-    reason='logos quality report: graph busy (locked by another logos process) — skipped.'
-  else
-    reason='logos quality report: graph unavailable (run logos index first) — skipped.'
-  fi
-  emit "$reason" "$reason"
-  exit 0
-fi
-baseline=$(printf '%s' "$gate_out" | grep -oE '"baseline_signal":[0-9]+' | head -1 | grep -oE '[0-9]+')
-freshness=$(printf '%s' "$gate_out" \
-  | grep -oE '"freshness":"([^"\\]|\\.)*"' \
-  | head -1 \
-  | sed -e 's/^"freshness":"//' -e 's/"$//' -e 's/\\"/"/g')
-
-# --- rule violations: `check` (FR-GV-02) -----------------------------------
-# Only trust a count when the violations array is present in the output: `check`
-# also exits non-zero with empty output when it cannot read the graph, and a
-# blind grep would then mis-report that as a truthful "0 violations".
-check_json=$(logos check --no-reconcile --json 2>/dev/null)
-if printf '%s' "$check_json" | grep -q '"violations"'; then
-  violations=$(printf '%s' "$check_json" | grep -oE '"severity":"[a-z]+"' | grep -c '.')
-else
-  violations=""
-fi
-
-# --- build the readout -----------------------------------------------------
-readout="logos quality report (session start)"
-readout="$readout
-  signal:   $signal"
-if [ -n "$baseline" ]; then
-  delta=$((signal - baseline))
-  readout="$readout
-  baseline: $baseline
-  delta:    $delta"
-  summary="logos quality report: signal $signal · baseline $baseline · delta $delta"
-else
-  readout="$readout
-  baseline: n/a (none saved — bless one with 'logos gate --save')"
-  summary="logos quality report: signal $signal · no baseline saved"
-fi
-readout="$readout
-  rule violations: ${violations:-n/a (check unavailable)}"
-if [ -n "$violations" ]; then
-  summary="$summary · $violations violation(s)"
-else
-  summary="$summary · violations n/a"
-fi
-if [ -n "$freshness" ]; then
-  readout="$readout
-  freshness: $freshness"
-fi
-
-# List the violation messages (report-only detail), capped for brevity. Match
-# the full message value allowing escaped chars so a message containing a quote
-# is not truncated at the first quote, then unescape for display — json_escape
-# re-escapes the whole readout on the way out.
-if [ "${violations:-0}" -gt 0 ] 2>/dev/null; then
-  messages=$(printf '%s' "$check_json" \
-    | grep -oE '"message":"([^"\\]|\\.)*"' \
-    | sed -e 's/^"message":"//' -e 's/"$//' -e 's/\\"/"/g' \
-    | head -20 \
-    | sed -e 's/^/    - /')
-  if [ -n "$messages" ]; then
-    readout="$readout
-$messages"
-  fi
-fi
-
-emit "$summary" "$readout"
-
-# ALWAYS exit 0: this hook reports, it never blocks a session (FR-GV-05).
 exit 0
 "#;
 
@@ -308,17 +216,22 @@ struct HookSpec {
     settings_rel: &'static str,
     /// The Claude Code hook event the entry registers under (e.g. `SessionStart`).
     event: &'static str,
-    /// The event-field matcher, or `None` for a matcher-less entry that fires on
-    /// every occurrence. Compared by the host as an exact-match alternation list.
-    matcher: Option<&'static str>,
+    /// The event-field matcher, compared by the host as an exact-match
+    /// alternation list.
+    ///
+    /// Not an `Option`: a matcher-less entry fires on **every** occurrence of the
+    /// event, which for `SessionStart` includes `compact` — mid-task
+    /// auto-compaction, the readout-as-noise pattern [CR-095] deliberately
+    /// excludes. Making the axis unrepresentable is worth more than the
+    /// generality; the retired [FR-WK-14] spec that once justified `None` is gone.
+    matcher: &'static str,
     /// The declared per-hook timeout in seconds — never inherit a host default
     /// ([CR-095]).
     timeout_secs: u64,
-    /// The wired command (uses the `${CLAUDE_PROJECT_DIR}` placeholder).
+    /// The wired command (uses the `${CLAUDE_PROJECT_DIR}` placeholder). Also
+    /// the ownership token: an entry is ours when a hook's command equals this
+    /// exactly ([CR-095] — never a substring test).
     command: &'static str,
-    /// The idempotency / ownership marker: our unique script basename, found in
-    /// the command of an entry we own.
-    marker: &'static str,
     /// The marker-tagged script body.
     script: &'static str,
     /// Managed entries from prior versions, swept on every emit ([CR-095]).
@@ -333,10 +246,9 @@ const QUALITY_REPORT_SPEC: HookSpec = HookSpec {
     script_rel: QUALITY_REPORT_HOOK_SCRIPT_REL,
     settings_rel: SETTINGS_REL,
     event: "SessionStart",
-    matcher: Some(QUALITY_REPORT_HOOK_MATCHER),
+    matcher: QUALITY_REPORT_HOOK_MATCHER,
     timeout_secs: QUALITY_REPORT_HOOK_TIMEOUT_SECS,
     command: QUALITY_REPORT_HOOK_COMMAND,
-    marker: QUALITY_REPORT_HOOK_MARKER,
     script: QUALITY_REPORT_HOOK_SCRIPT,
     retired: RETIRED_HOOKS,
 };
@@ -361,10 +273,19 @@ pub struct HookEmitSummary {
     /// A one-line reason when a foreign/unsafe settings file was skipped; else
     /// `None`.
     pub notice: Option<String>,
-    /// Retired artifacts removed by this emit, repo-relative ([CR-095]) — the
-    /// stale entry's script path, reported so the sweep is visible rather than
-    /// silent. Empty on a clean install and on every subsequent re-run.
+    /// Retired artifacts removed by this emit, repo-relative ([CR-095]).
+    ///
+    /// Covers **both** halves of the sweep — the settings entry and the script
+    /// file — because either alone is a destructive edit the user must be told
+    /// about. Reporting only deleted files would stay silent in the common case
+    /// where `.claude/settings.json` is committed and `.claude/hooks/` is
+    /// ignored: the entry disappears from a shared file with nothing said.
+    /// Empty on a clean install and on every subsequent re-run.
     pub retired_removed: Vec<String>,
+    /// Retired artifacts left in place because the settings shape around them
+    /// was unrecognized, so removing the script would orphan a live entry
+    /// ([CR-095]). Surfaced rather than silently skipped.
+    pub retired_skipped: Vec<String>,
 }
 
 /// What the settings merge resolved to — a pure function of the existing file
@@ -376,11 +297,15 @@ enum Merge {
     AlreadyPresent,
     /// Write this serialized settings document; `forced` distinguishes a
     /// re-emit (entry was present) from a first install. `swept` names the
-    /// retired specs whose entries this merge removed ([CR-095]).
+    /// retired scripts whose settings hooks this merge removed, and
+    /// `unsweepable` those whose event shape it did not recognize — the file
+    /// sweep must skip the latter or it would orphan a surviving entry
+    /// ([CR-095]).
     Write {
         json: String,
         forced: bool,
         swept: Vec<&'static str>,
+        unsweepable: Vec<&'static str>,
     },
     /// A foreign/unparseable settings file — never overwritten ([FR-IN-07]).
     Foreign { reason: String },
@@ -394,9 +319,9 @@ enum Merge {
 /// **Idempotent and non-clobbering:** an existing managed entry (recognized by
 /// its command path) is left untouched unless `force`; a foreign or unparseable
 /// settings file is never overwritten. Installing the hook performs **no** LLM
-/// call and opens **no** network connection ([NFR-SE-01]) — the hook only
-/// shells out to the pure-read `gate`/`check` commands at session start, and
-/// always exits 0 ([FR-GV-05] report tier).
+/// call and opens **no** network connection ([NFR-SE-01]) — the hook only shells
+/// out to `logos quality-report`, which computes the signal without persisting a
+/// snapshot ([FR-GV-06]) and always exits 0 ([FR-GV-05] report tier).
 ///
 /// # Errors
 /// Returns an error only when a Logos-owned path cannot be created, written or
@@ -418,25 +343,43 @@ fn materialize_spec(base: &Path, force: bool, spec: &HookSpec) -> Result<HookEmi
         None
     };
 
-    let summary_base = |action, notice, retired_removed| HookEmitSummary {
-        script: spec.script_rel.to_string(),
-        settings: spec.settings_rel.to_string(),
-        action,
-        notice,
-        retired_removed,
+    let summary_base = |action, notice, removed: Vec<String>, skipped: Vec<String>| {
+        HookEmitSummary {
+            script: spec.script_rel.to_string(),
+            settings: spec.settings_rel.to_string(),
+            action,
+            notice,
+            retired_removed: removed,
+            retired_skipped: skipped,
+        }
     };
 
     match merge_settings(existing.as_deref(), force, spec) {
         // A settings file we refuse to parse is also one we refuse to sweep:
         // leave every artifact exactly as it is ([FR-IN-07] never-overwrite).
-        Merge::Foreign { reason } => Ok(summary_base(EmitAction::Skipped, Some(reason), Vec::new())),
+        Merge::Foreign { reason } => Ok(summary_base(
+            EmitAction::Skipped,
+            Some(reason),
+            Vec::new(),
+            Vec::new(),
+        )),
         // Nothing to write, but an orphaned retired script can still be on disk
         // (a prior sweep that removed the entry, or a hand-edited settings file).
         Merge::AlreadyPresent => {
-            let removed = sweep_retired_scripts(base, spec)?;
-            Ok(summary_base(EmitAction::Skipped, None, removed))
+            let sweep = sweep_retired_scripts(base, spec, &[]);
+            Ok(summary_base(
+                EmitAction::Skipped,
+                None,
+                sweep.removed,
+                sweep.skipped,
+            ))
         }
-        Merge::Write { json, forced, swept } => {
+        Merge::Write {
+            json,
+            forced,
+            swept,
+            unsweepable,
+        } => {
             // Write the script first so the wired entry never points at a
             // missing file, then commit the settings merge.
             write_script(base, spec)?;
@@ -446,14 +389,23 @@ fn materialize_spec(base: &Path, force: bool, spec: &HookSpec) -> Result<HookEmi
             }
             fs::write(&settings_path, json)
                 .with_context(|| format!("writing {}", settings_path.display()))?;
-            let removed = sweep_retired_scripts(base, spec)?;
+            let sweep = sweep_retired_scripts(base, spec, &unsweepable);
+            // Both halves of the sweep are reported: the settings hooks removed
+            // by the merge (`swept`) and the script files removed here.
+            let mut removed = sweep.removed;
+            for script_rel in swept {
+                let entry = format!("{script_rel} (settings entry)");
+                if !removed.contains(&entry) {
+                    removed.push(entry);
+                }
+            }
             tracing::info!(
                 script = spec.script_rel,
                 settings = spec.settings_rel,
                 event = spec.event,
                 forced,
-                swept = swept.len(),
-                retired_scripts_removed = removed.len(),
+                retired_removed = removed.len(),
+                retired_skipped = sweep.skipped.len(),
                 "wiki hook materialized"
             );
             Ok(summary_base(
@@ -464,30 +416,78 @@ fn materialize_spec(base: &Path, force: bool, spec: &HookSpec) -> Result<HookEmi
                 },
                 None,
                 removed,
+                sweep.skipped,
             ))
         }
     }
 }
 
-/// Delete the retired hooks' orphaned script artifacts, returning the
-/// repo-relative paths actually removed ([CR-095]).
+/// What the file-level sweep did ([CR-095]).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ScriptSweep {
+    /// Repo-relative paths actually deleted.
+    removed: Vec<String>,
+    /// Paths deliberately left alone, each with the reason — a file Logos did
+    /// not write, a non-regular path, an unrecognized settings shape, or a
+    /// failed unlink.
+    skipped: Vec<String>,
+}
+
+/// Delete the retired hooks' orphaned script artifacts ([CR-095]).
 ///
-/// Bounded by [`HookSpec::retired`] — only paths Logos itself wrote in a prior
-/// version are touched. An absent file is not an error: the sweep is idempotent,
-/// so the common case (a project that never had the retired hook, or already
-/// swept it) removes nothing and reports nothing.
-fn sweep_retired_scripts(base: &Path, spec: &HookSpec) -> Result<Vec<String>> {
-    let mut removed = Vec::new();
+/// Deliberately conservative on all four axes, because this is the one place
+/// Logos deletes a file:
+///
+/// - **Ownership is verified, not assumed.** Logos no longer writes
+///   `logos-quality-report.sh`, so that path is unclaimed and a user may
+///   legitimately own it now. The file must contain [`MANAGED_MARKER`] — the tag
+///   every Logos-authored hook script carries — or it is left alone. Deleting on
+///   path alone would destroy a file the user wrote and Logos never did.
+/// - **Regular files only.** `symlink_metadata` is used rather than `exists()`,
+///   which follows links: a symlink at that path is left in place (removing the
+///   link would break the user's wiring), and a *dangling* symlink — which
+///   `exists()` reports as absent — is reported as skipped rather than silently
+///   ignored.
+/// - **An unrecognized settings shape blocks the delete** (`unsweepable`): if
+///   the merge declined to touch a retired entry, the script it references must
+///   stay, or a live registration is left pointing at nothing.
+/// - **Failure degrades, it never aborts.** A failed unlink is recorded and the
+///   install still succeeds. Propagating it would abort `init::run` *after* the
+///   settings write already landed, discarding the whole step list and telling
+///   the user a successful install failed.
+fn sweep_retired_scripts(base: &Path, spec: &HookSpec, unsweepable: &[&str]) -> ScriptSweep {
+    let mut sweep = ScriptSweep::default();
     for retired in spec.retired {
-        let path = base.join(retired.script_rel);
-        if !path.exists() {
+        let rel = retired.script_rel;
+        if unsweepable.contains(&rel) {
+            sweep
+                .skipped
+                .push(format!("{rel} (left: its settings entry was not recognized)"));
             continue;
         }
-        fs::remove_file(&path)
-            .with_context(|| format!("removing the retired hook script {}", path.display()))?;
-        removed.push(retired.script_rel.to_string());
+        let path = base.join(rel);
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            // Genuinely absent — the common, silent case.
+            continue;
+        };
+        if !meta.is_file() {
+            sweep
+                .skipped
+                .push(format!("{rel} (left: not a regular file)"));
+            continue;
+        }
+        match fs::read_to_string(&path) {
+            Ok(body) if body.contains(MANAGED_MARKER) => match fs::remove_file(&path) {
+                Ok(()) => sweep.removed.push(rel.to_string()),
+                Err(err) => sweep.skipped.push(format!("{rel} (left: {err})")),
+            },
+            Ok(_) => sweep
+                .skipped
+                .push(format!("{rel} (left: not a Logos-authored script)")),
+            Err(err) => sweep.skipped.push(format!("{rel} (left: {err})")),
+        }
     }
-    Ok(removed)
+    sweep
 }
 
 /// Write the marker-tagged hook script, marking it executable on Unix.
@@ -507,36 +507,74 @@ fn write_script(base: &Path, spec: &HookSpec) -> Result<()> {
     Ok(())
 }
 
-/// The settings entry this hook installs. Matcher-less — SessionEnd (the only
-/// event materialized today) has no tool to match on, so it fires on every
-/// occurrence and the script self-gates.
+/// The settings entry this hook installs: the spec's source matcher wrapping one
+/// `command` hook.
+///
+/// Both fields are unconditional. The matcher bounds *which* session starts fire
+/// the hook (see [`HookSpec::matcher`]), and the declared timeout is never
+/// omitted — inheriting an undocumented host default is what broke the retired
+/// SessionEnd hook ([CR-095]).
 fn hook_entry(spec: &HookSpec) -> Value {
-    // The declared timeout is never omitted: inheriting an undocumented host
-    // default is what broke the retired SessionEnd hook ([CR-095]).
-    let hook = json!({
-        "type": "command",
-        "command": spec.command,
-        "timeout": spec.timeout_secs,
-    });
-    match spec.matcher {
-        Some(matcher) => json!({ "matcher": matcher, "hooks": [hook] }),
-        None => json!({ "hooks": [hook] }),
-    }
+    json!({
+        "matcher": spec.matcher,
+        "hooks": [ { "type": "command", "command": spec.command, "timeout": spec.timeout_secs } ],
+    })
 }
 
-/// Does this hook entry belong to us? An entry is ours when any of its `hooks`
-/// commands references our unique script path (`marker`).
-fn is_ours(entry: &Value, marker: &str) -> bool {
+/// Is this individual hook object one Logos wrote, i.e. does its command match
+/// `command` exactly?
+///
+/// Exact, not `contains`: the command Logos writes is fully known, so a substring
+/// test only widens the blast radius onto commands that merely *mention* our
+/// script name.
+fn is_our_hook(hook: &Value, command: &str) -> bool {
+    hook.get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|c| c == command)
+}
+
+/// Does this hook entry contain a hook Logos wrote?
+///
+/// Note what this does **not** license: an entry containing one of ours may also
+/// contain the user's own hooks, so it must be *pruned* at hook granularity —
+/// never dropped wholesale. See [`prune_our_hooks`].
+fn is_ours(entry: &Value, command: &str) -> bool {
     entry
         .get("hooks")
         .and_then(Value::as_array)
-        .is_some_and(|hooks| {
-            hooks.iter().any(|h| {
-                h.get("command")
-                    .and_then(Value::as_str)
-                    .is_some_and(|c| c.contains(marker))
-            })
-        })
+        .is_some_and(|hooks| hooks.iter().any(|h| is_our_hook(h, command)))
+}
+
+/// Remove Logos-authored hooks from `arr` at **hook** granularity, returning
+/// whether anything was removed ([CR-095]).
+///
+/// The granularity is the whole point. A settings entry is a `{matcher, hooks:
+/// [...]}` group, and a user may append their own command to an entry Logos
+/// installed — or, historically, to the retired one. Dropping the entry because
+/// it contains one of ours would silently unregister their hook: real
+/// configuration loss, in a file that is usually shared and version-controlled,
+/// caused by a command the user ran to *fix* something. So each entry keeps
+/// every hook that is not ours, and only an entry left with no hooks at all is
+/// dropped.
+fn prune_our_hooks(arr: &mut Vec<Value>, command: &str) -> bool {
+    let mut removed = false;
+    let mut kept = Vec::with_capacity(arr.len());
+    for mut entry in std::mem::take(arr) {
+        if let Some(hooks) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
+            let before = hooks.len();
+            hooks.retain(|hook| !is_our_hook(hook, command));
+            let shrank = hooks.len() != before;
+            removed |= shrank;
+            // Drop only an entry **we** emptied. One that arrived empty is the
+            // user's business, not ours to tidy.
+            if shrank && hooks.is_empty() {
+                continue;
+            }
+        }
+        kept.push(entry);
+    }
+    *arr = kept;
+    removed
 }
 
 /// Resolve the settings merge purely (no I/O) so the idempotent/non-clobbering
@@ -574,27 +612,36 @@ fn merge_settings(existing: Option<&str>, force: bool, spec: &HookSpec) -> Merge
             reason: format!("existing {settings} `hooks` is not an object — left untouched"),
         };
     };
-    // Sweep managed entries retired by a prior version ([CR-095]). Bounded by
-    // the ownership marker, so a foreign entry sharing the retired event — and
-    // an event array whose shape we do not recognize — survives untouched.
+    // Sweep hooks retired by a prior version ([CR-095]), at hook granularity so
+    // a user command sharing an entry with the retired one survives.
     let mut swept = Vec::new();
+    let mut unsweepable = Vec::new();
     for retired in spec.retired {
-        let Some(event) = hooks_obj.get_mut(retired.event) else {
-            continue;
+        // An event we cannot recognize is left verbatim — and `sweepable` stays
+        // false for it, so the file-level sweep declines to delete the script
+        // that surviving entry still references. The entry and its script go
+        // together or not at all; deleting one and keeping the other would
+        // leave a registration pointing at nothing, which is worse than either.
+        let sweepable = match hooks_obj.get_mut(retired.event) {
+            None => true,
+            Some(event) => match event.as_array_mut() {
+                None => false,
+                Some(arr) => {
+                    if prune_our_hooks(arr, retired.command) {
+                        swept.push(retired.script_rel);
+                    }
+                    // Drop an event key we just emptied rather than leaving
+                    // `"SessionEnd": []` behind — the retirement should be
+                    // invisible, not archaeological.
+                    if arr.is_empty() {
+                        hooks_obj.remove(retired.event);
+                    }
+                    true
+                }
+            },
         };
-        let Some(arr) = event.as_array_mut() else {
-            continue;
-        };
-        let before = arr.len();
-        arr.retain(|entry| !is_ours(entry, retired.marker));
-        if arr.len() == before {
-            continue;
-        }
-        swept.push(retired.marker);
-        // Drop an event key we just emptied rather than leaving `"SessionEnd": []`
-        // behind — the retirement should be invisible, not archaeological.
-        if arr.is_empty() {
-            hooks_obj.remove(retired.event);
+        if !sweepable {
+            unsweepable.push(retired.script_rel);
         }
     }
 
@@ -608,17 +655,23 @@ fn merge_settings(existing: Option<&str>, force: bool, spec: &HookSpec) -> Merge
         };
     };
 
-    let present = arr.iter().any(|e| is_ours(e, spec.marker));
-    // Idempotent only when there is also nothing retired left to remove:
-    // otherwise a project whose entry is already current would keep its stale
-    // SessionEnd entry — and keep emitting the error the sweep exists to stop.
-    if present && !force && swept.is_empty() {
+    let present = arr.iter().any(|e| is_ours(e, spec.command));
+    // Reconcile a present entry whose *shape* drifted from the spec — a matcher
+    // or timeout from an older emit, or a hand edit. Without this the sweep is
+    // only half self-healing: the retired event heals, while an entry carrying
+    // (say) `timeout: 1` survives and reproduces the very cancellation
+    // [CR-095] exists to remove.
+    let current = present && arr.iter().any(|e| *e == hook_entry(spec));
+    // Idempotent only when our entry is already exactly right AND nothing
+    // retired is left to remove.
+    if current && !force && swept.is_empty() {
         return Merge::AlreadyPresent;
     }
-    // `force` re-emit: drop our prior entries before re-adding so a refresh
-    // never accumulates duplicates. Foreign entries are preserved untouched.
+    // Re-emit: prune our prior hooks before re-adding so a refresh never
+    // accumulates duplicates. Pruning is per-hook, so a user command sharing
+    // our entry is preserved — the entry is only dropped if we emptied it.
     if present {
-        arr.retain(|entry| !is_ours(entry, spec.marker));
+        prune_our_hooks(arr, spec.command);
     }
     arr.push(hook_entry(spec));
 
@@ -626,6 +679,7 @@ fn merge_settings(existing: Option<&str>, force: bool, spec: &HookSpec) -> Merge
         json: serialize(&config),
         forced: present,
         swept,
+        unsweepable,
     }
 }
 
@@ -643,6 +697,11 @@ fn serialize(value: &Value) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// A retired script body as a prior Logos version wrote it — carrying the
+    /// managed marker, which is what licenses the sweep to delete it.
+    const RETIRED_SCRIPT_BODY: &str =
+        "#!/bin/sh\n# logos:quality-report:managed — retired\nexit 0\n";
 
     /// The retired SessionEnd entry as a prior Logos version wrote it, for the
     /// [CR-095] sweep tests.
@@ -663,7 +722,7 @@ mod tests {
             .as_array()
             .map(|a| {
                 a.iter()
-                    .filter(|e| is_ours(e, QUALITY_REPORT_HOOK_MARKER))
+                    .filter(|e| is_ours(e, QUALITY_REPORT_HOOK_COMMAND))
                     .cloned()
                     .collect()
             })
@@ -686,7 +745,7 @@ mod tests {
             },
             "permissions": { "allow": ["Bash"] }
         }"#;
-        let Merge::Write { json, forced, swept } =
+        let Merge::Write { json, forced, swept, .. } =
             merge_settings(Some(existing), false, &QUALITY_REPORT_SPEC)
         else {
             panic!("expected a write");
@@ -697,7 +756,7 @@ mod tests {
         let start = value["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(start.len(), 2, "the foreign entry is preserved alongside ours");
         assert!(start.iter().any(|e| e["hooks"][0]["command"] == "my-own.sh"));
-        assert!(start.iter().any(|e| is_ours(e, QUALITY_REPORT_HOOK_MARKER)));
+        assert!(start.iter().any(|e| is_ours(e, QUALITY_REPORT_HOOK_COMMAND)));
         // Unrelated keys survive verbatim.
         assert_eq!(value["permissions"]["allow"][0], "Bash");
     }
@@ -797,6 +856,94 @@ mod tests {
         assert!(!QUALITY_REPORT_HOOK_MATCHER.contains("fork"));
     }
 
+    /// The declared timeout is pinned to a **literal** value, not to its own
+    /// constant: a comparison against `QUALITY_REPORT_HOOK_TIMEOUT_SECS` passes
+    /// for any value, including a 1 that would reproduce the very cancellation
+    /// [CR-095] exists to remove. The band is what matters — comfortably above
+    /// the readout's real cost, comfortably below a wedged session.
+    #[test]
+    fn the_declared_timeout_is_pinned_to_a_usable_band() {
+        assert_eq!(QUALITY_REPORT_HOOK_TIMEOUT_SECS, 30);
+        let Merge::Write { json, .. } = merge_settings(None, false, &QUALITY_REPORT_SPEC) else {
+            panic!("expected a write");
+        };
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["hooks"]["SessionStart"][0]["hooks"][0]["timeout"], 30);
+    }
+
+    /// An entry that is present but whose **shape** drifted — an older emit's
+    /// timeout, or a hand edit — is reconciled rather than left alone. Without
+    /// this the self-healing is only half done: the retired event heals while a
+    /// `timeout: 1` entry survives and keeps cancelling.
+    #[test]
+    fn a_drifted_managed_entry_is_reconciled() {
+        let stale = format!(
+            r#"{{ "hooks": {{ "SessionStart": [
+                {{ "matcher": "startup", "hooks": [
+                    {{ "type": "command", "command": "{QUALITY_REPORT_HOOK_COMMAND}", "timeout": 1 }}
+                ] }}
+            ] }} }}"#
+        );
+        let Merge::Write { json, forced, .. } =
+            merge_settings(Some(&stale), false, &QUALITY_REPORT_SPEC)
+        else {
+            panic!("a drifted managed entry must be rewritten, not accepted as current");
+        };
+        assert!(forced, "rewriting a present-but-drifted entry is a re-emit");
+        let value: Value = serde_json::from_str(&json).unwrap();
+        let mine = ours(&value, "SessionStart");
+        assert_eq!(mine.len(), 1, "reconciled in place, not duplicated: {value}");
+        assert_eq!(mine[0]["hooks"][0]["timeout"], 30, "the stale timeout is corrected");
+        assert_eq!(mine[0]["matcher"], QUALITY_REPORT_HOOK_MATCHER, "and the matcher");
+    }
+
+    /// A user command appended to the entry Logos installed survives a re-emit.
+    /// The prune is per-**hook**, never per-entry: dropping the group because it
+    /// contains one of ours would silently unregister their hook — real
+    /// configuration loss, in a shared file, caused by a command run to fix
+    /// something.
+    #[test]
+    fn a_user_hook_sharing_our_entry_survives_a_re_emit() {
+        let shared = format!(
+            r#"{{ "hooks": {{ "SessionStart": [
+                {{ "matcher": "{QUALITY_REPORT_HOOK_MATCHER}", "hooks": [
+                    {{ "type": "command", "command": "{QUALITY_REPORT_HOOK_COMMAND}", "timeout": 30 }},
+                    {{ "type": "command", "command": "their-own.sh" }}
+                ] }}
+            ] }} }}"#
+        );
+        let value = written(merge_settings(Some(&shared), true, &QUALITY_REPORT_SPEC));
+        let start = value["hooks"]["SessionStart"].as_array().unwrap();
+        let commands: Vec<String> = start
+            .iter()
+            .flat_map(|e| e["hooks"].as_array().cloned().unwrap_or_default())
+            .filter_map(|h| h["command"].as_str().map(str::to_string))
+            .collect();
+        assert!(
+            commands.iter().any(|c| c == "their-own.sh"),
+            "the user's hook is never unregistered: {value}"
+        );
+        assert_eq!(
+            commands.iter().filter(|c| *c == QUALITY_REPORT_HOOK_COMMAND).count(),
+            1,
+            "and ours is re-emitted exactly once: {value}"
+        );
+    }
+
+    /// An entry that arrived with an empty `hooks` array is the user's business,
+    /// not ours to tidy: the prune drops only groups **it** emptied.
+    #[test]
+    fn an_entry_that_arrived_empty_is_left_alone() {
+        let mut arr: Vec<Value> = serde_json::from_str(
+            r#"[ { "matcher": "startup", "hooks": [] },
+                 { "hooks": [ { "type": "command", "command": "ours" } ] } ]"#,
+        )
+        .unwrap();
+        assert!(prune_our_hooks(&mut arr, "ours"), "ours was removed");
+        assert_eq!(arr.len(), 1, "the pre-existing empty entry survives: {arr:?}");
+        assert_eq!(arr[0]["matcher"], "startup");
+    }
+
     // ── [CR-095] retirement sweep ─────────────────────────────────────────────
 
     /// The retired SessionEnd entry is removed while a foreign entry sharing
@@ -820,7 +967,7 @@ mod tests {
         else {
             panic!("expected a write — a pending sweep is never a no-op");
         };
-        assert_eq!(swept, vec!["logos-quality-report.sh"]);
+        assert_eq!(swept, vec![".claude/hooks/logos-quality-report.sh"]);
         let value: Value = serde_json::from_str(&json).unwrap();
         let end = value["hooks"]["SessionEnd"].as_array().unwrap();
         assert_eq!(end.len(), 1, "only the foreign SessionEnd entry remains");
@@ -864,7 +1011,7 @@ mod tests {
         else {
             panic!("a pending sweep must write even when our entry is already present");
         };
-        assert_eq!(swept, vec!["logos-quality-report.sh"]);
+        assert_eq!(swept, vec![".claude/hooks/logos-quality-report.sh"]);
     }
 
     /// A retired event whose shape we do not recognize is left alone — the sweep
@@ -889,7 +1036,7 @@ mod tests {
         let claude = tmp.path().join(".claude/hooks");
         fs::create_dir_all(&claude).unwrap();
         let retired_script = tmp.path().join(".claude/hooks/logos-quality-report.sh");
-        fs::write(&retired_script, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(&retired_script, RETIRED_SCRIPT_BODY).unwrap();
         fs::write(
             tmp.path().join(SETTINGS_REL),
             format!(
@@ -907,11 +1054,19 @@ mod tests {
 
         let summary = materialize_quality_report(tmp.path(), false).unwrap();
         assert_eq!(summary.action, EmitAction::Created);
+        // BOTH halves are reported: the deleted script and the removed settings
+        // entry. Reporting only the file would stay silent when `.claude/hooks/`
+        // is ignored but `settings.json` is committed — an entry vanishing from a
+        // shared file with nothing said.
         assert_eq!(
             summary.retired_removed,
-            vec![".claude/hooks/logos-quality-report.sh".to_string()],
+            vec![
+                ".claude/hooks/logos-quality-report.sh".to_string(),
+                ".claude/hooks/logos-quality-report.sh (settings entry)".to_string(),
+            ],
             "the sweep is reported, not silent"
         );
+        assert!(summary.retired_skipped.is_empty(), "nothing was left behind");
         assert!(!retired_script.exists(), "the orphaned script is deleted");
         assert!(
             tmp.path().join(QUALITY_REPORT_HOOK_SCRIPT_REL).exists(),
@@ -943,7 +1098,7 @@ mod tests {
         let before = fs::read_to_string(tmp.path().join(SETTINGS_REL)).unwrap();
 
         let orphan = tmp.path().join(".claude/hooks/logos-quality-report.sh");
-        fs::write(&orphan, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(&orphan, RETIRED_SCRIPT_BODY).unwrap();
 
         let summary = materialize_quality_report(tmp.path(), false).unwrap();
         assert_eq!(summary.action, EmitAction::Skipped, "settings are already current");
@@ -963,16 +1118,107 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join(".claude/hooks")).unwrap();
         let retired_script = tmp.path().join(".claude/hooks/logos-quality-report.sh");
-        fs::write(&retired_script, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(&retired_script, RETIRED_SCRIPT_BODY).unwrap();
         fs::write(tmp.path().join(SETTINGS_REL), "{ not json").unwrap();
 
         let summary = materialize_quality_report(tmp.path(), false).unwrap();
         assert_eq!(summary.action, EmitAction::Skipped);
-        assert!(summary.notice.is_some(), "the refusal is explained");
+        let notice = summary.notice.expect("the refusal is explained");
+        assert!(notice.contains(SETTINGS_REL), "the notice names the file: {notice}");
+        assert!(notice.contains("not valid JSON"), "and the reason: {notice}");
+        assert!(notice.contains("left untouched"), "and what it did: {notice}");
         assert!(summary.retired_removed.is_empty());
         assert!(
             retired_script.exists(),
             "a file we will not parse is a file we will not sweep"
+        );
+    }
+
+    /// The file sweep is the one place Logos deletes a file, so it verifies
+    /// ownership rather than assuming it. A file at the retired path that Logos
+    /// did not write — the path is unclaimed now, so a user may legitimately own
+    /// it — is kept, and the reason is reported rather than swallowed.
+    #[test]
+    fn the_sweep_never_deletes_a_file_logos_did_not_write() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join(".claude/hooks")).unwrap();
+        let theirs = tmp.path().join(".claude/hooks/logos-quality-report.sh");
+        fs::write(&theirs, "#!/bin/sh\n# my own script, same name\necho hi\n").unwrap();
+
+        let summary = materialize_quality_report(tmp.path(), false).unwrap();
+        assert!(theirs.exists(), "an unmarked file at that path is not ours to delete");
+        assert!(summary.retired_removed.is_empty());
+        assert_eq!(summary.retired_skipped.len(), 1, "{summary:?}");
+        assert!(
+            summary.retired_skipped[0].contains("not a Logos-authored script"),
+            "the reason is named: {:?}",
+            summary.retired_skipped
+        );
+    }
+
+    /// A non-regular path at the retired location is left in place and reported.
+    /// `symlink_metadata` is used rather than `exists()` precisely so a symlink is
+    /// never followed and unlinked (that would break the user's wiring) and a
+    /// *dangling* one — which `exists()` calls absent — is still surfaced.
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_leaves_a_symlink_or_directory_in_place() {
+        // A dangling symlink: `exists()` reports absent, `symlink_metadata` does not.
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join(".claude/hooks")).unwrap();
+        let link = tmp.path().join(".claude/hooks/logos-quality-report.sh");
+        std::os::unix::fs::symlink(tmp.path().join("nowhere"), &link).unwrap();
+
+        let summary = materialize_quality_report(tmp.path(), false).unwrap();
+        assert!(
+            fs::symlink_metadata(&link).is_ok(),
+            "the symlink itself is never unlinked"
+        );
+        assert!(summary.retired_removed.is_empty());
+        assert_eq!(summary.retired_skipped.len(), 1);
+        assert!(
+            summary.retired_skipped[0].contains("not a regular file"),
+            "{:?}",
+            summary.retired_skipped
+        );
+
+        // A directory at the same path: likewise left, likewise reported.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".claude/hooks/logos-quality-report.sh");
+        fs::create_dir_all(&dir).unwrap();
+        let summary = materialize_quality_report(tmp.path(), false).unwrap();
+        assert!(dir.is_dir(), "a directory is never removed");
+        assert!(summary.retired_skipped[0].contains("not a regular file"));
+    }
+
+    /// A retired settings shape the merge declined to touch blocks the file
+    /// delete: the entry and its script go together or not at all. Deleting the
+    /// script while a live registration survives would leave that entry pointing
+    /// at nothing — worse than leaving both.
+    #[test]
+    fn an_unrecognized_retired_entry_blocks_its_script_delete() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join(".claude/hooks")).unwrap();
+        let retired_script = tmp.path().join(".claude/hooks/logos-quality-report.sh");
+        fs::write(&retired_script, RETIRED_SCRIPT_BODY).unwrap();
+        // A `SessionEnd` that is not an array — the merge leaves it verbatim.
+        fs::write(
+            tmp.path().join(SETTINGS_REL),
+            r#"{ "hooks": { "SessionEnd": "not-an-array" } }"#,
+        )
+        .unwrap();
+
+        let summary = materialize_quality_report(tmp.path(), false).unwrap();
+        assert!(
+            retired_script.exists(),
+            "the script a surviving entry still references is kept"
+        );
+        assert!(summary.retired_removed.is_empty());
+        assert_eq!(summary.retired_skipped.len(), 1);
+        assert!(
+            summary.retired_skipped[0].contains("settings entry was not recognized"),
+            "{:?}",
+            summary.retired_skipped
         );
     }
 
@@ -1014,7 +1260,7 @@ mod tests {
                 .unwrap();
         let start = settings["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(start.len(), 1, "exactly one SessionStart entry");
-        assert!(is_ours(&start[0], QUALITY_REPORT_HOOK_MARKER));
+        assert!(is_ours(&start[0], QUALITY_REPORT_HOOK_COMMAND));
         assert_eq!(start[0]["matcher"], QUALITY_REPORT_HOOK_MATCHER);
         let cmd = start[0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(cmd, QUALITY_REPORT_HOOK_COMMAND);
@@ -1083,7 +1329,7 @@ mod tests {
         assert!(start
             .iter()
             .any(|e| e["hooks"][0]["command"] == "their-startup.sh"));
-        assert!(start.iter().any(|e| is_ours(e, QUALITY_REPORT_HOOK_MARKER)));
+        assert!(start.iter().any(|e| is_ours(e, QUALITY_REPORT_HOOK_COMMAND)));
         // The unrelated PostToolUse entry is untouched — only SessionStart moved.
         let post = value["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(post.len(), 1);
@@ -1099,10 +1345,65 @@ mod tests {
         assert!(reason.contains("not valid JSON"));
     }
 
-    /// The quality-report script is offline, report-only, and carries the
-    /// documented off-switch. It reads via `gate`/`check` only, and always exits
-    /// 0 — it never makes a network or LLM call ([NFR-SE-01]) and never blocks a
-    /// session ([FR-GV-05]).
+    /// The script is a **launcher**, not a program ([CR-095]): it gates on the
+    /// off-switch, enters the project, runs one command, and exits 0. Every
+    /// property that made the shell-assembled predecessor fragile is asserted
+    /// absent — no parsing, no field extraction, no hand-rolled JSON — because
+    /// re-introducing any of them re-introduces the escaping bugs the move into
+    /// the binary removed.
+    #[test]
+    fn quality_report_script_is_a_launcher_not_a_program() {
+        // Assert against the executable body only. Matching the whole constant
+        // would match its own prose — the comment explaining that nothing is
+        // "parsed" here contains `sed`.
+        let body = script_body();
+        assert!(
+            body.contains("logos --json quality-report --hook-json"),
+            "the launcher delegates the whole payload to the binary: {body}"
+        );
+        // No parsing, extraction or JSON assembly in shell. The payload's field
+        // names must appear in the binary's `HookPayload`, never here.
+        for shell_ism in [
+            "grep", "sed", "awk", "cut", "tr ", "systemMessage", "additionalContext",
+            "hookEventName", "baseline_signal",
+        ] {
+            assert!(
+                !body.contains(shell_ism),
+                "the launcher neither parses nor assembles the payload ({shell_ism}): {body}"
+            );
+        }
+        // No graph command that computes or reconciles: `quality-report` is the
+        // single entry point, and it never pays for a reconcile or a write.
+        for cmd in ["logos scan", "logos gate", "logos check", "logos index"] {
+            assert!(
+                !body.contains(cmd),
+                "the launcher runs no second graph command ({cmd}): {body}"
+            );
+        }
+        // Not `exec`: an older PATH binary rejecting the subcommand must degrade
+        // to silence, not to a visible failed hook (CR-095).
+        assert!(
+            !body.contains("exec "),
+            "the command's failure is swallowed, so the shell must survive it: {body}"
+        );
+        assert!(
+            body.trim_end().ends_with("exit 0"),
+            "the script always exits 0 — never blocks a session: {body}"
+        );
+    }
+
+    /// The script's executable lines — comments and blanks stripped — so a
+    /// shape assertion tests the code rather than the prose describing it.
+    fn script_body() -> String {
+        QUALITY_REPORT_HOOK_SCRIPT
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Offline and report-only ([NFR-SE-01], [FR-GV-05]): no network client, no
+    /// agent spawn, and the documented off-switch.
     #[test]
     fn quality_report_script_is_offline_report_only() {
         for net in ["curl", "wget", "nc ", "http://", "https://"] {
@@ -1111,57 +1412,26 @@ mod tests {
                 "the quality-report script invokes no network client ({net})"
             );
         }
-        // No LLM/agent spawn — this is a pure readout.
         assert!(
             !QUALITY_REPORT_HOOK_SCRIPT.contains("claude "),
             "the quality-report hook spawns no agent — it only reports"
         );
-        // The documented off-switch env var.
         assert!(
             QUALITY_REPORT_HOOK_SCRIPT.contains("LOGOS_QUALITY_REPORT_DISABLE"),
             "off-switch env var"
         );
-        // Reads the signal + baseline via `gate` and violations via `check`
-        // (FR-GV-02/05), both `--no-reconcile`.
-        assert!(QUALITY_REPORT_HOOK_SCRIPT.contains("logos gate --no-reconcile --json"));
-        assert!(QUALITY_REPORT_HOOK_SCRIPT.contains("logos check --no-reconcile --json"));
-        assert!(QUALITY_REPORT_HOOK_SCRIPT.contains("baseline_signal"));
-        assert!(QUALITY_REPORT_HOOK_SCRIPT.contains("signal - baseline"));
-        // The reconciling `scan` pass is gone (CR-095): `gate` yields both the
-        // signal and the baseline, so the report never pays for a reconcile.
+        // The old stderr readout is gone: on SessionStart, stdout is the channel.
         assert!(
-            !QUALITY_REPORT_HOOK_SCRIPT.contains("logos scan"),
-            "no reconciling scan pass in the report path"
-        );
-        // No backtick command-substitution in a double-quoted `${:-}` default —
-        // it would run an unwanted `logos index` as a side effect (regression guard).
-        assert!(
-            !QUALITY_REPORT_HOOK_SCRIPT.contains("`logos index`"),
-            "no command-substitution side effect in the signal fallback"
-        );
-        // The readout rides STDOUT as one JSON object with the exact event name
-        // the host's parser demands (CR-095) — a mismatch discards the payload.
-        assert!(QUALITY_REPORT_HOOK_SCRIPT.contains(r#""hookEventName":"SessionStart""#));
-        assert!(QUALITY_REPORT_HOOK_SCRIPT.contains("systemMessage"));
-        assert!(QUALITY_REPORT_HOOK_SCRIPT.contains("additionalContext"));
-        // The old stderr readout is gone: on SessionStart, stderr is not the
-        // channel and exit-0 stdout is.
-        assert!(
-            !QUALITY_REPORT_HOOK_SCRIPT.contains("} >&2"),
+            !QUALITY_REPORT_HOOK_SCRIPT.contains(">&2"),
             "the readout is no longer written to stderr"
-        );
-        assert!(
-            QUALITY_REPORT_HOOK_SCRIPT.trim_end().ends_with("exit 0"),
-            "the script always exits 0 — never blocks a session"
         );
     }
 
-    /// Install a fake `logos` on PATH whose `gate`/`check` output is scripted,
-    /// returning the PATH to run the hook under. `exit_code` applies to both
-    /// subcommands, so a caller can prove the hook does not read a non-zero exit
-    /// as a failure.
+    /// Install a fake `logos` on PATH, returning the PATH to run the hook under.
+    /// It logs its argv to `<dir>/argv` and emits `stdout`/`stderr` verbatim, so a
+    /// caller can prove *what the launcher does with the binary* without a graph.
     #[cfg(unix)]
-    fn fake_logos(dir: &Path, gate: &str, check: &str, exit_code: i32) -> String {
+    fn fake_logos(dir: &Path, stdout: &str, stderr: &str, exit_code: i32) -> String {
         use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("fakebin");
         fs::create_dir_all(&bin).unwrap();
@@ -1169,10 +1439,11 @@ mod tests {
         fs::write(
             &logos,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  \
-                 gate)  printf '%s\\n' '{gate}';;\n  \
-                 check) printf '%s\\n' '{check}';;\n\
-                 esac\nexit {exit_code}\n"
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{argv}'\n\
+                 printf '%s' '{stdout}'\n\
+                 printf '%s' '{stderr}' >&2\n\
+                 exit {exit_code}\n",
+                argv = dir.join("argv").display(),
             ),
         )
         .unwrap();
@@ -1180,168 +1451,122 @@ mod tests {
         format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())
     }
 
-    /// Run the materialized script under a fake `logos`, returning (stdout, stderr).
+    /// Run the materialized script, returning (stdout, stderr). Asserts exit 0 in
+    /// every case — the report tier never blocks a session ([FR-GV-05]).
     #[cfg(unix)]
-    fn run_hook(tmp: &Path, path: &str, off_switch: bool) -> (String, String) {
+    fn run_hook(tmp: &Path, path: &str, project_dir: &Path, off_switch: bool) -> (String, String) {
         use std::process::Command;
-        let script = tmp.join(QUALITY_REPORT_HOOK_SCRIPT_REL);
-        let mut cmd = Command::new("sh");
-        cmd.arg(&script)
+        // An absolute interpreter: `path` is the *hook's* PATH, and one of the
+        // cases below is deliberately empty — resolving `sh` through it would
+        // fail the harness rather than exercise the script.
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg(tmp.join(QUALITY_REPORT_HOOK_SCRIPT_REL))
             .env("PATH", path)
-            .env("CLAUDE_PROJECT_DIR", tmp);
+            .env("CLAUDE_PROJECT_DIR", project_dir);
         if off_switch {
             cmd.env("LOGOS_QUALITY_REPORT_DISABLE", "1");
         } else {
             cmd.env_remove("LOGOS_QUALITY_REPORT_DISABLE");
         }
         let out = cmd.output().unwrap();
-        assert!(out.status.success(), "the hook always exits 0");
+        assert_eq!(out.status.code(), Some(0), "the hook always exits 0");
         (
             String::from_utf8_lossy(&out.stdout).into_owned(),
             String::from_utf8_lossy(&out.stderr).into_owned(),
         )
     }
 
-    /// End-to-end behavior: run the materialized script against a fake `logos`
-    /// and assert the actual payload — valid JSON on **stdout**, the exact
-    /// `hookEventName`, and a readout carrying the signal, baseline, delta and
-    /// (escaped-quote-safe) violation messages. Exercises the real script rather
-    /// than string-matching the constant.
+    /// The launcher hands the binary's stdout through **verbatim** and adds
+    /// nothing of its own to either stream: it is a pipe, not a formatter. It
+    /// invokes exactly the JSON report subcommand, from the project the host
+    /// named.
     #[cfg(unix)]
     #[test]
-    fn quality_report_script_emits_parseable_session_start_json() {
+    fn the_launcher_passes_the_payload_through_verbatim() {
         let tmp = TempDir::new().unwrap();
         materialize_quality_report(tmp.path(), false).unwrap();
+        let payload = r#"{"systemMessage":"logos quality report: signal 8234","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"detail"}}"#;
+        let path = fake_logos(tmp.path(), payload, "", 0);
 
-        // The check output carries a message with an escaped quote, so the run
-        // also proves the unescape/re-escape round-trip keeps the payload valid.
-        let path = fake_logos(
-            tmp.path(),
-            r#"{"passed":true,"signal":8234,"baseline_signal":8100,"freshness":"assumed-fresh (--no-reconcile)"}"#,
-            r#"{"passed":false,"violations":[{"severity":"error","message":"bad \"x\" import"},{"severity":"error","message":"cc too high"}]}"#,
-            0,
-        );
-        let (stdout, _) = run_hook(tmp.path(), &path, false);
+        let (stdout, stderr) = run_hook(tmp.path(), &path, tmp.path(), false);
+        assert_eq!(stdout, payload, "stdout is the binary's payload, unaltered");
+        assert!(stderr.is_empty(), "the launcher adds nothing to stderr: {stderr:?}");
+        // Parseable by the host, and the right event.
+        let value: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+        assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
 
-        let payload: Value = serde_json::from_str(stdout.trim())
-            .unwrap_or_else(|e| panic!("stdout must be one valid JSON object ({e}): {stdout}"));
+        // Exactly one invocation, of exactly the report subcommand.
+        let argv = fs::read_to_string(tmp.path().join("argv")).unwrap();
         assert_eq!(
-            payload["hookSpecificOutput"]["hookEventName"], "SessionStart",
-            "the host's parser rejects any other event name"
-        );
-        let context = payload["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .expect("additionalContext is a string");
-        let summary = payload["systemMessage"].as_str().expect("systemMessage is a string");
-
-        assert!(context.contains("signal:   8234"), "current signal: {context}");
-        assert!(context.contains("baseline: 8100"), "baseline signal: {context}");
-        assert!(context.contains("delta:    134"), "signal-vs-baseline delta: {context}");
-        assert!(context.contains("rule violations: 2"), "violation count: {context}");
-        assert!(context.contains("assumed-fresh"), "freshness line: {context}");
-        // The escaped-quote message survives the round-trip intact, and both
-        // violations are listed.
-        assert!(context.contains(r#"bad "x" import"#), "escaped-quote message: {context}");
-        assert!(context.contains("cc too high"), "second violation listed: {context}");
-        // The one-line summary is what the user sees.
-        assert!(summary.contains("8234"), "summary names the signal: {summary}");
-        assert!(summary.contains("8100"), "summary names the baseline: {summary}");
-        assert!(summary.contains("2 violation"), "summary names the count: {summary}");
-    }
-
-    /// A non-zero exit from `gate`/`check` is **not** a failure signal: `gate`
-    /// exits 1 on a regression and `check` on an error violation, both by design
-    /// ([FR-GV-03]). Reading the status instead of the output would report a
-    /// regressed-but-healthy graph as unavailable — the inverse of honest.
-    #[cfg(unix)]
-    #[test]
-    fn regression_exit_code_is_not_read_as_a_failure() {
-        let tmp = TempDir::new().unwrap();
-        materialize_quality_report(tmp.path(), false).unwrap();
-        let path = fake_logos(
-            tmp.path(),
-            r#"{"passed":false,"signal":7900,"baseline_signal":8100}"#,
-            r#"{"passed":false,"violations":[{"severity":"error","message":"rule breach"}]}"#,
-            1,
-        );
-        let (stdout, _) = run_hook(tmp.path(), &path, false);
-        let payload: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-        let context = payload["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap();
-        assert!(context.contains("signal:   7900"), "reports the regressed signal: {context}");
-        assert!(context.contains("delta:    -200"), "reports a negative delta: {context}");
-        assert!(context.contains("rule violations: 1"), "{context}");
-        assert!(
-            !context.contains("unavailable"),
-            "a regression is not an unavailable graph: {context}"
+            argv.lines().collect::<Vec<_>>(),
+            vec!["--json quality-report --hook-json"],
+            "one invocation, no second graph command"
         );
     }
 
-    /// Honest degradation: a graph another process has locked is reported as
-    /// busy, and an absent one as unavailable — never as a healthy zeroed
-    /// readout. Both still emit parseable JSON and exit 0.
-    #[cfg(unix)]
-    #[test]
-    fn locked_and_absent_graphs_degrade_honestly() {
-        for (output, expected) in [
-            ("Error: database is locked", "graph busy"),
-            ("Error: no index found", "graph unavailable"),
-        ] {
-            let tmp = TempDir::new().unwrap();
-            materialize_quality_report(tmp.path(), false).unwrap();
-            let path = fake_logos(tmp.path(), output, output, 1);
-            let (stdout, _) = run_hook(tmp.path(), &path, false);
-            let payload: Value = serde_json::from_str(stdout.trim())
-                .unwrap_or_else(|e| panic!("valid JSON even when degraded ({e}): {stdout}"));
-            let summary = payload["systemMessage"].as_str().unwrap();
-            assert!(summary.contains(expected), "expected {expected:?} in {summary:?}");
-            assert!(
-                !summary.contains("signal:   0"),
-                "never a zeroed readout rendered as healthy: {summary}"
-            );
-        }
-    }
-
-    /// The off-switch silences the hook entirely — no stdout, no stderr — and it
-    /// still exits 0.
+    /// The off-switch silences the hook entirely — no stdout, no stderr, and the
+    /// binary is never invoked at all.
     #[cfg(unix)]
     #[test]
     fn off_switch_silences_the_hook() {
         let tmp = TempDir::new().unwrap();
         materialize_quality_report(tmp.path(), false).unwrap();
-        let path = fake_logos(
-            tmp.path(),
-            r#"{"signal":8234,"baseline_signal":8100}"#,
-            r#"{"violations":[]}"#,
-            0,
-        );
-        let (stdout, stderr) = run_hook(tmp.path(), &path, true);
+        let path = fake_logos(tmp.path(), r#"{"systemMessage":"x"}"#, "", 0);
+        let (stdout, stderr) = run_hook(tmp.path(), &path, tmp.path(), true);
         assert!(
             stdout.is_empty() && stderr.is_empty(),
             "the off-switch silences the hook entirely: stdout={stdout:?} stderr={stderr:?}"
         );
+        assert!(
+            !tmp.path().join("argv").exists(),
+            "the off-switch short-circuits before the binary is invoked"
+        );
     }
 
-    /// A missing baseline is reported as such rather than as a delta against
-    /// zero, and a `check` that cannot read the graph yields "n/a", never a
-    /// truthful-looking "0 violations".
+    /// Three ways the environment can be wrong, all of which must degrade to
+    /// silence rather than to a visible failed hook: no `logos` on PATH, a
+    /// `CLAUDE_PROJECT_DIR` that cannot be entered, and — the normal mid-upgrade
+    /// state — a PATH binary too old to know the subcommand, which exits non-zero
+    /// with a clap usage error on stderr.
     #[cfg(unix)]
     #[test]
-    fn missing_baseline_and_unreadable_check_are_not_fabricated() {
+    fn a_broken_environment_degrades_to_silence() {
         let tmp = TempDir::new().unwrap();
         materialize_quality_report(tmp.path(), false).unwrap();
-        let path = fake_logos(tmp.path(), r#"{"signal":8234,"baseline_signal":null}"#, "", 0);
-        let (stdout, _) = run_hook(tmp.path(), &path, false);
-        let payload: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-        let context = payload["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap();
-        assert!(context.contains("baseline: n/a"), "no baseline: {context}");
-        assert!(!context.contains("delta:"), "no delta without a baseline: {context}");
+
+        // 1. No `logos` on PATH at all.
+        let empty_dir = tmp.path().join("emptybin");
+        fs::create_dir_all(&empty_dir).unwrap();
+        let (stdout, stderr) =
+            run_hook(tmp.path(), &empty_dir.display().to_string(), tmp.path(), false);
         assert!(
-            context.contains("rule violations: n/a"),
-            "an unreadable check is n/a, not 0: {context}"
+            stdout.is_empty() && stderr.is_empty(),
+            "a missing binary is nothing to report: stdout={stdout:?} stderr={stderr:?}"
+        );
+
+        // 2. A project directory that cannot be entered.
+        let path = fake_logos(tmp.path(), r#"{"systemMessage":"x"}"#, "", 0);
+        let (stdout, stderr) =
+            run_hook(tmp.path(), &path, &tmp.path().join("no-such-dir"), false);
+        assert!(
+            stdout.is_empty() && stderr.is_empty(),
+            "an unusable project dir is silent: stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(!tmp.path().join("argv").exists(), "and never runs the binary");
+
+        // 3. An older binary that rejects the subcommand (clap exits 2 with a
+        //    usage error on stderr). The host renders a hook's stderr on failure,
+        //    so leaking this would turn a missing readout into a visible defect.
+        let old = fake_logos(
+            tmp.path(),
+            "",
+            "error: unrecognized subcommand 'quality-report'",
+            2,
+        );
+        let (stdout, stderr) = run_hook(tmp.path(), &old, tmp.path(), false);
+        assert!(
+            stdout.is_empty() && stderr.is_empty(),
+            "an older binary's usage error is swallowed: stdout={stdout:?} stderr={stderr:?}"
         );
     }
 }

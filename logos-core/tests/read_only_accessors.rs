@@ -93,6 +93,101 @@ fn temporal_snapshot_count(repo: &Path) -> i64 {
         .expect("count temporal_snapshots")
 }
 
+/// Count `violations` rows — the table `check_rules` clears and rewrites.
+fn violation_count(repo: &Path) -> i64 {
+    let conn = Connection::open_with_flags(
+        repo.join(".logos/logos.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open logos.db read-only");
+    conn.query_row("SELECT count(*) FROM violations", [], |r| r.get(0))
+        .expect("count violations")
+}
+
+// ── report tier: quality_readout (CR-095) ────────────────────────────────────
+
+/// `quality_readout` computes a **fresh** signal and writes **nothing**
+/// ([FR-IN-07], [CR-095]).
+///
+/// This is the invariant the whole accessor exists for. The report tier fires at
+/// every session boundary — every start, resume and `/clear` — so a single write
+/// per call would take the graph-DB write lock and append a row to the
+/// [FR-GV-06] `evolution` series on every one of them, drowning the signal
+/// history in session-open noise and causing exactly the lock contention the
+/// readout is supposed to tolerate. `gate` (which persists, [FR-GV-09]) is
+/// called first here purely to establish a baseline and a non-zero row count, so
+/// the assertions below prove the readout adds nothing on top.
+#[test]
+fn quality_readout_computes_fresh_and_writes_nothing() {
+    let tmp = indexed_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    // Establish a persisted baseline + a recorded check, then freeze the counts.
+    engine.gate(None, true, true).expect("baseline saved");
+    engine.check_rules(None, true).expect("check runs");
+    let snapshots_before = metric_snapshot_count(tmp.path());
+    let violations_before = violation_count(tmp.path());
+    assert!(snapshots_before > 0, "the fixture has a persisted snapshot");
+
+    // Several readouts back to back — the shape a /clear-heavy session produces.
+    let first = engine.quality_readout().expect("readout");
+    for _ in 0..3 {
+        engine.quality_readout().expect("readout");
+    }
+
+    assert_eq!(
+        metric_snapshot_count(tmp.path()),
+        snapshots_before,
+        "the readout must not append to the evolution series"
+    );
+    assert_eq!(
+        violation_count(tmp.path()),
+        violations_before,
+        "the readout must not re-persist violations"
+    );
+
+    // Fresh computation, not a replay of the last persisted snapshot: the signal
+    // is present and agrees with what the persisting gate reports.
+    let gate = engine.latest_gate().expect("read-only verdict");
+    assert_eq!(
+        first.signal, gate.signal,
+        "the readout's freshly computed signal agrees with the recorded one on an unchanged tree"
+    );
+    assert!(first.baseline_signal.is_some(), "the blessed baseline is reported");
+    assert_eq!(
+        first.delta,
+        Some(0),
+        "an unchanged tree sits exactly on its baseline"
+    );
+    assert!(
+        first.freshness.contains("assumed-fresh"),
+        "the readout never reconciles, and says so: {}",
+        first.freshness
+    );
+}
+
+/// On a never-checked store the readout reports "nothing recorded" as `None`,
+/// never as a clean bill of health — `check_rules` clears and rewrites the
+/// table, so an empty one is left equally by a clean check and by no check at
+/// all, and the readout must not resolve that ambiguity by guessing ([CR-095]).
+#[test]
+fn quality_readout_never_fabricates_a_clean_check() {
+    let tmp = indexed_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let readout = engine.quality_readout().expect("readout");
+    assert!(
+        readout.violations.is_none(),
+        "no check has run — the readout reports nothing recorded, not zero violations"
+    );
+    assert!(readout.violation_count.is_none());
+    assert_eq!(
+        violation_count(tmp.path()),
+        0,
+        "reading the readout recorded no violations of its own"
+    );
+}
+
 // ── metric side: latest_metrics / latest_scan / latest_gate ──────────────────
 
 /// On a never-`scan`-ned store the read-only accessors honestly report "no

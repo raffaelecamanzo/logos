@@ -1470,7 +1470,13 @@ fn wiki_hook_emit_sweeps_the_retired_session_end_hook() {
     let tmp = TempDir::new().unwrap();
     fs::create_dir_all(tmp.path().join(".claude/hooks")).unwrap();
     let retired_script = tmp.path().join(".claude/hooks/logos-quality-report.sh");
-    fs::write(&retired_script, "#!/bin/sh\nexit 0\n").unwrap();
+    // The managed marker licenses the delete — an unmarked file at that now-
+    // unclaimed path belongs to the user and is kept instead.
+    fs::write(
+        &retired_script,
+        "#!/bin/sh\n# logos:quality-report:managed — retired\nexit 0\n",
+    )
+    .unwrap();
     fs::write(
         tmp.path().join(".claude/settings.json"),
         r#"{"hooks":{"SessionEnd":[
@@ -1483,9 +1489,21 @@ fn wiki_hook_emit_sweeps_the_retired_session_end_hook() {
     let out = logos(tmp.path(), &["--json", "wiki", "hook", "--emit"]);
     assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     let summary: serde_json::Value = serde_json::from_slice(&out.stdout).expect("object JSON");
+    // Both halves of the sweep are reported: the deleted script and the removed
+    // settings entry. Reporting only the file would stay silent where
+    // `.claude/hooks/` is ignored but `settings.json` is committed.
     assert_eq!(
-        summary["retired_removed"][0], ".claude/hooks/logos-quality-report.sh",
+        summary["retired_removed"],
+        serde_json::json!([
+            ".claude/hooks/logos-quality-report.sh",
+            ".claude/hooks/logos-quality-report.sh (settings entry)"
+        ]),
         "the sweep is reported, not silent: {summary}"
+    );
+    assert_eq!(
+        summary["retired_skipped"].as_array().map(Vec::len),
+        Some(0),
+        "nothing was left behind: {summary}"
     );
     assert!(!retired_script.exists(), "the orphaned retired script is deleted");
 

@@ -230,7 +230,10 @@ This is the **freshen → enforce → report → bless** loop: `index` freshens,
 without blocking, and `gate --save` blesses a new baseline — **at release only,
 never in the PR path**. The same loop is wired into your editor and `git push`
 by [`logos init`](commands.md#init--i---hooks) (the freshness hooks, the `pre-push` gate,
-and the session-start quality-report hook). For the full copy-pasteable CI recipe —
+and the session-start quality-report hook — which uses
+[`quality-report`](commands.md#quality-report---hook-json), the write-free
+readout, precisely so a per-session trigger never grows the snapshot series).
+For the full copy-pasteable CI recipe —
 GitHub Actions and a plain-shell variant, plus a local reproduction — see
 [CI integration](ci-integration.md).
 

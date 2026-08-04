@@ -394,25 +394,7 @@ pub fn snapshot(
     commit_sha: Option<&str>,
     thresholds: Thresholds,
 ) -> Result<(i64, MetricSnapshot)> {
-    let (nodes, edges, functions, test_ids) = runtime
-        .submit_read(|store| {
-            Ok((
-                store.all_nodes()?,
-                store.all_edges()?,
-                store.function_metrics()?,
-                store.test_node_ids()?,
-            ))
-        })
-        .context("reading the metrics snapshot inputs")?;
-
-    // Read the persisted is_test verdict — the single source of truth the
-    // annotation pass computes (FR-AN-05, CR-001); never re-derived here.
-    let test_ids: HashSet<NodeId> = test_ids.into_iter().collect();
-    // The effective CR-005 detection thresholds (BR-25): the governance engine
-    // composes the documented defaults with the rules.toml [metric_thresholds]
-    // overrides and passes the result here — the single seam S-044 left for
-    // S-045. The persisted thresholds_hash follows automatically.
-    let computed = compute(view, &nodes, &edges, &functions, &test_ids, thresholds);
+    let computed = compute_snapshot(runtime, view, thresholds)?;
 
     // created_at is bookkeeping, not part of the deterministic signal
     // (golden tests pin aggregate_signal, never the timestamp — ADR-08).
@@ -467,6 +449,55 @@ pub fn snapshot(
         .context("persisting the metric snapshot")?;
 
     Ok((id, computed))
+}
+
+/// Compute the metric snapshot **without persisting it** — the read-only twin of
+/// [`snapshot`] ([CR-095]).
+///
+/// [`snapshot`] is the [FR-GV-09] path: "every gate writes a snapshot, saved or
+/// compared". That is right for `scan`/`gate`, which exist to record the signal
+/// — and wrong for the **report tier**, which only wants to *show* it. A hook
+/// that fires at every session boundary would otherwise take the graph-DB write
+/// lock and append a row to the [FR-GV-06] `evolution` series on every
+/// `/clear`, drowning the signal history in session-open noise and causing the
+/// very lock contention the readout was written to tolerate.
+///
+/// So this returns the same freshly-computed [`MetricSnapshot`] [`snapshot`]
+/// would have persisted, with **no write**: the deterministic `compute` half is
+/// shared verbatim, so the two paths can never disagree on the signal.
+///
+/// # Errors
+/// Returns an error if the snapshot input read fails.
+///
+/// [FR-GV-06]: ../../../docs/specs/requirements/FR-GV-06.md
+/// [FR-GV-09]: ../../../docs/specs/requirements/FR-GV-09.md
+/// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
+pub fn compute_snapshot(
+    runtime: &Runtime,
+    view: &GraphView,
+    thresholds: Thresholds,
+) -> Result<MetricSnapshot> {
+    let (nodes, edges, functions, test_ids) = runtime
+        .submit_read(|store| {
+            Ok((
+                store.all_nodes()?,
+                store.all_edges()?,
+                store.function_metrics()?,
+                store.test_node_ids()?,
+            ))
+        })
+        .context("reading the metrics snapshot inputs")?;
+
+    // Read the persisted is_test verdict — the single source of truth the
+    // annotation pass computes (FR-AN-05, CR-001); never re-derived here.
+    let test_ids: HashSet<NodeId> = test_ids.into_iter().collect();
+    // The effective CR-005 detection thresholds (BR-25): the governance engine
+    // composes the documented defaults with the rules.toml [metric_thresholds]
+    // overrides and passes the result here — the single seam S-044 left for
+    // S-045. The persisted thresholds_hash follows automatically.
+    Ok(compute(
+        view, &nodes, &edges, &functions, &test_ids, thresholds,
+    ))
 }
 
 /// The class-like containers over the god thresholds ([FR-QM-12]), in node-id

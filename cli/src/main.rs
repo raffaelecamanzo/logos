@@ -222,6 +222,19 @@ pub(crate) enum Commands {
         #[arg(long, alias = "assume-fresh")]
         no_reconcile: bool,
     },
+    /// Non-blocking quality readout for the report tier (FR-IN-07, CR-095):
+    /// the freshly computed signal, the blessed baseline and their delta, plus
+    /// the last recorded `check` findings — computed **without writing**, so it
+    /// never appends to the evolution series or takes the graph write lock.
+    /// Always exits 0; it reports, it never gates.
+    #[command(name = "quality-report", alias = "quality_report")]
+    QualityReport {
+        /// Emit the agent-host session-start hook payload instead of the plain
+        /// read-model. This is what the installed hook script runs; the shape is
+        /// the host's, so it is built here rather than assembled in shell.
+        #[arg(long)]
+        hook_json: bool,
+    },
     /// CI gate: regression vs the saved baseline (or under --threshold) exits 1.
     Gate {
         /// Required signal floor (0–10000); below it the gate fails.

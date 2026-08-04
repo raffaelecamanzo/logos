@@ -126,12 +126,24 @@ fn adapter_lines() -> usize {
 /// at 751). The scoped, promotions-only projection lives entirely in
 /// `logos_core::federation::reach` (verified by `logos check`); the adapter only
 /// declares the flags and delegates. CR-084 §4.4 owns and blesses this raise.
+///
+/// S-312/CR-095 760→775 for the `quality-report` report-tier command: the
+/// `QualityReport { hook_json }` variant declaration (+5) and its two-branch
+/// dispatch arm (+6, landing at 763), each branch **one** `Engine` call —
+/// `quality_readout` for the plain read-model, `quality_report_hook_payload` for
+/// the agent-host session-start payload. The readout, its baseline-comparability
+/// logic and the payload's JSON shape all live in `logos_core`
+/// (`governance::quality_readout`, `wiki::session_start_payload`) precisely so the
+/// hook script does not assemble JSON in shell; the adapter declares the flag and
+/// picks the rendering. CR-095 §4.4 owns and blesses this raise. It is the last
+/// raise this surface should need for the report tier — a third rendering belongs
+/// behind a `--format` flag on the same arm, not a new command.
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 760,
-        "cli adapter exceeds the 760 production-LOC budget (NFR-MA-02): \
+        lines <= 775,
+        "cli adapter exceeds the 775 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }
