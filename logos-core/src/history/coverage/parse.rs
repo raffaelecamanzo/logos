@@ -288,10 +288,13 @@ fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Result<Option<String>>
     for attr in e.attributes() {
         let attr = attr.context("malformed Cobertura attribute")?;
         if attr.key.local_name().as_ref() == key {
-            // `unescape_value` decodes XML entities assuming UTF-8 (Cobertura is
-            // always UTF-8 in practice; the `encoding` feature is off).
+            // `normalized_value` decodes XML entities and applies the spec's
+            // attribute-value normalization, assuming UTF-8 (Cobertura is always
+            // UTF-8 in practice; the `encoding` feature is off). Cobertura is an
+            // XML 1.0 format, and the parser does not read the declaration, so
+            // the implicit-1.0 rules are the correct ones to apply.
             let decoded = attr
-                .unescape_value()
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                 .context("decoding Cobertura attribute value")?;
             return Ok(Some(decoded.into_owned()));
         }

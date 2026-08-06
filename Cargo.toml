@@ -125,7 +125,7 @@ chrono            = { version = "0.4", default-features = false, features = ["st
 # NFR-CR-01). Chosen over hand-rolling XML so malformed-report rejection
 # (FR-CV-01 atomic-rejection) leans on a real parser's entity/quoting/CDATA
 # handling rather than a bespoke scanner.
-quick-xml         = "0.37"
+quick-xml         = "0.41"
 # Debounced filesystem watcher hosted under `serve --mcp` (S-022, FR-SY-04,
 # ADR-02, filesystem-watcher integration). `notify` wraps the OS facilities
 # (FSEvents/inotify/kqueue/ReadDirectoryChanges) and `notify-debouncer-full`
