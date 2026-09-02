@@ -103,20 +103,6 @@ pub enum MemberWarmState {
     },
 }
 
-impl MemberWarmState {
-    /// The lowercase label, for a human rendering that wants the word without
-    /// the JSON.
-    #[must_use]
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Warm => "warm",
-            Self::Warming => "warming",
-            Self::Deferred => "deferred",
-            Self::Degraded { .. } => "degraded",
-        }
-    }
-}
-
 /// The live warm facts a `workspace status` read has available — the seam that
 /// keeps `warming` and warm-failure **inputs** rather than guesses
 /// ([NFR-CC-04], [BR-44]).
@@ -397,7 +383,10 @@ mod tests {
             &WarmEvidence::none().with_failures([("api", "index exited 2")]),
         );
         for state in [&unopenable, &warm_failed] {
-            assert_eq!(state.label(), "degraded", "{state:?}");
+            assert!(
+                matches!(state, MemberWarmState::Degraded { .. }),
+                "{state:?} must be degraded"
+            );
             assert_ne!(*state, MemberWarmState::Deferred);
         }
     }
@@ -515,20 +504,24 @@ mod tests {
         assert_eq!(value["reason"], "store is corrupt");
     }
 
-    /// Every variant's JSON tag equals its [`MemberWarmState::label`] — one
-    /// vocabulary, so a human rendering and the machine output can never drift.
+    /// Every variant serialises to the word the vocabulary names it by — the
+    /// tag list pinned against literals, so a `rename_all` change or a renamed
+    /// variant is a failing test rather than a silently changed wire contract.
     #[test]
-    fn the_human_label_and_the_json_tag_are_the_same_word() {
-        for state in [
-            MemberWarmState::Warm,
-            MemberWarmState::Warming,
-            MemberWarmState::Deferred,
-            MemberWarmState::Degraded {
-                reason: "boom".to_string(),
-            },
+    fn every_variant_serialises_to_its_vocabulary_word() {
+        for (state, word) in [
+            (MemberWarmState::Warm, "warm"),
+            (MemberWarmState::Warming, "warming"),
+            (MemberWarmState::Deferred, "deferred"),
+            (
+                MemberWarmState::Degraded {
+                    reason: "boom".to_string(),
+                },
+                "degraded",
+            ),
         ] {
             let value = serde_json::to_value(&state).unwrap();
-            assert_eq!(value["warm_state"], state.label());
+            assert_eq!(value["warm_state"], word, "{state:?}");
         }
     }
 }
