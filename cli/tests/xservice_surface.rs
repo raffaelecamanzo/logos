@@ -558,11 +558,129 @@ fn a_degraded_member_states_a_cause_not_the_raw_sqlite_symptom() {
         !reason.contains("FR-DB-02"),
         "the reason must not be the raw connection-contract symptom: {reason}"
     );
-    assert!(
-        broken.get("degraded_cause").is_some(),
-        "this failure IS classifiable — an absent cause here would mean the \
-         classification silently stopped recognising it: {broken}"
+    // `break_store` puts a DIRECTORY at `.logos/logos.db`, which is the only
+    // production path on which `store_file` distinguishes its three states — so
+    // the cause and the remedy are pinned by value, not merely by presence.
+    // Asserting `is_some()` alone would survive `is_file()` being changed to
+    // `exists()`, which would silently reclassify this as a host resource limit.
+    assert_eq!(
+        broken["degraded_cause"], "store-obstructed",
+        "a non-regular file at the store path is the obstructed cause: {broken}"
     );
+    assert!(
+        reason.contains("not a") && reason.contains("regular file"),
+        "the reason states what is actually wrong: {reason}"
+    );
+    assert!(
+        reason.contains("clear that path") && reason.contains("logos index"),
+        "and gives the remedy that can actually work — clear the path, THEN \
+         re-index; a bare `logos index` cannot fix an occupied path: {reason}"
+    );
+    // The verbatim engine diagnostic survives classification on its own key.
+    assert!(
+        broken["degraded_diagnostic"]
+            .as_str()
+            .is_some_and(|d| d.contains("unable to open database file")),
+        "classifying a cause must not destroy the evidence it read: {broken}"
+    );
+}
+
+/// **[FR-WS-16] AC6, pinned structurally.** `workspace status`'s top-level key
+/// set, against literals.
+///
+/// The per-member row's key set is already pinned in `federation::query`, but the
+/// criterion S-326 has to meet is that the degraded roll-up "composes with the
+/// warm roll-up in ONE coherent payload, not two competing member tables" — and
+/// nothing was asserting the *payload's* shape. Adding a second per-member array
+/// beside `members` is exactly what that forbids, and it would have left every
+/// other test green.
+#[test]
+fn the_workspace_status_payload_has_exactly_one_member_table() {
+    let tmp = warm_fixture(&["api", "web"], &["api", "web"]);
+    let status = logos_json(tmp.path(), &["workspace", "status"]);
+
+    let mut keys: Vec<&str> = status
+        .as_object()
+        .expect("a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "coverage",
+            "degraded_rollup",
+            "members",
+            "topics",
+            "warm_rollup",
+            "workspace"
+        ],
+        "one `members` table with two roll-ups projected FROM it — a second \
+         per-member array here is the competing table FR-WS-16 forbids: {status}"
+    );
+    // And both roll-ups partition the same roster, so they cannot describe
+    // different member sets.
+    assert_eq!(status["warm_rollup"]["members"], status["degraded_rollup"]["members"]);
+    assert_eq!(status["warm_rollup"]["members"], 2);
+}
+
+/// `--quiet` suppresses the human notice but **not** the exit code — the
+/// documented contract of the flag ("Suppress non-essential output; exit codes
+/// and --json still apply"). A script that silences the warning still fails.
+#[test]
+fn quiet_suppresses_the_degraded_notice_but_not_the_exit_code() {
+    let tmp = warm_fixture(&["api", "broken"], &["api", "broken"]);
+    break_store(tmp.path(), "broken");
+
+    let out = logos(tmp.path(), &["--quiet", "workspace", "status"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "--quiet silences output, never the verdict"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("could not be opened"),
+        "the notice is non-essential output and is suppressed: {stderr}"
+    );
+}
+
+/// **The scope decision, pinned.** The `xservice` group keeps exit **0** even
+/// over a workspace with an unopenable member: [CR-100] §4.4 and S-326 both
+/// scope the exit-code change to the `workspace` group, and `run_xservice` does
+/// not consult the open-state ledger at all.
+///
+/// Asserted so the boundary cannot move silently in either direction — the
+/// engineer flagged widening it as a call for the sprint review, and a flag with
+/// no test is a flag a later change walks past.
+///
+/// [CR-100]: ../../docs/requests/CR-100-workspace-resource-budget.md
+#[test]
+fn the_xservice_group_keeps_exit_zero_over_a_degraded_workspace() {
+    let tmp = warm_fixture(&["api", "broken"], &["api", "broken"]);
+    break_store(tmp.path(), "broken");
+
+    // Same fixture, same broken member: `workspace status` exits 1 …
+    assert_eq!(
+        logos(tmp.path(), &["workspace", "status", "--json"]).status.code(),
+        Some(1),
+        "the workspace group gates on it"
+    );
+    // … and every `xservice` subcommand still exits 0.
+    for args in [
+        &["xservice", "search", "f", "--json"][..],
+        &["xservice", "route-providers", "--json"][..],
+        &["xservice", "callers", "f", "--json"][..],
+    ] {
+        let out = logos(tmp.path(), args);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?} is outside CR-100 §4.4's scope and must not gate: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 /// **[FR-WS-16] AC1 across the whole `workspace` group.** `reachability` and
@@ -598,6 +716,15 @@ fn every_workspace_subcommand_exits_non_zero_on_an_unopenable_member() {
                 stderr.contains("broken"),
                 "{full:?} names the degraded member on stderr: {stderr}"
             );
+            // **[FR-WS-16] AC3 for `check` and `reachability`.** Neither payload
+            // carries a member table, so stderr is their ONLY degraded channel —
+            // naming members without their cause would leave them exiting 1 with
+            // no diagnosis, which is the misdiagnosis this story removes made
+            // silent instead of merely misleading.
+            assert!(
+                stderr.contains("regular file") && stderr.contains("clear that path"),
+                "{full:?} states the CAUSE on stderr, not just the name: {stderr}"
+            );
         }
     }
 
@@ -615,10 +742,16 @@ fn every_workspace_subcommand_exits_non_zero_on_an_unopenable_member() {
 /// because nothing needed it is `not-attempted`, and the command exits **0**.
 ///
 /// `xservice search --repo api` touches exactly one member of a two-member
-/// workspace ([NFR-PE-10]), so `web` is never attempted. A derivation that read
-/// "not resident" as "failed" would exit non-zero here on a completely healthy
-/// workspace — which is the mirror image of the defect this story fixes, and the
-/// reason laziness and eviction are asserted separately from failure.
+/// workspace ([NFR-PE-10]), so `web` is never attempted — and the `xservice`
+/// group does not consult the open-state ledger at all, which is what this half
+/// pins (see `the_xservice_group_keeps_exit_zero_over_a_degraded_workspace` for
+/// the boundary itself).
+///
+/// The `not-attempted`-is-never-degraded derivation is asserted where it is
+/// actually produced: `federation::registry`'s
+/// `a_lazily_skipped_member_reads_not_attempted_and_is_never_degraded`. The
+/// second half below is the real end-to-end claim — the same healthy workspace
+/// keeps exit 0 with every member `opened`.
 #[test]
 fn a_lazily_skipped_member_never_makes_a_healthy_command_fail() {
     let tmp = workspace();

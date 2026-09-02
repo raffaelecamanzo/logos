@@ -222,7 +222,18 @@ async fn workspace_status_reports_name_members_and_coverage() {
     names.sort_unstable();
     assert_eq!(names, ["api", "web"], "both members are repo-qualified: {body}");
     // The 3-state coverage summary is always present (advisory tier, S-247).
-    assert!(v["coverage"].get("bound_ratio").is_some(), "coverage summary present: {body}");
+    // Asserted on a field that is ALWAYS emitted: since S-326 `bound_ratio` is
+    // `skip_serializing_if`, so its presence means "the denominator was non-zero",
+    // not "the summary is here" — two different claims that this assertion used to
+    // conflate.
+    assert!(
+        v["coverage"].get("members_total").is_some(),
+        "coverage summary present: {body}"
+    );
+    assert_eq!(
+        v["coverage"]["bound_ratio"], 1.0,
+        "and this fixture DOES bind one reference, so the ratio is measured: {body}"
+    );
     // S-323: the warm state rides the same rows the web surface already serves —
     // one read-model, so the shell sees exactly what `logos workspace status`
     // prints ([FR-WS-15]). `warming` is absent, never a fabricated 0 ([NFR-CC-04]).
@@ -264,6 +275,63 @@ async fn workspace_status_reports_name_members_and_coverage() {
     assert_eq!(v["coverage"]["members_read"], 2, "{body}");
     assert_eq!(v["coverage"]["members_total"], 2, "{body}");
     assert_eq!(v["coverage"]["covers_all_members"], true, "{body}");
+}
+
+/// **The degraded shape over the web surface ([FR-WS-16]).**
+///
+/// The SPA declares `MemberStatus.open_state` / `degraded_cause` /
+/// `degraded_reason` and `DegradedRollup` as its read-model contract, and every
+/// other test of that shape runs through the CLI's serializer. This is the only
+/// place the *web* payload is asserted to carry it — a handler that dropped the
+/// flattened open state, or a roll-up that stopped naming members, would leave
+/// the SPA's types describing a payload it no longer receives.
+#[tokio::test]
+async fn workspace_status_carries_the_degraded_shape_for_an_unopenable_member() {
+    let tmp = workspace();
+    // Break `web` the way the CLI suite does: a DIRECTORY where the store must
+    // be, which no open can succeed against.
+    let db = tmp.path().join("web").join(".logos").join("logos.db");
+    std::fs::remove_file(&db).expect("clear the store file");
+    std::fs::create_dir_all(&db).expect("a directory where the store must be");
+
+    let router = ws_router(&tmp);
+    let resp = router.oneshot(get("/api/v1/workspace/status")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "a degraded member is not an HTTP error: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    let web = v["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["member"] == "web")
+        .expect("the broken member still has a row");
+    assert_eq!(web["open_state"], "degraded", "{web}");
+    assert_eq!(web["degraded_cause"], "store-obstructed", "{web}");
+    assert!(
+        web["degraded_reason"].as_str().is_some_and(|r| r.contains("regular file")),
+        "the classified reason reaches the web payload: {web}"
+    );
+    assert!(
+        web["degraded_diagnostic"]
+            .as_str()
+            .is_some_and(|d| d.contains("unable to open database file")),
+        "and so does the verbatim diagnostic: {web}"
+    );
+    assert!(
+        web["error"].as_str().is_some(),
+        "the pre-existing `error` channel is untouched: {web}"
+    );
+
+    assert_eq!(
+        v["degraded_rollup"]["degraded_members"].as_array().unwrap(),
+        &vec![serde_json::Value::from("web")],
+        "the roll-up NAMES it: {body}"
+    );
+    assert_eq!(v["degraded_rollup"]["opened"], 1, "{body}");
+    assert_eq!(v["degraded_rollup"]["covers_all_members"], false, "{body}");
+    assert_eq!(v["coverage"]["covers_all_members"], false, "{body}");
+    assert_eq!(v["coverage"]["members_read"], 1, "{body}");
 }
 
 /// The cross-service read-models (service map, impact) are exposed to the frontend
