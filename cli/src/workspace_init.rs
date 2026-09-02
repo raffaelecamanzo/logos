@@ -6,14 +6,31 @@
 //! workspace MCP injection are all core business logic
 //! ([`logos_core::federation::enable`]) — this module only resolves the
 //! anchor, gates, wires the warm, and reports.
+//!
+//! The warm is **bounded** (FR-WS-14, BR-44): [`spawn_supervisor`] starts
+//! exactly one detached child whatever N is, and that child re-enters this
+//! module at [`run_supervisor`], which drives
+//! [`logos_core::federation::warm::warm_queue`] over the member delta. The
+//! scheduling decisions and the bound resolution are core business logic; the
+//! two things that genuinely cannot live there — detaching a process that
+//! outlives its parent, and spawning/awaiting an `index` child — are here.
 
-use std::path::Path;
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::Result;
-use logos_core::federation::{self, enable, Member};
+use logos_core::federation::{self, enable, warm, Member};
 
 use crate::{ask, Output};
+
+/// The supervisor's own subcommand name — **internal**, hidden from help
+/// output, and not a public CLI contract (FR-CL-01, FR-WS-14 Notes). Named
+/// here so the spawn and the clap variant cannot drift apart silently (the
+/// unit test below parses this literal through the real parser).
+pub(crate) const SUPERVISOR_COMMAND: &str = "internal-warm";
 
 /// `logos init --workspace [--yes] [--exclude <glob>]...` (FR-WS-02).
 ///
@@ -25,16 +42,16 @@ use crate::{ask, Output};
 /// [`enable::enable`] runs the non-clobber per-member `init`, the manifest
 /// upsert, and the workspace MCP injection.
 ///
-/// Returns without blocking on indexing: each **newly** approved member's
-/// index is warmed by a detached background process
-/// ([`spawn_background_warm`]) — best-effort, never awaited. Members already
-/// in the manifest are not re-warmed on every re-run (they were warmed, or
-/// fell back to lazy indexing, on the run that first added them) — only the
-/// delta this invocation approves. A member whose warm never starts (or
-/// hasn't finished before first real use) still indexes correctly via the
-/// engine's lazy `ensure_indexed` fallback (FR-IX-07), so this command never
-/// needs to wait on it.
-pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output) -> Result<i32> {
+/// Returns without blocking on indexing: the **newly** approved members are
+/// warmed by a single detached background supervisor at a bounded concurrency
+/// ([`spawn_supervisor`], FR-WS-14) — best-effort, never awaited. Members
+/// already in the manifest are not re-warmed on every re-run (they were
+/// warmed, or fell back to lazy indexing, on the run that first added them) —
+/// only the delta this invocation approves. A member whose warm never starts,
+/// waits behind the bound, or hasn't finished before first real use still
+/// indexes correctly via the engine's lazy `ensure_indexed` fallback
+/// (FR-IX-07), so this command never needs to wait on it.
+pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm: fn(&[Member]) -> bool) -> Result<i32> {
     let existing = federation::discover(root)?;
     let workspace_root = existing
         .as_ref()
@@ -82,9 +99,10 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output) -> R
     }
 
     let report = enable::enable(&workspace_root, &name, &members)?;
-    for member in &approved_new {
-        spawn_background_warm(&member.root);
-    }
+    // ONE call with the whole delta — never a per-member loop, which is the
+    // exact shape this story replaced. Injected (like `gate`'s `approve`) so a
+    // test can assert the call count and the slice it received.
+    warm(&approved_new);
 
     out.print(&report)?;
     Ok(0)
@@ -104,27 +122,128 @@ fn gate(candidates: &[Member], yes: bool, mut approve: impl FnMut(&Member) -> bo
         .collect()
 }
 
-/// Best-effort background index warm for one member (FR-WS-02, hybrid
-/// indexing): spawn this same binary as `logos --project <member> --quiet
-/// index`, detached from this process — an independent child, not a thread,
-/// so it keeps running after `init --workspace` returns (a thread would be
-/// killed with the process; a spawned child is reparented, not terminated).
-/// A spawn failure (the binary not resolvable, the OS out of processes, …)
-/// just leaves that member on the lazy `ensure_indexed` fallback — never
-/// fatal to the command.
-fn spawn_background_warm(member_root: &Path) {
+/// Start the **single** detached warm supervisor for the newly approved
+/// members (FR-WS-14, BR-44) — one child process whatever N is, replacing the
+/// per-member `logos index` fan-out that made the process and peak-RSS cost
+/// scale with the member count (84 members meant 84 concurrent rayon-parallel
+/// indexers, breaching NFR-PE-06 ~84× and NFR-PE-08's no-contention premise).
+///
+/// Detached, not a thread: `init --workspace` must return without blocking
+/// (FR-WS-02) *and* the warm must outlive it — a thread would be killed with
+/// the process, a spawned child is reparented. The effective bound is resolved
+/// **here**, in the parent that owns the workspace context, and passed down as
+/// `--concurrency`, so the manifest override of FR-WS-01/S-322 lands at this
+/// one call without the supervisor changing.
+///
+/// Best-effort throughout: an unresolvable `current_exe`, an OS out of
+/// processes, or an empty delta simply leaves those members on the lazy
+/// `ensure_indexed` fallback (FR-IX-07) — never fatal to the command.
+pub(crate) fn spawn_supervisor(members: &[Member]) -> bool {
+    if members.is_empty() {
+        return false;
+    }
     let Ok(exe) = std::env::current_exe() else {
-        return;
+        return false;
     };
-    let _ = Command::new(exe)
-        .arg("--project")
-        .arg(member_root)
+    let mut cmd = Command::new(exe);
+    cmd.args(supervisor_argv(members, warm::effective_concurrency(None)))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Its OWN process group, so the warm survives the parent's *terminal*, not
+    // just the parent's exit. Left in the invoking shell's foreground group,
+    // the supervisor and its in-flight children take SIGINT on Ctrl-C and
+    // SIGHUP when the window closes — and the bound turned that window from
+    // "one member index" into "N/K × one member index", minutes on a large
+    // workspace, all of it after the command already returned. A killed
+    // in-flight index is also the one failure the FR-IX-07 lazy path does not
+    // fully cover (see `run_supervisor`), so not taking the signal matters
+    // beyond losing the warm.
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd.spawn().is_ok()
+}
+
+/// The supervisor's argv: **one** command line carrying the whole member
+/// delta and the resolved bound. That the delta is arguments to a single
+/// invocation — rather than the loop bound of N invocations — is what makes
+/// the process count `1 + K` instead of `N` (FR-WS-14, BR-44); factored out so
+/// that property is directly assertable without spawning anything.
+fn supervisor_argv(members: &[Member], bound: usize) -> Vec<OsString> {
+    // Everything after `--` is a positional, whatever it starts with. Member
+    // roots are canonical absolute paths today, so no current root can look like
+    // a flag — but the whole failure mode of this argv is invisibility (the
+    // child's stderr is /dev/null and nobody reads its exit code), so a root
+    // such as `-legacy` would silently exit 2 and lose the entire warm rather
+    // than fail loudly. One token buys immunity.
+    let k = bound.to_string();
+    [SUPERVISOR_COMMAND, "--concurrency", &k, "--"]
+        .into_iter()
+        .map(OsString::from)
+        .chain(members.iter().map(|m| m.root.clone().into_os_string()))
+        .collect()
+}
+
+/// The supervisor itself (FR-WS-14): drive
+/// [`warm::warm_queue`] over `members` at the resolved bound, spawning and
+/// awaiting one `logos --project <member> --quiet index` child per member and
+/// never more than K at once.
+///
+/// This process opens no store of its own — no `Engine`, no `Runtime`, no
+/// connection, and (uniquely among the subcommands) not even the telemetry
+/// writer, which `main::run` skips for this arm precisely so the claim is
+/// literal: it holds no `.logos` file at any point. `warm_queue` returns the
+/// instant the last member finishes, which is this function's — and the
+/// process's — exit.
+///
+/// Every failure here is advisory. A degraded member is reported on stderr and
+/// never changes the exit code, and an unresolvable `current_exe` warms
+/// nothing while still returning 0: nothing reads a detached child's status,
+/// and correctness is carried by FR-IX-07, not by the warm. The stderr report
+/// therefore exists for a foreground/diagnostic invocation — in the real
+/// detached spawn it goes to `/dev/null`, and the durable per-member readout
+/// is S-323's. Killing the supervisor leaves members it never reached on the
+/// FR-IX-07 lazy path, exactly as an unspawned child does; a member killed
+/// *mid*-index is the one case that path does not fully cover (see
+/// [`warm`]'s module docs), which is why the spawn takes its own process group.
+pub(crate) fn run_supervisor(members: &[PathBuf], concurrency: Option<usize>) -> i32 {
+    let Ok(exe) = std::env::current_exe() else {
+        return 0;
+    };
+    let bound = warm::effective_concurrency(concurrency);
+    let summary = warm::warm_queue(members, bound, |root| index_member(&exe, root));
+    for m in &summary.members {
+        if let Some(reason) = &m.degraded {
+            eprintln!("logos workspace warm: {} degraded — {reason}", m.root);
+        }
+    }
+    0
+}
+
+/// Index one member to completion: this same binary as `logos --project
+/// <member> --quiet index`, awaited (`status`, not `spawn`) because the whole
+/// bound rests on a worker slot staying occupied until its member is done.
+/// stdio is nulled — a background warm never writes to the user's terminal.
+fn index_member(exe: &Path, member_root: &Path) -> Result<(), String> {
+    // `--project=<path>` (attached, not a detached value) for the same
+    // hyphen-safety reason as the `--` above: a `-`-leading root passed as a
+    // separate value would be parsed as a flag by the child.
+    let mut project = OsString::from("--project=");
+    project.push(member_root);
+    let status = Command::new(exe)
+        .arg(project)
         .arg("--quiet")
         .arg("index")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
+        .status()
+        .map_err(|err| format!("spawn failed: {err}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("index failed: {status}"))
+    }
 }
 
 #[cfg(test)]
@@ -162,5 +281,244 @@ mod tests {
     #[test]
     fn gate_over_no_candidates_is_empty() {
         assert!(gate(&[], false, |_| true).is_empty());
+    }
+
+    // ── the supervisor entry point (FR-WS-14, FR-CL-01) ───────────────────
+
+    /// The spawn names [`SUPERVISOR_COMMAND`] as a bare string, so the clap
+    /// variant must answer to that exact literal — otherwise a rename (or
+    /// clap's own kebab-casing) would silently turn every warm into an
+    /// exit-2 usage error inside a detached, stdio-nulled child nobody
+    /// watches.
+    #[test]
+    fn the_supervisor_command_literal_parses_through_the_real_parser() {
+        use clap::Parser;
+
+        let cli = crate::Cli::try_parse_from([
+            "logos",
+            SUPERVISOR_COMMAND,
+            "--concurrency",
+            "3",
+            "/tmp/a",
+            "/tmp/b",
+        ])
+        .expect("the spawned argv parses");
+
+        let crate::Commands::InternalWarm {
+            concurrency,
+            members,
+        } = cli.command
+        else {
+            panic!("the literal must route to the supervisor variant");
+        };
+        assert_eq!(concurrency, Some(3));
+        assert_eq!(members, [PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")]);
+    }
+
+    /// Invoked without `--concurrency` (a human poking at it, or a future
+    /// caller that has no bound to pass), the supervisor still resolves one.
+    #[test]
+    fn the_supervisor_command_accepts_no_concurrency_and_no_members() {
+        use clap::Parser;
+
+        let cli = crate::Cli::try_parse_from(["logos", SUPERVISOR_COMMAND])
+            .expect("both arguments are optional");
+        assert!(matches!(
+            cli.command,
+            crate::Commands::InternalWarm {
+                concurrency: None,
+                ..
+            }
+        ));
+    }
+
+    /// The whole delta rides **one** command line, so approving N members
+    /// spawns one supervisor rather than N indexers (BR-44) — the argv is
+    /// `internal-warm --concurrency K <root>…`, never N of them.
+    #[test]
+    fn the_whole_delta_becomes_a_single_supervisor_command_line() {
+        let members: Vec<Member> = (0..5).map(|i| member(&format!("m{i}"))).collect();
+        let argv = supervisor_argv(&members, 3);
+
+        let rendered: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            rendered,
+            [SUPERVISOR_COMMAND, "--concurrency", "3", "--", "m0", "m1", "m2", "m3", "m4"],
+            "one invocation carries every member and the resolved bound"
+        );
+    }
+
+    /// A member root beginning with `-` must reach the child as a member, not
+    /// as a flag. Without the `--` separator the detached child exits 2 on a
+    /// usage error with all three streams nulled, so the entire warm vanishes
+    /// with no diagnostic anywhere.
+    #[test]
+    fn a_hyphen_leading_member_root_still_parses_as_a_member() {
+        use clap::Parser;
+
+        let members = vec![member("-legacy"), member("--weird")];
+        let mut full = vec![OsString::from("logos")];
+        full.extend(supervisor_argv(&members, 1));
+
+        let cli = crate::Cli::try_parse_from(full).expect("a hyphen-leading root still parses");
+        let crate::Commands::InternalWarm { members: parsed, .. } = cli.command else {
+            panic!("must route to the supervisor variant");
+        };
+        assert_eq!(parsed, [PathBuf::from("-legacy"), PathBuf::from("--weird")]);
+    }
+
+    /// The whole delta rides one command line at scale too — the 84-member
+    /// workspace that motivated the bound is ~7 KB of argv, far under ARG_MAX.
+    /// Free to assert: no process is spawned.
+    #[test]
+    fn the_argv_carries_every_member_of_a_large_delta() {
+        let members: Vec<Member> = (0..200).map(|i| member(&format!("m{i}"))).collect();
+        let argv = supervisor_argv(&members, 4);
+        assert_eq!(argv.len(), 204, "4 head tokens + 200 members, one command line");
+    }
+
+    /// And that single command line is one the real parser accepts — the argv
+    /// builder and the clap variant are checked against each other, not each
+    /// against an assumption.
+    #[test]
+    fn the_built_argv_parses_back_into_the_supervisor_variant() {
+        use clap::Parser;
+
+        let members = vec![member("api"), member("web")];
+        let mut full = vec![OsString::from("logos")];
+        full.extend(supervisor_argv(&members, 2));
+
+        let cli = crate::Cli::try_parse_from(full).expect("the spawned argv parses");
+        let crate::Commands::InternalWarm {
+            concurrency,
+            members: parsed,
+        } = cli.command
+        else {
+            panic!("must route to the supervisor variant");
+        };
+        assert_eq!(concurrency, Some(2));
+        assert_eq!(parsed, [PathBuf::from("api"), PathBuf::from("web")]);
+    }
+
+    /// An empty delta (the common incremental re-run: nothing new approved)
+    /// must not spawn a supervisor at all — one process to immediately exit
+    /// is pure waste on every re-run of a settled workspace.
+    ///
+    /// Asserts the *decision*, not just that the call is survivable: before
+    /// `spawn_supervisor` reported it, deleting the empty-delta guard left
+    /// every test green while every re-run spawned a stray child.
+    #[test]
+    fn no_newly_approved_members_spawns_no_supervisor() {
+        assert!(
+            !spawn_supervisor(&[]),
+            "an empty delta must spawn nothing at all"
+        );
+    }
+
+    // ── the warm is invoked ONCE, with the whole delta (BR-44) ────────────
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(["-c", "user.email=t@logos", "-c", "user.name=logos-test"])
+            .args(args)
+            .output()
+            .expect("git is on PATH");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A parent folder holding `n` committed sibling repos.
+    fn fixture(names: &[&str]) -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for name in names {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            git(&dir, &["init", "-q", "-b", "main"]);
+            std::fs::write(dir.join("a.rs"), "fn a() {}
+").unwrap();
+            git(&dir, &["add", "."]);
+            git(&dir, &["commit", "-q", "-m", "init"]);
+        }
+        tmp
+    }
+
+    /// The regression this story exists to prevent is a per-member **loop** at
+    /// this call site. Asserting the argv shape cannot catch that — a loop
+    /// calling `spawn_supervisor` once per member builds N perfectly-shaped
+    /// single-member command lines. Only the call count can, so `run` takes
+    /// the warm as a parameter and the count is asserted here.
+    #[test]
+    fn run_invokes_the_warm_exactly_once_with_the_whole_delta() {
+        use std::sync::Mutex;
+        static SEEN: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
+
+        fn record(members: &[Member]) -> bool {
+            SEEN.lock()
+                .unwrap()
+                .push(members.iter().map(|m| m.name.clone()).collect());
+            true
+        }
+
+        let tmp = fixture(&["api", "web"]);
+        SEEN.lock().unwrap().clear();
+        let out = Output { json: true, quiet: true };
+        assert_eq!(run(tmp.path(), true, &[], &out, record).unwrap(), 0);
+
+        let seen = SEEN.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "exactly ONE warm invocation for N members, never one per member: {seen:?}"
+        );
+        let mut names = seen[0].clone();
+        names.sort();
+        assert_eq!(names, ["api", "web"], "the single invocation carries the whole delta");
+    }
+
+    /// A re-run warms only the newly approved delta — the already-manifested
+    /// members were warmed (or fell back to lazy indexing) on the run that
+    /// first added them. Handing the supervisor the full member set instead is
+    /// a plausible regression that no end-to-end assertion would notice.
+    #[test]
+    fn a_rerun_hands_the_warm_only_the_new_delta() {
+        use std::sync::Mutex;
+        static SEEN: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
+
+        fn record(members: &[Member]) -> bool {
+            SEEN.lock()
+                .unwrap()
+                .push(members.iter().map(|m| m.name.clone()).collect());
+            true
+        }
+
+        let tmp = fixture(&["api", "web"]);
+        let out = Output { json: true, quiet: true };
+        assert_eq!(run(tmp.path(), true, &[], &out, record).unwrap(), 0);
+
+        // A third sibling appears only for the second run.
+        let batch = tmp.path().join("batch");
+        std::fs::create_dir_all(&batch).unwrap();
+        git(&batch, &["init", "-q", "-b", "main"]);
+        std::fs::write(batch.join("a.rs"), "fn a() {}\n").unwrap();
+        git(&batch, &["add", "."]);
+        git(&batch, &["commit", "-q", "-m", "init"]);
+
+        SEEN.lock().unwrap().clear();
+        assert_eq!(run(tmp.path(), true, &[], &out, record).unwrap(), 0);
+
+        let seen = SEEN.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "still one invocation: {seen:?}");
+        assert_eq!(
+            seen[0], ["batch"],
+            "only the newly approved member is warmed, not the manifested pair"
+        );
+    }
+
+    /// Draining an empty queue is a no-op that reports success, so the
+    /// supervisor's own exit path is exercised without launching an indexer.
+    #[test]
+    fn the_supervisor_over_an_empty_queue_exits_zero() {
+        assert_eq!(run_supervisor(&[], Some(2)), 0);
     }
 }

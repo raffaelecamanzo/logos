@@ -3,8 +3,10 @@
 //! Split out of `main.rs::run` so the entry point stays a thin setup wrapper and
 //! each function stays under the architecture-quality gates
 //! (`max_cc`/`max_fn_lines`, `.logos/rules.toml`). This is still pure routing —
-//! every arm parses nothing new, calls **exactly one** `Engine` method, and
-//! serialises its read-model (NFR-MA-02, ADR-01).
+//! every *read* arm parses nothing new, calls **exactly one** `Engine` method,
+//! and serialises its read-model (NFR-MA-02, ADR-01); the delegating arms
+//! (`Serve`, `Init --workspace`, `Xservice`/`Workspace`, `InternalWarm`) route
+//! to a surface module instead, with the logic still in the core.
 //!
 //! Cyclomatic complexity here is driven by the `?` operator, not the number of
 //! match arms (arms are free). The heavy `?`/exit-code boilerplate therefore
@@ -35,7 +37,7 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             exclude,
         } => {
             if workspace {
-                crate::workspace_init::run(root, yes, &exclude, out)
+                crate::workspace_init::run(root, yes, &exclude, out, crate::workspace_init::spawn_supervisor)
             } else {
                 out.print(&Engine::init_with(root, &init_options(interactive, hooks))?)?;
                 Ok(0)
@@ -51,6 +53,14 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             out.print(&engine(root, true)?.index())?;
             Ok(0)
         }
+        // The hidden bounded-warm supervisor (FR-WS-14). One of the delegating
+        // arms (alongside `Serve`, `Init --workspace` and `Xservice`/`Workspace`,
+        // which route to a surface module rather than the façade) — and the only
+        // one that opens no store whatever: it just supervises `index` children.
+        Commands::InternalWarm {
+            concurrency,
+            members,
+        } => Ok(crate::workspace_init::run_supervisor(&members, concurrency)),
         Commands::Sync { paths } => out.query(root, |e| e.sync(&paths)),
         Commands::Status => out.query(root, |e| e.status()),
         Commands::Search { query, kind, limit } => out.query(root, |e| e.search(&query, kind, limit)),
