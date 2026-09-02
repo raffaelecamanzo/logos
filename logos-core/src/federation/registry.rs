@@ -225,27 +225,11 @@ struct Resident<E: MemberEngine> {
 /// The eviction accounting and the shared worker pool — the state an
 /// **admission** owns, held behind the admission lock so a start can never
 /// disagree with the bookkeeping that authorised it.
+#[derive(Default)]
 struct Admission {
     /// Every member this registry has built at least once — the denominator
     /// that turns a start into a *re*construction.
     started_before: HashSet<String>,
-    /// Engine starts that rebuilt a previously-evicted member. The cost of the
-    /// budget, counted so thrash is measurable ([NFR-PE-11]).
-    ///
-    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
-    reconstructions: u64,
-    /// Engine starts that **failed**, across every touch this registry has served.
-    ///
-    /// The per-member `Err` a fan-out returns is the only other record, and it
-    /// survives just as far as its read-model: [`workspace_status`](super::workspace_status)
-    /// walks every member four times, and the coverage and topic tiers have no
-    /// per-member error channel, so a member that fails to open during those
-    /// walks is silently dropped. Counting failures registry-side is what lets a
-    /// caller assert "no member failed to open" over the whole command rather
-    /// than over its first walk ([NFR-PE-11], [FR-WS-16]).
-    ///
-    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
-    start_failures: u64,
     /// The one `rayon` pool every resident member engine shares ([NFR-PE-11],
     /// [ADR-63]) — held **weakly**, because the residents own it.
     ///
@@ -262,15 +246,6 @@ struct Admission {
 }
 
 impl Admission {
-    fn new() -> Self {
-        Self {
-            started_before: HashSet::new(),
-            reconstructions: 0,
-            start_failures: 0,
-            worker_pool: WeakWorkerPool::default(),
-        }
-    }
-
     /// The pool the next member engine joins: the live shared one if any
     /// resident still holds it, otherwise a freshly built pool of `threads`
     /// workers, remembered weakly for the members admitted after it.
@@ -278,7 +253,7 @@ impl Admission {
     /// # Errors
     /// Propagates a `rayon` pool-build failure, which the caller reports as a
     /// degraded member start — the same class as a failed store open.
-    fn worker_pool(&mut self, threads: usize) -> Result<SharedWorkerPool> {
+    fn join_or_build_pool(&mut self, threads: usize) -> Result<SharedWorkerPool> {
         if let Some(pool) = self.worker_pool.upgrade() {
             return Ok(pool);
         }
@@ -288,12 +263,10 @@ impl Admission {
         Ok(pool)
     }
 
-    /// Record that `member` was just built, counting a rebuild of a member seen
-    /// before as a reconstruction.
-    fn record_start(&mut self, member: &str) {
-        if !self.started_before.insert(member.to_string()) {
-            self.reconstructions += 1;
-        }
+    /// Record that `member` was just built, reporting whether this was a
+    /// *re*construction — a rebuild of a member seen before.
+    fn record_start(&mut self, member: &str) -> bool {
+        !self.started_before.insert(member.to_string())
     }
 }
 
@@ -388,6 +361,30 @@ pub struct EngineRegistry<E: MemberEngine = Engine> {
     /// Lock order is always `admission` → `resident`; nothing takes them the
     /// other way round.
     admission: Mutex<Admission>,
+    /// Engine starts that rebuilt a previously-evicted member. The cost of the
+    /// budget, counted so thrash is measurable ([NFR-PE-11]).
+    ///
+    /// Atomic rather than admission state so the readout never queues behind an
+    /// admission: a cold start under that lock can run for seconds (open and
+    /// migrate a store, spawn a watcher, join an evicted member's writer thread),
+    /// and a caller asking how much thrash it has paid should not have to wait
+    /// for one.
+    ///
+    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+    reconstructions: AtomicU64,
+    /// Engine starts that **failed**, across every touch this registry has served.
+    ///
+    /// The per-member `Err` a fan-out returns is the only other record, and it
+    /// survives just as far as its read-model: [`workspace_status`](super::workspace_status)
+    /// walks every member four times, and the coverage and topic tiers have no
+    /// per-member error channel, so a member that fails to open during those
+    /// walks is silently dropped. Counting failures registry-side is what lets a
+    /// caller assert "no member failed to open" over the whole command rather
+    /// than over its first walk ([NFR-PE-11], [FR-WS-16]). Atomic for the same
+    /// reason as [`reconstructions`](Self::reconstructions).
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    start_failures: AtomicU64,
     /// Monotonic logical clock — bumped on every touch to order residents by
     /// recency for LRU eviction. A tick, not wall-clock, so eviction is
     /// deterministic.
@@ -481,7 +478,9 @@ impl<E: MemberEngine> EngineRegistry<E> {
             mode,
             budget,
             resident: RwLock::new(HashMap::new()),
-            admission: Mutex::new(Admission::new()),
+            admission: Mutex::new(Admission::default()),
+            reconstructions: AtomicU64::new(0),
+            start_failures: AtomicU64::new(0),
             tick: AtomicU64::new(0),
         }
     }
@@ -558,7 +557,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
         // A pool that cannot be built is a degraded member start of the same
         // class as a store that cannot be opened, so both land in one arm.
         let started = admission
-            .worker_pool(self.budget.worker_threads())
+            .join_or_build_pool(self.budget.worker_threads())
             .and_then(|worker_pool| {
                 E::start(
                     &target.root,
@@ -569,21 +568,33 @@ impl<E: MemberEngine> EngineRegistry<E> {
         let engine = match started {
             Ok(engine) => engine,
             Err(err) => {
-                admission.start_failures += 1;
+                self.start_failures.fetch_add(1, Ordering::Relaxed);
                 return Err(err).with_context(|| {
                     format!("starting the engine for workspace member {member:?}")
                 });
             }
         };
-        admission.record_start(member);
+        if admission.record_start(member) {
+            self.reconstructions.fetch_add(1, Ordering::Relaxed);
+        }
         let watcher = self.spawn_watcher(member, &engine);
-        self.write_resident().insert(
+        let displaced = self.write_resident().insert(
             member.to_string(),
             Resident {
                 _watcher: watcher,
                 engine: Arc::clone(&engine),
                 last_touch: AtomicU64::new(self.tick.fetch_add(1, Ordering::Relaxed)),
             },
+        );
+        // Unreachable: the admission lock is held across the re-check above and
+        // this insert, and nothing else inserts. Asserted rather than assumed
+        // because a displaced `Resident` would drop *under the write guard* —
+        // joining a watcher and a writer thread with every hit blocked, which is
+        // precisely the teardown that `evict_to` was restructured to keep off
+        // this lock.
+        debug_assert!(
+            displaced.is_none(),
+            "a second engine was admitted for member {member:?} while one was resident"
         );
         Ok(engine)
     }
@@ -593,9 +604,14 @@ impl<E: MemberEngine> EngineRegistry<E> {
     fn touch_resident(&self, member: &str) -> Option<Arc<E>> {
         let resident = self.read_resident();
         let entry = resident.get(member)?;
+        // `fetch_max`, not `store`: the tick allocation and the write are two
+        // operations, so a thread preempted between them could otherwise write a
+        // stale tick over a newer one and make the hottest member look like the
+        // least-recently-touched — one spurious eviction and rebuild. Monotone by
+        // construction instead.
         entry
             .last_touch
-            .store(self.tick.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+            .fetch_max(self.tick.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
         Some(Arc::clone(&entry.engine))
     }
 
@@ -626,9 +642,11 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// Each member's result is a [`Result`]: a member whose engine fails to
     /// start is reported as an `Err` for that member rather than aborting the
     /// whole query, so a partly-degraded workspace still answers ([ADR-53]).
-    /// `f` runs eagerly, once per member, in discovery order; because each
-    /// member's engine is independent (its own pools and store), the per-member
-    /// calls never interfere.
+    /// `f` runs eagerly, once per member, in discovery order. Each member's
+    /// engine owns its own store, writer and read pool, so a per-member call
+    /// never advances another member's state; since S-325 they do share one
+    /// `rayon` worker pool, so CPU jobs queue behind one another rather than
+    /// running on private pools ([NFR-PE-11], [ADR-63] Consequences).
     ///
     /// [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
     /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
@@ -669,7 +687,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
     ///
     /// Normally at or below [`ConnectionBudget::total_read_connections`]. It can
     /// exceed it when callers hold engines the registry would otherwise have
-    /// evicted, because a held engine is never evicted (see `Residency::evict_to`)
+    /// evicted, because a held engine is never evicted (see [`evict_to`])
     /// — and this readout **rises** to say so rather than reporting the budget it
     /// wishes were true. Compare it against the budget; do not assume it.
     ///
@@ -687,7 +705,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
     ///
     /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
     pub fn reconstructions(&self) -> u64 {
-        self.lock_admission().reconstructions
+        self.reconstructions.load(Ordering::Relaxed)
     }
 
     /// How many engine starts have **failed** across every touch this registry
@@ -702,7 +720,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     pub fn start_failures(&self) -> u64 {
-        self.lock_admission().start_failures
+        self.start_failures.load(Ordering::Relaxed)
     }
 
     /// Worker threads the workspace's **shared** `rayon` pool is running right
@@ -2192,6 +2210,26 @@ mod tests {
             fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
                 Ok(())
             }
+        }
+
+        // The gate is process-global (an associated fn has nowhere to hang
+        // per-registry state), so reset it rather than inherit whatever a
+        // previous user left. Without this a second test using `GatedEngine` —
+        // or any harness that re-runs this one in-process — would get an
+        // already-released gate and a vacuous pass.
+        {
+            let (lock, _) = gate();
+            *lock.lock().unwrap() = Gate::default();
+        }
+
+        // The gate is process-global (an associated fn has nowhere to hang
+        // per-registry state), so reset it rather than inherit whatever a
+        // previous user left. Without this a second test using `GatedEngine` —
+        // or any harness re-running this one in-process — would find an
+        // already-released gate and pass vacuously.
+        {
+            let (lock, _) = gate();
+            *lock.lock().unwrap() = Gate::default();
         }
 
         let registry = EngineRegistry::<GatedEngine>::with_budget(

@@ -28,7 +28,7 @@
 
 use std::path::{Path, PathBuf};
 
-use logos_core::{Engine, RuntimeConfig};
+use logos_core::{Engine, RuntimeConfig, SharedWorkerPool};
 
 const SOURCE: &str = r#"
 pub fn alpha() -> u32 { 1 }
@@ -152,4 +152,30 @@ fn payloads_are_byte_identical_whatever_the_read_pool_size() {
              core-sized single-root pool"
         );
     }
+
+    // …and the same for an INJECTED worker pool, which is the other half of the
+    // budgeted seam and the half [S-325]'s "identical results" criterion is
+    // about. Without this the byte-comparison above varies only the read pool,
+    // so a shared worker pool that produced different answers would pass every
+    // assertion in this binary.
+    let shared = SharedWorkerPool::with_threads(1).expect("pool builds");
+    let injected =
+        Engine::start_with_pools(root, 2, Some(shared.clone())).expect("engine starts");
+    let injected_runtime = injected
+        .runtime()
+        .expect("a started engine owns a runtime");
+    assert_eq!(
+        injected_runtime.worker_pool().current_num_threads(),
+        1,
+        "the injected pool must actually be the one in use, or the comparison \
+         below is against a core-sized private pool"
+    );
+    assert_eq!(
+        payload(&injected),
+        baseline,
+        "an engine running on an injected shared worker pool answered differently \
+         from one on its own core-sized pool"
+    );
+    drop(injected);
+    drop(shared);
 }

@@ -143,12 +143,17 @@ fn cores() -> usize {
         .unwrap_or(4)
 }
 
-/// The [NFR-PE-01] point-query budget: `search` at p95 over an indexed repo.
-/// Applied to the far smaller fixtures here as a *starvation* alarm rather than
-/// as a benchmark — a member whose query is anywhere near this on a one-file
-/// store is being starved of the shared pool, which is the regression [ADR-63]
-/// trades private pools against.
-const POINT_QUERY_P95_MS: u128 = 100;
+/// The [NFR-PE-01] point-query budget, applied to the far smaller fixtures here
+/// as a *starvation* alarm rather than as a benchmark.
+///
+/// What it guards is the **connection** half of the budget: a resident member
+/// answers on its budgeted share of read connections, so a share squeezed too
+/// small shows up as query latency here. It does not guard the worker pool —
+/// steady-state navigation never enters it ([ADR-11]) — which is asserted
+/// directly, under a saturated pool, in `workspace_shared_worker_pool.rs`.
+///
+/// [ADR-11]: ../../docs/specs/architecture/decisions/ADR-11.md
+const POINT_QUERY_MS: u128 = 100;
 
 /// Poll `condition` until it holds or a generous deadline passes.
 ///
@@ -330,22 +335,25 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
         let _ = engine.search("f", None, None);
         latencies_ms.push(started.elapsed().as_millis());
     }
+    // The **worst** of the resident set, not a percentile: the sample is the
+    // budgeted resident count, so any p95 index rounds to the maximum anyway.
+    // Naming it honestly keeps the assertion from reading as more statistically
+    // forgiving than it is.
     latencies_ms.sort_unstable();
-    let p95 = latencies_ms[(latencies_ms.len() * 95).div_ceil(100).saturating_sub(1)];
+    let worst = latencies_ms.last().copied().unwrap_or_default();
     eprintln!(
         "shared pool: {} workers for {MEMBERS} members ({} resident); per-member \
-         search p95 {p95} ms, max {} ms",
+         search worst {worst} ms of {latencies_ms:?}",
         registry.shared_worker_threads(),
         resident.len(),
-        latencies_ms.last().copied().unwrap_or_default(),
     );
     assert!(
-        p95 < POINT_QUERY_P95_MS,
-        "per-member search p95 was {p95} ms over {} resident members sharing {} \
-         workers — the shared pool is starving members ([NFR-PE-01]); full \
-         distribution: {latencies_ms:?}",
+        worst < POINT_QUERY_MS,
+        "a member's search took {worst} ms over {} resident members on a budgeted \
+         {} read connections each — the budget is starving members \
+         ([NFR-PE-01]); full distribution: {latencies_ms:?}",
         resident.len(),
-        budget.worker_threads(),
+        budget.per_member_read_connections(),
     );
 
     // Teardown: the pool belongs to the engines, so releasing the last of them

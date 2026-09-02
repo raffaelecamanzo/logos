@@ -18,7 +18,7 @@
 //!    indexed on purpose: a member's *first* navigation call runs the [FR-IX-07]
 //!    auto-index prologue, which is a full index on this pool and therefore the
 //!    one navigation path that genuinely does queue behind another member.
-//! 2b. A real cross-member **worker-pool** job submitted while the pool is
+//!    A real cross-member **worker-pool** job submitted while the pool is
 //!    saturated queues, and runs once the long jobs release — no deadlock.
 //! 3. Sharing composes with eviction: an evicted member rejoins the same pool.
 //! 4. The pool is torn down with the last engine holding it — no orphan threads.

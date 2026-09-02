@@ -19,10 +19,10 @@
 //! ([`total_read_connections`](ConnectionBudget::total_read_connections)); the
 //! third is the thread ceiling — together, the two quantities [NFR-PE-11] bounds.
 //!
-//! Because the connection halves fall out of the descriptor limit and the thread
-//! half out of the core count, a host with a larger allowance keeps more members
-//! resident with **no code change** — the budget tracks the host, never the
-//! member count.
+//! Because the connection quantities fall out of the descriptor limit and the
+//! thread quantity out of the core count, a host with a larger allowance keeps
+//! more members resident with **no code change** — the budget tracks the host,
+//! never the member count.
 //!
 //! # Not on the single-root path
 //! A budget exists only where a workspace does. [`Backing::Single`](super::Backing::Single)
