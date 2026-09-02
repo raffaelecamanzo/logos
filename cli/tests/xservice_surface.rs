@@ -174,6 +174,194 @@ fn workspace_status_reports_freshness_and_three_state_coverage() {
     );
 }
 
+// ── S-323: per-member warm state and roll-up (FR-WS-15, BR-44, NFR-CC-04) ──
+
+/// A workspace of `members`, each a committed git repo (so `discover` keeps it),
+/// indexed only if named in `index`.
+///
+/// The warm state is a fact about *index presence*, so what the fixture varies
+/// is exactly which members were indexed — never a stub or an injected label.
+fn warm_fixture(members: &[&str], index: &[&str]) -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    for member in members {
+        let repo = root.join(member);
+        init_repo(&repo);
+        write(&repo, "src/lib.rs", "pub fn f() {}\n");
+        if index.contains(member) {
+            assert!(logos(&repo, &["index"]).status.success(), "index {member}");
+        }
+    }
+    let list = members
+        .iter()
+        .map(|m| format!("\"{m}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        format!("[workspace]\nname = \"shop\"\nmembers = [{list}]\n"),
+    )
+    .unwrap();
+    tmp
+}
+
+/// Break a member so its engine cannot be opened at all: `.logos/logos.db` as a
+/// **directory**, which no store open can succeed against. The one warm failure
+/// that is durable today — the supervisor's own per-member failures reach a
+/// `/dev/null` stderr, so `workspace status` cannot see them (see
+/// `federation::warm_state`).
+fn break_store(root: &Path, member: &str) {
+    let db = root.join(member).join(".logos").join("logos.db");
+    if db.exists() {
+        std::fs::remove_file(&db).expect("clear the store file");
+    }
+    std::fs::create_dir_all(&db).expect("a directory where the store must be");
+}
+
+/// The per-member `warm_state` label keyed by member name.
+fn warm_states(status: &Value) -> Vec<(String, String)> {
+    let mut states: Vec<(String, String)> = status["members"]
+        .as_array()
+        .expect("members array")
+        .iter()
+        .map(|m| {
+            (
+                m["member"].as_str().expect("member name").to_string(),
+                m["warm_state"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("member row carries a warm_state: {m}"))
+                    .to_string(),
+            )
+        })
+        .collect();
+    states.sort();
+    states
+}
+
+/// [FR-WS-15] AC1/AC2/AC4: a mixed workspace labels each member `warm` /
+/// `deferred` / `degraded` and prints the roll-up — and `--json` carries the same
+/// per-member field and roll-up the human rendering does.
+///
+/// `cold` is the load-bearing case: it is un-indexed and was never attempted, so
+/// it must read `deferred` rather than merely "stale" — the whole point of the
+/// story once the warm is deliberately bounded.
+#[test]
+fn workspace_status_labels_each_member_warm_deferred_or_degraded_with_a_rollup() {
+    let tmp = warm_fixture(&["api", "cold", "broken"], &["api", "broken"]);
+    break_store(tmp.path(), "broken");
+
+    let status = logos_json(tmp.path(), &["workspace", "status"]);
+    assert_eq!(
+        warm_states(&status),
+        [
+            ("api".to_string(), "warm".to_string()),
+            ("broken".to_string(), "degraded".to_string()),
+            ("cold".to_string(), "deferred".to_string()),
+        ],
+        "each member carries its own state: {status}"
+    );
+
+    let rollup = &status["warm_rollup"];
+    assert_eq!(rollup["members"], 3);
+    assert_eq!(rollup["warm"], 1);
+    assert_eq!(rollup["deferred"], 1);
+    assert_eq!(rollup["degraded"], 1, "a failed member is degraded, never deferred (BR-44)");
+
+    // The human rendering is the same read-model (pretty-printed, FR-CL-02), so
+    // "both outputs carry the state" is asserted by reading the human stream and
+    // finding the identical fields — not by trusting that they must match.
+    let human = logos(tmp.path(), &["workspace", "status"]);
+    assert!(human.status.success());
+    let human: Value = serde_json::from_str(&String::from_utf8(human.stdout).unwrap())
+        .expect("the human rendering is the same read-model, pretty-printed");
+    assert_eq!(warm_states(&human), warm_states(&status));
+    assert_eq!(human["warm_rollup"], status["warm_rollup"]);
+}
+
+/// [FR-WS-15] AC3: a fully warmed workspace reports every member `warm`, with no
+/// `deferred` and no `warming`.
+#[test]
+fn a_fully_warmed_workspace_reports_every_member_warm() {
+    let tmp = warm_fixture(&["api", "web"], &["api", "web"]);
+    let status = logos_json(tmp.path(), &["workspace", "status"]);
+
+    for (member, state) in warm_states(&status) {
+        assert_eq!(state, "warm", "member {member} is indexed: {status}");
+    }
+    let rollup = &status["warm_rollup"];
+    assert_eq!(rollup["members"], 2);
+    assert_eq!(rollup["warm"], 2);
+    assert_eq!(rollup["deferred"], 0);
+    assert_eq!(rollup["degraded"], 0);
+    assert!(rollup.get("warming").is_none(), "no warming key at all: {rollup}");
+}
+
+/// [FR-WS-15] AC5 / [NFR-CC-04]: with no live warming signal available, `status`
+/// reports only `warm` / `deferred` / `degraded` and the roll-up **omits** the
+/// `warming` key rather than defaulting it to `0` — across every warm-state
+/// combination, so the omission is a property of the read-model and not of one
+/// fixture.
+#[test]
+fn warming_is_omitted_rather_than_inferred_in_every_combination() {
+    for (members, index, broken) in [
+        (&["api", "web"][..], &["api", "web"][..], None),
+        (&["api", "web"][..], &[][..], None),
+        (&["api", "web"][..], &["api"][..], None),
+        (&["api", "web"][..], &["api", "web"][..], Some("web")),
+    ] {
+        let tmp = warm_fixture(members, index);
+        if let Some(member) = broken {
+            break_store(tmp.path(), member);
+        }
+        let status = logos_json(tmp.path(), &["workspace", "status"]);
+
+        assert!(
+            status["warm_rollup"].get("warming").is_none(),
+            "indexed {index:?}, broken {broken:?}: `warming` must be absent, not 0: {}",
+            status["warm_rollup"]
+        );
+        for (member, state) in warm_states(&status) {
+            assert_ne!(
+                state, "warming",
+                "member {member} was labeled `warming` with no live signal to derive it from"
+            );
+        }
+    }
+}
+
+/// [FR-WS-15] AC4 (exit code): no warm state moves the exit code — including
+/// `deferred` on **every** member, and including a member that failed outright.
+///
+/// The degraded exit code is [S-326]'s to introduce; until then a warm state is
+/// purely informational, and this pins that it stayed that way.
+///
+/// [S-326]: ../../docs/planning/journal.md#s-326-degraded-member-reporting-and-non-zero-exit-for-workspace-commands
+#[test]
+fn no_warm_state_changes_the_exit_code() {
+    for (label, members, index, broken) in [
+        ("all deferred", &["api", "web", "svc"][..], &[][..], None),
+        ("all warm", &["api", "web"][..], &["api", "web"][..], None),
+        ("mixed", &["api", "web"][..], &["api"][..], None),
+        ("one degraded", &["api", "web"][..], &["api", "web"][..], Some("web")),
+        ("degraded + deferred", &["api", "web"][..], &["api"][..], Some("api")),
+    ] {
+        let tmp = warm_fixture(members, index);
+        if let Some(member) = broken {
+            break_store(tmp.path(), member);
+        }
+        for args in [&["workspace", "status"][..], &["workspace", "status", "--json"][..]] {
+            let out = logos(tmp.path(), args);
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "{label} / {args:?} exited {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
 /// AC1: `xservice route-providers` returns repo-qualified cross-service
 /// bindings, and `--repo` scopes to routes a single member provides.
 #[test]

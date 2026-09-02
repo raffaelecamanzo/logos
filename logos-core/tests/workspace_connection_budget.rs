@@ -1,5 +1,6 @@
 //! Fitness function for the workspace-wide read-connection budget (S-324,
-//! [CR-100], [NFR-PE-11], [BR-45], [ADR-63]).
+//! [CR-100], [NFR-PE-11], [BR-45], [ADR-63]), and for the warm read-model that
+//! rides the same walk without widening it (S-323, [FR-WS-15], [NFR-PE-10]).
 //!
 //! The unit tests in `federation::registry` prove the ceiling against spy
 //! engines. This proves it against the **operating system**: 72 real member
@@ -22,12 +23,15 @@
 //! [NFR-PE-11]: ../../docs/specs/requirements/NFR-PE-11.md
 //! [BR-45]: ../../docs/specs/software-spec.md#327-workspace-federation
 //! [ADR-63]: ../../docs/specs/architecture/decisions/ADR-63.md
+//! [FR-WS-15]: ../../docs/specs/requirements/FR-WS-15.md
+//! [NFR-PE-10]: ../../docs/specs/requirements/NFR-PE-10.md
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 
 use logos_core::federation::{
-    workspace_status, ConnectionBudget, EngineRegistry, Federation, Member, RegistryMode,
+    workspace_status, ConnectionBudget, EngineRegistry, Federation, Member, MemberWarmState,
+    RegistryMode,
 };
 use logos_core::Engine;
 
@@ -180,7 +184,7 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
     let failures: Vec<&str> = status
         .members
         .iter()
-        .filter_map(|m| m.error.as_deref())
+        .filter_map(|m| m.status.error.as_deref())
         .collect();
     assert!(
         failures.is_empty(),
@@ -244,6 +248,51 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
         budget.max_resident_members(),
         registry.live_read_connections(),
         budget.total_read_connections(),
+    );
+
+    // ── S-323: the warm read-model over the same N = 72 walk ──────────────
+    //
+    // The fixture indexes nothing, so every member is genuinely un-indexed and
+    // never attempted — the all-`deferred` workspace [FR-WS-15] must report
+    // honestly, and the exact state the bounded warm ([FR-WS-14]) makes normal.
+    // Asserted here rather than in a fixture of its own because the interesting
+    // claim is that labelling all N members costs **nothing** on top of the walk
+    // that was already happening ([NFR-PE-10]), which needs the real N = 72
+    // registry: the `resident_count()`/`reconstructions()` bounds above are
+    // unchanged by this story, so the labels rode along on freshness the fan-out
+    // had already produced rather than opening anything of their own.
+    let deferred = status
+        .members
+        .iter()
+        .filter(|m| m.warm == MemberWarmState::Deferred)
+        .count();
+    assert_eq!(
+        deferred, MEMBERS,
+        "every un-indexed, never-attempted member reads `deferred`, not `warm`          and not `degraded`"
+    );
+    assert_eq!(status.warm_rollup.members, MEMBERS);
+    assert_eq!(
+        (status.warm_rollup.warm, status.warm_rollup.deferred, status.warm_rollup.degraded),
+        (0, MEMBERS, 0),
+        "the roll-up partitions the workspace and agrees with the rows"
+    );
+    assert_eq!(
+        status.warm_rollup.warming, None,
+        "no live warming signal exists, so the count is OMITTED rather than          inferred ([NFR-CC-04])"
+    );
+    let wire = serde_json::to_value(&status).expect("the read-model serialises");
+    assert!(
+        wire["warm_rollup"].get("warming").is_none(),
+        "`--json` must carry no `warming` key at all: {}",
+        wire["warm_rollup"]
+    );
+    assert_eq!(wire["members"][0]["warm_state"], "deferred");
+    // [NFR-PE-10], instrumented: labelling N members constructed no engine of
+    // its own, so live residency after a full `status` is still far BELOW N.
+    assert!(
+        registry.resident_count() < MEMBERS,
+        "{} of {MEMBERS} engines resident after a warm-labelled status — the          read-model must not eagerly hold all N",
+        registry.resident_count(),
     );
 
     for repo in &member_roots {

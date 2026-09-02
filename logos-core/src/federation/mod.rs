@@ -41,6 +41,14 @@
 //!   the bounded queue one detached supervisor runs over the newly approved
 //!   member delta, replacing the unbounded one-child-per-member fan-out
 //!   ([FR-WS-14], [BR-44]).
+//! - the [`warm_state`] — the user-facing `warm`/`warming`/`deferred`/`degraded`
+//!   vocabulary `workspace status` labels each member with, plus the roll-up.
+//!   Pure derivation over what a status walk already gathered, with `warming`
+//!   and warm-failure taken as explicit inputs so neither is ever inferred
+//!   ([FR-WS-15], [NFR-CC-04], [BR-44]).
+//!
+//! [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+//! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 //!
 //! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 //! [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
@@ -80,6 +88,7 @@ pub mod reach;
 pub mod registry;
 pub mod topics;
 pub mod warm;
+pub mod warm_state;
 
 use std::path::{Path, PathBuf};
 
@@ -106,12 +115,13 @@ pub use reach::{
 };
 pub use query::{
     workspace_status, xservice_callers, xservice_impact, xservice_route_providers, xservice_search,
-    CrossServiceImpact, MemberResult, WorkspaceStatus, XserviceCallers, XserviceImpact,
-    XserviceRouteProviders, XserviceSearch,
+    CrossServiceImpact, MemberResult, MemberStatus, WorkspaceStatus, XserviceCallers,
+    XserviceImpact, XserviceRouteProviders, XserviceSearch,
 };
 pub use budget::ConnectionBudget;
 pub use registry::{Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode};
 pub use topics::{workspace_topics, MemberTopics, TopicSummary};
+pub use warm_state::{MemberWarmState, WarmEvidence, WarmRollup};
 
 /// One resolved, validated member repository of a [`Federation`] ([FR-WS-01]).
 ///

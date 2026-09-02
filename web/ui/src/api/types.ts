@@ -1080,13 +1080,49 @@ export interface MemberTopics {
   topics: TopicSummary[];
 }
 
-/** `GET /api/v1/workspace/status` — per-member index freshness, the coverage
- *  summary, and the promoted topic inventory. Fetched by the Workspace tab (it fans
- *  out over every member). */
+/** One member's warm state (S-323, FR-WS-15): `warm` — its graph holds at least one
+ *  indexed file; `warming` — its index is running right now; `deferred` — never
+ *  attempted, and it indexes lazily on first query (FR-IX-07), so this is honest and
+ *  NON-alarming; `degraded` — attempted and FAILED (BR-44).
+ *
+ *  `"warming"` is in the vocabulary but is never produced today: deriving it needs a
+ *  live signal from the bounded warm supervisor, and NFR-CC-04 forbids inferring one.
+ *  A UI must not treat its absence as "nothing is warming". */
+export type MemberWarmStateLabel = "warm" | "warming" | "deferred" | "degraded";
+
+/** One member's row in {@link WorkspaceStatus}: its index freshness and its warm
+ *  state in one record, so no join by member name is needed. */
+export interface MemberStatus extends MemberResult<StatusInfo> {
+  /** This member's warm state (FR-WS-15). */
+  warm_state: MemberWarmStateLabel;
+  /** Why the attempt failed — present only when `warm_state` is `"degraded"`. */
+  reason?: string;
+}
+
+/** The workspace-wide warm roll-up (S-323, FR-WS-15). The unconditional counts plus
+ *  `warming` (when present) partition {@link WarmRollup.members}. */
+export interface WarmRollup {
+  /** Members in the workspace — the denominator the counts below partition. */
+  members: number;
+  warm: number;
+  /** Members being indexed right now. **Absent** when no trustworthy live signal
+   *  source exists, rather than reported as `0` (NFR-CC-04) — so an absent key means
+   *  "not knowable", never "none". */
+  warming?: number;
+  deferred: number;
+  degraded: number;
+}
+
+/** `GET /api/v1/workspace/status` — per-member index freshness and warm state, the
+ *  warm roll-up, the coverage summary, and the promoted topic inventory. Fetched by
+ *  the Workspace tab (it fans out over every member). */
 export interface WorkspaceStatus {
   /** The workspace name from the manifest. */
   workspace: string;
-  members: MemberResult<StatusInfo>[];
+  members: MemberStatus[];
+  /** The warm roll-up over `members` (FR-WS-15) — derived from those rows, so it can
+   *  never disagree with them. */
+  warm_rollup: WarmRollup;
   coverage: CrossServiceCoverage;
   /** Each member's promoted broker topics (S-256, FR-WS-11).
    *
