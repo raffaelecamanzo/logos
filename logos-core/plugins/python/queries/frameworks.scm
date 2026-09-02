@@ -24,11 +24,45 @@
 ;                       (unmapped text drops the match, FR-FW-04 best-effort);
 ;   @fw.route.handler — optional; a plain (possibly dotted) handler name the
 ;                       binder must prove (NFR-RA-05, never fabricate);
+;   @fw.route.prefix  — a class-/interface-level path prefix every route
+;                       declared inside its scope is joined onto (S-329,
+;                       FR-FW-05). Collected as a list like @fw.route.path, so
+;                       a type declaring several bases fans each route out;
+;   @fw.route.prefix.scope — the declaration whose byte range the prefix
+;                       governs. REQUIRED alongside @fw.route.prefix: the pass
+;                       matches a route to a prefix by containment, and the
+;                       *innermost* containing scope wins, so a prefixed nested
+;                       type takes its own prefix. Must span the whole
+;                       declaration, annotation and body — a scope that stops
+;                       short of the body contains no handler and silently
+;                       composes nothing;
+;   @fw.route.prefix.opaque — a prefix argument that is NOT a written literal
+;                       (a constant, a concatenation). Its mere PRESENCE marks
+;                       the scope non-composable: with no literal alongside it,
+;                       routes inside are refused rather than promoted at a
+;                       partial path (`path-not-composed`, FR-WS-05,
+;                       NFR-RA-05). Capture it only where the argument really
+;                       is in the path position — marking a `method =` argument
+;                       opaque would refuse a whole controller;
 ;   @fw.component.name — a component declaration's name;
 ;   @fw.component.base — predicate-only helper, not consumed by the pass.
 ;
 ; Any other `@fw.route.*` / `@fw.component.*` capture is predicate-only too —
-; the Java query's `@fw.route.key` filters argument names with `#any-of?`.
+; the Java query's `@fw.route.key` filters argument names with `#any-of?`, and
+; its `@fw.route.prefix.name`/`@fw.route.prefix.key` pin which class-level
+; annotation is a prefix.
+;
+; Composition itself — separator normalisation across all four slash cases, the
+; prefix-as-whole-path fallback for an annotation that named none, the
+; non-literal refusal — lives once in `compose_prefixes` and is NOT expressible
+; in a query file (a pattern captures, it cannot concatenate). A prefixing
+; dialect therefore inherits every one of those rules by naming the three
+; captures above and writing no code (S-330).
+;
+; A registration that captures @fw.route.method and @fw.route.handler but NO
+; path is not zero routes: it is a *pathless* candidate whose full path is its
+; prefix. With no prefix in scope it promotes nothing and reports nothing —
+; absence of a prefix is never a composition failure (BR-46).
 ;
 ; Droppable on disk at `.logos/plugins/python/queries/frameworks.scm`.
 ;

@@ -337,6 +337,7 @@ fn dedup_prefers_the_proven_handler_and_is_first_wins_otherwise() {
         start_line: line,
         end_line: line,
         origin: PathOrigin::default(),
+        at: 0,
     };
 
     // Handler-less first, handler-bearing second: the upgrade fires.
@@ -380,6 +381,7 @@ fn outranked_positional_paths_are_dropped_only_within_their_own_site() {
         start_line: 1,
         end_line: 1,
         origin: PathOrigin { site, named },
+        at: site.unwrap_or(0),
     };
 
     let mut routes = vec![
@@ -418,6 +420,7 @@ fn a_dropped_positional_match_hands_its_proven_handler_to_the_survivor() {
             site: Some(7),
             named,
         },
+        at: 7,
     };
 
     let mut routes = vec![
@@ -431,6 +434,462 @@ fn a_dropped_positional_match_hands_its_proven_handler_to_the_survivor() {
         .map(|r| (r.path.as_str(), r.handler.as_deref()))
         .collect();
     assert_eq!(kept, [("/x", Some("handle")), ("/y", Some("handle"))]);
+}
+
+// ── Prefix composition, language-independent (S-329) ─────────────────────────
+
+/// Separator normalisation, exhaustively: the four slash combinations plus the
+/// two degenerate ends ([FR-FW-05]). `/v1//users` and `/v1users` are the two
+/// failures the rule exists to prevent, so both are asserted absent by
+/// construction — every case names its exact expected output.
+#[test]
+fn joining_a_prefix_and_a_path_yields_exactly_one_separator() {
+    for (prefix, path, want) in [
+        // The four cases the acceptance criterion enumerates.
+        ("/v1", "/users", "/v1/users"),
+        ("/v1", "users", "/v1/users"),
+        ("/v1/", "/users", "/v1/users"),
+        ("/v1/", "users", "/v1/users"),
+        // Multi-segment on both sides — the rule is about the seam only.
+        ("/api/v1/", "/users/{id}", "/api/v1/users/{id}"),
+        // A prefix that is just the root contributes no segment.
+        ("/", "/users", "/users"),
+        // An unwritten method path leaves the prefix as the whole path, and a
+        // path that is only a slash keeps the trailing one Spring maps.
+        ("/v1", "", "/v1"),
+        ("/v1", "/", "/v1/"),
+        // Surrounding whitespace in a literal is not part of the path.
+        ("  /v1  ", "  /users  ", "/v1/users"),
+        // Composition joins; it does not absolutise (see `join_route_path`).
+        ("v1", "/users", "v1/users"),
+        ("", "/users", "/users"),
+    ] {
+        let got = join_route_path(prefix, path);
+        assert_eq!(got, want, "join({prefix:?}, {path:?})");
+        assert!(!got.contains("//"), "join({prefix:?}, {path:?}) = {got:?}");
+    }
+}
+
+/// A [`PrefixScope`] built by hand, the way a query match would.
+#[cfg(test)]
+fn scope(start: usize, end: usize, literals: &[(&str, usize, usize)], opaque: &[(usize, usize)]) -> PrefixScope {
+    PrefixScope {
+        start,
+        end,
+        literals: literals
+            .iter()
+            .map(|(text, s, e)| PrefixLiteral {
+                text: (*text).to_string(),
+                start: *s,
+                end: *e,
+                resolvable: is_resolvable_prefix(text),
+            })
+            .collect(),
+        opaque: opaque.to_vec(),
+    }
+}
+
+/// A [`RouteMatch`] at byte `at`.
+#[cfg(test)]
+fn route_at(path: &str, at: usize) -> RouteMatch {
+    RouteMatch {
+        path: path.to_string(),
+        method: "GET".to_string(),
+        handler: Some("h".to_string()),
+        start_line: 1,
+        end_line: 1,
+        origin: PathOrigin::default(),
+        at,
+    }
+}
+
+/// The reuse claim of [S-329], asserted without a query: composition is driven
+/// entirely by [`PrefixScope`] byte ranges and [`RouteMatch::at`], so a second
+/// dialect inherits every rule below by naming the captures and adding no code
+/// (S-330). If this test can express a language's behaviour, that language
+/// needs no implementation.
+#[test]
+fn composition_is_driven_by_capture_data_alone() {
+    let mut out = FileMatches {
+        routes: vec![
+            // Inside the literal scope 0..100 → composed.
+            route_at("/users", 10),
+            // Inside the nested scope 20..40 → the *innermost* prefix wins,
+            // exactly as Spring binds a nested type to its own prefix.
+            route_at("/inner", 30),
+            // Inside the opaque scope 200..300 → refused, never partial.
+            route_at("/orphan", 250),
+            // Inside a *boundary* that declared no prefix, itself nested in
+            // the literal scope: the boundary wins and contributes nothing,
+            // so the route keeps its own path and is not refused (BR-46).
+            route_at("/boundary", 60),
+            // Containment is half-open, so the scope's first byte is inside it
+            // and the byte at `end` belongs to the next sibling.
+            route_at("/at-start", 0),
+            route_at("/at-end", 100),
+            // Outside every scope → untouched, and not refused (BR-46).
+            route_at("/free", 500),
+        ],
+        pathless: vec![
+            // Prefix-only inside the literal scope, and a pathless
+            // registration with no prefix at all (dropped, not refused).
+            route_at("", 15),
+            route_at("", 500),
+        ],
+        prefixes: vec![
+            scope(0, 100, &[("/v1", 1, 5)], &[]),
+            scope(20, 40, &[("/v1/inner", 21, 30)], &[]),
+            scope(50, 70, &[], &[]),
+            scope(200, 300, &[], &[(201, 205)]),
+        ],
+        ..FileMatches::default()
+    };
+    compose_prefixes(&mut out);
+
+    let mut got: Vec<String> = out.routes.iter().map(|r| r.path.clone()).collect();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            "/at-end",
+            "/boundary",
+            "/free",
+            "/v1",
+            "/v1/at-start",
+            "/v1/inner/inner",
+            "/v1/users"
+        ]
+    );
+    // Exactly one refusal — the opaque scope's route. The unprefixed pathless
+    // candidate contributed none.
+    assert_eq!(out.refusals, [RouteRefusal::PathNotComposed]);
+    // The pending list is always drained: an empty `path` never escapes.
+    assert!(out.pathless.is_empty());
+    assert!(
+        out.routes.iter().all(|r| !r.path.is_empty()),
+        "{:?}",
+        out.routes
+    );
+}
+
+/// A type declaring several literal prefixes fans each route out over them,
+/// deterministically (sorted, deduplicated) whatever order the query matched
+/// them in ([NFR-RA-06]).
+#[test]
+fn several_prefixes_on_one_scope_fan_the_route_out_deterministically() {
+    let mut out = FileMatches {
+        routes: vec![route_at("/users", 5)],
+        prefixes: vec![scope(
+            0,
+            10,
+            &[("/b", 1, 2), ("/a", 3, 4), ("/b", 5, 6)],
+            &[],
+        )],
+        ..FileMatches::default()
+    };
+    compose_prefixes(&mut out);
+    let got: Vec<&str> = out.routes.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(got, ["/a/users", "/b/users"]);
+}
+
+/// Scopes that share a range are **combined**, not arbitrated — and the outcome
+/// is identical whichever order the query matched them in ([NFR-RA-06]). This
+/// is the ordinary case, not an exotic one: the bare type-boundary pattern and
+/// a prefix pattern both match the same declaration on every prefixed class.
+#[test]
+fn scopes_sharing_a_range_are_combined_in_either_order() {
+    let boundary = scope(0, 100, &[], &[]);
+    let declared = scope(0, 100, &[("/v1", 1, 5)], &[]);
+    for (label, prefixes) in [
+        ("boundary first", vec![boundary.clone(), declared.clone()]),
+        ("declared first", vec![declared, boundary]),
+    ] {
+        let mut out = FileMatches {
+            routes: vec![route_at("/users", 10)],
+            prefixes,
+            ..FileMatches::default()
+        };
+        compose_prefixes(&mut out);
+        let got: Vec<&str> = out.routes.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(got, ["/v1/users"], "{label}");
+        assert!(out.refusals.is_empty(), "{label}: {:?}", out.refusals);
+    }
+}
+
+/// An opaque capture disqualifies the prefix literals it **overlaps**, not the
+/// whole scope — and in both directions. This is the seam that lets a second
+/// grammar refuse its own unreadable syntax with no Rust change (S-330): a
+/// Kotlin `"$BASE/v1"` string template captures its `interpolation` child,
+/// which sits *inside* the literal.
+#[test]
+fn an_opaque_capture_disqualifies_only_the_literals_it_overlaps() {
+    // A fragment INSIDE a literal (Kotlin's `"$BASE/v1"`): the literal spans
+    // 10..20, the interpolation 11..16 — the literal is unreadable.
+    let mut inside = FileMatches {
+        routes: vec![route_at("/users", 50)],
+        prefixes: vec![scope(0, 100, &[("$BASE/v1", 10, 20)], &[(11, 16)])],
+        ..FileMatches::default()
+    };
+    compose_prefixes(&mut inside);
+    assert!(inside.routes.is_empty(), "{:?}", inside.routes);
+    assert_eq!(inside.refusals, [RouteRefusal::PathNotComposed]);
+
+    // A mixed list: the opaque node overlaps only the second element, so the
+    // first still composes and nothing is refused.
+    let mut mixed = FileMatches {
+        routes: vec![route_at("/users", 50)],
+        prefixes: vec![scope(0, 100, &[("/a", 10, 14)], &[(16, 20)])],
+        ..FileMatches::default()
+    };
+    compose_prefixes(&mut mixed);
+    let got: Vec<&str> = mixed.routes.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(got, ["/a/users"]);
+    assert!(mixed.refusals.is_empty(), "{:?}", mixed.refusals);
+
+    // An opaque capture IDENTICAL to a literal is that literal restated — the
+    // exemption that lets a query mark the whole path position opaque with a
+    // supertype pattern without having to exclude the literal case.
+    let mut identical = FileMatches {
+        routes: vec![route_at("/users", 50)],
+        prefixes: vec![scope(0, 100, &[("/a", 10, 14)], &[(10, 14)])],
+        ..FileMatches::default()
+    };
+    compose_prefixes(&mut identical);
+    let got: Vec<&str> = identical.routes.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(got, ["/a/users"]);
+    assert!(identical.refusals.is_empty(), "{:?}", identical.refusals);
+}
+
+/// One refused **registration** is one refusal, however many path candidates
+/// it produced: a list-valued method path is several `RouteMatch`es for one
+/// annotation, and `routes_not_composed` counts registrations. A match with no
+/// anchor names no site and is counted on its own.
+#[test]
+fn a_refused_registration_is_counted_once_however_many_paths_it_wrote() {
+    let sited = |path: &str, site: usize| RouteMatch {
+        origin: PathOrigin {
+            site: Some(site),
+            named: true,
+        },
+        ..route_at(path, 50)
+    };
+    let mut out = FileMatches {
+        // Two paths from ONE annotation (site 7), one from another (site 9),
+        // and one anchor-less match.
+        routes: vec![
+            sited("/a", 7),
+            sited("/b", 7),
+            sited("/c", 9),
+            route_at("/d", 50),
+        ],
+        prefixes: vec![scope(0, 100, &[], &[(1, 5)])],
+        ..FileMatches::default()
+    };
+    compose_prefixes(&mut out);
+    assert!(out.routes.is_empty(), "{:?}", out.routes);
+    assert_eq!(out.refusals.len(), 3, "{:?}", out.refusals);
+}
+
+/// A scope that captured both a literal and an unreadable prefix composes on
+/// the literal: what the source establishes is promoted and the rest is
+/// dropped, the same rule a mixed method-path list already follows (S-328).
+/// Only a scope with *no* readable literal is a refusal.
+#[test]
+fn a_part_literal_prefix_composes_on_its_literal_and_is_not_refused() {
+    let mut out = FileMatches {
+        routes: vec![route_at("/users", 5)],
+        prefixes: vec![scope(0, 10, &[("/a", 1, 3)], &[(6, 8)])],
+        ..FileMatches::default()
+    };
+    compose_prefixes(&mut out);
+    let got: Vec<&str> = out.routes.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(got, ["/a/users"]);
+    assert!(out.refusals.is_empty(), "{:?}", out.refusals);
+}
+
+/// A prefix that is a literal to the grammar but not an address is refused, and
+/// the text-level rule covers every form no query can decompose ([CR-101] §3.3).
+#[test]
+fn a_literal_that_is_not_an_address_is_not_a_resolvable_prefix() {
+    for bad in [
+        "${api.base}",           // property placeholder
+        "/v1/${tenant}",         // placeholder mid-path
+        "#{cfg.base}",           // SpEL
+        "\n/v1",                 // a Java text block's stray newline
+        "\"\"/v1",                // ...and its stray quotes
+    ] {
+        assert!(!is_resolvable_prefix(bad), "{bad:?} must not be resolvable");
+    }
+    for good in ["/v1", "/", "", "/v1/{id}", "/ete/v1"] {
+        assert!(is_resolvable_prefix(good), "{good:?} must be resolvable");
+    }
+}
+
+/// A pathless registration whose only prefix is empty establishes nothing, so
+/// it drops silently rather than promoting a route named `"GET "`.
+#[test]
+fn a_pathless_registration_under_an_empty_prefix_is_dropped() {
+    let mut out = FileMatches {
+        pathless: vec![route_at("", 50)],
+        prefixes: vec![scope(0, 100, &[("", 10, 12)], &[])],
+        ..FileMatches::default()
+    };
+    compose_prefixes(&mut out);
+    assert!(out.routes.is_empty(), "{:?}", out.routes);
+    assert!(out.refusals.is_empty(), "{:?}", out.refusals);
+}
+
+/// Composition **cannot** live in a query file: a tree-sitter pattern matches
+/// and captures, it has no string arithmetic to join two literals with. What a
+/// query file therefore has to do is name the shared captures the interpreter
+/// interprets — and it has to name them as a **pair**.
+///
+/// This guard is written over *every* shipped `frameworks.scm`, not over Java's
+/// alone, and it is inverted deliberately: rather than listing the queries that
+/// must carry prefix captures, it requires every query that names one to name
+/// the other. A closed list cannot notice what it does not name, so the moment
+/// S-330 adds Kotlin prefix patterns this test already covers them — and a
+/// query that captures `@fw.route.prefix` while forgetting
+/// `@fw.route.prefix.scope` fails here instead of silently composing nothing
+/// (`generic_match` drops the literals, every route keeps its bare method path,
+/// and no test would otherwise notice).
+#[test]
+fn every_framework_query_naming_a_prefix_also_names_its_scope() {
+    let mut checked = 0;
+    for entry in crate::plugin::grammars::compiled() {
+        for query in entry.embedded_queries {
+            if !query.relative_path.ends_with("frameworks.scm") {
+                continue;
+            }
+            // Count the bare capture, not any longer name that starts with it:
+            // a plain `contains("@fw.route.prefix")` is satisfied vacuously by
+            // `@fw.route.prefix.scope` and would pin nothing.
+            let names_literal = capture_occurrences(query.source, "fw.route.prefix") > 0;
+            let names_scope = capture_occurrences(query.source, "fw.route.prefix.scope") > 0;
+            let names_opaque = capture_occurrences(query.source, "fw.route.prefix.opaque") > 0;
+            assert_eq!(
+                names_literal, names_scope,
+                "{}: @fw.route.prefix and @fw.route.prefix.scope are a pair",
+                query.label
+            );
+            assert!(
+                !names_opaque || names_scope,
+                "{}: @fw.route.prefix.opaque needs @fw.route.prefix.scope too",
+                query.label
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no frameworks.scm was checked");
+}
+
+/// Occurrences of `@<name>` in a query, counting only the capture whose name is
+/// exactly `name` — `@fw.route.prefix.scope` is not an occurrence of
+/// `@fw.route.prefix`.
+#[cfg(test)]
+fn capture_occurrences(source: &str, name: &str) -> usize {
+    let needle = format!("@{name}");
+    source
+        .match_indices(&needle)
+        .filter(|(at, _)| {
+            source[at + needle.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '.' && c != '_' && c != '-')
+        })
+        .count()
+}
+
+/// The Java query names each shared capture as its own capture, not merely as a
+/// prefix of a longer one — asserted by exact-name counting so a rename to
+/// `@fw.route.prefix.value` fails here rather than passing vacuously.
+#[test]
+fn the_java_query_delegates_composition_by_naming_the_shared_captures() {
+    let query = include_str!("../../../plugins/java/queries/frameworks.scm");
+    for capture in [
+        "fw.route.prefix",
+        "fw.route.prefix.scope",
+        "fw.route.prefix.opaque",
+    ] {
+        assert!(
+            capture_occurrences(query, capture) > 0,
+            "the Java query must name @{capture}"
+        );
+    }
+}
+
+/// The reuse claim of [S-329] proved the way [S-330] will have to satisfy it:
+/// composition driven by a **second language's query**, dropped in as data with
+/// no Rust change at all ([FR-PL-04] makes
+/// `.logos/plugins/<lang>/queries/frameworks.scm` shadow the embedded one, so a
+/// query really is the whole per-language surface).
+///
+/// The Kotlin query shipped today captures no prefix — that is S-330's work —
+/// so this test writes a minimal one naming only the shared captures and
+/// asserts the interpreter composes it. Separator normalisation, the innermost
+/// scope, the prefix-only fallback and the refusal all come for free; if this
+/// test can express a dialect's behaviour, that dialect needs no
+/// implementation. A second composition implementation would make this
+/// redundant, which is exactly the failure [S-330] is meant to detect.
+///
+/// [FR-PL-04]: ../../../docs/specs/requirements/FR-PL-04.md
+#[test]
+#[cfg(feature = "lang-kotlin")]
+fn a_second_language_inherits_composition_from_its_query_alone() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let qdir = root.path().join(".logos/plugins/kotlin/queries");
+    std::fs::create_dir_all(&qdir).expect("query dir");
+    // Kotlin shapes: an annotation WITH arguments is a `constructor_invocation`;
+    // a class-level one sits in the class's `modifiers`. Nothing here joins
+    // anything — it only names the captures.
+    std::fs::write(
+        qdir.join("frameworks.scm"),
+        r#"
+(class_declaration
+  (modifiers
+    (annotation
+      (constructor_invocation
+        (user_type (identifier) @fw.route.prefix.name)
+        (value_arguments
+          (value_argument
+            (string_literal) @fw.route.prefix))))))  @fw.route.prefix.scope
+
+(function_declaration
+  (modifiers
+    (annotation
+      (constructor_invocation
+        (user_type (identifier) @fw.route.method)
+        (value_arguments
+          (value_argument
+            (string_literal) @fw.route.path)))))
+  name: (identifier) @fw.route.handler)
+"#,
+    )
+    .expect("write override");
+
+    let registry = LanguageRegistry::load(root.path()).expect("registry loads");
+    let plugin = registry.for_extension("kt").expect("kotlin plugin");
+    let mut parser = Parser::new();
+    let matches = scan_source(
+        &mut parser,
+        plugin,
+        r#"
+@RequestMapping("/v1/")
+class UserController {
+    @GetMapping("/users")
+    fun listUsers(): String { return "" }
+}
+"#,
+    );
+    assert_eq!(
+        route_triples(matches),
+        vec![(
+            "/v1/users".to_string(),
+            "GET".to_string(),
+            Some("listUsers".to_string())
+        )],
+        "a second language composes from its query alone"
+    );
 }
 
 // ── Java Spring mapping annotations (S-328) ──────────────────────────────────
@@ -447,9 +906,7 @@ mod java_spring {
     /// sorted so a test asserts the promoted *set*, not tree-sitter's match
     /// order.
     fn java_routes(source: &str) -> Vec<(String, String, Option<String>)> {
-        let mut got = route_triples(scan_lang("java", source));
-        got.sort();
-        got
+        sorted_triples(&scan_lang("java", source))
     }
 
     /// A method wrapped in the minimal legal class body.
@@ -755,10 +1212,31 @@ class UserController implements UserApi {
         assert!(m.routes.is_empty(), "{:?}", m.routes);
     }
 
+    /// The sorted `(path, method, handler)` projection of an already-scanned
+    /// file — for the tests that assert routes *and* refusals from one scan.
+    fn sorted_triples(m: &FileMatches) -> Vec<(String, String, Option<String>)> {
+        let mut got: Vec<(String, String, Option<String>)> = m
+            .routes
+            .iter()
+            .map(|r| (r.path.clone(), r.method.clone(), r.handler.clone()))
+            .collect();
+        got.sort();
+        got
+    }
+
+    /// A handler method wrapped in a class carrying `@RequestMapping(<args>)`.
+    fn in_prefixed_class(arguments: &str, members: &str) -> String {
+        format!(
+            "@RequestMapping({arguments})\n@RestController\npublic class C {{\n{members}\n}}\n"
+        )
+    }
+
+    /// The canonical handler: a named-argument `@GetMapping` on `/users`.
+    const USERS_HANDLER: &str = r#"    @GetMapping(value = "/users")
+    public String listUsers() { return ""; }"#;
+
     #[test]
-    fn class_level_prefixes_are_not_composed_yet() {
-        // S-329 owns prefix composition; this task promotes the method path
-        // verbatim and the class-level annotation promotes nothing on its own.
+    fn class_level_prefix_composes_with_the_method_path() {
         let got = java_routes(
             r#"
 @RequestMapping("/api/v1")
@@ -772,10 +1250,639 @@ public class C {
         assert_eq!(
             got,
             vec![(
+                "/api/v1/users".to_string(),
+                "GET".to_string(),
+                Some("listUsers".to_string())
+            )]
+        );
+    }
+
+    /// Separator normalisation over real Java source, not just the pure
+    /// joiner: whichever side writes the slash, the promoted route carries
+    /// exactly one ([FR-FW-05]).
+    #[test]
+    fn prefix_composition_normalises_the_separator_over_real_source() {
+        for (prefix, path) in [
+            (r#""/v1""#, "/users"),
+            (r#""/v1""#, "users"),
+            (r#""/v1/""#, "/users"),
+            (r#""/v1/""#, "users"),
+        ] {
+            let got = java_routes(&in_prefixed_class(
+                prefix,
+                &format!(
+                    "    @GetMapping(value = \"{path}\")\n    public String listUsers() {{ return \"\"; }}"
+                ),
+            ));
+            assert_eq!(
+                got,
+                vec![(
+                    "/v1/users".to_string(),
+                    "GET".to_string(),
+                    Some("listUsers".to_string())
+                )],
+                "prefix {prefix}, path {path}"
+            );
+        }
+    }
+
+    /// A handler in a prefixed class whose own annotation carries no path
+    /// takes the prefix as its full path ([FR-FW-05]).
+    #[test]
+    fn a_prefixed_handler_with_no_method_path_takes_the_prefix() {
+        let got = java_routes(&in_prefixed_class(
+            r#""/v1/users""#,
+            "    @GetMapping\n    public String listUsers() { return \"\"; }",
+        ));
+        assert_eq!(
+            got,
+            vec![(
+                "/v1/users".to_string(),
+                "GET".to_string(),
+                Some("listUsers".to_string())
+            )]
+        );
+    }
+
+    /// The other half of the pathless rule: with no prefix in scope there is
+    /// nothing to take, so the bare annotation promotes nothing — and it is
+    /// **not** a composition failure, so it reports no reason ([BR-46]).
+    ///
+    /// [BR-46]: ../../../docs/specs/software-spec.md#310-framework-extraction
+    #[test]
+    fn a_pathless_annotation_with_no_prefix_promotes_nothing_and_is_not_refused() {
+        let m = scan_lang(
+            "java",
+            &in_class("    @GetMapping\n    public String listUsers() { return \"\"; }"),
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    /// [BR-46] directly: a handler with no prefix in scope composes to its
+    /// method path alone and is never reported `path-not-composed`.
+    ///
+    /// [BR-46]: ../../../docs/specs/software-spec.md#310-framework-extraction
+    #[test]
+    fn an_unprefixed_handler_keeps_its_method_path_and_is_not_refused() {
+        let m = scan_lang("java", &in_class(USERS_HANDLER));
+        assert_eq!(
+            sorted_triples(&m),
+            vec![(
                 "/users".to_string(),
                 "GET".to_string(),
                 Some("listUsers".to_string())
             )]
+        );
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    /// A prefix that cannot be resolved to a literal — a constant reference, a
+    /// qualified constant, a concatenation, in either the positional or the
+    /// named form — yields **no** path at all, and the registration is
+    /// reported `path-not-composed` ([FR-WS-05], [NFR-RA-05]). Promoting
+    /// `/users` here would advertise a provider at an address the service does
+    /// not serve.
+    ///
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn a_non_literal_prefix_refuses_the_route_instead_of_promoting_a_partial_path() {
+        for arguments in [
+            "BASE",
+            "Paths.V1",
+            r#"BASE + "/v1""#,
+            "value = BASE",
+            "path = Paths.V1",
+            r#"value = BASE + "/v1""#,
+            "value = {BASE}",
+        ] {
+            let m = scan_lang("java", &in_prefixed_class(arguments, USERS_HANDLER));
+            assert!(m.routes.is_empty(), "{arguments}: {:?}", m.routes);
+            assert_eq!(
+                m.refusals,
+                [RouteRefusal::PathNotComposed],
+                "{arguments} must report path-not-composed"
+            );
+        }
+    }
+
+    /// A property placeholder is a written literal but not a resolvable
+    /// address, and resolving it is out of scope ([CR-101] §3.3) — so as a
+    /// *prefix* it is refused rather than joined onto. Asserted alongside the
+    /// unchanged method-path rule (promoted verbatim, S-328) so the asymmetry
+    /// is a decision on the record: a path written whole is recorded as
+    /// written, a prefix has to survive being joined.
+    ///
+    /// [CR-101]: ../../../docs/requests/CR-101-jvm-spring-route-extraction.md
+    #[test]
+    fn a_property_placeholder_prefix_is_refused_while_a_placeholder_path_is_not() {
+        let prefixed = scan_lang(
+            "java",
+            &in_prefixed_class(r#""${api.base}""#, USERS_HANDLER),
+        );
+        assert!(prefixed.routes.is_empty(), "{:?}", prefixed.routes);
+        assert_eq!(prefixed.refusals, [RouteRefusal::PathNotComposed]);
+
+        let unprefixed = java_routes(&in_class(
+            r#"    @GetMapping(value = "${api.base}/users")
+    public String listUsers() { return ""; }"#,
+        ));
+        assert_eq!(
+            unprefixed,
+            vec![(
+                "${api.base}/users".to_string(),
+                "GET".to_string(),
+                Some("listUsers".to_string())
+            )]
+        );
+    }
+
+    /// The contract-first shape: the **interface** declares the prefix and the
+    /// mappings, and composition treats an interface exactly as a class
+    /// ([FR-FW-05]).
+    #[test]
+    fn an_interface_level_prefix_composes_like_a_class_one() {
+        let got = java_routes(
+            r#"
+@RequestMapping("/v1")
+public interface UserApi {
+    @RequestMapping(method = RequestMethod.GET, value = "/users", produces = "application/json")
+    String listUsers();
+
+    @GetMapping(path = {"/users/{id}", "/users/by-id/{id}"})
+    String getUser(String id);
+}
+"#,
+        );
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "/v1/users".to_string(),
+                    "ANY".to_string(),
+                    Some("listUsers".to_string())
+                ),
+                (
+                    "/v1/users/by-id/{id}".to_string(),
+                    "GET".to_string(),
+                    Some("getUser".to_string())
+                ),
+                (
+                    "/v1/users/{id}".to_string(),
+                    "GET".to_string(),
+                    Some("getUser".to_string())
+                ),
+            ]
+        );
+    }
+
+    /// A list-valued class prefix serves the type at every base, so each
+    /// handler registers once per base.
+    #[test]
+    fn a_list_valued_class_prefix_registers_the_handler_at_each_base() {
+        let got = java_routes(&in_prefixed_class(
+            r#"value = {"/v1", "/v2"}"#,
+            USERS_HANDLER,
+        ));
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "/v1/users".to_string(),
+                    "GET".to_string(),
+                    Some("listUsers".to_string())
+                ),
+                (
+                    "/v2/users".to_string(),
+                    "GET".to_string(),
+                    Some("listUsers".to_string())
+                ),
+            ]
+        );
+    }
+
+    /// A prefixed nested type takes **its own** prefix, not its enclosing
+    /// type's — Spring binds a handler to its declaring type. The innermost
+    /// containing scope wins.
+    /// A **positional** array-valued class prefix — `@RequestMapping({"/a"})`,
+    /// which several codegen templates emit — composes exactly like the named
+    /// form. Before the positional patterns learned the array shape it matched
+    /// no prefix pattern at all, so the type read as *unprefixed* and every
+    /// handler was silently promoted at its bare method path: a wrong address,
+    /// not an absent one ([NFR-RA-05]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    /// Composition runs **before** dedup, so two method paths that differ only
+    /// before composition converge afterwards and collapse to one route. Pinned
+    /// so the consequence is on the record rather than a surprise: `/users` and
+    /// `users` under `/v1` are the same endpoint, Spring would reject the pair
+    /// as an ambiguous mapping, and the surviving route keeps a proven handler.
+    #[test]
+    fn two_method_paths_that_converge_after_composition_collapse_to_one_route() {
+        let m = scan_lang(
+            "java",
+            &in_prefixed_class(
+                r#""/v1""#,
+                r#"    @GetMapping(value = "/users")
+    public String listUsers() { return ""; }
+
+    @GetMapping(value = "users")
+    public String listUsersAgain() { return ""; }"#,
+            ),
+        );
+        let got = sorted_triples(&m);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, "/v1/users");
+        assert_eq!(got[0].1, "GET");
+        assert!(got[0].2.is_some(), "the survivor keeps a proven handler");
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    #[test]
+    fn a_positional_array_valued_class_prefix_composes() {
+        let got = java_routes(&in_prefixed_class(r#"{"/v1", "/v2"}"#, USERS_HANDLER));
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "/v1/users".to_string(),
+                    "GET".to_string(),
+                    Some("listUsers".to_string())
+                ),
+                (
+                    "/v2/users".to_string(),
+                    "GET".to_string(),
+                    Some("listUsers".to_string())
+                ),
+            ]
+        );
+
+        // ...and its non-literal twin refuses rather than promoting `/users`.
+        let m = scan_lang("java", &in_prefixed_class("{BASE}", USERS_HANDLER));
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert_eq!(m.refusals, [RouteRefusal::PathNotComposed]);
+    }
+
+    /// A method-level `@RequestMapping` must never be read as a prefix
+    /// governing its own route. The regression this pins is real and was
+    /// observed: expressing "a type declaration" as the grammar's
+    /// `declaration` supertype also matches `method_declaration`, which
+    /// composed every named mapping with itself into `/v1/x/v1/x`.
+    #[test]
+    fn a_method_level_mapping_is_never_its_own_prefix() {
+        let got = java_routes(&in_class(
+            r#"    @RequestMapping(method = RequestMethod.GET, value = "/v1/x")
+    public String getX() { return ""; }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![(
+                "/v1/x".to_string(),
+                "ANY".to_string(),
+                Some("getX".to_string())
+            )]
+        );
+    }
+
+    /// An explicitly empty `value = {}` declares no prefix — Spring reads it
+    /// that way — so the type's handlers keep their own paths and nothing is
+    /// refused. The catch-all opaque pattern must not fire on it.
+    #[test]
+    fn an_empty_prefix_list_declares_no_prefix() {
+        let m = scan_lang("java", &in_prefixed_class("value = {}", USERS_HANDLER));
+        assert_eq!(
+            sorted_triples(&m),
+            vec![(
+                "/users".to_string(),
+                "GET".to_string(),
+                Some("listUsers".to_string())
+            )]
+        );
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    /// A prefix that is the empty string supplies nothing: a handler with its
+    /// own path keeps it, and a *pathless* handler is dropped rather than
+    /// promoted as a route named `"GET "`.
+    #[test]
+    fn an_empty_string_prefix_never_manufactures_a_pathless_route() {
+        let with_path = java_routes(&in_prefixed_class(r#""""#, USERS_HANDLER));
+        assert_eq!(
+            with_path,
+            vec![(
+                "/users".to_string(),
+                "GET".to_string(),
+                Some("listUsers".to_string())
+            )]
+        );
+
+        let m = scan_lang(
+            "java",
+            &in_prefixed_class(
+                r#""""#,
+                "    @GetMapping\n    public String listUsers() { return \"\"; }",
+            ),
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    /// A SpEL prefix is refused exactly like a property placeholder, and a Java
+    /// text block — which the unquoting heuristic cannot fully read — never
+    /// composes a route name carrying stray quotes or a newline.
+    #[test]
+    fn a_spel_or_text_block_prefix_is_refused() {
+        for arguments in [r##""#{cfg.base}""##, "\"\"\"\n/v1\"\"\""] {
+            let m = scan_lang("java", &in_prefixed_class(arguments, USERS_HANDLER));
+            assert!(m.routes.is_empty(), "{arguments}: {:?}", m.routes);
+            assert_eq!(
+                m.refusals,
+                [RouteRefusal::PathNotComposed],
+                "{arguments} must report path-not-composed"
+            );
+        }
+    }
+
+    /// One refused registration counts once, however many paths it wrote — the
+    /// grain `routes_not_composed` documents.
+    #[test]
+    fn a_refused_list_valued_registration_counts_once() {
+        let m = scan_lang(
+            "java",
+            &in_prefixed_class(
+                "BASE",
+                r#"    @GetMapping(value = {"/a", "/b"})
+    public String list() { return ""; }"#,
+            ),
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert_eq!(m.refusals, [RouteRefusal::PathNotComposed], "one annotation, one refusal");
+    }
+
+    /// A **positional** method path composes with the class prefix exactly as a
+    /// named one does — the two forms S-328 established must both compose, and
+    /// composition runs after precedence so a suppressed positional path is
+    /// never composed and then dropped.
+    #[test]
+    fn a_positional_method_path_composes_with_the_class_prefix() {
+        let got = java_routes(&in_prefixed_class(
+            r#""/v1""#,
+            r#"    @GetMapping("/users")
+    public String listUsers() { return ""; }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![(
+                "/v1/users".to_string(),
+                "GET".to_string(),
+                Some("listUsers".to_string())
+            )]
+        );
+    }
+
+    /// The stereotype is written first in real Spring code; annotation order
+    /// must not decide whether a prefix is found.
+    #[test]
+    fn the_prefix_is_found_whatever_order_the_annotations_are_written_in() {
+        let got = java_routes(&format!(
+            "@RestController\n@RequestMapping(\"/v1\")\npublic class C {{\n{USERS_HANDLER}\n}}\n"
+        ));
+        assert_eq!(
+            got,
+            vec![(
+                "/v1/users".to_string(),
+                "GET".to_string(),
+                Some("listUsers".to_string())
+            )]
+        );
+    }
+
+    /// A record and an enum can carry a controller prefix too, and both
+    /// compose. Leaving them out would not lose the route — the type-boundary
+    /// pattern would still match, so the handler would be promoted at its bare
+    /// method path, a wrong address rather than an absent one.
+    #[test]
+    fn a_record_or_enum_level_prefix_composes_like_a_class_one() {
+        let record = java_routes(&format!(
+            "@RequestMapping(\"/v1\")\npublic record R(String id) {{\n{USERS_HANDLER}\n}}\n"
+        ));
+        assert_eq!(
+            record,
+            vec![(
+                "/v1/users".to_string(),
+                "GET".to_string(),
+                Some("listUsers".to_string())
+            )]
+        );
+
+        let enumeration = java_routes(&format!(
+            "@RequestMapping(\"/v1\")\npublic enum E {{\n    A;\n{USERS_HANDLER}\n}}\n"
+        ));
+        assert_eq!(
+            enumeration,
+            vec![(
+                "/v1/users".to_string(),
+                "GET".to_string(),
+                Some("listUsers".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn a_nested_prefixed_class_takes_its_own_prefix() {
+        let got = java_routes(
+            r#"
+@RequestMapping("/outer")
+public class Outer {
+    @GetMapping(value = "/a")
+    public String outerHandler() { return ""; }
+
+    @RequestMapping("/inner")
+    public static class Inner {
+        @GetMapping(value = "/b")
+        public String innerHandler() { return ""; }
+    }
+}
+"#,
+        );
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "/inner/b".to_string(),
+                    "GET".to_string(),
+                    Some("innerHandler".to_string())
+                ),
+                (
+                    "/outer/a".to_string(),
+                    "GET".to_string(),
+                    Some("outerHandler".to_string())
+                ),
+            ]
+        );
+    }
+
+    /// An **unannotated** nested type is its own controller in Spring and
+    /// inherits nothing: its handlers must NOT be promoted at the enclosing
+    /// type's prefix. Without the type-boundary scope this composes
+    /// `/outer/b`, a path the service never serves ([NFR-RA-05]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn an_unannotated_nested_class_does_not_inherit_the_outer_prefix() {
+        let m = scan_lang(
+            "java",
+            r#"
+@RequestMapping("/outer")
+public class Outer {
+    @GetMapping(value = "/a")
+    public String outerHandler() { return ""; }
+
+    public static class Inner {
+        @GetMapping(value = "/b")
+        public String innerHandler() { return ""; }
+    }
+}
+"#,
+        );
+        assert_eq!(
+            sorted_triples(&m),
+            vec![
+                (
+                    "/b".to_string(),
+                    "GET".to_string(),
+                    Some("innerHandler".to_string())
+                ),
+                (
+                    "/outer/a".to_string(),
+                    "GET".to_string(),
+                    Some("outerHandler".to_string())
+                ),
+            ]
+        );
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    /// A class-level `@RequestMapping` that names no path argument declares no
+    /// prefix: its handlers compose to their own paths and nothing is refused.
+    /// Without this the `method =`-only form — legal, and common on a base
+    /// controller — would silently refuse every route in the class.
+    #[test]
+    fn a_class_annotation_with_no_path_argument_is_not_a_prefix() {
+        for arguments in [
+            "method = RequestMethod.GET",
+            r#"produces = "application/json""#,
+            r#"consumes = {"application/json"}"#,
+        ] {
+            let m = scan_lang("java", &in_prefixed_class(arguments, USERS_HANDLER));
+            assert_eq!(
+                sorted_triples(&m),
+                vec![(
+                    "/users".to_string(),
+                    "GET".to_string(),
+                    Some("listUsers".to_string())
+                )],
+                "{arguments}"
+            );
+            assert!(m.refusals.is_empty(), "{arguments}: {:?}", m.refusals);
+        }
+    }
+
+    /// Only `@RequestMapping` prefixes a type in Spring. A stereotype marker,
+    /// and any other string-valued class annotation, must contribute no
+    /// prefix — otherwise `@Validated("group")` would relocate every route in
+    /// the class.
+    #[test]
+    fn only_request_mapping_prefixes_a_type() {
+        for annotation in [
+            "@RestController",
+            r#"@Validated("group")"#,
+            r#"@Profile(value = "prod")"#,
+            r#"@GetMapping("/not-a-prefix")"#,
+        ] {
+            let source = format!("{annotation}\npublic class C {{\n{USERS_HANDLER}\n}}\n");
+            let m = scan_lang("java", &source);
+            assert_eq!(
+                sorted_triples(&m),
+                vec![(
+                    "/users".to_string(),
+                    "GET".to_string(),
+                    Some("listUsers".to_string())
+                )],
+                "{annotation}"
+            );
+            assert!(
+                m.prefixes
+                    .iter()
+                    .all(|s| s.literals.is_empty() && s.opaque.is_empty()),
+                "{annotation} must declare no prefix: {:?}",
+                m.prefixes
+            );
+        }
+    }
+
+    /// The `[framework_methods]` gate still runs first: `@Override` in a
+    /// prefixed class is a marker annotation the pathless pattern matches, and
+    /// it promotes nothing because its name is not in the table ([FR-FW-04]).
+    /// The bare `@RestController` implementation of a prefixed interface is
+    /// exactly this shape, so a regression here would double every
+    /// contract-first route.
+    ///
+    /// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
+    #[test]
+    fn an_unmapped_marker_annotation_in_a_prefixed_class_promotes_nothing() {
+        let m = scan_lang(
+            "java",
+            &in_prefixed_class(
+                r#""/v1""#,
+                "    @Override\n    public String listUsers() { return \"\"; }",
+            ),
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    /// The wiring composition depends on, asserted at the source level rather
+    /// than on hand-built values (the S-328 pattern): the scope must span the
+    /// whole declaration — annotation *and* body — or a handler's byte offset
+    /// would fall outside it and every route would silently lose its prefix.
+    #[test]
+    fn a_prefix_scope_spans_the_whole_declaration_it_governs() {
+        let source = in_prefixed_class(r#""/v1""#, USERS_HANDLER);
+        let m = scan_lang("java", &source);
+        // The prefix pattern and the bare type-boundary pattern both match the
+        // one declaration, so both scopes carry its range; only one declares
+        // the path, and `innermost_prefix` unions the tie.
+        let scope = m
+            .prefixes
+            .iter()
+            .find(|s| !s.literals.is_empty())
+            .unwrap_or_else(|| panic!("a declared prefix: {:?}", m.prefixes));
+        assert_eq!(
+            scope.literals.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            ["/v1"]
+        );
+        assert!(
+            scope.literals.iter().all(|l| l.resolvable),
+            "a literal prefix reads as an address"
+        );
+        assert!(
+            m.prefixes
+                .iter()
+                .all(|s| s.start == scope.start && s.end == scope.end),
+            "every scope here is the one declaration: {:?}",
+            m.prefixes
+        );
+        // The whole class declaration: from its first annotation to its
+        // closing brace.
+        assert_eq!(scope.start, source.find('@').expect("annotation"));
+        assert_eq!(scope.end, source.trim_end().len());
+        // And the handler this scope must govern really is inside it.
+        let handler = source.find("@GetMapping").expect("handler annotation");
+        assert!(
+            scope.start <= handler && handler < scope.end,
+            "{scope:?} must contain byte {handler}"
         );
     }
 }

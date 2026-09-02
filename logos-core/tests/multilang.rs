@@ -944,15 +944,21 @@ public class UserApiController implements UserApi {
     let result = engine.index();
 
     // Three endpoints: the named `value =` one, and one per element of the
-    // list-valued `path =`. The class-level `@RequestMapping("/api/v1")`
-    // prefix is *not* composed — method paths are promoted verbatim (S-329
-    // owns composition) — and `@Operation`, absent from
+    // list-valued `path =` — each composed onto the interface's class-level
+    // `@RequestMapping("/api/v1")` prefix (S-329, [FR-FW-05]), which is the
+    // full OpenAPI path a consumer references. `@Operation`, absent from
     // `[framework_methods]`, promotes nothing despite its `value =` argument.
     assert_eq!(
         route_names(rt),
-        ["ANY /users", "GET /users/by-id/{id}", "GET /users/{id}"]
+        [
+            "ANY /api/v1/users",
+            "GET /api/v1/users/by-id/{id}",
+            "GET /api/v1/users/{id}"
+        ]
     );
     assert_eq!(result.framework.routes, 3);
+    // Nothing was refused: every prefix here is a written literal.
+    assert_eq!(result.framework.routes_not_composed, 0);
 
     // The implementation is the wired building block; the interface is not a
     // stereotype and declares no second route.
@@ -980,9 +986,9 @@ public class UserApiController implements UserApi {
     let routes_to = edges_of(rt, EdgeKind::RoutesTo);
     assert_eq!(routes_to.len(), 3, "{routes_to:?}");
     for (route, handler) in [
-        ("ANY /users", "listUsers"),
-        ("GET /users/{id}", "getUser"),
-        ("GET /users/by-id/{id}", "getUser"),
+        ("ANY /api/v1/users", "listUsers"),
+        ("GET /api/v1/users/{id}", "getUser"),
+        ("GET /api/v1/users/by-id/{id}", "getUser"),
     ] {
         let route_id = node_id(rt, route, NodeKind::Route);
         let bound: Vec<&(NodeId, String, Option<String>)> = routes_to
@@ -1147,6 +1153,144 @@ interface UserApi {
         edges_of(rt, EdgeKind::RoutesTo).is_empty(),
         "an unprovable handler gets no edge"
     );
+}
+
+/// Prefix composition end to end on the shape that produced `bound: 0` over a
+/// real 72-member Spring workspace (S-329, [CR-101]): a **prefixed interface**
+/// declaring named-argument mappings, implemented by a bare `@RestController`.
+/// The promoted route names must be the full OpenAPI paths — the whole point
+/// of composition is that a consumer's `GET /v1/users` has something to bind
+/// to — and the prefix-only handler must take the prefix as its entire path.
+///
+/// The 72-member re-index itself is human validation; this is the in-repo
+/// equivalent.
+///
+/// [CR-101]: ../../docs/requests/CR-101-jvm-spring-route-extraction.md
+#[cfg(feature = "lang-java")]
+#[test]
+fn spring_prefixed_interface_composes_the_full_contract_paths() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/ArchiveApiV1.java",
+        "\
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+
+@RequestMapping(\"/v1/\")
+public interface ArchiveApiV1 {
+    @RequestMapping(method = RequestMethod.PUT, value = \"/users/{userId}/archives\", consumes = {\"application/json\"})
+    String upsertArchive(String userId);
+
+    @GetMapping
+    String listArchives();
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/ArchiveController.java",
+        "\
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class ArchiveController implements ArchiveApiV1 {
+    @Override
+    public String upsertArchive(String userId) {
+        return \"\";
+    }
+
+    @Override
+    public String listArchives() {
+        return \"\";
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    // `/v1/` + `/users/{userId}/archives` joins with exactly one separator,
+    // and the pathless `@GetMapping` takes the prefix as its whole path —
+    // *verbatim*, trailing slash included, because there is no seam to
+    // normalise and `/v1/` is the address Spring maps it to. The bare
+    // `@Override` implementations add nothing.
+    assert_eq!(
+        route_names(rt),
+        ["ANY /v1/users/{userId}/archives", "GET /v1/"]
+    );
+    assert_eq!(result.framework.routes, 2);
+    assert_eq!(result.framework.routes_not_composed, 0);
+
+    // Each composed route still links to the annotated declaration on the
+    // interface — composition changes the path, never the handler proof.
+    let methods = nodes_with_files(rt, NodeKind::Method);
+    let routes_to = edges_of(rt, EdgeKind::RoutesTo);
+    assert_eq!(routes_to.len(), 2, "{routes_to:?}");
+    for (route, handler) in [
+        ("ANY /v1/users/{userId}/archives", "upsertArchive"),
+        ("GET /v1/", "listArchives"),
+    ] {
+        let route_id = node_id(rt, route, NodeKind::Route);
+        let bound: Vec<&(NodeId, String, Option<String>)> = routes_to
+            .iter()
+            .filter(|(from, _)| *from == route_id)
+            .filter_map(|(_, to)| methods.iter().find(|(id, _, _)| id == to))
+            .collect();
+        assert_eq!(bound.len(), 1, "{route}: {bound:?}");
+        assert_eq!(bound[0].1, handler, "{route}");
+        assert_eq!(
+            bound[0].2.as_deref(),
+            Some("src/ArchiveApiV1.java"),
+            "{route} must bind the annotated declaration"
+        );
+    }
+}
+
+/// The honesty half, end to end: a controller prefixed by a constant promotes
+/// **no** route — never one at the partial method path, which would advertise
+/// a provider at an address the service does not serve — and the run counts
+/// the refusal as the `path-not-composed` figure ([FR-FW-05], [NFR-RA-05]).
+///
+/// [FR-FW-05]: ../../docs/specs/requirements/FR-FW-05.md
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+#[cfg(feature = "lang-java")]
+#[test]
+fn spring_non_literal_prefix_promotes_no_route_and_is_counted() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/UserController.java",
+        "\
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RequestMapping(ApiPaths.USERS)
+@RestController
+public class UserController {
+    @GetMapping(value = \"/users\")
+    public String listUsers() {
+        return \"\";
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(result.framework.routes, 0);
+    assert!(nodes_of(rt, NodeKind::Route).is_empty());
+    assert!(edges_of(rt, EdgeKind::RoutesTo).is_empty());
+    assert_eq!(result.framework.routes_not_composed, 1);
+    // The stereotype still promotes: the refusal is about the path, not the
+    // class.
+    assert_eq!(result.framework.components, 1);
 }
 
 // ── C: extraction parity, the honesty fixture (no frameworks) ────────────────
