@@ -180,7 +180,7 @@ impl Engine {
     ///
     /// The seam a **workspace** uses: the [federation registry] hands every
     /// resident member engine the share of the workspace-wide
-    /// [`ConnectionBudget`](crate::federation::ConnectionBudget) it is entitled
+    /// [`WorkspaceBudget`](crate::federation::WorkspaceBudget) it is entitled
     /// to, so N members cost a host-derived ceiling rather than `N × cores` live
     /// connections and `N × cores` worker threads. Nothing else calls this — the
     /// single-root path stays on [`Engine::start`] and its core-sized pools,

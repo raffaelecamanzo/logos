@@ -51,7 +51,7 @@ pub mod extract;
 /// silent raise of this process's `RLIMIT_NOFILE` soft limit toward its hard
 /// limit, and the clamped read of that limit the workspace connection budget is
 /// derived from. A **secondary** defence only — the guarantee rests on
-/// [`ConnectionBudget`](federation::ConnectionBudget), never on this
+/// [`WorkspaceBudget`](federation::WorkspaceBudget), never on this
 /// (NFR-PE-11).
 #[allow(unsafe_code)]
 pub mod fdlimit;

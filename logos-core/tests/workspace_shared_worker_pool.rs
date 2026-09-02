@@ -43,7 +43,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use logos_core::federation::{ConnectionBudget, EngineRegistry, Federation, Member, RegistryMode};
+use logos_core::federation::{WorkspaceBudget, EngineRegistry, Federation, Member, RegistryMode};
 use logos_core::{live_worker_threads, Engine, Runtime};
 
 /// The live runtime of a started member engine.
@@ -153,7 +153,7 @@ fn resident_member_engines_share_one_bounded_worker_pool() {
         live_worker_threads()
     );
 
-    let budget = ConnectionBudget::from_limits(ROOMY_FD_LIMIT, BUDGET_CORES);
+    let budget = WorkspaceBudget::from_limits(ROOMY_FD_LIMIT, BUDGET_CORES);
     assert_eq!(
         budget.worker_threads(),
         BUDGET_CORES,

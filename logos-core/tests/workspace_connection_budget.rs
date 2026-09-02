@@ -40,7 +40,7 @@
 use std::path::{Path, PathBuf};
 
 use logos_core::federation::{
-    workspace_status, ConnectionBudget, EngineRegistry, Federation, Member, MemberWarmState,
+    workspace_status, WorkspaceBudget, EngineRegistry, Federation, Member, MemberWarmState,
     RegistryMode,
 };
 use logos_core::{live_worker_threads, Engine};
@@ -205,7 +205,7 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
     // The budget this host would derive *for a 256-fd limit*, stated explicitly
     // so the assertion is about the budget's arithmetic and not about whatever
     // limit the CI runner happens to grant.
-    let budget = ConnectionBudget::from_limits(STOCK_SOFT_LIMIT, cores());
+    let budget = WorkspaceBudget::from_limits(STOCK_SOFT_LIMIT, cores());
     let federation = Federation {
         name: "workspace".to_string(),
         root: root.to_path_buf(),

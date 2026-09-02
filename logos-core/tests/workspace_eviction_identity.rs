@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use logos_core::federation::{
-    ConnectionBudget, EngineRegistry, Federation, Member, RegistryMode,
+    WorkspaceBudget, EngineRegistry, Federation, Member, RegistryMode,
 };
 use logos_core::Engine;
 
@@ -81,7 +81,7 @@ fn an_evicted_member_answers_identically_once_reconstructed() {
         .map(|name| indexed_member(root, name))
         .collect();
 
-    let budget = ConnectionBudget::from_limits(HOSTILE_FD_LIMIT, 12);
+    let budget = WorkspaceBudget::from_limits(HOSTILE_FD_LIMIT, 12);
     assert!(
         budget.max_resident_members() < names.len(),
         "the fixture must exceed the budget ({} members, {} resident) or nothing \
@@ -168,7 +168,7 @@ fn an_evicted_member_answers_identically_once_reconstructed() {
 fn a_serve_mode_workspace_evicts_to_its_budget_like_a_lazy_one() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
-    let budget = ConnectionBudget::from_limits(HOSTILE_FD_LIMIT, 12);
+    let budget = WorkspaceBudget::from_limits(HOSTILE_FD_LIMIT, 12);
 
     let names = ["delta", "epsilon", "zeta"];
     assert!(

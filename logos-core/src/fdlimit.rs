@@ -1,7 +1,7 @@
 //! Process open-file-limit hygiene ([NFR-PE-11], [ADR-63]).
 //!
 //! A workspace's live database connections are bounded by
-//! [`ConnectionBudget`](crate::federation::ConnectionBudget), which derives that
+//! [`WorkspaceBudget`](crate::federation::WorkspaceBudget), which derives that
 //! bound from this process's `RLIMIT_NOFILE` **soft** limit. Raising the soft
 //! limit toward the hard limit therefore widens the budget — but it is a
 //! *secondary* defence only: [ADR-63] rejects "raise the limit and stop there"

@@ -493,7 +493,7 @@ pub(crate) enum WikiCommands {
 fn main() {
     // Widen this process's descriptor allowance before anything opens a file
     // (S-324, NFR-PE-11, ADR-63). Best-effort and silent: a workspace's live
-    // connections are bounded by the core's ConnectionBudget, so a kernel that
+    // connections are bounded by the core's WorkspaceBudget, so a kernel that
     // refuses the raise costs residency, never correctness — which is exactly
     // why this is not allowed to report anything.
     logos_core::fdlimit::raise_open_file_limit();

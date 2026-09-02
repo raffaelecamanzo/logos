@@ -24,7 +24,7 @@
 //! Laziness bounds the members a *scoped* query touches, but the commands that
 //! define a workspace — `workspace status`, `workspace check`, `xservice search`
 //! — touch every member by design, so laziness bounds nothing there. Residency
-//! is therefore capped by a workspace-wide [`ConnectionBudget`]: a member engine
+//! is therefore capped by a workspace-wide [`WorkspaceBudget`]: a member engine
 //! opens only its budgeted share of read connections, and admitting a new member
 //! first **evicts the least-recently-touched** ones until the cap has room. The
 //! cap is derived from the host's descriptor limit, never from the member count,
@@ -37,7 +37,7 @@
 //! [`Engine`](crate::Engine) builds a `rayon` pool of one worker per core, so a
 //! resident set costs `residents × cores` threads on top of its connections —
 //! ~864 on the measured 12-core host. The registry therefore builds **one**
-//! [`SharedWorkerPool`] sized by [`ConnectionBudget::worker_threads`] and injects
+//! [`SharedWorkerPool`] sized by [`WorkspaceBudget::worker_threads`] and injects
 //! it into every member engine it starts, so a workspace's thread cost is what a
 //! single engine would have spawned for itself.
 //!
@@ -100,7 +100,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result};
 
-use super::budget::ConnectionBudget;
+use super::budget::WorkspaceBudget;
 use super::open_state::{MemberOpen, MemberOpenState, StoreFile};
 use super::{Federation, Member};
 use crate::{Engine, SharedWorkerPool, WeakWorkerPool};
@@ -410,7 +410,7 @@ pub struct EngineRegistry<E: MemberEngine = Engine> {
     /// The host-derived ceiling on live read connections and worker threads, and
     /// the residency they imply. Never a function of the member count
     /// ([NFR-PE-11]).
-    budget: ConnectionBudget,
+    budget: WorkspaceBudget,
     /// The resident member engines. An [`RwLock`] rather than a `Mutex` because
     /// a **hit** is the common case and must not queue behind an admission: a
     /// fan-out over a large workspace spends its time in cold starts and engine
@@ -484,7 +484,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
     /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
     pub fn new(federation: Federation, mode: RegistryMode) -> Self {
-        Self::with_budget(federation, mode, ConnectionBudget::from_host())
+        Self::with_budget(federation, mode, WorkspaceBudget::from_host())
     }
 
     /// Build a registry over `federation`'s members in `mode` under an explicit
@@ -498,7 +498,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
     pub fn with_budget(
         federation: Federation,
         mode: RegistryMode,
-        budget: ConnectionBudget,
+        budget: WorkspaceBudget,
     ) -> Self {
         let registry = Self::build(federation, mode, budget);
         if mode == RegistryMode::Serve {
@@ -531,12 +531,12 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
     /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
     pub fn new_serve_default(federation: Federation) -> Self {
-        Self::serve_default_with_budget(federation, ConnectionBudget::from_host())
+        Self::serve_default_with_budget(federation, WorkspaceBudget::from_host())
     }
 
     /// [`new_serve_default`](Self::new_serve_default) under an explicit budget —
     /// the same seam [`with_budget`](Self::with_budget) opens for [`new`](Self::new).
-    pub fn serve_default_with_budget(federation: Federation, budget: ConnectionBudget) -> Self {
+    pub fn serve_default_with_budget(federation: Federation, budget: WorkspaceBudget) -> Self {
         let registry = Self::build(federation, RegistryMode::Serve, budget);
         if let Err(err) = registry.default_engine() {
             tracing::warn!(
@@ -550,7 +550,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// Construct the registry struct **without** warming any member — the shared
     /// skeleton [`new`](Self::new) and [`new_serve_default`](Self::new_serve_default)
     /// layer their construction policy on top of.
-    fn build(federation: Federation, mode: RegistryMode, budget: ConnectionBudget) -> Self {
+    fn build(federation: Federation, mode: RegistryMode, budget: WorkspaceBudget) -> Self {
         Self {
             federation,
             mode,
@@ -766,14 +766,14 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// ([NFR-PE-11]).
     ///
     /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
-    pub fn budget(&self) -> ConnectionBudget {
+    pub fn budget(&self) -> WorkspaceBudget {
         self.budget
     }
 
     /// Live read connections held by resident member engines right now — the
     /// quantity [NFR-PE-11] bounds.
     ///
-    /// Normally at or below [`ConnectionBudget::total_read_connections`]. It can
+    /// Normally at or below [`WorkspaceBudget::total_read_connections`]. It can
     /// exceed it when callers hold engines the registry would otherwise have
     /// evicted, because a held engine is never evicted (see [`evict_to`])
     /// — and this readout **rises** to say so rather than reporting the budget it
@@ -873,7 +873,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// now — `0` when no engine holds it ([NFR-PE-11], [ADR-63]).
     ///
     /// The whole thread cost of a federated workspace, whatever its member count:
-    /// one pool of [`ConnectionBudget::worker_threads`] workers, or none at all.
+    /// one pool of [`WorkspaceBudget::worker_threads`] workers, or none at all.
     /// A zero here after the last resident engine has been evicted is the
     /// teardown claim [ADR-63] makes, stated as a readout rather than as a hope.
     ///
@@ -1231,14 +1231,14 @@ mod tests {
     /// not also a test of this host's descriptor limit. Stated in explicit
     /// limits rather than a magic capacity, because the *derivation* is what
     /// keeps eviction budget-driven ([NFR-PE-11]).
-    fn roomy_budget() -> ConnectionBudget {
-        ConnectionBudget::from_limits(65_536, 4)
+    fn roomy_budget() -> WorkspaceBudget {
+        WorkspaceBudget::from_limits(65_536, 4)
     }
 
     /// What the stock 256-descriptor macOS default budgets on a 12-core host —
     /// the exact envelope a 72-member workspace died in ([NFR-PE-11]).
-    fn stock_macos_budget() -> ConnectionBudget {
-        ConnectionBudget::from_limits(256, 12)
+    fn stock_macos_budget() -> WorkspaceBudget {
+        WorkspaceBudget::from_limits(256, 12)
     }
 
     /// The read-pool size the **single-root** path uses: whatever the engine
@@ -2099,7 +2099,7 @@ mod tests {
     fn eviction_is_driven_by_the_budget_not_a_fixed_member_count() {
         let members = 72;
         let mut residency = Vec::new();
-        for budget in [stock_macos_budget(), ConnectionBudget::from_limits(65_536, 12)] {
+        for budget in [stock_macos_budget(), WorkspaceBudget::from_limits(65_536, 12)] {
             reset_spies();
             let registry =
                 EngineRegistry::<SpyEngine>::with_budget(big_fed(members), RegistryMode::Lazy, budget);
@@ -2342,7 +2342,7 @@ mod tests {
         }
 
         // A budget that holds only two members, so admission genuinely evicts.
-        let budget = ConnectionBudget::from_limits(78, 12);
+        let budget = WorkspaceBudget::from_limits(78, 12);
         assert_eq!(budget.max_resident_members(), 2, "the fixture must bind");
         let registry = EngineRegistry::<FlakyEngine>::with_budget(
             fed(&["a", "b", "c"]),
@@ -2527,7 +2527,7 @@ mod tests {
         reset_spies();
         // A budget that holds two of three members, so touching the third
         // evicts the first while the second keeps the pool alive.
-        let budget = ConnectionBudget::from_limits(78, 12);
+        let budget = WorkspaceBudget::from_limits(78, 12);
         assert_eq!(budget.max_resident_members(), 2, "fixture assumption");
         let registry =
             EngineRegistry::<SpyEngine>::with_budget(fed(&["a", "b", "c"]), RegistryMode::Lazy, budget);
