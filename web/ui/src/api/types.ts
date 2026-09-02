@@ -1121,9 +1121,14 @@ export type MemberOpenStateLabel = "opened" | "not-attempted" | "degraded";
  *
  *  `host-resource-limit` — the process ran out of file descriptors; the member's
  *  store is present and its graph intact, so a re-index is NOT the remedy.
- *  `store-unavailable` — there is no store file at the member's `.logos/logos.db`;
- *  `logos index` in that member is the fix. */
-export type DegradedCause = "host-resource-limit" | "store-unavailable";
+ *  `store-obstructed` — something that is not a regular file occupies the member's
+ *  `.logos/logos.db` path; clear it, *then* re-index.
+ *
+ *  A failure whose store file is merely *missing* deliberately carries NO cause:
+ *  the store is created on open, so a never-indexed member opens fine, and an
+ *  absent file at failure time is equally consistent with descriptor exhaustion
+ *  during creation. `degraded_reason` is then the verbatim diagnostic. */
+export type DegradedCause = "host-resource-limit" | "store-obstructed";
 
 /** One member's row in {@link WorkspaceStatus}: its index freshness, its warm state
  *  and its open state in one record, so no join by member name is needed. */
@@ -1138,10 +1143,17 @@ export interface MemberStatus extends MemberResult<StatusInfo> {
   /** The classified cause of a failed open. **Absent** when the diagnostic
    *  identifies none, rather than defaulted to the likeliest (NFR-CC-04). */
   degraded_cause?: DegradedCause;
-  /** The open failure's plain-language reason — present only when `open_state` is
-   *  `"degraded"`. Additive to `error`, which keeps the verbatim engine
-   *  diagnostic. */
+  /** The open failure's plain-language reason — the classified cause's sentence,
+   *  or the verbatim diagnostic when no cause was identified. Present only when
+   *  `open_state` is `"degraded"`. Additive to `error`, never a replacement. */
   degraded_reason?: string;
+  /** The verbatim engine diagnostic, always present on a `"degraded"` row.
+   *
+   *  Distinct from `error`, which is empty whenever the member *opened* for the
+   *  freshness walk and failed on a later one — so this is the only place the raw
+   *  text is guaranteed. Classifying a cause never destroys the evidence it
+   *  read. */
+  degraded_diagnostic?: string;
 }
 
 /** The workspace-wide degraded roll-up (S-326, FR-WS-16) — a projection of the

@@ -44,6 +44,7 @@ export const NO_TOPICS: MemberTopics[] = [];
 export function status(
   coverage: CrossServiceCoverage = EMPTY_COVERAGE,
   topics: MemberTopics[] = NO_TOPICS,
+  degradedRollup?: WorkspaceStatus["degraded_rollup"],
 ): WorkspaceStatus {
   return {
     workspace: "shop",
@@ -66,7 +67,7 @@ export function status(
     warm_rollup: { members: 2, warm: 2, deferred: 0, degraded: 0 },
     // Both members opened, so every figure beside this roll-up covers all of them
     // (S-326, FR-WS-16).
-    degraded_rollup: {
+    degraded_rollup: degradedRollup ?? {
       members: 2,
       opened: 2,
       not_attempted: 0,
@@ -89,6 +90,9 @@ export interface StubOptions {
   impact?: unknown;
   /** Each member's promoted broker topics — the service map draws a node per topic. */
   topics?: MemberTopics[];
+  /** Override the degraded roll-up, for the partially-opened-workspace cases
+   *  (S-326, FR-WS-16). Defaults to the all-opened shape. */
+  degradedRollup?: WorkspaceStatus["degraded_rollup"];
 }
 
 /**
@@ -103,6 +107,7 @@ export function stubApi(opts: StubOptions = {}): () => string[] {
     providers = [],
     impact = {},
     topics = NO_TOPICS,
+    degradedRollup,
   } = opts;
   const calls: string[] = [];
   const json = (body: unknown, ok = true, code = 200) =>
@@ -115,7 +120,8 @@ export function stubApi(opts: StubOptions = {}): () => string[] {
       if (url.startsWith("/api/v1/workspace/roster")) {
         return json(ROSTER, probeStatus === 200, probeStatus);
       }
-      if (url.startsWith("/api/v1/workspace/status")) return json(status(coverage, topics));
+      if (url.startsWith("/api/v1/workspace/status"))
+        return json(status(coverage, topics, degradedRollup));
       if (url.startsWith("/api/v1/workspace/route-providers")) return json({ providers });
       if (url.startsWith("/api/v1/workspace/impact")) return json(impact);
       return json({});

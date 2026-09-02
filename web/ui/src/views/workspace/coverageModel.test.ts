@@ -157,18 +157,16 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
     expect([model.membersRead, model.membersTotal]).toEqual([9, 72]);
   });
 
-  it("does not claim partial coverage when the payload carries no marker at all", () => {
-    // A payload from a server that predates the marker: claiming a shortfall with
-    // no evidence of one is its own fabrication (NFR-CC-04).
-    const {
-      covers_all_members: _a,
-      members_read: _b,
-      members_total: _c,
-      ...bare
-    } = coverage([...bound("route", 1)], { bound: 1 });
-    const model = buildCoverageDashboard(bare as CrossServiceCoverage);
+  it("reports a fully-read workspace as covering all members", () => {
+    // The complement of the case above, asserted on a real (non-cast) payload:
+    // the three marker fields are non-optional on the wire, so there is no
+    // "absent marker" case to defend against — see `coverageModel.ts`.
+    const model = buildCoverageDashboard(
+      coverage([...bound("route", 1)], { bound: 1, members_read: 2, members_total: 2 }),
+    );
 
     expect(model.coversAllMembers).toBe(true);
+    expect([model.membersRead, model.membersTotal]).toEqual([2, 2]);
   });
 
   it("shows an unknown (future-arm) relation verbatim rather than dropping it", () => {

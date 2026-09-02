@@ -374,4 +374,70 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     expect(await screen.findByText(/33\.3% bound/)).toBeInTheDocument();
     expect(screen.queryByText(/workspace members/i)).toBeNull();
   });
+
+  /* **The CR-100 shape, and the regression that hid it.** 63 of 72 members
+   * unopened and the 9 survivors holding no cross-boundary reference: the
+   * coverage set is EMPTY *and* the workspace is partial. The empty branch used
+   * to short-circuit before the shortfall rider, so the panel asserted "No
+   * cross-boundary references found in this workspace" — a positive claim about
+   * all 72 members made from 9, which moved the fabrication from
+   * `bound_ratio: 1.0` to the empty state rather than removing it. */
+  it("does not claim an empty coverage set describes the whole workspace when it is partial", async () => {
+    stubApi({
+      coverage: {
+        ...COVERAGE,
+        references: [],
+        bound: 0,
+        ambiguous: 0,
+        unbound: 0,
+        no_provider_in_workspace: 0,
+        members_read: 9,
+        members_total: 72,
+        covers_all_members: false,
+      },
+    });
+    mount();
+
+    expect(
+      await screen.findByText(/among the 9 of 72 workspace members that could be read/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/No cross-boundary references found in this workspace/i),
+      "the unqualified whole-workspace claim must be gone",
+    ).toBeNull();
+    // And the shortfall rider renders in the empty branch too.
+    expect(screen.getByText(/every figure here is a lower bound/i)).toBeInTheDocument();
+  });
+
+  it("states the shortfall without attributing a cause the marker cannot know", async () => {
+    // `covers_all_members` is also false when a member opened FINE and its
+    // contract-surface read failed, so the banner must not say "could not be
+    // opened" — that would send an operator to `ulimit -n` for a read fault.
+    stubApi({
+      coverage: { ...COVERAGE, members_read: 1, members_total: 2, covers_all_members: false },
+    });
+    mount();
+
+    const banner = await screen.findByText(/did not contribute/i);
+    expect(banner).toHaveTextContent(/contract surface could not be read/i);
+  });
+
+  it("names the members that could not be opened, from the degraded roll-up", async () => {
+    // The names come from `degraded_rollup` — the field that actually knows which
+    // members failed to OPEN — not from the coverage marker.
+    stubApi({
+      coverage: COVERAGE,
+      degradedRollup: {
+        members: 3,
+        opened: 1,
+        not_attempted: 0,
+        degraded_members: ["filters-api", "orders"],
+        covers_all_members: false,
+      },
+    });
+    mount();
+
+    expect(await screen.findByText(/2 members could not be opened/i)).toBeInTheDocument();
+    expect(screen.getByText(/filters-api, orders/)).toBeInTheDocument();
+  });
 });

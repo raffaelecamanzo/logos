@@ -17,8 +17,11 @@
  * `bound_ratio` **absent** whenever nothing was measured (its denominator is 0), so
  * `boundRatio` here is `number | null` and the view must render "not measured"
  * rather than a bar. `coversAllMembers` is the other honesty rider: `false` means
- * every count in this model was computed over fewer than all workspace members,
- * because at least one member's store could not be opened (FR-WS-16).
+ * every count in this model was computed over fewer than all workspace members —
+ * their contract surface did not contribute, either because the member's store
+ * could not be opened OR because it opened and the surface read itself failed
+ * (FR-WS-16). It does NOT identify which, so a view must not name a cause from
+ * it; `degraded_rollup.degraded_members` is the field that knows.
  */
 
 import type { CrossServiceCoverage, UnboundReason } from "../../api/types.ts";
@@ -110,9 +113,11 @@ export interface CoverageDashboard {
   arms: ArmCoverage[];
   /** No cross-boundary reference exists at all — the honest awaiting-data state. */
   isEmpty: boolean;
-  /** Whether every workspace member contributed to the counts above (FR-WS-16).
-   *  `false` means a member's store could not be opened, so the whole model is a
-   *  partial picture and must be labelled one. */
+  /** Whether every workspace member's contract surface contributed to the counts
+   *  above (FR-WS-16). `false` means the model is a partial picture and must be
+   *  labelled one — but it does not say *why* a member did not contribute (an
+   *  unopenable store and a failed surface read both reduce it), so a view must
+   *  not attribute a cause from this field alone. */
   coversAllMembers: boolean;
   /** Members that contributed, out of the roster — the shortfall, stated. */
   membersRead: number;
@@ -172,10 +177,14 @@ export function buildCoverageDashboard(coverage: CrossServiceCoverage): Coverage
     noProviderInWorkspace: coverage.no_provider_in_workspace,
     arms: [...byArm.values()].sort((a, b) => a.relation.localeCompare(b.relation)),
     isEmpty: coverage.references.length === 0,
-    // `?? true` for a payload from a server that predates the marker: claiming
-    // partial coverage with no evidence of it would be its own fabrication.
-    coversAllMembers: coverage.covers_all_members ?? true,
-    membersRead: coverage.members_read ?? 0,
-    membersTotal: coverage.members_total ?? 0,
+    // No `??` fallbacks: these three are non-optional in `CrossServiceCoverage`
+    // and the SPA ships inside the same binary that serves them, so there is no
+    // version skew to defend against. A fallback the type says can never fire is
+    // a claim about the wire that contradicts the type — one or the other has to
+    // be wrong. (`bound_ratio` IS optional, which is why its `?? null` above is
+    // real and type-checked.)
+    coversAllMembers: coverage.covers_all_members,
+    membersRead: coverage.members_read,
+    membersTotal: coverage.members_total,
   };
 }

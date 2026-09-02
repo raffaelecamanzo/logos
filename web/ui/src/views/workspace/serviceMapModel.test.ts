@@ -91,11 +91,37 @@ describe("buildServiceMap (S-250, FR-UI-29)", () => {
     const status = {
       workspace: "shop",
       members: [
-        { member: "api", result: { indexed: true }, warm_state: "warm" },
-        { member: "web", error: "engine failed to start", warm_state: "degraded" },
+        { member: "api", result: { indexed: true }, warm_state: "warm", open_state: "opened" },
+        {
+          member: "web",
+          error: "engine failed to start",
+          warm_state: "degraded",
+          open_state: "degraded",
+          degraded_reason: "engine failed to start",
+          degraded_diagnostic: "engine failed to start",
+        },
       ],
       warm_rollup: { members: 2, warm: 1, deferred: 0, degraded: 1 },
-      coverage: { references: [], bound: 0, ambiguous: 0, unbound: 0, no_provider_in_workspace: 0, bound_ratio: 1 },
+      degraded_rollup: {
+        members: 2,
+        opened: 1,
+        not_attempted: 0,
+        degraded_members: ["web"],
+        covers_all_members: false,
+      },
+      // `bound_ratio` OMITTED, as the server omits it when nothing was measured
+      // (S-326): a fixture carrying `1` here would model a payload the server can
+      // no longer emit, and the `as unknown as` cast means `tsc` would not notice.
+      coverage: {
+        references: [],
+        bound: 0,
+        ambiguous: 0,
+        unbound: 0,
+        no_provider_in_workspace: 0,
+        members_read: 1,
+        members_total: 2,
+        covers_all_members: false,
+      },
     } as unknown as WorkspaceStatus;
     // The server's `warm_state` is carried through verbatim — the projection reads
     // the label, it does not re-derive it (S-323, FR-WS-15).
