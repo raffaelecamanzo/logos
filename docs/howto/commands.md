@@ -27,9 +27,9 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`languages`](#languages) | ✅ | Registered language grammars |
 | [`serve`](#serve) | ✅ | MCP server over stdio and/or the localhost web UI (`--ui`, requires a `--features ui` build) |
 | [`xservice`](#xservice-workspace-federation-queries) | ✅ | Cross-service queries over a workspace: `route-providers` / `callers` / `impact` / `search` (`--repo` to scope) |
-| [`workspace status`](#workspace-status) | ✅ | Per-member freshness + the 3-state cross-service coverage summary |
-| [`workspace reachability`](#workspace-reachability) | ✅ | App-wide cross-service dead-code union view — advisory, never a gate input |
-| [`workspace check`](#workspace-check) | ✅ | Evaluate workspace governance rules over cross-service bindings — advisory, always exits 0 |
+| [`workspace status`](#workspace-status) | ✅ | Per-member freshness, warm state and open state + the 3-state cross-service coverage summary — exits 1 if a member could not be opened |
+| [`workspace reachability`](#workspace-reachability) | ✅ | App-wide cross-service dead-code union view — advisory, never a gate input; exits 1 if a member could not be opened |
+| [`workspace check`](#workspace-check) | ✅ | Evaluate workspace governance rules over cross-service bindings — advisory: a violation never moves the exit code (an unopenable member exits 1) |
 | [`scan`](#scan) | ✅ | Full architecture-quality scan |
 | [`check`](#check) | ✅ | Architecture-rules compliance check |
 | [`gate`](#gate) | ✅ | CI quality gate on the signal |
@@ -546,8 +546,19 @@ diagnostic identifies one, a `degraded_cause`:
 - `host-resource-limit` — the process ran out of file descriptors
   (`RLIMIT_NOFILE`). The member's store is present and its graph intact, so
   **a re-index is not the remedy**; raise `ulimit -n`, or query fewer members.
-- `store-unavailable` — there is no store at the member's `.logos/logos.db`.
-  Run `logos index` in that member.
+- `store-obstructed` — something that is not a regular file occupies the
+  member's `.logos/logos.db` path (a directory, a socket, a dangling symlink).
+  Clear that path, *then* run `logos index` in that member.
+
+`degraded_cause` is **absent** when the diagnostic identifies no cause, and
+`degraded_reason` is then the verbatim engine diagnostic. Notably, a failure whose
+store file is simply *missing* claims **no** cause: the store is created on open,
+so a never-indexed member opens perfectly well (it reads `deferred` / `opened`) —
+which means an absent file at failure time is equally consistent with descriptor
+exhaustion partway through creating it. Guessing "no store, go re-index" there
+would send an operator whose real problem is `ulimit -n` to a command that cannot
+help. `degraded_diagnostic` always carries the verbatim engine error, whether or
+not a cause was identified.
 
 `warming` is in the vocabulary but is never reported without a live signal from
 the warm supervisor, and the roll-up then **omits** the `warming` key entirely
@@ -561,12 +572,27 @@ and is not a failure.
 #### Exit code (⚠️ changed)
 
 `workspace status`, `workspace reachability` and `workspace check` **exit 1 when
-one or more members could not be opened**, and 0 otherwise. The payload's
-`degraded_rollup` names those members and its `covers_all_members: false` marks
-every other figure in the answer — the warm roll-up, the coverage summary, the
-topic inventory — as computed over fewer than all members. A human-readable
-warning naming the members also goes to **stderr**, so `--json` stdout stays
-machine-clean.
+one or more members could not be opened**, and 0 otherwise.
+
+Where the members are named differs by subcommand, because the three payloads are
+different read-models:
+
+| Subcommand | `--json` naming |
+|---|---|
+| `workspace status` | `degraded_rollup.degraded_members`, plus `open_state` / `degraded_cause` / `degraded_reason` / `degraded_diagnostic` on each member row |
+| `workspace reachability` | `skipped_members`, plus `coverage.members_read` vs `coverage.members_total` (this also fires when a member opened and its surface read failed) |
+| `workspace check` | nothing structured — its payload is a bare governance `Option` that must keep serialising as `null`, so stderr is its only channel |
+
+**All three** additionally print a human-readable warning to **stderr** naming
+each degraded member *and its cause*, one per line, so `--json` stdout stays
+machine-clean and `check` is not left exiting 1 with no diagnosis.
+
+On `workspace status`, `degraded_rollup.covers_all_members: false` marks the
+member rows and the warm roll-up folded from them as covering fewer than all
+members. It does **not** govern `coverage`, which carries its own
+`covers_all_members` from a separate walk — a member can open fine and still fail
+its contract-surface read, which reduces the coverage figures while leaving
+nothing degraded. Read the marker that belongs to the figure you are rendering.
 
 **This is a breaking change.** These commands previously returned 0 no matter how
 many members failed, so a workspace where 63 of 72 members could not be opened

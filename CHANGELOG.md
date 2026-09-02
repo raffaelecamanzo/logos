@@ -37,9 +37,16 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
   where the diagnostic identifies one, `degraded_cause`:
   `host-resource-limit` (the store is present and intact; the process ran out of
   file descriptors — raise `ulimit -n`, do **not** re-index) or
-  `store-unavailable` (no store at `.logos/logos.db` — run `logos index` there).
-  The previous message named only SQLite's "unable to open database file", which
-  reads as a corrupt store and sent readers to the wrong remedy.
+  `store-obstructed` (something that is not a regular file occupies
+  `.logos/logos.db` — clear that path, then re-index). The previous message named
+  only SQLite's "unable to open database file", which reads as a corrupt store
+  and sent readers to the wrong remedy. A failure whose store file is merely
+  *missing* deliberately claims **no** cause: the store is created on open, so an
+  absent file at failure time is equally consistent with descriptor exhaustion
+  during creation, and a guessed "go re-index" would relocate the very
+  misdiagnosis this removes. `degraded_diagnostic` always carries the verbatim
+  engine error beside the classified sentence, so classifying never destroys the
+  evidence it read.
   The payload gains a `degraded_rollup` naming every unopenable member, folded
   into the same member table as the warm roll-up rather than a competing one, and
   a human-readable warning naming them goes to stderr so `--json` stdout stays
