@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use tempfile::TempDir;
 
-use super::{Runtime, RuntimeConfig};
+use super::{live_worker_threads, Runtime, RuntimeConfig, SharedWorkerPool};
 use crate::graph_store::{BatchWriter, NewNode};
 use crate::model::{LogosSymbol, NodeKind};
 
@@ -212,6 +212,7 @@ fn concurrent_writes_are_serialized_no_interleaving() {
         RuntimeConfig {
             reader_pool_size: 4,
             worker_threads: 4,
+            worker_pool: None,
             write_queue_capacity: 64,
         },
     )
@@ -280,6 +281,7 @@ fn many_reads_run_concurrently_up_to_the_pool_size() {
         RuntimeConfig {
             reader_pool_size: POOL,
             worker_threads: 2,
+            worker_pool: None,
             write_queue_capacity: 8,
         },
     )
@@ -342,6 +344,7 @@ fn reader_pool_size_zero_is_rejected() {
         RuntimeConfig {
             reader_pool_size: 0,
             worker_threads: 1,
+            worker_pool: None,
             write_queue_capacity: 1,
         },
     );
@@ -357,4 +360,184 @@ fn worker_pool_runs_parallel_jobs() {
         (1..=1000_u64).into_par_iter().sum()
     });
     assert_eq!(sum, 500_500);
+}
+
+// ── the injectable worker pool (S-325, NFR-PE-11, ADR-63) ────────────────────
+
+/// Open a runtime over a fresh database with an explicit worker-pool config.
+fn runtime_with_pool(
+    dir: &TempDir,
+    name: &str,
+    worker_threads: usize,
+    worker_pool: Option<SharedWorkerPool>,
+) -> Runtime {
+    Runtime::open_with_config(
+        dir.path().join(name),
+        RuntimeConfig {
+            reader_pool_size: 1,
+            worker_threads,
+            worker_pool,
+            write_queue_capacity: 8,
+        },
+    )
+    .expect("runtime opens")
+}
+
+/// The pool is **injected, not discovered**: a runtime given none builds its own,
+/// exactly as before this story — so the single-root path cannot accidentally
+/// join a workspace's pool ([FR-WS-03], [ADR-52]).
+#[test]
+fn a_runtime_given_no_pool_builds_its_own() {
+    let dir = TempDir::new().expect("temp dir");
+    let a = runtime_with_pool(&dir, "a.db", 3, None);
+    let b = runtime_with_pool(&dir, "b.db", 3, None);
+
+    assert!(
+        !a.shares_worker_pool_with(&b),
+        "two runtimes given no pool must each build a private one; sharing by          default would make the pool discovered rather than injected"
+    );
+    assert_eq!(
+        a.worker_pool().current_num_threads(),
+        3,
+        "a private pool is sized by RuntimeConfig::worker_threads"
+    );
+}
+
+/// Runtimes handed the same pool run on that one pool — the whole mechanism
+/// behind [NFR-PE-11]'s "threads track the host, not `members × cores`".
+#[test]
+fn runtimes_given_one_pool_share_it() {
+    let dir = TempDir::new().expect("temp dir");
+    let shared = SharedWorkerPool::with_threads(2).expect("pool builds");
+
+    let a = runtime_with_pool(&dir, "a.db", 3, Some(shared.clone()));
+    let b = runtime_with_pool(&dir, "b.db", 3, Some(shared.clone()));
+
+    assert!(
+        a.shares_worker_pool_with(&b),
+        "runtimes injected with the same pool must submit to the same pool"
+    );
+    assert_eq!(
+        a.worker_pool().current_num_threads(),
+        2,
+        "an injected pool keeps ITS size; `worker_threads` (3 here) is the size          of the pool a runtime would have built for itself, and must not be          re-derived over an injected one"
+    );
+    // A control against the reverse mistake: `shares_worker_pool_with` must be
+    // able to say "no", or the assertion above is vacuous.
+    let private = runtime_with_pool(&dir, "c.db", 3, None);
+    assert!(!a.shares_worker_pool_with(&private));
+}
+
+/// Job submission semantics are unchanged: the same job, run on a private pool
+/// and on a shared one, returns the same result through the same
+/// `worker_pool().install(…)` call every core call site uses.
+#[test]
+fn a_shared_pool_runs_the_same_jobs_with_the_same_results() {
+    use rayon::prelude::*;
+
+    let dir = TempDir::new().expect("temp dir");
+    let shared = SharedWorkerPool::with_threads(2).expect("pool builds");
+    let private = runtime_with_pool(&dir, "private.db", 2, None);
+    let injected = runtime_with_pool(&dir, "injected.db", 2, Some(shared));
+
+    let job = |runtime: &Runtime| -> u64 {
+        runtime
+            .worker_pool()
+            .install(|| (1..=1000_u64).into_par_iter().sum())
+    };
+    assert_eq!(job(&private), 500_500);
+    assert_eq!(job(&injected), job(&private));
+}
+
+/// Two members' jobs interleave on one shared pool without deadlocking: a
+/// long-running job holding a worker cannot wedge another member's submission,
+/// because every job enters through `install` from a caller that is not itself a
+/// pool worker (no nested blocking submission).
+#[test]
+fn a_long_job_on_a_shared_pool_does_not_deadlock_another_submission() {
+    let dir = TempDir::new().expect("temp dir");
+    // Two workers: one for the long job, one for everything else. A one-thread
+    // pool would prove only that rayon queues, not that it never deadlocks.
+    let shared = SharedWorkerPool::with_threads(2).expect("pool builds");
+    let long = runtime_with_pool(&dir, "long.db", 2, Some(shared.clone()));
+    let short = runtime_with_pool(&dir, "short.db", 2, Some(shared));
+
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    let (short_tx, short_rx) = mpsc::channel::<u64>();
+
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            long.worker_pool().install(move || {
+                started_tx.send(()).expect("signal the long job is running");
+                // Occupy a worker until the short job has completed.
+                release_rx.recv().expect("release the long job");
+            });
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the long job must reach the shared pool");
+
+        // The other member's submission completes while the long job still holds
+        // a worker. A deadlock shows up as this timeout, not as a hang.
+        scope.spawn(move || {
+            let value = short.worker_pool().install(|| 7_u64);
+            short_tx.send(value).expect("send the short job's result");
+        });
+        assert_eq!(
+            short_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("a second member's job must not wait on the first's"),
+            7
+        );
+
+        release_tx.send(()).expect("release the long job");
+    });
+}
+
+/// The thread gauge counts real workers: it rises by a pool's size when the pool
+/// is built and falls back once the last handle is dropped, so
+/// "no orphaned threads" is a measurement rather than an argument.
+///
+/// Relative rather than absolute, because `cargo` runs this binary's tests on
+/// parallel threads of one process and the gauge is process-wide. The absolute
+/// ceiling is asserted in `tests/workspace_connection_budget.rs`, whose binary
+/// holds exactly one test.
+#[test]
+fn the_thread_gauge_follows_a_pools_lifetime() {
+    const THREADS: usize = 3;
+    let before = live_worker_threads();
+    let pool = SharedWorkerPool::with_threads(THREADS).expect("pool builds");
+    // Workers start asynchronously, so wait for them rather than sampling once.
+    assert!(
+        wait_until(|| live_worker_threads() >= before + THREADS),
+        "the gauge never rose by the {THREADS} workers the pool was built with          (before {before}, now {})",
+        live_worker_threads()
+    );
+    assert_eq!(pool.threads(), THREADS);
+
+    drop(pool);
+    // `rayon` signals termination rather than joining, so the workers exit
+    // shortly after the last handle goes.
+    assert!(
+        wait_until(|| live_worker_threads() < before + THREADS),
+        "the pool's workers outlived the pool (still {} live, was {before}          before it was built)",
+        live_worker_threads()
+    );
+}
+
+/// Poll `condition` until it holds, or give up after a generous deadline.
+///
+/// Used only where the property is genuinely asynchronous (thread start and
+/// exit); everywhere else the tests assert directly.
+fn wait_until(condition: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    condition()
 }

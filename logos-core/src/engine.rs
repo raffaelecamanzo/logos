@@ -38,7 +38,7 @@ use crate::models::{
         SessionInfo, SkippedLanguage, StatsInfo, VerifyReport,
     },
 };
-use crate::runtime::{Runtime, RuntimeConfig};
+use crate::runtime::{Runtime, RuntimeConfig, SharedWorkerPool};
 
 /// Thick-core engine — the single public façade over all Logos operations.
 ///
@@ -172,17 +172,23 @@ impl Engine {
         Self::start_with_configs(root, hydration, RuntimeConfig::default())
     }
 
-    /// Start a long-lived engine whose read-only pool holds exactly
-    /// `read_connections` connections instead of one per core ([NFR-PE-11],
-    /// [ADR-63]).
+    /// Start a long-lived engine on a **budgeted share** of a workspace's
+    /// resources rather than on the ones it would size for itself ([NFR-PE-11],
+    /// [ADR-63]): exactly `read_connections` read-only connections instead of one
+    /// per core, and — when `worker_pool` is `Some` — the workspace's one shared
+    /// `rayon` pool instead of a private core-sized one.
     ///
     /// The seam a **workspace** uses: the [federation registry] hands every
     /// resident member engine the share of the workspace-wide
     /// [`ConnectionBudget`](crate::federation::ConnectionBudget) it is entitled
     /// to, so N members cost a host-derived ceiling rather than `N × cores` live
-    /// connections. Nothing else calls this — the single-root path stays on
-    /// [`Engine::start`] and its core-sized pool, byte-for-byte as today
-    /// ([FR-WS-03], [ADR-52]).
+    /// connections and `N × cores` worker threads. Nothing else calls this — the
+    /// single-root path stays on [`Engine::start`] and its core-sized pools,
+    /// byte-for-byte as today ([FR-WS-03], [ADR-52]).
+    ///
+    /// A `worker_pool` of `None` builds a private pool exactly as
+    /// [`Engine::start`] does, which is what makes the sharing *injected rather
+    /// than discovered*: an engine given no pool has no way to find one.
     ///
     /// # Errors
     /// Same as [`Engine::start`]; additionally, a `read_connections` of zero is
@@ -193,12 +199,17 @@ impl Engine {
     /// [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
     /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
     /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
-    pub fn start_with_read_pool(root: impl AsRef<Path>, read_connections: usize) -> Result<Self> {
+    pub fn start_with_pools(
+        root: impl AsRef<Path>,
+        read_connections: usize,
+        worker_pool: Option<SharedWorkerPool>,
+    ) -> Result<Self> {
         Self::start_with_configs(
             root,
             HydrationConfig::default(),
             RuntimeConfig {
                 reader_pool_size: read_connections,
+                worker_pool,
                 ..RuntimeConfig::default()
             },
         )
@@ -206,9 +217,9 @@ impl Engine {
 
     /// The shared start path behind [`start`](Self::start),
     /// [`start_with_hydration_config`](Self::start_with_hydration_config) and
-    /// [`start_with_read_pool`](Self::start_with_read_pool): resolve the root,
-    /// seed a DB-less worktree, bring up the runtime under `runtime`, and load
-    /// the plugin substrate.
+    /// [`start_with_pools`](Self::start_with_pools): resolve the root, seed a
+    /// DB-less worktree, bring up the runtime under `runtime`, and load the
+    /// plugin substrate.
     fn start_with_configs(
         root: impl AsRef<Path>,
         hydration: HydrationConfig,

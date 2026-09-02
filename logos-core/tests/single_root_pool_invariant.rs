@@ -5,8 +5,9 @@
 //! single-root path alone: "no manifest, no budget, core-sized pools exactly as
 //! today". This binary pins both halves of that against a real indexed repo:
 //!
-//! 1. **No budget, core-sized pool** — an [`Engine::start`] engine's read pool
-//!    is still [`RuntimeConfig::default`]'s one-per-core, never a budgeted share.
+//! 1. **No budget, core-sized pools** — an [`Engine::start`] engine's read pool
+//!    *and* worker pool are still [`RuntimeConfig::default`]'s one-per-core,
+//!    never a budgeted share and never a workspace's shared pool (S-325).
 //! 2. **Identical payloads** — the read-model bytes a repo produces do not
 //!    depend on how many read connections served them. The comparison is run
 //!    against the *same* store, so any difference is attributable to pool sizing
@@ -62,10 +63,10 @@ fn payload(engine: &Engine) -> String {
     )
 }
 
-/// A single-root engine keeps the core-sized read pool it sizes for itself — the
+/// A single-root engine keeps the core-sized pools it sizes for itself — the
 /// budget never reaches below the workspace seam ([ADR-63]).
 #[test]
-fn a_single_root_engine_keeps_its_core_sized_read_pool() {
+fn a_single_root_engine_keeps_its_core_sized_pools() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
     indexed_repo(root);
@@ -77,6 +78,24 @@ fn a_single_root_engine_keeps_its_core_sized_read_pool() {
         RuntimeConfig::default().reader_pool_size,
         "the single-root path must keep RuntimeConfig::default()'s one-connection-\
          per-core pool, not a workspace budget's share"
+    );
+    assert_eq!(
+        runtime.worker_pool().current_num_threads(),
+        RuntimeConfig::default().worker_threads,
+        "the single-root path must keep RuntimeConfig::default()'s core-sized \
+         worker pool, not a workspace's shared one (S-325)"
+    );
+
+    // …and it is genuinely *its own* pool: the injectable seam must not have
+    // turned "build one" into "join whatever exists". Two single-root engines
+    // sharing a pool would couple two unrelated repos' CPU work.
+    let other = Engine::start(root).expect("engine starts");
+    assert!(
+        !runtime.shares_worker_pool_with(
+            other.runtime().expect("a started engine owns a runtime")
+        ),
+        "two single-root engines shared a worker pool; the pool is being \
+         discovered rather than injected"
     );
 }
 
@@ -106,18 +125,18 @@ fn payloads_are_byte_identical_whatever_the_read_pool_size() {
     );
 
     // A budgeted share of zero is rejected rather than silently defaulted — the
-    // error path `start_with_read_pool` documents. Asserted here because a
+    // error path `start_with_pools` documents. Asserted here because a
     // substituted default would be indistinguishable from success at every other
     // call site.
     assert!(
-        Engine::start_with_read_pool(root, 0).is_err(),
+        Engine::start_with_pools(root, 0, None).is_err(),
         "a zero-connection pool must be rejected, not defaulted to the core-sized one"
     );
 
     // The budgeted path: the tightest share a workspace could ever hand a member.
     for read_connections in [1, 2] {
         let budgeted =
-            Engine::start_with_read_pool(root, read_connections).expect("engine starts");
+            Engine::start_with_pools(root, read_connections, None).expect("engine starts");
         assert_eq!(
             budgeted
                 .runtime()

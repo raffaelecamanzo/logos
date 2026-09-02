@@ -92,9 +92,10 @@ fn an_evicted_member_answers_identically_once_reconstructed() {
     );
 
     // The one line that wires the budget to a real engine —
-    // `MemberEngine::start` → `Engine::start_with_read_pool` — asserted here
-    // against a live runtime. Reverting it to `Engine::start` would leave every
-    // other test in this story green on a host with few enough cores.
+    // `MemberEngine::start` → `Engine::start_with_pools` — asserted here against
+    // a live runtime. Reverting it to `Engine::start` would leave every other
+    // test in this story green on a host with few enough cores. (The worker-pool
+    // half of that same share is pinned in `workspace_shared_worker_pool.rs`.)
     let budgeted = registry.engine_for("alpha").expect("member engine starts");
     assert_eq!(
         budgeted
