@@ -101,6 +101,24 @@ const STATE_EXTRACTORS: [&str; 2] = ["State", "Data"];
 /// (`State<Arc<AppState>>` promotes `AppState`).
 const TRANSPARENT_WRAPPERS: [&str; 3] = ["Arc", "Rc", "Box"];
 
+/// Where a declarative route match's path was written — the grouping key and
+/// the rank that the named-over-positional precedence rule needs (S-328).
+///
+/// Two query patterns can match one registration site (a positional literal
+/// and a named `value =` argument are separate patterns, hence separate
+/// matches), so the ranking is resolved across matches once the file has been
+/// fully scanned — see [`drop_outranked_paths`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct PathOrigin {
+    /// The `@fw.route.anchor` node's id: the registration site within which
+    /// paths are ranked against each other. `None` when the dialect names no
+    /// anchor — every legacy Rust walker, and any query that captures none.
+    site: Option<usize>,
+    /// `true` for a `@fw.route.path.named` capture — a path written as a
+    /// named argument, which outranks a positional literal at the same site.
+    named: bool,
+}
+
 /// One matched route registration in one file (pre-binding).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RouteMatch {
@@ -115,6 +133,9 @@ struct RouteMatch {
     start_line: u32,
     /// 1-based last line of the registration site.
     end_line: u32,
+    /// How the path was written, for the precedence pass. Dropped at
+    /// promotion — it never reaches the graph.
+    origin: PathOrigin,
 }
 
 /// One matched shared-state extractor in one file (pre-binding).
@@ -351,10 +372,11 @@ fn scan_path(
 /// Two capture dialects coexist (S-015):
 ///
 /// - the **declarative contract** — a pattern that captures the registration
-///   *parts* directly (`@fw.route.path`, `@fw.route.method`, optionally
-///   `@fw.route.handler`; `@fw.component.name`) is interpreted per-match,
+///   *parts* directly (`@fw.route.path` / `@fw.route.path.named`,
+///   `@fw.route.method`, optionally `@fw.route.handler` and
+///   `@fw.route.anchor`; `@fw.component.name`) is interpreted per-match,
 ///   generically: the captured method text maps through the descriptor's
-///   `[framework_methods]` table, the path literal is unquoted, the handler
+///   `[framework_methods]` table, each path literal is unquoted, the handler
 ///   text is canonicalised. This is the dialect every S-015 language uses, and
 ///   what makes a new language's framework rules pure data ([NFR-MA-01]);
 /// - the **legacy Rust anchors** (`@fw.route`, `@fw.attr`, `@fw.param`) — kept
@@ -399,6 +421,11 @@ fn scan_source(parser: &mut Parser, plugin: &dyn LanguagePlugin, source: &str) -
             }
         }
     }
+    // A named `value =`/`path =` argument is the registered path where an
+    // annotation also carries a positional literal (Spring's `value`/`path`
+    // alias semantics, FR-FW-05); the two are separate patterns, so the
+    // ranking waits until every match for the file is in.
+    drop_outranked_paths(&mut out.routes);
     // Overlapping declarative patterns (e.g. a handler-bearing and a
     // handler-less variant of the same registration shape) may both match one
     // site: collapse to one match per (method, path), preferring the one that
@@ -417,7 +444,11 @@ fn generic_match(
     methods: &std::collections::BTreeMap<String, String>,
     out: &mut FileMatches,
 ) -> bool {
-    let mut path_node: Option<Node<'_>> = None;
+    // One match can carry several paths: a list-valued annotation argument
+    // (`value = {"/a", "/b"}`) registers one route per element (FR-FW-05).
+    // `bool` is the `PathOrigin::named` rank of each.
+    let mut path_nodes: Vec<(Node<'_>, bool)> = Vec::new();
+    let mut anchor_node: Option<Node<'_>> = None;
     let mut method_node: Option<Node<'_>> = None;
     let mut handler_node: Option<Node<'_>> = None;
     let mut component_node: Option<Node<'_>> = None;
@@ -432,13 +463,19 @@ fn generic_match(
         generic = true;
         start_line = start_line.min(cap.node.start_position().row as u32 + 1);
         end_line = end_line.max(cap.node.end_position().row as u32 + 1);
+        // A path capture may repeat within one match: a list-valued argument
+        // registers one route per element.
+        if name == "fw.route.path" || name == "fw.route.path.named" {
+            path_nodes.push((cap.node, name == "fw.route.path.named"));
+            continue;
+        }
         let slot = match name {
-            "fw.route.path" => &mut path_node,
+            "fw.route.anchor" => &mut anchor_node,
             "fw.route.method" => &mut method_node,
             "fw.route.handler" => &mut handler_node,
             "fw.component.name" => &mut component_node,
-            // Auxiliary captures (`fw.component.base`, …) exist only for the
-            // query's own `#match?`/`#any-of?` predicates.
+            // Auxiliary captures (`fw.component.base`, `fw.route.key`, …)
+            // exist only for the query's own `#match?`/`#any-of?` predicates.
             _ => continue,
         };
         slot.get_or_insert(cap.node);
@@ -452,10 +489,11 @@ fn generic_match(
             type_path: text(name, src).trim().to_string(),
         });
     }
-    if let (Some(path), Some(method)) = (path_node, method_node) {
+    if let Some(method) = method_node {
         // The descriptor's [framework_methods] table is both the method
         // normaliser and the recognised-registration filter: unmapped text
-        // (`app.set(…)`, an unknown annotation) promotes nothing (FR-FW-04).
+        // (`app.set(…)`, an unknown annotation) promotes nothing whatever
+        // arguments it carries (FR-FW-04).
         if let Some(mapped) = methods.get(text(method, src).trim()) {
             // The handler must be a plain (possibly qualified) name to bind;
             // canonicalise its separators the same way extraction does.
@@ -463,16 +501,41 @@ fn generic_match(
                 let segments = crate::extract::refs::split_path_text(text(h, src));
                 (!segments.is_empty()).then(|| segments.join("::"))
             });
-            out.routes.push(RouteMatch {
-                path: crate::extract::refs::unquote(text(path, src)).to_string(),
-                method: mapped.clone(),
-                handler,
-                start_line,
-                end_line,
-            });
+            let site = anchor_node.map(|a| a.id());
+            for (path, named) in path_nodes {
+                out.routes.push(RouteMatch {
+                    path: crate::extract::refs::unquote(text(path, src)).to_string(),
+                    method: mapped.clone(),
+                    handler: handler.clone(),
+                    start_line,
+                    end_line,
+                    origin: PathOrigin { site, named },
+                });
+            }
         }
     }
     true
+}
+
+/// Apply the named-over-positional precedence rule (FR-FW-05): at a
+/// registration site that proved a named path, a positional literal on the
+/// same site is not a second route. Sites are identified by
+/// `@fw.route.anchor`, so precedence is per annotation — a positional mapping
+/// on one annotation is never suppressed by a named one on its neighbour. A
+/// route with no anchor competes with nothing and always survives.
+fn drop_outranked_paths(routes: &mut Vec<RouteMatch>) {
+    let named_sites: HashSet<usize> = routes
+        .iter()
+        .filter(|r| r.origin.named)
+        .filter_map(|r| r.origin.site)
+        .collect();
+    if named_sites.is_empty() {
+        return;
+    }
+    routes.retain(|r| match r.origin.site {
+        Some(site) => r.origin.named || !named_sites.contains(&site),
+        None => true,
+    });
 }
 
 /// Collapse duplicate `(method, path)` route matches within one file, keeping
@@ -558,6 +621,9 @@ fn route_registrations(call: Node<'_>, src: &[u8]) -> Vec<RouteMatch> {
             handler,
             start_line: call.start_position().row as u32 + 1,
             end_line: call.end_position().row as u32 + 1,
+            // The legacy Rust walkers name no anchor: a structural walk emits
+            // each registration once, so nothing competes for precedence.
+            origin: PathOrigin::default(),
         })
         .collect()
 }
@@ -687,6 +753,7 @@ fn attribute_route(attr_item: Node<'_>, src: &[u8]) -> Option<RouteMatch> {
                     handler: Some(handler),
                     start_line: attr_item.start_position().row as u32 + 1,
                     end_line: n.end_position().row as u32 + 1,
+                    origin: PathOrigin::default(),
                 });
             }
             _ => return None, // attributed item is not a function

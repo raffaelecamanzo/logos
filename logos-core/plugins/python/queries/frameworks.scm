@@ -3,13 +3,24 @@
 ;
 ; Declarative capture contract (resolve::framework::generic_match): a pattern
 ; captures the registration parts directly —
-;   @fw.route.path    — the URL string literal (unquoted by the pass);
+;   @fw.route.path    — the URL string literal (unquoted by the pass); may be
+;                       captured more than once in one match, which registers
+;                       one route per capture (a list-valued path argument);
+;   @fw.route.path.named — the same, for a path written as a *named* argument
+;                       (Java/Kotlin `value =`/`path =`). Outranks a plain
+;                       @fw.route.path at the same @fw.route.anchor (S-328);
+;   @fw.route.anchor  — optional; the registration site (the annotation, the
+;                       call) that paths are ranked within. Only a query whose
+;                       patterns can both match one site needs it;
 ;   @fw.route.method  — the node whose text maps through [framework_methods]
 ;                       (unmapped text drops the match, FR-FW-04 best-effort);
 ;   @fw.route.handler — optional; a plain (possibly dotted) handler name the
 ;                       binder must prove (NFR-RA-05, never fabricate);
 ;   @fw.component.name — a component declaration's name;
 ;   @fw.component.base — predicate-only helper, not consumed by the pass.
+;
+; Any other `@fw.route.*` / `@fw.component.*` capture is predicate-only too —
+; the Java query's `@fw.route.key` filters argument names with `#any-of?`.
 ;
 ; Droppable on disk at `.logos/plugins/python/queries/frameworks.scm`.
 ;

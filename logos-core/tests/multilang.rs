@@ -823,6 +823,156 @@ public class UserController {
     assert_eq!(result.framework.components, 1);
 }
 
+/// The named-argument mapping form (S-328, [FR-FW-05]) — what OpenAPI codegen
+/// emits and the shape a bare positional-literal capture missed entirely: the
+/// route is promoted with the named path and linked to its handler.
+///
+/// [FR-FW-05]: ../../docs/specs/requirements/FR-FW-05.md
+#[cfg(feature = "lang-java")]
+#[test]
+fn spring_named_argument_mappings_are_promoted_and_linked() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/UserController.java",
+        "\
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class UserController {
+    @RequestMapping(method = RequestMethod.GET, value = \"/v1/users\", produces = \"application/json\")
+    public String listUsers() {
+        return \"\";
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    // `@RequestMapping` declares no single verb, so the method is `ANY`; the
+    // path comes from the named `value =` argument.
+    assert_eq!(route_names(rt), ["ANY /v1/users"]);
+    assert_eq!(result.framework.routes, 1);
+
+    let routes_to = edges_of(rt, EdgeKind::RoutesTo);
+    let route = node_id(rt, "ANY /v1/users", NodeKind::Route);
+    let handler = node_id(rt, "listUsers", NodeKind::Method);
+    assert!(routes_to.contains(&(route, handler)));
+}
+
+/// The contract-first Spring shape end to end (S-328): a prefixed interface
+/// declares the mappings with named arguments and a bare `@RestController`
+/// implements it. Every endpoint yields exactly one route — the interface
+/// declaration is not missed for being abstract, and the implementation adds
+/// no duplicate — while the `[framework_methods]` gate still drops an
+/// annotation it does not name, whatever arguments it carries ([FR-FW-04]).
+///
+/// [FR-FW-04]: ../../docs/specs/requirements/FR-FW-04.md
+#[cfg(feature = "lang-java")]
+#[test]
+fn spring_contract_first_interface_and_bare_implementation_yield_one_route_each() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/UserApi.java",
+        "\
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+
+@RequestMapping(\"/api/v1\")
+public interface UserApi {
+    @RequestMapping(method = RequestMethod.GET, value = \"/users\", produces = \"application/json\")
+    String listUsers();
+
+    @GetMapping(path = {\"/users/{id}\", \"/users/by-id/{id}\"})
+    String getUser(String id);
+
+    @Operation(value = \"/documented\")
+    String documented();
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/UserApiController.java",
+        "\
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class UserApiController implements UserApi {
+    @Override
+    public String listUsers() {
+        return \"\";
+    }
+
+    @Override
+    public String getUser(String id) {
+        return \"\";
+    }
+
+    @Override
+    public String documented() {
+        return \"\";
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    // Three endpoints: the named `value =` one, and one per element of the
+    // list-valued `path =`. The class-level `@RequestMapping("/api/v1")`
+    // prefix is *not* composed — method paths are promoted verbatim (S-329
+    // owns composition) — and `@Operation`, absent from
+    // `[framework_methods]`, promotes nothing despite its `value =` argument.
+    assert_eq!(
+        route_names(rt),
+        ["ANY /users", "GET /users/by-id/{id}", "GET /users/{id}"]
+    );
+    assert_eq!(result.framework.routes, 3);
+
+    // The implementation is the wired building block; the interface is not a
+    // stereotype and declares no second route.
+    assert_eq!(result.framework.components, 1);
+    assert_eq!(
+        nodes_of(rt, NodeKind::Component)
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>(),
+        ["UserApiController"]
+    );
+    // Every route links to exactly one handler method of the annotated name
+    // — an abstract declaration binds like any other method, and the
+    // same-named override does not leave the link ambiguous and unproven
+    // (NFR-RA-05). `documented` is never a handler: its annotation is not in
+    // the table, so no route was promoted to link from.
+    let routes_to = edges_of(rt, EdgeKind::RoutesTo);
+    assert_eq!(routes_to.len(), 3, "{routes_to:?}");
+    let mapped_methods: Vec<NodeId> = nodes_of(rt, NodeKind::Method)
+        .into_iter()
+        .filter(|(_, name)| name == "listUsers" || name == "getUser")
+        .map(|(id, _)| id)
+        .collect();
+    for route in ["ANY /users", "GET /users/by-id/{id}", "GET /users/{id}"] {
+        let route_id = node_id(rt, route, NodeKind::Route);
+        let handlers: Vec<NodeId> = routes_to
+            .iter()
+            .filter(|(from, _)| *from == route_id)
+            .map(|(_, to)| *to)
+            .collect();
+        assert_eq!(handlers.len(), 1, "{route}: {handlers:?}");
+        assert!(mapped_methods.contains(&handlers[0]), "{route}: {handlers:?}");
+    }
+}
+
 // ── C: extraction parity, the honesty fixture (no frameworks) ────────────────
 
 #[cfg(feature = "lang-c")]

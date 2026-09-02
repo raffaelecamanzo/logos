@@ -1,26 +1,41 @@
 //! Unit tests for the pure scanner core of the framework pass (S-012):
-//! [`scan_source`] against real parsed Rust fixtures, with no store involved.
-//! The end-to-end promotion behaviour (binding, reconcile, stats) lives in
-//! `tests/framework_extraction.rs`.
+//! [`scan_source`] against real parsed fixtures — Rust for the legacy
+//! structural anchors, Java for the declarative capture contract (S-328) —
+//! with no store involved. The end-to-end promotion behaviour (binding,
+//! reconcile, stats) lives in `tests/framework_extraction.rs`, and its
+//! per-language face in `tests/multilang.rs`.
 
 use super::*;
 use crate::plugin::LanguageRegistry;
 
-/// Scan a Rust source snippet with the compiled-in plugin set.
-fn scan(source: &str) -> FileMatches {
+/// Scan a source snippet with the plugin registered for `ext` — the capture
+/// dialects are per-language, so each language arm enters through its own
+/// extension.
+fn scan_lang(ext: &str, source: &str) -> FileMatches {
     let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
-    let plugin = registry.for_extension("rs").expect("rust plugin");
+    let plugin = registry
+        .for_extension(ext)
+        .unwrap_or_else(|| panic!("{ext} plugin"));
     let mut parser = Parser::new();
     scan_source(&mut parser, plugin, source)
 }
 
-/// Shorthand for the `(path, method, handler)` projection of scanned routes.
-fn routes(source: &str) -> Vec<(String, String, Option<String>)> {
-    scan(source)
-        .routes
+/// Scan a Rust source snippet with the compiled-in plugin set.
+fn scan(source: &str) -> FileMatches {
+    scan_lang("rs", source)
+}
+
+/// The `(path, method, handler)` projection of a scan's routes.
+fn route_triples(m: FileMatches) -> Vec<(String, String, Option<String>)> {
+    m.routes
         .into_iter()
         .map(|r| (r.path, r.method, r.handler))
         .collect()
+}
+
+/// Shorthand for the `(path, method, handler)` projection of scanned routes.
+fn routes(source: &str) -> Vec<(String, String, Option<String>)> {
+    route_triples(scan(source))
 }
 
 // ── Axum `.route` registrations ──────────────────────────────────────────────
@@ -321,6 +336,7 @@ fn dedup_prefers_the_proven_handler_and_is_first_wins_otherwise() {
         handler: handler.map(str::to_string),
         start_line: line,
         end_line: line,
+        origin: PathOrigin::default(),
     };
 
     // Handler-less first, handler-bearing second: the upgrade fires.
@@ -350,4 +366,257 @@ fn dedup_prefers_the_proven_handler_and_is_first_wins_otherwise() {
     assert_eq!(distinct.len(), 2);
     assert_eq!(distinct[0].method, "GET");
     assert_eq!(distinct[1].method, "POST");
+}
+
+/// The named-over-positional precedence pass (S-328) is scoped to one
+/// registration site and leaves anchor-less matches — every legacy Rust
+/// walker — untouched.
+#[test]
+fn outranked_positional_paths_are_dropped_only_within_their_own_site() {
+    let route = |path: &str, site: Option<usize>, named: bool| RouteMatch {
+        path: path.to_string(),
+        method: "GET".to_string(),
+        handler: Some("h".to_string()),
+        start_line: 1,
+        end_line: 1,
+        origin: PathOrigin { site, named },
+    };
+
+    let mut routes = vec![
+        // Site 1 proves a named path: its positional literal is outranked.
+        route("/positional", Some(1), false),
+        route("/named", Some(1), true),
+        // Site 2 has only a positional one — a different site's named path
+        // never suppresses it.
+        route("/other", Some(2), false),
+        // The legacy walkers name no site and always survive.
+        route("/legacy", None, false),
+    ];
+    drop_outranked_paths(&mut routes);
+    let kept: Vec<&str> = routes.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(kept, ["/named", "/other", "/legacy"]);
+
+    // With no named path anywhere, nothing is dropped.
+    let mut positional_only = vec![route("/a", Some(1), false), route("/b", None, false)];
+    drop_outranked_paths(&mut positional_only);
+    assert_eq!(positional_only.len(), 2);
+}
+
+// ── Java Spring mapping annotations (S-328) ──────────────────────────────────
+
+/// Contract-first Spring code names its paths, never positions them: the
+/// annotation `@RequestMapping(method = …, value = "/v1/x", produces = …)` is
+/// what OpenAPI codegen emits, and a bare positional literal is the shape it
+/// never writes (FR-FW-05, BR-46).
+#[cfg(feature = "lang-java")]
+mod java_spring {
+    use super::*;
+
+    /// The `(path, method, handler)` projection of a scanned Java snippet,
+    /// sorted so a test asserts the promoted *set*, not tree-sitter's match
+    /// order.
+    fn java_routes(source: &str) -> Vec<(String, String, Option<String>)> {
+        let mut got = route_triples(scan_lang("java", source));
+        got.sort();
+        got
+    }
+
+    /// A method wrapped in the minimal legal class body.
+    fn in_class(members: &str) -> String {
+        format!("public class C {{\n{members}\n}}\n")
+    }
+
+    #[test]
+    fn named_value_argument_yields_the_route() {
+        let got = java_routes(&in_class(
+            r#"    @RequestMapping(method = RequestMethod.GET, value = "/v1/x", produces = "application/json")
+    public String getX() { return ""; }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![(
+                "/v1/x".to_string(),
+                "ANY".to_string(),
+                Some("getX".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn named_path_argument_is_an_alias_for_value() {
+        let got = java_routes(&in_class(
+            r#"    @GetMapping(path = "/v1/y")
+    public String getY() { return ""; }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![(
+                "/v1/y".to_string(),
+                "GET".to_string(),
+                Some("getY".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn list_valued_paths_yield_one_route_each() {
+        let got = java_routes(&in_class(
+            r#"    @GetMapping(value = {"/a", "/b"})
+    public String get() { return ""; }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![
+                ("/a".to_string(), "GET".to_string(), Some("get".to_string())),
+                ("/b".to_string(), "GET".to_string(), Some("get".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn named_argument_wins_over_a_positional_one() {
+        // Spring's `value`/`path` alias semantics: where both are written the
+        // named argument is the registered path, and the positional literal
+        // never becomes a second route.
+        let got = java_routes(&in_class(
+            r#"    @RequestMapping("/positional", value = "/named")
+    public String get() { return ""; }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![(
+                "/named".to_string(),
+                "ANY".to_string(),
+                Some("get".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn a_named_path_on_one_annotation_never_suppresses_another() {
+        // Precedence is per registration site: two annotations on one method
+        // are two sites, so the positional one keeps its route.
+        let got = java_routes(&in_class(
+            r#"    @GetMapping("/read")
+    @PostMapping(value = "/write")
+    public String both() { return ""; }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "/read".to_string(),
+                    "GET".to_string(),
+                    Some("both".to_string())
+                ),
+                (
+                    "/write".to_string(),
+                    "POST".to_string(),
+                    Some("both".to_string())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn positional_literal_form_is_unchanged() {
+        let got = java_routes(&in_class(
+            r#"    @GetMapping("/users")
+    public String listUsers() { return ""; }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![(
+                "/users".to_string(),
+                "GET".to_string(),
+                Some("listUsers".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn interface_declared_handler_yields_exactly_one_route() {
+        // The contract-first shape: the interface declares the mapping, the
+        // implementation is a bare `@RestController`. Exactly one route —
+        // neither duplicated by the implementation nor missed for being
+        // declared on an abstract method.
+        let m = scan_lang(
+            "java",
+            r#"
+interface UserApi {
+    @GetMapping(path = "/users")
+    String listUsers();
+}
+
+@RestController
+class UserController implements UserApi {
+    @Override
+    public String listUsers() { return ""; }
+}
+"#,
+        );
+        assert_eq!(
+            route_triples(m),
+            vec![(
+                "/users".to_string(),
+                "GET".to_string(),
+                Some("listUsers".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn annotation_absent_from_the_method_table_promotes_nothing() {
+        // The [framework_methods] gate (FR-FW-04): an unmapped annotation
+        // promotes nothing whatever arguments it carries — named, positional
+        // or list-valued.
+        let m = scan_lang(
+            "java",
+            &in_class(
+                r#"    @Operation(value = "/v1/x")
+    @ApiResponse(path = {"/a", "/b"})
+    @Deprecated("/positional")
+    public String getX() { return ""; }"#,
+            ),
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+    }
+
+    #[test]
+    fn non_path_named_arguments_never_become_paths() {
+        // `produces`/`consumes` are string-valued too — only `value`/`path`
+        // name a URL.
+        let m = scan_lang(
+            "java",
+            &in_class(
+                r#"    @GetMapping(produces = "application/json", consumes = "text/plain")
+    public String getX() { return ""; }"#,
+            ),
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+    }
+
+    #[test]
+    fn class_level_prefixes_are_not_composed_yet() {
+        // S-329 owns prefix composition; this task promotes the method path
+        // verbatim and the class-level annotation promotes nothing on its own.
+        let got = java_routes(
+            r#"
+@RequestMapping("/api/v1")
+@RestController
+public class C {
+    @GetMapping(value = "/users")
+    public String listUsers() { return ""; }
+}
+"#,
+        );
+        assert_eq!(
+            got,
+            vec![(
+                "/users".to_string(),
+                "GET".to_string(),
+                Some("listUsers".to_string())
+            )]
+        );
+    }
 }
