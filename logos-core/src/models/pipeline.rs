@@ -69,6 +69,14 @@ pub struct FrameworkStats {
     pub routes: u64,
     /// `component` nodes currently promoted (the post-reconcile total).
     pub components: u64,
+    /// Route registrations the pass **refused** this run because a
+    /// class-/interface-level path prefix governed them but was not a
+    /// resolvable literal (FR-FW-05, S-329). Promoting the method path alone
+    /// would advertise a provider at an address the service does not serve, so
+    /// the registration is dropped instead and counted here — the honest
+    /// figure behind the `path-not-composed` coverage reason (FR-WS-05,
+    /// NFR-RA-05). Zero on every codebase whose prefixes are written literals.
+    pub routes_not_composed: u64,
     /// Wall-clock cost of the whole pass for this run (OQ-07 evidence).
     pub duration_ms: u64,
 }

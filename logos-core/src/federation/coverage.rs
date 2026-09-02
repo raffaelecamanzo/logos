@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use crate::model::{BridgeRole, MatchDiscipline, NodeKind};
+use crate::resolve::framework::RouteRefusal;
 use crate::resolve::http_client_call::ClientCallRefusal;
 
 use super::bridge::{
@@ -69,6 +70,24 @@ pub enum UnboundReason {
     /// The consumer and provider shapes at this key diverge — deferred to a
     /// later invocation arm's schema check ([ADR-54]).
     SchemaMismatch,
+}
+
+impl From<RouteRefusal> for UnboundReason {
+    /// Map the framework pass's composition refusal ([`RouteRefusal`], S-329)
+    /// onto the shared coverage vocabulary. A provider-side counterpart to the
+    /// consumer-side [`ClientCallRefusal`] mapping below, and it exists for the
+    /// same reason: a route the interpreter refused to compose contributes no
+    /// provider ([FR-FW-05]), and the read-model must name that under the *same*
+    /// reason it already reports for a template it could not reduce — one
+    /// vocabulary, so "why is this unbound" never drifts between the two sides
+    /// of the same endpoint.
+    ///
+    /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+    fn from(refusal: RouteRefusal) -> Self {
+        match refusal {
+            RouteRefusal::PathNotComposed => UnboundReason::PathNotComposed,
+        }
+    }
 }
 
 impl From<ClientCallRefusal> for UnboundReason {
@@ -989,6 +1008,25 @@ mod tests {
         assert_eq!(
             serde_json::to_value(UnboundReason::PathNotComposed).unwrap(),
             "path-not-composed"
+        );
+    }
+
+    /// The framework pass's composition refusal ([S-329], [FR-FW-05]) lands in
+    /// the *same* bucket as the consumer-side one above — the provider whose
+    /// class-level prefix could not be resolved and the consumer whose
+    /// template could not be reduced are both `path-not-composed`, so the two
+    /// sides of one endpoint never disagree about the word for it.
+    ///
+    /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+    #[test]
+    fn route_composition_refusals_map_to_the_same_coverage_reason() {
+        assert_eq!(
+            UnboundReason::from(RouteRefusal::PathNotComposed),
+            UnboundReason::PathNotComposed
+        );
+        assert_eq!(
+            UnboundReason::from(RouteRefusal::PathNotComposed),
+            UnboundReason::from(ClientCallRefusal::PathNotComposed),
         );
     }
 
