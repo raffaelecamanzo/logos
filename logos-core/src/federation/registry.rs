@@ -190,10 +190,16 @@ pub struct MemberScoped<T> {
 /// One resident member engine and (under serve) its watcher, with the logical
 /// clock tick of its last touch for LRU eviction.
 struct Resident<E: MemberEngine> {
-    engine: Arc<E>,
     /// Held for the engine's residency; dropping it stops the watcher. `None`
     /// under [`RegistryMode::Lazy`] or when the watcher failed to spawn.
+    ///
+    /// Declared **before** `engine` so it drops first: a watcher's shutdown
+    /// flushes any pending edits through the engine it watches, and Rust drops
+    /// struct fields in declaration order, so the engine must still be alive
+    /// when the handle is dropped. Reordering these two silently turns an
+    /// eviction into a lost final sync.
     _watcher: Option<E::Watcher>,
+    engine: Arc<E>,
     /// Value of the registry's [`tick`](EngineRegistry::tick) at last touch.
     ///
     /// Atomic so a **hit** needs only a read lock on the resident map: touching
@@ -560,8 +566,8 @@ impl<E: MemberEngine> EngineRegistry<E> {
         self.write_resident().insert(
             member.to_string(),
             Resident {
-                engine: Arc::clone(&engine),
                 _watcher: watcher,
+                engine: Arc::clone(&engine),
                 last_touch: AtomicU64::new(self.tick.fetch_add(1, Ordering::Relaxed)),
             },
         );

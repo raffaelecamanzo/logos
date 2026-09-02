@@ -64,7 +64,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -325,7 +325,14 @@ pub fn spawn(engine: Arc<Engine>) -> Result<WatchHandle> {
     let (wake_tx, wake_rx) = bounded::<()>(1);
 
     let worker = spawn_sync_worker(
-        Arc::clone(&engine),
+        // **Weak**, not a clone: a strong reference here would live for the
+        // worker thread's whole lifetime and make the engine permanently
+        // ineligible for the federation registry's LRU eviction, which skips any
+        // member whose engine another holder still has ([NFR-PE-11], [ADR-63]).
+        // The worker upgrades per turn, so it holds the engine only while it is
+        // actually syncing. Every caller of [`spawn`] outlives its handle, so the
+        // upgrade succeeds for as long as the watcher is meant to run.
+        Arc::downgrade(&engine),
         Arc::clone(&pending),
         Arc::clone(&pending_artifacts),
         wake_rx,
@@ -597,7 +604,7 @@ struct Cadence {
 /// [FR-SY-06]: ../../../docs/specs/requirements/FR-SY-06.md
 /// [ADR-11]: ../../../docs/specs/architecture/decisions/ADR-11.md
 fn spawn_sync_worker(
-    engine: Arc<Engine>,
+    engine: Weak<Engine>,
     pending: Arc<Mutex<HashSet<PathBuf>>>,
     pending_artifacts: Arc<Mutex<HashSet<PathBuf>>>,
     wake_rx: Receiver<()>,
@@ -659,6 +666,16 @@ fn spawn_sync_worker(
                 // a warning so it can never block the source sync below. Drained in
                 // the same worker turn (including the shutdown flush), so an
                 // artifact written just before shutdown still ingests.
+                // The engine for this turn. `None` means the only holders are
+                // gone — the federation registry evicted this member, or the
+                // owner dropped its engine without dropping the handle — so
+                // there is nothing left to sync into and the worker exits rather
+                // than resurrect a corpse. Held only for the turn, so a parked
+                // worker never blocks eviction ([NFR-PE-11], [ADR-63]).
+                let Some(engine) = engine.upgrade() else {
+                    break;
+                };
+
                 let artifacts: Vec<PathBuf> = {
                     let mut pending = pending_artifacts.lock().unwrap_or_else(|p| p.into_inner());
                     pending.drain().collect()
