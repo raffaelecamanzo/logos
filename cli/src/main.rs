@@ -525,7 +525,20 @@ fn run(cli: Cli) -> Result<i32> {
         Commands::Serve { .. } => observability::Surface::Mcp,
         _ => observability::Surface::Cli,
     };
-    let _telemetry = observability::init(surface, &root);
+    // The warm supervisor (FR-WS-14) is the one arm that initialises NOTHING:
+    // it emits no telemetry event (no `traced` span is reachable from it — it
+    // opens no Engine), yet unlike every other command it lives for the whole
+    // serialized warm, minutes on a large workspace. Initialising here would
+    // open — and migrate, and hold for that whole lifetime — a connection to
+    // `.logos/telemetry.db` at whatever root the detached child inherited,
+    // creating a store file at a parent-of-repos root that has no index
+    // (the CR-098 state) and costing two `git` subprocesses per warm. Skipping
+    // it is what makes "the supervisor holds no `.logos` store" literally
+    // true rather than nearly true.
+    let _telemetry = match &cli.command {
+        Commands::InternalWarm { .. } => None,
+        _ => Some(observability::init(surface, &root)),
+    };
 
     let out = Output {
         json: cli.json,
