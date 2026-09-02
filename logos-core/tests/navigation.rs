@@ -735,7 +735,20 @@ fn dogfood_runs_all_eight_tools_on_logos_own_source() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let result = engine.index();
-    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    // No *unexpected* warning. `logos-core/src` has itself grown past the
+    // [NFR-PE-09] envelope's 10% margin (>110k LOC), so indexing it now emits
+    // the beyond-envelope advisory — a truthful degradation note about this
+    // repository's size, not a fault in the run. It is tolerated by name here
+    // and nowhere else: any other warning still fails, and the advisory's own
+    // behaviour is covered by `beyond_envelope_degrades_with_advisory_not_crash`.
+    //
+    // [NFR-PE-09]: ../../docs/specs/requirements/NFR-PE-09.md
+    let unexpected: Vec<&String> = result
+        .warnings
+        .iter()
+        .filter(|w| !w.contains("performance envelope (NFR-PE-09)"))
+        .collect();
+    assert!(unexpected.is_empty(), "{unexpected:?}");
 
     // search: a real Logos symbol ranks first under its exact name.
     let t = std::time::Instant::now();
