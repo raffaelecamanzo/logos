@@ -50,6 +50,9 @@ fn init_repo(dir: &Path) {
     fs::create_dir_all(dir).unwrap();
     sh_git(dir, &["init", "-q", "-b", "main"]);
     fs::write(dir.join("f.txt"), "x\n").unwrap();
+    // A real source file, so a completed index admits something and
+    // `graph_revision` can distinguish warmed from merely scaffolded.
+    fs::write(dir.join("lib.rs"), "pub fn member_entry() -> u32 { 7 }\n").unwrap();
     sh_git(dir, &["add", "."]);
     sh_git(dir, &["commit", "-q", "-m", "init"]);
 }
@@ -62,10 +65,35 @@ fn two_member_fixture() -> TempDir {
     tmp
 }
 
-/// `--yes` returns promptly (indexing is deferred to the single detached
-/// bounded warm supervisor of FR-WS-14, never blocking this command — the
-/// FR-WS-02 non-blocking contract is preserved verbatim by the bound) and
-/// reports both members initialised.
+/// A member's `graph_revision` — `0` before its first index, advanced by each
+/// completed one.
+///
+/// This, not the existence of `.logos/logos.db`, is what distinguishes "the
+/// warm ran" from "enablement scaffolded the store": `enable` calls
+/// `Engine::init_with` per member, which creates the db file itself, so a
+/// file-existence assertion is satisfied before any supervisor starts and
+/// cannot fail.
+fn graph_revision(member_root: &Path) -> u64 {
+    let out = logos(member_root, &["--json", "status"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .expect("status emits JSON")["graph_revision"]
+        .as_u64()
+        .expect("status carries graph_revision")
+}
+
+/// `--yes` returns promptly and reports both members initialised.
+///
+/// Scope note: this is a smoke test, NOT a proof of the FR-WS-02 non-blocking
+/// contract. On a fixture this small a fully blocking implementation would also
+/// finish well inside the bound, so the wall clock cannot separate "returned
+/// before indexing" from "indexing was fast". The non-blocking property is held
+/// structurally (`spawn_supervisor` calls `Command::spawn` and never `wait`)
+/// and the *decision* — one warm invocation, not a synchronous per-member walk
+/// — is asserted deterministically in `workspace_init`'s unit tests. A stronger
+/// assertion here would need either wall-clock ratios (flaky under the parallel
+/// load this suite already runs) or a many-member fixture, which S-321's own
+/// criteria forbid in the suite.
 #[test]
 fn yes_returns_promptly_without_blocking_on_indexing() {
     let tmp = two_member_fixture();
@@ -214,8 +242,7 @@ fn default_name_is_the_real_directory_name_not_the_literal_dot() {
 // ── The bounded warm supervisor (S-321, FR-WS-14, BR-44) ───────────────────
 
 /// The supervisor's entry point is internal (FR-CL-01): it must not appear in
-/// help output, at the top level or under any command group, so nobody can
-/// discover and script against it.
+/// top-level help output, so nobody can discover and script against it.
 #[test]
 fn the_supervisor_entry_point_is_hidden_from_help() {
     let tmp = TempDir::new().unwrap();
@@ -223,6 +250,9 @@ fn the_supervisor_entry_point_is_hidden_from_help() {
     assert_eq!(exit_code(&out), 0);
 
     let help = String::from_utf8_lossy(&out.stdout);
+    // Positive control first: an assertion about what help LACKS is vacuous if
+    // the capture is empty or help ever moves to stderr.
+    assert!(help.contains("index"), "help output was captured: {help}");
     assert!(
         !help.contains("internal-warm"),
         "the warm supervisor must not be listed in help output: {help}"
@@ -272,20 +302,30 @@ fn the_supervisor_warms_a_two_member_fixture_and_releases_every_store() {
 
     for member in ["api", "web"] {
         let root = tmp.path().join(member);
+        // `graph_revision >= 1`, not file existence: `enable` already created
+        // the db, so only a completed index moves this.
         assert!(
-            root.join(".logos/logos.db").is_file(),
-            "{member} was warmed by the supervisor"
+            graph_revision(&root) >= 1,
+            "{member} was actually indexed by the supervisor, not merely scaffolded"
         );
-        // No lingering lock: `status` opens the store and would block or fail
-        // if the drained supervisor still held it.
-        let status = logos(&root, &["--json", "status"]);
+        // No lingering lock — and a *write* is the half a WAL reader cannot
+        // prove: readers never see SQLITE_BUSY, so `status` alone would pass
+        // even against a live writer.
+        let sync = logos(&root, &["--json", "sync"]);
         assert_eq!(
-            exit_code(&status),
+            exit_code(&sync),
             0,
-            "{member}'s store is lock-free after the queue drained: {}",
-            String::from_utf8_lossy(&status.stderr)
+            "{member}'s store accepts a writer after the queue drained: {}",
+            String::from_utf8_lossy(&sync.stderr)
         );
     }
+    // The supervisor opens no store of its own: it ran with `--project <parent>`,
+    // which has no index at all. Had it gone through the Engine-guarded dispatch
+    // path it would have exited 3 (CoreError::NoIndex) instead of 0.
+    assert!(
+        !tmp.path().join(".logos").exists(),
+        "the supervisor must not create a store at the workspace root"
+    );
 }
 
 /// A member whose index genuinely fails (here: a malformed `config.toml`, the
@@ -329,41 +369,51 @@ fn a_failing_member_degrades_without_stalling_or_aborting_the_queue() {
         "the failing member is recorded degraded: {stderr}"
     );
     // K = 1, so the bad member was first in a strictly serial queue: both
-    // members behind it were still reached.
+    // members behind it must have been reached AND indexed. `graph_revision`,
+    // not file existence — the latter is true before the supervisor starts.
     for member in ["api", "web"] {
         assert!(
-            tmp.path().join(member).join(".logos/logos.db").is_file(),
-            "{member} was warmed after the failing member, not skipped"
+            graph_revision(&tmp.path().join(member)) >= 1,
+            "{member} was indexed after the failing member, not skipped"
         );
     }
 }
 
-/// Killing the supervisor mid-queue must leave an unwarmed member correctly
-/// indexable on first query (FR-IX-07) — the lazy `ensure_indexed` fallback,
-/// which is what makes a *bounded* (therefore deferred) warm safe at all.
-/// Simulated by never warming `web` in the first place, which is exactly the
-/// state a killed supervisor leaves behind.
+/// A member the supervisor never reached must still index correctly on first
+/// query (FR-IX-07) — the lazy `ensure_indexed` fallback is what makes a
+/// *bounded*, therefore deferred, warm safe at all. This is exactly the state a
+/// killed supervisor leaves behind for its unreached members.
+///
+/// Scaffolded with a plain per-member `init` rather than `init --workspace`
+/// on purpose: the latter spawns a real detached supervisor that would race in
+/// and warm the member, so the test would assert against an already-warm store
+/// and prove nothing. Here the member is provably cold (`graph_revision == 0`)
+/// before the query.
 #[test]
-fn an_unwarmed_member_still_indexes_on_first_query() {
+fn a_cold_member_indexes_itself_on_its_first_navigation_call() {
     let tmp = two_member_fixture();
-    let enabled = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
-    assert_eq!(exit_code(&enabled), 0);
-
     let web = tmp.path().join("web");
-    let out = logos(&web, &["--json", "search", "x"]);
-    assert_eq!(
-        exit_code(&out),
-        0,
-        "an unwarmed member answers its first query by indexing lazily: {}",
-        String::from_utf8_lossy(&out.stderr)
+    assert_eq!(exit_code(&logos(&web, &["init"])), 0);
+    assert_eq!(graph_revision(&web), 0, "the member starts genuinely cold");
+
+    // `search` is infallible by contract (it degrades to warnings, exit 0), so
+    // the exit code proves nothing on its own — assert the hit and the index.
+    let out = logos(&web, &["--json", "search", "member_entry"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let found = String::from_utf8_lossy(&out.stdout).contains("member_entry");
+    assert!(
+        graph_revision(&web) >= 1,
+        "the first navigation call indexed the cold member (FR-IX-07)"
     );
-    assert!(web.join(".logos/logos.db").is_file());
+    assert!(found, "and returned the hit from the freshly built index");
 }
 
-/// A re-run warms only the **newly** approved delta: with no new candidate,
-/// the second run has nothing to warm and spawns no supervisor at all.
+/// A re-run carries the already-manifested members forward and adds the new
+/// one. (Which members the re-run *warms* is asserted where it is observable —
+/// `workspace_init::tests::a_rerun_hands_the_warm_only_the_new_delta`; from out
+/// here the warm set is not visible, so this covers the manifest half only.)
 #[test]
-fn a_rerun_warms_only_the_newly_approved_delta() {
+fn a_rerun_carries_the_manifested_members_forward() {
     let tmp = two_member_fixture();
     let first = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
     assert_eq!(exit_code(&first), 0);
@@ -385,5 +435,33 @@ fn a_rerun_warms_only_the_newly_approved_delta() {
         ["api", "web", "batch"],
         "the already-manifested pair is carried forward; only `batch` — the \
          newly approved delta — is what the second run's supervisor warms"
+    );
+}
+
+/// `--concurrency 0` must still drain. Both floors that guarantee it
+/// (`effective_concurrency`'s and `warm_queue`'s) are unit-tested, but this is
+/// the boundary that ships: had either been missing, the queue would spin
+/// forever inside a detached, stdio-nulled child — a hang with no diagnostic,
+/// which is strictly worse than a crash.
+#[test]
+fn a_zero_concurrency_bound_still_drains_the_queue() {
+    let tmp = two_member_fixture();
+    let enabled = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&enabled), 0);
+
+    let out = logos(
+        tmp.path(),
+        &[
+            "internal-warm",
+            "--concurrency",
+            "0",
+            "--",
+            tmp.path().join("api").to_str().unwrap(),
+        ],
+    );
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        graph_revision(&tmp.path().join("api")) >= 1,
+        "a zero bound is floored to one worker and the member is warmed"
     );
 }
