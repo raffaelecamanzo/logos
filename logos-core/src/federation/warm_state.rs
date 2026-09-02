@@ -27,16 +27,31 @@
 //!   convention a later edit can forget, but because nothing short of
 //!   [`WarmEvidence::with_in_flight`] can put a member in the in-flight set,
 //!   and no caller calls it yet.
-//! - **A failed member is `degraded`, never `deferred`** ([BR-44]). The one
-//!   failure channel that *is* durable today — a member whose engine could not
-//!   be opened at all, which the fan-out reports per member — maps to
-//!   `degraded` here. A member whose *index* was attempted and failed while its
-//!   store still opens cleanly is currently indistinguishable from a member the
-//!   queue never reached, and [`WarmEvidence::with_failures`] is the seam that
-//!   closes that gap the moment a durable per-member warm-failure record
-//!   exists.
-//!   Adding it is a change of *input*, not of this module's shape or of the
-//!   read-model's wire format.
+//! - **A failed member is `degraded`, never `deferred`** ([BR-44]). Two failure
+//!   channels reach here durably, and both map to `degraded`: a member whose
+//!   engine could not be **started**, and a member that started but whose
+//!   **freshness read** failed. The second one takes care — [`Engine::status`](crate::Engine::status)
+//!   is infallible and degrades to a *defaulted* [`StatusInfo`](crate::models::StatusInfo) whose
+//!   `indexed: false` is indistinguishable from an honestly empty graph — so
+//!   [`workspace_status`](super::query::workspace_status) fans
+//!   [`Engine::try_status`](crate::Engine::try_status) and folds its `Err` into the per-member error
+//!   channel instead.
+//!
+//!   What is **not** yet distinguishable is a warm that was attempted and
+//!   failed while the member's store still opens and reads cleanly: that is
+//!   indistinguishable from a member the queue never reached, and
+//!   [`WarmEvidence::with_failures`] is the seam that closes the gap the moment
+//!   a durable per-member warm-failure record exists. Adding it is a change of
+//!   *input*, not of this module's shape or of the read-model's wire format.
+//!
+//! # One residual gap, stated rather than papered over
+//! `warm` is index **presence**, per [FR-WS-15]. A member the warm reached and
+//! indexed successfully but which contains no supported-language files holds no
+//! indexed file, so it reports `deferred` — "never attempted" — permanently. The
+//! requirement itself equates `warm` with index presence, so this is not fixed
+//! here; naming it is the honest alternative to a heuristic that would guess at
+//! *why* a graph is empty ([NFR-CC-04]). It belongs to the same human decision
+//! as the warm-failure producer above.
 //!
 //! # No engines are constructed to answer
 //! Every function here is pure, over values a `workspace status` walk has
@@ -210,9 +225,14 @@ impl WarmEvidence {
 ///
 /// `indexed` is what the member's own status walk already found:
 /// `Ok(true)` — its graph holds at least one indexed file; `Ok(false)` — the
-/// store opened and is empty; `Err(reason)` — the member could not be opened at
-/// all, which is an attempt that **failed** and therefore `degraded`, never
-/// `deferred` ([BR-44]).
+/// read **succeeded** and the graph is empty; `Err(reason)` — the member could
+/// not be opened, or could not be read, which is an attempt that **failed** and
+/// therefore `degraded`, never `deferred` ([BR-44]).
+///
+/// The caller owes this distinction: an `Ok(false)` that actually came from a
+/// *failed* read would be labeled `deferred` here, which is why
+/// [`workspace_status`](super::query::workspace_status) fans the fallible
+/// [`Engine::try_status`](crate::Engine::try_status) rather than the degrading [`Engine::status`](crate::Engine::status).
 ///
 /// # Precedence
 /// There are **four** inputs, not three, because failure arrives on two
