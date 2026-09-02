@@ -813,11 +813,23 @@ fn innermost_prefix(scopes: &[MergedScope], at: usize) -> Option<&MergedScope> {
 /// [`merge_scopes`] disqualifies the literal without any text inspection.
 ///
 /// Rejected: an unresolved property placeholder (`${…}`) or SpEL expression
-/// (`#{…}`), whose resolution is explicitly out of scope ([CR-101] §3.3); and a
-/// literal carrying a newline or a quote, which is not a path and which means
-/// the unquoting heuristic did not fully read the source form (a Java text
-/// block). Joining a method path onto any of these mints a route name that no
-/// consumer can match, silently inherited by every handler in the type.
+/// (`#{…}`), whose resolution is explicitly out of scope ([CR-101] §3.3); a
+/// string-template reference (`$BASE`), which is the *same* unresolved
+/// indirection written in Kotlin's syntax; and a literal carrying a newline or
+/// a quote, which is not a path and which means the unquoting heuristic did not
+/// fully read the source form (a Java text block). Joining a method path onto
+/// any of these mints a route name that no consumer can match, silently
+/// inherited by every handler in the type.
+///
+/// The template rule is text-level rather than structural for the same reason
+/// the whole function is: `tree-sitter-kotlin-ng` models `"${BASE}/v1"` as a
+/// `string_literal` with an `interpolation` child, which a query *could*
+/// capture as `@fw.route.prefix.opaque`, but models the equally common
+/// `"$BASE/v1"` as two plain `string_content` runs with no node to name. One
+/// text rule covers both forms, and it covers them in every language rather
+/// than only in the one whose grammar happens to expose the fragment. A lone
+/// `$` not introducing a reference (`/price$`) stays resolvable — the rule
+/// rejects a template *reference*, not a dollar sign.
 ///
 /// Deliberately *stricter* than the rule for a method path written whole:
 /// `@GetMapping("${api.base}/users")` is still promoted verbatim (S-328), where
@@ -831,10 +843,23 @@ fn innermost_prefix(scopes: &[MergedScope], at: usize) -> Option<&MergedScope> {
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 /// [CR-101]: ../../../docs/requests/CR-101-jvm-spring-route-extraction.md
 fn is_resolvable_prefix(literal: &str) -> bool {
-    !literal.contains("${")
+    !names_a_template_reference(literal)
         && !literal.contains("#{")
         && !literal.contains('\n')
         && !literal.contains('"')
+}
+
+/// `true` when the text holds a `$`-introduced reference to something outside
+/// it: a property placeholder (`${api.base}`) or a Kotlin string template
+/// (`$BASE`, `${BASE}`). Both name a value this pass does not resolve.
+fn names_a_template_reference(literal: &str) -> bool {
+    // Every `$`, not just the first: `/price$/x/${api.base}` names one.
+    literal.match_indices('$').any(|(at, _)| {
+        literal[at + 1..]
+            .chars()
+            .next()
+            .is_some_and(|next| next == '{' || next == '_' || next.is_alphabetic())
+    })
 }
 
 /// Join a route prefix and a method path with **exactly one** separator

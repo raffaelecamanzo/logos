@@ -818,19 +818,59 @@ fn the_java_query_delegates_composition_by_naming_the_shared_captures() {
     }
 }
 
-/// The reuse claim of [S-329] proved the way [S-330] will have to satisfy it:
+/// A `$`-introduced reference — a property placeholder or a Kotlin string
+/// template — is never a joinable prefix, whichever syntax wrote it, while a
+/// dollar sign that introduces nothing still is ([NFR-RA-05], S-330).
+///
+/// The rule is text-level because the grammars disagree about what they model:
+/// `tree-sitter-kotlin-ng` gives `"${BASE}/v1"` an `interpolation` child a query
+/// could capture but gives `"$BASE/v1"` two plain `string_content` runs with
+/// nothing to name, and Java's `"${api.base}"` is one flat literal. One rule in
+/// the shared interpreter therefore covers strictly more than any per-language
+/// capture could, in every language rather than in one.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+fn a_template_reference_is_never_a_resolvable_prefix() {
+    for refused in [
+        "${api.base}",
+        "${api.base}/v1",
+        "$BASE",
+        "$BASE/v1",
+        "${BASE}/v1",
+        "/v1/$BASE",
+        "/price$/x/${api.base}",
+        "$_private",
+        "#{cfg.base}",
+    ] {
+        assert!(
+            !is_resolvable_prefix(refused),
+            "{refused} names an unresolved reference"
+        );
+    }
+    for resolvable in ["/v1", "/price$", "/a$", "/v1/{id}", "", "/a$1"] {
+        assert!(
+            is_resolvable_prefix(resolvable),
+            "{resolvable} is a joinable path"
+        );
+    }
+}
+
+/// The reuse claim of [S-329] proved the way [S-330] had to satisfy it:
 /// composition driven by a **second language's query**, dropped in as data with
 /// no Rust change at all ([FR-PL-04] makes
 /// `.logos/plugins/<lang>/queries/frameworks.scm` shadow the embedded one, so a
 /// query really is the whole per-language surface).
 ///
-/// The Kotlin query shipped today captures no prefix — that is S-330's work —
-/// so this test writes a minimal one naming only the shared captures and
-/// asserts the interpreter composes it. Separator normalisation, the innermost
-/// scope, the prefix-only fallback and the refusal all come for free; if this
-/// test can express a dialect's behaviour, that dialect needs no
-/// implementation. A second composition implementation would make this
-/// redundant, which is exactly the failure [S-330] is meant to detect.
+/// The override written here is deliberately *minimal* — narrower than the
+/// Kotlin query [S-330] went on to ship — and it shadows that query, so this
+/// test keeps proving what it always proved: naming the three shared captures
+/// and nothing else is enough. Separator normalisation, the innermost scope,
+/// the prefix-only fallback and the refusal all come for free; if this test can
+/// express a dialect's behaviour, that dialect needs no implementation. A
+/// second composition implementation would make this redundant, which is
+/// exactly the failure [S-330] was meant to detect (and
+/// `no_language_specific_composition_code_exists` asserts directly).
 ///
 /// [FR-PL-04]: ../../../docs/specs/requirements/FR-PL-04.md
 #[test]
@@ -1885,4 +1925,1233 @@ public class Outer {
             "{scope:?} must contain byte {handler}"
         );
     }
+}
+
+// ── Kotlin Spring mapping annotations (S-330) ────────────────────────────────
+
+/// Kotlin's Spring query is annotation-compatible with Java's but sits on a
+/// different syntax tree, and before S-330 it paid for the difference twice: a
+/// named `value = "/x"` argument was matched by an **unanchored** positional
+/// pattern (so the query header's "deliberately NOT captured in v1" note was
+/// false), and the same unanchored pattern read `produces = "application/json"`
+/// as a URL. This module is the Java `java_spring` set mirrored onto Kotlin
+/// source; `jvm_parity` below asserts the two languages agree fixture for
+/// fixture.
+#[cfg(feature = "lang-kotlin")]
+mod kotlin_spring {
+    use super::*;
+
+    /// The sorted `(path, method, handler)` projection of a scanned Kotlin
+    /// snippet — sorted so a test asserts the promoted *set*, not tree-sitter's
+    /// match order.
+    fn kotlin_routes(source: &str) -> Vec<(String, String, Option<String>)> {
+        sorted_triples(&scan_lang("kt", source))
+    }
+
+    /// The same projection of an already-scanned file, for the tests that
+    /// assert routes *and* refusals from one scan.
+    fn sorted_triples(m: &FileMatches) -> Vec<(String, String, Option<String>)> {
+        let mut got: Vec<(String, String, Option<String>)> = m
+            .routes
+            .iter()
+            .map(|r| (r.path.clone(), r.method.clone(), r.handler.clone()))
+            .collect();
+        got.sort();
+        got
+    }
+
+    /// A function wrapped in the minimal legal class body.
+    fn in_class(members: &str) -> String {
+        format!("class C {{\n{members}\n}}\n")
+    }
+
+    /// A handler wrapped in a class carrying `@RequestMapping(<arguments>)`.
+    fn in_prefixed_class(arguments: &str, members: &str) -> String {
+        format!("@RequestMapping({arguments})\n@RestController\nclass C {{\n{members}\n}}\n")
+    }
+
+    /// The canonical handler: a named-argument `@GetMapping` on `/users`.
+    const USERS_HANDLER: &str = r#"    @GetMapping(value = "/users")
+    fun listUsers(): String { return "" }"#;
+
+    /// The `(path, method, handler)` triple `USERS_HANDLER` promotes unprefixed.
+    fn users_route(path: &str) -> Vec<(String, String, Option<String>)> {
+        vec![(
+            path.to_string(),
+            "GET".to_string(),
+            Some("listUsers".to_string()),
+        )]
+    }
+
+    // ── The named-argument form (the S-328 shape, on Kotlin's tree) ──────────
+
+    #[test]
+    fn named_value_argument_yields_the_route() {
+        let got = kotlin_routes(&in_class(
+            r#"    @RequestMapping(method = RequestMethod.GET, value = "/v1/x", produces = "application/json")
+    fun getX(): String { return "" }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![(
+                "/v1/x".to_string(),
+                "ANY".to_string(),
+                Some("getX".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn named_path_argument_is_an_alias_for_value() {
+        let got = kotlin_routes(&in_class(
+            r#"    @GetMapping(path = "/v1/y")
+    fun getY(): String { return "" }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![(
+                "/v1/y".to_string(),
+                "GET".to_string(),
+                Some("getY".to_string())
+            )]
+        );
+    }
+
+    /// Kotlin writes an annotation array as `[…]`, not Java's `{…}` — one route
+    /// per element either way.
+    #[test]
+    fn list_valued_paths_yield_one_route_each() {
+        let got = kotlin_routes(&in_class(
+            r#"    @GetMapping(value = ["/a", "/b"])
+    fun get(): String { return "" }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![
+                ("/a".to_string(), "GET".to_string(), Some("get".to_string())),
+                ("/b".to_string(), "GET".to_string(), Some("get".to_string())),
+            ]
+        );
+    }
+
+    /// The regression guard on the pattern that already existed: adding the
+    /// named form must not cost the positional one.
+    #[test]
+    fn positional_literal_form_is_unchanged() {
+        let got = kotlin_routes(&in_class(
+            r#"    @GetMapping("/users")
+    fun listUsers(): String { return "" }"#,
+        ));
+        assert_eq!(got, users_route("/users"));
+    }
+
+    /// **The defect this story exists to fix.** Kotlin's `value_argument` holds
+    /// the literal as a direct child whether or not a name precedes it, so the
+    /// pre-S-330 pattern `(value_argument (string_literal))` matched every
+    /// string-valued named argument — promoting `GET application/json` and
+    /// `GET text/plain` as *route paths*, the approximate match [NFR-RA-05]
+    /// forbids. Only `value`/`path` name a URL; the first-child anchor plus the
+    /// key predicate is what keeps every other argument out.
+    ///
+    /// Mutation-checked: deleting the `.` from the positional pattern makes
+    /// this fail with two fabricated media-type routes.
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn non_path_named_arguments_never_become_paths() {
+        let m = scan_lang(
+            "kt",
+            &in_class(
+                r#"    @GetMapping(produces = "application/json", consumes = "text/plain")
+    fun getX(): String { return "" }"#,
+            ),
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert!(m.pathless.is_empty(), "{:?}", m.pathless);
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+
+        // …and the same argument names on a *type* relocate nothing either:
+        // a class-level `produces` is not a prefix, and reading it as one would
+        // refuse every route in the controller instead of composing it.
+        let prefixed = scan_lang(
+            "kt",
+            &in_prefixed_class(r#"produces = "application/json""#, USERS_HANDLER),
+        );
+        assert_eq!(sorted_triples(&prefixed), users_route("/users"));
+        assert!(prefixed.refusals.is_empty(), "{:?}", prefixed.refusals);
+    }
+
+    /// The wiring the precedence pass depends on, asserted at the source level
+    /// rather than on hand-built values: **both** path patterns must capture
+    /// `@fw.route.anchor`, the `named` rank must follow the capture the path
+    /// came from, and two annotations on one function must be two distinct
+    /// sites. Without this the query could stop anchoring and the behavioural
+    /// tests would stay green until a mixed-form annotation showed up.
+    #[test]
+    fn path_origins_record_the_annotation_site_and_the_named_rank() {
+        let m = scan_lang(
+            "kt",
+            &in_class(
+                r#"    @GetMapping("/read")
+    @PostMapping(value = "/write")
+    fun both(): String { return "" }"#,
+            ),
+        );
+        let mut got: Vec<(&str, Option<usize>, bool)> = m
+            .routes
+            .iter()
+            .map(|r| (r.path.as_str(), r.origin.site, r.origin.named))
+            .collect();
+        got.sort();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].0, "/read");
+        assert!(!got[0].2, "a positional path is not named: {got:?}");
+        assert_eq!(got[1].0, "/write");
+        assert!(got[1].2, "a `value =` path is named: {got:?}");
+        let (read_site, write_site) = (got[0].1, got[1].1);
+        assert!(
+            read_site.is_some(),
+            "the positional pattern must anchor: {got:?}"
+        );
+        assert!(
+            write_site.is_some(),
+            "the named pattern must anchor: {got:?}"
+        );
+        assert_ne!(
+            read_site, write_site,
+            "each annotation is its own site: {got:?}"
+        );
+    }
+
+    /// Kotlin is the dialect [`drop_outranked_paths`] was built for (S-328).
+    /// Its `value_arguments` is a homogeneous list, so `@RequestMapping("/a",
+    /// value = "/b")` — illegal in Java, where the parser `ERROR`-wraps the
+    /// leading argument — parses cleanly here and really does match both path
+    /// patterns at one annotation. The *rank* therefore decides, and exactly
+    /// one route survives; without `@fw.route.anchor` on the positional pattern
+    /// both would be promoted and the service would advertise an endpoint it
+    /// does not serve.
+    ///
+    /// Mutation-checked: removing `@fw.route.anchor` from either pattern makes
+    /// this fail with two routes.
+    #[test]
+    fn a_named_path_outranks_a_positional_one_at_the_same_annotation() {
+        let got = kotlin_routes(&in_class(
+            r#"    @RequestMapping("/positional", value = "/named")
+    fun get(): String { return "" }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![(
+                "/named".to_string(),
+                "ANY".to_string(),
+                Some("get".to_string())
+            )]
+        );
+
+        // Written the other way round the rank still decides, which is where
+        // Kotlin and Java legitimately diverge: Java's recovery keeps whichever
+        // argument parsed cleanly (`/positional`), Kotlin's grammar parses both
+        // and the named one wins. Neither form is code a Spring service should
+        // contain — `value` is `@AliasFor` the positional argument — and the
+        // outcome is pinned so the divergence is a decision on the record.
+        let reversed = kotlin_routes(&in_class(
+            r#"    @RequestMapping(value = "/named", "/positional")
+    fun get(): String { return "" }"#,
+        ));
+        assert_eq!(
+            reversed,
+            vec![(
+                "/named".to_string(),
+                "ANY".to_string(),
+                Some("get".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn a_named_path_on_one_annotation_never_suppresses_another() {
+        // Precedence is per registration site: two annotations on one function
+        // are two sites, so the positional one keeps its route.
+        let got = kotlin_routes(&in_class(
+            r#"    @GetMapping("/read")
+    @PostMapping(value = "/write")
+    fun both(): String { return "" }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "/read".to_string(),
+                    "GET".to_string(),
+                    Some("both".to_string())
+                ),
+                (
+                    "/write".to_string(),
+                    "POST".to_string(),
+                    Some("both".to_string())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn both_alias_keys_on_one_annotation_yield_a_route_each() {
+        // `value` and `path` on one annotation is a Spring `@AliasFor` conflict
+        // the application would reject at startup. The query promotes each as
+        // written rather than adjudicating it, exactly as Java's does.
+        let got = kotlin_routes(&in_class(
+            r#"    @GetMapping(value = "/x", path = "/y")
+    fun get(): String { return "" }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![
+                ("/x".to_string(), "GET".to_string(), Some("get".to_string())),
+                ("/y".to_string(), "GET".to_string(), Some("get".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn non_literal_named_paths_promote_nothing() {
+        // A constant reference or a concatenation leaves no literal, so nothing
+        // is promoted — never a guessed path (NFR-RA-05).
+        for arguments in [
+            r#"value = BASE + "/x""#,
+            "value = BASE",
+            "value = Paths.USERS",
+            r#"["/a", "/b"]"#, // a *positional* array, uncaptured as in Java
+        ] {
+            let m = scan_lang(
+                "kt",
+                &in_class(&format!(
+                    "    @GetMapping({arguments})\n    fun get(): String {{ return \"\" }}"
+                )),
+            );
+            assert!(m.routes.is_empty(), "{arguments}: {:?}", m.routes);
+        }
+    }
+
+    #[test]
+    fn a_mixed_list_promotes_only_its_literal_elements() {
+        let got = kotlin_routes(&in_class(
+            r#"    @GetMapping(value = ["/a", BASE + "/b"])
+    fun get(): String { return "" }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![("/a".to_string(), "GET".to_string(), Some("get".to_string()))]
+        );
+    }
+
+    /// A path written *whole* is recorded as written, whether the indirection
+    /// is a Spring property placeholder or a Kotlin string template: the node
+    /// states the registration as the source does, and
+    /// [`route_template`](crate::resolve::route_template) refuses to bind it
+    /// one layer down. As a **prefix** the same text is refused instead —
+    /// `a_string_template_prefix_is_refused_while_a_template_path_is_not`
+    /// pins the asymmetry.
+    #[test]
+    fn placeholder_and_template_paths_are_promoted_verbatim() {
+        for path in ["${api.base}/users", "$BASE/users"] {
+            let got = kotlin_routes(&in_class(&format!(
+                "    @GetMapping(value = \"{path}\")\n    fun listUsers(): String {{ return \"\" }}"
+            )));
+            assert_eq!(
+                got,
+                vec![(
+                    path.to_string(),
+                    "GET".to_string(),
+                    Some("listUsers".to_string())
+                )],
+                "{path}"
+            );
+        }
+    }
+
+    /// The contract-first shape: the interface declares the mapping and the
+    /// implementation is a bare `@RestController`. Exactly one route — and in
+    /// Kotlin the implementation carries the `override` **keyword** rather than
+    /// an annotation, so it cannot match any pattern in the query at all.
+    #[test]
+    fn interface_declared_handler_yields_exactly_one_route() {
+        let m = scan_lang(
+            "kt",
+            r#"
+interface UserApi {
+    @GetMapping(path = "/users")
+    fun listUsers(): String
+}
+
+@RestController
+class UserController : UserApi {
+    override fun listUsers(): String { return "" }
+}
+"#,
+        );
+        assert_eq!(sorted_triples(&m), users_route("/users"));
+        assert_eq!(
+            m.components.iter().map(|c| &c.type_path).collect::<Vec<_>>(),
+            ["UserController"],
+            "the implementation is the stereotype, the interface is not"
+        );
+    }
+
+    #[test]
+    fn annotation_absent_from_the_method_table_promotes_nothing() {
+        // The [framework_methods] gate (FR-FW-04): an unmapped annotation
+        // promotes nothing whatever arguments it carries — named, positional
+        // or list-valued.
+        let m = scan_lang(
+            "kt",
+            &in_class(
+                r#"    @Operation(value = "/v1/x")
+    @ApiResponse(path = ["/a", "/b"])
+    @Deprecated("/positional")
+    fun getX(): String { return "" }"#,
+            ),
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert!(m.pathless.is_empty(), "{:?}", m.pathless);
+    }
+
+    // ── Composition, inherited from the shared interpreter (S-329) ───────────
+
+    #[test]
+    fn class_level_prefix_composes_with_the_method_path() {
+        let got = kotlin_routes(&in_prefixed_class(r#""/api/v1""#, USERS_HANDLER));
+        assert_eq!(got, users_route("/api/v1/users"));
+    }
+
+    /// Separator normalisation over real Kotlin source, not just the pure
+    /// joiner: whichever side writes the slash, the promoted route carries
+    /// exactly one. Inherited whole from `join_route_path` — the Kotlin query
+    /// contributes no joining code.
+    #[test]
+    fn prefix_composition_normalises_the_separator_over_real_source() {
+        for (prefix, path) in [
+            (r#""/v1""#, "/users"),
+            (r#""/v1""#, "users"),
+            (r#""/v1/""#, "/users"),
+            (r#""/v1/""#, "users"),
+        ] {
+            let got = kotlin_routes(&in_prefixed_class(
+                prefix,
+                &format!(
+                    "    @GetMapping(value = \"{path}\")\n    fun listUsers(): String {{ return \"\" }}"
+                ),
+            ));
+            assert_eq!(
+                got,
+                users_route("/v1/users"),
+                "prefix {prefix}, path {path}"
+            );
+        }
+    }
+
+    /// A handler in a prefixed type whose own annotation carries no path takes
+    /// the prefix as its full path — the marker-annotation shape, which in
+    /// Kotlin is `(annotation (user_type …))` rather than Java's
+    /// `marker_annotation` but is just as disjoint from the argument-bearing
+    /// form, so it can never share a registration site with it.
+    #[test]
+    fn a_prefixed_handler_with_no_method_path_takes_the_prefix() {
+        let got = kotlin_routes(&in_prefixed_class(
+            r#""/v1/users""#,
+            "    @GetMapping\n    fun listUsers(): String { return \"\" }",
+        ));
+        assert_eq!(got, users_route("/v1/users"));
+    }
+
+    /// The other half of the pathless rule: with no prefix in scope there is
+    /// nothing to take, so the bare annotation promotes nothing — and it is
+    /// **not** a composition failure, so it reports no reason ([BR-46]).
+    ///
+    /// [BR-46]: ../../../docs/specs/software-spec.md#310-framework-extraction
+    #[test]
+    fn a_pathless_annotation_with_no_prefix_promotes_nothing_and_is_not_refused() {
+        let m = scan_lang(
+            "kt",
+            &in_class("    @GetMapping\n    fun listUsers(): String { return \"\" }"),
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    /// [BR-46] directly: a handler with no prefix in scope composes to its
+    /// method path alone and is never reported `path-not-composed`.
+    ///
+    /// [BR-46]: ../../../docs/specs/software-spec.md#310-framework-extraction
+    #[test]
+    fn an_unprefixed_handler_keeps_its_method_path_and_is_not_refused() {
+        let m = scan_lang("kt", &in_class(USERS_HANDLER));
+        assert_eq!(sorted_triples(&m), users_route("/users"));
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    /// A prefix that cannot be resolved to a literal yields **no** path at all
+    /// and the registration is reported `path-not-composed` ([NFR-RA-05]).
+    /// Kotlin adds three forms Java has no syntax for: a string template in
+    /// either spelling, and a raw (`"""…"""`) literal, which the literal
+    /// patterns deliberately do not read — the `(expression)` catch-all catches
+    /// it as opaque so the type reads as *unreadable* rather than as
+    /// *unprefixed*, which would silently promote `/users` at the wrong
+    /// address.
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn a_non_literal_prefix_refuses_the_route_instead_of_promoting_a_partial_path() {
+        for arguments in [
+            "BASE",
+            "Paths.V1",
+            r#"BASE + "/v1""#,
+            "value = BASE",
+            "path = Paths.V1",
+            r#"value = BASE + "/v1""#,
+            "value = [BASE]",
+            "[BASE]",
+            r#""${api.base}""#,
+            r##""#{cfg.base}""##,
+            r#""$BASE/v1""#,
+            r#""${BASE}/v1""#,
+            "\"\"\"\n/v1\"\"\"",
+        ] {
+            let m = scan_lang("kt", &in_prefixed_class(arguments, USERS_HANDLER));
+            assert!(m.routes.is_empty(), "{arguments}: {:?}", m.routes);
+            assert_eq!(
+                m.refusals,
+                [RouteRefusal::PathNotComposed],
+                "{arguments} must report path-not-composed"
+            );
+        }
+    }
+
+    /// The asymmetry, on the record for Kotlin as it is for Java: the *same*
+    /// template text is refused as a prefix and promoted verbatim as a whole
+    /// method path. A prefix is *joined*, so every handler under the type would
+    /// inherit a fabricated address; a path written whole is the registration
+    /// as the source states it.
+    #[test]
+    fn a_string_template_prefix_is_refused_while_a_template_path_is_not() {
+        let prefixed = scan_lang("kt", &in_prefixed_class(r#""$BASE""#, USERS_HANDLER));
+        assert!(prefixed.routes.is_empty(), "{:?}", prefixed.routes);
+        assert_eq!(prefixed.refusals, [RouteRefusal::PathNotComposed]);
+
+        let unprefixed = kotlin_routes(&in_class(
+            r#"    @GetMapping(value = "$BASE/users")
+    fun listUsers(): String { return "" }"#,
+        ));
+        assert_eq!(unprefixed, users_route("$BASE/users"));
+    }
+
+    /// A dollar sign that introduces no reference is still a path character:
+    /// the refusal rule targets `${…}` / `$name`, not `$`.
+    #[test]
+    fn a_dollar_sign_that_names_nothing_still_composes() {
+        let m = scan_lang("kt", &in_prefixed_class(r#""/price$""#, USERS_HANDLER));
+        assert_eq!(sorted_triples(&m), users_route("/price$/users"));
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    /// The contract-first shape: the **interface** declares the prefix and the
+    /// mappings. In Kotlin an interface is a `class_declaration` with a
+    /// `class_body`, so it is the same node kind a class is and composition
+    /// treats the two identically without the query naming either.
+    #[test]
+    fn an_interface_level_prefix_composes_like_a_class_one() {
+        let got = kotlin_routes(
+            r#"
+@RequestMapping("/v1")
+interface UserApi {
+    @RequestMapping(method = RequestMethod.GET, value = "/users", produces = "application/json")
+    fun listUsers(): String
+
+    @GetMapping(path = ["/users/{id}", "/users/by-id/{id}"])
+    fun getUser(id: String): String
+}
+"#,
+        );
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "/v1/users".to_string(),
+                    "ANY".to_string(),
+                    Some("listUsers".to_string())
+                ),
+                (
+                    "/v1/users/by-id/{id}".to_string(),
+                    "GET".to_string(),
+                    Some("getUser".to_string())
+                ),
+                (
+                    "/v1/users/{id}".to_string(),
+                    "GET".to_string(),
+                    Some("getUser".to_string())
+                ),
+            ]
+        );
+    }
+
+    /// A list-valued class prefix serves the type at every base, in both the
+    /// named and the positional spelling, so each handler registers once per
+    /// base.
+    #[test]
+    fn a_list_valued_class_prefix_registers_the_handler_at_each_base() {
+        for arguments in [r#"value = ["/v1", "/v2"]"#, r#"["/v1", "/v2"]"#] {
+            let got = kotlin_routes(&in_prefixed_class(arguments, USERS_HANDLER));
+            assert_eq!(
+                got,
+                vec![
+                    (
+                        "/v1/users".to_string(),
+                        "GET".to_string(),
+                        Some("listUsers".to_string())
+                    ),
+                    (
+                        "/v2/users".to_string(),
+                        "GET".to_string(),
+                        Some("listUsers".to_string())
+                    ),
+                ],
+                "{arguments}"
+            );
+        }
+    }
+
+    /// In a mixed list the readable element wins and the rest is dropped: the
+    /// opaque capture overlaps only the non-literal element, so `/v1` still
+    /// composes rather than the whole scope being refused.
+    #[test]
+    fn a_mixed_list_class_prefix_composes_on_its_literal() {
+        let m = scan_lang(
+            "kt",
+            &in_prefixed_class(r#"value = ["/v1", BASE]"#, USERS_HANDLER),
+        );
+        assert_eq!(sorted_triples(&m), users_route("/v1/users"));
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    /// An explicitly empty `value = []` declares no prefix — Spring reads it
+    /// that way — so the type's handlers keep their own paths and nothing is
+    /// refused. This grammar cannot represent an empty `collection_literal`
+    /// (its element list is `commaSep1`) and error-recovers with a zero-width
+    /// `MISSING` node, which the opaque catch-all would otherwise read as a
+    /// written-but-unreadable prefix and refuse the whole controller for. The
+    /// query's `(#not-eq? @fw.route.prefix.opaque "")` guard is what keeps a
+    /// parse artefact from becoming a refusal.
+    #[test]
+    fn an_empty_prefix_list_declares_no_prefix() {
+        for arguments in ["value = []", "[]"] {
+            // Both the stereotyped shape real controllers carry and the bare
+            // one: an empty `collection_literal` is error-recovered, so the two
+            // do not parse alike and only the bare form exposes the `MISSING`
+            // node the guard exists for.
+            for source in [
+                in_prefixed_class(arguments, USERS_HANDLER),
+                format!("@RequestMapping({arguments})\nclass C {{\n{USERS_HANDLER}\n}}\n"),
+            ] {
+                let m = scan_lang("kt", &source);
+                assert_eq!(sorted_triples(&m), users_route("/users"), "{source}");
+                assert!(m.refusals.is_empty(), "{source}: {:?}", m.refusals);
+            }
+        }
+    }
+
+    /// A prefix that is the empty string supplies nothing: a handler with its
+    /// own path keeps it, and a *pathless* handler is dropped rather than
+    /// promoted as a route named `"GET "`.
+    #[test]
+    fn an_empty_string_prefix_never_manufactures_a_pathless_route() {
+        let with_path = kotlin_routes(&in_prefixed_class(r#""""#, USERS_HANDLER));
+        assert_eq!(with_path, users_route("/users"));
+
+        let m = scan_lang(
+            "kt",
+            &in_prefixed_class(
+                r#""""#,
+                "    @GetMapping\n    fun listUsers(): String { return \"\" }",
+            ),
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    #[test]
+    fn a_nested_prefixed_class_takes_its_own_prefix() {
+        let got = kotlin_routes(
+            r#"
+@RequestMapping("/outer")
+class Outer {
+    @GetMapping(value = "/a")
+    fun outerHandler(): String { return "" }
+
+    @RequestMapping("/inner")
+    class Inner {
+        @GetMapping(value = "/b")
+        fun innerHandler(): String { return "" }
+    }
+}
+"#,
+        );
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "/inner/b".to_string(),
+                    "GET".to_string(),
+                    Some("innerHandler".to_string())
+                ),
+                (
+                    "/outer/a".to_string(),
+                    "GET".to_string(),
+                    Some("outerHandler".to_string())
+                ),
+            ]
+        );
+    }
+
+    /// An **unannotated** nested type is its own controller in Spring and
+    /// inherits nothing: its handlers must NOT be promoted at the enclosing
+    /// type's prefix. Without the bare type-boundary pattern this composes
+    /// `/outer/b`, a path the service never serves ([NFR-RA-05]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn an_unannotated_nested_class_does_not_inherit_the_outer_prefix() {
+        let m = scan_lang(
+            "kt",
+            r#"
+@RequestMapping("/outer")
+class Outer {
+    @GetMapping(value = "/a")
+    fun outerHandler(): String { return "" }
+
+    class Inner {
+        @GetMapping(value = "/b")
+        fun innerHandler(): String { return "" }
+    }
+}
+"#,
+        );
+        assert_eq!(
+            sorted_triples(&m),
+            vec![
+                (
+                    "/b".to_string(),
+                    "GET".to_string(),
+                    Some("innerHandler".to_string())
+                ),
+                (
+                    "/outer/a".to_string(),
+                    "GET".to_string(),
+                    Some("outerHandler".to_string())
+                ),
+            ]
+        );
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    /// A class-level `@RequestMapping` that names no path argument declares no
+    /// prefix: its handlers compose to their own paths and nothing is refused.
+    /// Without this the `method =`-only form — legal, and common on a base
+    /// controller — would silently refuse every route in the class.
+    #[test]
+    fn a_class_annotation_with_no_path_argument_is_not_a_prefix() {
+        for arguments in [
+            "method = RequestMethod.GET",
+            r#"produces = "application/json""#,
+            r#"consumes = ["application/json"]"#,
+        ] {
+            let m = scan_lang("kt", &in_prefixed_class(arguments, USERS_HANDLER));
+            assert_eq!(sorted_triples(&m), users_route("/users"), "{arguments}");
+            assert!(m.refusals.is_empty(), "{arguments}: {:?}", m.refusals);
+        }
+    }
+
+    /// Only `@RequestMapping` prefixes a type in Spring. A stereotype marker,
+    /// and any other string-valued class annotation, must contribute no prefix
+    /// — otherwise `@Validated("group")` would relocate every route in the
+    /// class.
+    #[test]
+    fn only_request_mapping_prefixes_a_type() {
+        for annotation in [
+            "@RestController",
+            r#"@Validated("group")"#,
+            r#"@Profile(value = "prod")"#,
+            r#"@GetMapping("/not-a-prefix")"#,
+        ] {
+            let m = scan_lang(
+                "kt",
+                &format!("{annotation}\nclass C {{\n{USERS_HANDLER}\n}}\n"),
+            );
+            assert_eq!(sorted_triples(&m), users_route("/users"), "{annotation}");
+            assert!(
+                m.prefixes
+                    .iter()
+                    .all(|s| s.literals.is_empty() && s.opaque.is_empty()),
+                "{annotation} must declare no prefix: {:?}",
+                m.prefixes
+            );
+        }
+    }
+
+    /// An `object` declaration is a type declaration too, and Kotlin's is a
+    /// distinct node kind from a class's. Leaving it out would not lose the
+    /// route safely: the handler would be promoted at its bare method path, a
+    /// wrong address rather than an absent one ([NFR-RA-05]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn an_object_declaration_prefixes_like_a_class() {
+        let got = kotlin_routes(&format!(
+            "@RequestMapping(\"/v1\")\nobject O {{\n{USERS_HANDLER}\n}}\n"
+        ));
+        assert_eq!(got, users_route("/v1/users"));
+    }
+
+    /// A method-level `@RequestMapping` must never be read as a prefix
+    /// governing its own route — the `/v1/x/v1/x` self-composition S-329
+    /// observed in Java when "a type declaration" was spelled as a supertype
+    /// that also matched methods. Kotlin's spelling (a wildcard constrained by
+    /// a type-body child) excludes `function_declaration`, whose body is a
+    /// `function_body`.
+    #[test]
+    fn a_method_level_mapping_is_never_its_own_prefix() {
+        let got = kotlin_routes(&in_class(
+            r#"    @RequestMapping(method = RequestMethod.GET, value = "/v1/x")
+    fun getX(): String { return "" }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![(
+                "/v1/x".to_string(),
+                "ANY".to_string(),
+                Some("getX".to_string())
+            )]
+        );
+    }
+
+    /// The `[framework_methods]` gate still runs first: a marker annotation the
+    /// pathless pattern matches promotes nothing when its name is not in the
+    /// table ([FR-FW-04]). Kotlin's bare implementation of a prefixed interface
+    /// is *even* safer than Java's — it carries the `override` keyword, not an
+    /// annotation — but a plain `@Autowired` handler is the shape that would
+    /// double a route if the gate moved.
+    ///
+    /// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
+    #[test]
+    fn an_unmapped_marker_annotation_in_a_prefixed_class_promotes_nothing() {
+        let m = scan_lang(
+            "kt",
+            &in_prefixed_class(
+                r#""/v1""#,
+                "    @Autowired\n    fun listUsers(): String { return \"\" }",
+            ),
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    /// The wiring composition depends on, asserted at the source level rather
+    /// than on hand-built values: the scope must span the whole declaration —
+    /// annotation *and* body — or a handler's byte offset would fall outside it
+    /// and every route would silently lose its prefix. Kotlin puts a
+    /// declaration's annotations inside its `modifiers` child, so
+    /// `class_declaration` already covers them; this test is what would notice
+    /// if that stopped being true.
+    #[test]
+    fn a_prefix_scope_spans_the_whole_declaration_it_governs() {
+        let source = in_prefixed_class(r#""/v1""#, USERS_HANDLER);
+        let m = scan_lang("kt", &source);
+        let scope = m
+            .prefixes
+            .iter()
+            .find(|s| !s.literals.is_empty())
+            .unwrap_or_else(|| panic!("a declared prefix: {:?}", m.prefixes));
+        assert_eq!(
+            scope
+                .literals
+                .iter()
+                .map(|l| l.text.as_str())
+                .collect::<Vec<_>>(),
+            ["/v1"]
+        );
+        assert!(
+            scope.literals.iter().all(|l| l.resolvable),
+            "a literal prefix reads as an address"
+        );
+        // The whole class declaration: from its first annotation to its closing
+        // brace.
+        assert_eq!(scope.start, source.find('@').expect("annotation"));
+        assert_eq!(scope.end, source.trim_end().len());
+        // And the handler this scope must govern really is inside it.
+        let handler = source.find("@GetMapping").expect("handler annotation");
+        assert!(
+            scope.start <= handler && handler < scope.end,
+            "{scope:?} must contain byte {handler}"
+        );
+    }
+
+    /// The Kotlin query names each shared composition capture as its own
+    /// capture, not merely as a prefix of a longer one — asserted by
+    /// exact-name counting, the same guard the Java query carries, so a rename
+    /// fails here rather than passing vacuously.
+    /// `every_framework_query_naming_a_prefix_also_names_its_scope` covers the
+    /// pairing rule across every shipped query.
+    #[test]
+    fn the_kotlin_query_delegates_composition_by_naming_the_shared_captures() {
+        let query = include_str!("../../../plugins/kotlin/queries/frameworks.scm");
+        for capture in [
+            "fw.route.prefix",
+            "fw.route.prefix.scope",
+            "fw.route.prefix.opaque",
+            "fw.route.path",
+            "fw.route.path.named",
+            "fw.route.anchor",
+        ] {
+            assert!(
+                capture_occurrences(query, capture) > 0,
+                "the Kotlin query must name @{capture}"
+            );
+        }
+        // Both path patterns anchor (see
+        // `path_origins_record_the_annotation_site_and_the_named_rank` for the
+        // behavioural half): a path with no anchor competes with nothing and
+        // always survives, so anchoring one pattern and not the other silently
+        // promotes both at a mixed-form annotation.
+        assert!(
+            capture_occurrences(query, "fw.route.anchor") >= 3,
+            "every registration pattern must anchor: positional, named, pathless"
+        );
+        // The stale claim this story corrected: the header must no longer say
+        // named arguments are unsupported, because they never were merely
+        // absent — the unanchored positional pattern was matching them.
+        assert!(
+            !query.contains("Deliberately NOT captured in v1"),
+            "the header's exclusion note must be corrected, not carried over"
+        );
+    }
+}
+
+// ── Java/Kotlin parity (S-330) ───────────────────────────────────────────────
+
+/// The story's own acceptance criterion, asserted rather than argued: every
+/// [S-328]/[S-329] behaviour holds for the equivalent Kotlin fixture, with
+/// *identical* resulting routes. The table is paired source — the same Spring
+/// annotation written in each language's syntax — and the assertion compares
+/// the promoted route set, the refusal count and the promoted components, so a
+/// divergence in any of the three fails here rather than in one language's own
+/// module.
+#[cfg(all(feature = "lang-java", feature = "lang-kotlin"))]
+mod jvm_parity {
+    use super::*;
+
+    /// Everything the scan established, in a form two languages can be
+    /// compared on: the sorted route set, how many registrations were refused,
+    /// and the promoted component names.
+    fn promoted(ext: &str, source: &str) -> (Vec<String>, usize, Vec<String>) {
+        let m = scan_lang(ext, source);
+        let mut routes: Vec<String> = m
+            .routes
+            .iter()
+            .map(|r| format!("{} {} -> {:?}", r.method, r.path, r.handler))
+            .collect();
+        routes.sort();
+        let mut components: Vec<String> =
+            m.components.iter().map(|c| c.type_path.clone()).collect();
+        components.sort();
+        (routes, m.refusals.len(), components)
+    }
+
+    #[test]
+    fn kotlin_and_java_fixtures_promote_identical_routes() {
+        for (label, kotlin, java) in PAIRED_FIXTURES {
+            assert_eq!(
+                promoted("kt", kotlin),
+                promoted("java", java),
+                "{label}: Kotlin and Java must promote the same routes"
+            );
+        }
+        assert!(
+            PAIRED_FIXTURES.len() >= 20,
+            "the parity table must cover the fixture set, not a sample"
+        );
+    }
+
+    /// The candidacy gate and the method table are *shared*, not merely
+    /// similar: a route promoted from Kotlin has cleared the same
+    /// `org::springframework` ledger fingerprint and been named by the same
+    /// annotation→verb mapping as its Java twin ([FR-FW-04]). Asserted both
+    /// semantically (the loaded descriptors are equal) and byte-for-byte on the
+    /// `[framework_methods]` rows, so a row added to one descriptor and not the
+    /// other fails here.
+    ///
+    /// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
+    #[test]
+    fn the_candidacy_gate_and_method_table_are_shared_between_java_and_kotlin() {
+        let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+        let java = registry.for_extension("java").expect("java plugin");
+        let kotlin = registry.for_extension("kt").expect("kotlin plugin");
+
+        assert_eq!(
+            java.semantics().framework_detectors,
+            kotlin.semantics().framework_detectors,
+            "the ledger candidacy gate is one fingerprint for both languages"
+        );
+        assert_eq!(
+            java.semantics().framework_detectors,
+            ["org::springframework"],
+            "…and it is Spring's package prefix"
+        );
+        assert_eq!(
+            java.semantics().framework_methods,
+            kotlin.semantics().framework_methods,
+            "the annotation→verb table is one mapping for both languages"
+        );
+
+        // Byte-identical, not just equal once parsed: the rows as written.
+        let rows = |descriptor: &str| -> Vec<String> {
+            descriptor
+                .lines()
+                .skip_while(|line| line.trim() != "[framework_methods]")
+                .skip(1)
+                .take_while(|line| !line.trim_start().starts_with('['))
+                .map(|line| line.to_string())
+                .collect()
+        };
+        let java_rows = rows(include_str!("../../../plugins/java/plugin.toml"));
+        assert!(!java_rows.is_empty(), "the Java table must be found");
+        assert_eq!(
+            java_rows,
+            rows(include_str!("../../../plugins/kotlin/plugin.toml")),
+            "the [framework_methods] rows must be byte-identical"
+        );
+    }
+
+    /// The non-duplication criterion, proved structurally rather than by
+    /// reading the diff: the shared interpreter names **no** JVM annotation
+    /// node kind in its code, so neither language can have a composition
+    /// implementation of its own. Comments are stripped first — the module
+    /// documents these node kinds on purpose, to explain what the queries
+    /// carry.
+    ///
+    /// A second copy of composition would have to name at least one of these
+    /// (there is no other way to walk an annotation's arguments), which is what
+    /// makes the absence a real check rather than a stylistic one.
+    #[test]
+    fn no_language_specific_composition_code_exists() {
+        let code: String = include_str!("../framework.rs")
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for node_kind in [
+            // Kotlin
+            "value_argument",
+            "constructor_invocation",
+            "collection_literal",
+            "user_type",
+            "simple_identifier",
+            "class_body",
+            "object_declaration",
+            "interpolation",
+            // Java
+            "element_value_pair",
+            "element_value_array_initializer",
+            "annotation_argument_list",
+            "marker_annotation",
+            "interface_body",
+            "method_declaration",
+        ] {
+            assert!(
+                !code.contains(node_kind),
+                "the shared interpreter must not name the {node_kind} node kind"
+            );
+        }
+    }
+
+    /// The same Spring annotation written in each language's syntax. Kotlin
+    /// arrays are `[…]` where Java's are `{…}`, Kotlin's implementation
+    /// override is a keyword where Java's is `@Override`, and Kotlin's
+    /// interfaces and objects are the same node kind as its classes — none of
+    /// which may change the promoted route.
+    const PAIRED_FIXTURES: &[(&str, &str, &str)] = &[
+        (
+            "named value argument",
+            "class C {\n    @RequestMapping(method = RequestMethod.GET, value = \"/v1/x\", produces = \"application/json\")\n    fun getX(): String { return \"\" }\n}\n",
+            "public class C {\n    @RequestMapping(method = RequestMethod.GET, value = \"/v1/x\", produces = \"application/json\")\n    public String getX() { return \"\"; }\n}\n",
+        ),
+        (
+            "named path alias",
+            "class C {\n    @GetMapping(path = \"/v1/y\")\n    fun getY(): String { return \"\" }\n}\n",
+            "public class C {\n    @GetMapping(path = \"/v1/y\")\n    public String getY() { return \"\"; }\n}\n",
+        ),
+        (
+            "list-valued method path",
+            "class C {\n    @GetMapping(value = [\"/a\", \"/b\"])\n    fun get(): String { return \"\" }\n}\n",
+            "public class C {\n    @GetMapping(value = {\"/a\", \"/b\"})\n    public String get() { return \"\"; }\n}\n",
+        ),
+        (
+            "positional method path",
+            "class C {\n    @GetMapping(\"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "public class C {\n    @GetMapping(\"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "produces/consumes only",
+            "class C {\n    @GetMapping(produces = \"application/json\", consumes = \"text/plain\")\n    fun getX(): String { return \"\" }\n}\n",
+            "public class C {\n    @GetMapping(produces = \"application/json\", consumes = \"text/plain\")\n    public String getX() { return \"\"; }\n}\n",
+        ),
+        (
+            "prefixed interface and bare implementation",
+            "@RequestMapping(\"/v1\")\ninterface UserApi {\n    @RequestMapping(method = RequestMethod.GET, value = \"/users\", produces = \"application/json\")\n    fun listUsers(): String\n\n    @GetMapping(path = [\"/users/{id}\", \"/users/by-id/{id}\"])\n    fun getUser(id: String): String\n}\n\n@RestController\nclass UserController : UserApi {\n    override fun listUsers(): String { return \"\" }\n    override fun getUser(id: String): String { return \"\" }\n}\n",
+            "@RequestMapping(\"/v1\")\npublic interface UserApi {\n    @RequestMapping(method = RequestMethod.GET, value = \"/users\", produces = \"application/json\")\n    String listUsers();\n\n    @GetMapping(path = {\"/users/{id}\", \"/users/by-id/{id}\"})\n    String getUser(String id);\n}\n\n@RestController\nclass UserController implements UserApi {\n    @Override\n    public String listUsers() { return \"\"; }\n    @Override\n    public String getUser(String id) { return \"\"; }\n}\n",
+        ),
+        (
+            "pathless handler in a prefixed class",
+            "@RequestMapping(\"/v1/users\")\n@RestController\nclass C {\n    @GetMapping\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping(\"/v1/users\")\n@RestController\npublic class C {\n    @GetMapping\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "pathless handler with no prefix",
+            "class C {\n    @GetMapping\n    fun listUsers(): String { return \"\" }\n}\n",
+            "public class C {\n    @GetMapping\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "unannotated nested type inherits nothing",
+            "@RequestMapping(\"/outer\")\nclass Outer {\n    @GetMapping(value = \"/a\")\n    fun outerHandler(): String { return \"\" }\n\n    class Inner {\n        @GetMapping(value = \"/b\")\n        fun innerHandler(): String { return \"\" }\n    }\n}\n",
+            "@RequestMapping(\"/outer\")\npublic class Outer {\n    @GetMapping(value = \"/a\")\n    public String outerHandler() { return \"\"; }\n\n    public static class Inner {\n        @GetMapping(value = \"/b\")\n        public String innerHandler() { return \"\"; }\n    }\n}\n",
+        ),
+        (
+            "nested prefixed type takes its own prefix",
+            "@RequestMapping(\"/outer\")\nclass Outer {\n    @GetMapping(value = \"/a\")\n    fun outerHandler(): String { return \"\" }\n\n    @RequestMapping(\"/inner\")\n    class Inner {\n        @GetMapping(value = \"/b\")\n        fun innerHandler(): String { return \"\" }\n    }\n}\n",
+            "@RequestMapping(\"/outer\")\npublic class Outer {\n    @GetMapping(value = \"/a\")\n    public String outerHandler() { return \"\"; }\n\n    @RequestMapping(\"/inner\")\n    public static class Inner {\n        @GetMapping(value = \"/b\")\n        public String innerHandler() { return \"\"; }\n    }\n}\n",
+        ),
+        (
+            "positional non-literal prefix is refused",
+            "@RequestMapping(BASE)\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping(BASE)\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "named non-literal prefix is refused",
+            "@RequestMapping(value = BASE)\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping(value = BASE)\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "empty prefix list declares no prefix",
+            "@RequestMapping(value = [])\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping(value = {})\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "class annotation with no path argument",
+            "@RequestMapping(produces = \"application/json\")\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping(produces = \"application/json\")\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "class annotation with only a method argument",
+            "@RequestMapping(method = RequestMethod.GET)\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping(method = RequestMethod.GET)\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "named list-valued class prefix",
+            "@RequestMapping(value = [\"/v1\", \"/v2\"])\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping(value = {\"/v1\", \"/v2\"})\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "positional list-valued class prefix",
+            "@RequestMapping([\"/v1\", \"/v2\"])\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping({\"/v1\", \"/v2\"})\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "mixed class prefix list composes on its literal",
+            "@RequestMapping(value = [\"/v1\", BASE])\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping(value = {\"/v1\", BASE})\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "property-placeholder prefix is refused",
+            "@RequestMapping(\"${api.base}\")\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping(\"${api.base}\")\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "only RequestMapping prefixes a type",
+            "@Validated(\"group\")\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@Validated(\"group\")\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "separator normalisation",
+            "@RequestMapping(\"/v1/\")\nclass C {\n    @GetMapping(value = \"users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping(\"/v1/\")\npublic class C {\n    @GetMapping(value = \"users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "unmapped annotation carrying arguments",
+            "class C {\n    @Operation(value = \"/v1/x\")\n    @ApiResponse(path = [\"/a\", \"/b\"])\n    fun getX(): String { return \"\" }\n}\n",
+            "public class C {\n    @Operation(value = \"/v1/x\")\n    @ApiResponse(path = {\"/a\", \"/b\"})\n    public String getX() { return \"\"; }\n}\n",
+        ),
+        (
+            "two annotations on one handler",
+            "class C {\n    @GetMapping(\"/read\")\n    @PostMapping(value = \"/write\")\n    fun both(): String { return \"\" }\n}\n",
+            "public class C {\n    @GetMapping(\"/read\")\n    @PostMapping(value = \"/write\")\n    public String both() { return \"\"; }\n}\n",
+        ),
+        (
+            "both alias keys on one annotation",
+            "class C {\n    @GetMapping(value = \"/x\", path = \"/y\")\n    fun get(): String { return \"\" }\n}\n",
+            "public class C {\n    @GetMapping(value = \"/x\", path = \"/y\")\n    public String get() { return \"\"; }\n}\n",
+        ),
+        (
+            "placeholder method path promoted verbatim",
+            "class C {\n    @GetMapping(value = \"${api.base}/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "public class C {\n    @GetMapping(value = \"${api.base}/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "empty-string prefix over a pathless handler",
+            "@RequestMapping(\"\")\nclass C {\n    @GetMapping\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping(\"\")\npublic class C {\n    @GetMapping\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "stereotype component",
+            "@RestController\nclass UserController {\n    @GetMapping(\"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RestController\npublic class UserController {\n    @GetMapping(\"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "positional array method path is captured by neither language",
+            "class C {\n    @GetMapping([\"/a\", \"/b\"])\n    fun get(): String { return \"\" }\n}\n",
+            "public class C {\n    @GetMapping({\"/a\", \"/b\"})\n    public String get() { return \"\"; }\n}\n",
+        ),
+        (
+            "non-literal named method paths promote nothing",
+            "class C {\n    @GetMapping(value = BASE)\n    fun a(): String { return \"\" }\n    @GetMapping(value = BASE + \"/x\")\n    fun b(): String { return \"\" }\n    @GetMapping(value = Paths.USERS)\n    fun c(): String { return \"\" }\n}\n",
+            "public class C {\n    @GetMapping(value = BASE)\n    public String a() { return \"\"; }\n    @GetMapping(value = BASE + \"/x\")\n    public String b() { return \"\"; }\n    @GetMapping(value = Paths.USERS)\n    public String c() { return \"\"; }\n}\n",
+        ),
+        (
+            "mixed list method path",
+            "class C {\n    @GetMapping(value = [\"/a\", BASE + \"/b\"])\n    fun get(): String { return \"\" }\n}\n",
+            "public class C {\n    @GetMapping(value = {\"/a\", BASE + \"/b\"})\n    public String get() { return \"\"; }\n}\n",
+        ),
+        (
+            "paths converging after composition collapse",
+            "@RequestMapping(\"/v1\")\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n    @GetMapping(value = \"users\")\n    fun listUsersAgain(): String { return \"\" }\n}\n",
+            "@RequestMapping(\"/v1\")\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n    @GetMapping(value = \"users\")\n    public String listUsersAgain() { return \"\"; }\n}\n",
+        ),
+        (
+            "method-level mapping is not its own prefix",
+            "class C {\n    @RequestMapping(method = RequestMethod.GET, value = \"/v1/x\")\n    fun getX(): String { return \"\" }\n}\n",
+            "public class C {\n    @RequestMapping(method = RequestMethod.GET, value = \"/v1/x\")\n    public String getX() { return \"\"; }\n}\n",
+        ),
+        (
+            "annotation order does not decide the prefix",
+            "@RestController\n@RequestMapping(\"/v1\")\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RestController\n@RequestMapping(\"/v1\")\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "explicitly empty method path under a prefix",
+            "@RequestMapping(\"/v1\")\nclass C {\n    @GetMapping(\"\")\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping(\"/v1\")\npublic class C {\n    @GetMapping(\"\")\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+        (
+            "unmapped marker annotation in a prefixed class",
+            "@RequestMapping(\"/v1\")\nclass C {\n    @Autowired\n    fun listUsers(): String { return \"\" }\n}\n",
+            "@RequestMapping(\"/v1\")\npublic class C {\n    @Autowired\n    public String listUsers() { return \"\"; }\n}\n",
+        ),
+    ];
 }
