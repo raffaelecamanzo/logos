@@ -537,7 +537,11 @@ mod tests {
 
     impl MemberEngine for FakeEngine {
         type Watcher = ();
-        fn start(root: &Path, _read_connections: usize) -> Result<Arc<Self>> {
+        fn start(
+            root: &Path,
+            _read_connections: usize,
+            _worker_pool: crate::SharedWorkerPool,
+        ) -> Result<Arc<Self>> {
             let member = member_of(root);
             if member == "broken" {
                 anyhow::bail!("store is corrupt");

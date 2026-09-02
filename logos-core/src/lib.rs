@@ -165,4 +165,4 @@ pub mod workspace;
 pub use engine::Engine;
 pub use error::{CoreError, Severity};
 pub use hydrate::{Granularity, GraphView, HydrationConfig, HydrationStats, Scope, SyncStamp};
-pub use runtime::{Runtime, RuntimeConfig};
+pub use runtime::{live_worker_threads, Runtime, RuntimeConfig, SharedWorkerPool, WeakWorkerPool};

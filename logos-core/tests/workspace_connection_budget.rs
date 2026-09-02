@@ -1,5 +1,6 @@
-//! Fitness function for the workspace-wide read-connection budget (S-324,
-//! [CR-100], [NFR-PE-11], [BR-45], [ADR-63]).
+//! Fitness function for the workspace-wide resource budget — read connections
+//! (S-324) and worker threads (S-325) — under [CR-100], [NFR-PE-11], [BR-45],
+//! [ADR-63].
 //!
 //! The unit tests in `federation::registry` prove the ceiling against spy
 //! engines. This proves it against the **operating system**: 72 real member
@@ -9,6 +10,15 @@
 //! stock macOS 256 — the exact envelope in which the measured workspace
 //! exhausted its descriptors at member 10 and left **63 of 72 members
 //! unopened**. Under the budget every member must open.
+//!
+//! It is also where [NFR-PE-11]'s **thread** half is asserted at the size its
+//! measurable target names: 72 resident-or-evicted members must cost the host's
+//! core count in `rayon` workers, not `members × cores` (~864 on the measured
+//! 12-core host), with per-member query latency measured in the same breath so a
+//! starvation regression against [NFR-PE-01] fails here rather than passing
+//! quietly.
+//!
+//! [NFR-PE-01]: ../../docs/specs/requirements/NFR-PE-01.md
 //!
 //! # Why this file holds exactly one test
 //! Lowering `RLIMIT_NOFILE` is **process-wide**, and cargo runs a test binary's
@@ -29,7 +39,7 @@ use std::path::{Path, PathBuf};
 use logos_core::federation::{
     workspace_status, ConnectionBudget, EngineRegistry, Federation, Member, RegistryMode,
 };
-use logos_core::Engine;
+use logos_core::{live_worker_threads, Engine};
 
 /// Members in the fixture — the size of the workspace that failed ([CR-100] §2).
 const MEMBERS: usize = 72;
@@ -131,6 +141,34 @@ fn cores() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
+}
+
+/// The [NFR-PE-01] point-query budget, applied to the far smaller fixtures here
+/// as a *starvation* alarm rather than as a benchmark.
+///
+/// What it guards is the **connection** half of the budget: a resident member
+/// answers on its budgeted share of read connections, so a share squeezed too
+/// small shows up as query latency here. It does not guard the worker pool —
+/// steady-state navigation never enters it ([ADR-11]) — which is asserted
+/// directly, under a saturated pool, in `workspace_shared_worker_pool.rs`.
+///
+/// [ADR-11]: ../../docs/specs/architecture/decisions/ADR-11.md
+const POINT_QUERY_MS: u128 = 100;
+
+/// Poll `condition` until it holds or a generous deadline passes.
+///
+/// Needed only for thread counts: `rayon` starts and terminates workers
+/// asynchronously, so the gauge is eventually — not immediately — consistent
+/// with the pools that exist.
+fn wait_until(condition: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    condition()
 }
 
 /// [NFR-PE-11] acceptance: `workspace status` over a 72-member workspace
@@ -253,4 +291,77 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
             repo.display()
         );
     }
+
+    // ── the thread half of the same budget (S-325, [NFR-PE-11], [ADR-63]) ──
+    //
+    // Every resident member engine runs on ONE injected pool, so the workspace's
+    // whole thread cost is what a single engine would have spawned for itself.
+    // Left to themselves the resident engines would have built one pool each.
+    let per_member_pools = budget.max_resident_members() * budget.worker_threads();
+    assert!(
+        registry.resident_count() > 1,
+        "the pool-sharing assertions need more than one resident member; only \
+         {} are resident",
+        registry.resident_count(),
+    );
+    assert_eq!(
+        registry.shared_worker_threads(),
+        budget.worker_threads(),
+        "the {} resident member engines are not sharing one budgeted pool",
+        registry.resident_count(),
+    );
+    assert!(
+        wait_until(|| live_worker_threads() == budget.worker_threads()),
+        "this process runs {} rayon workers for a {MEMBERS}-member workspace; \
+         the budget is {} (per-member pools would have cost {per_member_pools} \
+         for the resident set alone, and {} had every member stayed resident)",
+        live_worker_threads(),
+        budget.worker_threads(),
+        MEMBERS * budget.worker_threads(),
+    );
+
+    // Per-member latency, measured alongside the thread count so a shared pool
+    // that bounded threads by starving members would fail here rather than pass
+    // quietly ([NFR-PE-01]). Timed on the members still resident after the walk,
+    // so this is steady-state query cost and not another cold start; each is
+    // warmed once first, because a member's first navigation call runs the
+    // FR-IX-07 auto-index prologue.
+    let resident = registry.resident_members();
+    let mut latencies_ms: Vec<u128> = Vec::with_capacity(resident.len());
+    for member in &resident {
+        let engine = registry.engine_for(member).expect("a resident member");
+        let _ = engine.search("f", None, None);
+        let started = std::time::Instant::now();
+        let _ = engine.search("f", None, None);
+        latencies_ms.push(started.elapsed().as_millis());
+    }
+    // The **worst** of the resident set, not a percentile: the sample is the
+    // budgeted resident count, so any p95 index rounds to the maximum anyway.
+    // Naming it honestly keeps the assertion from reading as more statistically
+    // forgiving than it is.
+    latencies_ms.sort_unstable();
+    let worst = latencies_ms.last().copied().unwrap_or_default();
+    eprintln!(
+        "shared pool: {} workers for {MEMBERS} members ({} resident); per-member \
+         search worst {worst} ms of {latencies_ms:?}",
+        registry.shared_worker_threads(),
+        resident.len(),
+    );
+    assert!(
+        worst < POINT_QUERY_MS,
+        "a member's search took {worst} ms over {} resident members on a budgeted \
+         {} read connections each — the budget is starving members \
+         ([NFR-PE-01]); full distribution: {latencies_ms:?}",
+        resident.len(),
+        budget.per_member_read_connections(),
+    );
+
+    // Teardown: the pool belongs to the engines, so releasing the last of them
+    // must leave no worker behind ([ADR-63]).
+    drop(registry);
+    assert!(
+        wait_until(|| live_worker_threads() == 0),
+        "{} rayon worker(s) outlived the workspace that built them",
+        live_worker_threads()
+    );
 }

@@ -8,23 +8,26 @@
 //! exhausted the stock 256-descriptor macOS soft limit at member 10 of 72.
 //!
 //! A [`ConnectionBudget`] replaces that per-member multiple with a **host-derived
-//! ceiling**. It answers two questions the [registry](super::EngineRegistry) asks:
-//! how many read connections one resident member may open
+//! ceiling**. It answers three questions the [registry](super::EngineRegistry)
+//! asks: how many read connections one resident member may open
 //! ([`per_member_read_connections`](ConnectionBudget::per_member_read_connections)),
-//! and how many members may be resident at once
-//! ([`max_resident_members`](ConnectionBudget::max_resident_members)). Their
-//! product is the ceiling on live read connections
-//! ([`total_read_connections`](ConnectionBudget::total_read_connections)) — the
-//! quantity [NFR-PE-11] bounds.
+//! how many members may be resident at once
+//! ([`max_resident_members`](ConnectionBudget::max_resident_members)), and how
+//! many `rayon` workers the whole resident set shares
+//! ([`worker_threads`](ConnectionBudget::worker_threads)). The first two multiply
+//! into the ceiling on live read connections
+//! ([`total_read_connections`](ConnectionBudget::total_read_connections)); the
+//! third is the thread ceiling — together, the two quantities [NFR-PE-11] bounds.
 //!
-//! Because both fall out of the descriptor limit, a host with a larger allowance
-//! keeps more members resident with **no code change** — the budget tracks the
-//! host, never the member count.
+//! Because the connection quantities fall out of the descriptor limit and the
+//! thread quantity out of the core count, a host with a larger allowance keeps
+//! more members resident with **no code change** — the budget tracks the host,
+//! never the member count.
 //!
 //! # Not on the single-root path
 //! A budget exists only where a workspace does. [`Backing::Single`](super::Backing::Single)
 //! never constructs one, and [`Engine::start`](crate::Engine::start) keeps its
-//! core-sized pool exactly as today ([FR-WS-03], [ADR-52]).
+//! core-sized pools exactly as today ([FR-WS-03], [ADR-52]).
 //!
 //! [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
 //! [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
@@ -63,12 +66,14 @@ const NON_CONNECTION_FDS_PER_MEMBER: usize = 1;
 /// Resident members allowed per host core, whatever the descriptor limit.
 ///
 /// Descriptors are not the only resource residency multiplies: each resident
-/// engine still owns a worker pool and a hydration cache ([ADR-63] leaves the
-/// shared pool to a later story). A host with a 65 536-descriptor allowance would
-/// otherwise be told it may hold ~1 700 members resident, which is sound in
-/// descriptors and absurd in threads and memory. Tying the ceiling to cores keeps
-/// it host-derived — never a function of the member count — while the
-/// descriptor budget stays the binding constraint on any ordinary host.
+/// engine still owns a hydration cache, and (before [`worker_threads`] made the
+/// pool shared) a private thread pool as well. A host with a 65 536-descriptor
+/// allowance would otherwise be told it may hold ~1 700 members resident, which
+/// is sound in descriptors and absurd in memory. Tying the ceiling to cores keeps
+/// it host-derived — never a function of the member count — while the descriptor
+/// budget stays the binding constraint on any ordinary host.
+///
+/// [`worker_threads`]: ConnectionBudget::worker_threads
 ///
 /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
 const MAX_RESIDENT_MEMBERS_PER_CORE: usize = 16;
@@ -93,6 +98,16 @@ const TARGET_RESIDENT_MEMBERS: usize = 8;
 /// rebuild an engine on every comparison.
 const MIN_RESIDENT_MEMBERS: usize = 2;
 
+/// Workers the shared pool is never sized below — a pool with no worker cannot
+/// run a job at all.
+///
+/// The clamp is load-bearing rather than cosmetic: `rayon` treats
+/// `num_threads(0)` as "choose automatically", so an unclamped zero would not
+/// fail, it would silently produce a pool sized by `RAYON_NUM_THREADS` or the
+/// host's cores — a thread count the budget never authorised. (The builder now
+/// rejects a zero outright, so the two guards agree.)
+const MIN_WORKER_THREADS: usize = 1;
+
 /// Soft limit assumed when the platform reports none, matching the stock POSIX
 /// default rather than guessing high.
 const ASSUMED_FD_SOFT_LIMIT: u64 = 256;
@@ -115,6 +130,7 @@ const MAX_USEFUL_FD_SOFT_LIMIT: u64 = 1_048_576;
 pub struct ConnectionBudget {
     per_member_read_connections: usize,
     max_resident_members: usize,
+    worker_threads: usize,
 }
 
 impl ConnectionBudget {
@@ -181,6 +197,11 @@ impl ConnectionBudget {
             per_member_read_connections: per_member,
             max_resident_members: residents_for(budgeted_units, per_member)
                 .clamp(MIN_RESIDENT_MEMBERS, host_residency_ceiling(cores)),
+            // Threads are budgeted off the core count, not off the descriptor
+            // table: a worker thread costs no descriptor, and the resident set
+            // shares ONE pool, so the workspace's thread cost is what a single
+            // engine would have spawned for itself ([NFR-PE-11], [ADR-63]).
+            worker_threads: cores.max(MIN_WORKER_THREADS),
         }
     }
 
@@ -202,6 +223,22 @@ impl ConnectionBudget {
     /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
     pub fn total_read_connections(&self) -> usize {
         self.per_member_read_connections * self.max_resident_members
+    }
+
+    /// Workers in the **one** `rayon` pool every resident member engine shares —
+    /// the workspace's whole thread cost ([NFR-PE-11], [ADR-63]).
+    ///
+    /// Derived from the host's core count, so it is the same size a single-root
+    /// engine builds for itself: federating N members multiplies the *stores* a
+    /// query reaches, never the CPU the host has to run them on. Unlike the
+    /// connection halves it is independent of the descriptor limit — a thread
+    /// costs no descriptor, and the pool is shared rather than per-member, so
+    /// residency does not multiply it.
+    ///
+    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+    /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
+    pub fn worker_threads(&self) -> usize {
+        self.worker_threads
     }
 }
 
@@ -471,5 +508,52 @@ mod tests {
             budget.total_read_connections(),
             budget.per_member_read_connections() * budget.max_resident_members()
         );
+    }
+
+    /// The thread half of the budget ([NFR-PE-11], S-325): sized by the host's
+    /// cores, never by the descriptor limit and never by the member count.
+    #[test]
+    fn worker_threads_track_the_cores_and_nothing_else() {
+        for fd_limit in [64, 256, 4_096, 65_536, u64::MAX] {
+            for cores in [1, 2, 12, 64] {
+                let budget = ConnectionBudget::from_limits(fd_limit, cores);
+                assert_eq!(
+                    budget.worker_threads(),
+                    cores,
+                    "a {cores}-core host under a {fd_limit}-fd limit budgeted \
+                     {} worker threads; a thread costs no descriptor, so the \
+                     limit must not enter this",
+                    budget.worker_threads(),
+                );
+            }
+        }
+    }
+
+    /// The pool is shared, so the workspace's thread cost is a *single* engine's
+    /// — it does not rise with residency the way connections do.
+    #[test]
+    fn worker_threads_do_not_multiply_by_residency() {
+        let tight = ConnectionBudget::from_limits(256, 12);
+        let roomy = ConnectionBudget::from_limits(65_536, 12);
+        assert!(
+            roomy.max_resident_members() > tight.max_resident_members(),
+            "fixture assumption: the roomy host holds more members resident"
+        );
+        assert_eq!(
+            roomy.worker_threads(),
+            tight.worker_threads(),
+            "holding more members resident must not cost more worker threads; \
+             that is the multiple the shared pool removes"
+        );
+    }
+
+    /// A degenerate host still gets a pool it can run a job on.
+    ///
+    /// A construction precondition, not taste: without the clamp the budget would
+    /// report zero worker threads while `rayon` quietly ran a host-sized pool, so
+    /// the number [NFR-PE-11] bounds would stop describing the process.
+    #[test]
+    fn a_coreless_host_still_gets_one_worker() {
+        assert_eq!(ConnectionBudget::from_limits(256, 0).worker_threads(), 1);
     }
 }

@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use tempfile::TempDir;
 
-use super::{Runtime, RuntimeConfig};
+use super::{Runtime, RuntimeConfig, SharedWorkerPool};
 use crate::graph_store::{BatchWriter, NewNode};
 use crate::model::{LogosSymbol, NodeKind};
 
@@ -212,6 +212,7 @@ fn concurrent_writes_are_serialized_no_interleaving() {
         RuntimeConfig {
             reader_pool_size: 4,
             worker_threads: 4,
+            worker_pool: None,
             write_queue_capacity: 64,
         },
     )
@@ -280,6 +281,7 @@ fn many_reads_run_concurrently_up_to_the_pool_size() {
         RuntimeConfig {
             reader_pool_size: POOL,
             worker_threads: 2,
+            worker_pool: None,
             write_queue_capacity: 8,
         },
     )
@@ -342,6 +344,7 @@ fn reader_pool_size_zero_is_rejected() {
         RuntimeConfig {
             reader_pool_size: 0,
             worker_threads: 1,
+            worker_pool: None,
             write_queue_capacity: 1,
         },
     );
@@ -357,4 +360,215 @@ fn worker_pool_runs_parallel_jobs() {
         (1..=1000_u64).into_par_iter().sum()
     });
     assert_eq!(sum, 500_500);
+}
+
+// ── the injectable worker pool (S-325, NFR-PE-11, ADR-63) ────────────────────
+
+/// Open a runtime over a fresh database with an explicit worker-pool config.
+fn runtime_with_pool(
+    dir: &TempDir,
+    name: &str,
+    worker_threads: usize,
+    worker_pool: Option<SharedWorkerPool>,
+) -> Runtime {
+    Runtime::open_with_config(
+        dir.path().join(name),
+        RuntimeConfig {
+            reader_pool_size: 1,
+            worker_threads,
+            worker_pool,
+            write_queue_capacity: 8,
+        },
+    )
+    .expect("runtime opens")
+}
+
+/// The pool is **injected, not discovered**: a runtime given none builds its own,
+/// exactly as before this story — so the single-root path cannot accidentally
+/// join a workspace's pool ([FR-WS-03], [ADR-52]).
+#[test]
+fn a_runtime_given_no_pool_builds_its_own() {
+    let dir = TempDir::new().expect("temp dir");
+    let a = runtime_with_pool(&dir, "a.db", 3, None);
+    let b = runtime_with_pool(&dir, "b.db", 3, None);
+
+    assert!(
+        !a.shares_worker_pool_with(&b),
+        "two runtimes given no pool must each build a private one; sharing by          default would make the pool discovered rather than injected"
+    );
+    assert_eq!(
+        a.worker_pool().current_num_threads(),
+        3,
+        "a private pool is sized by RuntimeConfig::worker_threads"
+    );
+}
+
+/// Runtimes handed the same pool run on that one pool — the whole mechanism
+/// behind [NFR-PE-11]'s "threads track the host, not `members × cores`".
+#[test]
+fn runtimes_given_one_pool_share_it() {
+    let dir = TempDir::new().expect("temp dir");
+    let shared = SharedWorkerPool::with_threads(2).expect("pool builds");
+
+    let a = runtime_with_pool(&dir, "a.db", 3, Some(shared.clone()));
+    let b = runtime_with_pool(&dir, "b.db", 3, Some(shared.clone()));
+
+    assert!(
+        a.shares_worker_pool_with(&b),
+        "runtimes injected with the same pool must submit to the same pool"
+    );
+    assert_eq!(
+        a.worker_pool().current_num_threads(),
+        2,
+        "an injected pool keeps ITS size; `worker_threads` (3 here) is the size          of the pool a runtime would have built for itself, and must not be          re-derived over an injected one"
+    );
+    // A control against the reverse mistake: `shares_worker_pool_with` must be
+    // able to say "no", or the assertion above is vacuous.
+    let private = runtime_with_pool(&dir, "c.db", 3, None);
+    assert!(!a.shares_worker_pool_with(&private));
+}
+
+/// Job submission semantics are unchanged: the same job, run on a private pool
+/// and on a shared one, returns the same result through the same
+/// `worker_pool().install(…)` call every core call site uses.
+#[test]
+fn a_shared_pool_runs_the_same_jobs_with_the_same_results() {
+    use rayon::prelude::*;
+
+    let dir = TempDir::new().expect("temp dir");
+    let shared = SharedWorkerPool::with_threads(2).expect("pool builds");
+    let witness_pool = shared.clone();
+    let private = runtime_with_pool(&dir, "private.db", 2, None);
+    let injected = runtime_with_pool(&dir, "injected.db", 2, Some(shared));
+
+    // Assert the PREMISE first. Without it the comparison below passes just as
+    // happily when the injection seam is severed and `injected` quietly gets a
+    // private pool — 500_500 is what any working rayon pool returns, so the
+    // equality alone says nothing about sharing.
+    let witness = runtime_with_pool(&dir, "witness.db", 2, Some(witness_pool));
+    assert!(
+        injected.shares_worker_pool_with(&witness),
+        "the injected runtime is not on the shared pool, so comparing its results \
+         would not be comparing a shared pool against a private one"
+    );
+    assert!(!private.shares_worker_pool_with(&injected));
+
+    let job = |runtime: &Runtime| -> u64 {
+        runtime
+            .worker_pool()
+            .install(|| (1..=1000_u64).into_par_iter().sum())
+    };
+    assert_eq!(job(&private), 500_500);
+    assert_eq!(job(&injected), job(&private));
+}
+
+/// Two members' jobs share one pool without deadlocking: a long-running job
+/// occupying **every** worker makes another member's submission *queue*, and
+/// releasing it lets that submission complete.
+///
+/// The queue step is what makes this a test of *sharing*: if the two runtimes
+/// were on separate pools the second job would run immediately, so the "still
+/// pending while saturated" assertion fails exactly when the injection seam is
+/// severed. Without it the test passes just as happily on two private pools,
+/// where a long job on one cannot contend with the other at all.
+#[test]
+fn a_long_job_on_a_shared_pool_queues_another_submission_without_deadlocking_it() {
+    const WORKERS: usize = 2;
+    let dir = TempDir::new().expect("temp dir");
+    let shared = SharedWorkerPool::with_threads(WORKERS).expect("pool builds");
+    let long = runtime_with_pool(&dir, "long.db", WORKERS, Some(shared.clone()));
+    let short = runtime_with_pool(&dir, "short.db", WORKERS, Some(shared));
+    assert!(
+        long.shares_worker_pool_with(&short),
+        "the premise: both members must be on the SAME pool, or nothing below \
+         is about sharing"
+    );
+
+    let latch = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let occupied = Arc::new(AtomicUsize::new(0));
+
+    // `spawn`, not `install`: queue one blocking job per worker without blocking
+    // this thread, so the pool is saturated rather than merely busy.
+    for _ in 0..WORKERS {
+        let latch = Arc::clone(&latch);
+        let occupied = Arc::clone(&occupied);
+        long.worker_pool().spawn(move || {
+            occupied.fetch_add(1, Ordering::SeqCst);
+            let (lock, cvar) = &*latch;
+            let mut released = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while !*released {
+                released = cvar.wait(released).unwrap_or_else(|e| e.into_inner());
+            }
+        });
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while occupied.load(Ordering::SeqCst) < WORKERS && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        occupied.load(Ordering::SeqCst),
+        WORKERS,
+        "the pool was never saturated, so the queueing assertion below would \
+         prove nothing"
+    );
+
+    let (tx, rx) = mpsc::channel::<u64>();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let value = short.worker_pool().install(|| 7_u64);
+            let _ = tx.send(value);
+        });
+
+        // Saturated: the other member's job has nowhere to run yet. Deterministic
+        // rather than timing-sensitive — every worker is parked on the latch, so
+        // the only way this could complete is a pool with a spare worker, i.e. a
+        // pool that is not the one the long jobs are on.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(250)).is_err(),
+            "a second member's job ran while every worker of the shared pool was \
+             occupied — the two runtimes are not sharing a pool"
+        );
+
+        // Releasing drains the queue: the pool queued the work, it did not
+        // deadlock on it.
+        let (lock, cvar) = &*latch;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cvar.notify_all();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("the queued job must run once the long jobs release"),
+            7
+        );
+    });
+}
+
+/// A zero-thread pool is **rejected**, not silently sized by the host.
+///
+/// The mirror of `reader_pool_size_zero_is_rejected`: `rayon` reads
+/// `num_threads(0)` as "choose automatically", so without this guard a caller
+/// asking for no workers would get `RAYON_NUM_THREADS`-many instead — a pool
+/// whose size no budget authorised, and indistinguishable from success at every
+/// call site ([NFR-PE-11]).
+#[test]
+fn worker_threads_zero_is_rejected() {
+    assert!(
+        SharedWorkerPool::with_threads(0).is_err(),
+        "a zero-worker pool must be rejected, not defaulted to the host's cores"
+    );
+
+    let dir = TempDir::new().expect("temp dir");
+    assert!(
+        Runtime::open_with_config(
+            dir.path().join("logos.db"),
+            RuntimeConfig {
+                reader_pool_size: 1,
+                worker_threads: 0,
+                worker_pool: None,
+                write_queue_capacity: 8,
+            },
+        )
+        .is_err(),
+        "a runtime asked for zero worker threads must fail rather than build a \
+         host-sized pool"
+    );
 }

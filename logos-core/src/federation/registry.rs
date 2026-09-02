@@ -32,6 +32,44 @@
 //! change. This applies on the **CLI fan-out path as well as `serve`**, extending
 //! [NFR-PE-10]'s serve-only eviction.
 //!
+//! # One worker pool, not one per member ([NFR-PE-11], [ADR-63])
+//! Connections are only half the multiple. Left to itself an
+//! [`Engine`](crate::Engine) builds a `rayon` pool of one worker per core, so a
+//! resident set costs `residents × cores` threads on top of its connections —
+//! ~864 on the measured 12-core host. The registry therefore builds **one**
+//! [`SharedWorkerPool`] sized by [`ConnectionBudget::worker_threads`] and injects
+//! it into every member engine it starts, so a workspace's thread cost is what a
+//! single engine would have spawned for itself.
+//!
+//! The registry holds the pool only [`Weak`](crate::WeakWorkerPool)ly: the
+//! resident engines own it, so the last one to be evicted tears it down and no
+//! worker thread outlives the residency it serves. While *any* resident holds it
+//! the weak handle re-shares that same pool, which is what makes eviction and
+//! sharing compose — evicting a member and touching it again rejoins the pool
+//! rather than building a second one.
+//!
+//! Submission is unchanged: every job still enters through
+//! `runtime.worker_pool().install(…)` from a caller that is not itself a pool
+//! worker, so sharing adds no nested blocking submission and one member's long
+//! job cannot deadlock another's — it can only queue behind it. That queueing is
+//! real, though: an eviction's teardown joins the evicted member's watcher, whose
+//! final sync runs on this same pool, and the admission lock is held across it.
+//!
+//! A **steady-state** navigation query is not exposed to that: `search`,
+//! `callers`, `node` and the rest read on the calling thread through the read
+//! pool ([ADR-11]) and never enter the worker pool, so the [NFR-PE-01] budget is
+//! independent of another member's CPU work. The exception is a member's *first*
+//! navigation call, which runs the [FR-IX-07] auto-index prologue — a full index,
+//! on this pool. On a workspace whose members are not yet warm (the case
+//! [CR-100] measured) that prologue is the one navigation path a shared pool
+//! couples across members, which is exactly the trade [ADR-63] Consequences
+//! records. Warming members up front ([FR-WS-14]) is what keeps it off the query
+//! path.
+//!
+//! [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+//! [FR-IX-07]: ../../../docs/specs/requirements/FR-IX-07.md
+//! [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+//!
 //! An evicted member is reconstructed on its next touch and is indistinguishable
 //! from a never-evicted one: the store is canonical ([FR-DB-01]) and an engine
 //! holds no authoritative state. Reconstruction is the policy's *cost*, so the
@@ -48,21 +86,23 @@
 //! [FR-DB-01]: ../../../docs/specs/requirements/FR-DB-01.md
 //! [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
 //! [FR-WS-06]: ../../../docs/specs/requirements/FR-WS-06.md
+//! [NFR-PE-01]: ../../../docs/specs/requirements/NFR-PE-01.md
 //! [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 //! [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+//! [ADR-11]: ../../../docs/specs/architecture/decisions/ADR-11.md
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 //! [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result};
 
 use super::budget::ConnectionBudget;
 use super::{Federation, Member};
-use crate::Engine;
+use crate::{Engine, SharedWorkerPool, WeakWorkerPool};
 
 /// A per-member unit the [`EngineRegistry`] multiplexes ([FR-WS-03]).
 ///
@@ -74,15 +114,22 @@ use crate::Engine;
 pub trait MemberEngine: Send + Sync + 'static {
     /// The watcher handle held for as long as the engine is resident under
     /// [`RegistryMode::Serve`]; dropping it stops that member's watcher.
-    type Watcher: Send;
-
-    /// Build a long-lived engine rooted at a member's working-tree root, opening
-    /// at most `read_connections` read-only connections — the resident member's
-    /// share of the workspace [`ConnectionBudget`] ([NFR-PE-11], [ADR-63]).
     ///
-    /// The budgeted share replaces the per-core pool an engine would size for
-    /// itself; that default belongs to the single-root path, which never reaches
-    /// this trait ([`Engine::start`](crate::Engine::start)).
+    /// `Sync` as well as `Send` because residents live behind the registry's
+    /// [`RwLock`] and the registry itself is shared across serve request tasks —
+    /// stating the bound here reports a non-shareable watcher at the `impl`
+    /// rather than at some distant `Arc<EngineRegistry<_>>` use site.
+    type Watcher: Send + Sync;
+
+    /// Build a long-lived engine rooted at a member's working-tree root on its
+    /// budgeted share of the workspace's resources ([NFR-PE-11], [ADR-63]): at
+    /// most `read_connections` read-only connections, and `worker_pool` — the
+    /// **one** pool every resident member shares — for its CPU jobs.
+    ///
+    /// The budgeted share replaces the per-core connection pool *and* the private
+    /// per-core worker pool an engine would size for itself; those defaults
+    /// belong to the single-root path, which never reaches this trait
+    /// ([`Engine::start`](crate::Engine::start)).
     ///
     /// # Errors
     /// Propagates a store-open / migrate / runtime failure so the registry can
@@ -90,7 +137,11 @@ pub trait MemberEngine: Send + Sync + 'static {
     ///
     /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
     /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
-    fn start(root: &Path, read_connections: usize) -> Result<Arc<Self>>;
+    fn start(
+        root: &Path,
+        read_connections: usize,
+        worker_pool: SharedWorkerPool,
+    ) -> Result<Arc<Self>>;
 
     /// Spawn this member's filesystem watcher, returning the handle to hold.
     ///
@@ -105,8 +156,16 @@ pub trait MemberEngine: Send + Sync + 'static {
 impl MemberEngine for Engine {
     type Watcher = crate::watch::WatchHandle;
 
-    fn start(root: &Path, read_connections: usize) -> Result<Arc<Self>> {
-        Ok(Arc::new(Engine::start_with_read_pool(root, read_connections)?))
+    fn start(
+        root: &Path,
+        read_connections: usize,
+        worker_pool: SharedWorkerPool,
+    ) -> Result<Arc<Self>> {
+        Ok(Arc::new(Engine::start_with_pools(
+            root,
+            read_connections,
+            Some(worker_pool),
+        )?))
     }
 
     fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
@@ -145,114 +204,135 @@ pub struct MemberScoped<T> {
 /// One resident member engine and (under serve) its watcher, with the logical
 /// clock tick of its last touch for LRU eviction.
 struct Resident<E: MemberEngine> {
-    engine: Arc<E>,
     /// Held for the engine's residency; dropping it stops the watcher. `None`
     /// under [`RegistryMode::Lazy`] or when the watcher failed to spawn.
+    ///
+    /// Declared **before** `engine` so it drops first: a watcher's shutdown
+    /// flushes any pending edits through the engine it watches, and Rust drops
+    /// struct fields in declaration order, so the engine must still be alive
+    /// when the handle is dropped. Reordering these two silently turns an
+    /// eviction into a lost final sync.
     _watcher: Option<E::Watcher>,
+    engine: Arc<E>,
     /// Value of the registry's [`tick`](EngineRegistry::tick) at last touch.
-    last_touch: u64,
+    ///
+    /// Atomic so a **hit** needs only a read lock on the resident map: touching
+    /// an already-resident member must not queue behind another member's
+    /// admission (see [`EngineRegistry::admission`]).
+    last_touch: AtomicU64,
 }
 
-/// The resident member engines plus the eviction accounting the budget needs,
-/// behind **one** lock so residency and its bookkeeping can never disagree.
-struct Residency<E: MemberEngine> {
-    /// Member name → its live engine (and, under serve, its watcher).
-    resident: HashMap<String, Resident<E>>,
+/// The eviction accounting and the shared worker pool — the state an
+/// **admission** owns, held behind the admission lock so a start can never
+/// disagree with the bookkeeping that authorised it.
+#[derive(Default)]
+struct Admission {
     /// Every member this registry has built at least once — the denominator
     /// that turns a start into a *re*construction.
     started_before: HashSet<String>,
-    /// Engine starts that rebuilt a previously-evicted member. The cost of the
-    /// budget, counted so thrash is measurable ([NFR-PE-11]).
+    /// The one `rayon` pool every resident member engine shares ([NFR-PE-11],
+    /// [ADR-63]) — held **weakly**, because the residents own it.
     ///
-    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
-    reconstructions: u64,
-    /// Engine starts that **failed**, across every touch this registry has served.
+    /// An admission upgrades it: a live pool is re-shared with the incoming
+    /// member (so evict-then-reconstruct rejoins the pool rather than building a
+    /// second one), and a dead one — the state after the last resident was
+    /// evicted, when no worker thread remains — is replaced by a fresh pool. A
+    /// strong reference here would keep `worker_threads` threads alive for a
+    /// workspace with nothing resident, which is exactly the orphan [ADR-63]'s
+    /// teardown clause forbids.
     ///
-    /// The per-member `Err` a fan-out returns is the only other record, and it
-    /// survives just as far as its read-model: [`workspace_status`](super::workspace_status)
-    /// walks every member four times, and the coverage and topic tiers have no
-    /// per-member error channel, so a member that fails to open during those
-    /// walks is silently dropped. Counting failures registry-side is what lets a
-    /// caller assert "no member failed to open" over the whole command rather
-    /// than over its first walk ([NFR-PE-11], [FR-WS-16]).
-    ///
-    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
-    start_failures: u64,
+    /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
+    worker_pool: WeakWorkerPool,
 }
 
-impl<E: MemberEngine> Residency<E> {
-    fn new() -> Self {
-        Self {
-            resident: HashMap::new(),
-            started_before: HashSet::new(),
-            reconstructions: 0,
-            start_failures: 0,
+impl Admission {
+    /// The pool the next member engine joins: the live shared one if any
+    /// resident still holds it, otherwise a freshly built pool of `threads`
+    /// workers, remembered weakly for the members admitted after it.
+    ///
+    /// # Errors
+    /// Propagates a `rayon` pool-build failure, which the caller reports as a
+    /// degraded member start — the same class as a failed store open.
+    fn join_or_build_pool(&mut self, threads: usize) -> Result<SharedWorkerPool> {
+        if let Some(pool) = self.worker_pool.upgrade() {
+            return Ok(pool);
         }
+        let pool = SharedWorkerPool::with_threads(threads)
+            .context("building the workspace's shared worker pool")?;
+        self.worker_pool = pool.downgrade();
+        Ok(pool)
     }
 
-    /// Evict least-recently-touched members until at most `cap` remain,
-    /// returning the evicted names least-recently-touched **first**.
-    ///
-    /// Dropping a [`Resident`] drops its engine `Arc` — closing that member's
-    /// connections — and stops its watcher.
-    ///
-    /// A member whose engine **another caller still holds** is skipped, and the
-    /// next-least-recently-touched evicted instead. Evicting it would free
-    /// nothing (its connections stay open for as long as that caller lives) and
-    /// would guarantee the next touch built a *second* engine over the same
-    /// store — two writer actors, two hydration caches, and one of them with no
-    /// watcher. The serve surface makes this concrete: it resolves the default
-    /// member's engine once and holds it for the process lifetime, so on a
-    /// workspace larger than the budget the default is the first member LRU
-    /// would discard. Skipping held members keeps "one live engine per member
-    /// store" true, which is what makes an evicted member's reconstruction
-    /// indistinguishable from a never-evicted one ([FR-DB-01], [NFR-PE-11]).
-    ///
-    /// The cost is that residency can exceed `cap` when callers hold many
-    /// engines at once. That is honest rather than harmful: those connections
-    /// were live either way, and [`live_read_connections`](EngineRegistry::live_read_connections)
-    /// reports the excess instead of hiding it.
-    ///
-    /// [FR-DB-01]: ../../../docs/specs/requirements/FR-DB-01.md
-    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
-    fn evict_to(&mut self, cap: usize) -> Vec<String> {
-        if self.resident.len() <= cap {
-            return Vec::new();
-        }
-        let mut by_recency: Vec<(String, u64)> = self
-            .resident
-            .iter()
-            .filter(|(_, resident)| Arc::strong_count(&resident.engine) == 1)
-            .map(|(name, resident)| (name.clone(), resident.last_touch))
-            .collect();
-        by_recency.sort_by_key(|(_, touch)| *touch); // least-recently-touched first
-        let evict_count = self.resident.len() - cap;
-        by_recency
-            .into_iter()
-            .take(evict_count)
-            .map(|(name, _)| {
-                self.resident.remove(&name); // drops the engine Arc + stops the watcher
-                name
-            })
-            .collect()
+    /// Record that `member` was just built, reporting whether this was a
+    /// *re*construction — a rebuild of a member seen before.
+    fn record_start(&mut self, member: &str) -> bool {
+        !self.started_before.insert(member.to_string())
     }
+}
 
-    /// Record that `member` was just built, counting a rebuild of a member seen
-    /// before as a reconstruction.
-    fn record_start(&mut self, member: &str) {
-        if !self.started_before.insert(member.to_string()) {
-            self.reconstructions += 1;
-        }
+/// Evict least-recently-touched members from `resident` until at most `cap`
+/// remain, returning the evicted entries least-recently-touched **first**.
+///
+/// The residents are **returned, not dropped here**: dropping one joins its
+/// writer thread and stops its watcher, and the caller — which holds the
+/// admission lock — drops them after releasing the map's write lock and *before*
+/// starting the incoming engine. That keeps the ordering the ceiling depends on
+/// (every evicted connection is closed before a new one opens) while taking the
+/// slow teardown off the lock a resident-member hit needs.
+///
+/// A member whose engine **another caller still holds** is skipped, and the
+/// next-least-recently-touched evicted instead. Evicting it would free
+/// nothing (its connections stay open for as long as that caller lives) and
+/// would guarantee the next touch built a *second* engine over the same
+/// store — two writer actors, two hydration caches, and one of them with no
+/// watcher. The serve surface makes this concrete: it resolves the default
+/// member's engine once and holds it for the process lifetime, so on a
+/// workspace larger than the budget the default is the first member LRU
+/// would discard. Skipping held members keeps "one live engine per member
+/// store" true, which is what makes an evicted member's reconstruction
+/// indistinguishable from a never-evicted one ([FR-DB-01], [NFR-PE-11]).
+///
+/// The strong-count check and the removal happen under the **same** write-lock
+/// acquisition, so a concurrent hit — which clones its `Arc` under the read lock
+/// — cannot slip between them and have its engine evicted out from under it.
+///
+/// The cost is that residency can exceed `cap` when callers hold many
+/// engines at once. That is honest rather than harmful: those connections
+/// were live either way, and [`live_read_connections`](EngineRegistry::live_read_connections)
+/// reports the excess instead of hiding it.
+///
+/// [FR-DB-01]: ../../../docs/specs/requirements/FR-DB-01.md
+/// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+fn evict_to<E: MemberEngine>(
+    resident: &mut HashMap<String, Resident<E>>,
+    cap: usize,
+) -> Vec<(String, Resident<E>)> {
+    if resident.len() <= cap {
+        return Vec::new();
     }
+    let mut by_recency: Vec<(String, u64)> = resident
+        .iter()
+        .filter(|(_, r)| Arc::strong_count(&r.engine) == 1)
+        .map(|(name, r)| (name.clone(), r.last_touch.load(Ordering::Relaxed)))
+        .collect();
+    by_recency.sort_by_key(|(_, touch)| *touch); // least-recently-touched first
+    let evict_count = resident.len() - cap;
+    by_recency
+        .into_iter()
+        .take(evict_count)
+        .filter_map(|(name, _)| resident.remove(&name).map(|r| (name, r)))
+        .collect()
 }
 
 /// The `root → Engine` registry over a workspace's members ([FR-WS-03],
 /// [NFR-PE-10], [NFR-PE-11], [ADR-52], [ADR-63]).
 ///
-/// Shareable behind an [`Arc`] across request tasks (the interior state is a
-/// [`Mutex`]), so the web surface and concurrent fan-out see one registry. Each
-/// member engine submits to **its own** runtime pools, so touching one member
-/// never advances another's state.
+/// Shareable behind an [`Arc`] across request tasks (the interior state is
+/// locked), so the web surface and concurrent fan-out see one registry. Each
+/// member engine owns its **own store, writer and read pool**, so touching one
+/// member never advances another's state; the `rayon` worker pool is the one
+/// thing they share, and it carries no per-member state — only CPU
+/// ([NFR-PE-11], [ADR-63]).
 ///
 /// [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
 /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
@@ -262,10 +342,49 @@ impl<E: MemberEngine> Residency<E> {
 pub struct EngineRegistry<E: MemberEngine = Engine> {
     federation: Federation,
     mode: RegistryMode,
-    /// The host-derived ceiling on live read connections, and the residency it
-    /// implies. Never a function of the member count ([NFR-PE-11]).
+    /// The host-derived ceiling on live read connections and worker threads, and
+    /// the residency they imply. Never a function of the member count
+    /// ([NFR-PE-11]).
     budget: ConnectionBudget,
-    residency: Mutex<Residency<E>>,
+    /// The resident member engines. An [`RwLock`] rather than a `Mutex` because
+    /// a **hit** is the common case and must not queue behind an admission: a
+    /// fan-out over a large workspace spends its time in cold starts and engine
+    /// teardowns, and under one lock every unrelated request for an
+    /// already-resident member — the serve surface's default member above all —
+    /// waited for the whole fan-out.
+    resident: RwLock<HashMap<String, Resident<E>>>,
+    /// Serialises **admission**: eviction, teardown, engine start and insertion
+    /// happen under this lock and in that order, so the live count never even
+    /// transiently exceeds the budget and two concurrent touches of the same
+    /// member cannot each build an engine.
+    ///
+    /// Lock order is always `admission` → `resident`; nothing takes them the
+    /// other way round.
+    admission: Mutex<Admission>,
+    /// Engine starts that rebuilt a previously-evicted member. The cost of the
+    /// budget, counted so thrash is measurable ([NFR-PE-11]).
+    ///
+    /// Atomic rather than admission state so the readout never queues behind an
+    /// admission: a cold start under that lock can run for seconds (open and
+    /// migrate a store, spawn a watcher, join an evicted member's writer thread),
+    /// and a caller asking how much thrash it has paid should not have to wait
+    /// for one.
+    ///
+    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+    reconstructions: AtomicU64,
+    /// Engine starts that **failed**, across every touch this registry has served.
+    ///
+    /// The per-member `Err` a fan-out returns is the only other record, and it
+    /// survives just as far as its read-model: [`workspace_status`](super::workspace_status)
+    /// walks every member four times, and the coverage and topic tiers have no
+    /// per-member error channel, so a member that fails to open during those
+    /// walks is silently dropped. Counting failures registry-side is what lets a
+    /// caller assert "no member failed to open" over the whole command rather
+    /// than over its first walk ([NFR-PE-11], [FR-WS-16]). Atomic for the same
+    /// reason as [`reconstructions`](Self::reconstructions).
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    start_failures: AtomicU64,
     /// Monotonic logical clock — bumped on every touch to order residents by
     /// recency for LRU eviction. A tick, not wall-clock, so eviction is
     /// deterministic.
@@ -358,7 +477,10 @@ impl<E: MemberEngine> EngineRegistry<E> {
             federation,
             mode,
             budget,
-            residency: Mutex::new(Residency::new()),
+            resident: RwLock::new(HashMap::new()),
+            admission: Mutex::new(Admission::default()),
+            reconstructions: AtomicU64::new(0),
+            start_failures: AtomicU64::new(0),
             tick: AtomicU64::new(0),
         }
     }
@@ -396,50 +518,101 @@ impl<E: MemberEngine> EngineRegistry<E> {
             anyhow::bail!("no such workspace member: {member:?}");
         };
 
-        // Hold the lock across the build so two concurrent touches of the same
-        // member cannot each construct an engine (the second would waste a cold
-        // start and orphan a watcher). Fan-out is member-sequential and serve
-        // warm is one-shot, so this does not serialise steady-state reads —
-        // those run on each engine's own pools after the Arc is cloned out.
-        let mut residency = self.lock_residency();
-        let tick = self.tick.fetch_add(1, Ordering::Relaxed);
+        // The hit path: a read lock, a clone, done. It never waits on an
+        // in-flight admission, so a fan-out's cold starts no longer serialise
+        // unrelated requests for members that are already resident.
+        if let Some(engine) = self.touch_resident(member) {
+            return Ok(engine);
+        }
 
-        if let Some(resident) = residency.resident.get_mut(member) {
-            resident.last_touch = tick;
-            return Ok(Arc::clone(&resident.engine));
+        // The miss path is serialised end to end so two concurrent touches of
+        // the same member cannot each construct an engine (the second would
+        // waste a cold start, orphan a watcher, and put a second writer actor on
+        // one store). Re-check under the lock: the member may have been admitted
+        // while this caller queued.
+        let mut admission = self.lock_admission();
+        if let Some(engine) = self.touch_resident(member) {
+            return Ok(engine);
         }
 
         // Make room BEFORE opening any connection, so the live count never even
-        // transiently exceeds the budget ([NFR-PE-11]). The evicted engines are
-        // dropped here, closing their connections unless a caller still holds
-        // one — which is why the room is made first rather than after the start.
-        //
-        // That drop (joining a writer thread, tearing down a worker pool) runs
-        // under this lock, and deliberately so: deferring it past the lock would
-        // leave the evicted connections open across the new engine's start,
-        // which is exactly the overshoot the ordering above avoids.
-        residency.evict_to(self.budget.max_resident_members().saturating_sub(1));
+        // transiently exceeds the budget ([NFR-PE-11]). `evict_to` removes the
+        // entries under the map's write lock and hands them back; dropping them
+        // *here* — still under the admission lock, still before the start below —
+        // closes their connections first, unless a caller still holds one. The
+        // teardown (joining a writer thread, stopping a watcher) is therefore off
+        // the map lock, where it would have blocked every concurrent hit, but
+        // still ahead of the start, which is what the ordering exists for.
+        // Two statements deliberately: binding the evicted residents first ends
+        // the temporary write guard, so the `drop` below runs off the map lock.
+        // Folding them into one expression would put the teardown back under it.
+        let evicted = evict_to(
+            &mut self.write_resident(),
+            self.budget.max_resident_members().saturating_sub(1),
+        );
+        drop(evicted);
 
-        let engine = match E::start(&target.root, self.budget.per_member_read_connections()) {
+        // Every resident member shares one pool ([NFR-PE-11], [ADR-63]). A live
+        // pool is re-shared; only a workspace with nothing resident builds one.
+        // A pool that cannot be built is a degraded member start of the same
+        // class as a store that cannot be opened, so both land in one arm.
+        let started = admission
+            .join_or_build_pool(self.budget.worker_threads())
+            .and_then(|worker_pool| {
+                E::start(
+                    &target.root,
+                    self.budget.per_member_read_connections(),
+                    worker_pool,
+                )
+            });
+        let engine = match started {
             Ok(engine) => engine,
             Err(err) => {
-                residency.start_failures += 1;
+                self.start_failures.fetch_add(1, Ordering::Relaxed);
                 return Err(err).with_context(|| {
                     format!("starting the engine for workspace member {member:?}")
                 });
             }
         };
-        residency.record_start(member);
+        if admission.record_start(member) {
+            self.reconstructions.fetch_add(1, Ordering::Relaxed);
+        }
         let watcher = self.spawn_watcher(member, &engine);
-        residency.resident.insert(
+        let displaced = self.write_resident().insert(
             member.to_string(),
             Resident {
-                engine: Arc::clone(&engine),
                 _watcher: watcher,
-                last_touch: tick,
+                engine: Arc::clone(&engine),
+                last_touch: AtomicU64::new(self.tick.fetch_add(1, Ordering::Relaxed)),
             },
         );
+        // Unreachable: the admission lock is held across the re-check above and
+        // this insert, and nothing else inserts. Asserted rather than assumed
+        // because a displaced `Resident` would drop *under the write guard* —
+        // joining a watcher and a writer thread with every hit blocked, which is
+        // precisely the teardown that `evict_to` was restructured to keep off
+        // this lock.
+        debug_assert!(
+            displaced.is_none(),
+            "a second engine was admitted for member {member:?} while one was resident"
+        );
         Ok(engine)
+    }
+
+    /// Clone out an already-resident member's engine, marking it most-recently
+    /// touched — the hit path, under a **read** lock only.
+    fn touch_resident(&self, member: &str) -> Option<Arc<E>> {
+        let resident = self.read_resident();
+        let entry = resident.get(member)?;
+        // `fetch_max`, not `store`: the tick allocation and the write are two
+        // operations, so a thread preempted between them could otherwise write a
+        // stale tick over a newer one and make the hottest member look like the
+        // least-recently-touched — one spurious eviction and rebuild. Monotone by
+        // construction instead.
+        entry
+            .last_touch
+            .fetch_max(self.tick.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+        Some(Arc::clone(&entry.engine))
     }
 
     /// The **default member's** engine ([FR-WS-05]): `[workspace] default`,
@@ -469,9 +642,11 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// Each member's result is a [`Result`]: a member whose engine fails to
     /// start is reported as an `Err` for that member rather than aborting the
     /// whole query, so a partly-degraded workspace still answers ([ADR-53]).
-    /// `f` runs eagerly, once per member, in discovery order; because each
-    /// member's engine is independent (its own pools and store), the per-member
-    /// calls never interfere.
+    /// `f` runs eagerly, once per member, in discovery order. Each member's
+    /// engine owns its own store, writer and read pool, so a per-member call
+    /// never advances another member's state; since S-325 they do share one
+    /// `rayon` worker pool, so CPU jobs queue behind one another rather than
+    /// running on private pools ([NFR-PE-11], [ADR-63] Consequences).
     ///
     /// [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
     /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
@@ -489,15 +664,14 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// The members with a resident (constructed) engine right now, sorted by
     /// name — introspection for eviction accounting and tests.
     pub fn resident_members(&self) -> Vec<String> {
-        let residency = self.lock_residency();
-        let mut names: Vec<String> = residency.resident.keys().cloned().collect();
+        let mut names: Vec<String> = self.read_resident().keys().cloned().collect();
         names.sort();
         names
     }
 
     /// The number of resident member engines.
     pub fn resident_count(&self) -> usize {
-        self.lock_residency().resident.len()
+        self.read_resident().len()
     }
 
     /// The workspace-wide budget this registry holds its residents inside
@@ -513,7 +687,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
     ///
     /// Normally at or below [`ConnectionBudget::total_read_connections`]. It can
     /// exceed it when callers hold engines the registry would otherwise have
-    /// evicted, because a held engine is never evicted (see `Residency::evict_to`)
+    /// evicted, because a held engine is never evicted (see [`evict_to`])
     /// — and this readout **rises** to say so rather than reporting the budget it
     /// wishes were true. Compare it against the budget; do not assume it.
     ///
@@ -531,7 +705,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
     ///
     /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
     pub fn reconstructions(&self) -> u64 {
-        self.lock_residency().reconstructions
+        self.reconstructions.load(Ordering::Relaxed)
     }
 
     /// How many engine starts have **failed** across every touch this registry
@@ -546,7 +720,24 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     pub fn start_failures(&self) -> u64 {
-        self.lock_residency().start_failures
+        self.start_failures.load(Ordering::Relaxed)
+    }
+
+    /// Worker threads the workspace's **shared** `rayon` pool is running right
+    /// now — `0` when no engine holds it ([NFR-PE-11], [ADR-63]).
+    ///
+    /// The whole thread cost of a federated workspace, whatever its member count:
+    /// one pool of [`ConnectionBudget::worker_threads`] workers, or none at all.
+    /// A zero here after the last resident engine has been evicted is the
+    /// teardown claim [ADR-63] makes, stated as a readout rather than as a hope.
+    ///
+    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+    /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
+    pub fn shared_worker_threads(&self) -> usize {
+        self.lock_admission()
+            .worker_pool
+            .upgrade()
+            .map_or(0, |pool| pool.threads())
     }
 
     /// Evict least-recently-touched member engines until at most `cap` remain,
@@ -564,23 +755,45 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
     /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
     pub fn evict_to_capacity(&self, cap: usize) -> Vec<String> {
-        self.lock_residency().evict_to(cap)
+        // Under the admission lock so a trim cannot interleave with an
+        // admission's evict-then-start, and dropped outside the map's write lock
+        // so the teardown does not block concurrent hits.
+        let _admission = self.lock_admission();
+        let evicted = evict_to(&mut self.write_resident(), cap);
+        evicted.into_iter().map(|(name, _)| name).collect()
     }
 
-    /// Lock the residency, **recovering** a poisoned lock rather than
+    /// Lock the admission state, **recovering** a poisoned lock rather than
     /// propagating the poison.
     ///
-    /// The map is a plain engine cache; a poisoned view is still usable. The
-    /// registry is shared behind an [`Arc`] across serve request tasks, and the
-    /// module's contract is per-member degradation — so a single member's panic
-    /// (e.g. inside a build held under this lock) must not brick every
-    /// subsequent `engine_for` / `fan_out` for the healthy members. Recovering
-    /// the guard keeps that all-or-nothing failure from happening ([ADR-53]).
+    /// The state is eviction bookkeeping and a pool handle; a poisoned view is
+    /// still usable. The registry is shared behind an [`Arc`] across serve
+    /// request tasks, and the module's contract is per-member degradation — so a
+    /// single member's panic (e.g. inside a build held under this lock) must not
+    /// brick every subsequent `engine_for` / `fan_out` for the healthy members.
+    /// Recovering the guard keeps that all-or-nothing failure from happening
+    /// ([ADR-53]).
     ///
     /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
-    fn lock_residency(&self) -> std::sync::MutexGuard<'_, Residency<E>> {
-        self.residency
+    fn lock_admission(&self) -> std::sync::MutexGuard<'_, Admission> {
+        self.admission
             .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Read the resident map, recovering a poisoned lock for the same reason
+    /// [`lock_admission`](Self::lock_admission) does.
+    fn read_resident(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, Resident<E>>> {
+        self.resident
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Write the resident map, recovering a poisoned lock for the same reason
+    /// [`lock_admission`](Self::lock_admission) does.
+    fn write_resident(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Resident<E>>> {
+        self.resident
+            .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
@@ -732,6 +945,17 @@ impl<E: MemberEngine> Backing<E> {
 mod tests {
     use super::*;
 
+    /// The registry is shared behind an [`Arc`] across serve request tasks, so
+    /// it must be `Send + Sync` with a **real** [`Engine`] and its real watcher
+    /// handle. Asserted at compile time because the interior locking is what
+    /// provides it: swapping a lock for one with tighter bounds on its contents
+    /// would otherwise break the web surface, not this module.
+    const _: fn() = || {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<EngineRegistry<Engine>>();
+        assert_send_sync::<Backing<Engine>>();
+    };
+
     use std::cell::Cell;
     use std::path::PathBuf;
 
@@ -788,13 +1012,23 @@ mod tests {
         root: PathBuf,
         /// The pool size the registry asked for — the member's budgeted share.
         read_connections: usize,
+        /// The `rayon` pool the registry injected. Held (not merely recorded)
+        /// because holding it is what a real member engine does, and it is the
+        /// only reason the pool outlives one admission: a spy that dropped it
+        /// would make every member build its own and hide the sharing this story
+        /// is about.
+        worker_pool: SharedWorkerPool,
     }
     struct SpyWatcher;
 
     impl MemberEngine for SpyEngine {
         type Watcher = SpyWatcher;
 
-        fn start(root: &Path, read_connections: usize) -> Result<Arc<Self>> {
+        fn start(
+            root: &Path,
+            read_connections: usize,
+            worker_pool: SharedWorkerPool,
+        ) -> Result<Arc<Self>> {
             STARTS.with(|c| c.set(c.get() + 1));
             LIVE_CONNECTIONS.with(|c| c.set(c.get() + read_connections));
             PEAK_CONNECTIONS.with(|peak| {
@@ -803,6 +1037,7 @@ mod tests {
             Ok(Arc::new(SpyEngine {
                 root: root.to_path_buf(),
                 read_connections,
+                worker_pool,
             }))
         }
 
@@ -967,7 +1202,11 @@ mod tests {
         struct FailingEngine;
         impl MemberEngine for FailingEngine {
             type Watcher = ();
-            fn start(_root: &Path, _read_connections: usize) -> Result<Arc<Self>> {
+            fn start(
+                _root: &Path,
+                _read_connections: usize,
+                _worker_pool: SharedWorkerPool,
+            ) -> Result<Arc<Self>> {
                 anyhow::bail!("store is corrupt")
             }
             fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
@@ -1052,7 +1291,11 @@ mod tests {
         struct PickyEngine;
         impl MemberEngine for PickyEngine {
             type Watcher = ();
-            fn start(root: &Path, _read_connections: usize) -> Result<Arc<Self>> {
+            fn start(
+                root: &Path,
+                _read_connections: usize,
+                _worker_pool: SharedWorkerPool,
+            ) -> Result<Arc<Self>> {
                 if root.ends_with("b") {
                     anyhow::bail!("store is corrupt");
                 }
@@ -1085,7 +1328,11 @@ mod tests {
         struct NoWatchEngine;
         impl MemberEngine for NoWatchEngine {
             type Watcher = ();
-            fn start(_root: &Path, _read_connections: usize) -> Result<Arc<Self>> {
+            fn start(
+                _root: &Path,
+                _read_connections: usize,
+                _worker_pool: SharedWorkerPool,
+            ) -> Result<Arc<Self>> {
                 Ok(Arc::new(NoWatchEngine))
             }
             fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
@@ -1174,7 +1421,11 @@ mod tests {
         struct FailingEngine;
         impl MemberEngine for FailingEngine {
             type Watcher = ();
-            fn start(_root: &Path, _read_connections: usize) -> Result<Arc<Self>> {
+            fn start(
+                _root: &Path,
+                _read_connections: usize,
+                _worker_pool: SharedWorkerPool,
+            ) -> Result<Arc<Self>> {
                 anyhow::bail!("store is corrupt")
             }
             fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
@@ -1599,7 +1850,11 @@ mod tests {
         }
         impl MemberEngine for FlakyEngine {
             type Watcher = ();
-            fn start(root: &Path, _read_connections: usize) -> Result<Arc<Self>> {
+            fn start(
+                root: &Path,
+                _read_connections: usize,
+                _worker_pool: SharedWorkerPool,
+            ) -> Result<Arc<Self>> {
                 if root.ends_with("b") {
                     let attempt = B_ATTEMPTS.with(|c| {
                         c.set(c.get() + 1);
@@ -1666,7 +1921,12 @@ mod tests {
     fn backing_single_bypasses_the_registry() {
         reset_spies();
         let backing = Backing::<SpyEngine>::resolve(None, RegistryMode::Serve, || {
-            SpyEngine::start(Path::new("/solo"), single_root_pool()).unwrap()
+            SpyEngine::start(
+                Path::new("/solo"),
+                single_root_pool(),
+                SharedWorkerPool::with_threads(1).unwrap(),
+            )
+            .unwrap()
         });
 
         assert!(!backing.is_federated());
@@ -1694,5 +1954,325 @@ mod tests {
         let registry = backing.as_federated().expect("federated backing");
         assert_eq!(registry.resident_members(), ["a", "b"]);
         assert_eq!((starts(), watches()), (2, 2), "the workspace members are warmed");
+    }
+
+    // ── the shared worker pool (S-325, NFR-PE-11, NFR-PE-08, ADR-63) ───────
+
+    /// Every resident member engine runs on **one** pool, so a workspace's
+    /// thread cost is the budget's, not `members × cores` ([NFR-PE-11]).
+    #[test]
+    fn resident_member_engines_share_one_worker_pool() {
+        reset_spies();
+        let registry = lazy(&["a", "b", "c"]);
+        let engines: Vec<Arc<SpyEngine>> = ["a", "b", "c"]
+            .iter()
+            .map(|m| registry.engine_for(m).unwrap())
+            .collect();
+
+        assert_eq!(starts(), 3, "the fixture must actually build three engines");
+        for other in &engines[1..] {
+            assert!(
+                SharedWorkerPool::ptr_eq(&engines[0].worker_pool, &other.worker_pool),
+                "member engines were handed different worker pools; the thread                  cost is still a multiple of the member count"
+            );
+        }
+        assert_eq!(
+            registry.shared_worker_threads(),
+            registry.budget().worker_threads(),
+            "the shared pool must be sized by the budget"
+        );
+    }
+
+    /// The pool is sized by the **host**, not by the workspace: 200 members
+    /// share the same pool of the same size three do ([NFR-PE-11]'s "threads
+    /// track C rather than N × C").
+    #[test]
+    fn the_shared_pool_is_sized_by_the_host_not_the_member_count() {
+        reset_spies();
+        let small = EngineRegistry::<SpyEngine>::with_budget(
+            big_fed(3),
+            RegistryMode::Lazy,
+            stock_macos_budget(),
+        );
+        let large = EngineRegistry::<SpyEngine>::with_budget(
+            big_fed(200),
+            RegistryMode::Lazy,
+            stock_macos_budget(),
+        );
+        let mut resident_pools: Vec<SharedWorkerPool> = Vec::new();
+        for registry in [&small, &large] {
+            for member in registry.members().to_vec() {
+                let engine = registry.engine_for(&member.name).unwrap();
+                if registry.resident_members().contains(&member.name) {
+                    resident_pools.push(engine.worker_pool.clone());
+                }
+            }
+        }
+        assert_eq!(
+            large.shared_worker_threads(),
+            small.shared_worker_threads(),
+            "a 200-member workspace ran more worker threads than a 3-member one"
+        );
+        // `shared_worker_threads` upgrades ONE weak handle, so on its own it
+        // reports a single pool's size and cannot see a second, third or 200th
+        // pool — the very failure this test is named for. Compare the handles the
+        // engines actually hold, per registry, so "one pool" is asserted rather
+        // than inferred from a number that would look identical either way.
+        for registry in [&small, &large] {
+            let pools: Vec<SharedWorkerPool> = registry
+                .resident_members()
+                .iter()
+                .map(|name| registry.engine_for(name).unwrap().worker_pool.clone())
+                .collect();
+            assert!(
+                pools.len() > 1,
+                "the fixture needs more than one resident engine to compare pools"
+            );
+            assert!(
+                pools
+                    .windows(2)
+                    .all(|pair| SharedWorkerPool::ptr_eq(&pair[0], &pair[1])),
+                "{} resident engines of this registry hold different worker \
+                 pools; the thread cost is still a multiple of residency",
+                pools.len(),
+            );
+        }
+        assert!(
+            resident_pools.len() > 2,
+            "the walk must leave engines to compare"
+        );
+        assert_eq!(
+            large.shared_worker_threads(),
+            stock_macos_budget().worker_threads(),
+        );
+        assert!(
+            large.resident_count() < large.members().len(),
+            "the fixture must exceed the budget, or nothing was evicted"
+        );
+    }
+
+    /// Sharing composes with eviction: a member evicted and rebuilt rejoins the
+    /// **same** pool rather than building a second one, as long as any resident
+    /// still holds it.
+    #[test]
+    fn an_evicted_member_rejoins_the_same_pool_when_rebuilt() {
+        reset_spies();
+        // A budget that holds two of three members, so touching the third
+        // evicts the first while the second keeps the pool alive.
+        let budget = ConnectionBudget::from_limits(78, 12);
+        assert_eq!(budget.max_resident_members(), 2, "fixture assumption");
+        let registry =
+            EngineRegistry::<SpyEngine>::with_budget(fed(&["a", "b", "c"]), RegistryMode::Lazy, budget);
+
+        let first = registry.engine_for("a").unwrap();
+        let pool = first.worker_pool.clone();
+        drop(first); // so LRU may evict it — a held engine is never evicted
+
+        registry.engine_for("b").unwrap();
+        registry.engine_for("c").unwrap();
+        assert!(
+            !registry.resident_members().contains(&"a".to_string()),
+            "a was expected to be evicted; residency = {:?}",
+            registry.resident_members()
+        );
+
+        let rebuilt = registry.engine_for("a").unwrap();
+        assert!(
+            registry.reconstructions() > 0,
+            "nothing was rebuilt, so this proves nothing"
+        );
+        assert!(
+            SharedWorkerPool::ptr_eq(&pool, &rebuilt.worker_pool),
+            "reconstruction built a SECOND worker pool instead of rejoining the              workspace's"
+        );
+    }
+
+    /// The shared pool is torn down when the last resident engine goes: nothing
+    /// keeps `worker_threads` workers alive for a workspace with nothing
+    /// resident ([ADR-63]'s teardown clause).
+    #[test]
+    fn the_shared_pool_is_torn_down_with_the_last_resident() {
+        reset_spies();
+        let registry = lazy(&["a", "b"]);
+        registry.engine_for("a").unwrap();
+        registry.engine_for("b").unwrap();
+        assert_eq!(registry.shared_worker_threads(), registry.budget().worker_threads());
+
+        registry.evict_to_capacity(1);
+        assert_eq!(
+            registry.shared_worker_threads(),
+            registry.budget().worker_threads(),
+            "one resident still holds the pool, so it must stay up"
+        );
+
+        registry.evict_to_capacity(0);
+        assert_eq!(registry.resident_count(), 0);
+        assert_eq!(
+            registry.shared_worker_threads(),
+            0,
+            "the pool outlived the last resident engine; its workers are orphans"
+        );
+
+        // …and the next admission brings a pool back up rather than failing.
+        registry.engine_for("a").unwrap();
+        assert_eq!(registry.shared_worker_threads(), registry.budget().worker_threads());
+    }
+
+    /// The pool's lifetime follows the **engines**, not the registry's map: a
+    /// member a caller still holds is skipped by eviction and keeps the pool up;
+    /// once released and evicted, the pool goes with it.
+    #[test]
+    fn the_pool_lives_exactly_as_long_as_its_engines() {
+        reset_spies();
+        let registry = lazy(&["a"]);
+        let held = registry.engine_for("a").unwrap();
+
+        registry.evict_to_capacity(0);
+        assert_eq!(
+            registry.resident_count(),
+            1,
+            "a held engine is never evicted (its connections would stay open \
+             anyway), so it is still resident here"
+        );
+        assert_eq!(
+            registry.shared_worker_threads(),
+            registry.budget().worker_threads(),
+            "a held engine's jobs would have nowhere to run"
+        );
+
+        drop(held);
+        registry.evict_to_capacity(0);
+        assert_eq!(registry.resident_count(), 0);
+        assert_eq!(
+            registry.shared_worker_threads(),
+            0,
+            "the pool outlived every engine that could submit to it"
+        );
+    }
+
+    /// A hit on an **already-resident** member does not wait for another
+    /// member's in-flight admission.
+    ///
+    /// The registry serialises admission deliberately — that is what keeps the
+    /// live count inside the budget and stops two touches building two engines
+    /// over one store. What it must *not* do is hold that same lock across the
+    /// hit path: a fan-out over a large workspace spends its whole duration in
+    /// cold starts and teardowns, and under one lock every unrelated request for
+    /// a resident member — the serve surface's default member above all — waited
+    /// for it (recorded against [S-324] as a deferred finding).
+    ///
+    /// A deadlock or a regression here shows up as the `recv_timeout` below
+    /// failing, not as a hung suite.
+    ///
+    /// [S-324]: ../../../docs/planning/journal.md#s-324-workspace-wide-read-connection-budget-with-lru-member-engine-eviction
+    #[test]
+    fn a_hit_does_not_wait_for_another_members_admission() {
+        use std::sync::{Condvar, OnceLock};
+
+        /// Whether the blocking start has been entered, and whether it may
+        /// return. Process-global because `MemberEngine::start` is an associated
+        /// function with nowhere to hang per-registry state; only this test uses
+        /// it.
+        #[derive(Default)]
+        struct Gate {
+            entered: bool,
+            released: bool,
+        }
+        static GATE: OnceLock<(Mutex<Gate>, Condvar)> = OnceLock::new();
+        fn gate() -> &'static (Mutex<Gate>, Condvar) {
+            GATE.get_or_init(|| (Mutex::new(Gate::default()), Condvar::new()))
+        }
+
+        /// Starts instantly for every member but `slow`, whose start parks until
+        /// the test releases it — standing in for the cold start and teardown a
+        /// real admission performs.
+        struct GatedEngine;
+        impl MemberEngine for GatedEngine {
+            type Watcher = ();
+
+            fn start(
+                root: &Path,
+                _read_connections: usize,
+                _worker_pool: SharedWorkerPool,
+            ) -> Result<Arc<Self>> {
+                if root.ends_with("slow") {
+                    let (lock, cvar) = gate();
+                    let mut state = lock.lock().unwrap();
+                    state.entered = true;
+                    cvar.notify_all();
+                    while !state.released {
+                        state = cvar.wait(state).unwrap();
+                    }
+                }
+                Ok(Arc::new(GatedEngine))
+            }
+
+            fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
+                Ok(())
+            }
+        }
+
+        // The gate is process-global (an associated fn has nowhere to hang
+        // per-registry state), so reset it rather than inherit whatever a
+        // previous user left. Without this a second test using `GatedEngine` —
+        // or any harness that re-runs this one in-process — would get an
+        // already-released gate and a vacuous pass.
+        {
+            let (lock, _) = gate();
+            *lock.lock().unwrap() = Gate::default();
+        }
+
+        // The gate is process-global (an associated fn has nowhere to hang
+        // per-registry state), so reset it rather than inherit whatever a
+        // previous user left. Without this a second test using `GatedEngine` —
+        // or any harness re-running this one in-process — would find an
+        // already-released gate and pass vacuously.
+        {
+            let (lock, _) = gate();
+            *lock.lock().unwrap() = Gate::default();
+        }
+
+        let registry = EngineRegistry::<GatedEngine>::with_budget(
+            fed(&["fast", "slow"]),
+            RegistryMode::Lazy,
+            roomy_budget(),
+        );
+        // `fast` is resident before anything blocks, so the touch below is a hit.
+        registry.engine_for("fast").expect("fast member starts");
+
+        let (hit_tx, hit_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                registry.engine_for("slow").expect("slow member starts");
+            });
+
+            // Wait until the slow admission is genuinely inside `start`.
+            let (lock, cvar) = gate();
+            let mut state = lock.lock().unwrap();
+            while !state.entered {
+                state = cvar.wait(state).unwrap();
+            }
+            drop(state);
+
+            let hit_registry = &registry;
+            scope.spawn(move || {
+                hit_registry
+                    .engine_for("fast")
+                    .expect("fast member is resident");
+                hit_tx.send(()).expect("report the hit completed");
+            });
+            let served = hit_rx.recv_timeout(std::time::Duration::from_secs(10));
+
+            // Release the blocked admission before asserting, so a failure ends
+            // the test instead of wedging the scope's join.
+            let (lock, cvar) = gate();
+            lock.lock().unwrap().released = true;
+            cvar.notify_all();
+
+            served.expect(
+                "a hit on a resident member blocked behind another member's \
+                 admission; the fan-out serialises unrelated requests again",
+            );
+        });
     }
 }

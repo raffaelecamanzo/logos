@@ -680,6 +680,7 @@ fn runtime_with_workers(threads: usize) -> (tempfile::TempDir, Runtime) {
         RuntimeConfig {
             reader_pool_size: 1,
             worker_threads: threads,
+            worker_pool: None,
             write_queue_capacity: 8,
         },
     )
