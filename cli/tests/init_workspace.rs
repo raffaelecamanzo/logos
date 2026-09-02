@@ -2,6 +2,9 @@
 //! through the real binary over a multi-repo fixture:
 //!
 //! - `--yes` returns promptly without blocking on indexing;
+//! - the bounded warm supervisor (S-321, FR-WS-14) is hidden from help,
+//!   warms a 2-member fixture end to end, holds no store lock afterwards,
+//!   drains past a failing member, and re-runs only the newly approved delta;
 //! - an existing member's `.logos/config.toml` is never overwritten;
 //! - stdout stays machine-clean while the approval gate goes to stderr;
 //! - `--exclude` drops a candidate member;
@@ -59,8 +62,10 @@ fn two_member_fixture() -> TempDir {
     tmp
 }
 
-/// `--yes` returns promptly (indexing is deferred to a detached background
-/// warm, never blocking this command) and reports both members initialised.
+/// `--yes` returns promptly (indexing is deferred to the single detached
+/// bounded warm supervisor of FR-WS-14, never blocking this command — the
+/// FR-WS-02 non-blocking contract is preserved verbatim by the bound) and
+/// reports both members initialised.
 #[test]
 fn yes_returns_promptly_without_blocking_on_indexing() {
     let tmp = two_member_fixture();
@@ -204,4 +209,181 @@ fn default_name_is_the_real_directory_name_not_the_literal_dot() {
 
     let manifest = fs::read_to_string(tmp.path().join("logos.workspace.toml")).unwrap();
     assert!(manifest.contains(&format!("name = \"{canonical_dir_name}\"")));
+}
+
+// ── The bounded warm supervisor (S-321, FR-WS-14, BR-44) ───────────────────
+
+/// The supervisor's entry point is internal (FR-CL-01): it must not appear in
+/// help output, at the top level or under any command group, so nobody can
+/// discover and script against it.
+#[test]
+fn the_supervisor_entry_point_is_hidden_from_help() {
+    let tmp = TempDir::new().unwrap();
+    let out = logos(tmp.path(), &["--help"]);
+    assert_eq!(exit_code(&out), 0);
+
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !help.contains("internal-warm"),
+        "the warm supervisor must not be listed in help output: {help}"
+    );
+}
+
+/// Even hidden, the entry point has to *work* — the detached spawn's argv is
+/// nulled on all three streams, so a usage error there would be invisible.
+#[test]
+fn the_hidden_supervisor_entry_point_still_routes() {
+    let tmp = TempDir::new().unwrap();
+    let out = logos(tmp.path(), &["internal-warm", "--concurrency", "2"]);
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "an empty queue drains immediately: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// End to end on a **2-member** fixture only (never a many-member one — the
+/// bound itself is asserted against a stubbed spawn in
+/// `logos_core::federation::warm`, so this suite never oversubscribes the host,
+/// NFR-PE-08): the supervisor indexes both members, exits when the queue
+/// drains, and holds no `.logos` store lock afterwards — a subsequent command
+/// that opens each member's store succeeds immediately.
+#[test]
+fn the_supervisor_warms_a_two_member_fixture_and_releases_every_store() {
+    let tmp = two_member_fixture();
+    // Both members need their `.logos/` scaffolding, which enablement writes.
+    let enabled = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&enabled), 0, "{}", String::from_utf8_lossy(&enabled.stderr));
+
+    // Run the supervisor in the FOREGROUND (the detached spawn is what
+    // `init --workspace` does; here we want to observe its completion).
+    let out = logos(
+        tmp.path(),
+        &[
+            "internal-warm",
+            "--concurrency",
+            "2",
+            tmp.path().join("api").to_str().unwrap(),
+            tmp.path().join("web").to_str().unwrap(),
+        ],
+    );
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    for member in ["api", "web"] {
+        let root = tmp.path().join(member);
+        assert!(
+            root.join(".logos/logos.db").is_file(),
+            "{member} was warmed by the supervisor"
+        );
+        // No lingering lock: `status` opens the store and would block or fail
+        // if the drained supervisor still held it.
+        let status = logos(&root, &["--json", "status"]);
+        assert_eq!(
+            exit_code(&status),
+            0,
+            "{member}'s store is lock-free after the queue drained: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+}
+
+/// A member whose index genuinely fails (here: a malformed `config.toml`, the
+/// loud usage fault of FR-CF-03 — the same shape `enable` already reports as
+/// `Degraded`) is recorded degraded on stderr and the queue continues to the
+/// next member — it neither stalls nor aborts, and the supervisor still exits
+/// 0 because the warm is advisory (FR-IX-07 carries correctness).
+#[test]
+fn a_failing_member_degrades_without_stalling_or_aborting_the_queue() {
+    let tmp = two_member_fixture();
+    let enabled = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&enabled), 0);
+
+    let bad = tmp.path().join("broken");
+    fs::create_dir_all(bad.join(".logos")).unwrap();
+    fs::write(bad.join(".logos/config.toml"), "this is not [[[ toml\n").unwrap();
+
+    let good = tmp.path().join("api");
+    let last = tmp.path().join("web");
+    let out = logos(
+        tmp.path(),
+        &[
+            "internal-warm",
+            "--concurrency",
+            "1",
+            bad.to_str().unwrap(),
+            good.to_str().unwrap(),
+            last.to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "one bad member is never fatal: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("degraded") && stderr.contains("broken"),
+        "the failing member is recorded degraded: {stderr}"
+    );
+    // K = 1, so the bad member was first in a strictly serial queue: both
+    // members behind it were still reached.
+    for member in ["api", "web"] {
+        assert!(
+            tmp.path().join(member).join(".logos/logos.db").is_file(),
+            "{member} was warmed after the failing member, not skipped"
+        );
+    }
+}
+
+/// Killing the supervisor mid-queue must leave an unwarmed member correctly
+/// indexable on first query (FR-IX-07) — the lazy `ensure_indexed` fallback,
+/// which is what makes a *bounded* (therefore deferred) warm safe at all.
+/// Simulated by never warming `web` in the first place, which is exactly the
+/// state a killed supervisor leaves behind.
+#[test]
+fn an_unwarmed_member_still_indexes_on_first_query() {
+    let tmp = two_member_fixture();
+    let enabled = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&enabled), 0);
+
+    let web = tmp.path().join("web");
+    let out = logos(&web, &["--json", "search", "x"]);
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "an unwarmed member answers its first query by indexing lazily: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(web.join(".logos/logos.db").is_file());
+}
+
+/// A re-run warms only the **newly** approved delta: with no new candidate,
+/// the second run has nothing to warm and spawns no supervisor at all.
+#[test]
+fn a_rerun_warms_only_the_newly_approved_delta() {
+    let tmp = two_member_fixture();
+    let first = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&first), 0);
+
+    // A third member appears only for the second run.
+    init_repo(&tmp.path().join("batch"));
+    let second = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&second), 0, "{}", String::from_utf8_lossy(&second.stderr));
+
+    let report: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    let names: Vec<&str> = report["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        ["api", "web", "batch"],
+        "the already-manifested pair is carried forward; only `batch` — the \
+         newly approved delta — is what the second run's supervisor warms"
+    );
 }

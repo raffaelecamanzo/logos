@@ -51,6 +51,12 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             out.print(&engine(root, true)?.index())?;
             Ok(0)
         }
+        // The hidden bounded-warm supervisor (FR-WS-14): not an Engine call at
+        // all — it supervises detached `index` children and opens no store.
+        Commands::InternalWarm {
+            concurrency,
+            members,
+        } => Ok(crate::workspace_init::run_supervisor(&members, concurrency)),
         Commands::Sync { paths } => out.query(root, |e| e.sync(&paths)),
         Commands::Status => out.query(root, |e| e.status()),
         Commands::Search { query, kind, limit } => out.query(root, |e| e.search(&query, kind, limit)),

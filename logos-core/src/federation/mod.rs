@@ -36,10 +36,17 @@
 //!   [`bridge`] matches (service-layer boundaries, no-cross-service-callers),
 //!   reported at the workspace level and **structurally incapable** of moving a
 //!   member's per-repo gate ([FR-WS-13], [ADR-56]).
+//! - the [`warm`] — the bounded background index warm: the effective-bound
+//!   resolution seam (K = `max(1, cores / 4)` capped at 4, override-ready) and
+//!   the bounded queue one detached supervisor runs over the newly approved
+//!   member delta, replacing the unbounded one-child-per-member fan-out
+//!   ([FR-WS-14], [BR-44]).
 //!
 //! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 //! [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
 //! [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
+//! [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+//! [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
 //! [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 //! [ADR-56]: ../../../docs/specs/architecture/decisions/ADR-56.md
 //!
@@ -71,6 +78,7 @@ pub mod query;
 pub mod reach;
 pub mod registry;
 pub mod topics;
+pub mod warm;
 
 use std::path::{Path, PathBuf};
 
@@ -102,6 +110,10 @@ pub use query::{
 };
 pub use registry::{Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode};
 pub use topics::{workspace_topics, MemberTopics, TopicSummary};
+pub use warm::{
+    default_concurrency, effective_concurrency, warm_queue, MemberWarm, WarmSummary,
+    CONCURRENCY_CAP,
+};
 
 /// One resolved, validated member repository of a [`Federation`] ([FR-WS-01]).
 ///

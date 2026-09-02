@@ -82,7 +82,7 @@ fn adapter_lines() -> usize {
         + file_lines(CLI_XSERVICE)
 }
 
-/// Budget: ≤ 555 production lines of Rust in the CLI adapter (NFR-MA-02).
+/// Budget: ≤ 825 production lines of Rust in the CLI adapter (NFR-MA-02).
 ///
 /// S-072 500→520 for the CR-012 `ui` serve wiring: the `--ui`/`--port` flags on
 /// `serve` (cfg-gated behind the non-default `ui` feature) and the combined
@@ -138,12 +138,40 @@ fn adapter_lines() -> usize {
 /// picks the rendering. CR-095 §4.4 owns and blesses this raise. It is the last
 /// raise this surface should need for the report tier — a third rendering belongs
 /// behind a `--format` flag on the same arm, not a new command.
+///
+/// S-321/CR-099 775→825 for the bounded warm supervisor (FR-WS-14, BR-44),
+/// measured 763→814 (+51). The raise buys the *process* half of the correction;
+/// the *logic* half deliberately went the other way. What is here:
+/// - `main.rs` (+6): the hidden `internal-warm` `Commands` variant — the
+///   supervisor's own entry point. It has to be a subcommand of this binary
+///   because the warm must outlive `init --workspace` (a thread dies with the
+///   parent; a detached child is reparented), and the warm already worked by
+///   re-invoking `current_exe()`. Hidden from help, not a public contract
+///   (FR-CL-01), asserted by `init_workspace::the_supervisor_entry_point_is_hidden_from_help`.
+/// - `dispatch.rs` (+4): one routing arm — the only arm in the file that is not
+///   an `Engine` call, because the supervisor opens no store at all.
+/// - `workspace_init.rs` (+41): `spawn_supervisor` (one detached child whatever
+///   N is), `supervisor_argv` (the single command line the whole delta rides —
+///   factored out so "one supervisor, not N indexers" is assertable without
+///   spawning), `run_supervisor` (the supervisor body), and `index_member`
+///   (spawn-and-*await* one `index` child) — minus the 14-line
+///   `spawn_background_warm` and the 3-line per-member fan-out they replace.
+///
+/// Every one of those is irreducibly surface: detaching a process, building an
+/// argv, and awaiting a child cannot live in a deterministic core. The
+/// scheduling itself — the bound resolution and the bounded queue, i.e. the
+/// business logic BR-44 constrains — is in `logos_core::federation::warm`, where
+/// the ceiling is unit-tested against a stubbed spawn (NFR-PE-08: launching 84
+/// real indexers to test a bound would oversubscribe the machine running the
+/// suite). CR-099 §4.4 owns and blesses this raise. If this fires again, move
+/// logic to logos-core — do not raise the number without a story-level
+/// justification.
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 775,
-        "cli adapter exceeds the 775 production-LOC budget (NFR-MA-02): \
+        lines <= 825,
+        "cli adapter exceeds the 825 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }
