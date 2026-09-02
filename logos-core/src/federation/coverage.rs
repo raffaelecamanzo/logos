@@ -73,16 +73,21 @@ pub enum UnboundReason {
 }
 
 impl From<RouteRefusal> for UnboundReason {
-    /// Map the framework pass's composition refusal ([`RouteRefusal`], S-329)
-    /// onto the shared coverage vocabulary. A provider-side counterpart to the
-    /// consumer-side [`ClientCallRefusal`] mapping below, and it exists for the
-    /// same reason: a route the interpreter refused to compose contributes no
-    /// provider ([FR-FW-05]), and the read-model must name that under the *same*
-    /// reason it already reports for a template it could not reduce — one
-    /// vocabulary, so "why is this unbound" never drifts between the two sides
-    /// of the same endpoint.
+    /// Align the framework pass's composition refusal ([`RouteRefusal`], S-329)
+    /// with the shared coverage vocabulary: a route refused for an unreadable
+    /// class-level prefix belongs under the *same* reason this tier already
+    /// reports for a template it could not reduce, so the two sides of one
+    /// endpoint never disagree about the word for it.
     ///
-    /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+    /// **This is vocabulary, not yet a report.** Like the [`ClientCallRefusal`]
+    /// mapping below — whose production sites construct the variant directly —
+    /// nothing calls this at runtime today. A refused registration promotes no
+    /// `route` node, so this tier sees no provider to label and a consumer
+    /// naming that endpoint reads `no-provider-in-workspace`. Emitting
+    /// `path-not-composed` for it needs the refusal to leave a ledger trace the
+    /// framework pass does not persist; [FR-FW-05](
+    /// ../../../docs/specs/requirements/FR-FW-05.md)'s "the resulting reference
+    /// reports `path-not-composed`" is therefore not met by this impl alone.
     fn from(refusal: RouteRefusal) -> Self {
         match refusal {
             RouteRefusal::PathNotComposed => UnboundReason::PathNotComposed,
@@ -1011,11 +1016,12 @@ mod tests {
         );
     }
 
-    /// The framework pass's composition refusal ([S-329], [FR-FW-05]) lands in
-    /// the *same* bucket as the consumer-side one above — the provider whose
-    /// class-level prefix could not be resolved and the consumer whose
-    /// template could not be reduced are both `path-not-composed`, so the two
-    /// sides of one endpoint never disagree about the word for it.
+    /// The framework pass's composition refusal ([FR-FW-05]) lands in the
+    /// *same* bucket as the consumer-side one above, so the two sides of one
+    /// endpoint never disagree about the word for it. This pins the
+    /// **vocabulary** only — see the impl's own note: no production path emits
+    /// it yet, because a refused registration promotes no provider for this
+    /// tier to label.
     ///
     /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
     #[test]
