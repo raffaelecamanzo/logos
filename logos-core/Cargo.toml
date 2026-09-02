@@ -22,6 +22,16 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 # SCIP symbol codec — confined to `model::convert` (ADR-06, NFR-MA-07).
 scip = { workspace = true }
 anyhow = { workspace = true }
+# Platform bindings behind two confined `unsafe` sites. In the library:
+# `fdlimit`'s `RLIMIT_NOFILE` get/set — the best-effort, silent soft-limit raise
+# the workspace connection budget is derived from (S-324, NFR-PE-11, ADR-63).
+# In the fitness suites: `getrusage(RUSAGE_SELF)` for the NFR-PE-06 RSS budget
+# (tests/perf_envelope.rs) and `setrlimit` for the NFR-PE-11 fd fitness function
+# (tests/workspace_connection_budget.rs). Declared once here rather than also as
+# a dev-dependency: a normal dependency is visible to a package's own test
+# targets, and two declarations would drift. Already present transitively via
+# `rusqlite`, so this adds no new crate — `Cargo.lock` is unchanged.
+libc = { workspace = true }
 # `toml` parses the declarative `plugin.toml` descriptors (S-004, FR-PL-02)
 # and the human-editable checked-in policy files (S-006, ADR-15). Pure parser
 # with no socket/HTTP surface; does not weaken the no-network invariant (NFR-SE-01).
@@ -342,8 +352,3 @@ petgraph = { workspace = true }
 # telemetry.db event rows directly — proving the store survives a logos.db wipe
 # + reindex (NFR-OO-05) without widening the public stats surface.
 rusqlite = { workspace = true }
-# Used by the performance-envelope fitness suite (tests/perf_envelope.rs) to read
-# peak process RSS via getrusage(RUSAGE_SELF) for the NFR-PE-06 ≤1GB budget.
-# Test-only: never enters the shipped binary graph (the no-network fitness test
-# scans default features, not dev-dependencies).
-libc = "0.2"

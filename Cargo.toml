@@ -88,6 +88,16 @@ ignore    = "0.4"
 # what we use. Pure in-process matcher, no socket surface (NFR-SE-01, kept honest
 # by the no-network fitness test); MIT/Apache-2.0 satisfies the license gate.
 regex     = "1"
+# `RLIMIT_NOFILE` get/set for the workspace connection budget's secondary
+# defence (S-324, NFR-PE-11, ADR-63). Already in the graph transitively (via
+# `rusqlite`/`libsqlite3-sys`), so making it a *direct* dependency adds no new
+# crate to the binary — it just names what we use. Raw platform bindings with no
+# socket surface of their own (NFR-SE-01, kept honest by the no-network fitness
+# test); MIT/Apache-2.0 satisfies the permissive license gate. The only *library*
+# module that uses it is `logos-core::fdlimit`; the fitness suites
+# `perf_envelope.rs` (getrusage) and `workspace_connection_budget.rs` (setrlimit)
+# use it under `unsafe` too.
+libc      = "0.2"
 # Data-parallel extraction (S-007, FR-IX-03, NFR-PE-08) and execution-runtime
 # CPU worker pool (S-008, AQ-04). One shared pool. `crossbeam-channel` provides
 # the bounded mpmc job/connection queues (S-008, ADR-02/03, §7.2). Both are

@@ -11,6 +11,19 @@
 //!   structural faults); the typed [`CoreError`](error::CoreError) enum and its
 //!   [`Severity`](error::Severity) classification carry the fail-soft /
 //!   fail-loud contract (S-026).
+//!
+//! # FFI containment
+//! The crate denies `unsafe` outright; [`fdlimit`] is the single module that
+//! opts back in, for two `RLIMIT_NOFILE` calls (S-324, [ADR-63]). That makes the
+//! containment a compile-time fact rather than a convention — and it matters
+//! because `libc` is a direct dependency, so a raw `socket`/`connect` anywhere
+//! in the core would slip past the [NFR-SE-01] no-network fitness function,
+//! which scans crate names rather than syscalls (architecture.md §8.3: the
+//! strongest network-security control is structural).
+//!
+//! [ADR-63]: ../../docs/specs/architecture/decisions/ADR-63.md
+//! [NFR-SE-01]: ../../docs/specs/requirements/NFR-SE-01.md
+#![deny(unsafe_code)]
 
 /// Pass 3 of the pipeline (S-014): the annotation engine — dead-code via
 /// exported-is-live reachability (FR-AN-01), duplicate detection over the
@@ -34,6 +47,14 @@ pub mod error;
 /// SCIP IDs, cyclomatic complexity, and per-function line counts (ADR-07,
 /// ADR-08). One `tree_sitter::Parser` per rayon worker (AR-05).
 pub mod extract;
+/// Process open-file-limit hygiene (S-324, CR-100, ADR-63): a best-effort,
+/// silent raise of this process's `RLIMIT_NOFILE` soft limit toward its hard
+/// limit, and the clamped read of that limit the workspace connection budget is
+/// derived from. A **secondary** defence only — the guarantee rests on
+/// [`ConnectionBudget`](federation::ConnectionBudget), never on this
+/// (NFR-PE-11).
+#[allow(unsafe_code)]
+pub mod fdlimit;
 /// Workspace **federation** (S-243, CR-061, ADR-52): the in-memory overlay that
 /// turns a parent folder of sibling repositories into one queryable workspace —
 /// `logos.workspace.toml` manifest parse + the up-tree `discover` walk that
