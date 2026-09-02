@@ -327,6 +327,61 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
         wire["warm_rollup"]
     );
     assert_eq!(wire["members"][0]["warm_state"], "deferred");
+
+    // ── S-326: the OPEN-state axis over the same N = 72 walk ──────────────
+    //
+    // **The story's central claim, at the N where eviction is unavoidable.**
+    // This budget holds far fewer than 72 members resident (asserted above), so
+    // the four all-member walks evict continuously — and every member must still
+    // read `opened`, because eviction reclaims a start that SUCCEEDED
+    // ([BR-45]). An open state derived from residency rather than from open
+    // attempts would report ~64 degraded members here and exit non-zero on a
+    // completely healthy workspace, which is a worse defect than the exit-0 this
+    // story removes.
+    //
+    // It also pins the other half of [FR-WS-16]: an all-`deferred` workspace —
+    // nothing indexed, every member openable — is NOT degraded. The two axes
+    // disagree here by design, which is why they are separate fields.
+    let unopened: Vec<&str> = status
+        .members
+        .iter()
+        .filter(|m| m.open.is_degraded())
+        .map(|m| m.status.member.as_str())
+        .collect();
+    assert!(
+        unopened.is_empty(),
+        "{} of {MEMBERS} members read `degraded` on the open axis under \
+         continuous eviction — eviction is not a failure ([BR-45]): {unopened:?}",
+        unopened.len(),
+    );
+    assert_eq!(
+        (
+            status.degraded_rollup.members,
+            status.degraded_rollup.opened,
+            status.degraded_rollup.not_attempted,
+        ),
+        (MEMBERS, MEMBERS, 0),
+        "every member was attempted and opened: {:?}",
+        status.degraded_rollup,
+    );
+    assert!(
+        status.degraded_rollup.degraded_members.is_empty(),
+        "a healthy workspace names nobody degraded: {:?}",
+        status.degraded_rollup.degraded_members,
+    );
+    assert!(
+        status.degraded_rollup.covers_all_members,
+        "and its figures cover all {MEMBERS} members"
+    );
+    assert_eq!(
+        (status.coverage.members_read, status.coverage.members_total),
+        (MEMBERS as u64, MEMBERS as u64),
+        "the coverage summary was computed over every member, and says so"
+    );
+    assert!(status.coverage.covers_all_members);
+    assert_eq!(wire["members"][0]["open_state"], "opened");
+    assert_eq!(wire["degraded_rollup"]["covers_all_members"], true);
+
     // [NFR-PE-10], instrumented on CONSTRUCTION: the warm labelling opened
     // nothing of its own.
     //
@@ -343,8 +398,8 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
         registry.engine_starts(),
         WALKS_PER_STATUS * MEMBERS as u64,
         "{} engine starts over {WALKS_PER_STATUS} all-member walks of {MEMBERS} \
-         members — the warm labelling must construct no engine of its own, and \
-         no walk may be added to `workspace status`",
+         members — the warm AND open-state labelling must construct no engine \
+         of their own, and no walk may be added to `workspace status`",
         registry.engine_starts(),
     );
 

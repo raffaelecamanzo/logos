@@ -69,6 +69,9 @@ const COVERAGE: CrossServiceCoverage = {
   unbound: 1,
   no_provider_in_workspace: 2,
   bound_ratio: 0.3333,
+  members_read: 2,
+  members_total: 2,
+  covers_all_members: true,
 };
 
 const BINDING: BridgeEdge = {
@@ -320,5 +323,55 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
       }),
     ).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "route_handler" })).toBeInTheDocument();
+  });
+
+  // ── S-326 / FR-WS-05 / FR-WS-16 / NFR-CC-04 ───────────────────────────────
+
+  it("renders an ABSENT bound ratio as 'not measured', with no bar", async () => {
+    // The server omits `bound_ratio` when nothing was measured. A bar is a
+    // quantity: a 0-width one reads "nothing bound" and a full one "everything
+    // bound", and neither is true when there was nothing to bind (CR-100).
+    const { bound_ratio: _omitted, ...noRatio } = COVERAGE;
+    stubApi({
+      coverage: {
+        ...noRatio,
+        references: COVERAGE.references.filter((r) => r.reason === "no-provider-in-workspace"),
+        bound: 0,
+        ambiguous: 0,
+        unbound: 0,
+        no_provider_in_workspace: 2,
+      } as typeof COVERAGE,
+    });
+    mount();
+
+    expect(await screen.findByText(/bound ratio not measured/i)).toBeInTheDocument();
+    expect(screen.queryByText(/0\.0% bound/)).toBeNull();
+    expect(screen.queryByText(/100\.0% bound/)).toBeNull();
+  });
+
+  it("labels a partially-opened workspace as covering fewer than all members", async () => {
+    stubApi({
+      coverage: {
+        ...COVERAGE,
+        members_read: 9,
+        members_total: 72,
+        covers_all_members: false,
+      },
+    });
+    mount();
+
+    expect(
+      await screen.findByText(/computed over 9 of 72 workspace members/i),
+    ).toBeInTheDocument();
+  });
+
+  it("says nothing about partial coverage when every member was read", async () => {
+    stubApi({ coverage: COVERAGE });
+    mount();
+
+    // The ratio card renders, so the assertion below is about absence of the
+    // banner rather than about the card not having loaded yet.
+    expect(await screen.findByText(/33\.3% bound/)).toBeInTheDocument();
+    expect(screen.queryByText(/workspace members/i)).toBeNull();
   });
 });

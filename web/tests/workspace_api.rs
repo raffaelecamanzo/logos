@@ -241,6 +241,29 @@ async fn workspace_status_reports_name_members_and_coverage() {
         v["warm_rollup"].get("warming").is_none(),
         "no live warming signal ⇒ no `warming` key: {body}"
     );
+
+    // S-326: the OPEN-state axis rides the same rows, on its own key, and the
+    // degraded roll-up rides beside the warm one in one payload — not a second
+    // member table ([FR-WS-16]). Both fixture members open, so the coverage
+    // marker says the figures cover all of them ([NFR-CC-04]).
+    for m in v["members"].as_array().unwrap() {
+        assert_eq!(m["open_state"], "opened", "both fixture members open: {m}");
+        assert!(
+            m.get("degraded_reason").is_none(),
+            "an opened member has no failure to report: {m}"
+        );
+    }
+    assert_eq!(v["degraded_rollup"]["members"], 2, "{body}");
+    assert_eq!(v["degraded_rollup"]["opened"], 2, "{body}");
+    assert_eq!(v["degraded_rollup"]["not_attempted"], 0, "{body}");
+    assert!(
+        v["degraded_rollup"]["degraded_members"].as_array().unwrap().is_empty(),
+        "nobody is degraded: {body}"
+    );
+    assert_eq!(v["degraded_rollup"]["covers_all_members"], true, "{body}");
+    assert_eq!(v["coverage"]["members_read"], 2, "{body}");
+    assert_eq!(v["coverage"]["members_total"], 2, "{body}");
+    assert_eq!(v["coverage"]["covers_all_members"], true, "{body}");
 }
 
 /// The cross-service read-models (service map, impact) are exposed to the frontend

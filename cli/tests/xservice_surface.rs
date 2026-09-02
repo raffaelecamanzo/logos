@@ -86,12 +86,22 @@ fn logos(project: &Path, args: &[&str]) -> Output {
 /// Run `logos --json <args>` and parse the single machine-clean stdout line as
 /// JSON, asserting exit 0 and that stdout carries JSON only (FR-CL-02).
 fn logos_json(project: &Path, args: &[&str]) -> Value {
+    logos_json_exiting(project, args, 0)
+}
+
+/// As [`logos_json`], but for a command whose exit code is deliberately not 0.
+///
+/// [FR-WS-16] makes an unopenable member a **non-zero** exit, so a fixture with
+/// a broken member can no longer go through `logos_json` — and the payload must
+/// still be machine-clean JSON on stdout, which is exactly what this asserts.
+fn logos_json_exiting(project: &Path, args: &[&str], code: i32) -> Value {
     let mut full = args.to_vec();
     full.push("--json");
     let out = logos(project, &full);
-    assert!(
-        out.status.success(),
-        "logos {args:?} exited {:?}: {}",
+    assert_eq!(
+        out.status.code(),
+        Some(code),
+        "logos {args:?} exited {:?}, expected {code}: {}",
         out.status.code(),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -250,7 +260,9 @@ fn workspace_status_labels_each_member_warm_deferred_or_degraded_with_a_rollup()
     let tmp = warm_fixture(&["api", "cold", "broken"], &["api", "broken"]);
     break_store(tmp.path(), "broken");
 
-    let status = logos_json(tmp.path(), &["workspace", "status"]);
+    // `broken` cannot be opened, so the command exits 1 ([FR-WS-16]) — the warm
+    // labelling below is unchanged by that.
+    let status = logos_json_exiting(tmp.path(), &["workspace", "status"], 1);
     assert_eq!(
         warm_states(&status),
         [
@@ -271,7 +283,7 @@ fn workspace_status_labels_each_member_warm_deferred_or_degraded_with_a_rollup()
     // "both outputs carry the state" is asserted by reading the human stream and
     // finding the identical fields — not by trusting that they must match.
     let human = logos(tmp.path(), &["workspace", "status"]);
-    assert!(human.status.success());
+    assert_eq!(human.status.code(), Some(1), "one unopenable member (FR-WS-16)");
     let human: Value = serde_json::from_str(&String::from_utf8(human.stdout).unwrap())
         .expect("the human rendering is the same read-model, pretty-printed");
     assert_eq!(warm_states(&human), warm_states(&status));
@@ -296,59 +308,77 @@ fn a_fully_warmed_workspace_reports_every_member_warm() {
     assert!(rollup.get("warming").is_none(), "no warming key at all: {rollup}");
 }
 
-/// [FR-WS-15] AC4 + AC5 / [NFR-CC-04] over **one** fixture matrix: no warm
-/// state moves the exit code, and `warming` is omitted rather than inferred —
-/// across every warm-state combination, so both are properties of the read-model
-/// and not of one fixture.
+/// [FR-WS-15] AC4 + AC5 / [FR-WS-16] AC1 / [NFR-CC-04] over **one** fixture
+/// matrix: the **warm** axis never moves the exit code, the **open** axis
+/// always does, and `warming` is omitted rather than inferred — across every
+/// combination, so all three are properties of the read-model and not of one
+/// fixture.
+///
+/// The exit code is now the axis discriminator, which is the whole point of
+/// [FR-WS-16] keeping `warm_state` and `open_state` separate: `all deferred` is
+/// a workspace nobody has indexed yet and exits **0**, while `all degraded` is a
+/// workspace nothing can open and exits **1**. Before this story both exited 0.
 ///
 /// Each row **proves the state it names.** Asserting only the exit code would
-/// let the coverage rot silently: exit 0 is also the default outcome, so if
-/// `break_store` ever stopped breaking (the store filename moves, say) the
-/// `degraded` rows would collapse into duplicates of the `warm` rows and this
-/// test would stay green while asserting nothing. The realized label multiset is
-/// therefore asserted per row.
-///
-/// The degraded exit code is [S-326]'s to introduce; until then a warm state is
-/// purely informational, and `all degraded` pins that it stayed that way for the
-/// combination S-326 will change first.
-///
-/// [S-326]: ../../docs/planning/journal.md#s-326-degraded-member-reporting-and-non-zero-exit-for-workspace-commands
+/// let the coverage rot silently: if `break_store` ever stopped breaking (the
+/// store filename moves, say) the `degraded` rows would collapse into duplicates
+/// of the `warm` rows and this test would stay green while asserting nothing.
+/// The realized label multiset is therefore asserted per row, and the expected
+/// exit code is *derived from the fixture's broken set* rather than restated, so
+/// the two cannot drift.
 #[test]
-fn no_warm_state_changes_the_exit_code_and_warming_is_never_inferred() {
+fn the_warm_axis_never_moves_the_exit_code_and_the_open_axis_always_does() {
     for (label, members, index, broken, expect) in [
         ("all deferred", &["api", "web", "svc"][..], &[][..], &[][..], &["deferred", "deferred", "deferred"][..]),
         ("all warm", &["api", "web"][..], &["api", "web"][..], &[][..], &["warm", "warm"][..]),
         ("mixed", &["api", "web"][..], &["api"][..], &[][..], &["warm", "deferred"][..]),
         ("one degraded", &["api", "web"][..], &["api", "web"][..], &["web"][..], &["warm", "degraded"][..]),
         ("degraded + deferred", &["api", "web"][..], &["api"][..], &["api"][..], &["degraded", "deferred"][..]),
-        // Every member broken — the highest-risk row for [S-326], which
-        // introduces a non-zero exit for degraded members.
+        // Every member broken — the [CR-100] shape, at the smallest N that
+        // reproduces it.
         ("all degraded", &["api", "web"][..], &["api", "web"][..], &["api", "web"][..], &["degraded", "degraded"][..]),
     ] {
         let tmp = warm_fixture(members, index);
         for member in broken {
             break_store(tmp.path(), member);
         }
+        // Derived, not restated: an unopenable member ⇒ 1, otherwise 0.
+        let expected_code = i32::from(!broken.is_empty());
 
-        // AC4: exit 0 in BOTH output modes, for every combination.
+        // [FR-WS-16] AC1: the same exit code in BOTH output modes.
         for args in [&["workspace", "status"][..], &["workspace", "status", "--json"][..]] {
             let out = logos(tmp.path(), args);
             assert_eq!(
                 out.status.code(),
-                Some(0),
+                Some(expected_code),
                 "{label} / {args:?} exited {:?}: {}",
                 out.status.code(),
                 String::from_utf8_lossy(&out.stderr)
             );
         }
 
-        let status = logos_json(tmp.path(), &["workspace", "status"]);
+        let status = logos_json_exiting(tmp.path(), &["workspace", "status"], expected_code);
         let states = warm_states(&status);
 
         // The row realized the combination it claims — so a no-op `break_store`
         // or a mislabelled member fails here rather than passing silently.
         let realized: Vec<&str> = states.iter().map(|(_, state)| state.as_str()).collect();
         assert_eq!(realized, expect, "{label}: fixture did not realize its named states: {status}");
+
+        // [FR-WS-16] AC2: the degraded roll-up names exactly the broken members.
+        let mut named: Vec<&str> = status["degraded_rollup"]["degraded_members"]
+            .as_array()
+            .expect("degraded_members array")
+            .iter()
+            .map(|m| m.as_str().expect("member name"))
+            .collect();
+        named.sort_unstable();
+        let mut expected_named: Vec<&str> = broken.to_vec();
+        expected_named.sort_unstable();
+        assert_eq!(
+            named, expected_named,
+            "{label}: the roll-up names exactly the unopenable members: {status}"
+        );
 
         // AC5 / NFR-CC-04: no `warming` label, and no `warming` key at all.
         assert!(
@@ -363,6 +393,249 @@ fn no_warm_state_changes_the_exit_code_and_warming_is_never_inferred() {
             );
         }
     }
+}
+
+// ── S-326: degraded-member reporting and non-zero exit (FR-WS-16, BR-45) ──
+
+/// The `degraded_rollup` and the per-member `open_state`s from one payload.
+fn open_states(status: &Value) -> Vec<(String, String)> {
+    let mut states: Vec<(String, String)> = status["members"]
+        .as_array()
+        .expect("members array")
+        .iter()
+        .map(|m| {
+            (
+                m["member"].as_str().expect("member name").to_string(),
+                m["open_state"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("member row carries an open_state: {m}"))
+                    .to_string(),
+            )
+        })
+        .collect();
+    states.sort();
+    states
+}
+
+/// **[FR-WS-16] AC1/AC2/AC5 end to end.** A workspace with one unopenable
+/// member exits **non-zero**, names that member in the `--json` payload *and*
+/// in the human rendering, and marks every roll-up as covering fewer than all
+/// members.
+///
+/// This is the [CR-100] failure at the smallest N that reproduces it: before
+/// this story the identical fixture exited **0** with the member's failure
+/// visible only as an `error` string buried in the payload.
+///
+/// [CR-100]: ../../docs/requests/CR-100-workspace-resource-budget.md
+#[test]
+fn an_unopenable_member_exits_non_zero_and_is_named_in_both_output_modes() {
+    let tmp = warm_fixture(&["api", "broken"], &["api", "broken"]);
+    break_store(tmp.path(), "broken");
+
+    let status = logos_json_exiting(tmp.path(), &["workspace", "status"], 1);
+
+    // AC2: named, and the row says which axis failed.
+    let rollup = &status["degraded_rollup"];
+    assert_eq!(rollup["members"], 2);
+    assert_eq!(rollup["opened"], 1);
+    assert_eq!(rollup["not_attempted"], 0);
+    assert_eq!(
+        rollup["degraded_members"].as_array().unwrap(),
+        &vec![Value::from("broken")],
+        "the unopenable member is NAMED, not merely counted: {status}"
+    );
+    // AC5: the roll-ups and the coverage summary are marked partial.
+    assert_eq!(
+        rollup["covers_all_members"], false,
+        "every figure beside this roll-up covers 1 of 2 members"
+    );
+    assert_eq!(status["coverage"]["members_read"], 1);
+    assert_eq!(status["coverage"]["members_total"], 2);
+    assert_eq!(status["coverage"]["covers_all_members"], false);
+
+    assert_eq!(
+        open_states(&status),
+        [
+            ("api".to_string(), "opened".to_string()),
+            ("broken".to_string(), "degraded".to_string()),
+        ],
+        "the open axis is per-member on the SAME rows as the warm axis: {status}"
+    );
+
+    // The existing per-member `error` detail is untouched, and the additive
+    // degraded reason rides beside it — neither replaces the other.
+    let broken = status["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["member"] == "broken")
+        .expect("the broken member has a row");
+    assert!(
+        broken["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "the verbatim engine diagnostic still rides `error`: {broken}"
+    );
+    assert!(
+        broken["degraded_reason"].as_str().is_some_and(|r| !r.is_empty()),
+        "and the classified reason is added beside it: {broken}"
+    );
+
+    // AC2, human half: the same exit code, the member named on stderr (stdout
+    // stays the machine-clean read-model, FR-CL-02), and the payload carries
+    // the roll-up in the human rendering too.
+    let human = logos(tmp.path(), &["workspace", "status"]);
+    assert_eq!(human.status.code(), Some(1));
+    let stderr = String::from_utf8(human.stderr).unwrap();
+    assert!(
+        stderr.contains("broken") && stderr.contains("degraded"),
+        "the human stream names the degraded member: {stderr}"
+    );
+    let human: Value = serde_json::from_str(&String::from_utf8(human.stdout).unwrap())
+        .expect("the human rendering is the same read-model, pretty-printed");
+    assert_eq!(human["degraded_rollup"], status["degraded_rollup"]);
+    assert_eq!(open_states(&human), open_states(&status));
+}
+
+/// **[FR-WS-16] AC1, the other half.** A workspace where every member opens
+/// exits **0** exactly as before, whatever its warm state — so the story adds a
+/// failure signal without adding a false one.
+#[test]
+fn a_workspace_whose_members_all_open_still_exits_zero() {
+    // Deliberately un-indexed: `deferred` on the warm axis, `opened` on the
+    // open axis. A member with no index is not a member that failed.
+    let tmp = warm_fixture(&["api", "cold"], &["api"]);
+    let status = logos_json(tmp.path(), &["workspace", "status"]);
+
+    let rollup = &status["degraded_rollup"];
+    assert_eq!(rollup["opened"], 2);
+    assert!(
+        rollup["degraded_members"].as_array().unwrap().is_empty(),
+        "nobody is degraded: {status}"
+    );
+    assert_eq!(rollup["covers_all_members"], true);
+    assert_eq!(status["coverage"]["covers_all_members"], true);
+    assert_eq!(
+        open_states(&status),
+        [
+            ("api".to_string(), "opened".to_string()),
+            ("cold".to_string(), "opened".to_string()),
+        ]
+    );
+    // And nothing is warned about on stderr.
+    let human = logos(tmp.path(), &["workspace", "status"]);
+    let stderr = String::from_utf8(human.stderr).unwrap();
+    assert!(
+        !stderr.contains("degraded"),
+        "a healthy workspace warns about nothing: {stderr}"
+    );
+}
+
+/// **[FR-WS-16] AC3.** A member whose store is *missing* names a store cause
+/// and a `logos index` remedy; the classification never sends a reader to a
+/// re-index for a host-resource failure and never repeats the [FR-DB-02]
+/// "unable to open database file" wording that reads as a corrupt store.
+///
+/// The fd-exhaustion arm itself is asserted in `federation::degraded`'s
+/// classification table against [CR-100]'s verbatim diagnostic — exhausting the
+/// host's descriptor table from an integration test would be flaky and would
+/// bound this suite to one platform's `ulimit`.
+///
+/// [FR-DB-02]: ../../docs/specs/requirements/FR-DB-02.md
+#[test]
+fn a_degraded_member_states_a_cause_not_the_raw_sqlite_symptom() {
+    let tmp = warm_fixture(&["api", "broken"], &["api", "broken"]);
+    break_store(tmp.path(), "broken");
+
+    let status = logos_json_exiting(tmp.path(), &["workspace", "status"], 1);
+    let broken = status["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["member"] == "broken")
+        .expect("the broken member has a row");
+
+    let reason = broken["degraded_reason"].as_str().expect("a degraded reason");
+    assert!(
+        !reason.contains("FR-DB-02"),
+        "the reason must not be the raw connection-contract symptom: {reason}"
+    );
+    assert!(
+        broken.get("degraded_cause").is_some(),
+        "this failure IS classifiable — an absent cause here would mean the \
+         classification silently stopped recognising it: {broken}"
+    );
+}
+
+/// **[FR-WS-16] AC1 across the whole `workspace` group.** `reachability` and
+/// `check` exit non-zero on an unopenable member too, and name it on stderr —
+/// the exit code is a property of the workspace, not of one subcommand.
+///
+/// `check` is the pointed case: its *governance* verdict is advisory and never
+/// moves the exit code ([ADR-56]), and its payload is a bare `Option` that must
+/// keep serialising as `null` with no rules declared ([NFR-CC-04]). Both hold
+/// while the degraded exit applies.
+#[test]
+fn every_workspace_subcommand_exits_non_zero_on_an_unopenable_member() {
+    let tmp = warm_fixture(&["api", "broken"], &["api", "broken"]);
+    break_store(tmp.path(), "broken");
+
+    for args in [
+        &["workspace", "status"][..],
+        &["workspace", "reachability"][..],
+        &["workspace", "check"][..],
+    ] {
+        for mode in [&[][..], &["--json"][..]] {
+            let full: Vec<&str> = args.iter().chain(mode.iter()).copied().collect();
+            let out = logos(tmp.path(), &full);
+            assert_eq!(
+                out.status.code(),
+                Some(1),
+                "{full:?} exited {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stderr = String::from_utf8(out.stderr).unwrap();
+            assert!(
+                stderr.contains("broken"),
+                "{full:?} names the degraded member on stderr: {stderr}"
+            );
+        }
+    }
+
+    // `check` with no rules declared still emits the honest empty payload —
+    // `null`, not a fabricated zero-violation report — on machine-clean stdout.
+    let out = logos(tmp.path(), &["workspace", "check", "--json"]);
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap().trim(),
+        "null",
+        "the non-zero exit did not turn the honest empty into a report"
+    );
+}
+
+/// **[FR-WS-16] AC4 / [BR-45], end to end.** A member the answer never opened
+/// because nothing needed it is `not-attempted`, and the command exits **0**.
+///
+/// `xservice search --repo api` touches exactly one member of a two-member
+/// workspace ([NFR-PE-10]), so `web` is never attempted. A derivation that read
+/// "not resident" as "failed" would exit non-zero here on a completely healthy
+/// workspace — which is the mirror image of the defect this story fixes, and the
+/// reason laziness and eviction are asserted separately from failure.
+#[test]
+fn a_lazily_skipped_member_never_makes_a_healthy_command_fail() {
+    let tmp = workspace();
+
+    let out = logos(tmp.path(), &["xservice", "search", "user", "--repo", "api", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a deliberately scoped query is not a degraded workspace: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // And the unscoped all-member commands over the same healthy workspace stay
+    // at exit 0 with every member `opened`.
+    let status = logos_json(tmp.path(), &["workspace", "status"]);
+    assert_eq!(status["degraded_rollup"]["opened"], 2);
+    assert_eq!(status["degraded_rollup"]["covers_all_members"], true);
 }
 
 /// AC1: `xservice route-providers` returns repo-qualified cross-service

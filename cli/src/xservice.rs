@@ -17,8 +17,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use logos_core::federation::{
-    app_wide_reachability, discover, query, workspace_governance, ContractBridge, EngineRegistry,
-    ReachabilityScope, RegistryMode,
+    app_wide_reachability, degraded, discover, query, workspace_governance, ContractBridge,
+    EngineRegistry, ReachabilityScope, RegistryMode,
 };
 use logos_core::{model::NodeKind, Engine};
 
@@ -105,9 +105,13 @@ pub(crate) enum WorkspaceCommands {
     /// logos.workspace.toml) over the cross-service bridge bindings (FR-WS-13).
     ///
     /// Reported at the WORKSPACE level and **advisory**: this never alters any
-    /// member's per-repo quality gate, and always exits 0 — a violation is
-    /// reported, not gated (ADR-56). With no rules declared, there is no output
-    /// at all (`null`), not a passing report.
+    /// member's per-repo quality gate, and a violation never moves the exit code
+    /// — it is reported, not gated (ADR-56). With no rules declared, there is no
+    /// output at all (`null`), not a passing report.
+    ///
+    /// A workspace **member that could not be opened** does exit non-zero (1),
+    /// for every `workspace` subcommand: that is the answer being incomplete,
+    /// not a governance verdict (FR-WS-16).
     Check,
 }
 
@@ -180,13 +184,47 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
     Ok(0)
 }
 
-/// Route one `workspace` subcommand to its read-model ([FR-WS-05], [FR-WS-12], [FR-WS-13]).
+/// Route one `workspace` subcommand to its read-model, then map the workspace's
+/// **degraded members** to the exit code ([FR-WS-05], [FR-WS-12], [FR-WS-13],
+/// [FR-WS-16]).
 ///
-/// `Check` prints an `Option<WorkspaceGovernance>` and always returns 0: the
-/// workspace rule family is **advisory** — it reports cross-service policy
-/// breaches without moving any member's gated signal ([ADR-56]). Serialising the
-/// `Option` directly is what makes the honest empty machine-readable: no declared
-/// rules ⇒ `null`, never a fabricated zero-violation report ([NFR-CC-04]).
+/// `Check`'s *governance verdict* still never moves the exit code: the workspace
+/// rule family is **advisory** — it reports cross-service policy breaches without
+/// moving any member's gated signal ([ADR-56]). Serialising the `Option` directly
+/// is what makes the honest empty machine-readable: no declared rules ⇒ `null`,
+/// never a fabricated zero-violation report ([NFR-CC-04]).
+///
+/// # Exit code: an unopenable member is exit 1 ([FR-WS-16], [FR-CL-01])
+/// What *does* move the exit code, for all three subcommands alike, is a member
+/// whose store could not be **opened**. That is not a governance verdict; it is
+/// the answer being incomplete. This function used to return `Ok(0)` whatever
+/// happened, so the observed [CR-100] run — 63 of 72 members unopened, every
+/// roll-up computed over the 9 that survived — was a *successful* command that
+/// passed in CI. Exit 1 is the result-level violation code the governance
+/// commands already use ([FR-CL-03], [`crate::violation_code`]): the command
+/// ran, and its answer is not the answer it claims to be.
+///
+/// This is a **breaking change** for a script that tolerated the old exit 0,
+/// stated as such in the CLI contract ([FR-CL-01]) and the release notes.
+///
+/// A member merely skipped by laziness, or reclaimed by the budget's eviction,
+/// is **not** degraded and does not move the exit code — the discrimination
+/// lives in [`logos_core::federation::degraded`], not here ([BR-45]).
+///
+/// # The notice goes to stderr
+/// So `--json` stdout stays machine-clean ([FR-CL-02]), and so *every*
+/// subcommand names its degraded members — including `check`, whose payload is a
+/// bare `Option` that must keep serialising as `null` ([NFR-CC-04]).
+/// `workspace status` additionally carries the roll-up **inside** its payload,
+/// folded into the member table, so a `--json` consumer reads it structurally
+/// rather than by parsing a warning.
+///
+/// [CR-100]: ../../docs/requests/CR-100-workspace-resource-budget.md
+/// [FR-CL-01]: ../../docs/specs/requirements/FR-CL-01.md
+/// [FR-CL-02]: ../../docs/specs/requirements/FR-CL-02.md
+/// [FR-CL-03]: ../../docs/specs/requirements/FR-CL-03.md
+/// [FR-WS-16]: ../../docs/specs/requirements/FR-WS-16.md
+/// [BR-45]: ../../docs/specs/software-spec.md#327-workspace-federation
 pub(crate) fn run_workspace(command: WorkspaceCommands, root: &Path, out: &Output) -> Result<i32> {
     let registry = registry(root)?;
     match command {
@@ -203,5 +241,13 @@ pub(crate) fn run_workspace(command: WorkspaceCommands, root: &Path, out: &Outpu
             out.print(&workspace_governance(registry.federation(), &edges)?)?;
         }
     }
-    Ok(0)
+    // Degraded members are read AFTER the read-model, deliberately: the
+    // registry's open-state ledger is complete only once the command's own
+    // walks have run, and `workspace status` walks every member four times
+    // through tiers with no per-member error channel of their own.
+    let degraded = degraded::rollup(&registry.open_states());
+    if let Some(notice) = degraded.notice().filter(|_| !out.quiet) {
+        eprintln!("{notice}");
+    }
+    Ok(crate::violation_code(degraded.degraded_members.is_empty()))
 }

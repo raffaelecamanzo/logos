@@ -46,9 +46,17 @@
 //!   Pure derivation over what a status walk already gathered, with `warming`
 //!   and warm-failure taken as explicit inputs so neither is ever inferred
 //!   ([FR-WS-15], [NFR-CC-04], [BR-44]).
+//! - the [`degraded`] open-state axis — whether each member's store was
+//!   **opened**, which is a different question from whether it holds an index.
+//!   A member attempted-and-failed is named, given a host-resource cause where
+//!   the evidence identifies one, and forces a non-zero exit; a member merely
+//!   skipped by laziness or reclaimed by the [`budget`]'s eviction is never
+//!   reported degraded ([FR-WS-16], [NFR-CC-04], [BR-45]).
 //!
 //! [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+//! [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+//! [BR-45]: ../../../docs/specs/software-spec.md#327-workspace-federation
 //!
 //! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 //! [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
@@ -80,6 +88,7 @@ pub mod bridge;
 pub mod broker;
 pub mod budget;
 pub mod coverage;
+pub mod degraded;
 pub mod enable;
 pub mod governance;
 pub mod manifest;
@@ -119,6 +128,7 @@ pub use query::{
     XserviceImpact, XserviceRouteProviders, XserviceSearch,
 };
 pub use budget::ConnectionBudget;
+pub use degraded::{DegradedCause, DegradedRollup, MemberOpen, MemberOpenState, StoreFile};
 pub use registry::{Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode};
 pub use topics::{workspace_topics, MemberTopics, TopicSummary};
 pub use warm_state::{MemberWarmState, WarmEvidence, WarmRollup};

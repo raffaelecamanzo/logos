@@ -185,7 +185,17 @@ impl ReferenceCoverage {
 ///
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
-#[derive(Debug, Default, Clone, Serialize)]
+/// Deliberately **not** `Default`. Every field but one could default harmlessly,
+/// and [`covers_all_members`](Self::covers_all_members) could not: `false` is the
+/// derived default and is a *lie* over the empty workspace a defaulted value
+/// describes (0 of 0 members is covered), while `true` would be a lie over any
+/// other. A caller must state the coverage it measured — which is the whole point
+/// of the marker ([FR-WS-16], [NFR-CC-04]). Nothing constructs this by default
+/// today; [`Tally::finish`] is the one constructor.
+///
+/// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Clone, Serialize)]
 pub struct CrossServiceCoverage {
     /// Every classified cross-boundary reference, sorted by endpoint for
     /// deterministic output ([NFR-RA-06]).
@@ -202,10 +212,38 @@ pub struct CrossServiceCoverage {
     /// ([ADR-53]).
     pub no_provider_in_workspace: u64,
     /// `bound / (bound + ambiguous + unbound)`, excluding
-    /// `no_provider_in_workspace` from the denominator ([ADR-53]). `1.0` when
-    /// that denominator is zero (nothing to bind is full coverage, honestly —
-    /// mirrors [`crate::resolve::stats`]).
-    pub bound_ratio: f64,
+    /// `no_provider_in_workspace` from the denominator ([ADR-53]).
+    ///
+    /// **Absent** (`null` in `--json`) when that denominator is zero, never a
+    /// perfect score ([FR-WS-05], [NFR-CC-04]). `0 / 0` is not full coverage; it
+    /// is *no measurement*, and reporting it as `1.0` is how a workspace with 63
+    /// of 72 members unopened presented as a healthy one — `bound: 0`,
+    /// `bound_ratio: 1.0` ([CR-100]). An `Option` rather than a sentinel so a
+    /// consumer that ignores absence fails to compile instead of lying.
+    ///
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_ratio: Option<f64>,
+    /// Members whose contract surface this summary actually read.
+    pub members_read: u64,
+    /// Members declared in the workspace — the roster this summary was computed
+    /// over ([FR-WS-16]).
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    pub members_total: u64,
+    /// Whether every member in the roster contributed to the counts above.
+    ///
+    /// `false` marks every figure in this summary as covering fewer than all
+    /// members, so a partial workspace never reads as a whole one
+    /// ([FR-WS-16], [NFR-CC-04]). Stated as its own field rather than left for a
+    /// reader to compute from the two counts, because the counts are easy to
+    /// ignore and this is the claim that matters.
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub covers_all_members: bool,
 }
 
 /// Classify every cross-boundary reference over `registry`'s members
@@ -219,7 +257,15 @@ pub struct CrossServiceCoverage {
 /// so no cross-boundary reference goes unaccounted for.
 ///
 /// A member that fails to start or whose surface read fails is skipped
-/// (degraded, not fatal), exactly as [`ContractBridge::edges`](super::bridge::ContractBridge::edges).
+/// (degraded, not fatal), exactly as [`ContractBridge::edges`](super::bridge::ContractBridge::edges)
+/// — and the shortfall is **reported**:
+/// [`members_read`](CrossServiceCoverage::members_read) against
+/// [`members_total`](CrossServiceCoverage::members_total), with
+/// [`covers_all_members`](CrossServiceCoverage::covers_all_members) marking every
+/// figure in the summary as partial ([FR-WS-16], [NFR-CC-04]).
+///
+/// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 pub fn cross_service_coverage<E>(registry: &EngineRegistry<E>) -> CrossServiceCoverage
 where
     E: MemberEngine + MemberContracts,
@@ -231,7 +277,14 @@ where
     // through the same provider index as the contract-surface consumers.
     let mut inv_consumers: Vec<(String, super::bridge::InvocationRef)> = Vec::new();
 
-    for (member, surface) in read_members(registry, "contract surface", |e| e.contract_surface()) {
+    let surfaces = read_members(registry, "contract surface", |e| e.contract_surface());
+    // The members that actually contributed — the numerator of the coverage
+    // marker below. A member whose engine failed to start or whose surface read
+    // failed is skipped here, and without recording that shortfall the summary
+    // would present a partial workspace as a whole one ([FR-WS-16]).
+    let members_read = surfaces.len();
+
+    for (member, surface) in surfaces {
         for node in &surface {
             if node.kind == NodeKind::ApiOperation {
                 consumer_refs.push((member.clone(), node.name.clone(), node.symbol.clone()));
@@ -345,7 +398,7 @@ where
         }
     }
 
-    tally.finish()
+    tally.finish(members_read, registry.members().len())
 }
 
 /// The running coverage tally — one `record` point, so a state and its counter can
@@ -377,14 +430,22 @@ impl Tally {
             .push(ReferenceCoverage::new(relation, from, state));
     }
 
-    fn finish(mut self) -> CrossServiceCoverage {
+    /// Seal the tally into the read-model, over a workspace of `members_total`
+    /// members of which `members_read` contributed ([FR-WS-05], [FR-WS-16]).
+    ///
+    /// The zero-denominator ratio is reported **absent**, never `1.0`: nothing
+    /// to bind is not full coverage, it is no measurement, and a fabricated
+    /// perfect score over a partially-opened workspace is exactly what
+    /// [CR-100] observed ([NFR-CC-04]).
+    ///
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    fn finish(mut self, members_read: usize, members_total: usize) -> CrossServiceCoverage {
         self.references.sort_by(|a, b| a.from.cmp(&b.from));
         let denom = self.bound + self.ambiguous + self.unbound;
-        let bound_ratio = if denom == 0 {
-            1.0
-        } else {
-            self.bound as f64 / denom as f64
-        };
+        let bound_ratio = (denom > 0).then(|| self.bound as f64 / denom as f64);
         CrossServiceCoverage {
             references: self.references,
             bound: self.bound,
@@ -392,6 +453,9 @@ impl Tally {
             unbound: self.unbound,
             no_provider_in_workspace: self.no_provider_in_workspace,
             bound_ratio,
+            members_read: members_read as u64,
+            members_total: members_total as u64,
+            covers_all_members: members_read == members_total,
         }
     }
 }
@@ -610,6 +674,98 @@ mod tests {
         }
     }
 
+    // ── FR-WS-16 / NFR-CC-04: the summary states how much of the workspace it
+    //    actually covers, so a partial answer never reads as a whole one ──────
+
+    /// A fully-read workspace reports `covers_all_members` and the two counts
+    /// agreeing — the baseline the partial cases below are a departure from.
+    #[test]
+    fn a_fully_read_workspace_covers_all_members() {
+        reset();
+        set_member("api", vec![op("GET /users/{id}", "local op_get")]);
+        set_member("web", vec![route("GET /users/{id}", "local route_get")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "web"]));
+
+        assert_eq!(cov.members_read, 2);
+        assert_eq!(cov.members_total, 2);
+        assert!(cov.covers_all_members);
+    }
+
+    /// **[FR-WS-16] AC5, the [CR-100] failure exactly.** A member whose engine
+    /// cannot be opened contributes nothing, and the summary says so: the
+    /// figures cover 1 of 2 members and `covers_all_members` is `false`.
+    ///
+    /// The observed run reported `bound: 0` with `bound_ratio: 1.0` over the 9
+    /// members of 72 that opened — sound-looking numbers over a workspace that
+    /// was three-quarters missing. Both halves of that are asserted here: the
+    /// ratio is absent, and the shortfall is stated.
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    #[test]
+    fn a_partially_opened_workspace_is_marked_as_covering_fewer_than_all_members() {
+        reset();
+        set_member("api", vec![op("GET /users/{id}", "local op_get")]);
+        // `broken`'s engine start fails; it would have provided the route.
+        set_member("broken", vec![route("GET /users/{id}", "local route_get")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "broken"]));
+
+        assert_eq!(cov.members_read, 1, "only `api` contributed");
+        assert_eq!(cov.members_total, 2);
+        assert!(
+            !cov.covers_all_members,
+            "every figure below covers 1 of 2 members and must be marked so"
+        );
+        assert_eq!(
+            cov.no_provider_in_workspace, 1,
+            "the provider was in the member that never opened"
+        );
+        assert_eq!(cov.bound, 0);
+        assert_eq!(
+            cov.bound_ratio, None,
+            "0 bound of an empty denominator is NOT a perfect score — the exact \
+             `bound: 0, bound_ratio: 1.0` CR-100 observed"
+        );
+
+        let value = serde_json::to_value(&cov).unwrap();
+        assert!(
+            value.get("bound_ratio").is_none(),
+            "and it reaches the wire absent, not as a number: {value}"
+        );
+        assert_eq!(value["covers_all_members"], false);
+    }
+
+    /// A member that *opened* but whose surface **read** failed is the second
+    /// shortfall channel, and it is marked identically — the summary's claim is
+    /// about what contributed, not about why it did not.
+    #[test]
+    fn a_member_whose_surface_read_failed_also_reduces_the_stated_coverage() {
+        reset();
+        set_member("api", vec![op("GET /users/{id}", "local op_get")]);
+        set_member("unreadable", vec![route("GET /users/{id}", "local route_get")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "unreadable"]));
+
+        assert_eq!(cov.members_read, 1);
+        assert_eq!(cov.members_total, 2);
+        assert!(!cov.covers_all_members);
+    }
+
+    /// An empty workspace covers all of nothing — `0 == 0` is honestly complete,
+    /// and the ratio is still absent because nothing was measured.
+    #[test]
+    fn an_empty_workspace_covers_all_members_and_measures_nothing() {
+        reset();
+        let cov = cross_service_coverage(&registry(&[]));
+
+        assert_eq!(cov.members_read, 0);
+        assert_eq!(cov.members_total, 0);
+        assert!(cov.covers_all_members, "0 of 0 members is covered");
+        assert_eq!(cov.bound_ratio, None, "and nothing is measured");
+    }
+
     /// A consumer with exactly one cross-member provider classifies `Bound`.
     #[test]
     fn a_sole_cross_member_provider_is_bound() {
@@ -626,7 +782,7 @@ mod tests {
         assert_eq!(cov.references.len(), 1);
         assert_eq!(cov.references[0].state, CoverageState::Bound);
         assert_eq!(cov.references[0].relation, "route");
-        assert_eq!(cov.bound_ratio, 1.0);
+        assert_eq!(cov.bound_ratio, Some(1.0));
     }
 
     /// The flattened `state` field serializes as one top-level `"state"` key
@@ -697,9 +853,10 @@ mod tests {
             }
         );
         assert_eq!(
-            cov.bound_ratio, 1.0,
-            "an empty bound+ambiguous+unbound denominator is full coverage, \
-             not depressed by the excluded no-provider bucket"
+            cov.bound_ratio, None,
+            "the no-provider bucket is excluded from the denominator, which leaves it \
+             EMPTY — and 0/0 is reported absent, never as the perfect score it used to \
+             fabricate (FR-WS-05, NFR-CC-04)"
         );
     }
 
@@ -857,7 +1014,7 @@ mod tests {
         assert_eq!(cov.ambiguous, 1);
         assert_eq!(cov.unbound, 1);
         assert_eq!(cov.no_provider_in_workspace, 1);
-        assert_eq!(cov.bound_ratio, 1.0 / 3.0, "1 bound of 3 counted (bound+ambiguous+unbound)");
+        assert_eq!(cov.bound_ratio, Some(1.0 / 3.0), "1 bound of 3 counted (bound+ambiguous+unbound)");
     }
 
     /// A `ProtoService`/`GqlType` surface node carries no portable HTTP key in
@@ -975,7 +1132,11 @@ mod tests {
 
         assert_eq!(cov.no_provider_in_workspace, 1);
         assert_eq!(cov.bound, 0);
-        assert_eq!(cov.bound_ratio, 1.0);
+        assert_eq!(
+            cov.bound_ratio, None,
+            "the only reference is bucketed out of the denominator, so there is nothing \
+             measured — absent, not 1.0 (NFR-CC-04)"
+        );
     }
 
     /// A client call whose only matching route is in its own member is an
@@ -1190,8 +1351,10 @@ mod tests {
                 reason: UnboundReason::NoProviderInWorkspace
             }
         );
-        // The non-defect bucket: it does not drag the bound ratio down.
-        assert_eq!(cov.bound_ratio, 1.0);
+        // The non-defect bucket does not drag the bound ratio down — it empties
+        // the denominator entirely, and 0/0 is reported absent rather than as a
+        // perfect score ([NFR-CC-04]).
+        assert_eq!(cov.bound_ratio, None);
     }
 
     // ── S-256 / FR-WS-11: the coverage tier and the bridge must not disagree ──
@@ -1231,7 +1394,7 @@ mod tests {
         assert_eq!(cov.references.len(), 1, "the subscribe is a provider, not a second reference");
         assert_eq!(cov.references[0].state, CoverageState::Bound);
         assert_eq!(cov.references[0].relation, "broker-topic");
-        assert_eq!(cov.bound_ratio, 1.0);
+        assert_eq!(cov.bound_ratio, Some(1.0));
     }
 
     /// A topic with **two** cross-member subscribers is `bound`, never `ambiguous`.

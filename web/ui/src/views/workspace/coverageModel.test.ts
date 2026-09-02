@@ -30,6 +30,9 @@ function coverage(references: ReferenceCoverage[], summary: Partial<CrossService
     unbound: 0,
     no_provider_in_workspace: 0,
     bound_ratio: 1,
+    members_read: 2,
+    members_total: 2,
+    covers_all_members: true,
     ...summary,
   };
 }
@@ -120,6 +123,52 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
     const model = buildCoverageDashboard(coverage([]));
     expect(model.isEmpty).toBe(true);
     expect(model.arms).toEqual([]);
+  });
+
+  // ── S-326 / FR-WS-05 / NFR-CC-04: absence is not a score ──────────────────
+
+  it("carries an ABSENT bound_ratio through as null, never as a number", () => {
+    // The server omits the key when its denominator is 0. Defaulting it to 0 or 1
+    // here would reinstate exactly the fabrication CR-100 filed: `bound: 0` beside
+    // a perfect ratio, over a workspace that was three-quarters unopened.
+    const { bound_ratio: _omitted, ...withoutRatio } = coverage([
+      ...unbound("route", "no-provider-in-workspace", 3),
+    ]);
+    const model = buildCoverageDashboard({
+      ...withoutRatio,
+      no_provider_in_workspace: 3,
+    } as CrossServiceCoverage);
+
+    expect(model.boundRatio).toBeNull();
+    expect(model.noProviderInWorkspace).toBe(3);
+  });
+
+  it("passes the partial-coverage marker through so a view can label the shortfall", () => {
+    const model = buildCoverageDashboard(
+      coverage([...bound("route", 1)], {
+        bound: 1,
+        bound_ratio: 1,
+        members_read: 9,
+        members_total: 72,
+        covers_all_members: false,
+      }),
+    );
+    expect(model.coversAllMembers).toBe(false);
+    expect([model.membersRead, model.membersTotal]).toEqual([9, 72]);
+  });
+
+  it("does not claim partial coverage when the payload carries no marker at all", () => {
+    // A payload from a server that predates the marker: claiming a shortfall with
+    // no evidence of one is its own fabrication (NFR-CC-04).
+    const {
+      covers_all_members: _a,
+      members_read: _b,
+      members_total: _c,
+      ...bare
+    } = coverage([...bound("route", 1)], { bound: 1 });
+    const model = buildCoverageDashboard(bare as CrossServiceCoverage);
+
+    expect(model.coversAllMembers).toBe(true);
   });
 
   it("shows an unknown (future-arm) relation verbatim rather than dropping it", () => {

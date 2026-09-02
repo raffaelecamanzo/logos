@@ -524,6 +524,57 @@ cross-service coverage summary** — every cross-boundary reference classified
 bucketed separately (`no-provider-in-workspace` never depresses the bound-ratio)
 and never feeds any member's quality gate ([ADR-53](../specs/architecture/decisions/ADR-53.md)).
 
+`coverage.bound_ratio` is **absent** (`null` under `--json`) when nothing was
+measured — when `bound + ambiguous + unbound` is zero. It is never reported as a
+perfect score: `0 / 0` is *no measurement*, not full coverage.
+
+#### Two per-member axes: `warm_state` and `open_state`
+
+Each member row carries **two independent labels**, and conflating them is the
+mistake to avoid:
+
+| Field | Question | Values |
+|---|---|---|
+| `warm_state` | does this member's graph hold an index? | `warm`, `warming`, `deferred`, `degraded` |
+| `open_state` | could this member's store be opened? | `opened`, `not-attempted`, `degraded` |
+
+A member with no index yet is `deferred` / `opened` — honest and
+**non-alarming**, it indexes lazily on its first query. A member whose store
+cannot be opened is `degraded` on both, with a `degraded_reason` and, where the
+diagnostic identifies one, a `degraded_cause`:
+
+- `host-resource-limit` — the process ran out of file descriptors
+  (`RLIMIT_NOFILE`). The member's store is present and its graph intact, so
+  **a re-index is not the remedy**; raise `ulimit -n`, or query fewer members.
+- `store-unavailable` — there is no store at the member's `.logos/logos.db`.
+  Run `logos index` in that member.
+
+`warming` is in the vocabulary but is never reported without a live signal from
+the warm supervisor, and the roll-up then **omits** the `warming` key entirely
+rather than sending `0` — an absent `warming` means *not knowable*, never *none*.
+
+A member the command never needed to open (a `--repo`-scoped query, say) is
+`not-attempted`, and a member whose engine was **evicted** to stay inside the
+workspace connection budget still reads `opened` — eviction reclaims a success
+and is not a failure.
+
+#### Exit code (⚠️ changed)
+
+`workspace status`, `workspace reachability` and `workspace check` **exit 1 when
+one or more members could not be opened**, and 0 otherwise. The payload's
+`degraded_rollup` names those members and its `covers_all_members: false` marks
+every other figure in the answer — the warm roll-up, the coverage summary, the
+topic inventory — as computed over fewer than all members. A human-readable
+warning naming the members also goes to **stderr**, so `--json` stdout stays
+machine-clean.
+
+**This is a breaking change.** These commands previously returned 0 no matter how
+many members failed, so a workspace where 63 of 72 members could not be opened
+was a *successful* command that passed in CI over a payload three-quarters
+missing. A script that relies on the old behaviour needs updating; the states
+that do **not** move the exit code are `deferred` (nothing indexed yet),
+`not-attempted` (nothing needed that member) and an evicted member.
+
 ### `workspace reachability`
 
 ```bash
@@ -573,11 +624,15 @@ never a fabricated edge set.
 
 Governance is reported at the **workspace level** and is **advisory by design**:
 it is a separate family from the per-repo rules ([`check`](#check)), it never
-alters any member's per-repo quality gate, and `workspace check` **always exits
-0** — a violation is *reported*, not *gated*. With no `[governance]` rules
-declared, there is no output at all (`null` under `--json`) — an honest empty,
-never a fabricated passing report. Rule targets match by glob on symbol, with an
-optional member scope.
+alters any member's per-repo quality gate, and a governance violation **never
+moves the exit code** — it is *reported*, not *gated*. With no `[governance]`
+rules declared, there is no output at all (`null` under `--json`) — an honest
+empty, never a fabricated passing report. Rule targets match by glob on symbol,
+with an optional member scope.
+
+An **unopenable member** does exit 1, here as for every `workspace` subcommand
+(see [`workspace status`](#workspace-status)): that is the answer being
+incomplete, not a governance verdict.
 
 ---
 

@@ -39,6 +39,7 @@ use crate::Engine;
 
 use super::bridge::BridgeEdge;
 use super::coverage::{cross_service_coverage, CrossServiceCoverage};
+use super::degraded::{self, DegradedRollup, MemberOpen, MemberOpenState};
 use super::registry::{EngineRegistry, MemberScoped};
 use super::topics::{workspace_topics, MemberTopics};
 use super::warm_state::{self, MemberWarmState, WarmEvidence, WarmRollup};
@@ -313,18 +314,27 @@ pub fn xservice_route_providers(
     }
 }
 
-/// One member's row in a [`WorkspaceStatus`]: its index freshness and its warm
-/// state, in **one** record ([FR-WS-05], [FR-WS-15]).
+/// One member's row in a [`WorkspaceStatus`]: its index freshness, its warm
+/// state, and its open state, in **one** record ([FR-WS-05], [FR-WS-15],
+/// [FR-WS-16]).
 ///
-/// Both halves are flattened, so a row is the flat table a reader expects —
-/// `{"member": "api", "result": {…}, "warm_state": "warm"}` — rather than a
-/// freshness list a caller has to join a state list against by name. That
-/// matters for what comes next as much as for now: [FR-WS-16]'s degraded
-/// reporting extends this same row.
+/// All three parts are flattened, so a row is the flat table a reader expects —
+/// `{"member": "api", "result": {…}, "warm_state": "warm", "open_state":
+/// "opened"}` — rather than a freshness list a caller has to join two state
+/// lists against by name. [FR-WS-16]'s degraded reporting extended this row
+/// rather than adding a competing member table, which is why `open_state` lives
+/// here beside `warm_state` and not in a payload of its own.
 ///
-/// Only `workspace status` carries a warm state; the `xservice` fan-outs keep
-/// the plain [`MemberResult`], which is why the state lives here rather than on
-/// the generic envelope.
+/// # Two axes, not one merged label
+/// `warm_state` is about **index presence** and `open_state` about **store
+/// openability** (see [`super::degraded`]) — different questions, kept as
+/// different keys so neither can be read as the other. A member that could not
+/// be opened reads `degraded` on both, which is two independent derivations
+/// agreeing, not one value duplicated.
+///
+/// Only `workspace status` carries these states; the `xservice` fan-outs keep
+/// the plain [`MemberResult`], which is why they live here rather than on the
+/// generic envelope.
 ///
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
@@ -334,29 +344,45 @@ pub struct MemberStatus {
     /// The member's index freshness, or why it could not be read.
     #[serde(flatten)]
     pub status: MemberResult<StatusInfo>,
-    /// This member's warm state ([FR-WS-15]).
+    /// This member's warm state — index presence ([FR-WS-15]).
     ///
     /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
     #[serde(flatten)]
     pub warm: MemberWarmState,
+    /// This member's open state — whether its store was opened, and the cause
+    /// when it was attempted and failed ([FR-WS-16]).
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    #[serde(flatten)]
+    pub open: MemberOpenState,
 }
 
 impl MemberStatus {
-    /// Build one labelled row from a member's already-read freshness
-    /// ([FR-WS-15]).
+    /// Build one labelled row from a member's already-read freshness and the
+    /// registry's record of whether its store opened ([FR-WS-15], [FR-WS-16]).
     ///
-    /// The state itself is derived by
+    /// The warm state is derived by
     /// [`warm_state::derive_state`](super::warm_state::derive_state), which owns
     /// the vocabulary AND its precedence rules; the only work here is projecting
     /// [`MemberResult`]'s two channels onto that function's
     /// `Result<bool, &str>` input. Deliberately not restated — a second copy of
     /// the table would go quietly stale the first time the precedence changed.
+    /// The open state is likewise taken as given, from
+    /// [`EngineRegistry::open_states`](super::registry::EngineRegistry::open_states):
+    /// re-deriving it from `error` here would be a second author of the
+    /// eviction/laziness discrimination, and the wrong one — this row cannot
+    /// tell an unopenable member from an unreadable index.
     ///
     /// No engine is constructed, opened, or touched here ([NFR-PE-10]).
     ///
     /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
-    fn labelled(status: MemberResult<StatusInfo>, evidence: &WarmEvidence) -> Self {
+    fn labelled(
+        status: MemberResult<StatusInfo>,
+        evidence: &WarmEvidence,
+        open: MemberOpenState,
+    ) -> Self {
         // `result` is the only channel that can yield `Ok`; absent freshness is
         // never evidence of an un-attempted member, so it reads unreadable
         // rather than silently `deferred` — including the `error`-less case,
@@ -370,7 +396,11 @@ impl MemberStatus {
                 .unwrap_or("the member reported no index freshness")),
         };
         let warm = warm_state::derive_state(&status.member, indexed, evidence);
-        Self { status, warm }
+        Self {
+            status,
+            warm,
+            open,
+        }
     }
 }
 
@@ -390,6 +420,19 @@ pub struct WorkspaceStatus {
     ///
     /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
     pub warm_rollup: WarmRollup,
+    /// The workspace-wide **degraded** roll-up over the same
+    /// [`members`](Self::members) ([FR-WS-16]).
+    ///
+    /// The second projection of one member table, not a second table: it names
+    /// the members whose store could not be opened, and its
+    /// [`covers_all_members`](DegradedRollup::covers_all_members) marks every
+    /// other figure in this payload — the warm roll-up, the coverage summary,
+    /// the topic inventory — as computed over fewer than all members
+    /// ([NFR-CC-04]).
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub degraded_rollup: DegradedRollup,
     /// The non-gated 3-state cross-service coverage summary from [S-247]
     /// ([`cross_service_coverage`], [ADR-53]).
     ///
@@ -446,9 +489,16 @@ where
     }
 }
 
-/// Per-member freshness and warm state, the warm roll-up, the 3-state coverage
-/// summary, and the promoted topic inventory ([FR-WS-05], [FR-WS-11],
-/// [FR-WS-15]).
+/// Per-member freshness, warm state and open state, the warm and degraded
+/// roll-ups, the 3-state coverage summary, and the promoted topic inventory
+/// ([FR-WS-05], [FR-WS-11], [FR-WS-15], [FR-WS-16]).
+///
+/// # The degraded roll-up costs no walk either
+/// [`EngineRegistry::open_states`](super::registry::EngineRegistry::open_states)
+/// reads the ledger the fan-outs below already wrote, so `WALKS_PER_STATUS`
+/// stays at 4 ([NFR-PE-10]) — see `tests/workspace_connection_budget.rs`.
+///
+/// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
 ///
 /// # The warm labelling costs nothing
 /// [`WarmEvidence::none`] is passed because no durable per-member warm record
@@ -467,17 +517,42 @@ where
 /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
 pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
     let evidence = WarmEvidence::none();
-    let members: Vec<MemberStatus> = fan_status(registry)
+    let freshness = fan_status(registry);
+    let coverage = cross_service_coverage(registry);
+    let topics = workspace_topics(registry);
+
+    // Read the open-state ledger **last**, after every walk this read-model
+    // makes. A member that opened for the freshness walk and then failed under
+    // descriptor pressure during the coverage walk is degraded for this answer
+    // as a whole, which is the claim the exit code and the coverage marker rest
+    // on ([FR-WS-16]).
+    let opens = registry.open_states();
+    let degraded_rollup = degraded::rollup(&opens);
+    let mut by_member: std::collections::BTreeMap<String, MemberOpenState> = opens
         .into_iter()
-        .map(|status| MemberStatus::labelled(status, &evidence))
+        .map(|MemberOpen { member, state }| (member, state))
+        .collect();
+
+    let members: Vec<MemberStatus> = freshness
+        .into_iter()
+        .map(|status| {
+            // A roster member always has a ledger entry; `NotAttempted` is the
+            // honest fallback for a row whose member the roster does not carry
+            // (an unknown `--repo`), which never reaches this read-model.
+            let open = by_member
+                .remove(&status.member)
+                .unwrap_or(MemberOpenState::NotAttempted);
+            MemberStatus::labelled(status, &evidence, open)
+        })
         .collect();
 
     WorkspaceStatus {
         workspace: registry.federation().name.clone(),
         warm_rollup: warm_state::rollup(members.iter().map(|m| &m.warm), &evidence),
+        degraded_rollup,
         members,
-        coverage: cross_service_coverage(registry),
-        topics: workspace_topics(registry),
+        coverage,
+        topics,
     }
 }
 
@@ -588,11 +663,24 @@ mod tests {
         }
     }
 
+    /// The open state of a member whose store opened — the default for rows
+    /// exercising the *warm* axis, which the open axis must not perturb.
+    fn opened() -> MemberOpenState {
+        MemberOpenState::Opened
+    }
+
+    /// The open state of a member whose store was attempted and failed, with a
+    /// diagnostic that classifies to no cause (so the row's `degraded_reason` is
+    /// the verbatim text and the key set stays minimal).
+    fn unopened(diagnostic: &str) -> MemberOpenState {
+        MemberOpenState::degraded(diagnostic, super::degraded::StoreFile::Present)
+    }
+
     /// The freshness row and the warm label serialise into **one flat member
     /// row** — the coherent table [FR-WS-16] extends, not two lists to join.
     #[test]
     fn a_member_row_carries_freshness_and_the_warm_label_in_one_record() {
-        let row = MemberStatus::labelled(fresh("api", true), &WarmEvidence::none());
+        let row = MemberStatus::labelled(fresh("api", true), &WarmEvidence::none(), opened());
         let value = serde_json::to_value(&row).unwrap();
 
         assert_eq!(value["member"], "api");
@@ -602,17 +690,22 @@ mod tests {
 
     /// The member row's **exact key set**, pinned against literals.
     ///
-    /// `MemberStatus` flattens two structs into one JSON object, and
+    /// `MemberStatus` flattens *three* structs into one JSON object, and
     /// `serde_json`'s flatten merge is last-write-wins and **silent**: a key
-    /// emitted by both halves produces no compile error, no runtime error and no
-    /// failing test — one value simply disappears. [FR-WS-16] extends this same
-    /// row in [S-326], and the half most likely to want a `reason` is precisely
-    /// the degraded half, so the collision surface is real and imminent. Pinning
-    /// the key set turns a future collision into a failing test instead of a
-    /// dropped field.
+    /// emitted by two halves produces no compile error, no runtime error and no
+    /// failing test — one value simply disappears. The collision surface S-323
+    /// flagged as "real and imminent" is now live: the degraded row carries
+    /// `error` (the verbatim engine diagnostic), `reason` (the *warm* axis') and
+    /// `degraded_reason` (the *open* axis'), three distinct facts under three
+    /// distinct keys. Pinning the key set is what turns a collision into a
+    /// failing test rather than a dropped field.
+    ///
+    /// [FR-WS-16]'s reason is deliberately **additive**: `error` is byte-for-byte
+    /// what it always was, so the still-open question of whether `error` or
+    /// `reason` is the canonical degraded-reason field (S-323 deferred #15) can be
+    /// settled either way without touching this row's other keys.
     ///
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
-    /// [S-326]: ../../../docs/planning/journal.md#s-326-degraded-member-reporting-and-non-zero-exit-for-workspace-commands
     #[test]
     fn a_member_row_has_exactly_the_keys_it_is_meant_to() {
         let keys = |row: &MemberStatus| {
@@ -622,20 +715,108 @@ mod tests {
             keys
         };
 
-        let healthy = MemberStatus::labelled(fresh("api", true), &WarmEvidence::none());
+        let healthy = MemberStatus::labelled(fresh("api", true), &WarmEvidence::none(), opened());
         assert_eq!(
             keys(&healthy),
-            ["member", "result", "warm_state"],
-            "a healthy row: no `error`, no `reason`, nothing shadowed"
+            ["member", "open_state", "result", "warm_state"],
+            "a healthy row: no `error`, no `reason`, no `degraded_*`, nothing shadowed"
         );
 
-        let degraded =
-            MemberStatus::labelled(unopenable("web", "store is corrupt"), &WarmEvidence::none());
+        let degraded = MemberStatus::labelled(
+            unopenable("web", "store is corrupt"),
+            &WarmEvidence::none(),
+            unopened("store is corrupt"),
+        );
         assert_eq!(
             keys(&degraded),
-            ["error", "member", "reason", "warm_state"],
-            "a degraded row: no `result`, and `error`/`reason` both survive the \
-             double flatten"
+            [
+                "degraded_reason",
+                "error",
+                "member",
+                "open_state",
+                "reason",
+                "warm_state"
+            ],
+            "a degraded row: no `result`, and `error`/`reason`/`degraded_reason` all \
+             survive the triple flatten as three separate facts"
+        );
+
+        // A classified cause adds exactly one more key — and only when there IS
+        // one, so an unidentified cause is an absent key rather than a default
+        // ([NFR-CC-04]).
+        let host_limited = MemberStatus::labelled(
+            unopenable("svc", "unable to open database file"),
+            &WarmEvidence::none(),
+            MemberOpenState::degraded(
+                "unable to open database file",
+                super::degraded::StoreFile::Present,
+            ),
+        );
+        assert_eq!(
+            keys(&host_limited),
+            [
+                "degraded_cause",
+                "degraded_reason",
+                "error",
+                "member",
+                "open_state",
+                "reason",
+                "warm_state"
+            ],
+            "a classified cause is one extra key, never a rename of another"
+        );
+    }
+
+    /// The two axes stay **separable**: a member that opens fine but has no index
+    /// is `warm_state: deferred` / `open_state: opened`, and one that cannot be
+    /// opened is `degraded` on both — two independent derivations, two keys
+    /// ([FR-WS-15], [FR-WS-16]).
+    ///
+    /// The regression this pins is a merge: folding open-state into the warm
+    /// vocabulary (or deriving either from the other) would make a perfectly
+    /// healthy un-indexed member indistinguishable from an unopenable one on
+    /// whichever axis survived.
+    ///
+    /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    #[test]
+    fn the_warm_axis_and_the_open_axis_are_independent_fields() {
+        let deferred_but_openable =
+            MemberStatus::labelled(fresh("cold", false), &WarmEvidence::none(), opened());
+        let value = serde_json::to_value(&deferred_but_openable).unwrap();
+        assert_eq!(value["warm_state"], "deferred");
+        assert_eq!(
+            value["open_state"], "opened",
+            "an un-indexed member opened perfectly well: {value}"
+        );
+
+        let unopenable_member = MemberStatus::labelled(
+            unopenable("broken", "no such table: nodes"),
+            &WarmEvidence::none(),
+            unopened("no such table: nodes"),
+        );
+        let value = serde_json::to_value(&unopenable_member).unwrap();
+        assert_eq!(value["warm_state"], "degraded");
+        assert_eq!(value["open_state"], "degraded");
+        assert_eq!(
+            value["reason"], value["degraded_reason"],
+            "the two axes agree here, and still report it on their own keys: {value}"
+        );
+
+        // And a member whose store opened but which was skipped by laziness is
+        // `not-attempted` on the open axis with the warm axis untouched — the
+        // shape a scoped fan-out produces ([NFR-PE-10]).
+        let never_reached = MemberStatus::labelled(
+            fresh("lazy", false),
+            &WarmEvidence::none(),
+            MemberOpenState::NotAttempted,
+        );
+        let value = serde_json::to_value(&never_reached).unwrap();
+        assert_eq!(value["open_state"], "not-attempted");
+        assert_eq!(value["warm_state"], "deferred");
+        assert!(
+            value.get("degraded_reason").is_none(),
+            "a member nobody tried to open has no failure to report: {value}"
         );
     }
 
@@ -645,11 +826,11 @@ mod tests {
     fn index_presence_decides_warm_versus_deferred() {
         let evidence = WarmEvidence::none();
         assert_eq!(
-            MemberStatus::labelled(fresh("api", true), &evidence).warm,
+            MemberStatus::labelled(fresh("api", true), &evidence, opened()).warm,
             MemberWarmState::Warm
         );
         assert_eq!(
-            MemberStatus::labelled(fresh("web", false), &evidence).warm,
+            MemberStatus::labelled(fresh("web", false), &evidence, opened()).warm,
             MemberWarmState::Deferred
         );
     }
@@ -664,6 +845,7 @@ mod tests {
         let row = MemberStatus::labelled(
             unopenable("web", "starting the engine for workspace member \"web\""),
             &WarmEvidence::none(),
+            unopened("starting the engine for workspace member \"web\""),
         );
 
         assert!(matches!(row.warm, MemberWarmState::Degraded { .. }));
@@ -706,7 +888,7 @@ mod tests {
         assert_eq!(row.error.as_deref(), Some("no such table: edges"));
         assert!(
             matches!(
-                MemberStatus::labelled(row, &WarmEvidence::none()).warm,
+                MemberStatus::labelled(row, &WarmEvidence::none(), opened()).warm,
                 MemberWarmState::Degraded { .. }
             ),
             "BR-44: the read was attempted and failed"
@@ -721,7 +903,7 @@ mod tests {
         let row = flatten_status(scoped(Ok(Ok(StatusInfo::default()))));
         assert!(row.error.is_none(), "a successful read carries no error");
         assert_eq!(
-            MemberStatus::labelled(row, &WarmEvidence::none()).warm,
+            MemberStatus::labelled(row, &WarmEvidence::none(), opened()).warm,
             MemberWarmState::Deferred,
             "an honestly empty graph is deferred, which is the whole distinction"
         );
@@ -742,6 +924,7 @@ mod tests {
                 error: None,
             },
             &WarmEvidence::none(),
+            opened(),
         );
         assert!(matches!(row.warm, MemberWarmState::Degraded { .. }));
     }
@@ -755,10 +938,14 @@ mod tests {
     fn the_rollup_agrees_with_the_rows_and_omits_warming() {
         let evidence = WarmEvidence::none();
         let rows: Vec<MemberStatus> = vec![
-            MemberStatus::labelled(fresh("api", true), &evidence),
-            MemberStatus::labelled(fresh("web", true), &evidence),
-            MemberStatus::labelled(fresh("svc", false), &evidence),
-            MemberStatus::labelled(unopenable("old", "store is corrupt"), &evidence),
+            MemberStatus::labelled(fresh("api", true), &evidence, opened()),
+            MemberStatus::labelled(fresh("web", true), &evidence, opened()),
+            MemberStatus::labelled(fresh("svc", false), &evidence, opened()),
+            MemberStatus::labelled(
+                unopenable("old", "store is corrupt"),
+                &evidence,
+                unopened("store is corrupt"),
+            ),
         ];
         let rollup = warm_state::rollup(rows.iter().map(|r| &r.warm), &evidence);
 

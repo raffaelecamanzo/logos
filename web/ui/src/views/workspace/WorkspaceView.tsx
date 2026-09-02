@@ -80,9 +80,13 @@ import styles from "./Workspace.module.css";
 const RELATION_ARMS = Object.keys(ARM_LABEL);
 
 /** A percentage rendered from a 0–1 ratio, at one decimal — never rounded up to a
- *  flattering figure. */
-function pct(ratio: number): string {
-  return `${(ratio * 100).toFixed(1)}%`;
+ *  flattering figure.
+ *
+ *  A `null` ratio means the server measured nothing (its denominator was 0) and is
+ *  rendered as "not measured", never as `0.0%` or `100.0%`: both would be a
+ *  measurement invented from no evidence (FR-WS-05, NFR-CC-04). */
+function pct(ratio: number | null): string {
+  return ratio === null ? "not measured" : `${(ratio * 100).toFixed(1)}%`;
 }
 
 export function WorkspaceView() {
@@ -376,11 +380,29 @@ function CoveragePanel({ dashboard }: { dashboard: CoverageDashboard }) {
       <Card title="Cross-boundary coverage">
         {/* Advisory only — never a gate input (ADR-53). The ratio is the server's,
             displayed verbatim: `no-provider-in-workspace` is deliberately outside its
-            denominator, so recomputing it here would contradict the CLI. */}
+            denominator, so recomputing it here would contradict the CLI.
+
+            An ABSENT ratio gets no bar at all (FR-WS-05, NFR-CC-04): a bar is a
+            quantity, and there is no quantity here — a 0-width bar would read "nothing
+            bound" and a full one "everything bound", when the truth is that nothing
+            was measured. */}
         <div className={styles.ratio}>
-          <ScoreBar value={dashboard.boundRatio} max={1} label={pct(dashboard.boundRatio)} />
-          <span className="mono">{pct(dashboard.boundRatio)} bound</span>
+          {dashboard.boundRatio === null ? (
+            <span className="mono">bound ratio not measured (nothing to bind)</span>
+          ) : (
+            <>
+              <ScoreBar value={dashboard.boundRatio} max={1} label={pct(dashboard.boundRatio)} />
+              <span className="mono">{pct(dashboard.boundRatio)} bound</span>
+            </>
+          )}
         </div>
+        {!dashboard.coversAllMembers && (
+          <p className="muted">
+            Partial: computed over {dashboard.membersRead} of {dashboard.membersTotal} workspace
+            members — the rest could not be opened, so every figure below is a lower bound
+            (FR-WS-16).
+          </p>
+        )}
         <p className="muted">
           {dashboard.bound} bound · {dashboard.ambiguous} ambiguous · {dashboard.unbound} unbound ·{" "}
           {dashboard.noProviderInWorkspace} with no provider in this workspace (reported apart, and

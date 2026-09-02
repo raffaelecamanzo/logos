@@ -1043,8 +1043,21 @@ export interface CrossServiceCoverage {
   ambiguous: number;
   unbound: number;
   no_provider_in_workspace: number;
-  /** `bound / (bound + ambiguous + unbound)`; `1.0` when that denominator is 0. */
-  bound_ratio: number;
+  /** `bound / (bound + ambiguous + unbound)`.
+   *
+   *  **Absent when that denominator is 0** (FR-WS-05, NFR-CC-04): `0/0` is not full
+   *  coverage, it is *no measurement*, and the server used to send `1.0` — which is
+   *  how a workspace with 63 of 72 members unopened reported `bound: 0` alongside a
+   *  perfect ratio (CR-100). A UI must render absence as "not measured", never as an
+   *  empty or a full bar. */
+  bound_ratio?: number;
+  /** Members whose contract surface this summary actually read. */
+  members_read: number;
+  /** Members in the workspace roster this summary was computed over. */
+  members_total: number;
+  /** Whether every roster member contributed. `false` means every figure above
+   *  covers fewer than all members (FR-WS-16, NFR-CC-04). */
+  covers_all_members: boolean;
 }
 
 /** `GET /api/v1/workspace/roster` — the manifest-only roster the shell probes on
@@ -1090,13 +1103,63 @@ export interface MemberTopics {
  *  A UI must not treat its absence as "nothing is warming". */
 export type MemberWarmStateLabel = "warm" | "warming" | "deferred" | "degraded";
 
-/** One member's row in {@link WorkspaceStatus}: its index freshness and its warm
- *  state in one record, so no join by member name is needed. */
+/** One member's **open** state (S-326, FR-WS-16) — a SEPARATE axis from
+ *  {@link MemberWarmStateLabel}, which is about index presence.
+ *
+ *  `opened` — its store was opened; a member the workspace connection budget later
+ *  evicted still reads `opened`, because eviction reclaims a *success*.
+ *  `not-attempted` — nothing needed this member, so nothing was opened; not a
+ *  failure. `degraded` — opening was attempted and FAILED (BR-45).
+ *
+ *  Never merge this with `warm_state`: an un-indexed member that opens perfectly
+ *  well is `deferred` / `opened`, and collapsing the two axes makes it
+ *  indistinguishable from a member nothing can open. */
+export type MemberOpenStateLabel = "opened" | "not-attempted" | "degraded";
+
+/** Why a member's store could not be opened, when the diagnostic identifies a cause
+ *  (FR-WS-16).
+ *
+ *  `host-resource-limit` — the process ran out of file descriptors; the member's
+ *  store is present and its graph intact, so a re-index is NOT the remedy.
+ *  `store-unavailable` — there is no store file at the member's `.logos/logos.db`;
+ *  `logos index` in that member is the fix. */
+export type DegradedCause = "host-resource-limit" | "store-unavailable";
+
+/** One member's row in {@link WorkspaceStatus}: its index freshness, its warm state
+ *  and its open state in one record, so no join by member name is needed. */
 export interface MemberStatus extends MemberResult<StatusInfo> {
-  /** This member's warm state (FR-WS-15). */
+  /** This member's warm state (FR-WS-15) — index presence. */
   warm_state: MemberWarmStateLabel;
-  /** Why the attempt failed — present only when `warm_state` is `"degraded"`. */
+  /** Why the *warm* attempt failed — present only when `warm_state` is
+   *  `"degraded"`. Distinct from `degraded_reason`, which is the *open* axis'. */
   reason?: string;
+  /** This member's open state (FR-WS-16) — store openability. */
+  open_state: MemberOpenStateLabel;
+  /** The classified cause of a failed open. **Absent** when the diagnostic
+   *  identifies none, rather than defaulted to the likeliest (NFR-CC-04). */
+  degraded_cause?: DegradedCause;
+  /** The open failure's plain-language reason — present only when `open_state` is
+   *  `"degraded"`. Additive to `error`, which keeps the verbatim engine
+   *  diagnostic. */
+  degraded_reason?: string;
+}
+
+/** The workspace-wide degraded roll-up (S-326, FR-WS-16) — a projection of the
+ *  same member rows, never a second member table. */
+export interface DegradedRollup {
+  /** Members in the workspace roster — the denominator the counts partition. */
+  members: number;
+  /** Members whose store was opened, evicted-and-reclaimed included. */
+  opened: number;
+  /** Members opening was never attempted for — outside the answer's scope, not a
+   *  failure (NFR-PE-10). */
+  not_attempted: number;
+  /** Members attempted and failed, **named**, in roster order. */
+  degraded_members: string[];
+  /** Whether every roster member was opened. `false` marks the warm roll-up, the
+   *  coverage summary and the topic inventory as computed over fewer than all
+   *  members (NFR-CC-04). */
+  covers_all_members: boolean;
 }
 
 /** The workspace-wide warm roll-up (S-323, FR-WS-15). The unconditional counts plus
@@ -1123,6 +1186,9 @@ export interface WorkspaceStatus {
   /** The warm roll-up over `members` (FR-WS-15) — derived from those rows, so it can
    *  never disagree with them. */
   warm_rollup: WarmRollup;
+  /** The degraded roll-up over the same `members` (FR-WS-16) — likewise derived.
+   *  Read `covers_all_members` before rendering any other figure in this payload. */
+  degraded_rollup: DegradedRollup;
   coverage: CrossServiceCoverage;
   /** Each member's promoted broker topics (S-256, FR-WS-11).
    *

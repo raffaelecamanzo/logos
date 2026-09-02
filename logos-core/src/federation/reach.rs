@@ -179,7 +179,16 @@ pub struct CoverageRider {
     /// workspace's boundary, not a defect ([ADR-53]).
     pub no_provider_in_workspace: u64,
     /// `bound / (bound + ambiguous + unbound)` ([ADR-53]).
-    pub bound_ratio: f64,
+    ///
+    /// **Absent** when that denominator is zero — a rider that carried `1.0`
+    /// there would tell a reader the union view rests on perfect coverage when
+    /// it rests on none at all ([FR-WS-05], [NFR-CC-04]). Carried verbatim from
+    /// [`CrossServiceCoverage::bound_ratio`], absence included.
+    ///
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_ratio: Option<f64>,
     /// Members whose reachability surface was read successfully.
     pub members_read: u64,
     /// Members declared in the workspace. `members_read < members_total` means a
