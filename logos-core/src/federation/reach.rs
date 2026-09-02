@@ -179,8 +179,27 @@ pub struct CoverageRider {
     /// workspace's boundary, not a defect ([ADR-53]).
     pub no_provider_in_workspace: u64,
     /// `bound / (bound + ambiguous + unbound)` ([ADR-53]).
-    pub bound_ratio: f64,
-    /// Members whose reachability surface was read successfully.
+    ///
+    /// **Absent** when that denominator is zero — a rider that carried `1.0`
+    /// there would tell a reader the union view rests on perfect coverage when
+    /// it rests on none at all ([FR-WS-05], [NFR-CC-04]). Carried verbatim from
+    /// [`CrossServiceCoverage::bound_ratio`], absence included.
+    ///
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_ratio: Option<f64>,
+    /// Members whose **reachability** surface was read successfully.
+    ///
+    /// Deliberately *not* [`CrossServiceCoverage::members_read`](super::coverage::CrossServiceCoverage::members_read),
+    /// even though every other field here is copied verbatim from that summary:
+    /// the two count different walks (this one the reachability surface, that one
+    /// the contract surface) and can legitimately differ. A member that opened
+    /// for one and failed for the other makes them disagree, so a reader must not
+    /// treat this count as governing the bound/ambiguous/unbound figures beside
+    /// it ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub members_read: u64,
     /// Members declared in the workspace. `members_read < members_total` means a
     /// member degraded (engine-start or read failure) and contributed **no**

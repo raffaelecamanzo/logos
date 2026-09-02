@@ -93,7 +93,7 @@
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 //! [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -101,6 +101,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use anyhow::{Context, Result};
 
 use super::budget::ConnectionBudget;
+use super::open_state::{MemberOpen, MemberOpenState, StoreFile};
 use super::{Federation, Member};
 use crate::{Engine, SharedWorkerPool, WeakWorkerPool};
 
@@ -230,6 +231,33 @@ struct Admission {
     /// Every member this registry has built at least once — the denominator
     /// that turns a start into a *re*construction.
     started_before: HashSet<String>,
+    /// The outcome of each member's most recent **cold open attempt**:
+    /// `None` — it opened; `Some(diagnostic)` — it was attempted and failed
+    /// ([FR-WS-16]).
+    ///
+    /// Keyed on the member name, so a member absent from this map was never
+    /// attempted at all. That three-way split — opened / never attempted /
+    /// attempted-and-failed — is what keeps a **lazily skipped** member and a
+    /// **budget-evicted** one out of the degraded set ([BR-45]):
+    ///
+    /// - never attempted ⇒ no entry, because only [`EngineRegistry::engine_for`]
+    ///   writes here and laziness means it was never called for that member.
+    /// - evicted ⇒ `None`, because eviction reclaims a start that **succeeded**
+    ///   and this map records open *attempts*, never residency. An evicted
+    ///   member re-touched records `None` again.
+    ///
+    /// Last write wins, so a member that failed once and opened later is not
+    /// degraded, and one that opened and later failed is — in both cases the
+    /// latest attempt is the one the answer rests on.
+    ///
+    /// A [`BTreeMap`] so the readout is name-ordered and deterministic
+    /// ([NFR-RA-06]); it holds one entry per *attempted* member, not per
+    /// attempt.
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    /// [BR-45]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    opens: BTreeMap<String, Option<String>>,
     /// The one `rayon` pool every resident member engine shares ([NFR-PE-11],
     /// [ADR-63]) — held **weakly**, because the residents own it.
     ///
@@ -267,6 +295,43 @@ impl Admission {
     /// *re*construction — a rebuild of a member seen before.
     fn record_start(&mut self, member: &str) -> bool {
         !self.started_before.insert(member.to_string())
+    }
+
+    /// Record the outcome of one cold open attempt on `member`
+    /// ([FR-WS-16]).
+    ///
+    /// Called on **both** arms of the cold path — a start that succeeded and one
+    /// that failed — because "never attempted" is a third outcome that only the
+    /// absence of an entry can express.
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    fn record_open(&mut self, member: &str, failure: Option<String>) {
+        self.opens.insert(member.to_string(), failure);
+    }
+}
+
+/// What is at a member's canonical store path `<root>/.logos/logos.db` — the one
+/// fact that disambiguates SQLite's `CANTOPEN`
+/// ([`super::open_state::classify`]).
+///
+/// Three states, not two. `exists()` alone would conflate "nothing here" with "a
+/// directory here", which license opposite conclusions: a *non-regular* file is
+/// decisive (nothing can open it), while *nothing at all* is uninformative,
+/// because [`Engine::start`](crate::Engine::start) creates the store on open —
+/// so an absent file is equally consistent with a never-indexed member and with
+/// descriptor exhaustion partway through creating it.
+///
+/// `symlink_metadata` is deliberately **not** used: a symlink to a real store is
+/// a store, and `metadata` follows it. A dangling symlink resolves to `Err`,
+/// which lands in `Obstructed` — correct, since nothing can open that either.
+fn store_file(root: &Path) -> StoreFile {
+    match root.join(".logos").join("logos.db").metadata() {
+        Ok(meta) if meta.is_file() => StoreFile::Present,
+        Ok(_) => StoreFile::Obstructed,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => StoreFile::Absent,
+        // Anything else (a dangling symlink, a permission-denied stat) is a path
+        // that cannot be opened as a store, whatever occupies it.
+        Err(_) => StoreFile::Obstructed,
     }
 }
 
@@ -583,11 +648,19 @@ impl<E: MemberEngine> EngineRegistry<E> {
             Ok(engine) => engine,
             Err(err) => {
                 self.start_failures.fetch_add(1, Ordering::Relaxed);
-                return Err(err).with_context(|| {
-                    format!("starting the engine for workspace member {member:?}")
-                });
+                let err = err.context(format!(
+                    "starting the engine for workspace member {member:?}"
+                ));
+                // Record the attempt-and-failure BEFORE returning, with the same
+                // contextualised diagnostic the caller receives — the per-member
+                // `Err` reaches only whichever read-model asked, and
+                // `workspace status` walks every member four times through
+                // tiers that have no error channel at all ([FR-WS-16]).
+                admission.record_open(member, Some(format!("{err:#}")));
+                return Err(err);
             }
         };
+        admission.record_open(member, None);
         self.starts.fetch_add(1, Ordering::Relaxed);
         if admission.record_start(member) {
             self.reconstructions.fetch_add(1, Ordering::Relaxed);
@@ -752,6 +825,48 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     pub fn start_failures(&self) -> u64 {
         self.start_failures.load(Ordering::Relaxed)
+    }
+
+    /// Each roster member's [open state](MemberOpenState) — the open-state axis
+    /// [FR-WS-16]'s degraded reporting and non-zero exit rest on.
+    ///
+    /// One entry per member of the workspace roster, **in manifest order**
+    /// ([NFR-RA-06]), so the answer is over the workspace and not over whatever
+    /// subset happened to be touched. Reading it costs no engine start, no
+    /// connection and no store read: the outcomes were recorded as the opens
+    /// happened, and the only I/O is a `metadata` call on the store path of each
+    /// member that **failed**, to tell SQLite's ambiguous `CANTOPEN` apart from
+    /// a genuinely missing store ([NFR-PE-10]).
+    ///
+    /// # What is deliberately not consulted
+    /// Residency. A member evicted to stay inside the budget reads `opened`,
+    /// because its open succeeded and eviction only reclaimed it ([BR-45],
+    /// [NFR-PE-11]) — reporting it degraded would turn the budget's normal
+    /// operation into a failing command. A member laziness never reached reads
+    /// `not-attempted` for the same reason: nothing was attempted, so nothing
+    /// failed.
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    /// [BR-45]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    pub fn open_states(&self) -> Vec<MemberOpen> {
+        let opens = self.lock_admission().opens.clone();
+        self.federation
+            .members
+            .iter()
+            .map(|member| MemberOpen {
+                member: member.name.clone(),
+                state: match opens.get(&member.name) {
+                    None => MemberOpenState::NotAttempted,
+                    Some(None) => MemberOpenState::Opened,
+                    Some(Some(diagnostic)) => {
+                        MemberOpenState::degraded(diagnostic, store_file(&member.root))
+                    }
+                },
+            })
+            .collect()
     }
 
     /// Worker threads the workspace's **shared** `rayon` pool is running right
@@ -1285,6 +1400,294 @@ mod tests {
         assert!(
             results.iter().all(|s| s.value.is_err()),
             "a failing member surfaces as Err, not a panic or a dropped member"
+        );
+    }
+
+    // ── FR-WS-16 / BR-45: the open-state axis ─────────────────────────────
+    //
+    // `degraded` means **attempted and failed**. The two states that must never
+    // be confused with it are a member laziness never reached and a member the
+    // budget evicted — the first is the design ([NFR-PE-10]), the second is the
+    // budget working ([NFR-PE-11]). Both would previously have been reported as
+    // failures by any derivation that read residency instead of attempts.
+
+    /// The open state of `member` in `states`, by name.
+    fn open_state(states: &[MemberOpen], member: &str) -> MemberOpenState {
+        states
+            .iter()
+            .find(|open| open.member == member)
+            .unwrap_or_else(|| panic!("{member} is in the roster: {states:?}"))
+            .state
+            .clone()
+    }
+
+    /// A registry whose every member fails to start — the fixture the degraded
+    /// assertions need, and the one shape [CR-100] observed at scale.
+    ///
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    struct UnopenableEngine;
+    impl MemberEngine for UnopenableEngine {
+        type Watcher = ();
+        fn start(
+            _root: &Path,
+            _read_connections: usize,
+            _worker_pool: SharedWorkerPool,
+        ) -> Result<Arc<Self>> {
+            // The verbatim SQLite wording CR-100 observed, so the classification
+            // under test is exercised on the real string and not a stand-in.
+            anyhow::bail!(
+                "applying the read-only connection contract (FR-DB-02): \
+                 unable to open database file: Error code 14"
+            )
+        }
+        fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
+            Ok(())
+        }
+    }
+
+    /// **The story's central regression assertion.** A member evicted to stay
+    /// inside the budget reads `opened`, **never** `degraded` ([BR-45]).
+    ///
+    /// This is the sharpest failure mode in [FR-WS-16]: eviction is the [S-324]
+    /// budget's normal operation, it happens on every all-member fan-out over a
+    /// workspace larger than the residency cap, and an open-state derived from
+    /// *residency* rather than from *open attempts* would report a healthy
+    /// 72-member workspace as 64 degraded members and exit non-zero on every
+    /// run — turning the fix into a worse defect than the one it replaces.
+    ///
+    /// Asserted at three points: while resident, after an explicit eviction, and
+    /// after the rebuild that follows the next touch.
+    ///
+    /// [BR-45]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [S-324]: ../../../docs/planning/journal.md#s-324-workspace-wide-read-connection-budget-with-lru-member-engine-eviction
+    #[test]
+    fn an_evicted_member_reads_opened_and_is_never_reported_degraded() {
+        reset_spies();
+        let registry = lazy(&["a", "b", "c"]);
+        for member in ["a", "b", "c"] {
+            registry.engine_for(member).unwrap();
+        }
+        assert_eq!(
+            registry.open_states().len(),
+            3,
+            "one row per roster member"
+        );
+        for member in ["a", "b", "c"] {
+            assert_eq!(open_state(&registry.open_states(), member), MemberOpenState::Opened);
+        }
+
+        // Evict everything: residency drops to zero, open state does not move.
+        registry.evict_to_capacity(0);
+        assert_eq!(registry.resident_count(), 0, "nothing resident any more");
+        let states = registry.open_states();
+        assert!(
+            states.iter().all(|open| open.state == MemberOpenState::Opened),
+            "eviction reclaims a SUCCESS — it is not a failure to report: {states:?}"
+        );
+        let rollup = super::super::open_state::rollup(&states);
+        assert!(
+            rollup.degraded_members.is_empty(),
+            "an evicted workspace names nobody degraded: {rollup:?}"
+        );
+        assert!(
+            rollup.covers_all_members,
+            "and its figures still cover every member"
+        );
+
+        // And the rebuild on next touch is likewise not a failure.
+        registry.engine_for("a").unwrap();
+        assert_eq!(open_state(&registry.open_states(), "a"), MemberOpenState::Opened);
+    }
+
+    /// **The same regression under the budget's own eviction**, not an explicit
+    /// `evict_to_capacity` call. A workspace larger than the residency cap
+    /// evicts during the fan-out itself; every member still reads `opened`
+    /// ([NFR-PE-11], [BR-45]).
+    ///
+    /// The explicit-eviction test above could pass while admission-driven
+    /// eviction still mislabelled, because that path evicts *before* the
+    /// incoming start rather than after a completed one.
+    #[test]
+    fn budget_driven_eviction_during_a_fan_out_leaves_every_member_opened() {
+        reset_spies();
+        let budget = stock_macos_budget();
+        let members = budget.max_resident_members() * 3;
+        let registry =
+            EngineRegistry::<SpyEngine>::with_budget(big_fed(members), RegistryMode::Lazy, budget);
+
+        let results = registry.fan_out(|_, _| ());
+        assert!(
+            results.iter().all(|scoped| scoped.value.is_ok()),
+            "every member opened"
+        );
+        assert!(
+            registry.resident_count() < members,
+            "the budget really did evict during the walk (resident {} of {members})",
+            registry.resident_count()
+        );
+
+        let states = registry.open_states();
+        assert_eq!(states.len(), members, "one row per roster member");
+        assert!(
+            states.iter().all(|open| open.state == MemberOpenState::Opened),
+            "a member reclaimed by the budget mid-walk is not degraded"
+        );
+        assert_eq!(registry.start_failures(), 0, "and nothing actually failed");
+    }
+
+    /// A member **laziness never reached** reads `not-attempted`, never
+    /// `degraded` and never `opened` ([NFR-PE-10], [BR-45]).
+    ///
+    /// The distinction is structural: only [`EngineRegistry::engine_for`] writes
+    /// the ledger, so an untouched member has no entry at all — there is no
+    /// path by which a never-attempted member could acquire a failure.
+    #[test]
+    fn a_lazily_skipped_member_reads_not_attempted_and_is_never_degraded() {
+        reset_spies();
+        let registry = lazy(&["touched", "skipped"]);
+        registry.engine_for("touched").unwrap();
+
+        let states = registry.open_states();
+        assert_eq!(open_state(&states, "touched"), MemberOpenState::Opened);
+        assert_eq!(
+            open_state(&states, "skipped"),
+            MemberOpenState::NotAttempted,
+            "nothing was attempted, so nothing failed"
+        );
+
+        let rollup = super::super::open_state::rollup(&states);
+        assert!(
+            rollup.degraded_members.is_empty(),
+            "laziness names nobody degraded: {rollup:?}"
+        );
+        assert_eq!(rollup.not_attempted, 1);
+        assert!(
+            !rollup.covers_all_members,
+            "the answer still covers 1 of 2 members, which is a coverage fact \
+             rather than a failure"
+        );
+    }
+
+    /// A member **attempted and failed** reads `degraded`, is named, and — for
+    /// the [CR-100] diagnostic over a store that is present — carries the
+    /// host-resource cause rather than SQLite's store-corruption wording
+    /// ([FR-WS-16] AC2/AC3).
+    ///
+    /// The fixture's member roots do not exist on disk, so the store file is
+    /// absent and the cause is `store-unavailable`; the host-resource half of
+    /// the classification is pinned in `federation::degraded`'s own table, which
+    /// takes the store presence as an explicit input rather than probing.
+    #[test]
+    fn an_attempted_and_failed_open_reads_degraded_and_is_named() {
+        let registry = EngineRegistry::<UnopenableEngine>::with_budget(
+            fed(&["a", "b"]),
+            RegistryMode::Lazy,
+            roomy_budget(),
+        );
+        assert!(registry.fan_out(|_, _| ()).iter().all(|s| s.value.is_err()));
+
+        let states = registry.open_states();
+        assert!(
+            states.iter().all(|open| open.state.is_degraded()),
+            "both members were attempted and failed: {states:?}"
+        );
+
+        let rollup = super::super::open_state::rollup(&states);
+        assert_eq!(
+            rollup.degraded_members,
+            ["a", "b"],
+            "named, in manifest order"
+        );
+        assert_eq!(rollup.opened, 0);
+        assert!(!rollup.covers_all_members);
+        let notice = rollup.notice(&states).expect("two members degraded");
+        assert!(
+            notice.contains("a:") && notice.contains("b:"),
+            "the human notice names them, each with its own reason line: {notice}"
+        );
+        // The fixture's member roots do not exist, so the store path is ABSENT and
+        // the classification correctly claims no cause — the verbatim CR-100
+        // diagnostic is what reaches the operator, never a `logos index` that
+        // could not help an fd-exhausted member.
+        assert!(
+            notice.contains("unable to open database file"),
+            "the verbatim diagnostic survives to the human channel: {notice}"
+        );
+        assert!(
+            !notice.contains("logos index"),
+            "and no re-index remedy is invented from an absent store: {notice}"
+        );
+    }
+
+    /// A member that failed once and **opened later** is no longer degraded, and
+    /// one that opened and later failed is — the ledger records the latest
+    /// attempt, because that is the one the answer rests on.
+    ///
+    /// Load-bearing for a fan-out under descriptor pressure: `workspace status`
+    /// walks every member four times, and a member that opened on the first walk
+    /// and failed on the third has contributed nothing to the third walk's
+    /// figures.
+    #[test]
+    fn the_ledger_records_the_latest_attempt_not_the_first() {
+        reset_spies();
+        // A registry over one member, whose engine fails only on the FIRST start.
+        thread_local! {
+            static FAIL_NEXT: Cell<bool> = const { Cell::new(true) };
+        }
+        struct FlakyEngine;
+        impl MemberEngine for FlakyEngine {
+            type Watcher = ();
+            fn start(
+                _root: &Path,
+                _read_connections: usize,
+                _worker_pool: SharedWorkerPool,
+            ) -> Result<Arc<Self>> {
+                if FAIL_NEXT.with(Cell::get) {
+                    FAIL_NEXT.with(|c| c.set(false));
+                    anyhow::bail!("Too many open files (os error 24)");
+                }
+                Ok(Arc::new(FlakyEngine))
+            }
+            fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
+                Ok(())
+            }
+        }
+
+        let registry = EngineRegistry::<FlakyEngine>::with_budget(
+            fed(&["a"]),
+            RegistryMode::Lazy,
+            roomy_budget(),
+        );
+        assert!(registry.engine_for("a").is_err(), "the first attempt fails");
+        assert!(open_state(&registry.open_states(), "a").is_degraded());
+
+        assert!(registry.engine_for("a").is_ok(), "the retry succeeds");
+        assert_eq!(
+            open_state(&registry.open_states(), "a"),
+            MemberOpenState::Opened,
+            "a member that opened on retry is not degraded — the answer used it"
+        );
+    }
+
+    /// Reading the open states constructs **no** engine and opens **no**
+    /// connection ([NFR-PE-10]): it is a ledger read, which is what keeps the
+    /// degraded roll-up off `workspace status`'s walk budget.
+    #[test]
+    fn reading_the_open_states_constructs_nothing() {
+        reset_spies();
+        let registry = lazy(&["a", "b", "c"]);
+        registry.engine_for("a").unwrap();
+        let before = (starts(), registry.engine_starts(), peak_connections());
+
+        for _ in 0..5 {
+            let _ = registry.open_states();
+        }
+
+        assert_eq!(
+            (starts(), registry.engine_starts(), peak_connections()),
+            before,
+            "five readouts built no engine and opened no connection"
         );
     }
 

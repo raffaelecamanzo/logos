@@ -727,8 +727,8 @@ fn edges_into_unknown_or_degraded_members_are_dropped_safely() {
     );
 }
 
-/// A workspace with no members yields an honest empty view — no NaN in the
-/// bound-ratio, no panic.
+/// A workspace with no members yields an honest empty view — no NaN and no
+/// fabricated perfect score in the bound-ratio, no panic.
 #[test]
 fn an_empty_workspace_yields_an_honest_empty_view() {
     reset();
@@ -740,8 +740,15 @@ fn an_empty_workspace_yields_an_honest_empty_view() {
     assert_eq!(view.coverage.members_read, 0);
     assert_eq!(view.coverage.members_total, 0);
     assert_eq!(
-        view.coverage.bound_ratio, 1.0,
-        "nothing to bind is full coverage, honestly — never NaN"
+        view.coverage.bound_ratio, None,
+        "nothing measured is reported ABSENT — never NaN, and never the 1.0 it used to \
+         fabricate from no evidence (FR-WS-05, NFR-CC-04)"
+    );
+    assert!(
+        serde_json::to_value(&view).unwrap()["coverage"]
+            .get("bound_ratio")
+            .is_none(),
+        "and the absence reaches the wire as an omitted key, not as a number"
     );
 }
 

@@ -31,6 +31,7 @@ import {
 } from "../../api/workspaceClient.ts";
 import type {
   CrossServiceImpact,
+  DegradedRollup,
   ImpactEntry,
   ImpactResult,
   MemberTopics,
@@ -80,7 +81,13 @@ import styles from "./Workspace.module.css";
 const RELATION_ARMS = Object.keys(ARM_LABEL);
 
 /** A percentage rendered from a 0–1 ratio, at one decimal — never rounded up to a
- *  flattering figure. */
+ *  flattering figure.
+ *
+ *  Takes a `number`, not `number | null`: an ABSENT ratio is not a percentage and
+ *  must never be rendered as one (FR-WS-05, NFR-CC-04). `CoveragePanel` branches
+ *  on the absence and states the reason in words, so every call here is already
+ *  narrowed — keeping a null arm would be a second, divergent wording for the
+ *  same thing. */
 function pct(ratio: number): string {
   return `${(ratio * 100).toFixed(1)}%`;
 }
@@ -170,7 +177,7 @@ function WorkspaceContent({
           {
             id: "coverage",
             label: "Cross-service coverage",
-            panel: <CoveragePanel dashboard={coverage} />,
+            panel: <CoveragePanel dashboard={coverage} degraded={status.degraded_rollup} />,
           },
           { id: "impact", label: "Cross-service impact", panel: <ImpactPanel /> },
         ]}
@@ -362,11 +369,68 @@ const ARM_COLUMNS: Column<ArmCoverage>[] = [
   },
 ];
 
-function CoveragePanel({ dashboard }: { dashboard: CoverageDashboard }) {
+/* The coverage shortfall rider (FR-WS-16, NFR-CC-04).
+ *
+ * Rendered in BOTH the empty and the populated branch, deliberately. The empty
+ * branch is where it matters most: in the exact CR-100 state — 63 of 72 members
+ * unopened, the 9 survivors holding no cross-boundary reference — `references`
+ * is empty AND `coversAllMembers` is false, and an unqualified "none found in
+ * this workspace" is then a positive claim about all 72 made from 9. That would
+ * simply move the fabrication from `bound_ratio: 1.0` to the empty state rather
+ * than removing it.
+ *
+ * It says what the marker knows and no more: `covers_all_members` is
+ * `members_read == members_total` over the CONTRACT-surface walk, so it is also
+ * false when a member opened perfectly well and its surface read failed. Naming
+ * "could not be opened" here would send an operator to `ulimit -n` for a read
+ * fault. Members that genuinely could not be OPENED are named separately, from
+ * `degraded_rollup` — the field that actually knows. */
+function CoverageShortfall({
+  dashboard,
+  degraded,
+}: {
+  dashboard: CoverageDashboard;
+  degraded: DegradedRollup;
+}) {
+  if (dashboard.coversAllMembers && degraded.degraded_members.length === 0) return null;
+  return (
+    <p className="muted">
+      {!dashboard.coversAllMembers && (
+        <>
+          Partial: computed over {dashboard.membersRead} of {dashboard.membersTotal} workspace
+          members — the rest did not contribute (their store could not be opened, or their
+          contract surface could not be read), so every figure here is a lower bound (FR-WS-16).{" "}
+        </>
+      )}
+      {degraded.degraded_members.length > 0 && (
+        <>
+          {degraded.degraded_members.length} member
+          {degraded.degraded_members.length === 1 ? "" : "s"} could not be opened:{" "}
+          <span className="mono">{degraded.degraded_members.join(", ")}</span>.
+        </>
+      )}
+    </p>
+  );
+}
+
+function CoveragePanel({
+  dashboard,
+  degraded,
+}: {
+  dashboard: CoverageDashboard;
+  degraded: DegradedRollup;
+}) {
   if (dashboard.isEmpty) {
     return (
       <div className={styles.panel}>
-        <EmptyState message="No cross-boundary references found in this workspace — nothing to bind, so no coverage is reported (never a fabricated 100%)." />
+        <EmptyState
+          message={
+            dashboard.coversAllMembers
+              ? "No cross-boundary references found in this workspace — nothing to bind, so no coverage is reported (never a fabricated 100%)."
+              : `No cross-boundary references found among the ${dashboard.membersRead} of ${dashboard.membersTotal} workspace members that could be read — this is NOT a statement about the whole workspace.`
+          }
+        />
+        <CoverageShortfall dashboard={dashboard} degraded={degraded} />
       </div>
     );
   }
@@ -376,11 +440,32 @@ function CoveragePanel({ dashboard }: { dashboard: CoverageDashboard }) {
       <Card title="Cross-boundary coverage">
         {/* Advisory only — never a gate input (ADR-53). The ratio is the server's,
             displayed verbatim: `no-provider-in-workspace` is deliberately outside its
-            denominator, so recomputing it here would contradict the CLI. */}
+            denominator, so recomputing it here would contradict the CLI.
+
+            An ABSENT ratio gets no bar at all (FR-WS-05, NFR-CC-04): a bar is a
+            quantity, and there is no quantity here — a 0-width bar would read "nothing
+            bound" and a full one "everything bound", when the truth is that nothing
+            was measured.
+
+            The reason is stated precisely rather than as "nothing to bind": the
+            `isEmpty` branch above already took the no-references case, so reaching
+            here means references DO exist and every one of them is bucketed out of
+            the denominator. Saying "nothing to bind" would replace a fabricated
+            number with a fabricated explanation. */}
         <div className={styles.ratio}>
-          <ScoreBar value={dashboard.boundRatio} max={1} label={pct(dashboard.boundRatio)} />
-          <span className="mono">{pct(dashboard.boundRatio)} bound</span>
+          {dashboard.boundRatio === null ? (
+            <span className="mono">
+              bound ratio not measured — all {dashboard.noProviderInWorkspace} cross-boundary
+              references have no provider in this workspace, so the ratio has no denominator
+            </span>
+          ) : (
+            <>
+              <ScoreBar value={dashboard.boundRatio} max={1} label={pct(dashboard.boundRatio)} />
+              <span className="mono">{pct(dashboard.boundRatio)} bound</span>
+            </>
+          )}
         </div>
+        <CoverageShortfall dashboard={dashboard} degraded={degraded} />
         <p className="muted">
           {dashboard.bound} bound · {dashboard.ambiguous} ambiguous · {dashboard.unbound} unbound ·{" "}
           {dashboard.noProviderInWorkspace} with no provider in this workspace (reported apart, and

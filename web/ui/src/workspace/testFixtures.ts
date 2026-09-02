@@ -20,13 +20,20 @@ export const ROSTER: WorkspaceRoster = {
   members: ["api", "web"],
 };
 
+/** An empty coverage summary over a fully-read two-member workspace.
+ *
+ *  `bound_ratio` is **omitted**, exactly as the server omits it when nothing was
+ *  measured (S-326, FR-WS-05) — a fixture carrying `1` here would let a view that
+ *  cannot cope with absence pass its tests. */
 export const EMPTY_COVERAGE: CrossServiceCoverage = {
   references: [],
   bound: 0,
   ambiguous: 0,
   unbound: 0,
   no_provider_in_workspace: 0,
-  bound_ratio: 1,
+  members_read: 2,
+  members_total: 2,
+  covers_all_members: true,
 };
 
 /** No member has promoted a broker topic — the default, and the shape every repo
@@ -37,6 +44,7 @@ export const NO_TOPICS: MemberTopics[] = [];
 export function status(
   coverage: CrossServiceCoverage = EMPTY_COVERAGE,
   topics: MemberTopics[] = NO_TOPICS,
+  degradedRollup?: WorkspaceStatus["degraded_rollup"],
 ): WorkspaceStatus {
   return {
     workspace: "shop",
@@ -45,16 +53,27 @@ export function status(
         member: "api",
         result: { indexed: true } as WorkspaceStatus["members"][0]["result"],
         warm_state: "warm",
+        open_state: "opened",
       },
       {
         member: "web",
         result: { indexed: true } as WorkspaceStatus["members"][0]["result"],
         warm_state: "warm",
+        open_state: "opened",
       },
     ],
     // Both members indexed, and no live warming signal exists — so `warming` is
     // absent rather than `0` (NFR-CC-04), exactly as the real payload omits it.
     warm_rollup: { members: 2, warm: 2, deferred: 0, degraded: 0 },
+    // Both members opened, so every figure beside this roll-up covers all of them
+    // (S-326, FR-WS-16).
+    degraded_rollup: degradedRollup ?? {
+      members: 2,
+      opened: 2,
+      not_attempted: 0,
+      degraded_members: [],
+      covers_all_members: true,
+    },
     coverage,
     topics,
   };
@@ -71,6 +90,9 @@ export interface StubOptions {
   impact?: unknown;
   /** Each member's promoted broker topics — the service map draws a node per topic. */
   topics?: MemberTopics[];
+  /** Override the degraded roll-up, for the partially-opened-workspace cases
+   *  (S-326, FR-WS-16). Defaults to the all-opened shape. */
+  degradedRollup?: WorkspaceStatus["degraded_rollup"];
 }
 
 /**
@@ -85,6 +107,7 @@ export function stubApi(opts: StubOptions = {}): () => string[] {
     providers = [],
     impact = {},
     topics = NO_TOPICS,
+    degradedRollup,
   } = opts;
   const calls: string[] = [];
   const json = (body: unknown, ok = true, code = 200) =>
@@ -97,7 +120,8 @@ export function stubApi(opts: StubOptions = {}): () => string[] {
       if (url.startsWith("/api/v1/workspace/roster")) {
         return json(ROSTER, probeStatus === 200, probeStatus);
       }
-      if (url.startsWith("/api/v1/workspace/status")) return json(status(coverage, topics));
+      if (url.startsWith("/api/v1/workspace/status"))
+        return json(status(coverage, topics, degradedRollup));
       if (url.startsWith("/api/v1/workspace/route-providers")) return json({ providers });
       if (url.startsWith("/api/v1/workspace/impact")) return json(impact);
       return json({});

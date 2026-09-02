@@ -13,7 +13,15 @@
  *
  * Honest empties (NFR-CC-04): a workspace with no cross-boundary references at all
  * is `isEmpty` — the view then says "no cross-service references yet" rather than
- * rendering a 100%-bound score bar over nothing.
+ * rendering a 100%-bound score bar over nothing. Since S-326 the server also sends
+ * `bound_ratio` **absent** whenever nothing was measured (its denominator is 0), so
+ * `boundRatio` here is `number | null` and the view must render "not measured"
+ * rather than a bar. `coversAllMembers` is the other honesty rider: `false` means
+ * every count in this model was computed over fewer than all workspace members —
+ * their contract surface did not contribute, either because the member's store
+ * could not be opened OR because it opened and the surface read itself failed
+ * (FR-WS-16). It does NOT identify which, so a view must not name a cause from
+ * it; `degraded_rollup.degraded_members` is the field that knows.
  */
 
 import type { CrossServiceCoverage, UnboundReason } from "../../api/types.ts";
@@ -89,8 +97,12 @@ export interface ArmCoverage {
 /** The dashboard's model: the verbatim server summary plus the per-arm breakdown. */
 export interface CoverageDashboard {
   /** `bound / (bound + ambiguous + unbound)` as the server computed it — displayed,
-   *  never recomputed (see the module docs). */
-  boundRatio: number;
+   *  never recomputed (see the module docs).
+   *
+   *  `null` when the server measured nothing (a zero denominator). Render that as
+   *  "not measured": a `0` bar would claim nothing bound and a full bar would claim
+   *  everything did, and the truth is that there was nothing to bind (NFR-CC-04). */
+  boundRatio: number | null;
   bound: number;
   ambiguous: number;
   unbound: number;
@@ -101,6 +113,15 @@ export interface CoverageDashboard {
   arms: ArmCoverage[];
   /** No cross-boundary reference exists at all — the honest awaiting-data state. */
   isEmpty: boolean;
+  /** Whether every workspace member's contract surface contributed to the counts
+   *  above (FR-WS-16). `false` means the model is a partial picture and must be
+   *  labelled one — but it does not say *why* a member did not contribute (an
+   *  unopenable store and a failed surface read both reduce it), so a view must
+   *  not attribute a cause from this field alone. */
+  coversAllMembers: boolean;
+  /** Members that contributed, out of the roster — the shortfall, stated. */
+  membersRead: number;
+  membersTotal: number;
 }
 
 /** Group a coverage read-model into the per-arm, per-reason dashboard model. */
@@ -147,12 +168,23 @@ export function buildCoverageDashboard(coverage: CrossServiceCoverage): Coverage
   }
 
   return {
-    boundRatio: coverage.bound_ratio,
+    // `?? null` rather than a numeric default: an absent ratio is "not measured",
+    // and defaulting it to 0 or 1 is exactly the fabrication FR-WS-05 forbids.
+    boundRatio: coverage.bound_ratio ?? null,
     bound: coverage.bound,
     ambiguous: coverage.ambiguous,
     unbound: coverage.unbound,
     noProviderInWorkspace: coverage.no_provider_in_workspace,
     arms: [...byArm.values()].sort((a, b) => a.relation.localeCompare(b.relation)),
     isEmpty: coverage.references.length === 0,
+    // No `??` fallbacks: these three are non-optional in `CrossServiceCoverage`
+    // and the SPA ships inside the same binary that serves them, so there is no
+    // version skew to defend against. A fallback the type says can never fire is
+    // a claim about the wire that contradicts the type — one or the other has to
+    // be wrong. (`bound_ratio` IS optional, which is why its `?? null` above is
+    // real and type-checked.)
+    coversAllMembers: coverage.covers_all_members,
+    membersRead: coverage.members_read,
+    membersTotal: coverage.members_total,
   };
 }

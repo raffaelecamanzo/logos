@@ -27,9 +27,9 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`languages`](#languages) | ✅ | Registered language grammars |
 | [`serve`](#serve) | ✅ | MCP server over stdio and/or the localhost web UI (`--ui`, requires a `--features ui` build) |
 | [`xservice`](#xservice-workspace-federation-queries) | ✅ | Cross-service queries over a workspace: `route-providers` / `callers` / `impact` / `search` (`--repo` to scope) |
-| [`workspace status`](#workspace-status) | ✅ | Per-member freshness + the 3-state cross-service coverage summary |
-| [`workspace reachability`](#workspace-reachability) | ✅ | App-wide cross-service dead-code union view — advisory, never a gate input |
-| [`workspace check`](#workspace-check) | ✅ | Evaluate workspace governance rules over cross-service bindings — advisory, always exits 0 |
+| [`workspace status`](#workspace-status) | ✅ | Per-member freshness, warm state and open state + the 3-state cross-service coverage summary — exits 1 if a member could not be opened |
+| [`workspace reachability`](#workspace-reachability) | ✅ | App-wide cross-service dead-code union view — advisory, never a gate input; exits 1 if a member could not be opened |
+| [`workspace check`](#workspace-check) | ✅ | Evaluate workspace governance rules over cross-service bindings — advisory: a violation never moves the exit code (an unopenable member exits 1) |
 | [`scan`](#scan) | ✅ | Full architecture-quality scan |
 | [`check`](#check) | ✅ | Architecture-rules compliance check |
 | [`gate`](#gate) | ✅ | CI quality gate on the signal |
@@ -524,6 +524,83 @@ cross-service coverage summary** — every cross-boundary reference classified
 bucketed separately (`no-provider-in-workspace` never depresses the bound-ratio)
 and never feeds any member's quality gate ([ADR-53](../specs/architecture/decisions/ADR-53.md)).
 
+`coverage.bound_ratio` is **absent** (`null` under `--json`) when nothing was
+measured — when `bound + ambiguous + unbound` is zero. It is never reported as a
+perfect score: `0 / 0` is *no measurement*, not full coverage.
+
+#### Two per-member axes: `warm_state` and `open_state`
+
+Each member row carries **two independent labels**, and conflating them is the
+mistake to avoid:
+
+| Field | Question | Values |
+|---|---|---|
+| `warm_state` | does this member's graph hold an index? | `warm`, `warming`, `deferred`, `degraded` |
+| `open_state` | could this member's store be opened? | `opened`, `not-attempted`, `degraded` |
+
+A member with no index yet is `deferred` / `opened` — honest and
+**non-alarming**, it indexes lazily on its first query. A member whose store
+cannot be opened is `degraded` on both, with a `degraded_reason` and, where the
+diagnostic identifies one, a `degraded_cause`:
+
+- `host-resource-limit` — the process ran out of file descriptors
+  (`RLIMIT_NOFILE`). The member's store is present and its graph intact, so
+  **a re-index is not the remedy**; raise `ulimit -n`, or query fewer members.
+- `store-obstructed` — something that is not a regular file occupies the
+  member's `.logos/logos.db` path (a directory, a socket, a dangling symlink).
+  Clear that path, *then* run `logos index` in that member.
+
+`degraded_cause` is **absent** when the diagnostic identifies no cause, and
+`degraded_reason` is then the verbatim engine diagnostic. Notably, a failure whose
+store file is simply *missing* claims **no** cause: the store is created on open,
+so a never-indexed member opens perfectly well (it reads `deferred` / `opened`) —
+which means an absent file at failure time is equally consistent with descriptor
+exhaustion partway through creating it. Guessing "no store, go re-index" there
+would send an operator whose real problem is `ulimit -n` to a command that cannot
+help. `degraded_diagnostic` always carries the verbatim engine error, whether or
+not a cause was identified.
+
+`warming` is in the vocabulary but is never reported without a live signal from
+the warm supervisor, and the roll-up then **omits** the `warming` key entirely
+rather than sending `0` — an absent `warming` means *not knowable*, never *none*.
+
+A member the command never needed to open (a `--repo`-scoped query, say) is
+`not-attempted`, and a member whose engine was **evicted** to stay inside the
+workspace connection budget still reads `opened` — eviction reclaims a success
+and is not a failure.
+
+#### Exit code (⚠️ changed)
+
+`workspace status`, `workspace reachability` and `workspace check` **exit 1 when
+one or more members could not be opened**, and 0 otherwise.
+
+Where the members are named differs by subcommand, because the three payloads are
+different read-models:
+
+| Subcommand | `--json` naming |
+|---|---|
+| `workspace status` | `degraded_rollup.degraded_members`, plus `open_state` / `degraded_cause` / `degraded_reason` / `degraded_diagnostic` on each member row |
+| `workspace reachability` | `skipped_members`, plus `coverage.members_read` vs `coverage.members_total` (this also fires when a member opened and its surface read failed) |
+| `workspace check` | nothing structured — its payload is a bare governance `Option` that must keep serialising as `null`, so stderr is its only channel |
+
+**All three** additionally print a human-readable warning to **stderr** naming
+each degraded member *and its cause*, one per line, so `--json` stdout stays
+machine-clean and `check` is not left exiting 1 with no diagnosis.
+
+On `workspace status`, `degraded_rollup.covers_all_members: false` marks the
+member rows and the warm roll-up folded from them as covering fewer than all
+members. It does **not** govern `coverage`, which carries its own
+`covers_all_members` from a separate walk — a member can open fine and still fail
+its contract-surface read, which reduces the coverage figures while leaving
+nothing degraded. Read the marker that belongs to the figure you are rendering.
+
+**This is a breaking change.** These commands previously returned 0 no matter how
+many members failed, so a workspace where 63 of 72 members could not be opened
+was a *successful* command that passed in CI over a payload three-quarters
+missing. A script that relies on the old behaviour needs updating; the states
+that do **not** move the exit code are `deferred` (nothing indexed yet),
+`not-attempted` (nothing needed that member) and an evicted member.
+
 ### `workspace reachability`
 
 ```bash
@@ -573,11 +650,15 @@ never a fabricated edge set.
 
 Governance is reported at the **workspace level** and is **advisory by design**:
 it is a separate family from the per-repo rules ([`check`](#check)), it never
-alters any member's per-repo quality gate, and `workspace check` **always exits
-0** — a violation is *reported*, not *gated*. With no `[governance]` rules
-declared, there is no output at all (`null` under `--json`) — an honest empty,
-never a fabricated passing report. Rule targets match by glob on symbol, with an
-optional member scope.
+alters any member's per-repo quality gate, and a governance violation **never
+moves the exit code** — it is *reported*, not *gated*. With no `[governance]`
+rules declared, there is no output at all (`null` under `--json`) — an honest
+empty, never a fabricated passing report. Rule targets match by glob on symbol,
+with an optional member scope.
+
+An **unopenable member** does exit 1, here as for every `workspace` subcommand
+(see [`workspace status`](#workspace-status)): that is the answer being
+incomplete, not a governance verdict.
 
 ---
 

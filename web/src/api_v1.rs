@@ -514,10 +514,11 @@ pub(crate) async fn workspace_roster(
     .await
 }
 
-/// `GET /api/v1/workspace/status` — per-member index freshness and warm state,
-/// the warm roll-up, and the 3-state cross-service coverage summary
-/// ([`workspace_status`](fed_query::workspace_status), [FR-WS-05]/[FR-WS-06],
-/// [FR-WS-15]): the coverage dashboard's data.
+/// `GET /api/v1/workspace/status` — per-member index freshness, warm state and
+/// open state, the warm and degraded roll-ups, and the 3-state cross-service
+/// coverage summary ([`workspace_status`](fed_query::workspace_status),
+/// [FR-WS-05]/[FR-WS-06], [FR-WS-15], [FR-WS-16]): the coverage dashboard's
+/// data.
 ///
 /// Each member row carries `warm_state` (`warm` / `deferred` / `degraded`;
 /// `deferred` is honest and non-alarming — the member indexes lazily on first
@@ -526,7 +527,21 @@ pub(crate) async fn workspace_roster(
 /// must read its absence as *not knowable*, never as *none warming*
 /// ([NFR-CC-04]).
 ///
+/// # Two axes on one row ([FR-WS-16])
+/// Beside `warm_state` — which is about **index presence** — each row carries
+/// `open_state`, about **store openability**: `opened` (a member the budget
+/// later evicted still reads `opened`, because eviction reclaims a success),
+/// `not-attempted`, or `degraded` with a `degraded_reason` and, where the
+/// diagnostic identifies one, a `degraded_cause`. The two are never merged.
+///
+/// A consumer that renders any figure from this payload must read
+/// `degraded_rollup.covers_all_members` and `coverage.covers_all_members`: when
+/// either is `false` the figures cover fewer than all members. `bound_ratio` is
+/// **absent** when nothing was measured, so a bar rendering it must show "not
+/// measured" rather than an empty or full bar ([NFR-CC-04]).
+///
 /// [FR-WS-15]: ../../docs/specs/requirements/FR-WS-15.md
+/// [FR-WS-16]: ../../docs/specs/requirements/FR-WS-16.md
 /// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 pub(crate) async fn workspace_status(
     State(backing): State<Arc<Backing<Engine>>>,

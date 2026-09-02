@@ -9,6 +9,65 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+### Changed — BREAKING (exit code)
+- **`logos workspace status` / `reachability` / `check` now exit 1 when a member
+  could not be opened (CR-100, S-326, FR-WS-16, FR-CL-01).** These commands
+  previously returned **0** no matter how many members failed to open: on a
+  72-member workspace under the stock 256-descriptor macOS limit, 63 members
+  failed and the command still succeeded, so the run passed in CI over a payload
+  that was three-quarters missing. An unopenable member now names itself and
+  moves the exit code.
+
+  **Scripts that tolerated the old exit 0 will begin failing** — which is the
+  point, but it is a behaviour change to plan for. What does *not* move the exit
+  code: a member with no index yet (`warm_state: deferred` — it indexes lazily on
+  first query), a member the command never needed to open (`open_state:
+  not-attempted`), and a member whose engine was **evicted** to stay inside the
+  workspace connection budget (`open_state: opened` — eviction reclaims a
+  success, not a failure). A workspace-governance violation still never moves the
+  exit code either; `workspace check` remains advisory.
+
+### Added
+- **Named, caused, degraded-member reporting in `workspace status` (S-326,
+  FR-WS-16).** Each member row gains an `open_state` — `opened` /
+  `not-attempted` / `degraded` — on an axis **separate** from the existing
+  `warm_state`: the first is about whether the store could be opened, the second
+  about whether it holds an index, and an un-indexed member that opens perfectly
+  well is `deferred` / `opened`. A degraded row carries `degraded_reason` and,
+  where the diagnostic identifies one, `degraded_cause`:
+  `host-resource-limit` (the store is present and intact; the process ran out of
+  file descriptors — raise `ulimit -n`, do **not** re-index) or
+  `store-obstructed` (something that is not a regular file occupies
+  `.logos/logos.db` — clear that path, then re-index). The previous message named
+  only SQLite's "unable to open database file", which reads as a corrupt store
+  and sent readers to the wrong remedy. A failure whose store file is merely
+  *missing* deliberately claims **no** cause: the store is created on open, so an
+  absent file at failure time is equally consistent with descriptor exhaustion
+  during creation, and a guessed "go re-index" would relocate the very
+  misdiagnosis this removes. `degraded_diagnostic` always carries the verbatim
+  engine error beside the classified sentence, so classifying never destroys the
+  evidence it read.
+  The payload gains a `degraded_rollup` naming every unopenable member, folded
+  into the same member table as the warm roll-up rather than a competing one, and
+  a human-readable warning naming them goes to stderr so `--json` stdout stays
+  machine-clean. The existing per-member `error` field is unchanged.
+
+### Fixed — BREAKING (payload shape)
+- **`coverage.bound_ratio` is now reported ABSENT instead of a fabricated `1.0`
+  when nothing was measured (CR-100, S-326, FR-WS-05, NFR-CC-04).** A zero
+  `bound + ambiguous + unbound` denominator used to serialise as a perfect
+  score, so the observed partial workspace reported `bound: 0` beside
+  `bound_ratio: 1.0` — a confident measurement invented from no evidence. The
+  field is now omitted (`null` in `--json`) in that case, in `workspace status`,
+  `workspace reachability`'s coverage rider, and the `/api/v1/workspace/*` web
+  payloads alike. A consumer reading it as a number must handle absence; the web
+  UI renders "bound ratio not measured" rather than an empty or full bar.
+- **The coverage summary states how much of the workspace it covers (S-326,
+  FR-WS-16, NFR-CC-04).** `coverage.members_read` / `members_total` /
+  `covers_all_members` are new: a summary computed over a partially-opened
+  workspace is now marked as covering fewer than all members instead of reading
+  as a complete picture.
+
 ## [1.0.7] — 2026-07-09
 
 **Sub-second `serve` cold start (CR-077).** The `serve --mcp` filesystem watcher
