@@ -718,8 +718,13 @@ fn refuse(refusals: &mut Vec<RouteRefusal>, seen: &mut HashSet<usize>, route: &R
 /// - an opaque node *containing* a literal means the literal is a fragment of a
 ///   larger expression (`BASE + "/x"`);
 /// - an opaque node *inside* a literal means the literal contains an
-///   unreadable fragment — a Kotlin `"$BASE/v1"` string template, whose
-///   `interpolation` child a query can capture directly.
+///   unreadable fragment — a Kotlin `"${BASE}/v1"` string template, whose
+///   `interpolation` child a query *can* capture directly. No shipped query
+///   does: the brace-less `"$BASE/v1"` spelling has no such node (see
+///   [`is_resolvable_prefix`]), so the Kotlin query leaves both spellings to
+///   the text rule rather than covering one structurally and missing the other.
+///   The mechanism is exercised by the unit tests, which build the capture
+///   shape directly.
 ///
 /// The identity exemption is what lets a query mark the whole path *position*
 /// opaque with a supertype pattern (`(expression) @fw.route.prefix.opaque`)
@@ -808,16 +813,34 @@ fn innermost_prefix(scopes: &[MergedScope], at: usize) -> Option<&MergedScope> {
 /// the opacity rule, for the cases a query *cannot* express because the grammar
 /// models no sub-node to capture — a Java `@RequestMapping("${api.base}")` is
 /// one flat `string_literal`, so only its text reveals the placeholder. Where a
-/// grammar *does* model the fragment (a Kotlin string template's
-/// `interpolation` child) the query marks it `@fw.route.prefix.opaque` and
-/// [`merge_scopes`] disqualifies the literal without any text inspection.
+/// grammar *does* model the fragment — a Kotlin `"${BASE}"` string template has
+/// an `interpolation` child — a query *could* mark it `@fw.route.prefix.opaque`
+/// and let [`merge_scopes`] disqualify the literal without any text inspection.
+/// The Kotlin query deliberately does not: the brace-less `"$BASE"` spelling is
+/// folded into plain `string_content` runs with no node to name, so a structural
+/// capture would refuse one spelling and silently compose a fabricated path from
+/// the other. One text rule covers both (S-330).
 ///
 /// Rejected: an unresolved property placeholder (`${…}`) or SpEL expression
-/// (`#{…}`), whose resolution is explicitly out of scope ([CR-101] §3.3); and a
-/// literal carrying a newline or a quote, which is not a path and which means
-/// the unquoting heuristic did not fully read the source form (a Java text
-/// block). Joining a method path onto any of these mints a route name that no
-/// consumer can match, silently inherited by every handler in the type.
+/// (`#{…}`), whose resolution is explicitly out of scope ([CR-101] §3.3); a
+/// string-template reference (`$BASE`), which is the *same* unresolved
+/// indirection written in Kotlin's syntax; and a literal carrying a newline, a
+/// quote or a backslash, none of which is a path and each of which means the
+/// unquoting heuristic did not fully read the source form (a Java text block,
+/// an unresolved escape sequence). Joining a method path onto any of these
+/// mints a route name that no consumer can match, silently inherited by every
+/// handler in the type — `@RequestMapping("/a\tb")` serves `/a<TAB>b`, not the
+/// six characters the literal spells.
+///
+/// The template rule is text-level rather than structural for the same reason
+/// the whole function is: `tree-sitter-kotlin-ng` models `"${BASE}/v1"` as a
+/// `string_literal` with an `interpolation` child, which a query *could*
+/// capture as `@fw.route.prefix.opaque`, but models the equally common
+/// `"$BASE/v1"` as two plain `string_content` runs with no node to name. One
+/// text rule covers both forms, and it covers them in every language rather
+/// than only in the one whose grammar happens to expose the fragment. A lone
+/// `$` not introducing a reference (`/price$`) stays resolvable — the rule
+/// rejects a template *reference*, not a dollar sign.
 ///
 /// Deliberately *stricter* than the rule for a method path written whole:
 /// `@GetMapping("${api.base}/users")` is still promoted verbatim (S-328), where
@@ -831,10 +854,24 @@ fn innermost_prefix(scopes: &[MergedScope], at: usize) -> Option<&MergedScope> {
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 /// [CR-101]: ../../../docs/requests/CR-101-jvm-spring-route-extraction.md
 fn is_resolvable_prefix(literal: &str) -> bool {
-    !literal.contains("${")
+    !names_a_template_reference(literal)
         && !literal.contains("#{")
         && !literal.contains('\n')
         && !literal.contains('"')
+        && !literal.contains('\\')
+}
+
+/// `true` when the text holds a `$`-introduced reference to something outside
+/// it: a property placeholder (`${api.base}`) or a Kotlin string template
+/// (`$BASE`, `${BASE}`). Both name a value this pass does not resolve.
+fn names_a_template_reference(literal: &str) -> bool {
+    // Every `$`, not just the first: `/price$/x/${api.base}` names one.
+    literal.match_indices('$').any(|(at, _)| {
+        literal[at + 1..]
+            .chars()
+            .next()
+            .is_some_and(|next| next == '{' || next == '_' || next.is_alphabetic())
+    })
 }
 
 /// Join a route prefix and a method path with **exactly one** separator

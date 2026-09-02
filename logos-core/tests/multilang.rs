@@ -1438,6 +1438,397 @@ class UserController {
     assert_eq!(result.framework.components, 1);
 }
 
+/// The named-argument mapping form on Kotlin's own annotation tree (S-330,
+/// [FR-FW-05]). A named argument is a `value_argument` carrying an `identifier`
+/// key, not Java's `element_value_pair` — and before this story the query's
+/// *unanchored* positional pattern matched it by accident, which is also why
+/// `produces = "application/json"` was promoted as a URL. Both halves are
+/// asserted here: the route is the `value =` path, and the media types produce
+/// nothing.
+///
+/// [FR-FW-05]: ../../docs/specs/requirements/FR-FW-05.md
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn spring_named_argument_mappings_are_promoted_and_linked_from_kotlin() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/UserController.kt",
+        "\
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestMethod
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+class UserController {
+    @RequestMapping(method = RequestMethod.GET, value = \"/v1/users\", produces = \"application/json\")
+    fun listUsers(): String {
+        return \"\"
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    // `@RequestMapping` declares no single verb, so the method is `ANY`; the
+    // path comes from the named `value =` argument and from nothing else —
+    // `ANY application/json` would be a fabricated endpoint.
+    assert_eq!(route_names(rt), ["ANY /v1/users"]);
+    assert_eq!(result.framework.routes, 1);
+
+    // Exact edge set, not containment: a spurious extra link would fail here.
+    let route = node_id(rt, "ANY /v1/users", NodeKind::Route);
+    let handler = node_id(rt, "listUsers", NodeKind::Function);
+    assert_eq!(edges_of(rt, EdgeKind::RoutesTo), [(route, handler)]);
+    assert_eq!(result.framework.components, 1);
+}
+
+/// The contract-first Spring shape end to end in Kotlin (S-330): a prefixed
+/// **interface** declares the mappings with named arguments — one of them
+/// list-valued — and a bare `@RestController` implements it. Every endpoint
+/// yields exactly one route at its full composed path, the implementation adds
+/// no duplicate (in Kotlin an override carries a keyword, not an annotation),
+/// and the `[framework_methods]` gate still drops an annotation it does not
+/// name whatever arguments it carries ([FR-FW-04]).
+///
+/// This is the [S-329] composition interpreter driven by a second language's
+/// captures with no Rust change — the reuse claim, at the level of real
+/// promoted `route` nodes.
+///
+/// [FR-FW-04]: ../../docs/specs/requirements/FR-FW-04.md
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn spring_contract_first_interface_and_bare_implementation_yield_one_route_each_from_kotlin() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/UserApi.kt",
+        "\
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestMethod
+
+@RequestMapping(\"/api/v1\")
+interface UserApi {
+    @RequestMapping(method = RequestMethod.GET, value = \"/users\", produces = \"application/json\")
+    fun listUsers(): String
+
+    @GetMapping(path = [\"/users/{id}\", \"/users/by-id/{id}\"])
+    fun getUser(id: String): String
+
+    @Operation(value = \"/documented\")
+    fun documented(): String
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/UserApiController.kt",
+        "\
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+class UserApiController : UserApi {
+    override fun listUsers(): String {
+        return \"\"
+    }
+
+    override fun getUser(id: String): String {
+        return \"\"
+    }
+
+    override fun documented(): String {
+        return \"\"
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(
+        route_names(rt),
+        [
+            "ANY /api/v1/users",
+            "GET /api/v1/users/by-id/{id}",
+            "GET /api/v1/users/{id}"
+        ]
+    );
+    assert_eq!(result.framework.routes, 3);
+    // Nothing was refused: every prefix here is a written literal.
+    assert_eq!(result.framework.routes_not_composed, 0);
+
+    // The implementation is the wired building block; the interface is not a
+    // stereotype and declares no second route.
+    assert_eq!(result.framework.components, 1);
+    assert_eq!(
+        nodes_of(rt, NodeKind::Component)
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>(),
+        ["UserApiController"]
+    );
+    // The overrides exist and carry the same names as the declarations, so the
+    // binding below has something it could have been ambiguous against.
+    let functions = nodes_with_files(rt, NodeKind::Function);
+    let overrides = functions
+        .iter()
+        .filter(|(_, _, file)| file.as_deref() == Some("src/UserApiController.kt"))
+        .count();
+    assert_eq!(overrides, 3, "{functions:?}");
+
+    // Every route links to exactly one handler, and it is the *annotated*
+    // declaration in the interface file — not the same-named override, and not
+    // left unproven ([NFR-RA-05]). `documented` is never a handler: its
+    // annotation is not in the table, so no route was promoted to link from.
+    let routes_to = edges_of(rt, EdgeKind::RoutesTo);
+    assert_eq!(routes_to.len(), 3, "{routes_to:?}");
+    for (route, handler) in [
+        ("ANY /api/v1/users", "listUsers"),
+        ("GET /api/v1/users/{id}", "getUser"),
+        ("GET /api/v1/users/by-id/{id}", "getUser"),
+    ] {
+        let route_id = node_id(rt, route, NodeKind::Route);
+        let bound: Vec<&(NodeId, String, Option<String>)> = routes_to
+            .iter()
+            .filter(|(from, _)| *from == route_id)
+            .filter_map(|(_, to)| functions.iter().find(|(id, _, _)| id == to))
+            .collect();
+        assert_eq!(bound.len(), 1, "{route}: {bound:?}");
+        assert_eq!(bound[0].1, handler, "{route}");
+        assert_eq!(
+            bound[0].2.as_deref(),
+            Some("src/UserApi.kt"),
+            "{route} must bind the annotated declaration, not the override"
+        );
+    }
+}
+
+/// A Kotlin prefix that is not a resolvable literal refuses the whole
+/// registration and is counted, exactly as Java's does — including the two
+/// forms Java has no syntax for. A string template
+/// (`@RequestMapping("$BASE/v1")`) is the Kotlin idiom for the concatenation
+/// Java writes with `+`, and promoting `/users` under it would advertise an
+/// address the service does not serve ([NFR-RA-05]).
+///
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn spring_non_literal_prefix_promotes_no_route_and_is_counted_from_kotlin() {
+    for prefix in ["ApiPaths.USERS", "\"$BASE/v1\""] {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "src/UserController.kt",
+            &format!(
+                "\
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RestController
+
+@RequestMapping({prefix})
+@RestController
+class UserController {{
+    @GetMapping(value = \"/users\")
+    fun listUsers(): String {{
+        return \"\"
+    }}
+}}
+"
+            ),
+        );
+
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        let rt = engine.runtime().unwrap();
+        let result = engine.index();
+
+        assert_eq!(result.framework.routes, 0, "{prefix}");
+        assert!(nodes_of(rt, NodeKind::Route).is_empty(), "{prefix}");
+        assert!(edges_of(rt, EdgeKind::RoutesTo).is_empty(), "{prefix}");
+        assert_eq!(result.framework.routes_not_composed, 1, "{prefix}");
+        // The stereotype still promotes: the refusal is about the path, not
+        // the class.
+        assert_eq!(result.framework.components, 1, "{prefix}");
+    }
+}
+
+/// [FR-FW-04] for Kotlin on its own, not only inside the every-language
+/// fixture: a plain Kotlin library names no Spring package, so the ledger
+/// candidacy gate rejects it before the query runs — zero files scanned, zero
+/// routes, zero components — and a Kotlin file that *does* clear the gate but
+/// declares no mapping still promotes nothing. The second half is what the
+/// every-language regression cannot see, because its fixture never reaches the
+/// query at all.
+///
+/// [FR-FW-04]: ../../docs/specs/requirements/FR-FW-04.md
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn kotlin_plain_library_and_mapping_free_spring_file_promote_no_route() {
+    let plain = TempDir::new().unwrap();
+    write(
+        plain.path(),
+        "src/Util.kt",
+        "class Util {\n    fun util(): Int {\n        return 1\n    }\n}\n",
+    );
+    let engine = Engine::start(plain.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+    assert_eq!(result.framework.files_scanned, 0, "the ledger gate rejects it");
+    assert!(nodes_of(rt, NodeKind::Route).is_empty());
+    assert!(nodes_of(rt, NodeKind::Component).is_empty());
+
+    let scanned = TempDir::new().unwrap();
+    write(
+        scanned.path(),
+        "src/Service.kt",
+        "\
+import org.springframework.beans.factory.annotation.Autowired
+
+class UserService {
+    @Autowired
+    fun helper(): String {
+        return \"\"
+    }
+}
+",
+    );
+    let engine = Engine::start(scanned.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+    assert!(
+        result.framework.files_scanned >= 1,
+        "the Spring import must clear the candidacy gate"
+    );
+    assert_eq!(result.framework.routes, 0);
+    assert!(nodes_of(rt, NodeKind::Route).is_empty());
+    assert_eq!(result.framework.routes_not_composed, 0);
+}
+
+/// The story's headline criterion at the level of promoted graph nodes: the
+/// same Spring contract written in Kotlin and in Java yields the **same**
+/// `route` node names. Two workspaces, one file each, indexed through the real
+/// engine — so a divergence in the query, the descriptor tables or the shared
+/// composition pass fails here even if each language's own fixtures still pass.
+#[cfg(all(feature = "lang-kotlin", feature = "lang-java"))]
+#[test]
+fn spring_kotlin_and_java_workspaces_promote_identical_route_nodes() {
+    let index = |file: &str, source: &str| -> (Vec<String>, u64, u64) {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), file, source);
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        let rt = engine.runtime().unwrap();
+        let result = engine.index();
+        (
+            route_names(rt),
+            result.framework.routes,
+            result.framework.components,
+        )
+    };
+
+    let kotlin = index(
+        "src/UserApi.kt",
+        "\
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.PostMapping
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestMethod
+import org.springframework.web.bind.annotation.RestController
+
+@RequestMapping(value = [\"/api/v1\", \"/api/v2\"])
+@RestController
+class UserApi {
+    @RequestMapping(method = RequestMethod.GET, value = \"/users\", produces = \"application/json\")
+    fun listUsers(): String {
+        return \"\"
+    }
+
+    @GetMapping(path = [\"/users/{id}\", \"/users/by-id/{id}\"])
+    fun getUser(id: String): String {
+        return \"\"
+    }
+
+    @GetMapping
+    fun root(): String {
+        return \"\"
+    }
+
+    @PostMapping(\"/users\")
+    fun create(): String {
+        return \"\"
+    }
+}
+",
+    );
+    let java = index(
+        "src/UserApi.java",
+        "\
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RestController;
+
+@RequestMapping(value = {\"/api/v1\", \"/api/v2\"})
+@RestController
+public class UserApi {
+    @RequestMapping(method = RequestMethod.GET, value = \"/users\", produces = \"application/json\")
+    public String listUsers() {
+        return \"\";
+    }
+
+    @GetMapping(path = {\"/users/{id}\", \"/users/by-id/{id}\"})
+    public String getUser(String id) {
+        return \"\";
+    }
+
+    @GetMapping
+    public String root() {
+        return \"\";
+    }
+
+    @PostMapping(\"/users\")
+    public String create() {
+        return \"\";
+    }
+}
+",
+    );
+
+    assert_eq!(
+        kotlin, java,
+        "the same Spring contract must promote the same route nodes in both languages"
+    );
+    // The exact set, not the count: a cross-language comparison plus a route
+    // *tally* would survive a regression that promoted all ten routes at the
+    // wrong address in both languages — a `join_route_path` that emitted
+    // `/api/v1//users`, or a prefix and path swapped, keeps the count at ten and
+    // keeps the two languages equal. The fixture is non-vacuous by construction:
+    // it exercises the named form, the `path =` alias, both list-valued
+    // arguments, the prefix-only pathless handler and the positional form,
+    // fanned out over two class-level bases.
+    assert_eq!(
+        kotlin.0,
+        [
+            "ANY /api/v1/users",
+            "ANY /api/v2/users",
+            "GET /api/v1",
+            "GET /api/v1/users/by-id/{id}",
+            "GET /api/v1/users/{id}",
+            "GET /api/v2",
+            "GET /api/v2/users/by-id/{id}",
+            "GET /api/v2/users/{id}",
+            "POST /api/v1/users",
+            "POST /api/v2/users",
+        ]
+    );
+    assert_eq!(kotlin.1, 10, "{:?}", kotlin.0);
+}
+
 // Measured resolution coverage + never-fabricate (S-055, NFR-RA-05): an
 // intra-file call binds; a member call on an untyped receiver the resolver
 // cannot bind produces no edge — never a guessed one. The ratio is recorded in

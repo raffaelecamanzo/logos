@@ -43,7 +43,11 @@
 ;                       partial path (`path-not-composed`, FR-WS-05,
 ;                       NFR-RA-05). Capture it only where the argument really
 ;                       is in the path position — marking a `method =` argument
-;                       opaque would refuse a whole controller;
+;                       opaque would refuse a whole controller. A prefix whose
+;                       *text* names an unresolved reference — `${…}`, `#{…}`,
+;                       or a Kotlin string template `$name` — is refused by the
+;                       interpreter without any capture at all (S-330), which is
+;                       what covers the fragments a grammar models no node for;
 ;   @fw.component.name — a component declaration's name;
 ;   @fw.component.base — predicate-only helper, not consumed by the pass.
 ;
