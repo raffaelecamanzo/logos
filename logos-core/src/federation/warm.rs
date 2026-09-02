@@ -42,16 +42,27 @@
 //!   its own lock for its own lifetime. When [`warm_queue`] returns, no
 //!   `.logos` lock is held on its behalf.
 //!
-//! Correctness never depends on any of this: a member the queue never reached
-//! — because the supervisor was killed, or never spawned at all — indexes
-//! correctly on first query through the lazy `ensure_indexed` fallback
+//! Correctness never depends on any of this: a member the queue never
+//! **reached** — because the supervisor was killed, or never spawned at all —
+//! indexes correctly on first query through the lazy `ensure_indexed` fallback
 //! ([FR-IX-07]). A deferred warm is the designed fallback, not a failure
 //! ([BR-44]).
+//!
+//! One exception, stated precisely because the fallback is otherwise total: a
+//! member killed **mid**-index is not covered. A full index persists in
+//! bounded chunks (`PERSIST_CHUNK_FILES`, [FR-IX-08]), and `ensure_indexed`
+//! no-ops whenever the store has *any* indexed file — so a member interrupted
+//! after its first chunk keeps serving an incomplete graph until an aggregate
+//! command (`sync`, `scan`, `check`) walks it. That hazard predates the bound
+//! (the per-member fan-out had it too) and is not widened by K, but the
+//! supervisor's longer lifetime widens the window, which is why the spawn asks
+//! for its own process group.
 //!
 //! [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
 //! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 //! [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
 //! [FR-IX-07]: ../../../docs/specs/requirements/FR-IX-07.md
+//! [FR-IX-08]: ../../../docs/specs/requirements/FR-IX-08.md
 //! [NFR-PE-06]: ../../../docs/specs/requirements/NFR-PE-06.md
 //! [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
 //! [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
@@ -59,8 +70,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-
-use serde::Serialize;
 
 /// Hard cap on the core-derived default warm concurrency ([FR-WS-14]).
 ///
@@ -75,14 +84,37 @@ pub const CONCURRENCY_CAP: usize = 4;
 /// [`CONCURRENCY_CAP`] ([FR-WS-14]).
 ///
 /// `cores / 4` (not `cores`) because each member index is itself
-/// rayon-parallel across the extraction pool ([NFR-PE-08]) — K concurrent
-/// members already means K auto-sized pools competing for the same cores.
+/// rayon-parallel: a child sizes both its extraction pool and its reader pool
+/// to the *full* core count ([NFR-PE-08]), so K concurrent members means
+/// `K × cores` worker threads, not `cores`. Dividing keeps that product within
+/// a small multiple instead of `N ×` it.
+///
+/// Note what this therefore does and does not bound: K bounds the **process**
+/// count, and with it the `1 + K` ceiling [FR-WS-14] promises. It does not by
+/// itself bound per-child pool width or per-child RSS, so peak memory is up to
+/// `K ×` one member index — [NFR-PE-06]'s 1 GB target is improved ~84× over
+/// the old fan-out but not literally met at K = 4. Capping a child's pool width
+/// is the separate lever that would close it, and is not this story's.
 ///
 /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+/// [NFR-PE-06]: ../../../docs/specs/requirements/NFR-PE-06.md
 /// [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
 #[must_use]
 pub fn default_concurrency() -> usize {
-    let cores = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+    derive_concurrency(std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get))
+}
+
+/// The formula itself, over an explicit core count ([FR-WS-14]).
+///
+/// Split from [`default_concurrency`] so the *rule* — `max(1, cores / 4)`
+/// capped at [`CONCURRENCY_CAP`] — is pinned by a table rather than by
+/// whatever the test host happens to report. A range assertion over the live
+/// core count cannot tell `cores / 4` from `cores / 2`, `cores / 8`, or a
+/// constant, so it would leave the stated formula unverified.
+///
+/// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+#[must_use]
+fn derive_concurrency(cores: usize) -> usize {
     (cores / 4).clamp(1, CONCURRENCY_CAP)
 }
 
@@ -115,11 +147,21 @@ pub fn effective_concurrency(configured: Option<usize>) -> usize {
 /// ([NFR-CC-04]) — a member that simply was never reached is *deferred*, not
 /// degraded, and never appears here at all ([BR-44]).
 ///
+/// Not a serialized read-model: the summary is an in-process reporting value
+/// with no wire shape. [FR-WS-15]/[S-323] derives the user-facing
+/// `warm`/`deferred` labels from index presence, not from this, so a
+/// `Serialize` derive here would publish a shape nothing projects — and
+/// [`root`](Self::root) is a diagnostic label (an absolute path), deliberately
+/// NOT the workspace-relative member *name* every federation read-model keys
+/// on, so it is not join-compatible with `WorkspaceStatus` either.
+///
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
 /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberWarm {
-    /// The member repository root the queue warmed.
+    /// The member repository root the queue warmed — a human-facing diagnostic
+    /// label, not a join key.
     pub root: String,
     /// `None` on success; the failure reason when the index or spawn failed.
     pub degraded: Option<String>,
@@ -131,7 +173,7 @@ pub struct MemberWarm {
 /// deterministic regardless of how the workers interleaved.
 ///
 /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WarmSummary {
     /// The resolved bound K the pass honoured.
     pub concurrency: usize,
@@ -144,12 +186,6 @@ impl WarmSummary {
     #[must_use]
     pub fn degraded_count(&self) -> usize {
         self.members.iter().filter(|m| m.degraded.is_some()).count()
-    }
-
-    /// Members indexed successfully.
-    #[must_use]
-    pub fn warmed_count(&self) -> usize {
-        self.members.len() - self.degraded_count()
     }
 }
 
@@ -164,12 +200,15 @@ impl WarmSummary {
 /// `index_member` is called once per member, from a worker thread, and must
 /// block until that member's index has finished (the whole bound rests on
 /// that: an early return would let the worker take another member while the
-/// previous index was still running). Report a failure as `Err(reason)`
-/// rather than panicking: a panicking worker forfeits its slot (the rest of
-/// the queue still drains through the remaining workers) and the panic
-/// resurfaces from the scope, so the whole summary is lost rather than one
-/// member's outcome. Nothing is swallowed either way.
-#[must_use]
+/// previous index was still running). Report a failure as `Err(reason)` rather
+/// than panicking: a panicking worker forfeits its slot — the remaining
+/// workers keep draining, though at K = 1 there are none — and either way the
+/// panic resurfaces when the scope ends, so the whole summary is lost rather
+/// than one member's outcome. Nothing is swallowed, but the scope re-raises a
+/// generic payload, so the worker's own message survives only on stderr.
+///
+/// The returned summary is a readout, not a result to check: this function
+/// exists for its side effect, so discarding it is a legitimate call shape.
 pub fn warm_queue<F>(members: &[PathBuf], concurrency: usize, index_member: F) -> WarmSummary
 where
     F: Fn(&Path) -> Result<(), String> + Sync,
@@ -196,10 +235,11 @@ where
                         root: root.display().to_string(),
                         degraded: index_member(root).err(),
                     };
-                    // A poisoned collector is still a usable Vec, and the
-                    // module's contract is per-member degradation: one
-                    // member's panic must not lose every other member's
-                    // outcome (the `registry::lock_residents` convention).
+                    // House convention (`registry::lock_residents`). Note it
+                    // cannot actually fire here: `index_member` runs OUTSIDE
+                    // the lock, the only code under it is a `Vec::push`, and a
+                    // worker panic re-raises from the scope rather than
+                    // returning a poisoned summary.
                     done.lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push((i, outcome));
@@ -234,8 +274,6 @@ fn take_next(cursor: &AtomicUsize, len: usize) -> Option<usize> {
 mod tests {
     use super::*;
 
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Barrier;
     use std::time::Duration;
 
     fn roots(n: usize) -> Vec<PathBuf> {
@@ -280,6 +318,34 @@ mod tests {
             (1..=CONCURRENCY_CAP).contains(&k),
             "max(1, cores/4) capped at {CONCURRENCY_CAP}, got {k}"
         );
+    }
+
+    /// The stated rule, pinned independently of the host: `max(1, cores / 4)`
+    /// capped at the cap. `cores / 2`, `cores / 8` and any constant all pass a
+    /// mere range check on the live core count, so the formula gets a table.
+    #[test]
+    fn the_derived_bound_follows_max_one_cores_over_four_capped() {
+        for (cores, expected) in [
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (7, 1),
+            (8, 2),
+            (12, 3),
+            (15, 3),
+            (16, 4),
+            (17, 4),
+            (64, 4),
+            (256, 4),
+        ] {
+            assert_eq!(
+                derive_concurrency(cores),
+                expected,
+                "{cores} cores must derive K = {expected}"
+            );
+        }
     }
 
     #[test]
@@ -336,7 +402,7 @@ mod tests {
         let members = roots(6);
         let stub = SpawnStub::default();
 
-        let _ = warm_queue(&members, 1, |_| {
+        warm_queue(&members, 1, |_| {
             stub.work();
             Ok(())
         });
@@ -358,31 +424,47 @@ mod tests {
 
         assert_eq!(stub.calls.load(Ordering::SeqCst), 2);
         assert_eq!(summary.concurrency, 4, "the resolved bound is reported as-is");
-        assert_eq!(summary.warmed_count(), 2);
+        assert_eq!(summary.members.len() - summary.degraded_count(), 2);
     }
 
     /// Not just "≤ K" — the queue must actually *use* its slots, or a bound
     /// implemented as head-of-line blocking would pass every ceiling test
     /// while warming serially.
+    ///
+    /// Deliberately a **deadline**, not a `Barrier`: a barrier makes a serial
+    /// regression hang `cargo test` forever (there is no per-test timeout), and
+    /// in this repo a wedged suite reads as a stuck session rather than as a red
+    /// test. Here a serial implementation records `peak == 1` and fails the
+    /// assertion within the deadline instead.
     #[test]
     fn the_queue_actually_runs_k_members_concurrently() {
         let members = roots(8);
-        let barrier = Barrier::new(3);
-        let tripped = AtomicBool::new(false);
+        let stub = SpawnStub::default();
+        // ONE deadline shared by the whole queue, not one per call: a serial
+        // regression must fail in ~3s total, not 3s × N.
+        let started = std::time::Instant::now();
+        let deadline = Duration::from_secs(3);
 
-        let _ = warm_queue(&members, 3, |_| {
-            // The first three workers can only get past this if all three are
-            // genuinely in flight at once; later members find it already
-            // tripped and pass straight through.
-            if !tripped.load(Ordering::SeqCst) {
-                barrier.wait();
-                tripped.store(true, Ordering::SeqCst);
+        warm_queue(&members, 3, |_| {
+            stub.enter();
+            // Hold the slot until three were genuinely in flight at once — or
+            // until the shared deadline proves they never will be. Keyed on the
+            // monotonic `peak`, not on live `in_flight`: once the rendezvous has
+            // happened every later member passes straight through, so the
+            // healthy run costs milliseconds and only a regression pays the
+            // deadline.
+            while stub.peak.load(Ordering::SeqCst) < 3 && started.elapsed() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
             }
+            stub.leave();
             Ok(())
         });
-        // Reaching here at all proves the barrier was satisfied — a serial
-        // implementation would deadlock rather than fail an assertion.
-        assert!(tripped.load(Ordering::SeqCst));
+
+        assert_eq!(
+            stub.peak.load(Ordering::SeqCst),
+            3,
+            "the queue must actually use its K slots, not serialise behind one"
+        );
     }
 
     // ── warm_queue: per-member failure isolation (FR-WS-14) ────────────────
@@ -409,7 +491,7 @@ mod tests {
             "the queue neither stalls nor aborts on a failing member"
         );
         assert_eq!(summary.degraded_count(), 1);
-        assert_eq!(summary.warmed_count(), 4);
+        assert_eq!(summary.members.len() - summary.degraded_count(), 4);
         assert_eq!(
             summary.members[2].degraded.as_deref(),
             Some("store is corrupt"),
@@ -425,7 +507,7 @@ mod tests {
 
         assert_eq!(summary.members.len(), 4);
         assert_eq!(summary.degraded_count(), 4);
-        assert_eq!(summary.warmed_count(), 0);
+        assert_eq!(summary.members.len() - summary.degraded_count(), 0);
     }
 
     // ── warm_queue: shape and edges ────────────────────────────────────────
@@ -450,6 +532,22 @@ mod tests {
         assert_eq!(reasons, (0..12).map(|i| format!("m{i}")).collect::<Vec<_>>());
     }
 
+    /// The documented panic contract: a panicking worker's panic resurfaces
+    /// when the scope ends, so the summary is lost rather than silently
+    /// returned short. Pins that the panic is never swallowed — note the scope
+    /// re-raises its own generic payload, so the worker's original message
+    /// reaches only stderr (via the default panic hook), which is why
+    /// `index_member` is documented to return `Err`, not to panic.
+    #[test]
+    #[should_panic(expected = "a scoped thread panicked")]
+    fn a_panicking_worker_resurfaces_from_the_scope() {
+        let members = roots(4);
+        warm_queue(&members, 2, |root| {
+            assert!(!root.ends_with("m2"), "member m2 exploded");
+            Ok(())
+        });
+    }
+
     #[test]
     fn an_empty_queue_is_a_noop_that_spawns_nothing() {
         let stub = SpawnStub::default();
@@ -470,7 +568,7 @@ mod tests {
     fn warm_queue_returns_as_soon_as_the_last_member_finishes() {
         let members = roots(4);
         let started = std::time::Instant::now();
-        let _ = warm_queue(&members, 4, |_| {
+        warm_queue(&members, 4, |_| {
             std::thread::sleep(Duration::from_millis(10));
             Ok(())
         });

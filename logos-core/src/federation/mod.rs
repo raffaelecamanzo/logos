@@ -110,10 +110,6 @@ pub use query::{
 };
 pub use registry::{Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode};
 pub use topics::{workspace_topics, MemberTopics, TopicSummary};
-pub use warm::{
-    default_concurrency, effective_concurrency, warm_queue, MemberWarm, WarmSummary,
-    CONCURRENCY_CAP,
-};
 
 /// One resolved, validated member repository of a [`Federation`] ([FR-WS-01]).
 ///
