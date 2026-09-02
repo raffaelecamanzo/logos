@@ -296,59 +296,41 @@ fn a_fully_warmed_workspace_reports_every_member_warm() {
     assert!(rollup.get("warming").is_none(), "no warming key at all: {rollup}");
 }
 
-/// [FR-WS-15] AC5 / [NFR-CC-04]: with no live warming signal available, `status`
-/// reports only `warm` / `deferred` / `degraded` and the roll-up **omits** the
-/// `warming` key rather than defaulting it to `0` — across every warm-state
-/// combination, so the omission is a property of the read-model and not of one
-/// fixture.
-#[test]
-fn warming_is_omitted_rather_than_inferred_in_every_combination() {
-    for (members, index, broken) in [
-        (&["api", "web"][..], &["api", "web"][..], None),
-        (&["api", "web"][..], &[][..], None),
-        (&["api", "web"][..], &["api"][..], None),
-        (&["api", "web"][..], &["api", "web"][..], Some("web")),
-    ] {
-        let tmp = warm_fixture(members, index);
-        if let Some(member) = broken {
-            break_store(tmp.path(), member);
-        }
-        let status = logos_json(tmp.path(), &["workspace", "status"]);
-
-        assert!(
-            status["warm_rollup"].get("warming").is_none(),
-            "indexed {index:?}, broken {broken:?}: `warming` must be absent, not 0: {}",
-            status["warm_rollup"]
-        );
-        for (member, state) in warm_states(&status) {
-            assert_ne!(
-                state, "warming",
-                "member {member} was labeled `warming` with no live signal to derive it from"
-            );
-        }
-    }
-}
-
-/// [FR-WS-15] AC4 (exit code): no warm state moves the exit code — including
-/// `deferred` on **every** member, and including a member that failed outright.
+/// [FR-WS-15] AC4 + AC5 / [NFR-CC-04] over **one** fixture matrix: no warm
+/// state moves the exit code, and `warming` is omitted rather than inferred —
+/// across every warm-state combination, so both are properties of the read-model
+/// and not of one fixture.
+///
+/// Each row **proves the state it names.** Asserting only the exit code would
+/// let the coverage rot silently: exit 0 is also the default outcome, so if
+/// `break_store` ever stopped breaking (the store filename moves, say) the
+/// `degraded` rows would collapse into duplicates of the `warm` rows and this
+/// test would stay green while asserting nothing. The realized label multiset is
+/// therefore asserted per row.
 ///
 /// The degraded exit code is [S-326]'s to introduce; until then a warm state is
-/// purely informational, and this pins that it stayed that way.
+/// purely informational, and `all degraded` pins that it stayed that way for the
+/// combination S-326 will change first.
 ///
 /// [S-326]: ../../docs/planning/journal.md#s-326-degraded-member-reporting-and-non-zero-exit-for-workspace-commands
 #[test]
-fn no_warm_state_changes_the_exit_code() {
-    for (label, members, index, broken) in [
-        ("all deferred", &["api", "web", "svc"][..], &[][..], None),
-        ("all warm", &["api", "web"][..], &["api", "web"][..], None),
-        ("mixed", &["api", "web"][..], &["api"][..], None),
-        ("one degraded", &["api", "web"][..], &["api", "web"][..], Some("web")),
-        ("degraded + deferred", &["api", "web"][..], &["api"][..], Some("api")),
+fn no_warm_state_changes_the_exit_code_and_warming_is_never_inferred() {
+    for (label, members, index, broken, expect) in [
+        ("all deferred", &["api", "web", "svc"][..], &[][..], &[][..], &["deferred", "deferred", "deferred"][..]),
+        ("all warm", &["api", "web"][..], &["api", "web"][..], &[][..], &["warm", "warm"][..]),
+        ("mixed", &["api", "web"][..], &["api"][..], &[][..], &["warm", "deferred"][..]),
+        ("one degraded", &["api", "web"][..], &["api", "web"][..], &["web"][..], &["warm", "degraded"][..]),
+        ("degraded + deferred", &["api", "web"][..], &["api"][..], &["api"][..], &["degraded", "deferred"][..]),
+        // Every member broken — the highest-risk row for [S-326], which
+        // introduces a non-zero exit for degraded members.
+        ("all degraded", &["api", "web"][..], &["api", "web"][..], &["api", "web"][..], &["degraded", "degraded"][..]),
     ] {
         let tmp = warm_fixture(members, index);
-        if let Some(member) = broken {
+        for member in broken {
             break_store(tmp.path(), member);
         }
+
+        // AC4: exit 0 in BOTH output modes, for every combination.
         for args in [&["workspace", "status"][..], &["workspace", "status", "--json"][..]] {
             let out = logos(tmp.path(), args);
             assert_eq!(
@@ -357,6 +339,27 @@ fn no_warm_state_changes_the_exit_code() {
                 "{label} / {args:?} exited {:?}: {}",
                 out.status.code(),
                 String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let status = logos_json(tmp.path(), &["workspace", "status"]);
+        let states = warm_states(&status);
+
+        // The row realized the combination it claims — so a no-op `break_store`
+        // or a mislabelled member fails here rather than passing silently.
+        let realized: Vec<&str> = states.iter().map(|(_, state)| state.as_str()).collect();
+        assert_eq!(realized, expect, "{label}: fixture did not realize its named states: {status}");
+
+        // AC5 / NFR-CC-04: no `warming` label, and no `warming` key at all.
+        assert!(
+            status["warm_rollup"].get("warming").is_none(),
+            "{label}: `warming` must be absent, not 0: {}",
+            status["warm_rollup"]
+        );
+        for (member, state) in &states {
+            assert_ne!(
+                state, "warming",
+                "{label}: member {member} was labeled `warming` with no live signal to derive it from"
             );
         }
     }
