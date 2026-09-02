@@ -39,10 +39,14 @@ const RAISE_LADDER: [u64; 2] = [65_536, 10_240];
 
 /// Raise this process's `RLIMIT_NOFILE` soft limit toward its hard limit.
 ///
-/// Best-effort, silent on failure, and idempotent: the raise itself is attempted
-/// exactly once per process however often this is called, so a library entry
-/// point and a binary's `main` can both call it. Returns the soft limit in force
-/// afterwards, or `None` where the platform has no such limit.
+/// Called once, from `main`, before anything opens a file — [ADR-63] scopes the
+/// raise to process startup, and nothing in the library changes a process-global
+/// limit behind an embedder's back. The `Once` guard makes a second call harmless
+/// rather than expected.
+///
+/// Best-effort and silent on failure. Returns the soft limit in force afterwards
+/// — clamped, per [`open_file_soft_limit`] — or `None` where the platform has no
+/// such limit.
 ///
 /// This is deliberately **not** a fallible API. A caller must not be able to
 /// treat "could not raise" as a condition worth reporting — that is the

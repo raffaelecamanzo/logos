@@ -105,6 +105,15 @@ fn payloads_are_byte_identical_whatever_the_read_pool_size() {
          would prove nothing"
     );
 
+    // A budgeted share of zero is rejected rather than silently defaulted — the
+    // error path `start_with_read_pool` documents. Asserted here because a
+    // substituted default would be indistinguishable from success at every other
+    // call site.
+    assert!(
+        Engine::start_with_read_pool(root, 0).is_err(),
+        "a zero-connection pool must be rejected, not defaulted to the core-sized one"
+    );
+
     // The budgeted path: the tightest share a workspace could ever hand a member.
     for read_connections in [1, 2] {
         let budgeted =

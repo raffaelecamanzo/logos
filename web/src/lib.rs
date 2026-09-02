@@ -135,9 +135,12 @@ pub fn serve_surfaces(root: &Path, mcp: bool, ui: bool, port: u16, standalone: b
     // One watcher for the whole process **only** on the single-root path
     // (S-022/FR-SY-04); a spawn failure degrades to watcherless serving (reconcile
     // backstops freshness), and the handle's drop on return orphans nothing
-    // (NFR-RA-12). Under the federated backing the registry owns every member's
-    // watcher (its default member is already warmed + watched), so there is no
-    // separate process watcher to hold here.
+    // (NFR-RA-12). Under the federated backing the registry owns member watchers,
+    // so there is no separate process watcher to hold here — but it watches the
+    // **resident** set, not all N: a member evicted to stay inside the connection
+    // budget loses its watcher until its next touch (S-324, NFR-PE-11, ADR-63).
+    // The default member below is exempt in practice, because holding its `Arc`
+    // for the process lifetime makes it ineligible for eviction.
     let _watcher: Option<logos_core::watch::WatchHandle> = backing.as_single().and_then(|engine| {
         engine
             .watch()

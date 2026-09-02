@@ -38,9 +38,13 @@ const MEMBERS: usize = 72;
 /// measured under.
 const STOCK_SOFT_LIMIT: u64 = 256;
 
-/// All-member walks one `workspace status` performs today: the per-member
-/// status read-model, the contract bridge's stamp and read passes, and the topic
-/// inventory.
+/// All-member walks one `workspace status` performs today, verified by tracing
+/// `federation::query::workspace_status`: the per-member status read-model
+/// (`query.rs`, via `fan`), the cross-service coverage tier's **two** passes over
+/// the contract surface and the invocation references (`coverage.rs`), and the
+/// topic inventory (`topics.rs`). The contract bridge's own stamp/read passes are
+/// *not* on this path — they belong to `ContractBridge::edges`, which
+/// `workspace_status` never calls.
 ///
 /// Named because it is the multiplier on the budget's cost: a workspace larger
 /// than the budget rebuilds every member on every walk after the first, so each
@@ -55,9 +59,20 @@ const WALKS_PER_STATUS: u64 = 4;
 /// Deliberately local to this test rather than a `logos_core` API: nothing in
 /// the product ever *lowers* its own descriptor allowance, and a public
 /// mutator would be a foot-gun that exists only for one fitness function.
-// `rlim_t` is already `u64` on every target we ship, so the widening below is a
-// no-op there — but it is platform-defined and narrower on some, and writing it
-// explicitly is what keeps this compiling on those.
+// `rlim_t` is `u64` on every target this `#![cfg(unix)]` binary is built for, so
+// the `try_from` below is a no-op there.
+#[allow(clippy::useless_conversion)]
+fn current_soft_limit() -> u64 {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` writes a fully-initialised `rlimit` through a pointer
+    // to our own stack slot; it neither escapes nor aliases.
+    assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) }, 0);
+    u64::try_from(limit.rlim_cur).expect("a soft limit fits in u64")
+}
+
 #[allow(clippy::useless_conversion)]
 fn lower_soft_limit(soft: u64) -> u64 {
     let mut limit = libc::rlimit {
@@ -97,6 +112,21 @@ fn member_repo(root: &Path, name: &str) -> Member {
     }
 }
 
+/// Restores the process's `RLIMIT_NOFILE` soft limit on **every** exit path.
+///
+/// The limit is process-wide and the code under test runs between lowering and
+/// restoring, so a panic in `workspace_status` — the very failure this test
+/// exists to detect — would otherwise unwind past a manual restore and leave the
+/// rest of the binary, including the teardown of 72 member stores, running at 256
+/// descriptors.
+struct SoftLimitGuard(u64);
+
+impl Drop for SoftLimitGuard {
+    fn drop(&mut self) {
+        lower_soft_limit(self.0);
+    }
+}
+
 fn cores() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -117,7 +147,18 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
 
     // Lower the limit only once the fixture is on disk, so directory creation
     // is not the thing that runs out of descriptors.
-    let restore_to = lower_soft_limit(STOCK_SOFT_LIMIT);
+    let _restore = SoftLimitGuard(lower_soft_limit(STOCK_SOFT_LIMIT));
+
+    // `lower_soft_limit` installs `min(requested, hard)`, so on a host whose hard
+    // limit is below 256 the fixture would silently be testing a tighter envelope
+    // than the budget below is derived for — reporting an environment problem as
+    // a budget failure. Assert what is actually in force.
+    let installed = current_soft_limit();
+    assert_eq!(
+        installed, STOCK_SOFT_LIMIT,
+        "this host's hard limit is below {STOCK_SOFT_LIMIT}; the fixture cannot \
+         mean what it claims"
+    );
 
     // The budget this host would derive *for a 256-fd limit*, stated explicitly
     // so the assertion is about the budget's arithmetic and not about whatever
@@ -135,10 +176,6 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
         EngineRegistry::<Engine>::with_budget(federation, RegistryMode::Lazy, budget);
 
     let status = workspace_status(&registry);
-
-    // Restore before asserting: a panic here must not leave the rest of the
-    // binary's teardown running under a 256-descriptor limit.
-    lower_soft_limit(restore_to);
 
     let failures: Vec<&str> = status
         .members

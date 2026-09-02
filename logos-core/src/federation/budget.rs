@@ -121,15 +121,18 @@ impl ConnectionBudget {
     /// Derive the budget from **this host**: its `RLIMIT_NOFILE` soft limit and
     /// its core count.
     ///
-    /// Raises the soft limit toward the hard limit first
-    /// ([`raise_open_file_limit`](crate::fdlimit::raise_open_file_limit)) so the
-    /// budget is derived from the widest limit the kernel will grant — a
-    /// best-effort, secondary defence the budget itself never depends on
-    /// ([ADR-63]).
+    /// **Observes** the limit; it does not change it. Raising the soft limit is
+    /// process-level startup work the binary owns ([`main`] calls
+    /// [`raise_open_file_limit`](crate::fdlimit::raise_open_file_limit) before
+    /// anything opens a file), and [ADR-63] scopes the raise to startup for that
+    /// reason. A value constructor that mutated a process-global limit as a side
+    /// effect would do it behind the back of every embedder of this crate — and
+    /// the budget is the guarantee regardless, so there is nothing to gain by it.
     ///
+    /// [`main`]: ../../../cli/src/main.rs
     /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
     pub fn from_host() -> Self {
-        let soft_limit = crate::fdlimit::raise_open_file_limit().unwrap_or(ASSUMED_FD_SOFT_LIMIT);
+        let soft_limit = crate::fdlimit::open_file_soft_limit().unwrap_or(ASSUMED_FD_SOFT_LIMIT);
         let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);

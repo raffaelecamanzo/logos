@@ -91,6 +91,22 @@ fn an_evicted_member_answers_identically_once_reconstructed() {
         budget,
     );
 
+    // The one line that wires the budget to a real engine —
+    // `MemberEngine::start` → `Engine::start_with_read_pool` — asserted here
+    // against a live runtime. Reverting it to `Engine::start` would leave every
+    // other test in this story green on a host with few enough cores.
+    let budgeted = registry.engine_for("alpha").expect("member engine starts");
+    assert_eq!(
+        budgeted
+            .runtime()
+            .expect("a started member engine owns a runtime")
+            .reader_pool_size(),
+        budget.per_member_read_connections(),
+        "a resident member must open its budgeted share of read connections, not \
+         the core-sized pool an engine sizes for itself"
+    );
+    drop(budgeted);
+
     // Answer from a never-evicted engine: `alpha` is the first member touched.
     let never_evicted: Vec<String> = names.iter().map(|n| answer(&registry, n)).collect();
 

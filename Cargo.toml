@@ -93,8 +93,10 @@ regex     = "1"
 # `rusqlite`/`libsqlite3-sys`), so making it a *direct* dependency adds no new
 # crate to the binary — it just names what we use. Raw platform bindings with no
 # socket surface of their own (NFR-SE-01, kept honest by the no-network fitness
-# test); MIT/Apache-2.0 satisfies the permissive license gate. Confined to
-# `logos-core::fdlimit`, the only module in the tree that needs `unsafe`.
+# test); MIT/Apache-2.0 satisfies the permissive license gate. The only *library*
+# module that uses it is `logos-core::fdlimit`; the fitness suites
+# `perf_envelope.rs` (getrusage) and `workspace_connection_budget.rs` (setrlimit)
+# use it under `unsafe` too.
 libc      = "0.2"
 # Data-parallel extraction (S-007, FR-IX-03, NFR-PE-08) and execution-runtime
 # CPU worker pool (S-008, AQ-04). One shared pool. `crossbeam-channel` provides
