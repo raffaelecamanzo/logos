@@ -336,6 +336,18 @@ pub fn xservice_route_providers(
 /// the plain [`MemberResult`], which is why they live here rather than on the
 /// generic envelope.
 ///
+/// # `error` is the canonical reason (Sprint 61 review, S-323 deferred #15)
+/// A degraded row can carry the same failure under three keys: `error` (this
+/// [`MemberResult`]'s verbatim engine diagnostic), `reason` (the *warm* axis'
+/// — unreachable in practice, since no evidence source populates it yet), and
+/// `degraded_reason`/`degraded_diagnostic` (the *open* axis' classified and
+/// verbatim readings). [FR-WS-16] states the row "keeps its existing `error`
+/// field", so `error` is the field a consumer wanting *one* fact should read;
+/// the other two are additive, axis-scoped detail, not a competing source of
+/// truth. Nothing here is renamed or removed — the exact key set (all three,
+/// plus their absence on a healthy row) stays pinned by this module's own
+/// tests — this note only settles which one is authoritative.
+///
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
 /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
