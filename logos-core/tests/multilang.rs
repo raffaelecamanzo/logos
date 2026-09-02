@@ -64,6 +64,20 @@ fn nodes_of(rt: &Runtime, kind: NodeKind) -> Vec<(NodeId, String)> {
     .expect("read runs")
 }
 
+/// Every node of `kind` as `(id, name, file_path)` — the file matters where a
+/// fixture declares the same name in two files (S-328's contract-first shape).
+fn nodes_with_files(rt: &Runtime, kind: NodeKind) -> Vec<(NodeId, String, Option<String>)> {
+    rt.submit_read(move |store| {
+        Ok(store
+            .all_nodes()?
+            .into_iter()
+            .filter(|n| n.kind == kind)
+            .map(|n| (n.id, n.name, n.file_path))
+            .collect())
+    })
+    .expect("read runs")
+}
+
 /// All `(source, target)` pairs of edges with `kind`.
 fn edges_of(rt: &Runtime, kind: EdgeKind) -> Vec<(NodeId, NodeId)> {
     rt.submit_read(move |store| {
@@ -821,6 +835,318 @@ public class UserController {
     let class = node_id(rt, "UserController", NodeKind::Class);
     assert!(edges_of(rt, EdgeKind::References).contains(&(component, class)));
     assert_eq!(result.framework.components, 1);
+}
+
+/// The named-argument mapping form (S-328, [FR-FW-05]) — what OpenAPI codegen
+/// emits and the shape a bare positional-literal capture missed entirely: the
+/// route is promoted with the named path and linked to its handler.
+///
+/// [FR-FW-05]: ../../docs/specs/requirements/FR-FW-05.md
+#[cfg(feature = "lang-java")]
+#[test]
+fn spring_named_argument_mappings_are_promoted_and_linked() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/UserController.java",
+        "\
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class UserController {
+    @RequestMapping(method = RequestMethod.GET, value = \"/v1/users\", produces = \"application/json\")
+    public String listUsers() {
+        return \"\";
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    // `@RequestMapping` declares no single verb, so the method is `ANY`; the
+    // path comes from the named `value =` argument.
+    assert_eq!(route_names(rt), ["ANY /v1/users"]);
+    assert_eq!(result.framework.routes, 1);
+
+    // Exact edge set, not containment: a spurious extra link would fail here.
+    let route = node_id(rt, "ANY /v1/users", NodeKind::Route);
+    let handler = node_id(rt, "listUsers", NodeKind::Method);
+    assert_eq!(edges_of(rt, EdgeKind::RoutesTo), [(route, handler)]);
+    assert_eq!(result.framework.components, 1);
+}
+
+/// The contract-first Spring shape end to end (S-328): a prefixed interface
+/// declares the mappings with named arguments and a bare `@RestController`
+/// implements it. Every endpoint yields exactly one route — the interface
+/// declaration is not missed for being abstract, and the implementation adds
+/// no duplicate — while the `[framework_methods]` gate still drops an
+/// annotation it does not name, whatever arguments it carries ([FR-FW-04]).
+///
+/// [FR-FW-04]: ../../docs/specs/requirements/FR-FW-04.md
+#[cfg(feature = "lang-java")]
+#[test]
+fn spring_contract_first_interface_and_bare_implementation_yield_one_route_each() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/UserApi.java",
+        "\
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+
+@RequestMapping(\"/api/v1\")
+public interface UserApi {
+    @RequestMapping(method = RequestMethod.GET, value = \"/users\", produces = \"application/json\")
+    String listUsers();
+
+    @GetMapping(path = {\"/users/{id}\", \"/users/by-id/{id}\"})
+    String getUser(String id);
+
+    @Operation(value = \"/documented\")
+    String documented();
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/UserApiController.java",
+        "\
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class UserApiController implements UserApi {
+    @Override
+    public String listUsers() {
+        return \"\";
+    }
+
+    @Override
+    public String getUser(String id) {
+        return \"\";
+    }
+
+    @Override
+    public String documented() {
+        return \"\";
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    // Three endpoints: the named `value =` one, and one per element of the
+    // list-valued `path =`. The class-level `@RequestMapping("/api/v1")`
+    // prefix is *not* composed — method paths are promoted verbatim (S-329
+    // owns composition) — and `@Operation`, absent from
+    // `[framework_methods]`, promotes nothing despite its `value =` argument.
+    assert_eq!(
+        route_names(rt),
+        ["ANY /users", "GET /users/by-id/{id}", "GET /users/{id}"]
+    );
+    assert_eq!(result.framework.routes, 3);
+
+    // The implementation is the wired building block; the interface is not a
+    // stereotype and declares no second route.
+    assert_eq!(result.framework.components, 1);
+    assert_eq!(
+        nodes_of(rt, NodeKind::Component)
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>(),
+        ["UserApiController"]
+    );
+    // The override exists and carries the same name as the declaration, so
+    // the binding below has something it could have been ambiguous against.
+    let methods = nodes_with_files(rt, NodeKind::Method);
+    let overrides = methods
+        .iter()
+        .filter(|(_, _, file)| file.as_deref() == Some("src/UserApiController.java"))
+        .count();
+    assert_eq!(overrides, 3, "{methods:?}");
+
+    // Every route links to exactly one handler, and it is the *annotated*
+    // declaration in the interface file — not the same-named override, and
+    // not left unproven (NFR-RA-05). `documented` is never a handler: its
+    // annotation is not in the table, so no route was promoted to link from.
+    let routes_to = edges_of(rt, EdgeKind::RoutesTo);
+    assert_eq!(routes_to.len(), 3, "{routes_to:?}");
+    for (route, handler) in [
+        ("ANY /users", "listUsers"),
+        ("GET /users/{id}", "getUser"),
+        ("GET /users/by-id/{id}", "getUser"),
+    ] {
+        let route_id = node_id(rt, route, NodeKind::Route);
+        let bound: Vec<&(NodeId, String, Option<String>)> = routes_to
+            .iter()
+            .filter(|(from, _)| *from == route_id)
+            .filter_map(|(_, to)| methods.iter().find(|(id, _, _)| id == to))
+            .collect();
+        assert_eq!(bound.len(), 1, "{route}: {bound:?}");
+        assert_eq!(bound[0].1, handler, "{route}");
+        assert_eq!(
+            bound[0].2.as_deref(),
+            Some("src/UserApi.java"),
+            "{route} must bind the annotated declaration, not the override"
+        );
+    }
+}
+
+/// A route node is per *declaring file*: where an implementation redundantly
+/// repeats the interface's mapping, each file holds a real registration and
+/// each yields its own `route` node. `dedup_routes` collapses duplicates
+/// within one file only, and route symbols are keyed on the declaring path —
+/// so this is the established identity contract, not a regression of S-328's
+/// interface capture: the positional form behaved the same way before it.
+/// Pinned so the shape is a decision on the record rather than a surprise.
+#[cfg(feature = "lang-java")]
+#[test]
+fn spring_redundantly_reannotated_override_yields_one_route_per_declaring_file() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/UserApi.java",
+        "\
+import org.springframework.web.bind.annotation.GetMapping;
+
+interface UserApi {
+    @GetMapping(value = \"/users\")
+    String listUsers();
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/UserApiController.java",
+        "\
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+class UserApiController implements UserApi {
+    @Override
+    @GetMapping(value = \"/users\")
+    public String listUsers() {
+        return \"\";
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(result.framework.routes, 2);
+    let mut declared: Vec<Option<String>> = nodes_with_files(rt, NodeKind::Route)
+        .into_iter()
+        .map(|(_, name, file)| {
+            assert_eq!(name, "GET /users");
+            file
+        })
+        .collect();
+    declared.sort();
+    assert_eq!(
+        declared,
+        [
+            Some("src/UserApi.java".to_string()),
+            Some("src/UserApiController.java".to_string()),
+        ]
+    );
+    // Each is linked to the handler in its own file — no cross-file guessing.
+    assert_eq!(edges_of(rt, EdgeKind::RoutesTo).len(), 2);
+}
+
+/// A Java file that IS scanned — it names the framework, so it clears the
+/// [FR-FW-04] ledger gate — but carries no mapping annotation promotes no
+/// route. The plain-library regression cannot cover this: that fixture is
+/// rejected before the query runs (`files_scanned == 0`), so it would stay
+/// green against a query that over-matches.
+///
+/// [FR-FW-04]: ../../docs/specs/requirements/FR-FW-04.md
+#[cfg(feature = "lang-java")]
+#[test]
+fn spring_scanned_file_without_mappings_promotes_no_route() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/UserService.java",
+        "\
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class UserService {
+    @Transactional(value = \"txManager\", readOnly = true)
+    public String load(String id) {
+        return \"\";
+    }
+
+    @Operation(value = \"/v1/users\", summary = \"load\")
+    public String documented() {
+        return \"\";
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    // Scanned — the ledger names Spring — and still empty of routes: every
+    // string-valued named argument here belongs to an annotation absent from
+    // `[framework_methods]`.
+    assert!(result.framework.files_scanned >= 1);
+    assert_eq!(result.framework.routes, 0);
+    assert!(nodes_of(rt, NodeKind::Route).is_empty());
+    // `@Service` is a stereotype, so the component still promotes.
+    assert_eq!(result.framework.components, 1);
+}
+
+/// Capturing interface-declared handlers makes a new ambiguity reachable: two
+/// same-named candidates in ONE file. The binder's exactly-one rule then
+/// proves nothing, and the route must keep its node with no fabricated edge
+/// ([NFR-RA-05]).
+///
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+#[cfg(feature = "lang-java")]
+#[test]
+fn spring_ambiguous_same_file_handler_yields_a_route_without_an_edge() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/UserApi.java",
+        "\
+import org.springframework.web.bind.annotation.GetMapping;
+
+interface UserApi {
+    @GetMapping(value = \"/users\")
+    String listUsers();
+
+    String listUsers(String query);
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(route_names(rt), ["GET /users"]);
+    assert_eq!(result.framework.routes, 1);
+    assert!(
+        edges_of(rt, EdgeKind::RoutesTo).is_empty(),
+        "an unprovable handler gets no edge"
+    );
 }
 
 // ── C: extraction parity, the honesty fixture (no frameworks) ────────────────
