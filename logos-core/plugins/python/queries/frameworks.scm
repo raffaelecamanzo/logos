@@ -3,15 +3,23 @@
 ;
 ; Declarative capture contract (resolve::framework::generic_match): a pattern
 ; captures the registration parts directly —
-;   @fw.route.path    — the URL string literal (unquoted by the pass); may be
-;                       captured more than once in one match, which registers
-;                       one route per capture (a list-valued path argument);
+;   @fw.route.path    — the URL string literal (unquoted by the pass). The
+;                       pass collects every such capture in a match and
+;                       registers one route per capture, so a `+`/`*`
+;                       quantifier works. Note a list-valued argument does NOT
+;                       need one: an unanchored child pattern already yields
+;                       one *match* per element (`value = {"/a", "/b"}` → two
+;                       matches, one path each);
 ;   @fw.route.path.named — the same, for a path written as a *named* argument
 ;                       (Java/Kotlin `value =`/`path =`). Outranks a plain
 ;                       @fw.route.path at the same @fw.route.anchor (S-328);
 ;   @fw.route.anchor  — optional; the registration site (the annotation, the
 ;                       call) that paths are ranked within. Only a query whose
-;                       patterns can both match one site needs it;
+;                       patterns can both match one site needs it — but then it
+;                       needs it on EVERY such pattern: a path with no anchor
+;                       competes with nothing and always survives, so anchoring
+;                       the named pattern while leaving a pre-existing
+;                       positional one unanchored silently promotes both;
 ;   @fw.route.method  — the node whose text maps through [framework_methods]
 ;                       (unmapped text drops the match, FR-FW-04 best-effort);
 ;   @fw.route.handler — optional; a plain (possibly dotted) handler name the

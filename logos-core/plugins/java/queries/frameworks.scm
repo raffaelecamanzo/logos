@@ -10,10 +10,15 @@
 ; (composition is S-329's, in the shared interpreter); functional
 ; `RouterFunction` routing (`RouterFunctions.route(GET("/p"), handler)`), whose
 ; builder chain names no annotated handler method to link; and paths that are
-; not written literals — a constant reference or concatenation
-; (`value = BASE + "/x"`) leaves no literal to promote, and a property
-; placeholder (`value = "${api.base}/x"`) is promoted verbatim, never resolved
-; against the property sources.
+; not written literals — a constant reference or a concatenation
+; (`value = BASE + "/x"`) leaves no literal, so nothing is promoted.
+;
+; Captured, but NOT interpreted: a property placeholder (`value =
+; "${api.base}/x"`) is a written literal, so it is promoted verbatim; resolving
+; it against the property sources is out of scope (FR-FW-05). And in a *mixed*
+; list (`value = {"/a", BASE + "/b"}`) the literal elements are promoted while
+; the non-literal ones are dropped silently — reporting that as
+; `path-not-composed` is S-329's.
 
 ; Spring request-mapping annotation on a handler method, positional form:
 ; `@GetMapping("/users") public List<User> list() {…}` — the annotation name
@@ -30,14 +35,25 @@
 ; OpenAPI codegen actually emit, and the shape that promoted nothing before
 ; S-328: `@RequestMapping(method = RequestMethod.GET, value = "/v1/x",
 ; produces = "application/json")` (FR-FW-05). `value` and `path` are Spring
-; aliases, so both key names count and neither outranks the other; either may
-; hold a list, and `value = {"/a", "/b"}` registers one route per element.
-; A named path outranks a positional literal on the same annotation — the
-; interpreter ranks them by `@fw.route.anchor`.
+; aliases, so both key names count; either may hold a list, and
+; `value = {"/a", "/b"}` registers one route per element. Writing both keys on
+; one annotation is a Spring configuration error (`@AliasFor` conflict); the
+; query promotes each independently rather than adjudicating it.
 ;
 ; The method declaration is matched the same way whether it carries a body or
 ; not, so a mapping declared on an **interface** method is captured and its
 ; bare `@RestController` implementation adds no second route.
+;
+; On named-vs-positional precedence: both patterns capture `@fw.route.anchor`
+; so the interpreter *can* rank them, but for Java the rank never decides
+; anything. `annotation_argument_list` is one positional value OR a list of
+; named pairs — never both — so mixing them is not legal Java, and the parser
+; puts the LEADING argument in an `ERROR` node that neither pattern reaches
+; through. `@X("/a", value = "/b")` therefore promotes `/b` and
+; `@X(value = "/b", "/a")` promotes `/a`: whichever argument the recovery left
+; well-formed, not whichever is named. The precedence pass earns its keep in
+; Kotlin, whose homogeneous `value_arguments` list parses the mixed form
+; cleanly and does match both patterns at one site (S-330).
 ((method_declaration
   (modifiers
     (annotation
