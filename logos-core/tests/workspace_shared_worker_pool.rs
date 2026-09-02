@@ -10,11 +10,16 @@
 //! 1. Real member [`Engine`]s injected by the registry submit to one pool, and
 //!    that pool is the budget's size rather than one-per-core-per-member.
 //! 2. A long-running job occupying **every** worker of the shared pool does not
-//!    deadlock, or even delay, another member's navigation query — because
-//!    navigation reads on the calling thread through the read pool and never
-//!    enters the worker pool at all ([ADR-11]). That is the whole answer to
-//!    [ADR-63]'s "a shared worker pool couples members" consequence, and it is
-//!    measured here rather than argued.
+//!    deadlock, or even delay, another member's navigation query on an
+//!    **already-indexed** member — because navigation reads on the calling thread
+//!    through the read pool and never enters the worker pool ([ADR-11]). That is
+//!    the answer to [ADR-63]'s "a shared worker pool couples members"
+//!    consequence, and it is measured here rather than argued. The fixture is
+//!    indexed on purpose: a member's *first* navigation call runs the [FR-IX-07]
+//!    auto-index prologue, which is a full index on this pool and therefore the
+//!    one navigation path that genuinely does queue behind another member.
+//! 2b. A real cross-member **worker-pool** job submitted while the pool is
+//!    saturated queues, and runs once the long jobs release — no deadlock.
 //! 3. Sharing composes with eviction: an evicted member rejoins the same pool.
 //! 4. The pool is torn down with the last engine holding it — no orphan threads.
 //!
@@ -28,6 +33,7 @@
 //! [NFR-PE-08]: ../../docs/specs/requirements/NFR-PE-08.md
 //! [NFR-PE-11]: ../../docs/specs/requirements/NFR-PE-11.md
 //! [BR-45]: ../../docs/specs/software-spec.md#327-workspace-federation
+//! [FR-IX-07]: ../../docs/specs/requirements/FR-IX-07.md
 //! [ADR-11]: ../../docs/specs/architecture/decisions/ADR-11.md
 //! [ADR-63]: ../../docs/specs/architecture/decisions/ADR-63.md
 #![cfg(feature = "lang-rust")]
@@ -64,6 +70,11 @@ const ROOMY_FD_LIMIT: u64 = 65_536;
 /// worker of the shared pool is blocked must still land inside it — that is the
 /// starvation regression this test exists to catch.
 const POINT_QUERY_MS: u128 = 100;
+
+/// How long a blocked-on-the-pool operation is given before the test calls it a
+/// deadlock. Generous: it is a liveness bound, not a latency one — the latency
+/// bound is [`POINT_QUERY_MS`].
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Distinct content per member, so an answer that leaked between members is
 /// visible rather than masked by identical fixtures.
@@ -243,7 +254,12 @@ fn resident_member_engines_share_one_bounded_worker_pool() {
     // and it is asserted here rather than assumed: the query runs on its own
     // thread behind a timeout, so if a future change ever routed navigation
     // through `worker_pool().install(…)` this FAILS instead of hanging.
-    let (query_tx, query_rx) = std::sync::mpsc::channel::<(String, u128)>();
+    // Each result carries its own member name: the channel delivers in
+    // completion order, not in the order the queries were spawned, so zipping
+    // arrivals against `MEMBERS` would compare one member's answer with
+    // another's name.
+    let (query_tx, query_rx) = std::sync::mpsc::channel::<(&str, String, u128)>();
+    let mut latencies_ms: Vec<u128> = Vec::new();
     std::thread::scope(|scope| {
         for (member, engine) in MEMBERS.iter().zip(engines.iter()).skip(1) {
             let query_tx = query_tx.clone();
@@ -251,34 +267,38 @@ fn resident_member_engines_share_one_bounded_worker_pool() {
                 let started = Instant::now();
                 let answer =
                     serde_json::to_string(&engine.search("entry", None, None)).expect("json");
-                let _ = query_tx.send((answer, started.elapsed().as_millis()));
+                let _ = query_tx.send((member, answer, started.elapsed().as_millis()));
             });
         }
         drop(query_tx);
 
-        let mut latencies_ms: Vec<u128> = Vec::new();
-        for member in MEMBERS.iter().skip(1) {
-            let (answer, elapsed_ms) = query_rx
-                .recv_timeout(Duration::from_secs(10))
-                .expect(
-                    "a member's navigation query did not return while another                      member occupied every worker of the shared pool — navigation                      is being routed through the worker pool, which is exactly the                      coupling [ADR-63] warns about",
-                );
+        for _ in MEMBERS.iter().skip(1) {
+            let (member, answer, elapsed_ms) = query_rx.recv_timeout(TIMEOUT).expect(
+                "a member's navigation query did not return while another member \
+                 occupied every worker of the shared pool — navigation is being \
+                 routed through the worker pool, which is the coupling ADR-63 warns \
+                 about",
+            );
             assert!(
                 answer.contains(&format!("{member}_entry")),
-                "member {member} answered without its own symbols while the shared                  pool was saturated: {answer}"
+                "member {member} answered without its own symbols while the shared \
+                 pool was saturated: {answer}"
             );
             latencies_ms.push(elapsed_ms);
         }
-        let worst = latencies_ms.iter().copied().max().unwrap_or_default();
-        eprintln!(
-            "shared pool saturated ({} workers busy): per-member search {latencies_ms:?} ms",
-            budget.worker_threads(),
-        );
-        assert!(
-            worst < POINT_QUERY_MS,
-            "a member's search took {worst} ms while another member occupied every              worker of the shared pool — that is the [NFR-PE-01] starvation              [ADR-63] trades private pools against; distribution: {latencies_ms:?}"
-        );
     });
+
+    let worst = latencies_ms.iter().copied().max().unwrap_or_default();
+    eprintln!(
+        "shared pool saturated ({} workers busy): per-member search {latencies_ms:?} ms",
+        budget.worker_threads(),
+    );
+    assert!(
+        worst < POINT_QUERY_MS,
+        "a member's search took {worst} ms while another member occupied every \
+         worker of the shared pool — that is the [NFR-PE-01] starvation [ADR-63] \
+         trades private pools against; distribution: {latencies_ms:?}"
+    );
 
     // A genuine WORKER-POOL job from another member, submitted while the pool is
     // still saturated, must queue and then run — not deadlock. Submitting it
@@ -303,7 +323,7 @@ fn resident_member_engines_share_one_bounded_worker_pool() {
     latch.release();
     assert_eq!(
         job_rx
-            .recv_timeout(Duration::from_secs(30))
+            .recv_timeout(TIMEOUT)
             .expect("the queued job must run once the long jobs release"),
         11
     );

@@ -51,10 +51,24 @@
 //! Submission is unchanged: every job still enters through
 //! `runtime.worker_pool().install(…)` from a caller that is not itself a pool
 //! worker, so sharing adds no nested blocking submission and one member's long
-//! job cannot deadlock another's — it can only queue behind it. Navigation point
-//! queries never reach this pool at all (they run on the calling thread through
-//! the read pool, [ADR-11]), so the [NFR-PE-01] latency budget is not exposed to
-//! another member's CPU work.
+//! job cannot deadlock another's — it can only queue behind it. That queueing is
+//! real, though: an eviction's teardown joins the evicted member's watcher, whose
+//! final sync runs on this same pool, and the admission lock is held across it.
+//!
+//! A **steady-state** navigation query is not exposed to that: `search`,
+//! `callers`, `node` and the rest read on the calling thread through the read
+//! pool ([ADR-11]) and never enter the worker pool, so the [NFR-PE-01] budget is
+//! independent of another member's CPU work. The exception is a member's *first*
+//! navigation call, which runs the [FR-IX-07] auto-index prologue — a full index,
+//! on this pool. On a workspace whose members are not yet warm (the case
+//! [CR-100] measured) that prologue is the one navigation path a shared pool
+//! couples across members, which is exactly the trade [ADR-63] Consequences
+//! records. Warming members up front ([FR-WS-14]) is what keeps it off the query
+//! path.
+//!
+//! [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+//! [FR-IX-07]: ../../../docs/specs/requirements/FR-IX-07.md
+//! [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
 //!
 //! An evicted member is reconstructed on its next touch and is indistinguishable
 //! from a never-evicted one: the store is canonical ([FR-DB-01]) and an engine
