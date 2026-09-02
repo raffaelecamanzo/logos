@@ -783,16 +783,27 @@ fn every_framework_query_naming_a_prefix_also_names_its_scope() {
     assert!(checked > 0, "no frameworks.scm was checked");
 }
 
-/// Occurrences of `@<name>` in a query, counting only the capture whose name is
-/// exactly `name` — `@fw.route.prefix.scope` is not an occurrence of
-/// `@fw.route.prefix`.
+/// Occurrences of `@<name>` in a query's **patterns**, counting only the
+/// capture whose name is exactly `name` — `@fw.route.prefix.scope` is not an
+/// occurrence of `@fw.route.prefix`.
+///
+/// Comment lines are dropped first, and that is load-bearing rather than tidy.
+/// These query files document their own capture vocabulary in prose, so a
+/// whole-file text count is satisfied by the header alone: measured before this
+/// filter, the Python query "named" `@fw.route.prefix` and
+/// `@fw.route.prefix.scope` twice and once respectively while capturing neither,
+/// which passed `every_framework_query_naming_a_prefix_also_names_its_scope`
+/// vacuously — the exact failure that guard exists to prevent. Counting only
+/// pattern text also stops a *floor* assertion from being inflated by a comment
+/// mentioning the capture it pins.
 #[cfg(test)]
 fn capture_occurrences(source: &str, name: &str) -> usize {
+    let patterns = query_patterns(source);
     let needle = format!("@{name}");
-    source
+    patterns
         .match_indices(&needle)
         .filter(|(at, _)| {
-            source[at + needle.len()..]
+            patterns[at + needle.len()..]
                 .chars()
                 .next()
                 .is_none_or(|c| !c.is_alphanumeric() && c != '.' && c != '_' && c != '-')
@@ -800,23 +811,95 @@ fn capture_occurrences(source: &str, name: &str) -> usize {
         .count()
 }
 
-/// The Java query names each shared capture as its own capture, not merely as a
-/// prefix of a longer one — asserted by exact-name counting so a rename to
-/// `@fw.route.prefix.value` fails here rather than passing vacuously.
-#[test]
-fn the_java_query_delegates_composition_by_naming_the_shared_captures() {
-    let query = include_str!("../../../plugins/java/queries/frameworks.scm");
-    for capture in [
-        "fw.route.prefix",
-        "fw.route.prefix.scope",
-        "fw.route.prefix.opaque",
-    ] {
+/// A `.scm` query with its comment lines removed — tree-sitter query comments
+/// run from a `;` to the end of the line, and every comment in the shipped
+/// queries occupies a whole line.
+#[cfg(test)]
+fn query_patterns(source: &str) -> String {
+    source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with(';'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Assert `query` names each of `captures` as its own capture in its patterns,
+/// not merely as a prefix of a longer name and not merely in its header prose.
+#[cfg(test)]
+fn names_every_capture(query: &str, label: &str, captures: &[&str]) {
+    for capture in captures {
         assert!(
             capture_occurrences(query, capture) > 0,
-            "the Java query must name @{capture}"
+            "the {label} query must name @{capture} in a pattern"
         );
     }
 }
+
+/// Assert every registration pattern in `query` carries `@fw.route.anchor`.
+///
+/// Expressed as an **equality against the handler count** rather than a floor:
+/// a floor equal to today's pattern count cannot notice a fourth registration
+/// pattern added without an anchor, and per S-328 a path with no anchor
+/// competes with nothing in [`drop_outranked_paths`] and always survives — so
+/// the omission silently promotes two routes for one registration. Every
+/// registration pattern in both JVM queries captures a handler, which makes the
+/// handler count the surface this invariant has to scale with.
+#[cfg(test)]
+fn every_registration_pattern_anchors(query: &str, label: &str) {
+    let handlers = capture_occurrences(query, "fw.route.handler");
+    assert!(handlers > 0, "{label}: no registration pattern found");
+    assert_eq!(
+        capture_occurrences(query, "fw.route.anchor"),
+        handlers,
+        "{label}: every registration pattern must anchor"
+    );
+}
+
+/// The Java query names each shared capture as its own capture, not merely as a
+/// prefix of a longer one and not merely in its header — asserted by exact-name
+/// counting over pattern text, so a rename fails here rather than passing
+/// vacuously.
+///
+/// Kept beside its Kotlin twin (S-330) and asserting the same set: the two
+/// queries describe one framework through one capture vocabulary, and an
+/// invariant pinned for one language and not the other is how the pair drifts.
+#[test]
+fn the_java_query_delegates_composition_by_naming_the_shared_captures() {
+    let query = include_str!("../../../plugins/java/queries/frameworks.scm");
+    names_every_capture(query, "Java", JVM_SPRING_CAPTURES);
+    every_registration_pattern_anchors(query, "Java");
+}
+
+/// The Kotlin query names the same shared captures and anchors the same way
+/// (S-330) — the parity claim at the level of the query's own text, which is
+/// what `kotlin_and_java_fixtures_promote_identical_routes` cannot see.
+#[test]
+fn the_kotlin_query_delegates_composition_by_naming_the_shared_captures() {
+    let query = include_str!("../../../plugins/kotlin/queries/frameworks.scm");
+    names_every_capture(query, "Kotlin", JVM_SPRING_CAPTURES);
+    every_registration_pattern_anchors(query, "Kotlin");
+    // The stale claim S-330 corrected: the header must no longer say named
+    // arguments are unsupported, because they never were merely absent — the
+    // unanchored positional pattern was already matching them.
+    assert!(
+        !query.contains("Deliberately NOT captured in v1"),
+        "the header's exclusion note must be corrected, not carried over"
+    );
+}
+
+/// The capture vocabulary both JVM queries must name: the S-328 path forms, the
+/// S-328 precedence anchor, and the three S-329 composition captures.
+#[cfg(test)]
+const JVM_SPRING_CAPTURES: &[&str] = &[
+    "fw.route.path",
+    "fw.route.path.named",
+    "fw.route.anchor",
+    "fw.route.handler",
+    "fw.route.method",
+    "fw.route.prefix",
+    "fw.route.prefix.scope",
+    "fw.route.prefix.opaque",
+];
 
 /// A `$`-introduced reference — a property placeholder or a Kotlin string
 /// template — is never a joinable prefix, whichever syntax wrote it, while a
@@ -2794,45 +2877,6 @@ class Outer {
         );
     }
 
-    /// The Kotlin query names each shared composition capture as its own
-    /// capture, not merely as a prefix of a longer one — asserted by
-    /// exact-name counting, the same guard the Java query carries, so a rename
-    /// fails here rather than passing vacuously.
-    /// `every_framework_query_naming_a_prefix_also_names_its_scope` covers the
-    /// pairing rule across every shipped query.
-    #[test]
-    fn the_kotlin_query_delegates_composition_by_naming_the_shared_captures() {
-        let query = include_str!("../../../plugins/kotlin/queries/frameworks.scm");
-        for capture in [
-            "fw.route.prefix",
-            "fw.route.prefix.scope",
-            "fw.route.prefix.opaque",
-            "fw.route.path",
-            "fw.route.path.named",
-            "fw.route.anchor",
-        ] {
-            assert!(
-                capture_occurrences(query, capture) > 0,
-                "the Kotlin query must name @{capture}"
-            );
-        }
-        // Both path patterns anchor (see
-        // `path_origins_record_the_annotation_site_and_the_named_rank` for the
-        // behavioural half): a path with no anchor competes with nothing and
-        // always survives, so anchoring one pattern and not the other silently
-        // promotes both at a mixed-form annotation.
-        assert!(
-            capture_occurrences(query, "fw.route.anchor") >= 3,
-            "every registration pattern must anchor: positional, named, pathless"
-        );
-        // The stale claim this story corrected: the header must no longer say
-        // named arguments are unsupported, because they never were merely
-        // absent — the unanchored positional pattern was matching them.
-        assert!(
-            !query.contains("Deliberately NOT captured in v1"),
-            "the header's exclusion note must be corrected, not carried over"
-        );
-    }
 }
 
 // ── Java/Kotlin parity (S-330) ───────────────────────────────────────────────
@@ -2930,47 +2974,181 @@ mod jvm_parity {
         );
     }
 
-    /// The non-duplication criterion, proved structurally rather than by
-    /// reading the diff: the shared interpreter names **no** JVM annotation
-    /// node kind in its code, so neither language can have a composition
-    /// implementation of its own. Comments are stripped first — the module
-    /// documents these node kinds on purpose, to explain what the queries
-    /// carry.
+    /// The non-duplication criterion, proved structurally rather than by reading
+    /// the diff: the shared interpreter names **no** JVM annotation node kind in
+    /// its code, so neither language can have a composition implementation of
+    /// its own. A second copy would have to walk an annotation's arguments, and
+    /// there is no way to do that without naming one of those kinds.
     ///
-    /// A second copy of composition would have to name at least one of these
-    /// (there is no other way to walk an annotation's arguments), which is what
-    /// makes the absence a real check rather than a stylistic one.
+    /// **Inverted, and derived from the grammars rather than from a hand-written
+    /// list.** The first version of this test listed the kinds it forbade, and
+    /// review demonstrated the consequence by mutation: a complete Kotlin-only
+    /// composition function walking `class_declaration` → `modifiers` →
+    /// `annotation` passed, because none of those three was on the list (and one
+    /// entry, `simple_identifier`, was not even a node kind in the pinned
+    /// grammar). A closed list cannot notice what it does not name. So the check
+    /// now enumerates **every named node kind of both JVM grammars** — 248 of
+    /// them, straight from the loaded `Language` — and requires any that the
+    /// interpreter's code names to be on a short, deliberate allowlist. A new
+    /// grammar release cannot leave it behind, and adding a JVM node kind to the
+    /// interpreter is a decision someone has to write down here.
+    ///
+    /// Scope is every `.rs` file under `src/resolve/`, not one file: a future
+    /// `resolve/framework/kotlin.rs` would be invisible to a single
+    /// `include_str!`, and `route_template.rs` is on the same promotion path.
     #[test]
     fn no_language_specific_composition_code_exists() {
-        let code: String = include_str!("../framework.rs")
-            .lines()
-            .map(|line| line.split("//").next().unwrap_or(""))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for node_kind in [
-            // Kotlin
-            "value_argument",
-            "constructor_invocation",
-            "collection_literal",
-            "user_type",
-            "simple_identifier",
-            "class_body",
-            "object_declaration",
-            "interpolation",
-            // Java
-            "element_value_pair",
-            "element_value_array_initializer",
-            "annotation_argument_list",
-            "marker_annotation",
-            "interface_body",
-            "method_declaration",
-        ] {
-            assert!(
-                !code.contains(node_kind),
-                "the shared interpreter must not name the {node_kind} node kind"
-            );
+        let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+        let jvm_kinds = jvm_node_kinds(&registry);
+        assert!(
+            jvm_kinds.contains("annotation") && jvm_kinds.contains("element_value_pair"),
+            "the derived kind set must really come from the JVM grammars"
+        );
+
+        for (file, code) in resolver_sources() {
+            for literal in quoted_identifiers(&code) {
+                if !jvm_kinds.contains(literal.as_str()) {
+                    continue;
+                }
+                assert!(
+                    RESOLVER_KIND_ALLOWLIST.contains(&literal.as_str()),
+                    "{file} names the JVM node kind {literal:?}; the shared \
+                     interpreter must stay language-neutral. If this is a Rust \
+                     (or other) grammar kind that merely collides with a JVM \
+                     one, add it to RESOLVER_KIND_ALLOWLIST with a reason."
+                );
+            }
+            // Language-specific logic need not name a node kind at all — a
+            // `plugin.id == "kotlin"` branch would do. The guard would miss
+            // that, so it is asserted directly.
+            for id in ["\"kotlin\"", "\"java\"", "\"kt\"", "\"scala\""] {
+                assert!(
+                    !code.contains(id),
+                    "{file} branches on the language id {id}; the shared \
+                     interpreter must be driven by capture names and descriptor \
+                     data, never by which language it is looking at"
+                );
+            }
         }
     }
+
+    /// Every named node kind of both JVM grammars, read from the loaded
+    /// `Language` so it cannot fall behind a grammar upgrade.
+    fn jvm_node_kinds(registry: &LanguageRegistry) -> std::collections::BTreeSet<String> {
+        let mut kinds = std::collections::BTreeSet::new();
+        for ext in ["java", "kt"] {
+            let language = registry
+                .for_extension(ext)
+                .unwrap_or_else(|| panic!("{ext} plugin"))
+                .language();
+            for id in 0..language.node_kind_count() {
+                let id = id as u16;
+                if language.node_kind_is_named(id) {
+                    if let Some(kind) = language.node_kind_for_id(id) {
+                        kinds.insert(kind.to_string());
+                    }
+                }
+            }
+        }
+        kinds
+    }
+
+    /// Every `.rs` file under `src/resolve/` except the test modules, verbatim.
+    ///
+    /// **No comment stripping, deliberately.** The first version of this test
+    /// split each line at the first `//` to skip the prose, and review defeated
+    /// that twice: `node.kind() == "http://value_argument"` named a guarded kind
+    /// and passed because the cut landed inside the string literal, and a
+    /// hand-written scanner then mis-lexed Rust's `'"'` char literal and stopped
+    /// seeing code at all. Both failures come from deciding what is a comment
+    /// without knowing what is a string.
+    ///
+    /// The raw source needs no such decision, because the guard only looks at
+    /// **double-quoted identifiers** and these modules quote node kinds in
+    /// `backticks` when they discuss them in prose. Measured: the set of
+    /// JVM-colliding quoted identifiers is identical with and without comment
+    /// stripping. If a future comment does double-quote a node kind the guard
+    /// will flag it, and the fix is to write it in backticks like its
+    /// neighbours.
+    fn resolver_sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            let entries = std::fs::read_dir(dir).expect("resolve/ is readable");
+            for entry in entries {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    && path.file_name().is_some_and(|f| f != "tests.rs")
+                {
+                    let source = std::fs::read_to_string(&path).expect("source is readable");
+                    out.push((
+                        path.file_name().expect("file name").to_string_lossy().into_owned(),
+                        source,
+                    ));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/resolve")),
+            &mut out,
+        );
+        assert!(out.len() > 1, "resolve/ must contribute several files: {out:?}");
+        out
+    }
+
+    /// Every `"identifier"` appearing in `code` — the only shape a `node.kind()`
+    /// comparison can take.
+    ///
+    /// Each `"` is tried as an opening quote **independently**, and the scan
+    /// advances one byte at a time rather than skipping past the literal it just
+    /// read. That matters: pairing quotes off against each other goes out of
+    /// phase on the first `'"'` char literal or `\"` escape in the file — which
+    /// `framework.rs` has — and everything after it is then read inside-out. An
+    /// occurrence test does not need to know where literals begin, only that the
+    /// three-token shape appears somewhere, so it does not pay for a lexer it
+    /// cannot get right.
+    fn quoted_identifiers(code: &str) -> Vec<String> {
+        let bytes = code.as_bytes();
+        let mut found = Vec::new();
+        for (at, _) in code.match_indices('"') {
+            let start = at + 1;
+            let mut end = start;
+            while end < bytes.len()
+                && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+            {
+                end += 1;
+            }
+            if end > start
+                && !bytes[start].is_ascii_digit()
+                && bytes.get(end) == Some(&b'"')
+            {
+                found.push(code[start..end].to_string());
+            }
+        }
+        found
+    }
+
+    /// Node kinds the resolver legitimately names that happen to exist in the
+    /// JVM grammars too. Every one is a **Rust** grammar kind used by the legacy
+    /// Axum/Actix structural walkers (or by the dispatch/binder passes), which is
+    /// why the collision is a coincidence of naming rather than JVM knowledge.
+    /// Measured: these are the complete intersection today.
+    const RESOLVER_KIND_ALLOWLIST: &[&str] = &[
+        "block_comment",
+        "call_expression",
+        "generic_type",
+        "identifier",
+        "line_comment",
+        "scoped_identifier",
+        "scoped_type_identifier",
+        "string_content",
+        "string_literal",
+        "super",
+        "type",
+        "type_arguments",
+        "type_identifier",
+    ];
 
     /// The same Spring annotation written in each language's syntax. Kotlin
     /// arrays are `[…]` where Java's are `{…}`, Kotlin's implementation
