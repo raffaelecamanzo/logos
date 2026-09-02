@@ -825,7 +825,7 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Workspace status (FR-WS-05): each member's index freshness plus the 3-state (bound/ambiguous/unbound-with-reasons) cross-service coverage summary. The coverage tier is advisory only, never a gate input."
+        description = "Workspace status (FR-WS-05): each member's index freshness and warm state, the workspace warm roll-up, plus the 3-state (bound/ambiguous/unbound-with-reasons) cross-service coverage summary. Each member row carries `warm_state`: `warm` (its graph holds at least one indexed file), `deferred` (no index yet and none attempted — honest and NON-alarming, it indexes lazily on first query, FR-IX-07), or `degraded` (attempted and FAILED, with the reason). `warming` is in the vocabulary but is never reported without a live signal from the warm supervisor, and the roll-up then OMITS the `warming` key entirely rather than sending 0 — an absent `warming` means not-knowable, never none (FR-WS-15, NFR-CC-04). No warm state affects the exit code. The coverage tier is advisory only, never a gate input."
     )]
     async fn workspace_status(&self) -> Result<CallToolResult, ErrorData> {
         self.run_xservice("workspace_status", |reg, _edges| {

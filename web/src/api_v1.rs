@@ -514,9 +514,20 @@ pub(crate) async fn workspace_roster(
     .await
 }
 
-/// `GET /api/v1/workspace/status` — per-member index freshness + the 3-state
-/// cross-service coverage summary ([`workspace_status`](fed_query::workspace_status),
-/// [FR-WS-05]/[FR-WS-06]): the coverage dashboard's data.
+/// `GET /api/v1/workspace/status` — per-member index freshness and warm state,
+/// the warm roll-up, and the 3-state cross-service coverage summary
+/// ([`workspace_status`](fed_query::workspace_status), [FR-WS-05]/[FR-WS-06],
+/// [FR-WS-15]): the coverage dashboard's data.
+///
+/// Each member row carries `warm_state` (`warm` / `deferred` / `degraded`;
+/// `deferred` is honest and non-alarming — the member indexes lazily on first
+/// query). `warming` is never reported without a live supervisor signal, and the
+/// roll-up then **omits** the `warming` key rather than sending `0`: a consumer
+/// must read its absence as *not knowable*, never as *none warming*
+/// ([NFR-CC-04]).
+///
+/// [FR-WS-15]: ../../docs/specs/requirements/FR-WS-15.md
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 pub(crate) async fn workspace_status(
     State(backing): State<Arc<Backing<Engine>>>,
     State(bridge): State<Arc<ContractBridge>>,
