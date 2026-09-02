@@ -437,8 +437,21 @@ fn a_shared_pool_runs_the_same_jobs_with_the_same_results() {
 
     let dir = TempDir::new().expect("temp dir");
     let shared = SharedWorkerPool::with_threads(2).expect("pool builds");
+    let witness_pool = shared.clone();
     let private = runtime_with_pool(&dir, "private.db", 2, None);
     let injected = runtime_with_pool(&dir, "injected.db", 2, Some(shared));
+
+    // Assert the PREMISE first. Without it the comparison below passes just as
+    // happily when the injection seam is severed and `injected` quietly gets a
+    // private pool — 500_500 is what any working rayon pool returns, so the
+    // equality alone says nothing about sharing.
+    let witness = runtime_with_pool(&dir, "witness.db", 2, Some(witness_pool));
+    assert!(
+        injected.shares_worker_pool_with(&witness),
+        "the injected runtime is not on the shared pool, so comparing its results \
+         would not be comparing a shared pool against a private one"
+    );
+    assert!(!private.shares_worker_pool_with(&injected));
 
     let job = |runtime: &Runtime| -> u64 {
         runtime
@@ -449,50 +462,83 @@ fn a_shared_pool_runs_the_same_jobs_with_the_same_results() {
     assert_eq!(job(&injected), job(&private));
 }
 
-/// Two members' jobs interleave on one shared pool without deadlocking: a
-/// long-running job holding a worker cannot wedge another member's submission,
-/// because every job enters through `install` from a caller that is not itself a
-/// pool worker (no nested blocking submission).
+/// Two members' jobs share one pool without deadlocking: a long-running job
+/// occupying **every** worker makes another member's submission *queue*, and
+/// releasing it lets that submission complete.
+///
+/// The queue step is what makes this a test of *sharing*: if the two runtimes
+/// were on separate pools the second job would run immediately, so the "still
+/// pending while saturated" assertion fails exactly when the injection seam is
+/// severed. Without it the test passes just as happily on two private pools,
+/// where a long job on one cannot contend with the other at all.
 #[test]
-fn a_long_job_on_a_shared_pool_does_not_deadlock_another_submission() {
+fn a_long_job_on_a_shared_pool_queues_another_submission_without_deadlocking_it() {
+    const WORKERS: usize = 2;
     let dir = TempDir::new().expect("temp dir");
-    // Two workers: one for the long job, one for everything else. A one-thread
-    // pool would prove only that rayon queues, not that it never deadlocks.
-    let shared = SharedWorkerPool::with_threads(2).expect("pool builds");
-    let long = runtime_with_pool(&dir, "long.db", 2, Some(shared.clone()));
-    let short = runtime_with_pool(&dir, "short.db", 2, Some(shared));
+    let shared = SharedWorkerPool::with_threads(WORKERS).expect("pool builds");
+    let long = runtime_with_pool(&dir, "long.db", WORKERS, Some(shared.clone()));
+    let short = runtime_with_pool(&dir, "short.db", WORKERS, Some(shared));
+    assert!(
+        long.shares_worker_pool_with(&short),
+        "the premise: both members must be on the SAME pool, or nothing below \
+         is about sharing"
+    );
 
-    let (release_tx, release_rx) = mpsc::channel::<()>();
-    let (started_tx, started_rx) = mpsc::channel::<()>();
-    let (short_tx, short_rx) = mpsc::channel::<u64>();
+    let latch = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let occupied = Arc::new(AtomicUsize::new(0));
 
+    // `spawn`, not `install`: queue one blocking job per worker without blocking
+    // this thread, so the pool is saturated rather than merely busy.
+    for _ in 0..WORKERS {
+        let latch = Arc::clone(&latch);
+        let occupied = Arc::clone(&occupied);
+        long.worker_pool().spawn(move || {
+            occupied.fetch_add(1, Ordering::SeqCst);
+            let (lock, cvar) = &*latch;
+            let mut released = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while !*released {
+                released = cvar.wait(released).unwrap_or_else(|e| e.into_inner());
+            }
+        });
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while occupied.load(Ordering::SeqCst) < WORKERS && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        occupied.load(Ordering::SeqCst),
+        WORKERS,
+        "the pool was never saturated, so the queueing assertion below would \
+         prove nothing"
+    );
+
+    let (tx, rx) = mpsc::channel::<u64>();
     std::thread::scope(|scope| {
         scope.spawn(move || {
-            long.worker_pool().install(move || {
-                started_tx.send(()).expect("signal the long job is running");
-                // Occupy a worker until the short job has completed.
-                release_rx.recv().expect("release the long job");
-            });
-        });
-
-        started_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the long job must reach the shared pool");
-
-        // The other member's submission completes while the long job still holds
-        // a worker. A deadlock shows up as this timeout, not as a hang.
-        scope.spawn(move || {
             let value = short.worker_pool().install(|| 7_u64);
-            short_tx.send(value).expect("send the short job's result");
+            let _ = tx.send(value);
         });
-        assert_eq!(
-            short_rx
-                .recv_timeout(Duration::from_secs(10))
-                .expect("a second member's job must not wait on the first's"),
-            7
+
+        // Saturated: the other member's job has nowhere to run yet. Deterministic
+        // rather than timing-sensitive — every worker is parked on the latch, so
+        // the only way this could complete is a pool with a spare worker, i.e. a
+        // pool that is not the one the long jobs are on.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(250)).is_err(),
+            "a second member's job ran while every worker of the shared pool was \
+             occupied — the two runtimes are not sharing a pool"
         );
 
-        release_tx.send(()).expect("release the long job");
+        // Releasing drains the queue: the pool queued the work, it did not
+        // deadlock on it.
+        let (lock, cvar) = &*latch;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cvar.notify_all();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("the queued job must run once the long jobs release"),
+            7
+        );
     });
 }
 

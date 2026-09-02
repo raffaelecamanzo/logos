@@ -1967,15 +1967,47 @@ mod tests {
             RegistryMode::Lazy,
             stock_macos_budget(),
         );
+        let mut resident_pools: Vec<SharedWorkerPool> = Vec::new();
         for registry in [&small, &large] {
             for member in registry.members().to_vec() {
-                registry.engine_for(&member.name).unwrap();
+                let engine = registry.engine_for(&member.name).unwrap();
+                if registry.resident_members().contains(&member.name) {
+                    resident_pools.push(engine.worker_pool.clone());
+                }
             }
         }
         assert_eq!(
             large.shared_worker_threads(),
             small.shared_worker_threads(),
             "a 200-member workspace ran more worker threads than a 3-member one"
+        );
+        // `shared_worker_threads` upgrades ONE weak handle, so on its own it
+        // reports a single pool's size and cannot see a second, third or 200th
+        // pool — the very failure this test is named for. Compare the handles the
+        // engines actually hold, per registry, so "one pool" is asserted rather
+        // than inferred from a number that would look identical either way.
+        for registry in [&small, &large] {
+            let pools: Vec<SharedWorkerPool> = registry
+                .resident_members()
+                .iter()
+                .map(|name| registry.engine_for(name).unwrap().worker_pool.clone())
+                .collect();
+            assert!(
+                pools.len() > 1,
+                "the fixture needs more than one resident engine to compare pools"
+            );
+            assert!(
+                pools
+                    .windows(2)
+                    .all(|pair| SharedWorkerPool::ptr_eq(&pair[0], &pair[1])),
+                "{} resident engines of this registry hold different worker \
+                 pools; the thread cost is still a multiple of residency",
+                pools.len(),
+            );
+        }
+        assert!(
+            resident_pools.len() > 2,
+            "the walk must leave engines to compare"
         );
         assert_eq!(
             large.shared_worker_threads(),
