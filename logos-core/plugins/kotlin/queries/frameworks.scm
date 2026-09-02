@@ -50,6 +50,15 @@
 ;      arbitrate rather than promoting two routes for one registration. Kotlin
 ;      is the dialect that precedence pass was built for (S-328).
 ;
+; The anchor is the `constructor_invocation` (or, for a marker, the `user_type`)
+; — deliberately NOT the enclosing `annotation` node. Kotlin's bracket form
+; `@[GetMapping(value = "/a") PostMapping("/b")]` puts several *independent*
+; registrations under one `annotation`, so anchoring there would make
+; precedence suppress one sibling's route as if it were a second path on one
+; annotation. Anchoring per invocation keeps "one anchor = one registration"
+; true in both spellings, and the two anchored node kinds stay disjoint, so a
+; marker can still never share a site with an argument-bearing form.
+;
 ; Deliberately NOT captured: functional `RouterFunction` routing, whose builder
 ; chain names no annotated handler method to link; a *method* path that is not
 ; a written literal — a constant reference, a concatenation or a string
@@ -58,12 +67,39 @@
 ; structural pattern alone cannot separate from an argument-bearing annotation
 ; (Java leaves it uncaptured for the same reason).
 ;
-; Out of reach rather than excluded: `tree-sitter-kotlin-ng` 1.1 does not parse
-; an **annotated** `enum class` as a declaration at all — it recovers the whole
-; construct as an expression — so nothing inside one is captured, prefix or
-; handler. That fails safe (zero routes, never a wrong address) and no pattern
-; here can fix it; a bare `enum class` parses and its handlers promote
-; normally.
+; ── Out of reach: an upstream grammar defect, not an exclusion ──────────────
+;
+; `tree-sitter-kotlin-ng` 1.1 fails to parse a type declaration carrying **two
+; or more annotations** when another top-level declaration follows it in the
+; file — the overwhelmingly common `@RestController @RequestMapping(...) class
+; C { … }` plus a DTO, a service interface or a second controller. The
+; declaration is not recognised as a `class_declaration` at all: its modifiers
+; are reparsed as a file-level expression, `has_error()` stays **false**, and
+; no pattern in this file (or any query) can see it. The same defect swallows
+; an annotated `enum class` outright unless a second modifier precedes it
+; (`internal enum class` parses and composes).
+;
+; This is NOT introduced by prefix composition — the pre-S-330 query lost the
+; route and the stereotype component on the same input, so the defect predates
+; it. What composition adds is that in the sub-case where the handler survives
+; the misparse, it is promoted at its **bare method path** rather than the
+; composed one: an under-composed address rather than an absent one. Escalated
+; for a grammar-upgrade change request; `an_upstream_misparse_of_a_multiply_
+; annotated_type_loses_its_prefix` pins the behaviour so the upgrade is
+; noticed.
+;
+; Two narrower shapes this file also cannot reach, both parity-consistent with
+; Java and both failing safe (a missing route, never a wrong one):
+;
+;   - a **positional** array method path (`@GetMapping(["/a","/b"])`) is not
+;     captured. Java's positional pattern has the same gap for `{...}`, so the
+;     two languages agree; Spring codegen writes the named form;
+;   - a mapping annotation whose only arguments are non-path
+;     (`@GetMapping(produces = ["text/plain"])`) is a `constructor_invocation`,
+;     so it matches neither path-bearing pattern (the key predicate rejects it)
+;     nor the marker pattern (which requires a bare `user_type`). Under a
+;     prefixed type its route would be the prefix alone; it is not promoted.
+;     Java behaves identically.
 ;
 ; Captured, but NOT interpreted: a property placeholder (`value =
 ; "${api.base}/x"`) is a written literal, so a *method* path holding one is
@@ -78,9 +114,12 @@
 ; path that would falsely claim a provider. `@fw.route.prefix.opaque` below is
 ; how this file says "a prefix is here and it is not a literal". Kotlin string
 ; templates are caught on their *text* by the shared `is_resolvable_prefix`
-; rather than structurally, because this grammar models `"${x}"` as an
-; `interpolation` child but `"$x"` as two plain `string_content` runs — a
-; structural capture would see only half of them.
+; rather than structurally: this grammar gives `"${x}"` an `interpolation`
+; child a query could capture, but folds the equally common `"$x"` into two
+; plain `string_content` runs with no node to name — and a lone trailing `$`
+; (`"/price$"`) folds the same way, so no structural pattern can tell a
+; template from a dollar sign. One text rule covers both spellings and keeps
+; `/price$` composable.
 
 ; ── Handler registrations ────────────────────────────────────────────────────
 
@@ -102,7 +141,7 @@
         (value_arguments
           (value_argument
             .
-            (string_literal) @fw.route.path)))) @fw.route.anchor)
+            (string_literal) @fw.route.path))) @fw.route.anchor))
   name: (identifier) @fw.route.handler)
 
 ; The same annotation in its **named** form — what contract-first code and
@@ -133,9 +172,9 @@
             [
               (string_literal) @fw.route.path.named
               (collection_literal (string_literal) @fw.route.path.named)
-            ])))) @fw.route.anchor)
+            ]))) @fw.route.anchor))
   name: (identifier) @fw.route.handler)
-  (#any-of? @fw.route.key "value" "path"))
+  (#any-of? @fw.route.key "value" "path" "`value`" "`path`"))
 
 ; A mapping annotation carrying NO path at all — `@GetMapping` on a handler
 ; whose full path is its declaring type's prefix (FR-FW-05, S-329). The
@@ -152,7 +191,7 @@
 (function_declaration
   (modifiers
     (annotation
-      (user_type (identifier) @fw.route.method)) @fw.route.anchor)
+      (user_type (identifier) @fw.route.method) @fw.route.anchor))
   name: (identifier) @fw.route.handler)
 
 ; ── Class-/interface-level `@RequestMapping` prefix (S-329, S-330) ───────────
@@ -222,7 +261,7 @@
               ])))))
     [(class_body) (enum_class_body)]) @fw.route.prefix.scope
   (#eq? @fw.route.prefix.name "RequestMapping")
-  (#any-of? @fw.route.prefix.key "value" "path"))
+  (#any-of? @fw.route.prefix.key "value" "path" "`value`" "`path`"))
 
 ; The same two argument forms in the **opaque** position — the half that makes
 ; a capture gap fail CLOSED. `(expression)` is the supertype catch-all: it
@@ -233,15 +272,19 @@
 ; interpreter ignores an opaque range identical to a captured literal, so the
 ; literal patterns still win wherever the argument reads.
 ;
-; The first-child anchor CANNOT be used to separate the positional form here.
-; A named argument's key is an `identifier`, which is itself an `expression`,
-; so `.` would match the key of `produces = "application/json"` and refuse the
-; whole controller. The positional form is identified by text instead: an
-; expression whose text IS the entire argument had no name in front of it.
-; `@fw.route.prefix.value` is that expression (the alternation's root, so the
-; list form compares as a whole).
+; The first-child anchor separates the positional form here as it does above,
+; for a reason worth stating because it is not obvious: `identifier` is a
+; declared subtype of the `expression` supertype, so `(expression)` looks like
+; it should match a named argument's KEY and refuse the whole controller. It
+; does not. The grammar spells the argument as
+; `(_identifier '=')? '*'? expression`, and tree-sitter resolves a supertype
+; pattern **positionally** — only against the slot the grammar declared as
+; `expression`. So `(value_argument (expression) @x)` never binds a key,
+; anchored or not, while `(value_argument (string_literal) @x)` (a concrete
+; kind) matches anywhere and genuinely needs the `.`. Verified over 155
+; argument-form x host-kind combinations.
 ;
-; The two remaining predicates are both about an **empty** list, which Spring
+; The two predicates below are both about an **empty** list, which Spring
 ; reads as "no prefix" and this grammar cannot represent at all — its
 ; `collection_literal` takes a `commaSep1` element list, so `value = []`
 ; error-recovers into a `collection_literal` holding one zero-width `MISSING`
@@ -256,13 +299,13 @@
           (user_type (identifier) @fw.route.prefix.name)
           (value_arguments
             (value_argument
+              .
               [
                 (expression) @fw.route.prefix.opaque
                 (collection_literal (expression) @fw.route.prefix.opaque)
-              ] @fw.route.prefix.value) @fw.route.prefix.arg))))
+              ])))))
     [(class_body) (enum_class_body)]) @fw.route.prefix.scope
   (#eq? @fw.route.prefix.name "RequestMapping")
-  (#eq? @fw.route.prefix.arg @fw.route.prefix.value)
   (#not-match? @fw.route.prefix.opaque "^\\[")
   (#not-eq? @fw.route.prefix.opaque ""))
 
@@ -280,7 +323,7 @@
               ])))))
     [(class_body) (enum_class_body)]) @fw.route.prefix.scope
   (#eq? @fw.route.prefix.name "RequestMapping")
-  (#any-of? @fw.route.prefix.key "value" "path")
+  (#any-of? @fw.route.prefix.key "value" "path" "`value`" "`path`")
   (#not-match? @fw.route.prefix.opaque "^\\[")
   (#not-eq? @fw.route.prefix.opaque ""))
 

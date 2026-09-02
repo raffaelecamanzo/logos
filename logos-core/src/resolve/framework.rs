@@ -815,11 +815,13 @@ fn innermost_prefix(scopes: &[MergedScope], at: usize) -> Option<&MergedScope> {
 /// Rejected: an unresolved property placeholder (`${…}`) or SpEL expression
 /// (`#{…}`), whose resolution is explicitly out of scope ([CR-101] §3.3); a
 /// string-template reference (`$BASE`), which is the *same* unresolved
-/// indirection written in Kotlin's syntax; and a literal carrying a newline or
-/// a quote, which is not a path and which means the unquoting heuristic did not
-/// fully read the source form (a Java text block). Joining a method path onto
-/// any of these mints a route name that no consumer can match, silently
-/// inherited by every handler in the type.
+/// indirection written in Kotlin's syntax; and a literal carrying a newline, a
+/// quote or a backslash, none of which is a path and each of which means the
+/// unquoting heuristic did not fully read the source form (a Java text block,
+/// an unresolved escape sequence). Joining a method path onto any of these
+/// mints a route name that no consumer can match, silently inherited by every
+/// handler in the type — `@RequestMapping("/a\tb")` serves `/a<TAB>b`, not the
+/// six characters the literal spells.
 ///
 /// The template rule is text-level rather than structural for the same reason
 /// the whole function is: `tree-sitter-kotlin-ng` models `"${BASE}/v1"` as a
@@ -847,6 +849,7 @@ fn is_resolvable_prefix(literal: &str) -> bool {
         && !literal.contains("#{")
         && !literal.contains('\n')
         && !literal.contains('"')
+        && !literal.contains('\\')
 }
 
 /// `true` when the text holds a `$`-introduced reference to something outside
