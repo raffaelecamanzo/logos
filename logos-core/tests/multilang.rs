@@ -1734,6 +1734,7 @@ fn spring_kotlin_and_java_workspaces_promote_identical_route_nodes() {
         "src/UserApi.kt",
         "\
 import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RequestMethod
 import org.springframework.web.bind.annotation.RestController
@@ -1802,9 +1803,29 @@ public class UserApi {
         kotlin, java,
         "the same Spring contract must promote the same route nodes in both languages"
     );
-    // Non-vacuous: the fixture exercises the named form, the alias key, both
-    // list-valued arguments, the prefix-only pathless handler and the
-    // positional form, fanned out over two class-level bases.
+    // The exact set, not the count: a cross-language comparison plus a route
+    // *tally* would survive a regression that promoted all ten routes at the
+    // wrong address in both languages — a `join_route_path` that emitted
+    // `/api/v1//users`, or a prefix and path swapped, keeps the count at ten and
+    // keeps the two languages equal. The fixture is non-vacuous by construction:
+    // it exercises the named form, the `path =` alias, both list-valued
+    // arguments, the prefix-only pathless handler and the positional form,
+    // fanned out over two class-level bases.
+    assert_eq!(
+        kotlin.0,
+        [
+            "ANY /api/v1/users",
+            "ANY /api/v2/users",
+            "GET /api/v1",
+            "GET /api/v1/users/by-id/{id}",
+            "GET /api/v1/users/{id}",
+            "GET /api/v2",
+            "GET /api/v2/users/by-id/{id}",
+            "GET /api/v2/users/{id}",
+            "POST /api/v1/users",
+            "POST /api/v2/users",
+        ]
+    );
     assert_eq!(kotlin.1, 10, "{:?}", kotlin.0);
 }
 
