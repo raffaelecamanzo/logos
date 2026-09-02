@@ -669,16 +669,41 @@ impl Engine {
 
     /// Current index and sync health of the code graph (FR-NV-07): counts,
     /// store size, resolution coverage, and the freshness statement.
+    ///
+    /// Infallible at the surface like the rest of navigation: a failed read
+    /// degrades to a **defaulted** read-model carrying the reason in
+    /// `warnings` (ADR-14). A caller that must tell that degradation apart from
+    /// a genuinely empty graph — both report `indexed: false` — needs
+    /// [`try_status`](Self::try_status) instead.
     pub fn status(&self) -> StatusInfo {
-        crate::observability::traced("status", || crate::navigate::status(self)).unwrap_or_else(
-            |err| {
-                tracing::warn!("status failed: {err:#}");
-                StatusInfo {
-                    warnings: vec![format!("status failed: {err}")],
-                    ..StatusInfo::default()
-                }
-            },
-        )
+        self.try_status().unwrap_or_else(|err| {
+            tracing::warn!("status failed: {err:#}");
+            StatusInfo {
+                warnings: vec![format!("status failed: {err}")],
+                ..StatusInfo::default()
+            }
+        })
+    }
+
+    /// [`status`](Self::status) without the infallible degradation — the same
+    /// traced read, returning its `Err` ([FR-NV-07], [NFR-CC-04]).
+    ///
+    /// `status`'s defaulted fallback is right for a single-root surface, where
+    /// the warning is displayed beside the numbers it explains. It is wrong for
+    /// the workspace fan-out: a defaulted `StatusInfo` reports `indexed: false`,
+    /// which is indistinguishable from an honestly empty graph, so a member
+    /// whose freshness read *failed* would be labeled `deferred` — "never
+    /// attempted" — by [`federation::warm_state`](crate::federation::warm_state)
+    /// ([BR-44]). Fanning this instead folds that failure into the per-member
+    /// `error` channel, where it reads `degraded` like any other failed attempt.
+    ///
+    /// # Errors
+    /// Propagates the store/runtime fault the read hit.
+    ///
+    /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub fn try_status(&self) -> Result<StatusInfo> {
+        crate::observability::traced("status", || crate::navigate::status(self))
     }
 
     /// Read-only graph-elements accessor feeding the web surface's interactive

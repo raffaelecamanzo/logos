@@ -41,9 +41,20 @@ export function status(
   return {
     workspace: "shop",
     members: [
-      { member: "api", result: { indexed: true } as WorkspaceStatus["members"][0]["result"] },
-      { member: "web", result: { indexed: true } as WorkspaceStatus["members"][0]["result"] },
+      {
+        member: "api",
+        result: { indexed: true } as WorkspaceStatus["members"][0]["result"],
+        warm_state: "warm",
+      },
+      {
+        member: "web",
+        result: { indexed: true } as WorkspaceStatus["members"][0]["result"],
+        warm_state: "warm",
+      },
     ],
+    // Both members indexed, and no live warming signal exists — so `warming` is
+    // absent rather than `0` (NFR-CC-04), exactly as the real payload omits it.
+    warm_rollup: { members: 2, warm: 2, deferred: 0, degraded: 0 },
     coverage,
     topics,
   };

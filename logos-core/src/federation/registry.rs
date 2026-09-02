@@ -372,6 +372,19 @@ pub struct EngineRegistry<E: MemberEngine = Engine> {
     ///
     /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
     reconstructions: AtomicU64,
+    /// **Every** successful engine start this registry has served — first
+    /// builds and reconstructions alike ([NFR-PE-10]).
+    ///
+    /// Distinct from [`reconstructions`](Self::reconstructions) in exactly the
+    /// case that matters for a laziness claim: a caller that opened a member's
+    /// engine a *second* time within one fan-out iteration leaves the member
+    /// resident and previously-started, so it moves neither the residency count
+    /// nor the reconstruction count — and a test asserting only those two
+    /// cannot see it. This counter can ([NFR-PE-10]). Atomic for the same
+    /// reason as [`reconstructions`](Self::reconstructions).
+    ///
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    starts: AtomicU64,
     /// Engine starts that **failed**, across every touch this registry has served.
     ///
     /// The per-member `Err` a fan-out returns is the only other record, and it
@@ -480,6 +493,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
             resident: RwLock::new(HashMap::new()),
             admission: Mutex::new(Admission::default()),
             reconstructions: AtomicU64::new(0),
+            starts: AtomicU64::new(0),
             start_failures: AtomicU64::new(0),
             tick: AtomicU64::new(0),
         }
@@ -574,6 +588,7 @@ impl<E: MemberEngine> EngineRegistry<E> {
                 });
             }
         };
+        self.starts.fetch_add(1, Ordering::Relaxed);
         if admission.record_start(member) {
             self.reconstructions.fetch_add(1, Ordering::Relaxed);
         }
@@ -706,6 +721,22 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
     pub fn reconstructions(&self) -> u64 {
         self.reconstructions.load(Ordering::Relaxed)
+    }
+
+    /// **Every** successful engine start this registry has served — first builds
+    /// and reconstructions alike ([NFR-PE-10]).
+    ///
+    /// The instrument a laziness claim is asserted against. Residency and
+    /// reconstruction counts cannot carry it: both are blind to a caller that
+    /// opens a member's engine twice inside one fan-out iteration (the member
+    /// stays resident and stays previously-started), and residency is pinned to
+    /// the budget by eviction no matter how many engines were built. A read-model
+    /// that must not construct engines of its own therefore asserts on this —
+    /// `starts == walks × members` — not on `resident_count()`.
+    ///
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    pub fn engine_starts(&self) -> u64 {
+        self.starts.load(Ordering::Relaxed)
     }
 
     /// How many engine starts have **failed** across every touch this registry
@@ -1135,6 +1166,40 @@ mod tests {
         registry.engine_for("a").unwrap();
         assert_eq!(starts(), 1, "a second touch reuses the cached engine");
         assert_eq!(registry.resident_members(), ["a"]);
+    }
+
+    /// `engine_starts()` counts **every** construction, which is what makes it
+    /// the instrument a laziness claim can be asserted against — unlike
+    /// residency (pinned to the budget by eviction) and unlike
+    /// `reconstructions()` (blind to a re-open of a still-resident member).
+    #[test]
+    fn engine_starts_counts_every_construction_including_a_still_resident_reopen() {
+        reset_spies();
+        let registry = lazy(&["a", "b"]);
+        assert_eq!(registry.engine_starts(), 0, "nothing built up front");
+
+        registry.engine_for("a").unwrap();
+        registry.engine_for("b").unwrap();
+        assert_eq!(registry.engine_starts(), 2);
+        assert_eq!(registry.engine_starts(), starts() as u64, "agrees with the spy");
+
+        // A repeated touch of a RESIDENT member reuses the cached engine, so it
+        // is not a start — the counter counts constructions, not touches.
+        registry.engine_for("a").unwrap();
+        assert_eq!(registry.engine_starts(), 2);
+        assert_eq!(registry.reconstructions(), 0);
+
+        // An evicted member's rebuild is both a start and a reconstruction, so
+        // the two counters diverge by exactly the first builds.
+        registry.evict_to_capacity(0);
+        registry.engine_for("a").unwrap();
+        assert_eq!(registry.engine_starts(), 3);
+        assert_eq!(registry.reconstructions(), 1);
+        assert_eq!(
+            registry.engine_starts() - registry.reconstructions(),
+            2,
+            "starts minus reconstructions is the number of distinct members built"
+        );
     }
 
     /// A scoped one-shot that needs one member constructs only that engine, not

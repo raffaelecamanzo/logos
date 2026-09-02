@@ -223,6 +223,24 @@ async fn workspace_status_reports_name_members_and_coverage() {
     assert_eq!(names, ["api", "web"], "both members are repo-qualified: {body}");
     // The 3-state coverage summary is always present (advisory tier, S-247).
     assert!(v["coverage"].get("bound_ratio").is_some(), "coverage summary present: {body}");
+    // S-323: the warm state rides the same rows the web surface already serves —
+    // one read-model, so the shell sees exactly what `logos workspace status`
+    // prints ([FR-WS-15]). `warming` is absent, never a fabricated 0 ([NFR-CC-04]).
+    // The fixture indexes BOTH members, so the correct label is known — asserting
+    // only `is_string()` would pass for `deferred`, `degraded`, or a bogus fifth
+    // word, and this is the sole place the wire vocabulary is pinned against the
+    // hand-maintained TS union `MemberWarmStateLabel` in `web/ui/src/api/types.ts`.
+    for m in v["members"].as_array().unwrap() {
+        assert_eq!(m["warm_state"], "warm", "both fixture members are indexed: {m}");
+    }
+    assert_eq!(v["warm_rollup"]["members"], 2, "the roll-up is served too: {body}");
+    assert_eq!(v["warm_rollup"]["warm"], 2, "{body}");
+    assert_eq!(v["warm_rollup"]["deferred"], 0, "{body}");
+    assert_eq!(v["warm_rollup"]["degraded"], 0, "{body}");
+    assert!(
+        v["warm_rollup"].get("warming").is_none(),
+        "no live warming signal ⇒ no `warming` key: {body}"
+    );
 }
 
 /// The cross-service read-models (service map, impact) are exposed to the frontend

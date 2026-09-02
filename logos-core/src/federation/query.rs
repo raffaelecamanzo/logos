@@ -41,6 +41,7 @@ use super::bridge::BridgeEdge;
 use super::coverage::{cross_service_coverage, CrossServiceCoverage};
 use super::registry::{EngineRegistry, MemberScoped};
 use super::topics::{workspace_topics, MemberTopics};
+use super::warm_state::{self, MemberWarmState, WarmEvidence, WarmRollup};
 
 /// One member's outcome for a repo-qualified fan-out query ([FR-WS-03]).
 ///
@@ -103,6 +104,46 @@ fn fan<T>(
             .map(MemberResult::from_scoped)
             .collect(),
     }
+}
+
+/// Per-member index freshness with **both** failure channels folded into
+/// [`MemberResult::error`] ([FR-WS-05], [BR-44]).
+///
+/// [`fan`] cannot serve this: it flattens only the engine-*start* `Err`, and the
+/// freshness read has a second failure mode of its own. [`Engine::status`] hides
+/// that one — it degrades to a defaulted [`StatusInfo`] whose `indexed: false`
+/// is indistinguishable from an honestly empty graph, so a member whose read
+/// failed would be labeled `deferred` ("never attempted") instead of `degraded`
+/// ([BR-44]). Fanning [`Engine::try_status`] and flattening both `Result`s keeps
+/// `MemberResult`'s exactly-one-channel contract while making the second failure
+/// visible to [`MemberStatus`].
+///
+/// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
+fn fan_status(registry: &EngineRegistry<Engine>) -> Vec<MemberResult<StatusInfo>> {
+    registry
+        .fan_out(|_, engine| engine.try_status())
+        .into_iter()
+        .map(flatten_status)
+        .collect()
+}
+
+/// Collapse the two nested failure channels of a fanned [`Engine::try_status`]
+/// onto [`MemberResult`]'s single `error` ([BR-44]).
+///
+/// Outer `Err`: the member's engine failed to start. Inner `Err`: it started and
+/// the freshness read itself failed. Split out from [`fan_status`] so both are
+/// assertable without a corrupt on-disk store — the inner channel is the one
+/// this story added, and the point of it is that it must NOT arrive as a
+/// defaulted `StatusInfo`.
+///
+/// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
+fn flatten_status(
+    scoped: MemberScoped<anyhow::Result<anyhow::Result<StatusInfo>>>,
+) -> MemberResult<StatusInfo> {
+    MemberResult::from_scoped(MemberScoped {
+        member: scoped.member,
+        value: scoped.value.and_then(|status| status),
+    })
 }
 
 /// Repo-qualified cross-service full-text search ([FR-WS-05]): [`Engine::search`]
@@ -272,15 +313,83 @@ pub fn xservice_route_providers(
     }
 }
 
+/// One member's row in a [`WorkspaceStatus`]: its index freshness and its warm
+/// state, in **one** record ([FR-WS-05], [FR-WS-15]).
+///
+/// Both halves are flattened, so a row is the flat table a reader expects —
+/// `{"member": "api", "result": {…}, "warm_state": "warm"}` — rather than a
+/// freshness list a caller has to join a state list against by name. That
+/// matters for what comes next as much as for now: [FR-WS-16]'s degraded
+/// reporting extends this same row.
+///
+/// Only `workspace status` carries a warm state; the `xservice` fan-outs keep
+/// the plain [`MemberResult`], which is why the state lives here rather than on
+/// the generic envelope.
+///
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+/// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+#[derive(Debug, Serialize)]
+pub struct MemberStatus {
+    /// The member's index freshness, or why it could not be read.
+    #[serde(flatten)]
+    pub status: MemberResult<StatusInfo>,
+    /// This member's warm state ([FR-WS-15]).
+    ///
+    /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+    #[serde(flatten)]
+    pub warm: MemberWarmState,
+}
+
+impl MemberStatus {
+    /// Build one labelled row from a member's already-read freshness
+    /// ([FR-WS-15]).
+    ///
+    /// The state itself is derived by
+    /// [`warm_state::derive_state`](super::warm_state::derive_state), which owns
+    /// the vocabulary AND its precedence rules; the only work here is projecting
+    /// [`MemberResult`]'s two channels onto that function's
+    /// `Result<bool, &str>` input. Deliberately not restated — a second copy of
+    /// the table would go quietly stale the first time the precedence changed.
+    ///
+    /// No engine is constructed, opened, or touched here ([NFR-PE-10]).
+    ///
+    /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    fn labelled(status: MemberResult<StatusInfo>, evidence: &WarmEvidence) -> Self {
+        // `result` is the only channel that can yield `Ok`; absent freshness is
+        // never evidence of an un-attempted member, so it reads unreadable
+        // rather than silently `deferred` — including the `error`-less case,
+        // which `MemberResult::from_scoped` cannot actually produce
+        // ([BR-44], [NFR-CC-04]).
+        let indexed = match &status.result {
+            Some(info) => Ok(info.indexed),
+            None => Err(status
+                .error
+                .as_deref()
+                .unwrap_or("the member reported no index freshness")),
+        };
+        let warm = warm_state::derive_state(&status.member, indexed, evidence);
+        Self { status, warm }
+    }
+}
+
 /// The `logos workspace status` read-model ([FR-WS-05]): each member's index
-/// freshness, the 3-state cross-service coverage summary, and the promoted topic
-/// inventory.
+/// freshness and warm state, the workspace warm roll-up, the 3-state
+/// cross-service coverage summary, and the promoted topic inventory.
 #[derive(Debug, Serialize)]
 pub struct WorkspaceStatus {
     /// The workspace name (`[workspace] name`).
     pub workspace: String,
-    /// Per-member index freshness ([`Engine::status`]), repo-qualified.
-    pub members: Vec<MemberResult<StatusInfo>>,
+    /// Per-member index freshness ([`Engine::status`]) and warm state,
+    /// repo-qualified.
+    pub members: Vec<MemberStatus>,
+    /// The workspace-wide warm roll-up over [`members`](Self::members)
+    /// ([FR-WS-15]). Purely derived from the rows above — it can never disagree
+    /// with them.
+    ///
+    /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+    pub warm_rollup: WarmRollup,
     /// The non-gated 3-state cross-service coverage summary from [S-247]
     /// ([`cross_service_coverage`], [ADR-53]).
     ///
@@ -337,14 +446,36 @@ where
     }
 }
 
-/// Per-member freshness, the 3-state coverage summary, and the promoted topic
-/// inventory ([FR-WS-05], [FR-WS-11]).
+/// Per-member freshness and warm state, the warm roll-up, the 3-state coverage
+/// summary, and the promoted topic inventory ([FR-WS-05], [FR-WS-11],
+/// [FR-WS-15]).
+///
+/// # The warm labelling costs nothing
+/// [`WarmEvidence::none`] is passed because no durable per-member warm record
+/// exists yet (see [`super::warm_state`]), so the labels are derived
+/// **entirely** from the freshness rows the first fan-out already produced. This
+/// adds no all-member walk, no engine construction, and no store read, which is
+/// what keeps the resident-engine ceiling of a `status` exactly what it was
+/// ([NFR-PE-10], [NFR-PE-11]) — asserted at N = 72 in
+/// `tests/workspace_connection_budget.rs`. `warming` is consequently absent from
+/// the roll-up rather than reported as `0` ([NFR-CC-04]).
 ///
 /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
+/// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+/// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
 pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
+    let evidence = WarmEvidence::none();
+    let members: Vec<MemberStatus> = fan_status(registry)
+        .into_iter()
+        .map(|status| MemberStatus::labelled(status, &evidence))
+        .collect();
+
     WorkspaceStatus {
         workspace: registry.federation().name.clone(),
-        members: fan(registry, None, Engine::status),
+        warm_rollup: warm_state::rollup(members.iter().map(|m| &m.warm), &evidence),
+        members,
         coverage: cross_service_coverage(registry),
         topics: workspace_topics(registry),
     }
@@ -432,5 +563,232 @@ mod tests {
         assert_eq!(value["member"], "web");
         assert!(value.get("result").is_none(), "an error omits the result key");
         assert_eq!(value["error"], "store is corrupt");
+    }
+
+    // ── warm state on the member row (FR-WS-15, BR-44, NFR-CC-04) ──────────
+
+    /// A member row carrying `indexed` freshness.
+    fn fresh(member: &str, indexed: bool) -> MemberResult<StatusInfo> {
+        MemberResult {
+            member: member.to_string(),
+            result: Some(StatusInfo {
+                indexed,
+                ..StatusInfo::default()
+            }),
+            error: None,
+        }
+    }
+
+    /// A member row whose engine failed to start.
+    fn unopenable(member: &str, error: &str) -> MemberResult<StatusInfo> {
+        MemberResult {
+            member: member.to_string(),
+            result: None,
+            error: Some(error.to_string()),
+        }
+    }
+
+    /// The freshness row and the warm label serialise into **one flat member
+    /// row** — the coherent table [FR-WS-16] extends, not two lists to join.
+    #[test]
+    fn a_member_row_carries_freshness_and_the_warm_label_in_one_record() {
+        let row = MemberStatus::labelled(fresh("api", true), &WarmEvidence::none());
+        let value = serde_json::to_value(&row).unwrap();
+
+        assert_eq!(value["member"], "api");
+        assert_eq!(value["result"]["indexed"], true);
+        assert_eq!(value["warm_state"], "warm", "one row, both facts: {value}");
+    }
+
+    /// The member row's **exact key set**, pinned against literals.
+    ///
+    /// `MemberStatus` flattens two structs into one JSON object, and
+    /// `serde_json`'s flatten merge is last-write-wins and **silent**: a key
+    /// emitted by both halves produces no compile error, no runtime error and no
+    /// failing test — one value simply disappears. [FR-WS-16] extends this same
+    /// row in [S-326], and the half most likely to want a `reason` is precisely
+    /// the degraded half, so the collision surface is real and imminent. Pinning
+    /// the key set turns a future collision into a failing test instead of a
+    /// dropped field.
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [S-326]: ../../../docs/planning/journal.md#s-326-degraded-member-reporting-and-non-zero-exit-for-workspace-commands
+    #[test]
+    fn a_member_row_has_exactly_the_keys_it_is_meant_to() {
+        let keys = |row: &MemberStatus| {
+            let value = serde_json::to_value(row).unwrap();
+            let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+
+        let healthy = MemberStatus::labelled(fresh("api", true), &WarmEvidence::none());
+        assert_eq!(
+            keys(&healthy),
+            ["member", "result", "warm_state"],
+            "a healthy row: no `error`, no `reason`, nothing shadowed"
+        );
+
+        let degraded =
+            MemberStatus::labelled(unopenable("web", "store is corrupt"), &WarmEvidence::none());
+        assert_eq!(
+            keys(&degraded),
+            ["error", "member", "reason", "warm_state"],
+            "a degraded row: no `result`, and `error`/`reason` both survive the \
+             double flatten"
+        );
+    }
+
+    /// Index presence is the whole derivation for the two derivable states: an
+    /// indexed member is `warm`, an empty one `deferred`.
+    #[test]
+    fn index_presence_decides_warm_versus_deferred() {
+        let evidence = WarmEvidence::none();
+        assert_eq!(
+            MemberStatus::labelled(fresh("api", true), &evidence).warm,
+            MemberWarmState::Warm
+        );
+        assert_eq!(
+            MemberStatus::labelled(fresh("web", false), &evidence).warm,
+            MemberWarmState::Deferred
+        );
+    }
+
+    /// [BR-44]: a member whose open was attempted and **failed** reports
+    /// `degraded` carrying the fan-out's own reason — never `deferred`, which
+    /// would claim it was never attempted.
+    ///
+    /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[test]
+    fn an_unopenable_member_is_degraded_not_deferred() {
+        let row = MemberStatus::labelled(
+            unopenable("web", "starting the engine for workspace member \"web\""),
+            &WarmEvidence::none(),
+        );
+
+        assert!(matches!(row.warm, MemberWarmState::Degraded { .. }));
+        assert_ne!(row.warm, MemberWarmState::Deferred);
+        let value = serde_json::to_value(&row).unwrap();
+        assert_eq!(value["warm_state"], "degraded");
+        assert!(
+            value["reason"].as_str().unwrap().contains("web"),
+            "the fan-out's reason rides the label: {value}"
+        );
+        // The freshness channel is untouched — the row still reports the error
+        // it always did, so no existing reader loses anything.
+        assert!(value["error"].as_str().is_some());
+    }
+
+    /// The finding this fix closes: a member whose engine STARTED but whose
+    /// **freshness read failed** must land in the `error` channel — and so read
+    /// `degraded` — not arrive as a defaulted `StatusInfo` whose `indexed:
+    /// false` would read `deferred` ("never attempted", [BR-44]).
+    ///
+    /// [`Engine::status`] hides exactly that case by design (ADR-14 degradation),
+    /// which is why [`fan_status`] fans [`Engine::try_status`]. Asserted over
+    /// [`flatten_status`] rather than a corrupted on-disk store, so all three
+    /// channels are pinned deterministically.
+    ///
+    /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[test]
+    fn a_failed_freshness_read_becomes_an_error_channel_not_an_empty_graph() {
+        let scoped = |value| MemberScoped {
+            member: "api".to_string(),
+            value,
+        };
+
+        // Inner Err — the engine started, `navigate::status` failed. THE case.
+        let row = flatten_status(scoped(Ok(Err(anyhow::anyhow!("no such table: edges")))));
+        assert!(
+            row.result.is_none(),
+            "a failed read must not surface as a defaulted, apparently-empty graph"
+        );
+        assert_eq!(row.error.as_deref(), Some("no such table: edges"));
+        assert!(
+            matches!(
+                MemberStatus::labelled(row, &WarmEvidence::none()).warm,
+                MemberWarmState::Degraded { .. }
+            ),
+            "BR-44: the read was attempted and failed"
+        );
+
+        // Outer Err — the engine never started. Still degraded, as before.
+        let row = flatten_status(scoped(Err(anyhow::anyhow!("starting the engine"))));
+        assert!(row.result.is_none());
+        assert_eq!(row.error.as_deref(), Some("starting the engine"));
+
+        // Ok — the read succeeded and reports an honestly empty graph.
+        let row = flatten_status(scoped(Ok(Ok(StatusInfo::default()))));
+        assert!(row.error.is_none(), "a successful read carries no error");
+        assert_eq!(
+            MemberStatus::labelled(row, &WarmEvidence::none()).warm,
+            MemberWarmState::Deferred,
+            "an honestly empty graph is deferred, which is the whole distinction"
+        );
+    }
+
+    /// A row with neither channel populated (unreachable through
+    /// `from_scoped`, but representable) reads `degraded`, not `deferred`:
+    /// missing freshness is not evidence that nothing was attempted
+    /// ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn a_row_with_no_freshness_at_all_is_degraded_not_deferred() {
+        let row = MemberStatus::labelled(
+            MemberResult {
+                member: "ghost".to_string(),
+                result: None,
+                error: None,
+            },
+            &WarmEvidence::none(),
+        );
+        assert!(matches!(row.warm, MemberWarmState::Degraded { .. }));
+    }
+
+    /// The roll-up is derived from the very rows it accompanies, so the two can
+    /// never disagree — and with no live signal the `warming` key is absent
+    /// from the roll-up entirely ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn the_rollup_agrees_with_the_rows_and_omits_warming() {
+        let evidence = WarmEvidence::none();
+        let rows: Vec<MemberStatus> = vec![
+            MemberStatus::labelled(fresh("api", true), &evidence),
+            MemberStatus::labelled(fresh("web", true), &evidence),
+            MemberStatus::labelled(fresh("svc", false), &evidence),
+            MemberStatus::labelled(unopenable("old", "store is corrupt"), &evidence),
+        ];
+        let rollup = warm_state::rollup(rows.iter().map(|r| &r.warm), &evidence);
+
+        assert_eq!(rollup.members, rows.len());
+        assert_eq!((rollup.warm, rollup.deferred, rollup.degraded), (2, 1, 1));
+
+        let value = serde_json::to_value(&rollup).unwrap();
+        assert!(
+            value.get("warming").is_none(),
+            "no live signal ⇒ no warming key, not a fabricated 0: {value}"
+        );
+
+        // The roll-up really is a projection of the rows, not a parallel count.
+        let count = |want: &MemberWarmState| {
+            rows.iter()
+                .filter(|r| std::mem::discriminant(&r.warm) == std::mem::discriminant(want))
+                .count()
+        };
+        assert_eq!(count(&MemberWarmState::Warm), rollup.warm);
+        assert_eq!(count(&MemberWarmState::Deferred), rollup.deferred);
+        assert_eq!(
+            count(&MemberWarmState::Degraded {
+                reason: String::new()
+            }),
+            rollup.degraded
+        );
+        assert_eq!(
+            count(&MemberWarmState::Warming),
+            0,
+            "the vocabulary is present but `warming` is unreachable today"
+        );
     }
 }
