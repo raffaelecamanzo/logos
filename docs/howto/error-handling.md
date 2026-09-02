@@ -37,9 +37,14 @@ only project it onto an exit code or an MCP error tag. This is the design in
 | **Corrupt / unreadable index** | Correctness | Aborts | `error:` on stderr; exit `3` | Delete `.logos/logos.db` and run `logos index` |
 | **Invalid `config.toml` / `rules.toml`** | Correctness | Aborts at load | `error:` on stderr; exit `2` | Fix the named key/pattern in the file |
 | Engine / internal failure | Correctness | Aborts | `error:` on stderr; exit `3` | See the message; re-index; file an issue if it persists |
+| **Workspace member that cannot be opened** | Degraded *result*, loud exit | Returns the partial answer over the members that did open, names the ones that did not | `degraded_rollup` in the read-model + the member and its cause on stderr; exit `1` | Raise the process file-descriptor limit (`ulimit -n`) for a `host-resource-limit` cause; otherwise repair the named member's store |
 
 Degraded conditions are **never** fatal — a single bad file can never abort a
-whole index. Correctness conditions are **never** swallowed — Logos would rather
+whole index. They are also, with one deliberate exception, never reflected in
+the exit code: a `workspace` subcommand that could not **open** a member exits
+`1` while still printing its partial answer, because a run that silently
+answered over a fraction of the workspace was the defect
+([FR-WS-16](../specs/requirements/FR-WS-16.md)). Correctness conditions are **never** swallowed — Logos would rather
 tell you the answer is unavailable than hand you a wrong one.
 
 ## How it surfaces on the CLI
@@ -141,6 +146,7 @@ A degraded result is *correct about what it could do*, not a defect:
 | `glob pattern … escapes the project root` | An `exclude`/path glob with `..` or an absolute path (exit 2) | Make the pattern project-relative |
 | `unknown node kind "<x>"` | A bad `--kind`/`kind:` filter (exit 2 / `invalid_params`) | Use one of the listed kinds |
 | A query returns nothing | The symbol isn't in the graph, or the index is stale | Check the name; `logos sync` after edits |
+| A `workspace` command exits `1` naming members with a `host-resource-limit` cause | The process ran out of file descriptors (`RLIMIT_NOFILE`) part-way through opening members — the named stores are **present and intact**, not corrupt | Raise the limit (`ulimit -n 4096`) and re-run. Logos already raises the soft limit toward the hard limit at startup and bounds concurrent member connections to a host-derived budget, so hitting this means the hard limit itself is low |
 | Node counts look wrong / keep growing across incremental `sync`s | Graph drift — duplicate or orphan rows the live store accumulated (exit 1 from `doctor`/`verify`) | `logos doctor` for the fast structural verdict, `logos verify` for the deep shadow-reindex diff; a full `logos index` heals a leak. Migration 16 auto-dedups on first open. |
 | `doctor`/`verify` reports `unadmitted_files > 0` (or `!ok`), naming the offending paths in `unadmitted_sample`; `gate --no-reconcile`, `check_rules`, or `health` fail alongside it | Admission drift — the store still holds a file the *current* `AdmissionAuthority` would reject (gitignored, under a nested `.git` boundary, in `ignored_dirs`, or glob-excluded), most often a dev worktree (`.worktrees/**`) or browser-test scratch (`.playwright-mcp/**`) that slipped in before [CR-054](../requests/CR-054-graph-update-admission-unification.md) or via a `.gitignore` edit that narrowed scope | `logos index` — a full reindex purges every unadmitted file (edges return to `unresolved_refs`); a plain reconciling `gate`/`check`/`session_end` usually self-heals it too. See [commands.md](commands.md#doctor). |
 

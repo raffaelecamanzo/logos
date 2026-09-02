@@ -142,12 +142,19 @@ it from the directory that contains your service repos. It:
    parent `.mcp.json` (distinct from the per-repo `logos` key so a member's own
    entry is never shadowed).
 
-Indexing is **hybrid**: the command returns immediately while each approved
-member warms its index in a detached background process; a member that has not
-finished warming still indexes correctly on first real use (lazy
-`ensure_indexed`). A member that fails to initialise is reported **degraded**
-without aborting the others. stdout stays machine-clean (the approval prompt is
-on stderr), so `logos init --workspace --yes` is safe to script. Re-running is
+Indexing is **hybrid**: the command returns immediately while a **single
+detached supervisor** warms the approved members through a bounded queue — at
+most `max(1, cores / 4)` members index concurrently, capped at 4
+([FR-WS-14](../specs/requirements/FR-WS-14.md)). It is one supervisor for the
+whole workspace, not one process per member: an 86-member workspace warms four
+at a time, not 86 at once. A member that has not finished warming still indexes
+correctly on first real use (lazy `ensure_indexed`). A member that fails to
+*initialise* — a manifest or MCP step — is reported **degraded** without
+aborting the others. A member whose **warm** fails after the command has
+returned is currently not reported anywhere: it simply stays un-indexed and
+shows as `deferred` in [`workspace status`](#workspace-status) until its first
+real use indexes it. stdout stays machine-clean (the approval prompt is on
+stderr), so `logos init --workspace --yes` is safe to script. Re-running is
 incremental — `manifest`/`mcp` actions report `unchanged` and no duplicate MCP
 entry is written. When no sibling repos are found, nothing is written and the
 command exits 0.

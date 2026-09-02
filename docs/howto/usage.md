@@ -168,14 +168,19 @@ Exit codes are a stable contract for scripting:
 | Code | Meaning |
 |---|---|
 | `0` | Success. |
-| `1` | Completed, but violations/threshold failures found (`check`, `gate`) or structural drift detected (`doctor`, `verify`). |
+| `1` | Completed, but the answer is not the answer it claims to be: violations/threshold failures (`check`, `gate`), structural drift (`doctor`, `verify`), or **result-level incompleteness** — a `workspace` subcommand that could not **open** one or more members ([FR-CL-03](../specs/requirements/FR-CL-03.md), [FR-WS-16](../specs/requirements/FR-WS-16.md)). |
 | `2` | Usage error: bad flags, invalid config/rules file. |
 | `3` | Internal/environment error — e.g. no index present (the message tells you to run `logos index`), engine failure. Never a raw panic. |
 
 These codes are the CLI projection of Logos's **fail-soft / fail-loud** error
 contract: a *degraded* condition (a skipped file, a partial resolution) warns
 and still exits `0`, while a *correctness* condition (no index, corrupt store,
-bad config) aborts loud. The full contract — both surfaces, every condition, and
+bad config) aborts loud. The one place a degraded condition *does* move the exit
+code is a workspace member that could not be opened: the command still returns
+its partial answer, but exits `1` so a CI step cannot pass over a
+three-quarters-missing payload. A member that is merely un-indexed, never
+needed, or evicted to stay inside the workspace budget leaves the code at `0` —
+see [commands.md](commands.md#workspace-status). The full contract — both surfaces, every condition, and
 a troubleshooting table — is in [error-handling.md](error-handling.md).
 
 Scripting example:
