@@ -51,6 +51,28 @@ const RESERVED_FDS: usize = 64;
 /// [ADR-02]: ../../../docs/specs/architecture/decisions/ADR-02.md
 const WRITER_CONNECTIONS_PER_MEMBER: usize = 1;
 
+/// Descriptors a resident member holds that are **not** database connections:
+/// its filesystem watcher's kqueue/inotify handle under `serve`.
+///
+/// Charged per member rather than taken from the fixed reserve because it scales
+/// with residency — a reserve that covers it at eight residents does not cover it
+/// at eight hundred, and residency is exactly what a roomier host is allowed to
+/// grow.
+const NON_CONNECTION_FDS_PER_MEMBER: usize = 1;
+
+/// Resident members allowed per host core, whatever the descriptor limit.
+///
+/// Descriptors are not the only resource residency multiplies: each resident
+/// engine still owns a worker pool and a hydration cache ([ADR-63] leaves the
+/// shared pool to a later story). A host with a 65 536-descriptor allowance would
+/// otherwise be told it may hold ~1 700 members resident, which is sound in
+/// descriptors and absurd in threads and memory. Tying the ceiling to cores keeps
+/// it host-derived — never a function of the member count — while the
+/// descriptor budget stays the binding constraint on any ordinary host.
+///
+/// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
+const MAX_RESIDENT_MEMBERS_PER_CORE: usize = 16;
+
 /// Read connections a member is never shrunk below — one connection is the floor
 /// at which a member can answer at all.
 const MIN_READ_CONNECTIONS_PER_MEMBER: usize = 1;
@@ -74,6 +96,12 @@ const MIN_RESIDENT_MEMBERS: usize = 2;
 /// Soft limit assumed when the platform reports none, matching the stock POSIX
 /// default rather than guessing high.
 const ASSUMED_FD_SOFT_LIMIT: u64 = 256;
+
+/// Descriptor allowance above which a larger limit buys no more residency.
+///
+/// Guards the derivation against `RLIM_INFINITY` and against an adversarial
+/// argument to [`ConnectionBudget::from_limits`], which is public.
+const MAX_USEFUL_FD_SOFT_LIMIT: u64 = 1_048_576;
 
 /// A workspace's ceiling on live read connections, and the residency that
 /// ceiling implies ([NFR-PE-11], [ADR-63]).
@@ -123,21 +151,33 @@ impl ConnectionBudget {
     ///
     /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
     pub fn from_limits(fd_soft_limit: u64, cores: usize) -> Self {
+        // An `RLIM_INFINITY` limit is true but useless as a budget input — it
+        // would derive an effectively unbounded resident set, reinstating the
+        // `members × cores` growth this type exists to remove. Clamped here as
+        // well as at the reporting boundary so the public derivation is sound for
+        // any argument, not only for the ones this host can report.
+        let fd_soft_limit = fd_soft_limit.min(MAX_USEFUL_FD_SOFT_LIMIT);
         let usable_fds = usize::try_from(fd_soft_limit)
             .unwrap_or(usize::MAX)
             .saturating_sub(RESERVED_FDS);
-        let connections = usable_fds / FDS_PER_CONNECTION;
+        let budgeted_units = usable_fds / FDS_PER_CONNECTION;
 
-        let mut per_member = cores.max(MIN_READ_CONNECTIONS_PER_MEMBER);
-        while per_member > MIN_READ_CONNECTIONS_PER_MEMBER
-            && residents_for(connections, per_member) < TARGET_RESIDENT_MEMBERS
-        {
-            per_member -= 1;
-        }
+        // The largest per-member read pool that still leaves room for
+        // `TARGET_RESIDENT_MEMBERS`, capped at one connection per core and
+        // floored at one. This is the closed form of "shrink the pool until the
+        // target residency fits": `units_for(u, p) >= TARGET` holds exactly while
+        // `p + per_member_overhead() <= u / TARGET`. Solved rather than searched
+        // so an adversarial `cores` can neither overflow nor spin.
+        let affordable = (budgeted_units / TARGET_RESIDENT_MEMBERS)
+            .saturating_sub(per_member_overhead())
+            .max(MIN_READ_CONNECTIONS_PER_MEMBER);
+        let per_member = cores
+            .clamp(MIN_READ_CONNECTIONS_PER_MEMBER, affordable.max(MIN_READ_CONNECTIONS_PER_MEMBER));
 
         Self {
             per_member_read_connections: per_member,
-            max_resident_members: residents_for(connections, per_member).max(MIN_RESIDENT_MEMBERS),
+            max_resident_members: residents_for(budgeted_units, per_member)
+                .clamp(MIN_RESIDENT_MEMBERS, host_residency_ceiling(cores)),
         }
     }
 
@@ -162,10 +202,26 @@ impl ConnectionBudget {
     }
 }
 
-/// How many members fit in `connections` when each holds `per_member` readers
-/// plus its writer connection.
-fn residents_for(connections: usize, per_member: usize) -> usize {
-    connections / (per_member + WRITER_CONNECTIONS_PER_MEMBER)
+/// Descriptor-sized units a resident member costs **besides** its read pool: its
+/// writer connection, plus its watcher handle expressed in the same units.
+fn per_member_overhead() -> usize {
+    WRITER_CONNECTIONS_PER_MEMBER + NON_CONNECTION_FDS_PER_MEMBER
+}
+
+/// How many members fit in `budgeted_units` when each holds `per_member` readers
+/// plus its per-member overhead.
+fn residents_for(budgeted_units: usize, per_member: usize) -> usize {
+    budgeted_units / per_member.saturating_add(per_member_overhead())
+}
+
+/// The residency this host tolerates whatever its descriptor allowance, so a
+/// roomy fd table cannot authorise a resident set the machine's threads and
+/// memory could not carry.
+fn host_residency_ceiling(cores: usize) -> usize {
+    cores
+        .max(1)
+        .saturating_mul(MAX_RESIDENT_MEMBERS_PER_CORE)
+        .max(MIN_RESIDENT_MEMBERS)
 }
 
 #[cfg(test)]
@@ -178,7 +234,13 @@ mod tests {
     fn assert_fits_within(budget: ConnectionBudget, fd_soft_limit: u64) {
         let connections = budget.max_resident_members()
             * (budget.per_member_read_connections() + WRITER_CONNECTIONS_PER_MEMBER);
-        let fds = connections * FDS_PER_CONNECTION;
+        // Every descriptor a full resident set holds: its connections at three
+        // apiece, plus each member's watcher handle. Charging the watcher here is
+        // what makes this a bound on the OS resource rather than on connections
+        // alone — a reserve that covers watchers at eight residents does not
+        // cover them at eight hundred.
+        let fds = connections * FDS_PER_CONNECTION
+            + budget.max_resident_members() * NON_CONNECTION_FDS_PER_MEMBER;
         let limit = usize::try_from(fd_soft_limit).unwrap_or(usize::MAX);
         assert!(
             fds + RESERVED_FDS <= limit,
@@ -270,15 +332,121 @@ mod tests {
         assert_fits_within(budget, 96);
     }
 
-    /// Residency is bounded by the host, never by the member count — the same
-    /// host budgets the same ceiling for a 72-member and a 200-member workspace.
+    /// Where the two-resident floor stops fitting.
+    ///
+    /// `MIN_RESIDENT_MEMBERS` is a floor applied *after* the affordability
+    /// arithmetic, so below a certain limit the budget knowingly over-commits —
+    /// two members that cannot answer at all is worse than two that might. This
+    /// pins the exact boundary, so a change to `RESERVED_FDS` or to the floor
+    /// moves it visibly rather than silently.
     #[test]
-    fn the_budget_does_not_depend_on_the_member_count() {
-        // There is no member count in the constructor at all; this pins that
-        // the derivation's only inputs stay (fd limit, cores).
-        let a = ConnectionBudget::from_limits(256, 12);
-        let b = ConnectionBudget::from_limits(256, 12);
-        assert_eq!(a, b);
+    fn the_two_member_floor_over_commits_only_below_its_own_boundary() {
+        // The first limit at which the floor genuinely fits: 2 × (1+1) × 3 + 2
+        // watcher fds = 14, plus the 64-fd reserve.
+        const FLOOR_FITS_FROM: u64 = 78;
+        assert_fits_within(
+            ConnectionBudget::from_limits(FLOOR_FITS_FROM, 12),
+            FLOOR_FITS_FROM,
+        );
+        for limit in [0, 1, 64, FLOOR_FITS_FROM - 1] {
+            let budget = ConnectionBudget::from_limits(limit, 12);
+            assert_eq!(
+                budget.max_resident_members(),
+                MIN_RESIDENT_MEMBERS,
+                "below the boundary the floor is all there is, at limit {limit}"
+            );
+        }
+    }
+
+    /// The derived numbers themselves, pinned exactly for two representative
+    /// hosts.
+    ///
+    /// Every other test here asserts an inequality or a floor, which leaves the
+    /// tuning constants free to drift: `TARGET_RESIDENT_MEMBERS` could be halved
+    /// or doubled with the whole suite green. These two equalities are what make
+    /// a change to the derivation a deliberate act — if one fires, re-derive it
+    /// on purpose rather than adjusting the number to match.
+    #[test]
+    fn the_derived_budget_is_pinned_for_representative_hosts() {
+        let stock = ConnectionBudget::from_limits(256, 12);
+        assert_eq!(
+            (
+                stock.per_member_read_connections(),
+                stock.max_resident_members()
+            ),
+            (6, 8),
+            "the stock 256-fd / 12-core host"
+        );
+        // Literal, not constant-derived: 8 residents × (6 readers + 1 writer) × 3
+        // fds + 8 watcher fds = 176, inside 256 - 64 reserved = 192.
+        assert_eq!(8 * (6 + 1) * 3 + 8, 176);
+
+        let roomy = ConnectionBudget::from_limits(65_536, 12);
+        assert_eq!(
+            (
+                roomy.per_member_read_connections(),
+                roomy.max_resident_members()
+            ),
+            (12, 192),
+            "a 65k-fd / 12-core host keeps its core-sized pool, capped by cores"
+        );
+    }
+
+    /// Residency is bounded by the host, never by the member count. The ceiling
+    /// scales with **cores**, so a descriptor allowance far beyond what the
+    /// machine can carry in threads and memory does not authorise a resident set
+    /// to match it.
+    #[test]
+    fn residency_is_ceilinged_by_the_host_not_by_its_fd_table() {
+        let huge = ConnectionBudget::from_limits(u64::MAX, 12);
+        assert_eq!(
+            huge.max_resident_members(),
+            host_residency_ceiling(12),
+            "an unbounded fd table must not derive an unbounded resident set"
+        );
+        assert!(
+            huge.max_resident_members() < 1_000,
+            "a limit of u64::MAX derived {} residents — the ceiling is not holding",
+            huge.max_resident_members()
+        );
+        // More cores carry more residents; the same cores carry the same number
+        // whatever the descriptor allowance above the useful maximum.
+        assert!(
+            ConnectionBudget::from_limits(u64::MAX, 24).max_resident_members()
+                > huge.max_resident_members()
+        );
+        assert_eq!(
+            ConnectionBudget::from_limits(MAX_USEFUL_FD_SOFT_LIMIT, 12),
+            huge,
+            "beyond the useful maximum a larger limit buys nothing"
+        );
+    }
+
+    /// `from_limits` is public and takes an arbitrary `cores`, so it must return
+    /// a usable budget for every input rather than panicking, overflowing, or
+    /// spinning — including the degenerate `cores = 0` and the adversarial
+    /// `usize::MAX` that a search-based derivation would hang on.
+    #[test]
+    fn any_input_yields_a_usable_budget() {
+        for limit in [0, 1, 64, 75, 76, 96, 256, 4096, 65_536, u64::MAX] {
+            for cores in [0, 1, 12, 128, usize::MAX] {
+                let budget = ConnectionBudget::from_limits(limit, cores);
+                assert!(
+                    budget.per_member_read_connections() >= MIN_READ_CONNECTIONS_PER_MEMBER,
+                    "limit {limit} / cores {cores} budgeted a member zero connections, \
+                     which the reader pool rejects outright"
+                );
+                assert!(
+                    budget.max_resident_members() >= MIN_RESIDENT_MEMBERS,
+                    "limit {limit} / cores {cores} budgeted fewer than two residents"
+                );
+                assert_eq!(
+                    budget.total_read_connections(),
+                    budget.per_member_read_connections() * budget.max_resident_members(),
+                    "limit {limit} / cores {cores} overflowed its own ceiling"
+                );
+            }
+        }
     }
 
     /// A single-core host still budgets a working read pool.
