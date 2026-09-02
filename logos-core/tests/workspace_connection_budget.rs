@@ -268,7 +268,8 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
         .count();
     assert_eq!(
         deferred, MEMBERS,
-        "every un-indexed, never-attempted member reads `deferred`, not `warm`          and not `degraded`"
+        "every un-indexed, never-attempted member reads `deferred`, not `warm` \
+         and not `degraded`"
     );
     assert_eq!(status.warm_rollup.members, MEMBERS);
     assert_eq!(
@@ -278,7 +279,8 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
     );
     assert_eq!(
         status.warm_rollup.warming, None,
-        "no live warming signal exists, so the count is OMITTED rather than          inferred ([NFR-CC-04])"
+        "no live warming signal exists, so the count is OMITTED rather than \
+         inferred ([NFR-CC-04])"
     );
     let wire = serde_json::to_value(&status).expect("the read-model serialises");
     assert!(
@@ -287,12 +289,25 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
         wire["warm_rollup"]
     );
     assert_eq!(wire["members"][0]["warm_state"], "deferred");
-    // [NFR-PE-10], instrumented: labelling N members constructed no engine of
-    // its own, so live residency after a full `status` is still far BELOW N.
-    assert!(
-        registry.resident_count() < MEMBERS,
-        "{} of {MEMBERS} engines resident after a warm-labelled status — the          read-model must not eagerly hold all N",
-        registry.resident_count(),
+    // [NFR-PE-10], instrumented on CONSTRUCTION: the warm labelling opened
+    // nothing of its own.
+    //
+    // Residency cannot carry this claim — eviction pins it to the budget however
+    // many engines were built, so `resident_count() < MEMBERS` is already implied
+    // by the two budget assertions above and would hold even if labelling opened
+    // every member a second time. Neither can `reconstructions()`: a second open
+    // *within* one fan-out iteration finds the member still resident, so it moves
+    // no counter at all. Total starts is the quantity that moves, and it is
+    // pinned to an EQUALITY: exactly one start per member per all-member walk.
+    // A labelling that opened anything, or a fifth walk added to `status`,
+    // both fail here.
+    assert_eq!(
+        registry.engine_starts(),
+        WALKS_PER_STATUS * MEMBERS as u64,
+        "{} engine starts over {WALKS_PER_STATUS} all-member walks of {MEMBERS} \
+         members — the warm labelling must construct no engine of its own, and \
+         no walk may be added to `workspace status`",
+        registry.engine_starts(),
     );
 
     for repo in &member_roots {
