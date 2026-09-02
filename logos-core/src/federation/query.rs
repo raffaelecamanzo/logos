@@ -600,6 +600,45 @@ mod tests {
         assert_eq!(value["warm_state"], "warm", "one row, both facts: {value}");
     }
 
+    /// The member row's **exact key set**, pinned against literals.
+    ///
+    /// `MemberStatus` flattens two structs into one JSON object, and
+    /// `serde_json`'s flatten merge is last-write-wins and **silent**: a key
+    /// emitted by both halves produces no compile error, no runtime error and no
+    /// failing test — one value simply disappears. [FR-WS-16] extends this same
+    /// row in [S-326], and the half most likely to want a `reason` is precisely
+    /// the degraded half, so the collision surface is real and imminent. Pinning
+    /// the key set turns a future collision into a failing test instead of a
+    /// dropped field.
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [S-326]: ../../../docs/planning/journal.md#s-326-degraded-member-reporting-and-non-zero-exit-for-workspace-commands
+    #[test]
+    fn a_member_row_has_exactly_the_keys_it_is_meant_to() {
+        let keys = |row: &MemberStatus| {
+            let value = serde_json::to_value(row).unwrap();
+            let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+
+        let healthy = MemberStatus::labelled(fresh("api", true), &WarmEvidence::none());
+        assert_eq!(
+            keys(&healthy),
+            ["member", "result", "warm_state"],
+            "a healthy row: no `error`, no `reason`, nothing shadowed"
+        );
+
+        let degraded =
+            MemberStatus::labelled(unopenable("web", "store is corrupt"), &WarmEvidence::none());
+        assert_eq!(
+            keys(&degraded),
+            ["error", "member", "reason", "warm_state"],
+            "a degraded row: no `result`, and `error`/`reason` both survive the \
+             double flatten"
+        );
+    }
+
     /// Index presence is the whole derivation for the two derivable states: an
     /// indexed member is `warm`, an empty one `deferred`.
     #[test]
