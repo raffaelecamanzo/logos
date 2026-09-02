@@ -181,9 +181,12 @@ impl WarmEvidence {
     /// Whether a live `warming` signal exists — the one condition under which
     /// the roll-up may carry a `warming` count at all ([NFR-CC-04]).
     ///
+    /// Private: [`rollup`] is the only consumer, and the seam an external caller
+    /// needs is the three constructors, not this predicate.
+    ///
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     #[must_use]
-    pub fn reports_warming(&self) -> bool {
+    fn reports_warming(&self) -> bool {
         self.in_flight.is_some()
     }
 
@@ -212,13 +215,29 @@ impl WarmEvidence {
 /// `deferred` ([BR-44]).
 ///
 /// # Precedence
-/// Failure evidence, then the live in-flight signal, then index presence.
-/// In-flight outranges index presence deliberately: a full index persists in
+/// There are **four** inputs, not three, because failure arrives on two
+/// channels. In order:
+///
+/// 1. `evidence.failure(member)` — a durable record that this member's warm was
+///    attempted and failed.
+/// 2. `indexed == Err(reason)` — the member could not be read at all.
+/// 3. `evidence.is_warming(member)` — a live in-flight signal.
+/// 4. `indexed == Ok(_)` — index presence.
+///
+/// In-flight outranks index presence deliberately: a full index persists in
 /// bounded chunks ([FR-IX-08]), so a member being indexed right now can already
 /// hold files — reporting it `warm` would claim a completed index that is still
-/// running. And recorded failure outranks both: a member whose warm failed
-/// part-way has exactly that partial index, which is precisely why it must not
-/// read `warm`.
+/// running. Recorded failure outranks both: a member whose warm failed part-way
+/// has exactly that partial index, which is precisely why it must not read
+/// `warm`.
+///
+/// The two failure channels rank **above** the in-flight signal, so a member
+/// that a live signal calls in-flight while its store cannot be read reports
+/// `degraded`, not `warming`. That ordering is unobservable today (nothing
+/// populates the in-flight set) and is pinned by the precedence table test so
+/// whichever way a future signal source wants it, the change is deliberate. Of
+/// the two failure channels the *durable record* wins, so its reason — not the
+/// transient open error — is the one that reaches the wire.
 ///
 /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
 /// [FR-IX-08]: ../../../docs/specs/requirements/FR-IX-08.md
@@ -324,6 +343,11 @@ mod tests {
         let none = WarmEvidence::none();
         let warming = WarmEvidence::none().with_in_flight(["api"]);
         let failed = WarmEvidence::none().with_failures([("api", "store is corrupt")]);
+        // Both signals on the SAME member — the cells where precedence is
+        // actually contested rather than merely stated.
+        let both = WarmEvidence::none()
+            .with_in_flight(["api"])
+            .with_failures([("api", "store is corrupt")]);
         let degraded = MemberWarmState::Degraded {
             reason: "store is corrupt".to_string(),
         };
@@ -346,6 +370,28 @@ mod tests {
             // Recorded failure outranks everything, partial index included.
             ("indexed, warm failed", &failed, Ok(true), degraded.clone()),
             ("empty, warm failed", &failed, Ok(false), degraded.clone()),
+            // ── the contested cells ────────────────────────────────────────
+            // An unreadable member outranks a live in-flight signal: reordering
+            // the `Err` arm below the `is_warming` guard fails here.
+            (
+                "unopenable, in flight",
+                &warming,
+                Err("engine start failed"),
+                MemberWarmState::Degraded {
+                    reason: "engine start failed".to_string(),
+                },
+            ),
+            // Recorded failure outranks the in-flight signal on the same member.
+            ("in flight and warm failed", &both, Ok(false), degraded.clone()),
+            ("in flight and warm failed, indexed", &both, Ok(true), degraded.clone()),
+            // Both failure channels at once: the DURABLE record's reason wins,
+            // not the transient open error — observable, so pinned.
+            (
+                "unopenable and warm failed",
+                &failed,
+                Err("engine start failed"),
+                degraded.clone(),
+            ),
         ] {
             assert_eq!(derive_state("api", indexed, evidence), expected, "{case}");
         }
@@ -429,11 +475,38 @@ mod tests {
     fn a_live_signal_reporting_nothing_in_flight_still_carries_a_zero() {
         let states = [MemberWarmState::Warm];
         let evidence = WarmEvidence::none().with_in_flight(Vec::<String>::new());
+        assert!(
+            evidence.reports_warming(),
+            "calling with_in_flight IS the assertion that a source answered"
+        );
         let rollup = rollup(&states, &evidence);
 
         assert_eq!(rollup.warming, Some(0));
         let value = serde_json::to_value(&rollup).unwrap();
         assert_eq!(value["warming"], 0, "an answered zero IS reported: {value}");
+    }
+
+    /// The branch `rollup`'s own comment justifies: a `Warming` state arriving
+    /// while the evidence reports no signal source must still be **counted**,
+    /// never silently dropped — dropping it would break the documented
+    /// partition (`warm + warming + deferred + degraded == members`) with no
+    /// test noticing.
+    ///
+    /// Degrading `get_or_insert(0)` to `if let Some(w) = &mut rollup.warming`
+    /// passes every other test in the repo and fails only this one.
+    #[test]
+    fn a_warming_row_is_counted_even_without_a_signal_source() {
+        let rollup = rollup(
+            &[MemberWarmState::Warming, MemberWarmState::Warm],
+            &WarmEvidence::none(),
+        );
+
+        assert_eq!(rollup.warming, Some(1), "the row is counted, not dropped");
+        assert_eq!(
+            rollup.warm + rollup.warming.unwrap_or(0) + rollup.deferred + rollup.degraded,
+            rollup.members,
+            "no member may fall out of the partition"
+        );
     }
 
     // ── the roll-up partitions the workspace ───────────────────────────────
