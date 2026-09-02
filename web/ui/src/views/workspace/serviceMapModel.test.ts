@@ -13,7 +13,10 @@ import {
 } from "./serviceMapModel.ts";
 
 function member(name: string, indexed = true): ServiceMember {
-  return { name, indexed, error: null };
+  // `warmState` is what the map now classifies on, and the server derives it from
+  // exactly these inputs — so the helper mirrors that derivation rather than letting
+  // a fixture describe a member the server could never produce.
+  return { name, indexed, error: null, warmState: indexed ? "warm" : "deferred" };
 }
 
 function binding(from: string, to: string, relation = "route", symbol = "sym"): BridgeEdge {
@@ -70,7 +73,12 @@ describe("buildServiceMap (S-250, FR-UI-29)", () => {
   });
 
   it("keeps a DEGRADED member apart from a merely un-indexed one — different facts, different remedies", () => {
-    const broken: ServiceMember = { name: "web", indexed: false, error: "store is locked" };
+    const broken: ServiceMember = {
+      name: "web",
+      indexed: false,
+      error: "store is locked",
+      warmState: "degraded",
+    };
     const map = buildServiceMap([member("api"), broken], []);
     expect(map.degraded).toEqual(["web"]);
     // It is NOT reported as "awaiting index" — that would send the user to `logos
@@ -83,14 +91,17 @@ describe("buildServiceMap (S-250, FR-UI-29)", () => {
     const status = {
       workspace: "shop",
       members: [
-        { member: "api", result: { indexed: true } },
-        { member: "web", error: "engine failed to start" },
+        { member: "api", result: { indexed: true }, warm_state: "warm" },
+        { member: "web", error: "engine failed to start", warm_state: "degraded" },
       ],
+      warm_rollup: { members: 2, warm: 1, deferred: 0, degraded: 1 },
       coverage: { references: [], bound: 0, ambiguous: 0, unbound: 0, no_provider_in_workspace: 0, bound_ratio: 1 },
     } as unknown as WorkspaceStatus;
+    // The server's `warm_state` is carried through verbatim — the projection reads
+    // the label, it does not re-derive it (S-323, FR-WS-15).
     expect(serviceMembers(status)).toEqual([
-      { name: "api", indexed: true, error: null },
-      { name: "web", indexed: false, error: "engine failed to start" },
+      { name: "api", indexed: true, error: null, warmState: "warm" },
+      { name: "web", indexed: false, error: "engine failed to start", warmState: "degraded" },
     ]);
   });
 

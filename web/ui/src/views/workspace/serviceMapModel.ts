@@ -23,7 +23,12 @@
  * No React, no ECharts, no fetch — every function here is pure (NFR-RA-06).
  */
 
-import type { BridgeEdge, MemberTopics, WorkspaceStatus } from "../../api/types.ts";
+import type {
+  BridgeEdge,
+  MemberTopics,
+  MemberWarmStateLabel,
+  WorkspaceStatus,
+} from "../../api/types.ts";
 import type { LoadedSet } from "../graph/graphModel.ts";
 
 /** One service as the map knows it — read from the workspace status fan-out, which
@@ -31,6 +36,13 @@ import type { LoadedSet } from "../graph/graphModel.ts";
 export interface ServiceMember {
   /** The repo-qualified member name. */
   name: string;
+  /** The member's warm state as the SERVER derived it (S-323, FR-WS-15) — the single
+   *  author of this vocabulary. The map used to re-derive the same three states from
+   *  `indexed`/`error` in TypeScript; two classifiers over the same inputs agree only
+   *  until the server's precedence changes (and it will: a durable warm-failure record
+   *  turns a warm-failed-but-openable member from `deferred` into `degraded`), so the
+   *  view reads the label rather than recomputing it. */
+  warmState: MemberWarmStateLabel;
   /** `false` when the member has no index yet. */
   indexed: boolean;
   /** The per-member degradation the fan-out reported, when it reported one — an
@@ -43,6 +55,7 @@ export interface ServiceMember {
 export function serviceMembers(status: WorkspaceStatus): ServiceMember[] {
   return status.members.map((m) => ({
     name: m.member,
+    warmState: m.warm_state,
     indexed: m.result?.indexed ?? false,
     error: m.error ?? null,
   }));
@@ -191,7 +204,7 @@ export function buildServiceMap(
       // A member awaiting an index (or one whose engine could not be read) is drawn
       // in the muted `doc` hue rather than the code hue, so "no data yet" never reads
       // as "indexed, but uncoupled".
-      layer: m.indexed && !m.error ? "code" : "doc",
+      layer: m.warmState === "warm" ? "code" : "doc",
     };
   }
 
@@ -298,8 +311,10 @@ export function buildServiceMap(
     topics,
     // Un-indexed and degraded are DIFFERENT facts: "no index yet" is a state the user
     // can fix by indexing; "could not be read" is a fault. Reporting the second as
-    // the first would send them to the wrong remedy.
-    awaitingIndex: members.filter((m) => !m.indexed && !m.error).map((m) => m.name),
-    degraded: members.filter((m) => m.error !== null).map((m) => m.name),
+    // the first would send them to the wrong remedy. Both read the server's
+    // `warm_state` rather than re-deriving the split here (S-323, FR-WS-15), so the
+    // vocabulary has exactly one author.
+    awaitingIndex: members.filter((m) => m.warmState === "deferred").map((m) => m.name),
+    degraded: members.filter((m) => m.warmState === "degraded").map((m) => m.name),
   };
 }
