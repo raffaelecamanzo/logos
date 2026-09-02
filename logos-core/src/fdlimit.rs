@@ -68,7 +68,17 @@ pub fn raise_open_file_limit() -> Option<u64> {
 /// query itself failed — in both cases the caller falls back to a conservative
 /// default rather than guessing high.
 pub fn open_file_soft_limit() -> Option<u64> {
-    limits().map(|(soft, _hard)| soft.min(REPORTED_SOFT_LIMIT_CEILING))
+    limits().map(|(soft, _hard)| clamp_reported(soft))
+}
+
+/// Clamp a raw soft limit to [`REPORTED_SOFT_LIMIT_CEILING`].
+///
+/// A named function rather than an inline `.min()` so the clamp can be asserted
+/// on an input this host will never report — every real soft limit (256, 1024,
+/// 65 536) is far below the ceiling, so an inline clamp is indistinguishable
+/// from no clamp at all in a test.
+fn clamp_reported(soft: u64) -> u64 {
+    soft.min(REPORTED_SOFT_LIMIT_CEILING)
 }
 
 #[cfg(unix)]
@@ -76,20 +86,29 @@ fn raise_once() {
     let Some((soft, hard)) = raw_limits() else {
         return;
     };
-    // Every rung that is both an actual increase and permitted by the hard
-    // limit, most generous first: the hard limit itself, then the fallbacks for
-    // kernels that refuse it.
-    let ladder = RAISE_LADDER
-        .iter()
-        .filter_map(|target| libc::rlim_t::try_from(*target).ok());
-    let candidates = std::iter::once(hard)
-        .chain(ladder)
-        .filter(|target| *target > soft && *target <= hard);
-    for target in candidates {
+    for target in raise_candidates(soft, hard) {
         if set_soft_limit(target, hard) {
             return;
         }
     }
+}
+
+/// The targets to attempt, most generous first: the hard limit itself, then the
+/// fallbacks for kernels that refuse it — keeping only rungs that are both an
+/// actual increase and permitted by the hard limit.
+///
+/// Split out as a pure function because the raise itself is `Once`-guarded and
+/// mutates a process-global limit, which makes the *ordering* — the part that
+/// carries the macOS `RLIM_INFINITY` handling — otherwise untestable.
+#[cfg(unix)]
+fn raise_candidates(soft: libc::rlim_t, hard: libc::rlim_t) -> Vec<libc::rlim_t> {
+    let ladder = RAISE_LADDER
+        .iter()
+        .filter_map(|target| libc::rlim_t::try_from(*target).ok());
+    std::iter::once(hard)
+        .chain(ladder)
+        .filter(|target| *target > soft && *target <= hard)
+        .collect()
 }
 
 #[cfg(not(unix))]
@@ -170,6 +189,35 @@ mod tests {
         assert_eq!(first, second, "a repeated raise must report the same limit");
     }
 
+    /// The macOS shape: a hard limit of `RLIM_INFINITY` is attempted first and,
+    /// when the kernel refuses it, the ladder supplies finite rungs in
+    /// descending order. This is the case the module exists for, and it is
+    /// unreachable through `raise_open_file_limit` because the raise is
+    /// `Once`-guarded and this host's limits are whatever they are.
+    #[cfg(unix)]
+    #[test]
+    fn the_raise_ladder_tries_the_hard_limit_then_descending_fallbacks() {
+        let infinite = libc::RLIM_INFINITY;
+        assert_eq!(
+            raise_candidates(256, infinite),
+            vec![infinite, 65_536, 10_240],
+            "an unbounded hard limit must still offer finite fallbacks"
+        );
+        // A finite hard limit filters out the rungs above it.
+        assert_eq!(raise_candidates(256, 20_000), vec![20_000, 10_240]);
+        // Nothing to do when the soft limit already is the hard limit.
+        assert!(
+            raise_candidates(65_536, 65_536).is_empty(),
+            "an already-raised process must attempt no setrlimit at all"
+        );
+        // Every candidate is a genuine increase within the hard limit.
+        for (soft, hard) in [(0, 100_000), (10_240, 65_536), (1_024, infinite)] {
+            for target in raise_candidates(soft, hard) {
+                assert!(target > soft && target <= hard);
+            }
+        }
+    }
+
     /// The soft limit never exceeds the hard limit, and is reported clamped so
     /// an `RLIM_INFINITY` soft limit cannot derive an unbounded budget.
     #[test]
@@ -183,5 +231,16 @@ mod tests {
             reported <= REPORTED_SOFT_LIMIT_CEILING,
             "an unbounded soft limit must be reported clamped, got {reported}"
         );
+    }
+
+    /// The clamp itself, on the input the whole constant exists for: a container
+    /// reporting `RLIM_INFINITY`. Real hosts report 256 / 1024 / 65 536, all far
+    /// below the ceiling, so nothing else in the suite can tell the clamp from
+    /// its absence.
+    #[test]
+    fn an_unbounded_soft_limit_is_reported_as_the_ceiling() {
+        assert_eq!(clamp_reported(u64::MAX), REPORTED_SOFT_LIMIT_CEILING);
+        assert_eq!(clamp_reported(REPORTED_SOFT_LIMIT_CEILING + 1), REPORTED_SOFT_LIMIT_CEILING);
+        assert_eq!(clamp_reported(256), 256, "an ordinary limit passes through");
     }
 }

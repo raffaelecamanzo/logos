@@ -194,6 +194,19 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
         MEMBERS,
         "every member is reported, not merely the ones that opened"
     );
+    // `status.members` carries the errors of the FIRST walk only — the coverage
+    // and topic tiers have no per-member error channel, so a member that failed
+    // to open during walks 2-4 would vanish silently. That is the exact defect
+    // class CR-100 §2 reports ("exited 0 with 63 members unopened"), so the
+    // zero-failure claim is asserted registry-wide, across every walk.
+    assert_eq!(
+        registry.start_failures(),
+        0,
+        "{} engine start(s) failed across the {WALKS_PER_STATUS} all-member \
+         walks, {} of which no read-model would have reported",
+        registry.start_failures(),
+        registry.start_failures() - failures.len() as u64,
+    );
 
     // The ceiling held: residency never exceeded the budget, and every member
     // really did get its own store rather than sharing one root.

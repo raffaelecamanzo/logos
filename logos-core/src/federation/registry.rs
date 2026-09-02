@@ -166,6 +166,18 @@ struct Residency<E: MemberEngine> {
     ///
     /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
     reconstructions: u64,
+    /// Engine starts that **failed**, across every touch this registry has served.
+    ///
+    /// The per-member `Err` a fan-out returns is the only other record, and it
+    /// survives just as far as its read-model: [`workspace_status`](super::workspace_status)
+    /// walks every member four times, and the coverage and topic tiers have no
+    /// per-member error channel, so a member that fails to open during those
+    /// walks is silently dropped. Counting failures registry-side is what lets a
+    /// caller assert "no member failed to open" over the whole command rather
+    /// than over its first walk ([NFR-PE-11], [FR-WS-16]).
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    start_failures: u64,
 }
 
 impl<E: MemberEngine> Residency<E> {
@@ -174,6 +186,7 @@ impl<E: MemberEngine> Residency<E> {
             resident: HashMap::new(),
             started_before: HashSet::new(),
             reconstructions: 0,
+            start_failures: 0,
         }
     }
 
@@ -407,8 +420,15 @@ impl<E: MemberEngine> EngineRegistry<E> {
         // which is exactly the overshoot the ordering above avoids.
         residency.evict_to(self.budget.max_resident_members().saturating_sub(1));
 
-        let engine = E::start(&target.root, self.budget.per_member_read_connections())
-            .with_context(|| format!("starting the engine for workspace member {member:?}"))?;
+        let engine = match E::start(&target.root, self.budget.per_member_read_connections()) {
+            Ok(engine) => engine,
+            Err(err) => {
+                residency.start_failures += 1;
+                return Err(err).with_context(|| {
+                    format!("starting the engine for workspace member {member:?}")
+                });
+            }
+        };
         residency.record_start(member);
         let watcher = self.spawn_watcher(member, &engine);
         residency.resident.insert(
@@ -512,6 +532,21 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
     pub fn reconstructions(&self) -> u64 {
         self.lock_residency().reconstructions
+    }
+
+    /// How many engine starts have **failed** across every touch this registry
+    /// has served.
+    ///
+    /// The registry-wide record of what a per-member `Err` only reports as far as
+    /// one read-model. A command that walks every member several times — and
+    /// whose later walks carry no per-member error channel — asserts on this to
+    /// mean "no member failed to open", rather than "no member failed to open
+    /// during the walk that happens to report errors" ([NFR-PE-11], [FR-WS-16]).
+    ///
+    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    pub fn start_failures(&self) -> u64 {
+        self.lock_residency().start_failures
     }
 
     /// Evict least-recently-touched member engines until at most `cap` remain,
@@ -1259,6 +1294,16 @@ mod tests {
                 members,
                 "N = {members}: exactly one construction per member"
             );
+            // Without this the assertions above hold for ANY budget — a single
+            // walk touches each member once, so zero reconstructions is true even
+            // at a cap of two. Pinning residency is what makes the test sensitive
+            // to the budget actually being applied.
+            assert_eq!(
+                registry.resident_count(),
+                budget.max_resident_members().min(members),
+                "N = {members}: the walk must end holding exactly the budget's worth"
+            );
+            assert_eq!(registry.start_failures(), 0, "N = {members}: every member opened");
         }
     }
 
@@ -1593,8 +1638,15 @@ mod tests {
             "a failed start is not recorded, so b's later success is a first \
              construction rather than a phantom reconstruction"
         );
+        assert_eq!(
+            registry.start_failures(),
+            1,
+            "the failed start is counted registry-wide, not only in the fan-out \
+             read-model that happened to surface it"
+        );
         assert!(registry.engine_for("b").is_ok(), "b recovers on its next touch");
         assert_eq!(registry.reconstructions(), 0);
+        assert_eq!(registry.start_failures(), 1, "a later success does not erase it");
         assert!(
             registry.resident_count() <= budget.max_resident_members(),
             "a failing member must not push residency over the budget"
@@ -1622,14 +1674,11 @@ mod tests {
         assert!(backing.as_single().is_some(), "the single-root engine is used");
         assert_eq!(starts(), 1, "exactly the one single-root engine is built");
         assert_eq!(watches(), 0, "the single-root path spawns no registry watcher");
-        // No budget is derived and no budgeted share is imposed: the one engine
-        // keeps the core-sized pool it sizes for itself ([FR-WS-03], [ADR-52]).
-        assert_eq!(
-            backing.as_single().expect("single-root engine").read_connections,
-            single_root_pool(),
-            "the single-root engine must keep its own core-sized pool, not a \
-             workspace budget's share"
-        );
+        // The engine's pool size is NOT asserted here: this test supplies it to
+        // the `single` thunk itself, so any assertion on it would restate its own
+        // input. That the single-root path keeps `RuntimeConfig::default()`'s
+        // core-sized pool is a property of the real call sites, pinned against a
+        // real engine in `tests/single_root_pool_invariant.rs`.
     }
 
     /// With a workspace, `Backing::resolve` yields `Federated` and never builds a
