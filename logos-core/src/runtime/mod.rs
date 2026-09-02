@@ -176,6 +176,17 @@ impl WeakWorkerPool {
 /// The single construction site for every pool Logos owns — private and shared
 /// alike — so the two cannot drift apart in sizing policy or in instrumentation.
 fn build_worker_pool(threads: usize, prefix: &'static str) -> Result<rayon::ThreadPool> {
+    // `rayon` does NOT reject a zero-thread request: `num_threads(0)` means
+    // "choose automatically", so a zero would silently build a pool sized by
+    // `RAYON_NUM_THREADS` or the host's cores. That is worse than an error here —
+    // the whole point of [NFR-PE-11] is that the pool is the size the budget
+    // asked for, so a substituted default would be indistinguishable from
+    // success while quietly leaving the thread count unbudgeted. Rejected for the
+    // same reason a zero-connection reader pool is ([`ReaderPool::open`]).
+    anyhow::ensure!(
+        threads > 0,
+        "a worker pool needs at least one thread (asked for {threads} on {prefix})"
+    );
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(move |i| format!("{prefix}-{i}"))

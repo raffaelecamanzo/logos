@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use tempfile::TempDir;
 
-use super::{live_worker_threads, Runtime, RuntimeConfig, SharedWorkerPool};
+use super::{Runtime, RuntimeConfig, SharedWorkerPool};
 use crate::graph_store::{BatchWriter, NewNode};
 use crate::model::{LogosSymbol, NodeKind};
 
@@ -542,48 +542,33 @@ fn a_long_job_on_a_shared_pool_queues_another_submission_without_deadlocking_it(
     });
 }
 
-/// The thread gauge counts real workers: it rises by a pool's size when the pool
-/// is built and falls back once the last handle is dropped, so
-/// "no orphaned threads" is a measurement rather than an argument.
+/// A zero-thread pool is **rejected**, not silently sized by the host.
 ///
-/// Relative rather than absolute, because `cargo` runs this binary's tests on
-/// parallel threads of one process and the gauge is process-wide. The absolute
-/// ceiling is asserted in `tests/workspace_connection_budget.rs`, whose binary
-/// holds exactly one test.
+/// The mirror of `reader_pool_size_zero_is_rejected`: `rayon` reads
+/// `num_threads(0)` as "choose automatically", so without this guard a caller
+/// asking for no workers would get `RAYON_NUM_THREADS`-many instead — a pool
+/// whose size no budget authorised, and indistinguishable from success at every
+/// call site ([NFR-PE-11]).
 #[test]
-fn the_thread_gauge_follows_a_pools_lifetime() {
-    const THREADS: usize = 3;
-    let before = live_worker_threads();
-    let pool = SharedWorkerPool::with_threads(THREADS).expect("pool builds");
-    // Workers start asynchronously, so wait for them rather than sampling once.
+fn worker_threads_zero_is_rejected() {
     assert!(
-        wait_until(|| live_worker_threads() >= before + THREADS),
-        "the gauge never rose by the {THREADS} workers the pool was built with          (before {before}, now {})",
-        live_worker_threads()
+        SharedWorkerPool::with_threads(0).is_err(),
+        "a zero-worker pool must be rejected, not defaulted to the host's cores"
     );
-    assert_eq!(pool.threads(), THREADS);
 
-    drop(pool);
-    // `rayon` signals termination rather than joining, so the workers exit
-    // shortly after the last handle goes.
+    let dir = TempDir::new().expect("temp dir");
     assert!(
-        wait_until(|| live_worker_threads() < before + THREADS),
-        "the pool's workers outlived the pool (still {} live, was {before}          before it was built)",
-        live_worker_threads()
+        Runtime::open_with_config(
+            dir.path().join("logos.db"),
+            RuntimeConfig {
+                reader_pool_size: 1,
+                worker_threads: 0,
+                worker_pool: None,
+                write_queue_capacity: 8,
+            },
+        )
+        .is_err(),
+        "a runtime asked for zero worker threads must fail rather than build a \
+         host-sized pool"
     );
-}
-
-/// Poll `condition` until it holds, or give up after a generous deadline.
-///
-/// Used only where the property is genuinely asynchronous (thread start and
-/// exit); everywhere else the tests assert directly.
-fn wait_until(condition: impl Fn() -> bool) -> bool {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        if condition() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    condition()
 }

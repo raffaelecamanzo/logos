@@ -99,7 +99,13 @@ const TARGET_RESIDENT_MEMBERS: usize = 8;
 const MIN_RESIDENT_MEMBERS: usize = 2;
 
 /// Workers the shared pool is never sized below — a pool with no worker cannot
-/// run a job at all, and `rayon` rejects a zero-thread build.
+/// run a job at all.
+///
+/// The clamp is load-bearing rather than cosmetic: `rayon` treats
+/// `num_threads(0)` as "choose automatically", so an unclamped zero would not
+/// fail, it would silently produce a pool sized by `RAYON_NUM_THREADS` or the
+/// host's cores — a thread count the budget never authorised. (The builder now
+/// rejects a zero outright, so the two guards agree.)
 const MIN_WORKER_THREADS: usize = 1;
 
 /// Soft limit assumed when the platform reports none, matching the stock POSIX
@@ -541,8 +547,11 @@ mod tests {
         );
     }
 
-    /// A degenerate host still gets a pool it can run a job on — `rayon` rejects
-    /// a zero-thread build, so this is a construction precondition, not taste.
+    /// A degenerate host still gets a pool it can run a job on.
+    ///
+    /// A construction precondition, not taste: without the clamp the budget would
+    /// report zero worker threads while `rayon` quietly ran a host-sized pool, so
+    /// the number [NFR-PE-11] bounds would stop describing the process.
     #[test]
     fn a_coreless_host_still_gets_one_worker() {
         assert_eq!(ConnectionBudget::from_limits(256, 0).worker_threads(), 1);
