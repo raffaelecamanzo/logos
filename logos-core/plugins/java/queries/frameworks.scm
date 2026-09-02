@@ -86,9 +86,10 @@
 ; neither path-bearing pattern above can match, so this pattern never competes
 ; for a registration site with them — the anchor-pairing invariant holds
 ; without the interpreter having to rank anything. (`@GetMapping()`, with empty
-; parens, parses as an argument-bearing `annotation`; a pattern for it could not
-; be constrained to an *empty* argument list and would shadow both patterns
-; above, so the degenerate form stays uncaptured.)
+; parens, parses as an argument-bearing `annotation` and is deliberately left
+; uncaptured as a degenerate shape. It *could* be matched — a text predicate on
+; the captured argument list, `(#eq? @args "()")`, constrains it precisely — but
+; a structural pattern alone cannot, and nobody writes the form.)
 ;
 ; Two things keep this broad pattern from manufacturing routes. The
 ; [framework_methods] gate runs first, so `@Override` — the whole body of a
@@ -114,17 +115,21 @@
 ;                             containing scope wins, so a prefixed nested class
 ;                             takes its own prefix and not its enclosing type's
 ;                             (Spring's rule);
-;   @fw.route.prefix.opaque — an argument in the prefix position that is NOT a
-;                             written literal. Its mere presence marks the scope
-;                             non-composable (the `path_dynamic` idiom of
-;                             `resolve::http_client_call`);
+;   @fw.route.prefix.opaque — a node in the prefix position that is not a
+;                             readable literal. It disqualifies every prefix
+;                             literal its bytes overlap without being identical
+;                             to, so it can refuse one element of a list, or a
+;                             fragment inside a literal, rather than the whole
+;                             scope;
 ;   @fw.route.prefix.name / @fw.route.prefix.key — predicate-only.
 ;
 ; A type may declare several literal prefixes (`value = {"/a", "/b"}`); the
-; interpreter fans each route out over them. A scope that captures both a
-; literal and an opaque argument composes on the literal — the same
-; "promote what is established, drop the rest" rule a mixed method-path list
-; already follows.
+; interpreter fans each route out over them. In a mixed list
+; (`value = {"/a", BASE}`) the opaque capture overlaps only `BASE`, so `/a`
+; still composes — the same "promote what is established, drop the rest" rule a
+; mixed method-path list already follows. An explicitly empty `value = {}`
+; captures nothing at all and therefore declares no prefix, exactly as Spring
+; reads it.
 
 ; Every type declaration is a prefix **boundary**, whether or not it declares
 ; one. A nested type is its own controller bean in Spring and does NOT inherit
@@ -132,40 +137,63 @@
 ; handler in an unannotated inner class of a prefixed outer class would be
 ; promoted at a prefix it is not actually served under. A boundary that
 ; declares no prefix reads as "unprefixed" — never as a refusal — because it
-; ties with, and is unioned into, the prefix patterns below when the same
-; declaration matched both.
+; shares its range with, and is combined into, the prefix patterns below when
+; the same declaration matched both.
 ;
-; Records and enums are listed as boundaries but NOT as prefix declarers: a
-; prefix *on* one is outside FR-FW-05's "class- or interface-level" scope, and
-; the asymmetry is deliberately the safe direction — a handler in a record
-; nested in a prefixed class loses a prefix it might have had rather than
-; gaining one it never did.
-[(class_declaration)
- (interface_declaration)
- (record_declaration)
- (enum_declaration)] @fw.route.prefix.scope
+; "A type declaration" is expressed as a wildcard node whose `body:` is one of
+; the three type-body kinds — `class_body` (class AND record), `interface_body`,
+; `enum_body`. That covers all four kinds Spring can put a controller on in one
+; pattern, and it excludes `method_declaration` (whose body is a `block`), which
+; is the shape that matters: a method-level `@RequestMapping` must never be read
+; as a prefix governing its own route. The grammar's `declaration` supertype
+; looks like the obvious spelling and is NOT usable here — the query engine
+; matches `method_declaration` through it, which self-composes every named
+; mapping into `/v1/x/v1/x`.
+(_ body: [(class_body) (interface_body) (enum_body)]) @fw.route.prefix.scope
 
-; Positional literal prefix: `@RequestMapping("/v1")`.
-([(class_declaration
-    (modifiers
+; The prefix itself, one pattern per argument form over that same wildcard —
+; a record or an enum can carry `@RequestMapping` as readily as a class, and
+; omitting them would not "lose a prefix safely": the boundary above would still
+; match, so the type would read as unprefixed and its handlers would be promoted
+; at their bare method paths, a wrong address rather than an absent one.
+;
+; The `.opaque` half is what makes a capture gap fail CLOSED. It captures the
+; `(expression)` supertype — every non-literal argument form at once, with no
+; enumeration to fall behind — which also matches a `string_literal` in the
+; same position; the interpreter ignores an opaque range identical to a
+; captured literal, so the literal patterns still win wherever the argument
+; reads. `element_value_pair` is not an `expression`, so the positional
+; catch-all can never mistake `method = RequestMethod.GET` for a path.
+
+; Positional prefix: `@RequestMapping("/v1")`, `@RequestMapping({"/v1","/v2"})`,
+; `@RequestMapping(BASE)`, `@RequestMapping(BASE + "/v1")`.
+((_ (modifiers
       (annotation
         name: (identifier) @fw.route.prefix.name
         arguments: (annotation_argument_list
-          (string_literal) @fw.route.prefix))))
-  (interface_declaration
-    (modifiers
-      (annotation
-        name: (identifier) @fw.route.prefix.name
-        arguments: (annotation_argument_list
-          (string_literal) @fw.route.prefix))))] @fw.route.prefix.scope
+          [
+            (string_literal) @fw.route.prefix
+            (element_value_array_initializer (string_literal) @fw.route.prefix)
+          ])))
+    body: [(class_body) (interface_body) (enum_body)]) @fw.route.prefix.scope
   (#eq? @fw.route.prefix.name "RequestMapping"))
 
-; Named literal prefix: `@RequestMapping(value = "/v1", produces = ...)`, and
-; its list form. `value`/`path` are Spring aliases, so both keys count — and the
+((_ (modifiers
+      (annotation
+        name: (identifier) @fw.route.prefix.name
+        arguments: (annotation_argument_list
+          [
+            (expression) @fw.route.prefix.opaque
+            (element_value_array_initializer (expression) @fw.route.prefix.opaque)
+          ])))
+    body: [(class_body) (interface_body) (enum_body)]) @fw.route.prefix.scope
+  (#eq? @fw.route.prefix.name "RequestMapping"))
+
+; Named prefix: `@RequestMapping(value = "/v1", produces = ...)` and its list
+; form. `value`/`path` are Spring aliases, so both keys count — and the key
 ; predicate is what stops a sibling string argument (`produces = "text/plain"`)
 ; from being read as a prefix.
-([(class_declaration
-    (modifiers
+((_ (modifiers
       (annotation
         name: (identifier) @fw.route.prefix.name
         arguments: (annotation_argument_list
@@ -173,74 +201,23 @@
             key: (identifier) @fw.route.prefix.key
             value: [
               (string_literal) @fw.route.prefix
-              (element_value_array_initializer
-                (string_literal) @fw.route.prefix)
-            ])))))
-  (interface_declaration
-    (modifiers
-      (annotation
-        name: (identifier) @fw.route.prefix.name
-        arguments: (annotation_argument_list
-          (element_value_pair
-            key: (identifier) @fw.route.prefix.key
-            value: [
-              (string_literal) @fw.route.prefix
-              (element_value_array_initializer
-                (string_literal) @fw.route.prefix)
-            ])))))] @fw.route.prefix.scope
+              (element_value_array_initializer (string_literal) @fw.route.prefix)
+            ]))))
+    body: [(class_body) (interface_body) (enum_body)]) @fw.route.prefix.scope
   (#eq? @fw.route.prefix.name "RequestMapping")
   (#any-of? @fw.route.prefix.key "value" "path"))
 
-; Positional NON-literal prefix: `@RequestMapping(BASE)`,
-; `@RequestMapping(Paths.V1)`, `@RequestMapping(BASE + "/v1")`. A positional
-; argument to `@RequestMapping` is by definition the path, so no key predicate
-; applies — and a *named* non-path argument (`method = RequestMethod.GET`) is an
-; `element_value_pair`, never a direct child here, so it can never be mistaken
-; for a prefix.
-([(class_declaration
-    (modifiers
-      (annotation
-        name: (identifier) @fw.route.prefix.name
-        arguments: (annotation_argument_list
-          [(identifier) (field_access) (binary_expression)] @fw.route.prefix.opaque))))
-  (interface_declaration
-    (modifiers
-      (annotation
-        name: (identifier) @fw.route.prefix.name
-        arguments: (annotation_argument_list
-          [(identifier) (field_access) (binary_expression)] @fw.route.prefix.opaque))))] @fw.route.prefix.scope
-  (#eq? @fw.route.prefix.name "RequestMapping"))
-
-; Named NON-literal prefix: `@RequestMapping(value = BASE)`,
-; `@RequestMapping(path = BASE + "/v1")`. The array form is listed so a
-; part-literal list (`value = {"/a", BASE}`) marks the scope too; the literal
-; pattern above then wins the composition.
-([(class_declaration
-    (modifiers
+((_ (modifiers
       (annotation
         name: (identifier) @fw.route.prefix.name
         arguments: (annotation_argument_list
           (element_value_pair
             key: (identifier) @fw.route.prefix.key
             value: [
-              (identifier)
-              (field_access)
-              (binary_expression)
-              (element_value_array_initializer)
-            ] @fw.route.prefix.opaque)))))
-  (interface_declaration
-    (modifiers
-      (annotation
-        name: (identifier) @fw.route.prefix.name
-        arguments: (annotation_argument_list
-          (element_value_pair
-            key: (identifier) @fw.route.prefix.key
-            value: [
-              (identifier)
-              (field_access)
-              (binary_expression)
-              (element_value_array_initializer)
-            ] @fw.route.prefix.opaque)))))] @fw.route.prefix.scope
+              (expression) @fw.route.prefix.opaque
+              (element_value_array_initializer (expression) @fw.route.prefix.opaque)
+            ]))))
+    body: [(class_body) (interface_body) (enum_body)]) @fw.route.prefix.scope
   (#eq? @fw.route.prefix.name "RequestMapping")
   (#any-of? @fw.route.prefix.key "value" "path"))
 
