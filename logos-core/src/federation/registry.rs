@@ -177,7 +177,27 @@ impl<E: MemberEngine> Residency<E> {
     /// returning the evicted names least-recently-touched **first**.
     ///
     /// Dropping a [`Resident`] drops its engine `Arc` — closing that member's
-    /// connections once no caller still holds it — and stops its watcher.
+    /// connections — and stops its watcher.
+    ///
+    /// A member whose engine **another caller still holds** is skipped, and the
+    /// next-least-recently-touched evicted instead. Evicting it would free
+    /// nothing (its connections stay open for as long as that caller lives) and
+    /// would guarantee the next touch built a *second* engine over the same
+    /// store — two writer actors, two hydration caches, and one of them with no
+    /// watcher. The serve surface makes this concrete: it resolves the default
+    /// member's engine once and holds it for the process lifetime, so on a
+    /// workspace larger than the budget the default is the first member LRU
+    /// would discard. Skipping held members keeps "one live engine per member
+    /// store" true, which is what makes an evicted member's reconstruction
+    /// indistinguishable from a never-evicted one ([FR-DB-01], [NFR-PE-11]).
+    ///
+    /// The cost is that residency can exceed `cap` when callers hold many
+    /// engines at once. That is honest rather than harmful: those connections
+    /// were live either way, and [`live_read_connections`](EngineRegistry::live_read_connections)
+    /// reports the excess instead of hiding it.
+    ///
+    /// [FR-DB-01]: ../../../docs/specs/requirements/FR-DB-01.md
+    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
     fn evict_to(&mut self, cap: usize) -> Vec<String> {
         if self.resident.len() <= cap {
             return Vec::new();
@@ -185,6 +205,7 @@ impl<E: MemberEngine> Residency<E> {
         let mut by_recency: Vec<(String, u64)> = self
             .resident
             .iter()
+            .filter(|(_, resident)| Arc::strong_count(&resident.engine) == 1)
             .map(|(name, resident)| (name.clone(), resident.last_touch))
             .collect();
         by_recency.sort_by_key(|(_, touch)| *touch); // least-recently-touched first
@@ -464,8 +485,13 @@ impl<E: MemberEngine> EngineRegistry<E> {
     }
 
     /// Live read connections held by resident member engines right now — the
-    /// quantity [NFR-PE-11] bounds, and never above
-    /// [`ConnectionBudget::total_read_connections`].
+    /// quantity [NFR-PE-11] bounds.
+    ///
+    /// Normally at or below [`ConnectionBudget::total_read_connections`]. It can
+    /// exceed it when callers hold engines the registry would otherwise have
+    /// evicted, because a held engine is never evicted (see `Residency::evict_to`)
+    /// — and this readout **rises** to say so rather than reporting the budget it
+    /// wishes were true. Compare it against the budget; do not assume it.
     ///
     /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
     pub fn live_read_connections(&self) -> usize {
@@ -672,6 +698,11 @@ mod tests {
         /// High-water mark of `LIVE_CONNECTIONS` — the instrument [NFR-PE-11]'s
         /// ceiling is asserted against.
         static PEAK_CONNECTIONS: Cell<usize> = const { Cell::new(0) };
+        /// Watchers currently running: spawned minus dropped. `WATCHES` counts
+        /// spawns only, so without this no test could tell "64 watchers were
+        /// spawned and 64 stopped" from "64 watchers are still running" — the
+        /// difference between a bounded and an unbounded steady state.
+        static LIVE_WATCHERS: Cell<usize> = const { Cell::new(0) };
     }
 
     fn reset_spies() {
@@ -679,6 +710,7 @@ mod tests {
         WATCHES.with(|c| c.set(0));
         LIVE_CONNECTIONS.with(|c| c.set(0));
         PEAK_CONNECTIONS.with(|c| c.set(0));
+        LIVE_WATCHERS.with(|c| c.set(0));
     }
     fn starts() -> usize {
         STARTS.with(Cell::get)
@@ -688,6 +720,9 @@ mod tests {
     }
     fn peak_connections() -> usize {
         PEAK_CONNECTIONS.with(Cell::get)
+    }
+    fn live_watchers() -> usize {
+        LIVE_WATCHERS.with(Cell::get)
     }
 
     /// A fake member engine that records its root and counts constructions,
@@ -722,7 +757,14 @@ mod tests {
 
         fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
             WATCHES.with(|c| c.set(c.get() + 1));
+            LIVE_WATCHERS.with(|c| c.set(c.get() + 1));
             Ok(SpyWatcher)
+        }
+    }
+
+    impl Drop for SpyWatcher {
+        fn drop(&mut self) {
+            let _ = LIVE_WATCHERS.try_with(|c| c.set(c.get() - 1));
         }
     }
 
@@ -1338,6 +1380,181 @@ mod tests {
                 budget.total_read_connections(),
             );
         }
+    }
+
+    /// An engine a caller still holds is **never** evicted, so no member ever has
+    /// two live engines over one store.
+    ///
+    /// This is the shipped `serve` shape: the web surface resolves the default
+    /// member's engine once and holds it for the process lifetime, so on a
+    /// workspace larger than the budget the default is exactly what LRU would
+    /// discard first — and rebuilding it would give that store a second writer
+    /// actor while the surface kept reading a frozen hydration cache from the
+    /// orphan.
+    #[test]
+    fn a_member_engine_a_caller_still_holds_is_never_evicted() {
+        let budget = stock_macos_budget();
+        let members = budget.max_resident_members() * 4; // far beyond the budget
+        reset_spies();
+        let registry =
+            EngineRegistry::<SpyEngine>::with_budget(big_fed(members), RegistryMode::Lazy, budget);
+
+        // A long-lived caller pins the first member, exactly as the serve
+        // surface pins the workspace default.
+        let pinned = registry.engine_for("m000").unwrap();
+        registry.fan_out(|_, _| ());
+
+        assert!(
+            registry.resident_members().contains(&"m000".to_string()),
+            "the held member was evicted; its next touch would build a second \
+             engine over the same store"
+        );
+        assert_eq!(
+            starts(),
+            members,
+            "exactly one engine per member — a held-then-evicted member would \
+             show up here as an extra start"
+        );
+        assert_eq!(registry.reconstructions(), 0, "nothing was rebuilt");
+        assert!(
+            Arc::ptr_eq(&pinned, &registry.engine_for("m000").unwrap()),
+            "the caller's engine and the registry's must remain the same instance"
+        );
+        // Pinning does not widen the ceiling: the held member occupies one of the
+        // budgeted slots rather than sitting outside them.
+        assert!(registry.resident_count() <= budget.max_resident_members());
+        assert!(peak_connections() <= budget.total_read_connections());
+    }
+
+    /// `live_read_connections` tracks residency rather than reporting the budget
+    /// it wishes were true — asserted with **equalities**, because a readout
+    /// pinned only by `<= budget` would still pass if it always returned zero.
+    #[test]
+    fn live_read_connections_tracks_actual_residency() {
+        let budget = stock_macos_budget();
+        reset_spies();
+        let registry =
+            EngineRegistry::<SpyEngine>::with_budget(big_fed(72), RegistryMode::Lazy, budget);
+
+        assert_eq!(registry.live_read_connections(), 0, "nothing resident yet");
+
+        registry.engine_for("m000").unwrap();
+        assert_eq!(
+            registry.live_read_connections(),
+            budget.per_member_read_connections(),
+            "one resident member reports one member's worth of connections"
+        );
+
+        registry.fan_out(|_, _| ());
+        assert_eq!(
+            registry.live_read_connections(),
+            registry.resident_count() * budget.per_member_read_connections(),
+        );
+        assert_eq!(registry.live_read_connections(), budget.total_read_connections());
+
+        registry.evict_to_capacity(0);
+        assert_eq!(
+            registry.live_read_connections(),
+            0,
+            "evicting everything must be visible in the readout"
+        );
+    }
+
+    /// Eviction stops the evicted member's watcher, so a serve workspace larger
+    /// than the budget ends up watching the resident set — not all N members.
+    ///
+    /// This is the steady-state cost [NFR-PE-10] and [NFR-PE-11] exist to bound,
+    /// and it is only observable by counting watcher *drops* against spawns.
+    #[test]
+    fn a_serve_warm_leaves_one_live_watcher_per_resident_member() {
+        let budget = stock_macos_budget();
+        reset_spies();
+        let registry =
+            EngineRegistry::<SpyEngine>::with_budget(big_fed(72), RegistryMode::Serve, budget);
+
+        assert_eq!(watches(), 72, "watch-on-touch: every member built is watched");
+        assert_eq!(
+            live_watchers(),
+            registry.resident_count(),
+            "a watcher lives exactly as long as its member's residency"
+        );
+        assert!(
+            live_watchers() <= budget.max_resident_members(),
+            "{} watchers still running, over the budgeted {} residents",
+            live_watchers(),
+            budget.max_resident_members(),
+        );
+    }
+
+    /// A member that fails to start under a **binding** budget does not corrupt
+    /// residency accounting: the failure is reported, the healthy members stay
+    /// answerable, and the failed member is not counted as a reconstruction when
+    /// it later succeeds.
+    ///
+    /// The pre-existing degrade tests all run under a roomy budget, where
+    /// admission eviction never fires — so without this the interaction between
+    /// "make room, then start" and a start that fails is untested.
+    #[test]
+    fn a_failing_member_under_a_binding_budget_degrades_without_corrupting_residency() {
+        #[derive(Debug)]
+        struct FlakyEngine {
+            root: PathBuf,
+        }
+        // "b" fails the first time it is asked and succeeds afterwards.
+        thread_local! {
+            static B_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+        }
+        impl MemberEngine for FlakyEngine {
+            type Watcher = ();
+            fn start(root: &Path, _read_connections: usize) -> Result<Arc<Self>> {
+                if root.ends_with("b") {
+                    let attempt = B_ATTEMPTS.with(|c| {
+                        c.set(c.get() + 1);
+                        c.get()
+                    });
+                    if attempt == 1 {
+                        anyhow::bail!("store is briefly unavailable");
+                    }
+                }
+                Ok(Arc::new(FlakyEngine {
+                    root: root.to_path_buf(),
+                }))
+            }
+            fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
+                Ok(())
+            }
+        }
+
+        // A budget that holds only two members, so admission genuinely evicts.
+        let budget = ConnectionBudget::from_limits(78, 12);
+        assert_eq!(budget.max_resident_members(), 2, "the fixture must bind");
+        let registry = EngineRegistry::<FlakyEngine>::with_budget(
+            fed(&["a", "b", "c"]),
+            RegistryMode::Lazy,
+            budget,
+        );
+
+        assert!(registry.engine_for("a").is_ok());
+        assert!(
+            registry.engine_for("b").is_err(),
+            "the first touch of b surfaces the start failure"
+        );
+        assert_eq!(
+            registry.reconstructions(),
+            0,
+            "a failed start is not recorded, so b's later success is a first \
+             construction rather than a phantom reconstruction"
+        );
+        assert!(registry.engine_for("b").is_ok(), "b recovers on its next touch");
+        assert_eq!(registry.reconstructions(), 0);
+        assert!(
+            registry.resident_count() <= budget.max_resident_members(),
+            "a failing member must not push residency over the budget"
+        );
+        // The healthy members still answer.
+        let results = registry.fan_out(|_, engine| engine.root.clone());
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|scoped| scoped.value.is_ok()));
     }
 
     // ── the single-root invariant via Backing (FR-WS-03 / ADR-52) ──────────
