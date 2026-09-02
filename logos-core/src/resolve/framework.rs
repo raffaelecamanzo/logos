@@ -718,8 +718,13 @@ fn refuse(refusals: &mut Vec<RouteRefusal>, seen: &mut HashSet<usize>, route: &R
 /// - an opaque node *containing* a literal means the literal is a fragment of a
 ///   larger expression (`BASE + "/x"`);
 /// - an opaque node *inside* a literal means the literal contains an
-///   unreadable fragment — a Kotlin `"$BASE/v1"` string template, whose
-///   `interpolation` child a query can capture directly.
+///   unreadable fragment — a Kotlin `"${BASE}/v1"` string template, whose
+///   `interpolation` child a query *can* capture directly. No shipped query
+///   does: the brace-less `"$BASE/v1"` spelling has no such node (see
+///   [`is_resolvable_prefix`]), so the Kotlin query leaves both spellings to
+///   the text rule rather than covering one structurally and missing the other.
+///   The mechanism is exercised by the unit tests, which build the capture
+///   shape directly.
 ///
 /// The identity exemption is what lets a query mark the whole path *position*
 /// opaque with a supertype pattern (`(expression) @fw.route.prefix.opaque`)
@@ -808,9 +813,13 @@ fn innermost_prefix(scopes: &[MergedScope], at: usize) -> Option<&MergedScope> {
 /// the opacity rule, for the cases a query *cannot* express because the grammar
 /// models no sub-node to capture — a Java `@RequestMapping("${api.base}")` is
 /// one flat `string_literal`, so only its text reveals the placeholder. Where a
-/// grammar *does* model the fragment (a Kotlin string template's
-/// `interpolation` child) the query marks it `@fw.route.prefix.opaque` and
-/// [`merge_scopes`] disqualifies the literal without any text inspection.
+/// grammar *does* model the fragment — a Kotlin `"${BASE}"` string template has
+/// an `interpolation` child — a query *could* mark it `@fw.route.prefix.opaque`
+/// and let [`merge_scopes`] disqualify the literal without any text inspection.
+/// The Kotlin query deliberately does not: the brace-less `"$BASE"` spelling is
+/// folded into plain `string_content` runs with no node to name, so a structural
+/// capture would refuse one spelling and silently compose a fabricated path from
+/// the other. One text rule covers both (S-330).
 ///
 /// Rejected: an unresolved property placeholder (`${…}`) or SpEL expression
 /// (`#{…}`), whose resolution is explicitly out of scope ([CR-101] §3.3); a

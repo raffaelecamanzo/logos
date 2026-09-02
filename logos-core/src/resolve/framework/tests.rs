@@ -638,15 +638,21 @@ fn scopes_sharing_a_range_are_combined_in_either_order() {
 /// An opaque capture disqualifies the prefix literals it **overlaps**, not the
 /// whole scope — and in both directions. This is the seam that lets a second
 /// grammar refuse its own unreadable syntax with no Rust change (S-330): a
-/// Kotlin `"$BASE/v1"` string template captures its `interpolation` child,
-/// which sits *inside* the literal.
+/// Kotlin `"${BASE}/v1"` string template exposes an `interpolation` child that
+/// sits *inside* the literal, so a query can name it directly.
+///
+/// The literal text here is deliberately one that
+/// [`is_resolvable_prefix`] **accepts**, so the disqualification can only come
+/// from the overlap. It used to read `"$BASE/v1"`, which S-330's template rule
+/// now rejects on its text as well — leaving the test green while no longer
+/// exercising the mechanism it names.
 #[test]
 fn an_opaque_capture_disqualifies_only_the_literals_it_overlaps() {
-    // A fragment INSIDE a literal (Kotlin's `"$BASE/v1"`): the literal spans
-    // 10..20, the interpolation 11..16 — the literal is unreadable.
+    // A fragment INSIDE a literal: the literal spans 10..20, the unreadable
+    // fragment 11..16, so the literal cannot be read as a whole address.
     let mut inside = FileMatches {
         routes: vec![route_at("/users", 50)],
-        prefixes: vec![scope(0, 100, &[("$BASE/v1", 10, 20)], &[(11, 16)])],
+        prefixes: vec![scope(0, 100, &[("/base/v1", 10, 20)], &[(11, 16)])],
         ..FileMatches::default()
     };
     compose_prefixes(&mut inside);
