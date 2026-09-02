@@ -751,6 +751,47 @@ mod tests {
         assert_eq!(cov.members_read, 1);
         assert_eq!(cov.members_total, 2);
         assert!(!cov.covers_all_members);
+        // The same payload consequences as its engine-start sibling above — the
+        // marker is about what CONTRIBUTED, not about why it did not.
+        assert_eq!(
+            cov.no_provider_in_workspace, 1,
+            "the provider was in the member whose surface could not be read"
+        );
+        assert_eq!(cov.bound, 0);
+        assert_eq!(cov.bound_ratio, None);
+    }
+
+    /// **[CR-100]'s shape at its extreme**: no member opens at all, so the
+    /// summary is computed over **zero** members of a non-empty roster.
+    ///
+    /// The partial cases above test 1-of-2. This is the case that generalises the
+    /// observed 9-of-72 all the way down, and it is where an absent ratio and a
+    /// stated shortfall matter most: every count is 0, which is exactly the state
+    /// a fabricated `bound_ratio: 1.0` made look healthy.
+    ///
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    #[test]
+    fn a_workspace_where_no_member_opens_measures_nothing_and_says_so() {
+        reset();
+        set_member("broken", vec![route("GET /users/{id}", "local route_get")]);
+
+        let cov = cross_service_coverage(&registry(&["broken"]));
+
+        assert_eq!(cov.members_read, 0, "not one member contributed");
+        assert_eq!(cov.members_total, 1);
+        assert!(!cov.covers_all_members);
+        assert_eq!(cov.bound, 0);
+        assert_eq!(cov.no_provider_in_workspace, 0, "no consumer was even read");
+        assert!(cov.references.is_empty());
+        assert_eq!(
+            cov.bound_ratio, None,
+            "a summary over zero members measures NOTHING — the 1.0 this replaces \
+             is what made the observed partial workspace look healthy"
+        );
+
+        let value = serde_json::to_value(&cov).unwrap();
+        assert!(value.get("bound_ratio").is_none(), "{value}");
+        assert_eq!(value["covers_all_members"], false);
     }
 
     /// An empty workspace covers all of nothing — `0 == 0` is honestly complete,

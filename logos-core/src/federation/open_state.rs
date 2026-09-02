@@ -42,6 +42,16 @@
 //! `error` field, untouched, so a reader who wants the raw diagnostic always
 //! has it.
 //!
+//! # "Degraded" here is not [ADR-14]'s "degraded"
+//! [`Severity::Degraded`](crate::error::Severity) is an **error-boundary** class
+//! that maps to exit **0** — a fault that must not abort the command. This
+//! module's `degraded` is a **result-level** class that maps to exit **1** via
+//! [FR-CL-03]: the command ran fine, and its answer is incomplete. Two
+//! orthogonal axes that happen to share a word; neither is a special case of the
+//! other.
+//!
+//! [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
+//! [FR-CL-03]: ../../../docs/specs/requirements/FR-CL-03.md
 //! [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
 //! [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
 //! [FR-DB-01]: ../../../docs/specs/requirements/FR-DB-01.md
@@ -72,10 +82,19 @@ pub enum DegradedCause {
     /// (`RLIMIT_NOFILE`). The member's store is present and its graph intact —
     /// the fix is a wider budget or a higher `ulimit -n`, never a re-index.
     HostResourceLimit,
-    /// The member has **no store file** at its canonical path
-    /// (`<root>/.logos/logos.db`): never indexed, removed, or something other
-    /// than a regular file sits there. `logos index` in that member is the fix.
-    StoreUnavailable,
+    /// Something that is **not a regular file** occupies the member's canonical
+    /// store path (`<root>/.logos/logos.db`) — a directory, a socket, a dangling
+    /// symlink. Nothing can open it and no re-index can fix it; the path has to
+    /// be cleared first.
+    ///
+    /// Deliberately **not** used for a merely *absent* store: a member that was
+    /// never indexed opens perfectly well, because
+    /// [`Engine::start`](crate::Engine::start) creates the store on open. An
+    /// absent file at failure time therefore carries no information — it is
+    /// equally consistent with descriptor exhaustion *during creation*, which is
+    /// exactly the failure this vocabulary exists to stop misreporting. That case
+    /// claims no cause at all (see [`classify`]).
+    StoreObstructed,
 }
 
 impl DegradedCause {
@@ -95,20 +114,31 @@ impl DegradedCause {
                  process could not obtain the file descriptors its connections need \
                  (RLIMIT_NOFILE) — raise `ulimit -n`, or query fewer members at once"
             }
-            Self::StoreUnavailable => {
-                "no store at the member's `.logos/logos.db` — run `logos index` in that member"
+            Self::StoreObstructed => {
+                "the member's `.logos/logos.db` path is occupied by something that is not a \
+                 regular file — clear that path, then run `logos index` in that member"
             }
         }
     }
 }
 
-/// Descriptor-exhaustion evidence, in the words the OS uses for it.
+/// Descriptor-exhaustion evidence, in every spelling a layer between the kernel
+/// and here might use.
 ///
 /// `EMFILE` renders as "Too many open files" and `ENFILE` as "Too many open
-/// files in system", so this one prefix covers both, and both are unambiguous.
-/// Matched case-insensitively so a wrapper that re-capitalises the errno text
-/// still classifies.
-const DESCRIPTOR_EXHAUSTION: &str = "too many open files";
+/// files in system", so that one prefix covers both. The bare errno forms are
+/// listed too: a wrapper that reports `io::Error` without its `strerror` text
+/// yields only "os error 24" / "os error 23", and missing the very failure this
+/// vocabulary exists for would leave the operator with no remedy at all. The
+/// closing parenthesis is part of the needle so `os error 24` cannot match
+/// `os error 240`.
+///
+/// Matched case-insensitively, so a wrapper that re-capitalises still classifies.
+const DESCRIPTOR_EXHAUSTION: [&str; 3] = [
+    "too many open files",
+    "os error 24)",
+    "os error 23)",
+];
 
 /// SQLite's `SQLITE_CANTOPEN`, in the two forms `rusqlite` surfaces it.
 ///
@@ -117,17 +147,25 @@ const DESCRIPTOR_EXHAUSTION: &str = "too many open files";
 /// it was is settled by whether the store file exists — see [`classify`].
 const CANNOT_OPEN: [&str; 2] = ["unable to open database file", "error code 14"];
 
-/// Whether the member's store file is where it should be — the fact that
-/// disambiguates SQLite's `CANTOPEN` ([`classify`]).
+/// What is at the member's canonical store path — the fact that disambiguates
+/// SQLite's `CANTOPEN` ([`classify`]).
 ///
 /// A dedicated enum rather than a `bool` so a call site cannot silently swap the
-/// polarity of the one input the classification turns on.
+/// polarity of the one input the classification turns on. **Three** states, not
+/// two, because "no file" and "a file of the wrong kind" license opposite
+/// conclusions: the first is uninformative and the second is decisive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreFile {
-    /// A regular file exists at `<root>/.logos/logos.db`.
+    /// A regular file exists at `<root>/.logos/logos.db`. A `CANTOPEN` over it
+    /// means the *process* was refused, not that the data is missing.
     Present,
-    /// Nothing, or something that is not a regular file, is at that path.
+    /// Nothing at all is at that path. **Uninformative**: the store is created on
+    /// open, so an absent file is equally consistent with a never-indexed member
+    /// and with descriptor exhaustion during creation.
     Absent,
+    /// Something that is not a regular file occupies the path — a directory, a
+    /// socket, a dangling symlink. Decisive, and no re-index can fix it.
+    Obstructed,
 }
 
 /// Classify an open failure from its diagnostic and the store's presence
@@ -137,33 +175,52 @@ pub enum StoreFile {
 /// diagnostic is then the whole of what a reader is told, rather than being
 /// dressed up with a guessed cause ([NFR-CC-04]).
 ///
-/// # The one inference, stated
+/// # The one inference, stated — and the case it deliberately refuses
 /// Descriptor exhaustion in the diagnostic is direct evidence and needs no
-/// inference. `CANTOPEN` over a store that **is** present does: SQLite reports
-/// `CANTOPEN` when the file is absent *or* when the `open(2)` itself was
-/// refused, and a present file rules out the first — so the refusal came from
-/// the process's ability to open a file, which under a workspace is
-/// descriptor-bound ([NFR-PE-11]). The blind spot is a store the process is not
-/// permitted to read, which classifies as [`HostResourceLimit`] too. That is
-/// wrong about *which* host resource, and still right about the thing
-/// [FR-WS-16] is fixing: the store is intact and a re-index is not the remedy.
+/// inference. `CANTOPEN` needs one, because SQLite reports it both when the file
+/// is absent and when the `open(2)` itself was refused. The store path settles
+/// it in two of three states and, crucially, **not** in the third:
+///
+/// - **`Present`** — a regular store file rules out "missing data", so the
+///   refusal came from the process's ability to open a file, which under a
+///   workspace is descriptor-bound ([NFR-PE-11]) ⇒ [`HostResourceLimit`].
+/// - **`Obstructed`** — a non-regular file at the path cannot be opened by
+///   anything ⇒ [`StoreObstructed`], with the remedy being to clear the path.
+/// - **`Absent`** — **no cause is claimed.** The store is *created* on open
+///   ([`Engine::start`](crate::Engine::start)), so a never-indexed member opens
+///   fine; an absent file at failure time means only that the create-open did
+///   not get far enough, which is exactly what descriptor exhaustion looks like.
+///   Reading it as "no store, go re-index" would send an operator whose real
+///   problem is `ulimit -n` to a command that cannot help — the same class of
+///   misdiagnosis [FR-WS-16] exists to remove, merely relocated. The verbatim
+///   diagnostic stands alone instead ([NFR-CC-04]).
+///
+/// The remaining blind spot is a *present* store the process is not permitted to
+/// read, which classifies as [`HostResourceLimit`]. That is wrong about which
+/// host resource and still right about what matters: the store is intact and a
+/// re-index is not the remedy.
 ///
 /// [`HostResourceLimit`]: DegradedCause::HostResourceLimit
+/// [`StoreObstructed`]: DegradedCause::StoreObstructed
 /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
 #[must_use]
 pub fn classify(diagnostic: &str, store: StoreFile) -> Option<DegradedCause> {
     let lower = diagnostic.to_ascii_lowercase();
+    let names = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
 
-    if lower.contains(DESCRIPTOR_EXHAUSTION) {
+    if names(&DESCRIPTOR_EXHAUSTION) {
         return Some(DegradedCause::HostResourceLimit);
     }
-    if CANNOT_OPEN.iter().any(|needle| lower.contains(needle)) {
-        return Some(match store {
-            StoreFile::Present => DegradedCause::HostResourceLimit,
-            StoreFile::Absent => DegradedCause::StoreUnavailable,
-        });
+    if names(&CANNOT_OPEN) {
+        return match store {
+            StoreFile::Present => Some(DegradedCause::HostResourceLimit),
+            StoreFile::Obstructed => Some(DegradedCause::StoreObstructed),
+            // Uninformative — see the doc above. Claiming nothing is the honest
+            // answer, and the verbatim diagnostic is what the reader gets.
+            StoreFile::Absent => None,
+        };
     }
     None
 }
@@ -200,17 +257,39 @@ pub enum MemberOpenState {
         #[serde(skip_serializing_if = "Option::is_none")]
         degraded_cause: Option<DegradedCause>,
         /// The cause's plain-language statement, or the verbatim diagnostic when
-        /// no cause was identified.
+        /// no cause was identified — what to *tell* the operator.
         ///
         /// Additive to — never a replacement for — the row's existing `error`
         /// field, which keeps the raw engine diagnostic exactly as it was.
         degraded_reason: String,
+        /// The verbatim engine diagnostic, **always**.
+        ///
+        /// Carried here rather than left to the row's `error` field because
+        /// `error` does not always hold it. Two reachable cases:
+        ///
+        /// - a member that **opened** for the freshness walk and failed on a
+        ///   later one has `result: {…}` and `error: null`, so a classified
+        ///   `degraded_reason` would be the only text and the raw diagnostic
+        ///   would exist nowhere in the payload;
+        /// - `workspace reachability` and `workspace check` have no member table
+        ///   at all, so this is the only structured place their degraded members'
+        ///   diagnostics can live.
+        ///
+        /// Classifying a cause must never *destroy* evidence — the sentence is a
+        /// reading of the diagnostic, not a replacement for it ([NFR-CC-04]).
+        degraded_diagnostic: String,
     },
 }
 
 impl MemberOpenState {
     /// The degraded state for a failed open, classifying `diagnostic` against
-    /// the store's presence ([FR-WS-16]).
+    /// what is at the store path ([FR-WS-16]).
+    ///
+    /// The verbatim `diagnostic` is retained whether or not a cause is
+    /// identified: the classified sentence is a *reading* of it, never a
+    /// substitute ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     #[must_use]
     pub fn degraded(diagnostic: &str, store: StoreFile) -> Self {
         let cause = classify(diagnostic, store);
@@ -218,6 +297,25 @@ impl MemberOpenState {
             degraded_cause: cause,
             degraded_reason: cause
                 .map_or_else(|| diagnostic.to_string(), |cause| cause.message().to_string()),
+            degraded_diagnostic: diagnostic.to_string(),
+        }
+    }
+
+    /// The reason to show an operator, when this member failed to open.
+    ///
+    /// The renderer [`DegradedRollup::notice`] uses so the stderr diagnostic can
+    /// state each member's cause — the only degraded channel `workspace check`
+    /// and `workspace reachability` have, since neither payload carries a member
+    /// table ([FR-WS-16]).
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    #[must_use]
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Degraded {
+                degraded_reason, ..
+            } => Some(degraded_reason),
+            _ => None,
         }
     }
 
@@ -269,48 +367,90 @@ pub struct DegradedRollup {
     pub not_attempted: usize,
     /// Members attempted and failed, **named**, in roster order ([FR-WS-16]).
     ///
-    /// Names only. The per-member cause and the verbatim `error` stay on the
-    /// member table's own rows, so this is a roll-up and not a second table.
+    /// Names only. The per-member cause, reason and verbatim diagnostic stay on
+    /// the member table's own rows, so this is a roll-up and not a second table.
     ///
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     pub degraded_members: Vec<String>,
     /// Whether every member in the roster was opened.
     ///
-    /// `false` marks **every** figure computed beside this roll-up — the warm
-    /// roll-up, the coverage summary, the topic inventory — as covering fewer
-    /// than all members, so a partial answer never reads as a complete one
+    /// `false` marks the figures derived from the **member rows** — those rows
+    /// themselves and the warm roll-up folded from them — as covering fewer than
+    /// all members, so a partial answer never reads as a complete one
     /// ([NFR-CC-04]).
     ///
+    /// It is **not** the whole payload's completeness marker. A read-model
+    /// computed from its own separate walk carries its own — see
+    /// `CrossServiceCoverage::covers_all_members`, which is also `false` when a
+    /// member *opened fine* and its contract-surface read failed. That is not an
+    /// open failure, so it moves neither this marker nor
+    /// [`all_opened`](Self::all_opened); a consumer must read the marker
+    /// belonging to the figure it is rendering.
+    ///
+    /// Distinct from [`all_opened`](Self::all_opened): this is `false` for a
+    /// member laziness never *attempted* too, which is a coverage fact and not a
+    /// failure — which is precisely why the exit code is derived from
+    /// `all_opened` and not from here ([BR-45]).
+    ///
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [BR-45]: ../../../docs/specs/software-spec.md#327-workspace-federation
     pub covers_all_members: bool,
 }
 
 impl DegradedRollup {
-    /// The human diagnostic naming the degraded members and their causes, or
+    /// Whether every member the workspace declares was opened — the predicate the
+    /// **exit code** is derived from ([FR-WS-16], [FR-CL-03]).
+    ///
+    /// Deliberately not [`covers_all_members`](Self::covers_all_members), which
+    /// is also `false` for a member laziness never *attempted*: that is a
+    /// coverage fact, not a failure, and gating the exit code on it would fail a
+    /// perfectly healthy scoped command ([BR-45]). The two differ exactly in that
+    /// case, which is why the choice between them lives here in the core beside
+    /// the doc that explains it, rather than in a CLI adapter picking one of two
+    /// adjacent fields ([ADR-01]).
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [FR-CL-03]: ../../../docs/specs/requirements/FR-CL-03.md
+    /// [BR-45]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
+    #[must_use]
+    pub const fn all_opened(&self) -> bool {
+        self.degraded_members.is_empty()
+    }
+
+    /// The human diagnostic naming each degraded member **and its cause**, or
     /// `None` when nothing degraded ([FR-WS-16]).
     ///
-    /// Rendered from the roll-up rather than from the payload so every workspace
-    /// command can name its degraded members on stderr, including the ones whose
-    /// read-model has no member table to fold into (`workspace check` serialises
-    /// a bare `Option`, and wrapping it would destroy the honest-`null` contract
-    /// [NFR-CC-04] gave it).
+    /// Takes the rows rather than reading the roll-up's names, because the cause
+    /// lives on the row. That matters most where there is nothing else: this is
+    /// the **only** degraded channel `workspace check` and `workspace
+    /// reachability` have — neither payload carries a member table (`check`
+    /// serialises a bare `Option`, and wrapping it would destroy the
+    /// honest-`null` contract [NFR-CC-04] gave it). Naming members without their
+    /// cause would leave those two commands exiting 1 with no diagnosis, which is
+    /// the misdiagnosis [FR-WS-16] exists to remove, merely made silent.
     ///
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     #[must_use]
-    pub fn notice(&self) -> Option<String> {
+    pub fn notice<'a>(&self, opens: impl IntoIterator<Item = &'a MemberOpen>) -> Option<String> {
         if self.degraded_members.is_empty() {
             return None;
         }
-        Some(format!(
+        let mut lines = format!(
             "warning: {} of {} workspace members could not be opened and are reported \
-             degraded: {}. Every figure in this answer covers only the {} members that \
-             opened (FR-WS-16).",
+             degraded. Every figure in this answer covers only the {} that opened \
+             (FR-WS-16).",
             self.degraded_members.len(),
             self.members,
-            self.degraded_members.join(", "),
             self.opened,
-        ))
+        );
+        for open in opens {
+            if let Some(reason) = open.state.reason() {
+                lines.push_str(&format!("\n  {}: {reason}", open.member));
+            }
+        }
+        Some(lines)
     }
 }
 
@@ -377,12 +517,12 @@ mod tests {
         }
     }
 
-    /// The whole classification as a table: diagnostic × store presence →
-    /// cause. A table because the *precedence* between the two inputs is the
-    /// rule under test — direct descriptor evidence must outrank the
-    /// store-presence inference.
+    /// The whole classification as a table: diagnostic × store path → cause. A
+    /// table because the *precedence* between the two inputs is the rule under
+    /// test — direct descriptor evidence must outrank whatever the store path
+    /// says, and an **absent** store must claim nothing at all.
     #[test]
-    fn the_cause_follows_descriptor_evidence_then_store_presence() {
+    fn the_cause_follows_descriptor_evidence_then_the_store_path() {
         for (case, diagnostic, store, expected) in [
             // Direct evidence: unambiguous, whatever the store looks like.
             (
@@ -411,16 +551,55 @@ mod tests {
                 Some(DegradedCause::HostResourceLimit),
             ),
             (
-                "cantopen over an absent store",
+                "cantopen over an OBSTRUCTED store path",
                 OBSERVED,
-                StoreFile::Absent,
-                Some(DegradedCause::StoreUnavailable),
+                StoreFile::Obstructed,
+                Some(DegradedCause::StoreObstructed),
             ),
             (
-                "cantopen by SQLite's own wording only",
+                "cantopen by SQLite's own wording only, path obstructed",
+                "applying the read-only connection contract: unable to open database file",
+                StoreFile::Obstructed,
+                Some(DegradedCause::StoreObstructed),
+            ),
+            // **The regression this arm exists for.** An absent store file is
+            // NOT evidence of a missing store: the store is created on open, so
+            // a never-indexed member opens fine and an absent file at failure
+            // time is equally consistent with descriptor exhaustion partway
+            // through creating it. Claiming `store-obstructed` here would send an
+            // operator whose real problem is `ulimit -n` to a `logos index` that
+            // cannot help — the same misdiagnosis FR-WS-16 removes, relocated.
+            (
+                "cantopen over an ABSENT store claims nothing",
+                OBSERVED,
+                StoreFile::Absent,
+                None,
+            ),
+            (
+                "cantopen by SQLite's wording only, store absent",
                 "applying the read-only connection contract: unable to open database file",
                 StoreFile::Absent,
-                Some(DegradedCause::StoreUnavailable),
+                None,
+            ),
+            // The errno-only rendering: a layer that drops `strerror` still
+            // classifies, so the fd failure never loses its remedy.
+            (
+                "errno-only EMFILE, store absent",
+                "opening read-only pool connection 3/12: os error 24)",
+                StoreFile::Absent,
+                Some(DegradedCause::HostResourceLimit),
+            ),
+            (
+                "errno-only ENFILE",
+                "opening the writer store: os error 23)",
+                StoreFile::Obstructed,
+                Some(DegradedCause::HostResourceLimit),
+            ),
+            (
+                "a nearby errno is not descriptor exhaustion",
+                "opening the writer store: permission denied (os error 240)",
+                StoreFile::Present,
+                None,
             ),
             // No evidence at all: no cause is claimed (NFR-CC-04).
             (
@@ -453,12 +632,19 @@ mod tests {
         let MemberOpenState::Degraded {
             degraded_cause,
             degraded_reason,
+            degraded_diagnostic,
         } = &state
         else {
             panic!("a failed open is degraded: {state:?}");
         };
 
         assert_eq!(*degraded_cause, Some(DegradedCause::HostResourceLimit));
+        // Classifying a cause must not DESTROY the evidence it read: the
+        // verbatim diagnostic is retained beside the sentence ([NFR-CC-04]).
+        assert_eq!(
+            degraded_diagnostic, OBSERVED,
+            "the raw diagnostic survives classification"
+        );
         assert!(
             degraded_reason.contains("host resource limit")
                 && degraded_reason.contains("not a damaged store"),
@@ -486,12 +672,14 @@ mod tests {
         let MemberOpenState::Degraded {
             degraded_cause,
             degraded_reason,
+            degraded_diagnostic,
         } = &state
         else {
             panic!("a failed open is degraded: {state:?}");
         };
         assert_eq!(*degraded_cause, None, "no cause is invented");
         assert_eq!(degraded_reason, raw, "the diagnostic stands as it is");
+        assert_eq!(degraded_diagnostic, raw, "and is carried on its own key too");
 
         let value = serde_json::to_value(&state).unwrap();
         assert!(
@@ -545,12 +733,13 @@ mod tests {
     /// the case that must keep exiting 0 ([FR-WS-16] AC1).
     #[test]
     fn a_fully_opened_workspace_covers_all_members_and_says_nothing() {
-        let rollup = rollup(&[opened("api"), opened("web")]);
+        let rows = vec![opened("api"), opened("web")];
+        let rollup = rollup(&rows);
 
         assert_eq!(rollup.opened, 2);
         assert!(rollup.degraded_members.is_empty());
         assert!(rollup.covers_all_members);
-        assert_eq!(rollup.notice(), None, "nothing to warn about");
+        assert_eq!(rollup.notice(&rows), None, "nothing to warn about");
     }
 
     /// A workspace whose members were merely never **attempted** is not
@@ -558,10 +747,16 @@ mod tests {
     /// exit code is untouched ([BR-45], [NFR-PE-10]).
     #[test]
     fn an_unattempted_workspace_is_partial_but_never_degraded() {
-        let rollup = rollup(&[opened("api"), not_attempted("web"), not_attempted("svc")]);
+        let rows = vec![opened("api"), not_attempted("web"), not_attempted("svc")];
+        let rollup = rollup(&rows);
 
         assert!(rollup.degraded_members.is_empty(), "laziness names nobody");
-        assert_eq!(rollup.notice(), None, "and warns about nobody");
+        assert_eq!(rollup.notice(&rows), None, "and warns about nobody");
+        assert!(
+            rollup.all_opened(),
+            "and `all_opened` — the exit-code predicate — is TRUE, unlike \
+             `covers_all_members`: laziness must never fail a healthy command (BR-45)"
+        );
         assert!(
             !rollup.covers_all_members,
             "the figures still cover only 1 of 3 members"
@@ -575,26 +770,44 @@ mod tests {
 
         assert_eq!(rollup.members, 0);
         assert!(rollup.covers_all_members, "0 of 0 is covered");
-        assert_eq!(rollup.notice(), None);
+        assert!(rollup.all_opened());
+        assert_eq!(rollup.notice(std::iter::empty()), None);
     }
 
-    /// The human notice names **every** degraded member and the coverage
-    /// shortfall — an exit code with no named member is what [FR-WS-16] is
-    /// replacing.
+    /// The human notice names **every** degraded member, **its cause**, and the
+    /// coverage shortfall — an exit code with no named member is what
+    /// [FR-WS-16] is replacing, and a named member with no cause is what it is
+    /// replacing for `workspace check` and `workspace reachability`, whose
+    /// payloads carry no member table at all.
     #[test]
-    fn the_notice_names_every_degraded_member_and_the_shortfall() {
+    fn the_notice_names_every_degraded_member_with_its_cause_and_the_shortfall() {
         let rows = vec![
             opened("api"),
             degraded("web", OBSERVED, StoreFile::Present),
-            degraded("svc", OBSERVED, StoreFile::Present),
+            degraded("svc", "database disk image is malformed", StoreFile::Present),
         ];
-        let notice = rollup(&rows).notice().expect("two members degraded");
+        let notice = rollup(&rows).notice(&rows).expect("two members degraded");
 
         assert!(notice.contains("web") && notice.contains("svc"), "{notice}");
         assert!(notice.contains("2 of 3"), "{notice}");
         assert!(
-            notice.contains("only the 1 members that opened"),
-            "the notice states the reduced coverage: {notice}"
+            notice.contains("only the 1 that opened"),
+            "the notice states the reduced coverage, grammatically: {notice}"
+        );
+        // Each member's own reason rides its own line — the classified sentence
+        // for the one that classified, the verbatim diagnostic for the one that
+        // did not.
+        assert!(
+            notice.contains("web: a host resource limit"),
+            "the classified cause reaches the human channel: {notice}"
+        );
+        assert!(
+            notice.contains("svc: database disk image is malformed"),
+            "and an unclassified failure carries its diagnostic there: {notice}"
+        );
+        assert!(
+            !notice.contains("api"),
+            "a healthy member is not named: {notice}"
         );
     }
 
@@ -623,5 +836,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every [`DegradedCause`]'s **serialized value**, pinned against literals.
+    ///
+    /// The SPA declares these as a closed union (`DegradedCause` in
+    /// `web/ui/src/api/types.ts`), and nothing else in Rust asserts the wire
+    /// spelling: dropping the `rename_all` attribute would emit
+    /// `"HostResourceLimit"`, leave every Rust test green, and silently break
+    /// that union. A hand-maintained cross-language contract needs pinning on
+    /// the side that produces it.
+    #[test]
+    fn every_degraded_cause_has_a_stable_kebab_case_wire_value() {
+        for (cause, wire) in [
+            (DegradedCause::HostResourceLimit, "host-resource-limit"),
+            (DegradedCause::StoreObstructed, "store-obstructed"),
+        ] {
+            assert_eq!(serde_json::to_value(cause).unwrap(), wire);
+        }
+
+        // And it reaches the member row under the `degraded_cause` key, not just
+        // as a bare enum.
+        let obstructed = MemberOpenState::degraded(OBSERVED, StoreFile::Obstructed);
+        let value = serde_json::to_value(&obstructed).unwrap();
+        assert_eq!(value["degraded_cause"], "store-obstructed", "{value}");
+        assert_eq!(
+            value["degraded_diagnostic"], OBSERVED,
+            "the verbatim diagnostic rides its own key: {value}"
+        );
+    }
+
+    /// [FR-WS-16] AC3, the arm the whole story is *for*: a store path occupied by
+    /// something that is not a regular file names that fact and its real remedy —
+    /// and a *never-indexed* member under the same diagnostic claims **no** cause
+    /// at all rather than the re-index that cannot help it.
+    #[test]
+    fn an_obstructed_path_states_its_remedy_and_an_absent_store_claims_nothing() {
+        let obstructed = MemberOpenState::degraded(OBSERVED, StoreFile::Obstructed);
+        let reason = obstructed.reason().expect("a degraded member has a reason");
+        assert!(
+            reason.contains("not a") && reason.contains("regular file"),
+            "the reason states what is actually wrong: {reason}"
+        );
+        assert!(
+            reason.contains("clear that path") && reason.contains("logos index"),
+            "and the remedy is clear-then-reindex, not reindex alone: {reason}"
+        );
+
+        // The absent case: no cause, and specifically NOT the obstructed remedy.
+        let absent = MemberOpenState::degraded(OBSERVED, StoreFile::Absent);
+        let value = serde_json::to_value(&absent).unwrap();
+        assert!(
+            value.get("degraded_cause").is_none(),
+            "an absent store licenses no cause: {value}"
+        );
+        assert_eq!(
+            absent.reason(),
+            Some(OBSERVED),
+            "the verbatim diagnostic is what the operator gets"
+        );
+        assert!(
+            !absent.reason().unwrap().contains("logos index"),
+            "and it must NOT send an fd-exhausted operator to a re-index"
+        );
     }
 }

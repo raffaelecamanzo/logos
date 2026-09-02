@@ -39,7 +39,7 @@ use crate::Engine;
 
 use super::bridge::BridgeEdge;
 use super::coverage::{cross_service_coverage, CrossServiceCoverage};
-use super::degraded::{self, DegradedRollup, MemberOpen, MemberOpenState};
+use super::open_state::{self, DegradedRollup, MemberOpenState};
 use super::registry::{EngineRegistry, MemberScoped};
 use super::topics::{workspace_topics, MemberTopics};
 use super::warm_state::{self, MemberWarmState, WarmEvidence, WarmRollup};
@@ -327,7 +327,7 @@ pub fn xservice_route_providers(
 ///
 /// # Two axes, not one merged label
 /// `warm_state` is about **index presence** and `open_state` about **store
-/// openability** (see [`super::degraded`]) — different questions, kept as
+/// openability** (see [`super::open_state`]) — different questions, kept as
 /// different keys so neither can be read as the other. A member that could not
 /// be opened reads `degraded` on both, which is two independent derivations
 /// agreeing, not one value duplicated.
@@ -424,11 +424,19 @@ pub struct WorkspaceStatus {
     /// [`members`](Self::members) ([FR-WS-16]).
     ///
     /// The second projection of one member table, not a second table: it names
-    /// the members whose store could not be opened, and its
-    /// [`covers_all_members`](DegradedRollup::covers_all_members) marks every
-    /// other figure in this payload — the warm roll-up, the coverage summary,
-    /// the topic inventory — as computed over fewer than all members
-    /// ([NFR-CC-04]).
+    /// the members whose store could not be opened.
+    ///
+    /// # Two markers, each governing its own scope ([NFR-CC-04])
+    /// [`covers_all_members`](DegradedRollup::covers_all_members) is about the
+    /// **open** axis: it is `false` when a member was not opened, so the rows
+    /// beside it (and the warm roll-up folded from them) describe fewer than all
+    /// members. It does **not** govern [`coverage`](Self::coverage), which has
+    /// its own [`covers_all_members`](CrossServiceCoverage::covers_all_members)
+    /// computed from a different walk — a member can open perfectly well and
+    /// still fail its *contract-surface* read, which reduces the coverage figures
+    /// while leaving nothing degraded. The two can therefore legitimately
+    /// disagree, and a consumer rendering any figure must read the marker that
+    /// belongs to it rather than assuming one implies the other.
     ///
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
@@ -527,22 +535,25 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
     // as a whole, which is the claim the exit code and the coverage marker rest
     // on ([FR-WS-16]).
     let opens = registry.open_states();
-    let degraded_rollup = degraded::rollup(&opens);
-    let mut by_member: std::collections::BTreeMap<String, MemberOpenState> = opens
-        .into_iter()
-        .map(|MemberOpen { member, state }| (member, state))
-        .collect();
+    let degraded_rollup = open_state::rollup(&opens);
 
+    // `zip`, not a name-keyed join: `fan_status` and `open_states` are two
+    // projections of the SAME list — both map over `federation.members` in
+    // manifest order, one row per roster member — so they are aligned by
+    // construction. A join would allocate a map, clone N keys, and need a
+    // fallback arm for a mismatch that cannot happen; worse, that arm would
+    // silently relabel a healthy member `not-attempted` if the invariant ever
+    // broke. The `debug_assert` makes a future divergence a dev-build panic
+    // instead of quietly wrong data.
     let members: Vec<MemberStatus> = freshness
         .into_iter()
-        .map(|status| {
-            // A roster member always has a ledger entry; `NotAttempted` is the
-            // honest fallback for a row whose member the roster does not carry
-            // (an unknown `--repo`), which never reaches this read-model.
-            let open = by_member
-                .remove(&status.member)
-                .unwrap_or(MemberOpenState::NotAttempted);
-            MemberStatus::labelled(status, &evidence, open)
+        .zip(opens)
+        .map(|(status, open)| {
+            debug_assert_eq!(
+                status.member, open.member,
+                "one roster order, two projections of it"
+            );
+            MemberStatus::labelled(status, &evidence, open.state)
         })
         .collect();
 
@@ -673,7 +684,7 @@ mod tests {
     /// diagnostic that classifies to no cause (so the row's `degraded_reason` is
     /// the verbatim text and the key set stays minimal).
     fn unopened(diagnostic: &str) -> MemberOpenState {
-        MemberOpenState::degraded(diagnostic, super::degraded::StoreFile::Present)
+        MemberOpenState::degraded(diagnostic, super::open_state::StoreFile::Present)
     }
 
     /// The freshness row and the warm label serialise into **one flat member
@@ -730,6 +741,7 @@ mod tests {
         assert_eq!(
             keys(&degraded),
             [
+                "degraded_diagnostic",
                 "degraded_reason",
                 "error",
                 "member",
@@ -738,7 +750,8 @@ mod tests {
                 "warm_state"
             ],
             "a degraded row: no `result`, and `error`/`reason`/`degraded_reason` all \
-             survive the triple flatten as three separate facts"
+             survive the triple flatten as three separate facts, with the verbatim \
+             diagnostic on a fourth"
         );
 
         // A classified cause adds exactly one more key — and only when there IS
@@ -749,13 +762,14 @@ mod tests {
             &WarmEvidence::none(),
             MemberOpenState::degraded(
                 "unable to open database file",
-                super::degraded::StoreFile::Present,
+                super::open_state::StoreFile::Present,
             ),
         );
         assert_eq!(
             keys(&host_limited),
             [
                 "degraded_cause",
+                "degraded_diagnostic",
                 "degraded_reason",
                 "error",
                 "member",

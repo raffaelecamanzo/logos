@@ -46,7 +46,7 @@
 //!   Pure derivation over what a status walk already gathered, with `warming`
 //!   and warm-failure taken as explicit inputs so neither is ever inferred
 //!   ([FR-WS-15], [NFR-CC-04], [BR-44]).
-//! - the [`degraded`] open-state axis — whether each member's store was
+//! - the [`open_state`] axis — whether each member's store was
 //!   **opened**, which is a different question from whether it holds an index.
 //!   A member attempted-and-failed is named, given a host-resource cause where
 //!   the evidence identifies one, and forces a non-zero exit; a member merely
@@ -88,10 +88,10 @@ pub mod bridge;
 pub mod broker;
 pub mod budget;
 pub mod coverage;
-pub mod degraded;
 pub mod enable;
 pub mod governance;
 pub mod manifest;
+pub mod open_state;
 pub mod query;
 pub mod reach;
 pub mod registry;
@@ -128,7 +128,7 @@ pub use query::{
     XserviceImpact, XserviceRouteProviders, XserviceSearch,
 };
 pub use budget::ConnectionBudget;
-pub use degraded::{DegradedCause, DegradedRollup, MemberOpen, MemberOpenState, StoreFile};
+pub use open_state::{DegradedCause, DegradedRollup, MemberOpen, MemberOpenState, StoreFile};
 pub use registry::{Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode};
 pub use topics::{workspace_topics, MemberTopics, TopicSummary};
 pub use warm_state::{MemberWarmState, WarmEvidence, WarmRollup};

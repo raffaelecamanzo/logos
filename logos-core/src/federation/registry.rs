@@ -101,7 +101,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use anyhow::{Context, Result};
 
 use super::budget::ConnectionBudget;
-use super::degraded::{MemberOpen, MemberOpenState, StoreFile};
+use super::open_state::{MemberOpen, MemberOpenState, StoreFile};
 use super::{Federation, Member};
 use crate::{Engine, SharedWorkerPool, WeakWorkerPool};
 
@@ -310,18 +310,28 @@ impl Admission {
     }
 }
 
-/// Whether a member root holds a store **file** at the canonical
-/// `<root>/.logos/logos.db` — the one fact that disambiguates SQLite's
-/// `CANTOPEN` ([`super::degraded::classify`]).
+/// What is at a member's canonical store path `<root>/.logos/logos.db` — the one
+/// fact that disambiguates SQLite's `CANTOPEN`
+/// ([`super::open_state::classify`]).
 ///
-/// `is_file`, not `exists`: a directory (or anything else) at the store path is
-/// not a store, and treating it as a present one would misreport a broken member
-/// as a host resource limit.
+/// Three states, not two. `exists()` alone would conflate "nothing here" with "a
+/// directory here", which license opposite conclusions: a *non-regular* file is
+/// decisive (nothing can open it), while *nothing at all* is uninformative,
+/// because [`Engine::start`](crate::Engine::start) creates the store on open —
+/// so an absent file is equally consistent with a never-indexed member and with
+/// descriptor exhaustion partway through creating it.
+///
+/// `symlink_metadata` is deliberately **not** used: a symlink to a real store is
+/// a store, and `metadata` follows it. A dangling symlink resolves to `Err`,
+/// which lands in `Obstructed` — correct, since nothing can open that either.
 fn store_file(root: &Path) -> StoreFile {
-    if root.join(".logos").join("logos.db").is_file() {
-        StoreFile::Present
-    } else {
-        StoreFile::Absent
+    match root.join(".logos").join("logos.db").metadata() {
+        Ok(meta) if meta.is_file() => StoreFile::Present,
+        Ok(_) => StoreFile::Obstructed,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => StoreFile::Absent,
+        // Anything else (a dangling symlink, a permission-denied stat) is a path
+        // that cannot be opened as a store, whatever occupies it.
+        Err(_) => StoreFile::Obstructed,
     }
 }
 
@@ -1475,7 +1485,7 @@ mod tests {
             states.iter().all(|open| open.state == MemberOpenState::Opened),
             "eviction reclaims a SUCCESS — it is not a failure to report: {states:?}"
         );
-        let rollup = super::super::degraded::rollup(&states);
+        let rollup = super::super::open_state::rollup(&states);
         assert!(
             rollup.degraded_members.is_empty(),
             "an evicted workspace names nobody degraded: {rollup:?}"
@@ -1546,7 +1556,7 @@ mod tests {
             "nothing was attempted, so nothing failed"
         );
 
-        let rollup = super::super::degraded::rollup(&states);
+        let rollup = super::super::open_state::rollup(&states);
         assert!(
             rollup.degraded_members.is_empty(),
             "laziness names nobody degraded: {rollup:?}"
@@ -1583,7 +1593,7 @@ mod tests {
             "both members were attempted and failed: {states:?}"
         );
 
-        let rollup = super::super::degraded::rollup(&states);
+        let rollup = super::super::open_state::rollup(&states);
         assert_eq!(
             rollup.degraded_members,
             ["a", "b"],
@@ -1591,9 +1601,22 @@ mod tests {
         );
         assert_eq!(rollup.opened, 0);
         assert!(!rollup.covers_all_members);
+        let notice = rollup.notice(&states).expect("two members degraded");
         assert!(
-            rollup.notice().is_some_and(|n| n.contains("a") && n.contains("b")),
-            "the human notice names them"
+            notice.contains("a:") && notice.contains("b:"),
+            "the human notice names them, each with its own reason line: {notice}"
+        );
+        // The fixture's member roots do not exist, so the store path is ABSENT and
+        // the classification correctly claims no cause — the verbatim CR-100
+        // diagnostic is what reaches the operator, never a `logos index` that
+        // could not help an fd-exhausted member.
+        assert!(
+            notice.contains("unable to open database file"),
+            "the verbatim diagnostic survives to the human channel: {notice}"
+        );
+        assert!(
+            !notice.contains("logos index"),
+            "and no re-index remedy is invented from an absent store: {notice}"
         );
     }
 

@@ -17,7 +17,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use logos_core::federation::{
-    app_wide_reachability, degraded, discover, query, workspace_governance, ContractBridge,
+    app_wide_reachability, discover, open_state, query, workspace_governance, ContractBridge,
     EngineRegistry, ReachabilityScope, RegistryMode,
 };
 use logos_core::{model::NodeKind, Engine};
@@ -209,7 +209,7 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
 ///
 /// A member merely skipped by laziness, or reclaimed by the budget's eviction,
 /// is **not** degraded and does not move the exit code — the discrimination
-/// lives in [`logos_core::federation::degraded`], not here ([BR-45]).
+/// lives in [`logos_core::federation::open_state`], not here ([BR-45]).
 ///
 /// # The notice goes to stderr
 /// So `--json` stdout stays machine-clean ([FR-CL-02]), and so *every*
@@ -245,9 +245,10 @@ pub(crate) fn run_workspace(command: WorkspaceCommands, root: &Path, out: &Outpu
     // registry's open-state ledger is complete only once the command's own
     // walks have run, and `workspace status` walks every member four times
     // through tiers with no per-member error channel of their own.
-    let degraded = degraded::rollup(&registry.open_states());
-    if let Some(notice) = degraded.notice().filter(|_| !out.quiet) {
+    let opens = registry.open_states();
+    let degraded = open_state::rollup(&opens);
+    if let Some(notice) = degraded.notice(&opens).filter(|_| !out.quiet) {
         eprintln!("{notice}");
     }
-    Ok(crate::violation_code(degraded.degraded_members.is_empty()))
+    Ok(crate::violation_code(degraded.all_opened()))
 }
