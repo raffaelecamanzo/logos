@@ -147,18 +147,26 @@ struct PathOrigin {
 /// Why a matched route registration was refused rather than promoted
 /// ([FR-FW-05], [NFR-RA-05]).
 ///
-/// Maps onto a federation coverage
-/// [`UnboundReason`](crate::federation::UnboundReason) in
-/// [`crate::federation::coverage`], exactly as
-/// [`ClientCallRefusal`](crate::resolve::http_client_call::ClientCallRefusal)
-/// does for the outbound arm: the classification stays in the resolver layer
-/// and the federation layer owns the reported vocabulary, so "why did this not
-/// bind" is one word wherever it is read.
+/// Crate-internal, like the `ClientCallRefusal` of
+/// [`http_client_call`](super::http_client_call) it mirrors: the classification
+/// stays in the resolver layer and the federation layer owns the *reported*
+/// vocabulary, so "why did this not bind" is one word wherever it is read. The
+/// mapping onto a federation coverage
+/// [`UnboundReason`](crate::federation::UnboundReason) lives in
+/// [`crate::federation::coverage`].
+///
+/// That mapping aligns the vocabulary; it is not itself a report. A refused
+/// registration promotes no node, so nothing reaches the cross-service
+/// read-model to be labelled — surfacing the refusal there needs a
+/// refusal-carrying ledger trace this pass does not persist. What this pass
+/// does surface is the per-run count,
+/// [`FrameworkStats::routes_not_composed`](crate::models::pipeline::FrameworkStats::routes_not_composed),
+/// which rides `IndexResult` into `logos index --json`.
 ///
 /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouteRefusal {
+pub(crate) enum RouteRefusal {
     /// A class- or interface-level path prefix governs the registration but is
     /// not a resolvable literal — a constant reference, a property
     /// placeholder, a concatenation. The handler's real address is
@@ -173,26 +181,58 @@ pub enum RouteRefusal {
     PathNotComposed,
 }
 
+/// One prefix literal a declaration wrote, with the byte range it occupies —
+/// the range is what lets an `@fw.route.prefix.opaque` capture disqualify
+/// *this* literal rather than the whole scope (see [`merge_scopes`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrefixLiteral {
+    /// The unquoted, trimmed literal text.
+    text: String,
+    start: usize,
+    end: usize,
+    /// `false` when the text is not a joinable address even though the grammar
+    /// calls it a literal — see [`is_resolvable_prefix`].
+    resolvable: bool,
+}
+
 /// A class- or interface-level path prefix and the source range it governs
-/// ([FR-FW-05], S-329).
+/// ([FR-FW-05], S-329), exactly as one query match declared it.
 ///
-/// Declared by a query through `@fw.route.prefix` / `@fw.route.prefix.scope` /
+/// Declared through `@fw.route.prefix` / `@fw.route.prefix.scope` /
 /// `@fw.route.prefix.opaque` and interpreted here, so composition is written
 /// once for every prefixing framework rather than per language (the seam
-/// S-330's Kotlin parity inherits).
+/// S-330's Kotlin parity inherits). Several matches may describe one
+/// declaration — a bare type boundary, a literal pattern and an opaque pattern
+/// all rooted at the same node — so scopes sharing a range are combined by
+/// [`merge_scopes`] before anything is composed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PrefixScope {
     /// First byte of the governed declaration.
     start: usize,
     /// One past the last byte of the governed declaration.
     end: usize,
-    /// Every literal prefix the declaration wrote, unquoted. Usually one; a
-    /// list-valued `value = {"/a", "/b"}` writes several and each route under
-    /// the scope fans out over them.
+    /// Every literal prefix this match captured. Usually one; a list-valued
+    /// `value = {"/a", "/b"}` writes several and each route under the scope
+    /// fans out over them.
+    literals: Vec<PrefixLiteral>,
+    /// Byte ranges of `@fw.route.prefix.opaque` captures — nodes sitting in the
+    /// prefix position that are not themselves readable literals.
+    opaque: Vec<(usize, usize)>,
+}
+
+/// A declaration's prefix after every match describing it has been combined —
+/// computed once per file by [`merge_scopes`], then consulted per route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MergedScope {
+    start: usize,
+    end: usize,
+    /// The literal prefixes that survived opacity, sorted and deduplicated so
+    /// the fan-out order never depends on match order ([NFR-RA-06]).
     paths: Vec<String>,
-    /// `true` when the declaration wrote a prefix argument that is **not** a
-    /// literal. With no literal alongside it the scope is non-composable and
-    /// its routes are refused ([`RouteRefusal::PathNotComposed`]).
+    /// `true` when this declaration wrote a prefix it could not read. With
+    /// `paths` empty that makes the scope non-composable and its routes are
+    /// refused ([`RouteRefusal::PathNotComposed`]); with `paths` non-empty the
+    /// readable part wins and this is ignored.
     opaque: bool,
 }
 
@@ -587,21 +627,30 @@ fn scan_source(parser: &mut Parser, plugin: &dyn LanguagePlugin, source: &str) -
 fn compose_prefixes(out: &mut FileMatches) {
     let prefixes = std::mem::take(&mut out.prefixes);
     let pathless = std::mem::take(&mut out.pathless);
+    // Combined once per file, not once per route: the type-boundary pattern
+    // makes the scope count grow with the number of declarations, so resolving
+    // opacity and sorting the fan-out per route made the pass quadratic in
+    // (routes x declarations) on a large generated file.
+    let scopes = merge_scopes(&prefixes);
     let mut composed: Vec<RouteMatch> = Vec::with_capacity(out.routes.len());
+    // One refusal per refused *registration*, not per refused path candidate: a
+    // list-valued method path is several `RouteMatch`es for one annotation, and
+    // `routes_not_composed` counts registrations.
+    let mut refused_sites: HashSet<usize> = HashSet::new();
 
     for route in out.routes.drain(..) {
-        match innermost_prefix(&prefixes, route.at) {
-            Some((paths, _)) if !paths.is_empty() => {
-                for prefix in &paths {
+        match innermost_prefix(&scopes, route.at) {
+            Some(scope) if !scope.paths.is_empty() => {
+                for prefix in &scope.paths {
                     composed.push(RouteMatch {
                         path: join_route_path(prefix, &route.path),
                         ..route.clone()
                     });
                 }
             }
-            // A prefix is in scope and is not a literal: the handler's real
+            // A prefix is in scope and could not be read: the handler's real
             // address is unknown, so no path is promoted (NFR-RA-05).
-            Some((_, true)) => out.refusals.push(RouteRefusal::PathNotComposed),
+            Some(scope) if scope.opaque => refuse(&mut out.refusals, &mut refused_sites, &route),
             // Unprefixed — no scope at all, or an innermost boundary that
             // declared nothing: promote exactly what was written, refuse
             // nothing (BR-46).
@@ -609,22 +658,29 @@ fn compose_prefixes(out: &mut FileMatches) {
         }
     }
 
-    // A registration that named no path is a route only where a literal
-    // prefix supplies one. With no prefix in scope it establishes nothing and
-    // is dropped **silently** — an unannotated path is not a composition
-    // failure, so it earns no reason (BR-46).
+    // A registration that named no path is a route only where a prefix
+    // supplies one. With no prefix in scope it establishes nothing and is
+    // dropped **silently** — an unwritten path is not a composition failure,
+    // so it earns no reason (BR-46). An *empty* prefix supplies nothing
+    // either, so it drops the same way rather than promoting a pathless route.
     for route in pathless {
-        match innermost_prefix(&prefixes, route.at) {
-            Some((paths, _)) if !paths.is_empty() => {
-                for prefix in &paths {
-                    composed.push(RouteMatch {
-                        path: prefix.clone(),
-                        ..route.clone()
-                    });
-                }
+        let usable: Vec<&String> = match innermost_prefix(&scopes, route.at) {
+            Some(scope) => scope
+                .paths
+                .iter()
+                .filter(|p| !join_route_path(p, "").is_empty())
+                .collect(),
+            None => Vec::new(),
+        };
+        if !usable.is_empty() {
+            for prefix in usable {
+                composed.push(RouteMatch {
+                    path: join_route_path(prefix, &route.path),
+                    ..route.clone()
+                });
             }
-            Some((_, true)) => out.refusals.push(RouteRefusal::PathNotComposed),
-            _ => {}
+        } else if innermost_prefix(&scopes, route.at).is_some_and(|s| s.opaque) {
+            refuse(&mut out.refusals, &mut refused_sites, &route);
         }
     }
 
@@ -632,70 +688,153 @@ fn compose_prefixes(out: &mut FileMatches) {
     out.prefixes = prefixes;
 }
 
-/// The prefix governing byte `at`: the paths and opaqueness of the **innermost**
-/// containing scope, or `None` when no scope contains it. An empty `paths`
-/// with `opaque == false` is a boundary that declared no prefix — distinct
-/// from `None` only in provenance, and treated the same by
-/// [`compose_prefixes`].
+/// Record one `path-not-composed` refusal, at most once per registration site.
 ///
-/// Innermost — smallest byte range — is Spring's rule: a handler takes its
-/// *declaring* type's prefix, not an enclosing type's. Scopes that tie on
-/// width (one declaration carrying two prefix annotations, an `@AliasFor`
-/// conflict the application would reject at startup) are merged rather than
-/// arbitrated, so the outcome does not depend on match order. The returned
-/// paths are sorted and deduplicated for the same reason ([NFR-RA-06]
-/// determinism).
-///
-/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-fn innermost_prefix(prefixes: &[PrefixScope], at: usize) -> Option<(Vec<String>, bool)> {
-    let mut narrowest: Option<usize> = None;
-    let mut paths: Vec<String> = Vec::new();
-    let mut opaque = false;
-    for scope in prefixes.iter().filter(|s| s.start <= at && at < s.end) {
-        let width = scope.end - scope.start;
-        if let Some(current) = narrowest {
-            if width > current {
-                continue;
-            }
-            if width < current {
-                paths.clear();
-                opaque = false;
-            }
-        }
-        narrowest = Some(width);
-        paths.extend(scope.paths.iter().cloned());
-        opaque |= scope.opaque;
+/// A site is one annotation; the several `RouteMatch`es a list-valued path
+/// produces for it are one refused registration, which is the grain
+/// [`FrameworkStats::routes_not_composed`] documents. A match with no anchor
+/// names no site and is counted on its own.
+fn refuse(refusals: &mut Vec<RouteRefusal>, seen: &mut HashSet<usize>, route: &RouteMatch) {
+    if route.origin.site.is_some_and(|site| !seen.insert(site)) {
+        return;
     }
-    narrowest?;
-    paths.sort();
-    paths.dedup();
-    Some((paths, opaque))
+    refusals.push(RouteRefusal::PathNotComposed);
+}
+
+/// Combine every [`PrefixScope`] describing the same declaration into one
+/// [`MergedScope`], resolving per-literal opacity ([FR-FW-05], [NFR-RA-06]).
+///
+/// Several matches describe one declaration — a bare type boundary, a literal
+/// pattern, an opaque pattern — so they are grouped by range and unioned.
+/// Combining is what makes the outcome independent of match order, and doing it
+/// once per file rather than once per route is what keeps the pass linear.
+///
+/// # Which literals survive
+///
+/// An `@fw.route.prefix.opaque` capture disqualifies every prefix literal whose
+/// bytes it **overlaps without being identical to**. Both directions matter and
+/// neither needs the query to enumerate anything:
+///
+/// - an opaque node *containing* a literal means the literal is a fragment of a
+///   larger expression (`BASE + "/x"`);
+/// - an opaque node *inside* a literal means the literal contains an
+///   unreadable fragment — a Kotlin `"$BASE/v1"` string template, whose
+///   `interpolation` child a query can capture directly.
+///
+/// The identity exemption is what lets a query mark the whole path *position*
+/// opaque with a supertype pattern (`(expression) @fw.route.prefix.opaque`)
+/// without having to exclude the literal case: an opaque capture landing
+/// exactly on a literal is that literal, and the interpreter decides whether it
+/// reads. That is why no per-language enumeration of "non-literal expression
+/// kinds" is needed, and why a capture gap fails **closed** — an unrecognised
+/// prefix expression is still an opaque range, so its routes are refused rather
+/// than promoted at a partial path.
+///
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn merge_scopes(prefixes: &[PrefixScope]) -> Vec<MergedScope> {
+    /// Everything the matches over one declaration's range contributed.
+    #[derive(Default)]
+    struct Declared {
+        literals: Vec<PrefixLiteral>,
+        opaque: Vec<(usize, usize)>,
+    }
+
+    let mut by_range: HashMap<(usize, usize), Declared> = HashMap::new();
+    for scope in prefixes {
+        let entry = by_range.entry((scope.start, scope.end)).or_default();
+        entry.literals.extend(scope.literals.iter().cloned());
+        entry.opaque.extend(scope.opaque.iter().copied());
+    }
+
+    let mut merged: Vec<MergedScope> = by_range
+        .into_iter()
+        .map(|((start, end), Declared { literals, opaque })| {
+            let disqualified = |lit: &PrefixLiteral| {
+                opaque.iter().any(|&(os, oe)| {
+                    (os, oe) != (lit.start, lit.end) && os < lit.end && lit.start < oe
+                })
+            };
+            let mut paths: Vec<String> = literals
+                .iter()
+                .filter(|lit| lit.resolvable && !disqualified(lit))
+                .map(|lit| lit.text.clone())
+                .collect();
+            paths.sort();
+            paths.dedup();
+            // The scope declared a prefix it could not read: an unreadable
+            // literal, or an opaque capture that is not simply one of the
+            // literals restated.
+            let unread = literals.iter().any(|lit| !lit.resolvable)
+                || opaque.iter().any(|&(os, oe)| {
+                    !literals.iter().any(|lit| (lit.start, lit.end) == (os, oe))
+                });
+            MergedScope {
+                start,
+                end,
+                paths,
+                opaque: unread,
+            }
+        })
+        .collect();
+    // Sorted by start so `innermost_prefix` can binary-search: declarations in
+    // a parse tree nest, never partially overlap, so among the scopes
+    // containing a byte the innermost is the one with the greatest start.
+    merged.sort_by_key(|s| (s.start, s.end));
+    merged
+}
+
+/// The prefix governing byte `at`: the **innermost** containing [`MergedScope`],
+/// or `None` when no scope contains it.
+///
+/// Innermost is Spring's rule — a handler takes its *declaring* type's prefix,
+/// not an enclosing type's. Because declarations nest rather than partially
+/// overlap, the innermost containing scope is the last one in `start` order
+/// whose range still covers `at`, so this binary-searches instead of scanning
+/// every scope for every route.
+///
+/// Containment is half-open (`start <= at < end`): `at == end` is the byte
+/// after the declaration, which belongs to the next sibling.
+fn innermost_prefix(scopes: &[MergedScope], at: usize) -> Option<&MergedScope> {
+    let upper = scopes.partition_point(|s| s.start <= at);
+    scopes[..upper].iter().rev().find(|s| at < s.end)
 }
 
 /// `true` when a captured prefix literal is a path that can actually be
 /// joined ([FR-FW-05], [NFR-RA-05]).
 ///
-/// A Spring property placeholder (`@RequestMapping("${api.base}")`) is a
-/// written literal but not a resolvable address: resolving it against the
-/// property sources is explicitly out of scope ([CR-101] §3.3), so joining a
-/// method path onto it would mint a route name that is neither what the source
-/// wrote nor anything a consumer can match — while every handler in the class
-/// silently inherited it. The scope is treated as opaque instead, and its
-/// routes are refused.
+/// The grammar's judgement that something is a string literal is not enough: a
+/// literal can still fail to denote an address. This is the text-level half of
+/// the opacity rule, for the cases a query *cannot* express because the grammar
+/// models no sub-node to capture — a Java `@RequestMapping("${api.base}")` is
+/// one flat `string_literal`, so only its text reveals the placeholder. Where a
+/// grammar *does* model the fragment (a Kotlin string template's
+/// `interpolation` child) the query marks it `@fw.route.prefix.opaque` and
+/// [`merge_scopes`] disqualifies the literal without any text inspection.
 ///
-/// This is deliberately *stricter* than the rule for a method path written
-/// whole. `@GetMapping("${api.base}/users")` is still promoted verbatim
-/// (S-328): there the placeholder is the entire registration as the source
-/// states it, the node faithfully records it, and the shared
+/// Rejected: an unresolved property placeholder (`${…}`) or SpEL expression
+/// (`#{…}`), whose resolution is explicitly out of scope ([CR-101] §3.3); and a
+/// literal carrying a newline or a quote, which is not a path and which means
+/// the unquoting heuristic did not fully read the source form (a Java text
+/// block). Joining a method path onto any of these mints a route name that no
+/// consumer can match, silently inherited by every handler in the type.
+///
+/// Deliberately *stricter* than the rule for a method path written whole:
+/// `@GetMapping("${api.base}/users")` is still promoted verbatim (S-328), where
+/// the placeholder is the entire registration as the source states it, the node
+/// records it faithfully, and the shared
 /// [`route_template`](super::route_template) normalizer refuses to bind it one
-/// layer down. A prefix is different in kind because it is *joined* — that
-/// join is where a guess would enter.
+/// layer down. A prefix is different in kind because it is *joined*, and every
+/// handler under the type inherits the result.
 ///
 /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 /// [CR-101]: ../../../docs/requests/CR-101-jvm-spring-route-extraction.md
 fn is_resolvable_prefix(literal: &str) -> bool {
     !literal.contains("${")
+        && !literal.contains("#{")
+        && !literal.contains('\n')
+        && !literal.contains('"')
 }
 
 /// Join a route prefix and a method path with **exactly one** separator
@@ -716,6 +855,9 @@ fn is_resolvable_prefix(literal: &str) -> bool {
 ///
 /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
 fn join_route_path(prefix: &str, path: &str) -> String {
+    // Both sides are trimmed where they are read, so this is belt-and-braces
+    // for a hand-built value; it keeps one normalisation rule for a route path
+    // whether or not a prefix happened to be in scope.
     let (prefix, path) = (prefix.trim(), path.trim());
     if prefix.is_empty() {
         return path.to_string();
@@ -750,7 +892,7 @@ fn generic_match(
     let mut path_nodes: Vec<(Node<'_>, bool)> = Vec::new();
     let mut prefix_nodes: Vec<Node<'_>> = Vec::new();
     let mut prefix_scope: Option<Node<'_>> = None;
-    let mut prefix_opaque = false;
+    let mut prefix_opaque: Vec<(usize, usize)> = Vec::new();
     let mut anchor_node: Option<Node<'_>> = None;
     let mut method_node: Option<Node<'_>> = None;
     let mut handler_node: Option<Node<'_>> = None;
@@ -779,8 +921,10 @@ fn generic_match(
             prefix_nodes.push(cap.node);
             continue;
         }
+        // Recorded as a byte range, not a flag: which *literal* an opaque
+        // capture disqualifies is decided by overlap in `merge_scopes`.
         if name == "fw.route.prefix.opaque" {
-            prefix_opaque = true;
+            prefix_opaque.push((cap.node.start_byte(), cap.node.end_byte()));
             continue;
         }
         let slot = match name {
@@ -804,19 +948,22 @@ fn generic_match(
     // nothing by itself; it only tells [`compose_prefixes`] which byte range
     // its path governs.
     if let Some(scope) = prefix_scope {
-        // A captured prefix literal still has to be a *resolvable* path: an
-        // unresolved property placeholder is a literal the compiler accepts
-        // and the router never sees, so it joins the opaque side instead of
-        // the literal one.
-        let (paths, unresolvable): (Vec<String>, Vec<String>) = prefix_nodes
-            .iter()
-            .map(|n| crate::extract::refs::unquote(text(*n, src)).to_string())
-            .partition(|p| is_resolvable_prefix(p));
         out.prefixes.push(PrefixScope {
             start: scope.start_byte(),
             end: scope.end_byte(),
-            paths,
-            opaque: prefix_opaque || !unresolvable.is_empty(),
+            literals: prefix_nodes
+                .iter()
+                .map(|node| {
+                    let text = crate::extract::refs::unquote(text(*node, src)).trim().to_string();
+                    PrefixLiteral {
+                        resolvable: is_resolvable_prefix(&text),
+                        text,
+                        start: node.start_byte(),
+                        end: node.end_byte(),
+                    }
+                })
+                .collect(),
+            opaque: prefix_opaque,
         });
     }
 
@@ -857,7 +1004,9 @@ fn generic_match(
             }
             for (path, named) in path_nodes {
                 out.routes.push(RouteMatch {
-                    path: crate::extract::refs::unquote(text(path, src)).to_string(),
+                    // Trimmed here rather than inside `join_route_path`, so an
+                    // uncomposed path and a composed one obey one rule.
+                    path: crate::extract::refs::unquote(text(path, src)).trim().to_string(),
                     method: mapped.clone(),
                     handler: handler.clone(),
                     start_line,
