@@ -402,6 +402,37 @@ fn outranked_positional_paths_are_dropped_only_within_their_own_site() {
     assert_eq!(positional_only.len(), 2);
 }
 
+/// Precedence never costs a proven handler: where the dropped positional
+/// match is the one that named a handler, the surviving named path inherits
+/// it rather than losing its `RoutesTo` edge. One site is one registration,
+/// so the handler is the same method by construction — nothing is fabricated.
+#[test]
+fn a_dropped_positional_match_hands_its_proven_handler_to_the_survivor() {
+    let route = |path: &str, handler: Option<&str>, named: bool| RouteMatch {
+        path: path.to_string(),
+        method: "GET".to_string(),
+        handler: handler.map(str::to_string),
+        start_line: 1,
+        end_line: 1,
+        origin: PathOrigin {
+            site: Some(7),
+            named,
+        },
+    };
+
+    let mut routes = vec![
+        route("/x", Some("handle"), false),
+        route("/x", None, true),
+        route("/y", None, true),
+    ];
+    drop_outranked_paths(&mut routes);
+    let kept: Vec<(&str, Option<&str>)> = routes
+        .iter()
+        .map(|r| (r.path.as_str(), r.handler.as_deref()))
+        .collect();
+    assert_eq!(kept, [("/x", Some("handle")), ("/y", Some("handle"))]);
+}
+
 // ── Java Spring mapping annotations (S-328) ──────────────────────────────────
 
 /// Contract-first Spring code names its paths, never positions them: the
@@ -475,9 +506,16 @@ mod java_spring {
 
     #[test]
     fn named_argument_wins_over_a_positional_one() {
-        // Spring's `value`/`path` alias semantics: where both are written the
-        // named argument is the registered path, and the positional literal
-        // never becomes a second route.
+        // Mixing a positional literal with a named argument is not legal
+        // Java, and tree-sitter puts the LEADING argument inside an `ERROR`
+        // node that neither pattern reaches through. So exactly one path
+        // survives, and which one is decided by the parser's recovery, not by
+        // the interpreter's rank: named first here, positional first below.
+        // Pinned as a regression guard on that recovery shape — the
+        // precedence pass itself is covered by
+        // `outranked_positional_paths_are_dropped_only_within_their_own_site`,
+        // and is only reachable from a dialect whose grammar admits the mixed
+        // form (Kotlin, S-330).
         let got = java_routes(&in_class(
             r#"    @RequestMapping("/positional", value = "/named")
     public String get() { return ""; }"#,
@@ -487,6 +525,127 @@ mod java_spring {
             vec![(
                 "/named".to_string(),
                 "ANY".to_string(),
+                Some("get".to_string())
+            )]
+        );
+
+        let reversed = java_routes(&in_class(
+            r#"    @RequestMapping(value = "/named", "/positional")
+    public String get() { return ""; }"#,
+        ));
+        assert_eq!(
+            reversed,
+            vec![(
+                "/positional".to_string(),
+                "ANY".to_string(),
+                Some("get".to_string())
+            )]
+        );
+    }
+
+    /// The wiring the precedence pass depends on, asserted at the source
+    /// level rather than on hand-built values: both patterns must anchor, the
+    /// `named` rank must follow the capture the path came from, and two
+    /// annotations on one method must be two distinct sites. Without this the
+    /// query could stop anchoring and every behavioural test would stay green.
+    #[test]
+    fn path_origins_record_the_annotation_site_and_the_named_rank() {
+        let m = scan_lang(
+            "java",
+            &in_class(
+                r#"    @GetMapping("/read")
+    @PostMapping(value = "/write")
+    public String both() { return ""; }"#,
+            ),
+        );
+        let mut got: Vec<(&str, Option<usize>, bool)> = m
+            .routes
+            .iter()
+            .map(|r| (r.path.as_str(), r.origin.site, r.origin.named))
+            .collect();
+        got.sort();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].0, "/read");
+        assert!(!got[0].2, "a positional path is not named: {got:?}");
+        assert_eq!(got[1].0, "/write");
+        assert!(got[1].2, "a `value =` path is named: {got:?}");
+        let (read_site, write_site) = (got[0].1, got[1].1);
+        assert!(read_site.is_some(), "positional pattern must anchor: {got:?}");
+        assert!(write_site.is_some(), "named pattern must anchor: {got:?}");
+        assert_ne!(
+            read_site, write_site,
+            "each annotation is its own site: {got:?}"
+        );
+    }
+
+    #[test]
+    fn both_alias_keys_on_one_annotation_yield_a_route_each() {
+        // `value` and `path` on one annotation is a Spring `@AliasFor`
+        // conflict the application would reject at startup. The query
+        // promotes each as written rather than adjudicating it — pinned so
+        // the choice is visible rather than incidental.
+        let got = java_routes(&in_class(
+            r#"    @GetMapping(value = "/x", path = "/y")
+    public String get() { return ""; }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![
+                ("/x".to_string(), "GET".to_string(), Some("get".to_string())),
+                ("/y".to_string(), "GET".to_string(), Some("get".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn non_literal_named_paths_promote_nothing() {
+        // The header's honesty claim: a constant reference or a concatenation
+        // leaves no literal, so nothing is promoted — never a guessed path
+        // (NFR-RA-05).
+        for arguments in [
+            r#"value = BASE + "/x""#,
+            "value = BASE",
+            "value = Paths.USERS",
+        ] {
+            let m = scan_lang(
+                "java",
+                &in_class(&format!(
+                    "    @GetMapping({arguments})\n    public String get() {{ return \"\"; }}"
+                )),
+            );
+            assert!(m.routes.is_empty(), "{arguments}: {:?}", m.routes);
+        }
+    }
+
+    #[test]
+    fn a_mixed_list_promotes_only_its_literal_elements() {
+        // The other half of the same claim: a list mixing a literal and a
+        // non-literal promotes what it can establish and drops the rest
+        // silently. Reporting that as `path-not-composed` is S-329's.
+        let got = java_routes(&in_class(
+            r#"    @GetMapping(value = {"/a", BASE + "/b"})
+    public String get() { return ""; }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![("/a".to_string(), "GET".to_string(), Some("get".to_string()))]
+        );
+    }
+
+    #[test]
+    fn property_placeholder_paths_are_promoted_verbatim() {
+        // A placeholder IS a written literal, so it is captured — and kept as
+        // written. Resolving it against the property sources is out of scope
+        // (FR-FW-05), and the route must not pretend otherwise.
+        let got = java_routes(&in_class(
+            r#"    @GetMapping(value = "${api.base}/users")
+    public String get() { return ""; }"#,
+        ));
+        assert_eq!(
+            got,
+            vec![(
+                "${api.base}/users".to_string(),
+                "GET".to_string(),
                 Some("get".to_string())
             )]
         );
