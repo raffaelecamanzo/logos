@@ -34,6 +34,13 @@ pub mod error;
 /// SCIP IDs, cyclomatic complexity, and per-function line counts (ADR-07,
 /// ADR-08). One `tree_sitter::Parser` per rayon worker (AR-05).
 pub mod extract;
+/// Process open-file-limit hygiene (S-324, CR-100, ADR-63): a best-effort,
+/// silent raise of this process's `RLIMIT_NOFILE` soft limit toward its hard
+/// limit, and the clamped read of that limit the workspace connection budget is
+/// derived from. A **secondary** defence only — the guarantee rests on
+/// [`ConnectionBudget`](federation::ConnectionBudget), never on this
+/// (NFR-PE-11).
+pub mod fdlimit;
 /// Workspace **federation** (S-243, CR-061, ADR-52): the in-memory overlay that
 /// turns a parent folder of sibling repositories into one queryable workspace —
 /// `logos.workspace.toml` manifest parse + the up-tree `discover` walk that

@@ -50,7 +50,7 @@ struct FakeEngine {
 
 impl MemberEngine for FakeEngine {
     type Watcher = ();
-    fn start(root: &Path) -> Result<Arc<Self>> {
+    fn start(root: &Path, _read_connections: usize) -> Result<Arc<Self>> {
         let member = root
             .file_name()
             .expect("a member root has a final component")

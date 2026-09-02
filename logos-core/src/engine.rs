@@ -38,7 +38,7 @@ use crate::models::{
         SessionInfo, SkippedLanguage, StatsInfo, VerifyReport,
     },
 };
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, RuntimeConfig};
 
 /// Thick-core engine — the single public façade over all Logos operations.
 ///
@@ -169,6 +169,51 @@ impl Engine {
         root: impl AsRef<Path>,
         hydration: HydrationConfig,
     ) -> Result<Self> {
+        Self::start_with_configs(root, hydration, RuntimeConfig::default())
+    }
+
+    /// Start a long-lived engine whose read-only pool holds exactly
+    /// `read_connections` connections instead of one per core ([NFR-PE-11],
+    /// [ADR-63]).
+    ///
+    /// The seam a **workspace** uses: the [federation registry] hands every
+    /// resident member engine the share of the workspace-wide
+    /// [`ConnectionBudget`](crate::federation::ConnectionBudget) it is entitled
+    /// to, so N members cost a host-derived ceiling rather than `N × cores` live
+    /// connections. Nothing else calls this — the single-root path stays on
+    /// [`Engine::start`] and its core-sized pool, byte-for-byte as today
+    /// ([FR-WS-03], [ADR-52]).
+    ///
+    /// # Errors
+    /// Same as [`Engine::start`]; additionally, a `read_connections` of zero is
+    /// rejected by the pool (no reader could serve navigation).
+    ///
+    /// [federation registry]: crate::federation::EngineRegistry
+    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+    /// [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
+    pub fn start_with_read_pool(root: impl AsRef<Path>, read_connections: usize) -> Result<Self> {
+        Self::start_with_configs(
+            root,
+            HydrationConfig::default(),
+            RuntimeConfig {
+                reader_pool_size: read_connections,
+                ..RuntimeConfig::default()
+            },
+        )
+    }
+
+    /// The shared start path behind [`start`](Self::start),
+    /// [`start_with_hydration_config`](Self::start_with_hydration_config) and
+    /// [`start_with_read_pool`](Self::start_with_read_pool): resolve the root,
+    /// seed a DB-less worktree, bring up the runtime under `runtime`, and load
+    /// the plugin substrate.
+    fn start_with_configs(
+        root: impl AsRef<Path>,
+        hydration: HydrationConfig,
+        runtime: RuntimeConfig,
+    ) -> Result<Self> {
         // The hint resolves to the containing working-tree root ([ADR-15],
         // [FR-WT-01]): in a linked worktree, THAT worktree's root — so each
         // worktree owns its own `.logos/logos.db` and a server launched with
@@ -218,7 +263,7 @@ impl Engine {
             )
         };
 
-        let runtime = Runtime::open(&db_path).with_context(|| {
+        let runtime = Runtime::open_with_config(&db_path, runtime).with_context(|| {
             format!("starting the execution runtime for root {}", root.display())
         })?;
 

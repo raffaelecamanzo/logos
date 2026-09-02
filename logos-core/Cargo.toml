@@ -22,6 +22,11 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 # SCIP symbol codec — confined to `model::convert` (ADR-06, NFR-MA-07).
 scip = { workspace = true }
 anyhow = { workspace = true }
+# `RLIMIT_NOFILE` get/set behind the `fdlimit` module (S-324, NFR-PE-11,
+# ADR-63): the best-effort, silent soft-limit raise the workspace connection
+# budget is derived from — and the only place in the tree that needs `unsafe`.
+# Already present transitively via `rusqlite`, so this adds no new crate.
+libc = { workspace = true }
 # `toml` parses the declarative `plugin.toml` descriptors (S-004, FR-PL-02)
 # and the human-editable checked-in policy files (S-006, ADR-15). Pure parser
 # with no socket/HTTP surface; does not weaken the no-network invariant (NFR-SE-01).

@@ -63,6 +63,7 @@
 
 pub mod bridge;
 pub mod broker;
+pub mod budget;
 pub mod coverage;
 pub mod enable;
 pub mod governance;
@@ -100,6 +101,7 @@ pub use query::{
     CrossServiceImpact, MemberResult, WorkspaceStatus, XserviceCallers, XserviceImpact,
     XserviceRouteProviders, XserviceSearch,
 };
+pub use budget::ConnectionBudget;
 pub use registry::{Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode};
 pub use topics::{workspace_topics, MemberTopics, TopicSummary};
 
