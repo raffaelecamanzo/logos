@@ -1,5 +1,5 @@
 //! The framework-promotion pass — Pass 2½ of the pipeline ([resolution-engine],
-//! S-012, [FR-FW-01]..[FR-FW-04]).
+//! S-012, [FR-FW-01]..[FR-FW-04], [FR-FW-05]).
 //!
 //! Runs **after** resolution on every index/sync and promotes matches of the
 //! ratified v1 framework set ([FR-FW-03], DL-02) — Rust Axum/Actix-web,
@@ -59,6 +59,7 @@
 //! [FR-FW-02]: ../../../docs/specs/requirements/FR-FW-02.md
 //! [FR-FW-03]: ../../../docs/specs/requirements/FR-FW-03.md
 //! [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
+//! [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 //! [NFR-PE-02]: ../../../docs/specs/requirements/NFR-PE-02.md
 //! [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
@@ -104,15 +105,27 @@ const TRANSPARENT_WRAPPERS: [&str; 3] = ["Arc", "Rc", "Box"];
 /// Where a declarative route match's path was written — the grouping key and
 /// the rank that the named-over-positional precedence rule needs (S-328).
 ///
-/// Two query patterns can match one registration site (a positional literal
-/// and a named `value =` argument are separate patterns, hence separate
-/// matches), so the ranking is resolved across matches once the file has been
-/// fully scanned — see [`drop_outranked_paths`].
+/// Two query patterns *may* match one registration site — a positional
+/// literal and a named `value =` argument are separate patterns, hence
+/// separate matches — so the ranking is resolved across matches once the file
+/// has been fully scanned (see [`drop_outranked_paths`]). Whether they
+/// actually can depends on the grammar: **Java cannot** produce both, because
+/// its `annotation_argument_list` is either one positional value or a list of
+/// named pairs and the illegal mixture parses with the leading argument inside
+/// an `ERROR` node. Kotlin's `value_arguments`, by contrast, is a homogeneous
+/// list of optionally-named arguments, so the mixed form parses cleanly and
+/// both patterns match — that is the dialect the pass exists for (S-330).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct PathOrigin {
-    /// The `@fw.route.anchor` node's id: the registration site within which
-    /// paths are ranked against each other. `None` when the dialect names no
-    /// anchor — every legacy Rust walker, and any query that captures none.
+    /// The `@fw.route.anchor` node's start byte: the registration site within
+    /// which paths are ranked against each other. `None` when the dialect
+    /// names no anchor — every legacy Rust walker, and any query that captures
+    /// none.
+    ///
+    /// A start byte rather than `Node::id()` (a subtree address) so the key
+    /// stays unique-per-file, deterministic, and meaningful after the parse
+    /// tree is dropped — `RouteMatch` outlives the tree, and a later pass that
+    /// ranked across files would otherwise compare freed pointers.
     site: Option<usize>,
     /// `true` for a `@fw.route.path.named` capture — a path written as a
     /// named argument, which outranks a positional literal at the same site.
@@ -444,9 +457,13 @@ fn generic_match(
     methods: &std::collections::BTreeMap<String, String>,
     out: &mut FileMatches,
 ) -> bool {
-    // One match can carry several paths: a list-valued annotation argument
-    // (`value = {"/a", "/b"}`) registers one route per element (FR-FW-05).
-    // `bool` is the `PathOrigin::named` rank of each.
+    // A path capture is collected as a list, not a single slot. A list-valued
+    // annotation argument (`value = {"/a", "/b"}`) registers one route per
+    // element (FR-FW-05) — tree-sitter delivers those as one *match* per
+    // element, so in every query shipped today this list holds one node; it
+    // holds several only under an explicit `+`/`*` quantifier, which the
+    // interpreter supports without the query having to know. `bool` is the
+    // `PathOrigin::named` rank of each path.
     let mut path_nodes: Vec<(Node<'_>, bool)> = Vec::new();
     let mut anchor_node: Option<Node<'_>> = None;
     let mut method_node: Option<Node<'_>> = None;
@@ -463,8 +480,7 @@ fn generic_match(
         generic = true;
         start_line = start_line.min(cap.node.start_position().row as u32 + 1);
         end_line = end_line.max(cap.node.end_position().row as u32 + 1);
-        // A path capture may repeat within one match: a list-valued argument
-        // registers one route per element.
+        // Collected, not slotted — see `path_nodes` above.
         if name == "fw.route.path" || name == "fw.route.path.named" {
             path_nodes.push((cap.node, name == "fw.route.path.named"));
             continue;
@@ -501,7 +517,7 @@ fn generic_match(
                 let segments = crate::extract::refs::split_path_text(text(h, src));
                 (!segments.is_empty()).then(|| segments.join("::"))
             });
-            let site = anchor_node.map(|a| a.id());
+            let site = anchor_node.map(|a| a.start_byte());
             for (path, named) in path_nodes {
                 out.routes.push(RouteMatch {
                     path: crate::extract::refs::unquote(text(path, src)).to_string(),
@@ -523,6 +539,16 @@ fn generic_match(
 /// `@fw.route.anchor`, so precedence is per annotation — a positional mapping
 /// on one annotation is never suppressed by a named one on its neighbour. A
 /// route with no anchor competes with nothing and always survives.
+///
+/// Precedence must never cost a handler. One site is one registration, so
+/// every path it carries routes to the *same* handler; a dropped match can
+/// therefore hand its proven handler to a surviving one that captured none,
+/// rather than leaving a route the earlier code would have linked with no
+/// [`EdgeKind::RoutesTo`] edge at all. Filling from the same site fabricates
+/// nothing — the text comes from the same registration, and it still has to
+/// clear the binder's exactly-one rule ([NFR-RA-05]).
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 fn drop_outranked_paths(routes: &mut Vec<RouteMatch>) {
     let named_sites: HashSet<usize> = routes
         .iter()
@@ -532,10 +558,21 @@ fn drop_outranked_paths(routes: &mut Vec<RouteMatch>) {
     if named_sites.is_empty() {
         return;
     }
+    let mut proven: HashMap<usize, String> = HashMap::new();
+    for route in routes.iter() {
+        if let (Some(site), Some(handler)) = (route.origin.site, route.handler.as_ref()) {
+            proven.entry(site).or_insert_with(|| handler.clone());
+        }
+    }
     routes.retain(|r| match r.origin.site {
         Some(site) => r.origin.named || !named_sites.contains(&site),
         None => true,
     });
+    for route in routes.iter_mut() {
+        if route.handler.is_none() {
+            route.handler = route.origin.site.and_then(|site| proven.get(&site).cloned());
+        }
+    }
 }
 
 /// Collapse duplicate `(method, path)` route matches within one file, keeping
