@@ -120,9 +120,13 @@ pub enum RegistryMode {
     /// CLI one-shot: a member's engine is built on first touch and no watcher is
     /// spawned. A scoped answer constructs only the engines it needs.
     Lazy,
-    /// `serve`: every member is warmed eagerly with one watcher each — though
-    /// only the budgeted number stay **resident** afterwards, the rest having
-    /// been evicted as the warm advanced.
+    /// `serve`: a member's engine is **watched whenever it is built**, on its
+    /// first touch as much as during an eager warm.
+    ///
+    /// How many members are warmed up front is the *constructor's* choice, not
+    /// the mode's — [`EngineRegistry::new`] warms the budget's worth,
+    /// [`EngineRegistry::new_serve_default`] only the default member — and
+    /// residency afterwards is capped by the budget either way.
     Serve,
 }
 
@@ -263,11 +267,11 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// touch. A member that fails to start under serve is logged and skipped
     /// (degraded), never fatal.
     ///
-    /// Either way residency is bounded by the budget this host derives, so a
-    /// workspace larger than the budget ends the warm with the most recently
-    /// warmed members resident and the rest evicted — reconstructed on their
-    /// next touch ([NFR-PE-11]).
+    /// The eager warm stops at the budget this host derives: a workspace larger
+    /// than the budget warms the first `max_resident_members` members and leaves
+    /// the rest deferred, to be built on first touch ([NFR-PE-11], [NFR-PE-10]).
     ///
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
     /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
     pub fn new(federation: Federation, mode: RegistryMode) -> Self {
         Self::with_budget(federation, mode, ConnectionBudget::from_host())
@@ -545,14 +549,26 @@ impl<E: MemberEngine> EngineRegistry<E> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Eagerly build (and, under serve, watch) every member. Degraded members
-    /// are logged and skipped, and members beyond the budget are evicted as the
-    /// warm advances — warming reaches every member, residency does not keep
-    /// every member ([NFR-PE-11]).
+    /// Eagerly build (and, under serve, watch) as many members as the budget can
+    /// hold resident, in discovery order. Degraded members are logged and
+    /// skipped.
     ///
-    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+    /// Stopping at the budget is the point: warming all N to keep `budget` of
+    /// them would pay N cold starts and N watcher spawns to discard all but a
+    /// handful, making **boot cost a function of the member count** — precisely
+    /// what [NFR-PE-10]'s lazy construction exists to prevent and what this
+    /// story removes everywhere else. The members past the budget are simply
+    /// deferred, and build on first touch like any other ([FR-IX-07]).
+    ///
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    /// [FR-IX-07]: ../../../docs/specs/requirements/FR-IX-07.md
     fn warm_all(&self) {
-        for member in &self.federation.members {
+        for member in self
+            .federation
+            .members
+            .iter()
+            .take(self.budget.max_resident_members())
+        {
             if let Err(err) = self.engine_for(&member.name) {
                 tracing::warn!(
                     member = %member.name,
@@ -1359,13 +1375,12 @@ mod tests {
         let budget = stock_macos_budget();
         for mode in [RegistryMode::Lazy, RegistryMode::Serve] {
             reset_spies();
-            // `Serve` warms all 72 members in its constructor; `Lazy` builds
-            // nothing until touched, so drive it with the fan-out that the
-            // all-member CLI commands use. Both reach every member.
+            // Whatever each mode warms up front, drive the all-member walk the
+            // CLI workspace commands and the `/api/v1/workspace/*` handlers both
+            // perform — that is the path the budget has to bound in either mode.
             let registry = EngineRegistry::<SpyEngine>::with_budget(big_fed(72), mode, budget);
-            if mode == RegistryMode::Lazy {
-                registry.fan_out(|_, _| ());
-            }
+            registry.fan_out(|_, _| ());
+
             assert_eq!(starts(), 72, "{mode:?} must reach every member");
             assert!(
                 registry.resident_count() <= budget.max_resident_members(),
@@ -1380,6 +1395,26 @@ mod tests {
                 budget.total_read_connections(),
             );
         }
+    }
+
+    /// The eager warm is bounded by the budget, so opening a workspace never
+    /// pays N cold starts to keep a handful ([NFR-PE-10]).
+    #[test]
+    fn the_eager_warm_stops_at_the_budget_rather_than_warming_every_member() {
+        let budget = stock_macos_budget();
+        reset_spies();
+        let registry =
+            EngineRegistry::<SpyEngine>::with_budget(big_fed(200), RegistryMode::Serve, budget);
+        assert_eq!(
+            starts(),
+            budget.max_resident_members(),
+            "warming 200 members to keep {} would make boot cost a function of \
+             the member count",
+            budget.max_resident_members(),
+        );
+        assert_eq!(registry.reconstructions(), 0, "the warm evicts nothing it built");
+        // The deferred members are still reachable — they build on first touch.
+        assert!(registry.engine_for("m199").is_ok());
     }
 
     /// An engine a caller still holds is **never** evicted, so no member ever has
@@ -1468,21 +1503,34 @@ mod tests {
     #[test]
     fn a_serve_warm_leaves_one_live_watcher_per_resident_member() {
         let budget = stock_macos_budget();
+        let cap = budget.max_resident_members();
         reset_spies();
         let registry =
             EngineRegistry::<SpyEngine>::with_budget(big_fed(72), RegistryMode::Serve, budget);
 
-        assert_eq!(watches(), 72, "watch-on-touch: every member built is watched");
+        // The eager warm stops at the budget rather than building 72 to keep 8.
+        assert_eq!(starts(), cap, "the warm builds the budget's worth, not all N");
+        assert_eq!(watches(), cap, "watch-on-touch: each member built is watched");
+        assert_eq!(live_watchers(), cap, "and each of them is still watching");
+
+        // Now walk every member. Each is built and watched on its first touch,
+        // and each eviction stops that member's watcher — so live watchers track
+        // residency rather than accumulating one per member ever touched.
+        registry.fan_out(|_, _| ());
+        assert_eq!(watches(), 72, "every member built is watched, warm or lazy");
         assert_eq!(
             live_watchers(),
             registry.resident_count(),
-            "a watcher lives exactly as long as its member's residency"
+            "a watcher lives exactly as long as its member's residency; \
+             {} spawned, {} still running, {} resident",
+            watches(),
+            live_watchers(),
+            registry.resident_count(),
         );
         assert!(
-            live_watchers() <= budget.max_resident_members(),
-            "{} watchers still running, over the budgeted {} residents",
+            live_watchers() <= cap,
+            "{} watchers still running, over the budgeted {cap} residents",
             live_watchers(),
-            budget.max_resident_members(),
         );
     }
 
