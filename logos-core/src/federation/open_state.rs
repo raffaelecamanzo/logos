@@ -77,10 +77,27 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DegradedCause {
-    /// A **host** resource limit refused the connection: the process could not
-    /// obtain the file descriptors the member's read pool needs
-    /// (`RLIMIT_NOFILE`). The member's store is present and its graph intact —
-    /// the fix is a wider budget or a higher `ulimit -n`, never a re-index.
+    /// The process was **refused when it opened a store that is there** — the
+    /// store and its graph are intact, and a re-index is not the remedy.
+    ///
+    /// Two host conditions produce this with an *identical* symptom: the
+    /// descriptor table is exhausted (`RLIMIT_NOFILE` — the [CR-100] failure), or
+    /// the file permissions on the member's `.logos/` refuse this user. Nothing
+    /// in the diagnostic separates them, because a refused `open(2)` reaches
+    /// SQLite as the same `CANTOPEN` either way — so
+    /// [`message`](Self::message) names **both** rather than asserting the one
+    /// that happened to be true the first time this was seen ([NFR-CC-04]).
+    ///
+    /// The variant and its wire key (`host-resource-limit`) are kept exactly as
+    /// they are. Telling the two conditions apart for real needs a readability
+    /// probe before classification *and* a second variant — a new key on every
+    /// degraded member row, which [CR-102] deliberately did not spend to
+    /// separate two conditions that share one remedy shape ("the store is fine,
+    /// look at the host"). See [`classify`] for that non-choice in full.
+    ///
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    /// [CR-102]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     HostResourceLimit,
     /// Something that is **not a regular file** occupies the member's canonical
     /// store path (`<root>/.logos/logos.db`) — a directory, a socket, a dangling
@@ -101,18 +118,27 @@ impl DegradedCause {
     /// The plain-language statement of this cause, for the human diagnostic and
     /// for the row's `degraded_reason`.
     ///
-    /// Stated as what is *known* plus the remedy, because the whole reason the
-    /// cause exists is that the raw SQLite wording sends a reader to the wrong
-    /// remedy ([FR-WS-16]).
+    /// Stated as what is *known* **first**, then the remedy, because the whole
+    /// reason the cause exists is that the raw SQLite wording sends a reader to
+    /// the wrong remedy ([FR-WS-16]). Where one symptom admits two causes the
+    /// remedy names **both** — asserting the narrower one is the same class of
+    /// misdiagnosis, merely relocated ([NFR-CC-04], [CR-102]).
     ///
+    /// [CR-102]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     #[must_use]
     pub const fn message(self) -> &'static str {
         match self {
             Self::HostResourceLimit => {
-                "a host resource limit, not a damaged store: the store is present but the \
-                 process could not obtain the file descriptors its connections need \
-                 (RLIMIT_NOFILE) — raise `ulimit -n`, or query fewer members at once"
+                "not a damaged store: the member's store is present and its graph intact, \
+                 so a re-index is not the remedy — what failed is this process's attempt \
+                 to open the file. Two conditions produce that identically and the \
+                 diagnostic separates neither, so both are named: the file permissions on \
+                 the member's `.logos/` directory and store, which must be readable by the \
+                 user running logos, and a host resource limit on file descriptors \
+                 (RLIMIT_NOFILE) — check the permissions, then raise `ulimit -n` or query \
+                 fewer members at once"
             }
             Self::StoreObstructed => {
                 "the member's `.logos/logos.db` path is occupied by something that is not a \
@@ -195,10 +221,30 @@ pub enum StoreFile {
 ///   misdiagnosis [FR-WS-16] exists to remove, merely relocated. The verbatim
 ///   diagnostic stands alone instead ([NFR-CC-04]).
 ///
-/// The remaining blind spot is a *present* store the process is not permitted to
-/// read, which classifies as [`HostResourceLimit`]. That is wrong about which
-/// host resource and still right about what matters: the store is intact and a
-/// re-index is not the remedy.
+/// # A present store admits two causes, and the remedy names both
+/// A *present* store this process is not **permitted** to read classifies as
+/// [`HostResourceLimit`] as well, because a refused `open(2)` reaches SQLite as
+/// the same `CANTOPEN` whether the descriptor table is full or the permission
+/// bits say no. The shipped remedy asserted the narrower cause and advised
+/// `ulimit -n`; on the [CR-102] acceptance run over the real 84-member
+/// workspace the descriptor limit was provably *not* what failed, so that advice
+/// was wrong on the one run that exercised it.
+///
+/// [`DegradedCause::message`] therefore states what **is** known first — the
+/// store is intact, and a re-index is not the remedy — and then names **both**
+/// candidates: the file permissions on the member's `.logos/`, and the
+/// descriptor limit. Claiming either alone is exactly the over-assertion
+/// [NFR-CC-04] forbids.
+///
+/// Separating them for real is a **deliberate non-choice**. It needs a
+/// readability probe on the store path *before* classification and a second
+/// [`DegradedCause`] variant — a new wire key on every degraded member row, paid
+/// by every consumer, to split two conditions that share one remedy shape ("the
+/// store is fine, look at the host"). [CR-102] widened the remedy text instead
+/// and recorded the probe as the larger option not taken; if it is ever built,
+/// the probe is what licenses the new variant, not the other way round.
+///
+/// [CR-102]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
 ///
 /// [`HostResourceLimit`]: DegradedCause::HostResourceLimit
 /// [`StoreObstructed`]: DegradedCause::StoreObstructed
@@ -663,6 +709,98 @@ mod tests {
         );
     }
 
+    /// [CR-102]: a present-but-unopenable store states what is **known** before
+    /// it advises, and then names **both** candidate causes — file permissions
+    /// and the descriptor limit ([FR-WS-16], [NFR-CC-04]).
+    ///
+    /// The regression this pins is the shipped remedy, which advised `ulimit -n`
+    /// alone. On the run that exercised it the descriptor limit was provably not
+    /// what failed, so the one piece of advice the operator got was wrong —
+    /// while everything the derivation actually *establishes* (the store is
+    /// there, a re-index will not help) was true and went unsaid. Order is part
+    /// of the assertion: what is known comes first, because that is the half a
+    /// reader can rely on.
+    ///
+    /// [CR-102]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
+    #[test]
+    fn a_present_but_unopenable_store_states_what_is_known_then_names_both_causes() {
+        let reason = MemberOpenState::degraded(OBSERVED, StoreFile::Present)
+            .reason()
+            .expect("a failed open has a reason")
+            .to_string();
+
+        // What is known, and where it sits: the store is intact and a re-index
+        // is not the remedy, stated before any advice.
+        let known = reason
+            .find("re-index is not the remedy")
+            .unwrap_or_else(|| panic!("the reason states what is known: {reason}"));
+        assert!(
+            reason.contains("store is present"),
+            "the intact store is stated as a fact: {reason}"
+        );
+
+        // Both candidates, each named — and both AFTER what is known.
+        let permissions = reason
+            .find("permissions")
+            .unwrap_or_else(|| panic!("file permissions are named: {reason}"));
+        let descriptors = reason
+            .find("RLIMIT_NOFILE")
+            .unwrap_or_else(|| panic!("the descriptor limit is named: {reason}"));
+        assert!(
+            known < permissions && known < descriptors,
+            "what is known is stated BEFORE the two candidates: {reason}"
+        );
+        assert!(
+            reason.contains("ulimit -n"),
+            "the descriptor candidate keeps its actionable remedy: {reason}"
+        );
+
+        // And neither candidate is asserted as THE cause — the sentence says
+        // both fit ([NFR-CC-04]).
+        assert!(
+            reason.contains("both are named"),
+            "the reason says both causes fit rather than picking one: {reason}"
+        );
+
+        // The wire contract is untouched: same variant, same kebab-case key, and
+        // the verbatim diagnostic still rides its own field.
+        let state = MemberOpenState::degraded(OBSERVED, StoreFile::Present);
+        let value = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            value["degraded_cause"], "host-resource-limit",
+            "no variant added and no wire key renamed: {value}"
+        );
+        assert_eq!(value["degraded_diagnostic"], OBSERVED);
+    }
+
+    /// The widened remedy is confined to the ambiguous cause: an **obstructed**
+    /// store path still gets its own, unambiguous remedy, and an unclassified
+    /// failure still gets the verbatim diagnostic and nothing invented.
+    #[test]
+    fn the_other_outcomes_keep_their_own_narrower_remedies() {
+        let obstructed = MemberOpenState::degraded(OBSERVED, StoreFile::Obstructed)
+            .reason()
+            .expect("a failed open has a reason")
+            .to_string();
+        assert!(
+            obstructed.contains("not a regular file") && obstructed.contains("clear that path"),
+            "an obstructed path has ONE cause and keeps its own remedy: {obstructed}"
+        );
+        assert!(
+            !obstructed.contains("RLIMIT_NOFILE") && !obstructed.contains("permissions"),
+            "and does not inherit the ambiguous cause's two candidates: {obstructed}"
+        );
+
+        let unclassified = MemberOpenState::degraded("database disk image is malformed", StoreFile::Present)
+            .reason()
+            .expect("a failed open has a reason")
+            .to_string();
+        assert_eq!(
+            unclassified, "database disk image is malformed",
+            "no cause, no remedy invented — the diagnostic stands alone"
+        );
+    }
+
     /// An unclassifiable failure carries the **verbatim** diagnostic rather than
     /// a fabricated cause ([NFR-CC-04]).
     #[test]
@@ -798,8 +936,9 @@ mod tests {
         // for the one that classified, the verbatim diagnostic for the one that
         // did not.
         assert!(
-            notice.contains("web: a host resource limit"),
-            "the classified cause reaches the human channel: {notice}"
+            notice.contains("web: not a damaged store"),
+            "the classified cause reaches the human channel, leading with what is \
+             known: {notice}"
         );
         assert!(
             notice.contains("svc: database disk image is malformed"),

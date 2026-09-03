@@ -799,7 +799,22 @@ where
 /// `X` in the warning so both the contract-surface and invocation-consumer reads
 /// (and both tiers) share this handling verbatim.
 ///
+/// # An engine-start failure is announced once per command
+/// The two arms warn on different schedules, because they report different
+/// things. A **read** failure is per-`subject`: the same member can read its
+/// contract surface fine and fail on its invocation refs, so each is its own
+/// news. An **engine-start** failure is per-member and subject-independent — a
+/// member whose store will not open fails identically for every subject, and
+/// `workspace status` walks all members three times, so the shipped code emitted
+/// one broken member's diagnostic three times over. The start arm therefore asks
+/// [`EngineRegistry::announce_open_failure`] whether the operator has been told
+/// yet, and stays quiet when they have ([FR-WS-16], [NFR-CC-04]). Nothing is
+/// lost: the member is still skipped, still recorded in the open-state ledger,
+/// and still named — with its cause — by the degraded roll-up's own notice.
+///
 /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+/// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 pub(super) fn read_members<E, T>(
     registry: &EngineRegistry<E>,
     subject: &str,
@@ -817,10 +832,15 @@ where
                 member = %member,
                 "reading a workspace member's {subject} failed; degraded without it: {err:#}"
             ),
-            Err(err) => tracing::warn!(
-                member = %member,
-                "a workspace member engine failed to start; degraded without it: {err:#}"
-            ),
+            Err(err) => {
+                if registry.announce_open_failure(&member) {
+                    tracing::warn!(
+                        member = %member,
+                        "a workspace member engine failed to start; degraded without it: \
+                         {err:#}"
+                    );
+                }
+            }
         }
     }
     out

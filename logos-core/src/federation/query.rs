@@ -518,6 +518,26 @@ where
 /// reads the ledger the fan-outs below already wrote, so `WALKS_PER_STATUS`
 /// stays at 4 ([NFR-PE-10]) — see `tests/workspace_connection_budget.rs`.
 ///
+/// # A broken member is attempted, and reported, once per command
+/// The three walks below are three all-member fan-outs, and each used to
+/// re-attempt a member whose engine had already failed to start — so one
+/// unopenable member cost three wasted opens and emitted the same `WARN` three
+/// times, growing as `3 × N`. The walks now share one attempt and one
+/// announcement: the freshness walk makes the real attempt and records the
+/// diagnostic on the member row's `error`, while the coverage and topic walks
+/// replay the recorded failure without touching the store
+/// ([`EngineRegistry::fan_out`](super::registry::EngineRegistry::fan_out)) and
+/// the first walk that reaches the human channel is the only one to speak
+/// ([`EngineRegistry::announce_open_failure`](super::registry::EngineRegistry::announce_open_failure)).
+///
+/// Nothing in this payload moves: the ledger read below is unchanged, so the
+/// member rows, [`degraded_rollup`](WorkspaceStatus::degraded_rollup), the
+/// coverage marker and the exit code derived from them are what they were. What
+/// changes is only how many times the same failure is paid for and repeated
+/// ([FR-WS-16], [NFR-CC-04], [NFR-PE-10]). A **fresh** command builds a fresh
+/// registry, so a member whose failure was transient is attempted again on the
+/// next invocation.
+///
 /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
 ///
 /// # The warm labelling costs nothing
