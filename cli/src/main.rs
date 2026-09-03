@@ -120,7 +120,7 @@ pub(crate) enum Commands {
         /// Search query string.
         query: String,
         /// Filter by node kind (e.g. function, struct, route).
-        #[arg(long, value_parser = parse_kind)]
+        #[arg(long)]
         kind: Option<NodeKind>,
         /// Maximum number of results (default 20).
         #[arg(long)]
@@ -131,7 +131,7 @@ pub(crate) enum Commands {
         /// Symbol or name to query.
         symbol: String,
         /// Filter the search by node kind.
-        #[arg(long, value_parser = parse_kind, conflicts_with_all = ["callers", "callees"])]
+        #[arg(long, conflicts_with_all = ["callers", "callees"])]
         kind: Option<NodeKind>,
         /// List the symbol's direct callers instead of searching.
         #[arg(long, conflicts_with = "callees")]
@@ -716,18 +716,6 @@ const fn violation_code(passed: bool) -> i32 {
     }
 }
 
-/// Parse a `--kind` filter against the canonical ontology's wire names; an
-/// unknown kind is a clap value error → usage exit 2 (FR-CL-03).
-pub(crate) fn parse_kind(s: &str) -> Result<NodeKind, String> {
-    NodeKind::ALL
-        .into_iter()
-        .find(|k| k.as_str() == s)
-        .ok_or_else(|| {
-            let names: Vec<&str> = NodeKind::ALL.iter().map(|k| k.as_str()).collect();
-            format!("unknown node kind {s:?} (one of: {})", names.join(", "))
-        })
-}
-
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -764,14 +752,28 @@ mod tests {
         assert_eq!(error::exit_code(&anyhow::anyhow!("boom")), CoreError::EXIT_INTERNAL);
     }
 
-    /// `--kind` accepts every canonical wire name and rejects garbage with an
-    /// enumerating message (NFR-UX-02).
+    /// `--kind` is wired to the ontology's own `FromStr` (no adapter-side
+    /// parser): a canonical wire name parses, and garbage is a clap value
+    /// error → usage exit 2 (FR-CL-03). The round-trip over all 37 kinds and
+    /// the enumerating message are asserted where the vocabulary lives,
+    /// `logos_core::model::kinds`.
     #[test]
-    fn kind_parser_round_trips_the_ontology() {
-        for kind in NodeKind::ALL {
-            assert_eq!(parse_kind(kind.as_str()), Ok(kind));
-        }
-        let err = parse_kind("nonsense").unwrap_err();
-        assert!(err.contains("function"), "names the valid kinds: {err}");
+    fn kind_flag_parses_through_the_ontology_from_str() {
+        let cli = Cli::try_parse_from(["logos", "search", "q", "--kind", "function"])
+            .expect("a canonical wire name parses");
+        let Commands::Search { kind, .. } = cli.command else {
+            panic!("expected Search");
+        };
+        assert_eq!(kind, Some(NodeKind::Function));
+
+        // `match`, not `expect_err`: `Cli` derives no `Debug`.
+        let err = match Cli::try_parse_from(["logos", "search", "q", "--kind", "nonsense"]) {
+            Err(err) => err,
+            Ok(_) => panic!("an unknown kind is a usage error"),
+        };
+        assert!(
+            err.to_string().contains("function"),
+            "clap surfaces the ontology's enumerating message: {err}"
+        );
     }
 }

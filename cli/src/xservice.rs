@@ -22,7 +22,7 @@ use logos_core::federation::{
 };
 use logos_core::{model::NodeKind, Engine};
 
-use crate::{parse_kind, Output};
+use crate::Output;
 
 /// `xservice` sub-subcommands ([FR-WS-05]): the repo-qualified cross-service
 /// query surface. Each carries an optional `--repo` member filter.
@@ -65,7 +65,7 @@ pub(crate) enum XserviceCommands {
         /// Search query string.
         query: String,
         /// Filter by node kind (e.g. function, struct, route).
-        #[arg(long, value_parser = parse_kind)]
+        #[arg(long)]
         kind: Option<NodeKind>,
         /// Maximum hits per member (default 20).
         #[arg(long)]

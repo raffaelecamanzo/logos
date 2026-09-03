@@ -172,17 +172,26 @@ fn adapter_lines() -> usize {
 /// stubbed spawn (NFR-PE-08: launching 84 real indexers to test a bound would
 /// oversubscribe the machine running the suite).
 ///
-/// **Attribution — read before citing this raise.** S-321 owns and spends it.
-/// Unlike the CR-095 raise above, it is *not* yet blessed in its CR: CR-099
-/// mentions no budget, no LOC, and no NFR-MA-02 (its §4.4 says only
-/// "gate-neutral"), and `architecture/components/cli-surface.md` still records
-/// the allowance as 760→775. Per the CR-084 §6 protocol ("the raise is
-/// recorded, not laundered") that record is owed in three places — a CR-099
-/// §4.1 NFR-MA-02 row, a §4.4 bullet naming 775→825 measured 819, and the
-/// `cli-surface.md` Notes — and is flagged for the sprint review rather than
-/// asserted here as though it already existed. Do not raise this number again
-/// without a story-level justification; the next author should find the CR-099
-/// record in place first.
+/// **Attribution.** S-321 owns and spends it, and the raise is now **recorded**
+/// per the CR-084 §6 protocol ("the raise is recorded, not laundered") in all
+/// three places it was owed: the CR-099 §4.1 NFR-MA-02 row, the §4.4 surface-
+/// budget bullet naming 775→825 measured 819, and the `cli-surface.md` Notes.
+/// Approved at the Sprint 61 human review. Do not raise this number again
+/// without a story-level justification.
+///
+/// **Headroom, and how it was bought back.** The raise landed at 819 of 825 —
+/// six lines. The Sprint 61 review's disposition bought nine back by deleting
+/// `parse_kind` from `main.rs`, which duplicated `NodeKind::from_wire`: the
+/// ontology now carries its own `FromStr` (`logos_core::model::kinds`), so
+/// `--kind` validates through the vocabulary that defines it and clap needs no
+/// adapter-side `value_parser`. That is the *correct* shape of a reduction
+/// here — remove a duplication of core logic, not relocate surface. Note what
+/// was considered and rejected: moving `supervisor_argv` into
+/// `logos_core::federation::warm` would have given the core its first
+/// production knowledge of this binary's own flag spelling (`internal-warm`,
+/// `--concurrency`), inverting the seam `warm_queue`'s spawn closure exists to
+/// hold. The adapter is genuinely thin at this point; the next author needing
+/// room should expect to find a duplication, not a relocation.
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();

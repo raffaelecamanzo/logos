@@ -615,6 +615,30 @@ pub enum EdgeKind {
     Subscribes = 17,
 }
 
+/// Parse a lower-case wire/CLI node-kind name, enumerating the valid names on
+/// failure.
+///
+/// The ontology owns this parse because it owns the vocabulary: the lookup
+/// delegates to [`from_wire`](NodeKind::from_wire), which scans
+/// [`ALL`](NodeKind::ALL) and therefore cannot drift from
+/// [`as_str`](NodeKind::as_str). Adapters get `--kind`/filter-token validation
+/// by using `FromStr` — a `clap` `value_parser` needs no bespoke function, and
+/// the error text (which must list the accepted names, NFR-UX-02) is written
+/// once here rather than per surface.
+impl std::str::FromStr for NodeKind {
+    /// `String` rather than a typed error: every consumer renders it verbatim
+    /// (clap turns it into a usage error, exit 2), and `String` already
+    /// satisfies clap's `Into<Box<dyn Error + Send + Sync>>` bound.
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<NodeKind, String> {
+        NodeKind::from_wire(s).ok_or_else(|| {
+            let names: Vec<&str> = NodeKind::ALL.iter().map(|k| k.as_str()).collect();
+            format!("unknown node kind {s:?} (one of: {})", names.join(", "))
+        })
+    }
+}
+
 impl EdgeKind {
     /// Every edge kind, in declaration (discriminant) order.
     pub const ALL: [EdgeKind; 17] = [
@@ -1323,6 +1347,19 @@ mod tests {
             let json = serde_json::to_string(&kind).unwrap();
             assert_eq!(serde_json::from_str::<EdgeKind>(&json).unwrap(), kind);
         }
+    }
+
+    /// `FromStr` accepts every canonical wire name and rejects an unknown one
+    /// with a message enumerating the valid names (NFR-UX-02). Owned here
+    /// rather than in an adapter: the vocabulary is the ontology's.
+    #[test]
+    fn from_str_round_trips_the_whole_ontology_and_enumerates_on_failure() {
+        for kind in NodeKind::ALL {
+            assert_eq!(kind.as_str().parse::<NodeKind>(), Ok(kind));
+        }
+        let err = "nonsense".parse::<NodeKind>().unwrap_err();
+        assert!(err.contains("function"), "names the valid kinds: {err}");
+        assert!(err.contains("nonsense"), "quotes the offending input: {err}");
     }
 
     #[test]
