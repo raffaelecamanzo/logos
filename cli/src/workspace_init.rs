@@ -157,7 +157,7 @@ pub(crate) fn spawn_supervisor(members: &[Member], declared_k: Option<usize>) ->
         return false;
     };
     let mut cmd = Command::new(exe);
-    cmd.args(supervisor_argv(members, warm::effective_concurrency(declared_k)))
+    cmd.args(supervisor_argv(members, declared_k))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -180,14 +180,21 @@ pub(crate) fn spawn_supervisor(members: &[Member], declared_k: Option<usize>) ->
 /// invocation — rather than the loop bound of N invocations — is what makes
 /// the process count `1 + K` instead of `N` (FR-WS-14, BR-44); factored out so
 /// that property is directly assertable without spawning anything.
-fn supervisor_argv(members: &[Member], bound: usize) -> Vec<OsString> {
+///
+/// Resolution happens **here** rather than at the spawn site for the same
+/// reason: `declared_k` is the raw `[workspace.warm] concurrency` (S-322), and
+/// taking it un-resolved is what lets a test assert that a declared K reaches
+/// the argv — and that an absent one falls back to the core-derived default —
+/// without a process. Resolving at the caller left the only line the story
+/// exists for outside every test's reach.
+fn supervisor_argv(members: &[Member], declared_k: Option<usize>) -> Vec<OsString> {
     // Everything after `--` is a positional, whatever it starts with. Member
     // roots are canonical absolute paths today, so no current root can look like
     // a flag — but the whole failure mode of this argv is invisibility (the
     // child's stderr is /dev/null and nobody reads its exit code), so a root
     // such as `-legacy` would silently exit 2 and lose the entire warm rather
     // than fail loudly. One token buys immunity.
-    let k = bound.to_string();
+    let k = warm::effective_concurrency(declared_k).to_string();
     [SUPERVISOR_COMMAND, "--concurrency", &k, "--"]
         .into_iter()
         .map(OsString::from)
@@ -349,7 +356,7 @@ mod tests {
     #[test]
     fn the_whole_delta_becomes_a_single_supervisor_command_line() {
         let members: Vec<Member> = (0..5).map(|i| member(&format!("m{i}"))).collect();
-        let argv = supervisor_argv(&members, 3);
+        let argv = supervisor_argv(&members, Some(3));
 
         let rendered: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
@@ -369,7 +376,7 @@ mod tests {
 
         let members = vec![member("-legacy"), member("--weird")];
         let mut full = vec![OsString::from("logos")];
-        full.extend(supervisor_argv(&members, 1));
+        full.extend(supervisor_argv(&members, Some(1)));
 
         let cli = crate::Cli::try_parse_from(full).expect("a hyphen-leading root still parses");
         let crate::Commands::InternalWarm { members: parsed, .. } = cli.command else {
@@ -384,7 +391,7 @@ mod tests {
     #[test]
     fn the_argv_carries_every_member_of_a_large_delta() {
         let members: Vec<Member> = (0..200).map(|i| member(&format!("m{i}"))).collect();
-        let argv = supervisor_argv(&members, 4);
+        let argv = supervisor_argv(&members, Some(4));
         assert_eq!(argv.len(), 204, "4 head tokens + 200 members, one command line");
     }
 
@@ -397,7 +404,7 @@ mod tests {
 
         let members = vec![member("api"), member("web")];
         let mut full = vec![OsString::from("logos")];
-        full.extend(supervisor_argv(&members, 2));
+        full.extend(supervisor_argv(&members, Some(2)));
 
         let cli = crate::Cli::try_parse_from(full).expect("the spawned argv parses");
         let crate::Commands::InternalWarm {
@@ -518,11 +525,23 @@ mod tests {
         let seen = SEEN.lock().unwrap().clone();
         assert_eq!(seen, [Some(2)], "the declared override reaches the warm");
 
-        // …and survives resolution into the argv the supervisor is spawned with,
-        // rather than being resolved back to the core-derived default.
-        let argv = supervisor_argv(&[member("api")], warm::effective_concurrency(Some(2)));
+        // …and survives resolution into the argv the supervisor is spawned with.
+        // Asserted through `supervisor_argv` itself, which owns the resolution
+        // `spawn_supervisor` hands it: re-composing `effective_concurrency` in
+        // the test body instead would assert the test's own arithmetic, and
+        // left `spawn_supervisor` forwarding `None` undetectable.
+        let argv = supervisor_argv(&[member("api")], Some(2));
         assert_eq!(argv[1], OsString::from("--concurrency"));
-        assert_eq!(argv[2], OsString::from("2"));
+        assert_eq!(argv[2], OsString::from("2"), "the declared K, not the default");
+
+        // The other direction, which is what makes the assertion above mean
+        // something: no declaration resolves to the core-derived default.
+        let argv = supervisor_argv(&[member("api")], None);
+        assert_eq!(
+            argv[2],
+            OsString::from(warm::default_concurrency().to_string()),
+            "absent ⇒ the core-derived default"
+        );
     }
 
     /// A re-run warms only the newly approved delta — the already-manifested

@@ -1261,6 +1261,34 @@ reason = \"deprecated in v3\"
     );
 }
 
+/// An out-of-range `[workspace.warm] concurrency` fails LOUD on a command that
+/// has nothing to do with warming (S-322, FR-WS-01, [ADR-14]).
+///
+/// The rejection lives in `manifest::parse`, which `federation::discover` calls
+/// on the path of *every* command — so proving it only through
+/// `init --workspace` (where the key is actually used) would leave the far more
+/// important half unstated: an operator who mistypes the bound is told so by
+/// whatever they run next, not silently given a degraded workspace. This is the
+/// same fail-loud posture the malformed-rule test below pins.
+#[test]
+fn an_out_of_range_warm_concurrency_fails_loud_on_an_unrelated_command() {
+    let tmp = workspace();
+    declare_rules(tmp.path(), "\n[workspace.warm]\nconcurrency = 0\n");
+
+    let out = logos(tmp.path(), &["workspace", "check", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a bad manifest value is a config fault on every command, not just the \
+         one that reads it"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("workspace.warm.concurrency"),
+        "and it names the offending key: {stderr}"
+    );
+}
+
 /// A malformed rule fails LOUD (exit 2, the config-error code) rather than
 /// silently matching nothing — a governance rule that quietly never fires would
 /// report a false all-clear ([ADR-14]).

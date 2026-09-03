@@ -14,8 +14,10 @@
 //!   defaults to `max(1, cores / 4)` capped at [`CONCURRENCY_CAP`]; the
 //!   `configured` argument is the per-workspace override channel, fed by the
 //!   `[workspace.warm] concurrency` manifest key of [FR-WS-01] — registered and
-//!   range-validated at parse time ([`MANIFEST_CONCURRENCY_MAX`]), so what
-//!   arrives here is already known to be in range and is honoured verbatim.
+//!   range-validated at parse time ([`MANIFEST_CONCURRENCY_MAX`]), so a value
+//!   that came from a manifest is already in range and is honoured verbatim.
+//!   Note where that guarantee lives: in the parse, not in this signature —
+//!   nothing here re-checks a ceiling, so a programmatic caller is trusted.
 //! - [`warm_queue`] — the bounded queue itself: at most K member indexes in
 //!   flight, the next starting as each finishes, whatever N is.
 //!

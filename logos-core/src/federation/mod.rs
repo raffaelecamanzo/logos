@@ -115,8 +115,7 @@ pub use coverage::{
 };
 pub use governance::{workspace_governance, WorkspaceGovernance, WorkspaceViolation};
 pub use manifest::{
-    Governance, Link, NoCrossServiceCallers, ServiceBoundary, ServiceLayer, Warm,
-    MANIFEST_FILENAME,
+    Governance, Link, NoCrossServiceCallers, ServiceBoundary, ServiceLayer, MANIFEST_FILENAME,
 };
 pub use reach::{
     app_wide_reachability, AppWideReachability, AppWideVerdict, BoundedReachability, CoverageRider,
@@ -191,9 +190,13 @@ pub struct Federation {
     ///
     /// Carried on the federation rather than re-read from disk so the surface
     /// that spawns the warm supervisor gets K from the same manifest parse that
-    /// resolved the member set — one read, one source of truth. Guaranteed in
-    /// `1..=`[`warm::MANIFEST_CONCURRENCY_MAX`] when `Some`: an out-of-range
-    /// value never survives [`manifest::parse`].
+    /// resolved the member set — one read, one source of truth.
+    ///
+    /// In `1..=`[`warm::MANIFEST_CONCURRENCY_MAX`] when it came from
+    /// [`discover`], which validates via [`manifest::parse`]. The field is
+    /// `pub` on a struct built by literal in tests across several crates, so
+    /// that is a property of the producer, not of the type — see
+    /// [`manifest::Manifest::warm_concurrency`].
     ///
     /// This is the value as **declared**, not the resolved K: `None` means "the
     /// core-derived default applies", which only
@@ -227,9 +230,15 @@ pub struct Federation {
 ///
 /// # Errors
 /// Returns a [`ConfigError`] (exit code 2) when a manifest **is** found but is
-/// unreadable ([`ConfigError::Io`]) or malformed / has an unknown key
-/// ([`ConfigError::Parse`]) — a discovered-but-broken manifest fails loud rather
-/// than silently degrading to single-root ([ADR-14]).
+/// unreadable ([`ConfigError::Io`]), malformed / has an unknown key or a
+/// wrong-typed value ([`ConfigError::Parse`]), or gives a key an out-of-range
+/// value ([`ConfigError::InvalidValue`]) — a discovered-but-broken manifest
+/// fails loud rather than silently degrading to single-root ([ADR-14]).
+///
+/// Note the reach: this walk is on the path of **every** command, so a manifest
+/// rejected here fails all of them, not just the one that would have used the
+/// offending key. That is the intended posture, and it is why the messages name
+/// the key and what a legal value is.
 ///
 /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
 /// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
@@ -275,16 +284,18 @@ pub fn discover(hint: &Path) -> Result<Option<Federation>, ConfigError> {
         .and_then(|spec| member_name(&root, &root.join(spec)))
         .filter(|name| members.iter().any(|m| &m.name == name));
 
+    // Read before the literal moves `manifest` apart field by field, the same
+    // reason `members` and `default` above are locals rather than inline.
+    let warm_concurrency = manifest.warm_concurrency();
+
     Ok(Some(Federation {
-        // First because it borrows `manifest`, which the fields below move out
-        // of field by field.
-        warm_concurrency: manifest.warm_concurrency(),
         name: manifest.workspace.name,
         root,
         members,
         default,
         links: manifest.links,
         governance: manifest.governance,
+        warm_concurrency,
     }))
 }
 

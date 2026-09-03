@@ -108,8 +108,14 @@ impl Manifest {
     /// (table present, key absent) mean exactly what an absent table means,
     /// without every caller having to flatten two `Option`s the same way.
     ///
-    /// Always in `1..=`[`warm::MANIFEST_CONCURRENCY_MAX`](super::warm::MANIFEST_CONCURRENCY_MAX)
-    /// when `Some`: a value outside that range never survives [`parse`].
+    /// In `1..=`[`warm::MANIFEST_CONCURRENCY_MAX`](super::warm::MANIFEST_CONCURRENCY_MAX)
+    /// **when the `Manifest` came from [`parse`]** — that is the only
+    /// constructor that validates. The bound is not enforced by the type:
+    /// [`Warm::concurrency`] is a plain `pub Option<usize>`, so a
+    /// programmatically built `Manifest` can carry anything, and
+    /// [`warm::effective_concurrency`](super::warm::effective_concurrency)
+    /// applies no ceiling. Stated precisely because an unconditional
+    /// "guaranteed" here is what would stop the next author from re-checking.
     ///
     /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
     /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
@@ -138,29 +144,42 @@ impl Manifest {
         let Some(k) = self.warm_concurrency() else {
             return Ok(());
         };
-        let range = 1..=super::warm::MANIFEST_CONCURRENCY_MAX;
-        if range.contains(&k) {
+        /// The smallest declarable bound. 1, not 0: a zero bound could never
+        /// drain the queue, so it can never be honoured literally.
+        const LEGAL_MIN: usize = 1;
+
+        if (LEGAL_MIN..=super::warm::MANIFEST_CONCURRENCY_MAX).contains(&k) {
             return Ok(());
         }
         Err(ConfigError::InvalidValue {
             key: "workspace.warm.concurrency".to_string(),
-            message: if k == 0 {
-                format!(
-                    "0 would stall the background warm forever — it must be at \
-                     least 1; omit the key entirely for the core-derived \
-                     default of max(1, cores / 4) capped at {}",
-                    super::warm::CONCURRENCY_CAP
-                )
-            } else {
-                format!(
-                    "{k} exceeds the maximum of {}; each concurrent member \
-                     index is itself parallel over the host's cores, so K \
-                     costs K × cores worker threads and up to K × one index's \
-                     peak memory — a value near the member count is the \
-                     unbounded fan-out this bound exists to prevent",
-                    super::warm::MANIFEST_CONCURRENCY_MAX
-                )
-            },
+            // Both branches name the whole legal range, not just the bound
+            // that was breached. Naming only the floor once let the zero
+            // message mention `CONCURRENCY_CAP` (the *default's* cap) and
+            // nothing else, which reads as "4 is the highest I may declare"
+            // when the ceiling is four times that. The core-derived default is
+            // reported as the resolved number for this host rather than as the
+            // `cores / 4` formula, which lives in `warm::derive_concurrency`
+            // and would make this message lie the moment it retunes.
+            message: format!(
+                "{k} is outside the valid range {}..={} — {}. Omit the key \
+                 entirely for the core-derived default ({} on this host).",
+                LEGAL_MIN,
+                super::warm::MANIFEST_CONCURRENCY_MAX,
+                if k < LEGAL_MIN {
+                    "a bound of 0 would stall the background warm forever".to_string()
+                } else {
+                    format!(
+                        "each concurrent member index is itself parallel over the \
+                         host's cores, so K costs K × cores worker threads and up \
+                         to K × one index's peak memory; a value near the member \
+                         count is the unbounded fan-out the bound exists to \
+                         prevent (the default is capped at {})",
+                        super::warm::CONCURRENCY_CAP
+                    )
+                },
+                super::warm::default_concurrency()
+            ),
         })
     }
 }
@@ -339,39 +358,36 @@ pub struct WorkspaceSection {
 
 /// The `[workspace.warm]` sub-table ([FR-WS-01], [FR-WS-14], [BR-44]).
 ///
-/// Registration is **load-bearing**, not documentation: the manifest parses
-/// under `deny_unknown_fields`, so before this table existed a manifest
-/// carrying it was rejected *whole* — the workspace flipped back to single-root
-/// with an exit-2 config error, not just a lost warm bound. Every field is
-/// optional, so a bare `[workspace.warm]` is valid and inert (the same posture
-/// `[workspace.autodiscover] enabled = false` has), and a manifest without the
-/// table parses byte-for-byte as it did before.
+/// Every field is optional, so a bare `[workspace.warm]` is valid and inert —
+/// the same "documented but currently off" posture
+/// `[workspace.autodiscover] enabled = false` has, and a natural intermediate
+/// authoring state — while a manifest without the table parses byte-for-byte as
+/// it did before. Why registering it at all is load-bearing under
+/// `deny_unknown_fields` is stated in the module docs.
 ///
 /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
 /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
 /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Warm {
     /// `concurrency = N` — how many member indexes the warm supervisor may run
     /// at once, overriding the core-derived `max(1, cores / 4)` default
     /// ([`warm::default_concurrency`](super::warm::default_concurrency)).
     ///
-    /// # Resource cost
-    /// Each of the K is a full `logos index` child, itself rayon-parallel over
-    /// the host's cores ([NFR-PE-08]), so K costs `K × cores` worker threads and
-    /// up to `K ×` one member index's peak RSS ([NFR-PE-06]) — which is why the
-    /// default divides by four rather than scaling with the host, and why this
-    /// is validated against [`warm::MANIFEST_CONCURRENCY_MAX`](super::warm::MANIFEST_CONCURRENCY_MAX)
-    /// rather than accepted verbatim. Whatever resolves from it is a **hard**
-    /// ceiling: no member count and no `--yes` can put more indexes in flight
-    /// ([BR-44]).
+    /// K is not free — it buys `K × cores` worker threads and up to `K ×` one
+    /// member index's peak RSS, which is why it is range-checked rather than
+    /// accepted verbatim. That cost model, and the reasoning behind the
+    /// ceiling, is stated once at
+    /// [`warm::MANIFEST_CONCURRENCY_MAX`](super::warm::MANIFEST_CONCURRENCY_MAX);
+    /// `docs/howto/commands.md` states it for the operator.
+    ///
+    /// Whatever resolves from this is a **hard** ceiling: no member count and no
+    /// `--yes` can put more indexes in flight ([BR-44]).
     ///
     /// Omit the key (or the whole table) for the default. `None` here — a bare
     /// table — is "no override", never zero.
     ///
-    /// [NFR-PE-06]: ../../../docs/specs/requirements/NFR-PE-06.md
-    /// [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
     /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency: Option<usize>,
@@ -427,8 +443,13 @@ pub struct Link {
 /// # Errors
 /// - [`ConfigError::Io`] if the file cannot be read (it was located by the
 ///   up-tree walk, so a read failure is a real fault, not "no manifest").
-/// - [`ConfigError::Parse`] if the TOML is syntactically invalid or contains an
-///   unknown key (`deny_unknown_fields`) — surfaced as exit code 2 ([FR-CF-01]).
+/// - [`ConfigError::Parse`] if the TOML is syntactically invalid, contains an
+///   unknown key (`deny_unknown_fields`), or gives a key a value of the wrong
+///   type — surfaced as exit code 2 ([FR-CF-01]).
+/// - [`ConfigError::InvalidValue`] if a well-typed value is out of range —
+///   today `[workspace.warm] concurrency` outside
+///   `1..=`[`warm::MANIFEST_CONCURRENCY_MAX`](super::warm::MANIFEST_CONCURRENCY_MAX)
+///   ([`Manifest::validate`], also exit code 2).
 ///
 /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
 /// [FR-CF-01]: ../../../docs/specs/requirements/FR-CF-01.md
@@ -455,8 +476,14 @@ pub fn parse(path: &Path) -> Result<Manifest, ConfigError> {
 /// applied to the one field this command owns.
 ///
 /// # Errors
-/// [`ConfigError::Io`]/[`ConfigError::Parse`] reading a malformed existing
-/// manifest; [`ConfigError::Write`] if the write itself fails.
+/// [`ConfigError::Io`]/[`ConfigError::Parse`]/[`ConfigError::InvalidValue`]
+/// reading a malformed existing manifest — it is read through [`parse`], so a
+/// re-run over an out-of-range manifest fails loud rather than rewriting it;
+/// [`ConfigError::Write`] if the write itself fails.
+///
+/// Because the existing manifest is validated on the way in, everything this
+/// function carries forward is already in range: it can never write a manifest
+/// its own [`parse`] would reject.
 ///
 /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 /// [FR-IN-01]: ../../../docs/specs/requirements/FR-IN-01.md
@@ -954,12 +981,16 @@ mod tests {
         };
         assert_eq!(key, "workspace.warm.concurrency");
         assert!(
-            message.contains("at least 1"),
-            "names the floor: {message}"
+            message.contains(&format!("1..={}", warm::MANIFEST_CONCURRENCY_MAX)),
+            "names the whole legal range, not just the bound breached: {message}"
         );
         assert!(
-            message.contains("omit the key"),
-            "and says how to get the default instead: {message}"
+            message.contains("stall"),
+            "and why zero specifically cannot be honoured: {message}"
+        );
+        assert!(
+            message.contains("Omit the key"),
+            "and how to get the default instead: {message}"
         );
         // A wrapped literal that lost its `\` continuations reads as a run of
         // spaces on the operator's terminal. Cheap to assert, and it is how
@@ -993,6 +1024,10 @@ mod tests {
         assert!(
             message.contains(&(warm::MANIFEST_CONCURRENCY_MAX + 1).to_string()),
             "names the rejected value: {message}"
+        );
+        assert!(
+            message.contains(&format!("1..={}", warm::MANIFEST_CONCURRENCY_MAX)),
+            "names the whole legal range: {message}"
         );
         assert!(!message.contains("  "), "message is not garbled: {message:?}");
     }
@@ -1031,7 +1066,37 @@ mod tests {
                 matches!(err, ConfigError::Parse { .. }),
                 "{bad} must be a parse error, got {err:?}"
             );
+            // The doc promises the offending key reaches the operator. It does
+            // so only through toml's rendered source snippet, so pin that
+            // rather than the variant alone — losing the span would leave the
+            // message un-actionable with every other assertion still green.
+            let text = err.to_string();
+            assert!(
+                text.contains("concurrency"),
+                "{bad} must name the offending key: {text}"
+            );
             assert_eq!(err.exit_code(), 2);
+        }
+    }
+
+    /// A value beyond the integer type is still a clean exit-2 config fault,
+    /// not a panic or a wrap-around.
+    ///
+    /// Only the exit code is asserted: which variant it lands in is
+    /// target-width dependent — on a 64-bit host `i64::MAX` deserialises into
+    /// `usize` and is caught by the range check as `InvalidValue`, while on a
+    /// 32-bit target serde rejects it by type as `Parse` first. Both are exit
+    /// 2 with the key named, which is the property that matters.
+    #[test]
+    fn an_integer_beyond_the_type_is_still_a_clean_exit_2() {
+        for bad in ["9223372036854775807", "99999999999999999999"] {
+            let tmp = TempDir::new().unwrap();
+            let path = write_manifest(
+                &tmp,
+                &format!("[workspace]\nname = \"a\"\n\n[workspace.warm]\nconcurrency = {bad}\n"),
+            );
+            let err = parse(&path).expect_err("an oversized integer must be rejected");
+            assert_eq!(err.exit_code(), 2, "{bad}: {err}");
         }
     }
 
@@ -1100,6 +1165,14 @@ mod tests {
         assert_eq!(m.warm_concurrency(), Some(2));
         assert_eq!(m.links.len(), 1);
         assert_eq!(m.governance.service_layers.len(), 1);
+
+        // And the rewrite is a fixed point. Re-parsing proves the output is
+        // valid; this proves it is *settled* — without it, a serialisation that
+        // never converges would rewrite the operator's tuned manifest on every
+        // `logos init --workspace` and never once report `Unchanged`.
+        let step = upsert(tmp.path(), "ignored", &["api".into(), "web".into()])
+            .expect("a settled manifest re-runs clean");
+        assert_eq!(step.action, InitAction::Unchanged);
     }
 
     /// A bare table survives `upsert` too: it is user-authored content, the

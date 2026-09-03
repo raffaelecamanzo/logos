@@ -169,9 +169,12 @@ Know what you are buying. Each of the K is a full `logos index` child that is
 itself parallel over your cores, so K costs roughly **K × cores worker threads**
 and up to **K × one member index's peak memory** — which is exactly why the
 default divides by four instead of scaling with the host. Legal values are
-`1`–`16`; `0`, a non-integer, or anything above `16` is rejected when the
-manifest loads, with a message naming the key and the legal range (exit code
-2) — it is never quietly clamped to something you did not ask for. Omit the key
+`1`–`16`. `0` or anything above `16` is rejected when the manifest loads, with a
+message naming the key and the legal range; a non-integer is rejected as a type
+error naming the key and its line. Either way it is exit code 2 and never a
+quiet clamp to something you did not ask for. Note that the manifest is read on
+the path of *every* command, so a rejected value fails all of them until you fix
+it — the same as any other malformed key. Omit the key
 or the whole table for the default. Whatever resolves is a **hard** ceiling: no
 member count and no `--yes` puts more indexes in flight than K
 ([BR-44](../specs/software-spec.md#327-workspace-federation)). The key is
