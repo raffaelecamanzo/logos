@@ -21,9 +21,15 @@
 //!
 //! # What must NOT move
 //! Everything a consumer reads. The exit-code predicate, the `degraded_rollup`
-//! and the coverage completeness marker are asserted against the *healthy*
-//! workspace's own values in the same run, so a change in what the suppression
-//! costs the payload fails here rather than in a release.
+//! and **both** completeness markers — the roll-up's and the coverage tier's
+//! own — are asserted on the degraded side *and* on a healthy workspace in the
+//! same binary, so a change in what the suppression costs the payload fails
+//! here rather than in a release.
+//!
+//! The walk count itself is deliberately **not** asserted here: the whole point
+//! of the fix is that one attempt and one line are paid whatever the walk count
+//! is. `workspace_connection_budget.rs`'s `WALKS_PER_STATUS` is what pins the
+//! count, and it is the test that fails if a fan-out is added.
 //!
 //! [CR-102]: ../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
 //! [FR-WS-16]: ../../docs/specs/requirements/FR-WS-16.md
@@ -38,13 +44,6 @@ use logos_core::federation::{
 };
 use logos_core::Engine;
 use tracing_subscriber::layer::SubscriberExt;
-
-/// All-member walks one `workspace status` performs — the multiplier the
-/// duplicate diagnostics grew by. Restated from
-/// `workspace_connection_budget.rs`'s `WALKS_PER_STATUS` because the two
-/// binaries cannot share a constant, and named here so "someone added a walk"
-/// reads as a deliberate edit to this test rather than an unexplained number.
-const WALKS_PER_STATUS: usize = 4;
 
 /// A minimal member repo: one tiny source file, no index. The report is a
 /// property of the *open attempt*, so the fixture needs a real store path, not a
@@ -173,8 +172,8 @@ fn one_unopenable_member_costs_one_attempt_and_one_diagnostic_line() {
     assert_eq!(
         registry.start_failures(),
         1,
-        "the broken member was attempted ONCE across the {WALKS_PER_STATUS} \
-         all-member walks, not once per walk — {} attempts recorded",
+        "the broken member was attempted ONCE across every all-member walk, \
+         not once per walk — {} attempts recorded",
         registry.start_failures()
     );
 
@@ -208,6 +207,20 @@ fn one_unopenable_member_costs_one_attempt_and_one_diagnostic_line() {
     assert!(
         !degraded.covers_all_members,
         "and the member-derived figures still declare themselves partial"
+    );
+    // The coverage tier derives its OWN marker from its OWN walk — one of the
+    // two that now replay rather than re-attempt — so it is asserted here
+    // beside the roll-up's, not assumed to follow it ([NFR-CC-04]). A replay
+    // that let the coverage walk count a member it never read fails here.
+    assert!(
+        !status.coverage.covers_all_members,
+        "the coverage tier's own marker declares itself partial too: {:?}",
+        status.coverage
+    );
+    assert_eq!(
+        (status.coverage.members_read, status.coverage.members_total),
+        (1, 2),
+        "and the replayed Err still drops the member from the coverage counts"
     );
 
     // The member row keeps its own diagnostic on its own key, which is why
