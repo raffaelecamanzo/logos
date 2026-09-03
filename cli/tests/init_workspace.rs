@@ -527,8 +527,16 @@ fn an_out_of_range_warm_concurrency_is_an_actionable_exit_2() {
         stderr.contains("workspace.warm.concurrency"),
         "the message names the offending key: {stderr}"
     );
+    let range = format!(
+        "1..={}",
+        logos_core::federation::warm::MANIFEST_CONCURRENCY_MAX
+    );
     assert!(
-        stderr.contains("at least 1"),
-        "and says what a legal value is: {stderr}"
+        stderr.contains(&range),
+        "and names the whole legal range ({range}), not just the bound breached: {stderr}"
+    );
+    assert!(
+        stderr.contains("Omit the key"),
+        "and how to get the core-derived default instead: {stderr}"
     );
 }
