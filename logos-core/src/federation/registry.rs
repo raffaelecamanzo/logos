@@ -842,9 +842,16 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// failing across requests — the same reason
     /// [`open_for_walk`](Self::open_for_walk) does not suppress there.
     ///
+    /// Deliberately **not** part of this crate's public API, and not merely for
+    /// hygiene: it is a predicate with a side effect — asking consumes the
+    /// latch — so an outside caller reading it as a query would silently
+    /// swallow the real emitter's line. `pub(super)` reaches every module that
+    /// legitimately emits a degraded diagnostic (`bridge`, and through it
+    /// `coverage`, `topics`, `reach`) and nothing else.
+    ///
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    pub fn announce_open_failure(&self, member: &str) -> bool {
+    pub(super) fn announce_open_failure(&self, member: &str) -> bool {
         if self.mode != RegistryMode::Lazy {
             return true;
         }
