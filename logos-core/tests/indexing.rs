@@ -1071,13 +1071,44 @@ fn parent_of_sibling_repos_indexes_nothing_and_warns_exactly_once() {
         "exactly one nested-git prune warning: {:?}",
         result.warnings
     );
-    let warning = warned[0];
-    assert!(warning.contains('5'), "the prune count is named: {warning}");
-    assert!(warning.contains("svc-00"), "a bounded sample of names is given: {warning}");
-    assert!(warning.contains("+2 more"), "the remainder is elided, not listed: {warning}");
-    assert!(
-        warning.contains("logos init --workspace"),
-        "the remedy is named: {warning}"
+    // The message is fully deterministic (the sample is the sorted record's head),
+    // so pin it whole: count, bounded sample, elided remainder and remedy in one
+    // assertion no single-token match can satisfy by accident.
+    assert_eq!(
+        warned[0].as_str(),
+        "discovery admitted no files: 5 directories were pruned as nested git boundaries \
+         (svc-00, svc-01, svc-02, \u{2026} +2 more). This looks like a parent folder of \
+         sibling repositories \u{2014} run `logos init --workspace` to index them as a \
+         federated workspace."
+    );
+}
+
+#[test]
+fn a_stray_non_indexable_file_does_not_silence_the_diagnostic() {
+    // Regression (review fix): discovery's default `include` is `**`, so a lone
+    // `LICENSE`/`.DS_Store` at a parent-of-repos root is admitted by the WALK
+    // while `admits_file` still rejects it and `files_indexed` stays 0. Keying the
+    // diagnostic on the walk count left exactly the CR-098 root silent — on macOS,
+    // where Finder writes a `.DS_Store` into any browsed folder, that is the
+    // common case rather than the corner case.
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path();
+    for i in 0..5 {
+        let svc = format!("svc-{i:02}");
+        write(root, &format!("{svc}/.git/HEAD"), "ref: refs/heads/main\n");
+        write(root, &format!("{svc}/src/lib.rs"), "pub fn f() {}\n");
+    }
+    write(root, "LICENSE", "All rights reserved.\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let result = engine.index();
+
+    assert_eq!(result.files_indexed, 0, "the stray file is not indexable");
+    assert_eq!(
+        prune_warnings(&result.warnings).len(),
+        1,
+        "the diagnostic still fires: {:?}",
+        result.warnings
     );
 }
 
@@ -1097,6 +1128,14 @@ fn a_repo_vendoring_a_nested_repo_emits_no_prune_warning() {
     let result = engine.index();
 
     assert_eq!(result.files_indexed, 1, "only the parent's own file is admitted");
+    // FR-IX-13 AC2 is about the WHOLE array, not just the absence of a warning
+    // carrying the remedy — assert it empty so any new warning on this fixture
+    // fails, not only a differently-worded zero-admission one.
+    assert!(
+        result.warnings.is_empty(),
+        "a vendoring repo's `warnings` stay byte-for-byte as before: {:?}",
+        result.warnings
+    );
     assert!(
         prune_warnings(&result.warnings).is_empty(),
         "a repo that admits files is never diagnosed: {:?}",
@@ -1113,11 +1152,44 @@ fn a_repo_vendoring_a_nested_repo_emits_no_prune_warning() {
         "the nested repository's files are still not admitted: {vendored:?}"
     );
 
-    // `sync` over the same tree stays silent too.
+    // A partial `Engine::sync` re-discovers nothing (`SyncScope::Partial` never
+    // reaches `discover_candidates`), so it cannot emit the diagnostic in either
+    // direction — asserting on it would be vacuous. The sync-FAMILY path that does
+    // walk is the governance reconcile, exercised below.
     let synced = engine.sync(&[PathBuf::from("src/own.rs")]);
-    assert!(
-        prune_warnings(&synced.warnings).is_empty(),
-        "sync emits no prune warning either: {:?}",
-        synced.warnings
+    assert!(synced.warnings.is_empty(), "sync stays clean: {:?}", synced.warnings);
+}
+
+#[test]
+fn the_reconcile_walk_emits_the_diagnostic_exactly_once() {
+    // FR-IX-13 names `index` *and* `sync`. A partial `Engine::sync` performs no
+    // discovery walk, so the sync-family surface that can carry the diagnostic is
+    // the governance reconcile — and it must carry exactly one, never two (it both
+    // walks itself and folds in the warnings of the `sync` it drives).
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path();
+    for i in 0..5 {
+        let svc = format!("svc-{i:02}");
+        write(root, &format!("{svc}/.git/HEAD"), "ref: refs/heads/main\n");
+        write(root, &format!("{svc}/src/lib.rs"), "pub fn f() {}\n");
+    }
+
+    let engine = Engine::start(root).expect("engine starts");
+    // Index first so the store is non-empty. (It stays empty here — a
+    // zero-admission root indexes nothing — so `reconcile` takes the FR-RC-02
+    // degrade-to-full-index arm, which is itself the path that must not
+    // double-emit: it returns `index`'s warnings verbatim.)
+    assert_eq!(engine.index().files_indexed, 0);
+
+    let rt = engine.runtime().expect("runtime present");
+    let registry = engine.registry().expect("registry present");
+    let config = logos_core::config::load_config_from_root(root).expect("config loads");
+    let outcome = logos_core::pipeline::reconcile(rt, registry, root, &config)
+        .expect("reconcile runs");
+    assert_eq!(
+        prune_warnings(&outcome.warnings).len(),
+        1,
+        "the reconcile path emits exactly one prune warning, never two: {:?}",
+        outcome.warnings
     );
 }
