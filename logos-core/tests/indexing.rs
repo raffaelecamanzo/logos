@@ -1026,3 +1026,98 @@ fn index_and_doctor_surface_the_unindexed_doc_symlink_warning() {
         report.doc_symlink_warnings
     );
 }
+
+// ---------------------------------------------------------------------------
+// Zero-admission diagnostic over nested-git-boundary prunes
+// ([FR-IX-13](../../docs/specs/requirements/FR-IX-13.md),
+//  [CR-098](../../docs/requests/CR-098-nested-git-prune-diagnostic.md)).
+// ---------------------------------------------------------------------------
+
+/// Every warning naming the nested-git prune remedy — the diagnostic's identity
+/// across surfaces, so "exactly one" is asserted on the count, not on a substring
+/// of the whole array.
+fn prune_warnings(warnings: &[String]) -> Vec<&String> {
+    warnings
+        .iter()
+        .filter(|w| w.contains("logos init --workspace"))
+        .collect()
+}
+
+#[test]
+fn parent_of_sibling_repos_indexes_nothing_and_warns_exactly_once() {
+    // FR-IX-13 AC1: at a parent folder of sibling git repositories every child is
+    // pruned as a nested git boundary, so the index admits nothing — today's
+    // silent `files_indexed: 0` / empty `warnings` / exit 0. Exactly one warning
+    // now names the prune count, a bounded sample of the pruned directory names,
+    // and `logos init --workspace`.
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path();
+    for i in 0..5 {
+        let svc = format!("svc-{i:02}");
+        write(root, &format!("{svc}/.git/HEAD"), "ref: refs/heads/main\n");
+        write(root, &format!("{svc}/src/lib.rs"), "pub fn f() {}\n");
+    }
+
+    let engine = Engine::start(root).expect("engine starts");
+    let result = engine.index();
+
+    assert_eq!(result.files_indexed, 0, "the prune rule is unchanged: nothing is admitted");
+    assert_eq!(result.nodes_created, 0, "a nested repo's symbols never enter the parent graph");
+
+    let warned = prune_warnings(&result.warnings);
+    assert_eq!(
+        warned.len(),
+        1,
+        "exactly one nested-git prune warning: {:?}",
+        result.warnings
+    );
+    let warning = warned[0];
+    assert!(warning.contains('5'), "the prune count is named: {warning}");
+    assert!(warning.contains("svc-00"), "a bounded sample of names is given: {warning}");
+    assert!(warning.contains("+2 more"), "the remainder is elided, not listed: {warning}");
+    assert!(
+        warning.contains("logos init --workspace"),
+        "the remedy is named: {warning}"
+    );
+}
+
+#[test]
+fn a_repo_vendoring_a_nested_repo_emits_no_prune_warning() {
+    // FR-IX-13 AC2 / BR-43: a repository that legitimately contains a submodule or
+    // vendored repository admits its own files, so no nested-git prune warning is
+    // emitted by `index` or `sync` — `warnings` is byte-for-byte as before. The
+    // prune rule itself is unchanged: the vendored repo's files stay out.
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path();
+    write(root, "src/own.rs", "pub fn own() {}\n");
+    write(root, "vendor/dep/.git/HEAD", "ref: refs/heads/main\n");
+    write(root, "vendor/dep/src/dep.rs", "pub fn dep() {}\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let result = engine.index();
+
+    assert_eq!(result.files_indexed, 1, "only the parent's own file is admitted");
+    assert!(
+        prune_warnings(&result.warnings).is_empty(),
+        "a repo that admits files is never diagnosed: {:?}",
+        result.warnings
+    );
+
+    // The prune rule is unchanged — the vendored repository's symbol is absent.
+    let rt = engine.runtime().expect("runtime present");
+    let vendored: Vec<_> = rt
+        .submit_read(|store| store.search("dep", Some(NodeKind::Function), 16))
+        .expect("read runs");
+    assert!(
+        vendored.is_empty(),
+        "the nested repository's files are still not admitted: {vendored:?}"
+    );
+
+    // `sync` over the same tree stays silent too.
+    let synced = engine.sync(&[PathBuf::from("src/own.rs")]);
+    assert!(
+        prune_warnings(&synced.warnings).is_empty(),
+        "sync emits no prune warning either: {:?}",
+        synced.warnings
+    );
+}

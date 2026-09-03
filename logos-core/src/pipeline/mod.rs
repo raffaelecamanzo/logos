@@ -1192,6 +1192,19 @@ fn discover_candidates(
     for drop in &report.unindexed_doc_symlinks {
         warnings.push(drop.to_string());
     }
+    // Zero-admission diagnostic ([FR-IX-13], [CR-098]). A parent folder of sibling
+    // repositories has every child pruned as a nested git boundary and so reports
+    // `files_indexed: 0`, `coverage: 1.0`, empty `warnings` and exit 0 — every
+    // signal consistent with success. Emitted here, the single discovery site
+    // `index`, `sync`'s reconcile walk and the navigation prologue already share,
+    // so exactly one warning is produced per command and no surface can derive it
+    // differently. The derivation itself lives in [config] and is `None` unless the
+    // walk admitted nothing *and* pruned at least one nested git boundary, so a
+    // repository that legitimately vendors a submodule stays byte-for-byte silent
+    // ([BR-43]) and the normal path pays nothing ([NFR-PE-08]).
+    if let Some(diagnostic) = report.zero_admission_diagnostic() {
+        warnings.push(diagnostic.to_string());
+    }
     // `discover` walks the canonicalised root and yields paths beneath it.
     let canon_root = root
         .canonicalize()
