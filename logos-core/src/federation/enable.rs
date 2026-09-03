@@ -104,10 +104,16 @@ pub struct WorkingTreeFootprint {
     ///
     /// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
     pub committed: Vec<&'static str>,
-    /// The derived state the generated `.logos/.gitignore` already keeps out of
-    /// git ([FR-IN-04]) — named so the operator can act without reading it.
+    /// What the generated `.logos/.gitignore` already keeps out of git
+    /// ([FR-IN-04]) — named so the operator can act without reading it.
+    ///
+    /// "Ignored", not "derived": the list is mostly derived state, but
+    /// `secrets.toml` is on it because it is a secret ([NFR-SE-07]), not
+    /// because it is regenerable, and telling an operator that a secret is
+    /// *derived* state would be worse than saying nothing.
     ///
     /// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
+    /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
     pub ignored: Vec<&'static str>,
 }
 
@@ -141,9 +147,8 @@ impl WorkingTreeFootprint {
         };
         Some(format!(
             "note: {} of {} workspace members now carry a fresh untracked `.logos/`{already}. \
-             Commit the policy meant to travel with each repository — {} — and leave the \
-             derived state ({}) to the generated `.logos/.gitignore`, which already ignores \
-             it (FR-IN-04).",
+             Commit the policy meant to travel with each repository — {} — and leave the rest \
+             ({}) to the generated `.logos/.gitignore`, which already ignores it (FR-IN-04).",
             self.fresh,
             self.members(),
             self.committed.join(", "),
@@ -514,6 +519,38 @@ mod tests {
         assert!(footprint(&rows).notice().is_none());
     }
 
+    /// A workspace where *every* member failed to initialise reaches the same
+    /// silence by a different route than the settled re-run above: `fresh` is 0
+    /// because nothing was attempted successfully, not because everything was
+    /// already there. Pinned separately so a future change to the `fresh == 0`
+    /// guard cannot regress one path while the other keeps passing.
+    #[test]
+    fn a_wholly_degraded_workspace_counts_but_says_nothing() {
+        let rows = vec![
+            row("a", MemberOutcome::Degraded { reason: "boom".into() }),
+            row("b", MemberOutcome::Degraded { reason: "boom".into() }),
+        ];
+        let f = footprint(&rows);
+        assert_eq!((f.fresh, f.unchanged, f.degraded), (0, 0, 2));
+        assert_eq!(f.members(), 2);
+        assert!(f.notice().is_none(), "nothing was written, so nothing is advised");
+    }
+
+    /// The core API is total over an empty member set. `enable`'s only caller
+    /// guards this case in the adapter today, so nothing else pins it — and a
+    /// roll-up that panicked or narrated an empty workspace would be a surprise
+    /// found by a future second caller, not by this suite.
+    #[test]
+    fn an_empty_member_set_has_no_footprint_and_no_notice() {
+        let f = footprint(&[]);
+        assert_eq!((f.fresh, f.unchanged, f.degraded), (0, 0, 0));
+        assert_eq!(f.members(), 0);
+        assert!(f.notice().is_none());
+        // The FR-IN-04 explanation is a statement about the layout, not about
+        // this run, so it is present even with nothing to report.
+        assert!(!f.committed.is_empty() && !f.ignored.is_empty());
+    }
+
     /// End to end over real repositories: a first run reports both members
     /// fresh, a second reports both unchanged. The classification is asserted
     /// against the working trees `enable` actually wrote, not just hand-built
@@ -562,10 +599,15 @@ mod tests {
         );
 
         // git's own verdict, not ours: the only dirt is the untracked `.logos/`.
+        //
+        // `showUntrackedFiles` is pinned for the same reason `sh_git` pins the
+        // identity — a host (or CI) whose gitconfig sets it to `all` expands the
+        // one collapsed directory line into one line per file, failing this exact
+        // string against code that is behaving perfectly.
         let status = Command::new("git")
             .arg("-C")
             .arg(&member)
-            .args(["status", "--porcelain"])
+            .args(["-c", "status.showUntrackedFiles=normal", "status", "--porcelain"])
             .output()
             .expect("git is on PATH");
         assert_eq!(
