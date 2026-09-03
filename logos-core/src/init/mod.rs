@@ -258,21 +258,30 @@ const COMMITTED_POLICY: [&str; 3] = [
 ///
 /// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
 #[must_use]
-pub fn committed_policy() -> Vec<&'static str> {
+pub(crate) fn committed_policy() -> Vec<&'static str> {
     COMMITTED_POLICY.to_vec()
 }
 
-/// [FR-IN-04]'s ignored half: the derived/machine-specific state the generated
-/// `.logos/.gitignore` keeps out of git, read out of the very block `init`
-/// writes rather than restated.
+/// [FR-IN-04]'s ignored half: everything the generated `.logos/.gitignore`
+/// keeps out of git, read out of the very block `init` writes rather than
+/// restated.
+///
+/// Mostly derived/machine-specific state, but **not** only that: `secrets.toml`
+/// is ignored because it is a secret ([FR-CF-06], [NFR-SE-07]), not because it
+/// is regenerable. So the name here — and the wording a caller renders — is
+/// "ignored", not "derived": a report telling an operator to leave the *derived*
+/// state to git-ignore, while listing a secret among it, would contradict the
+/// distinction [`GITIGNORE_BLOCK`] draws one item away.
 ///
 /// Parsed, not duplicated — the block is the single source of truth, so an
 /// entry added to it (as `wiki.db*` and `chat.db*` were) is explained to the
 /// operator on the next run with no second edit here.
 ///
 /// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
+/// [FR-CF-06]: ../../../docs/specs/requirements/FR-CF-06.md
+/// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
 #[must_use]
-pub fn ignored_state() -> Vec<&'static str> {
+pub(crate) fn ignored_state() -> Vec<&'static str> {
     GITIGNORE_BLOCK
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
