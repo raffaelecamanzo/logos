@@ -519,13 +519,17 @@ where
 /// stays at 4 ([NFR-PE-10]) — see `tests/workspace_connection_budget.rs`.
 ///
 /// # A broken member is attempted, and reported, once per command
-/// The three walks below are three all-member fan-outs, and each used to
-/// re-attempt a member whose engine had already failed to start — so one
-/// unopenable member cost three wasted opens and emitted the same `WARN` three
-/// times, growing as `3 × N`. The walks now share one attempt and one
-/// announcement: the freshness walk makes the real attempt and records the
-/// diagnostic on the member row's `error`, while the coverage and topic walks
-/// replay the recorded failure without touching the store
+/// The three statements below are **four** all-member fan-outs — `coverage`
+/// reads twice (the contract surface and the invocation references), which is
+/// why `WALKS_PER_STATUS` above is 4 and not 3. The first of them makes a
+/// member's *first* attempt; the other three used to **re**-attempt one whose
+/// engine had already failed to start, so a single unopenable member cost three
+/// wasted opens and emitted the same `WARN` three times, growing as `3 × N`.
+///
+/// The four walks now share one attempt and one announcement: the freshness
+/// walk makes the real attempt and records the diagnostic on the member row's
+/// `error`, while the three coverage and topic reads replay the recorded failure
+/// without touching the store
 /// ([`EngineRegistry::fan_out`](super::registry::EngineRegistry::fan_out)) and
 /// the first walk that reaches the human channel is the only one to speak
 /// ([`EngineRegistry::announce_open_failure`](super::registry::EngineRegistry::announce_open_failure)).

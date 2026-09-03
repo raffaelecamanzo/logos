@@ -278,10 +278,10 @@ struct Admission {
     /// Separate from [`opens`](Self::opens) because the two answer different
     /// questions: `opens` records what the *latest attempt* did (and so must be
     /// overwritten by a later attempt), while this records what the *operator has
-    /// already been told* (and so must not be). `workspace status` makes three
-    /// all-member walks and the first of them channels its failure into the
-    /// member row's `error` rather than onto the diagnostic channel, so without
-    /// this latch a single broken member emitted the same `WARN` three times.
+    /// already been told* (and so must not be). `workspace status` makes **four**
+    /// all-member walks, and the first of them channels its failure into the
+    /// member row's `error` rather than onto the diagnostic channel — so without
+    /// this latch the remaining three each emitted the same `WARN`.
     ///
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
@@ -790,10 +790,10 @@ impl<E: MemberEngine> EngineRegistry<E> {
     ///
     /// # Why the suppression lives on the walk and not on `engine_for`
     /// A read-model like [`workspace_status`](super::query::workspace_status)
-    /// makes three all-member walks, and a member that failed to open on the
-    /// first would not have succeeded on the second — so the retries bought
-    /// nothing and cost one wasted open and one duplicate diagnostic each
-    /// ([CRA-06]). A direct [`engine_for`](Self::engine_for), by contrast, is a
+    /// makes **four** all-member walks (`coverage` reads twice), and a member
+    /// that failed to open on the first would not have succeeded on the second —
+    /// so the three retries bought nothing and cost one wasted open and one
+    /// duplicate diagnostic each ([CRA-06]). A direct [`engine_for`](Self::engine_for), by contrast, is a
     /// caller asking for **one named member**, and it keeps its real attempt:
     /// the ledger's last-write-wins contract (a member that failed once and
     /// opened later is not degraded) is a property of that path, and nothing

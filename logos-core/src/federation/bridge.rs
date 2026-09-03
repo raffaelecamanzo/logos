@@ -805,8 +805,10 @@ where
 /// contract surface fine and fail on its invocation refs, so each is its own
 /// news. An **engine-start** failure is per-member and subject-independent — a
 /// member whose store will not open fails identically for every subject, and
-/// `workspace status` walks all members three times, so the shipped code emitted
-/// one broken member's diagnostic three times over. The start arm therefore asks
+/// `workspace status` reaches **this helper** three times (`coverage` twice,
+/// `topics` once — its fourth walk, the freshness read, does not come through
+/// here), so the shipped code emitted one broken member's diagnostic three
+/// times over. The start arm therefore asks
 /// [`EngineRegistry::announce_open_failure`] whether the operator has been told
 /// yet, and stays quiet when they have ([FR-WS-16], [NFR-CC-04]). Nothing is
 /// lost: the member is still skipped, still recorded in the open-state ledger,
