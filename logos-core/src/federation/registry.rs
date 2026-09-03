@@ -1804,6 +1804,105 @@ mod tests {
         );
     }
 
+    /// A member that **opened on one walk and failed on a later one** is really
+    /// re-attempted by that later walk, ends the command degraded, and is
+    /// announced by the walk that actually failed — then replayed for the rest.
+    ///
+    /// The branch this pins is [`Admission::recorded_failure`]'s middle state.
+    /// `opens` holds `Option<Option<String>>`, and an *opened* member is
+    /// `Some(None)` — which must read as "nothing to replay", so the next walk
+    /// attempts for real. Flattening that to a key-presence check, or caching
+    /// successes into the replay path, would make an opened-then-failed member
+    /// report `opened` for the whole answer: the wrong exit code and a coverage
+    /// figure counting a member nobody read ([FR-WS-16], [NFR-CC-04]). Every
+    /// other test here starts from a member that fails on its *first* attempt,
+    /// so none of them can see that.
+    ///
+    /// Load-bearing for a real fan-out under descriptor pressure, which is
+    /// exactly how [CR-100] failed: members opened until the descriptor table
+    /// ran out partway through, so the members walked early succeeded and the
+    /// later walks did not.
+    ///
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn a_member_that_opened_first_and_failed_later_is_degraded_and_announced_once() {
+        reset_spies();
+        thread_local! {
+            /// Starts still allowed before the store "closes" under us.
+            static STARTS_LEFT: Cell<usize> = const { Cell::new(1) };
+        }
+        struct LateFailingEngine;
+        impl MemberEngine for LateFailingEngine {
+            type Watcher = ();
+            fn start(
+                _root: &Path,
+                _read_connections: usize,
+                _worker_pool: SharedWorkerPool,
+            ) -> Result<Arc<Self>> {
+                if STARTS_LEFT.with(Cell::get) == 0 {
+                    anyhow::bail!("Too many open files (os error 24)");
+                }
+                STARTS_LEFT.with(|c| c.set(c.get() - 1));
+                Ok(Arc::new(LateFailingEngine))
+            }
+            fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
+                Ok(())
+            }
+        }
+
+        let registry = EngineRegistry::<LateFailingEngine>::with_budget(
+            fed(&["a"]),
+            RegistryMode::Lazy,
+            roomy_budget(),
+        );
+
+        // Walk 1: the member opens on its one allowed start, so its ledger entry
+        // is `Some(None)` — attempted, and succeeded.
+        assert!(
+            registry.fan_out(|_, _| ()).iter().all(|s| s.value.is_ok()),
+            "walk 1 opens the member"
+        );
+        assert_eq!(open_state(&registry.open_states(), "a"), MemberOpenState::Opened);
+        assert_eq!(registry.start_failures(), 0, "nothing has failed yet");
+
+        // The budget reclaims it — the normal operation of a workspace larger
+        // than the residency cap, which is how CR-100 failed partway through a
+        // walk. The next touch must therefore really re-open it.
+        registry.evict_to_capacity(0);
+        assert_eq!(registry.resident_count(), 0);
+
+        // Walk 2: `Some(None)` must read as "nothing to replay", so this walk
+        // attempts for real — and now the store will not open.
+        assert!(
+            registry.fan_out(|_, _| ()).iter().all(|s| s.value.is_err()),
+            "an OPENED member is re-attempted by a later walk, never replayed"
+        );
+        assert_eq!(
+            registry.start_failures(),
+            1,
+            "walk 2 really re-opened rather than reusing walk 1's success"
+        );
+        assert!(
+            open_state(&registry.open_states(), "a").is_degraded(),
+            "and the ledger records the LATEST attempt, so the answer is degraded"
+        );
+
+        // The walk that actually failed is the one that speaks, and only it.
+        assert!(registry.announce_open_failure("a"), "announced by the failing walk");
+        assert!(!registry.announce_open_failure("a"), "and not again");
+
+        // Walk 3: now there IS a recorded failure, so it is replayed with no
+        // further open attempt.
+        assert!(registry.fan_out(|_, _| ()).iter().all(|s| s.value.is_err()));
+        assert_eq!(
+            registry.start_failures(),
+            1,
+            "once a failure is recorded, later walks replay instead of re-opening"
+        );
+    }
+
     /// [CRA-06]: a **fresh** command retries, so a transient condition clears on
     /// the next invocation.
     ///
