@@ -230,6 +230,55 @@ const GITIGNORE_HEADER: &str = "\
 # ignored; the checked-in policy (config.toml, rules.toml) travels.
 ";
 
+/// The `.logos/` targets [`run`] writes that [`GITIGNORE_BLOCK`] deliberately
+/// does **not** ignore: the checked-in policy that travels with the repository
+/// ([FR-IN-04]). Root-relative, spelled exactly as the [`InitStep::target`] each
+/// one reports, so a caller may match the two without normalising.
+///
+/// A guarded duplicate, not a silent one: `committed_policy_is_what_run_writes_
+/// and_the_block_leaves_tracked` below asserts every entry is a real step target
+/// of a real `run` *and* that none of them is ignored, so drifting this list or
+/// the block apart fails the suite rather than the operator.
+///
+/// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
+const COMMITTED_POLICY: [&str; 3] = [
+    ".logos/config.toml",
+    ".logos/rules.toml",
+    ".logos/.gitignore",
+];
+
+/// [FR-IN-04]'s committed half: what an operator is meant to commit inside a
+/// freshly created `.logos/`.
+///
+/// Exposed as data so a report can *state* the layout instead of asking the
+/// reader to look it up — see
+/// [`federation::enable::WorkingTreeFootprint`](crate::federation::enable::WorkingTreeFootprint),
+/// whose whole reason to exist is that enabling N members left N dirty
+/// repositories and said nothing about them.
+///
+/// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
+#[must_use]
+pub fn committed_policy() -> Vec<&'static str> {
+    COMMITTED_POLICY.to_vec()
+}
+
+/// [FR-IN-04]'s ignored half: the derived/machine-specific state the generated
+/// `.logos/.gitignore` keeps out of git, read out of the very block `init`
+/// writes rather than restated.
+///
+/// Parsed, not duplicated — the block is the single source of truth, so an
+/// entry added to it (as `wiki.db*` and `chat.db*` were) is explained to the
+/// operator on the next run with no second edit here.
+///
+/// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
+#[must_use]
+pub fn ignored_state() -> Vec<&'static str> {
+    GITIGNORE_BLOCK
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
+}
+
 /// The managed `CLAUDE.md` block (FR-IN-02): the graph-first usage steer —
 /// the project-memory twin of the MCP `server-instructions`.
 const CLAUDE_MD_BLOCK: &str = "\
@@ -824,5 +873,53 @@ mod tests {
             upsert_managed_block(CLAUDE_MD_BLOCK, MD_BEGIN, MD_END, CLAUDE_MD_BLOCK),
             Upsert::Unchanged
         );
+    }
+
+    // ── FR-IN-04 as data: what travels vs what is ignored ─────────────────
+
+    /// [`ignored_state`] reads the managed block rather than restating it, so
+    /// the derived state it names is exactly what the written file ignores.
+    #[test]
+    fn ignored_state_is_read_out_of_the_block_that_is_written() {
+        let ignored = ignored_state();
+        assert!(ignored.contains(&"logos.db*"), "{ignored:?}");
+        assert!(ignored.contains(&"secrets.toml"), "the one non-derived exception: {ignored:?}");
+        assert!(
+            ignored.iter().all(|p| !p.starts_with('#') && !p.is_empty()),
+            "comments and the markers are not patterns: {ignored:?}"
+        );
+        // Every pattern is a line of the block, and every non-comment line of
+        // the block is a pattern — neither list may grow past the other.
+        let lines = GITIGNORE_BLOCK.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).count();
+        assert_eq!(ignored.len(), lines);
+    }
+
+    /// [`COMMITTED_POLICY`] duplicates what [`run`] writes, so this asserts the
+    /// duplication is true on both sides: every entry is a real step target of a
+    /// real `run`, and none of them is ignored by the block written beside it.
+    /// Drifting either apart fails here, not in an operator's working tree.
+    #[test]
+    fn committed_policy_is_what_run_writes_and_the_block_leaves_tracked() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join(".logos")).unwrap();
+        let steps = run(tmp.path(), &InitOptions::default()).expect("the default init runs");
+
+        let written: Vec<&str> = steps.iter().map(|s| s.target.as_str()).collect();
+        assert_eq!(written, COMMITTED_POLICY, "the policy list IS the default step set");
+
+        // Matched as the globs they are — `logos.db*` is a pattern, not a name,
+        // so a future `*.toml` would have to fail here rather than slip past a
+        // string comparison and quietly stop the policy travelling.
+        let patterns: Vec<String> = ignored_state().into_iter().map(String::from).collect();
+        let ignored = crate::config::globs::compile(&patterns).expect("the block's globs compile");
+        // …and the matcher is live, so the loop below cannot pass vacuously.
+        assert!(ignored.is_match("logos.db-wal"), "the derived store IS matched");
+        for target in committed_policy() {
+            let name = target.strip_prefix(".logos/").expect("root-relative under .logos/");
+            assert!(
+                !ignored.is_match(name),
+                "{target} is meant to travel, but the block ignores {name}"
+            );
+        }
     }
 }
