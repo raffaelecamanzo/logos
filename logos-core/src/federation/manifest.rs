@@ -146,12 +146,18 @@ impl Manifest {
             key: "workspace.warm.concurrency".to_string(),
             message: if k == 0 {
                 format!(
-                    "0 would stall the background warm forever — it must be at least 1;                      omit the key entirely for the core-derived default of                      max(1, cores / 4) capped at {}",
+                    "0 would stall the background warm forever — it must be at \
+                     least 1; omit the key entirely for the core-derived \
+                     default of max(1, cores / 4) capped at {}",
                     super::warm::CONCURRENCY_CAP
                 )
             } else {
                 format!(
-                    "{k} exceeds the maximum of {}; each concurrent member index is itself                      parallel over the host's cores, so K costs K × cores worker threads and                      up to K × one index's peak memory — a value near the member count is the                      unbounded fan-out this bound exists to prevent",
+                    "{k} exceeds the maximum of {}; each concurrent member \
+                     index is itself parallel over the host's cores, so K \
+                     costs K × cores worker threads and up to K × one index's \
+                     peak memory — a value near the member count is the \
+                     unbounded fan-out this bound exists to prevent",
                     super::warm::MANIFEST_CONCURRENCY_MAX
                 )
             },
@@ -947,7 +953,18 @@ mod tests {
             panic!("expected an InvalidValue, got {err:?}");
         };
         assert_eq!(key, "workspace.warm.concurrency");
-        assert!(message.contains('1'), "names the floor: {message}");
+        assert!(
+            message.contains("at least 1"),
+            "names the floor: {message}"
+        );
+        assert!(
+            message.contains("omit the key"),
+            "and says how to get the default instead: {message}"
+        );
+        // A wrapped literal that lost its `\` continuations reads as a run of
+        // spaces on the operator's terminal. Cheap to assert, and it is how
+        // this very message was caught garbled before review.
+        assert!(!message.contains("  "), "message is not garbled: {message:?}");
         assert_eq!(err.exit_code(), 2);
     }
 
@@ -977,6 +994,7 @@ mod tests {
             message.contains(&(warm::MANIFEST_CONCURRENCY_MAX + 1).to_string()),
             "names the rejected value: {message}"
         );
+        assert!(!message.contains("  "), "message is not garbled: {message:?}");
     }
 
     /// Both ends of the accepted range parse — the rejection is a range check,
