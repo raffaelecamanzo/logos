@@ -801,9 +801,16 @@ where
 ///
 /// # An engine-start failure is announced once per command
 /// The two arms warn on different schedules, because they report different
-/// things. A **read** failure is per-`subject`: the same member can read its
-/// contract surface fine and fail on its invocation refs, so each is its own
-/// news. An **engine-start** failure is per-member and subject-independent — a
+/// things. A **read** failure is per-`read`: the same member can read its
+/// contract surface fine and fail on its invocation refs, so each read is its
+/// own news. Note that this is per *read*, not per *subject* — `subject` is not
+/// unique to a call site (`"contract surface"` is read both here and by
+/// [`coverage`](super::coverage), as is `"invocation references"`), so
+/// `workspace reachability`, which runs both paths, still repeats a read
+/// failure once per path. That is an accepted duplicate: it needs a store that
+/// opens and a query that then fails, a rarer condition than the one this story
+/// targets, and de-duplicating it would mean latching on `(member, subject)`.
+/// An **engine-start** failure is per-member and subject-independent — a
 /// member whose store will not open fails identically for every subject, and
 /// `workspace status` reaches **this helper** three times (`coverage` twice,
 /// `topics` once — its fourth walk, the freshness read, does not come through

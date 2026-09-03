@@ -800,28 +800,44 @@ impl<E: MemberEngine> EngineRegistry<E> {
     /// here changes it.
     ///
     /// # Scoped to the one-shot registry, deliberately
-    /// [`RegistryMode::Lazy`] is the CLI's registry and it is built and dropped
-    /// **per command**, so "already failed in this registry" and "already failed
-    /// in this command" are the same statement — which is exactly the scope
-    /// [CRA-06] accepted the loss of a mid-command recovery for. A
-    /// [`RegistryMode::Serve`] registry outlives every answer it serves, so
+    /// A [`RegistryMode::Serve`] registry outlives every answer it serves, so
     /// suppressing there would leave one transiently-unavailable member reported
     /// degraded until the process restarted; serve therefore keeps re-attempting,
     /// and a fresh command retries for the same reason.
+    ///
+    /// The scope is therefore the **registry's lifetime**, and it equals "one
+    /// command" only because the sole production [`RegistryMode::Lazy`]
+    /// construction — `cli::xservice::registry` — builds one per command and
+    /// drops it. That is the scope [CRA-06] accepted the loss of a mid-command
+    /// recovery for; it is a property of the *caller*, not something this mode
+    /// enforces. `Lazy` records construction and watch policy, not lifetime, so
+    /// a caller that holds a `Lazy` registry across many answers (nothing in the
+    /// product does; `mcp::LogosMcp::federated` and `web::workspace_router` would
+    /// both accept one) gets a latch for that whole lifetime. Hold a `Serve`
+    /// registry there, or mint a per-answer scope, rather than widening this.
     ///
     /// [CRA-06]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
     fn open_for_walk(&self, member: &str) -> Result<Arc<E>> {
+        // Two statements deliberately: the admission guard is a temporary in
+        // this `let`, so it drops at the `;` — before the `engine_for` below
+        // re-acquires it. Folding this into `match self.lock_admission()…` would
+        // hold the guard across that call and deadlock every walk on its first
+        // member, because the mutex is not reentrant (the same hazard the
+        // `evict_to` / `drop(evicted)` pair above is split in two for).
         let replay = if self.mode == RegistryMode::Lazy {
             self.lock_admission().recorded_failure(member)
         } else {
             None
         };
         match replay {
-            // The recorded string is the contextualised diagnostic the failing
-            // attempt itself returned (`{err:#}`), so the replayed `Err` reads
-            // byte-for-byte as the one this walk would have produced.
+            // The recorded string is the `{err:#}` rendering the failing attempt
+            // produced, so the replay renders identically under `{:#}` — the only
+            // form any fan-out consumer uses. It is a single-message error, so
+            // the source chain and any downcast to the root cause are NOT
+            // replayed; a consumer that needs those must read the ledger's own
+            // entry from the attempt that made them.
             Some(diagnostic) => Err(anyhow::anyhow!("{diagnostic}")),
             None => self.engine_for(member),
         }
