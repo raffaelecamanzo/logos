@@ -8,7 +8,10 @@
 //! - an existing member's `.logos/config.toml` is never overwritten;
 //! - stdout stays machine-clean while the approval gate goes to stderr;
 //! - `--exclude` drops a candidate member;
-//! - a second run injects no duplicate workspace MCP entry (idempotent).
+//! - a second run injects no duplicate workspace MCP entry (idempotent);
+//! - the `[workspace.warm] concurrency` key (S-322, FR-WS-01) is accepted, is
+//!   preserved across a re-run, and is rejected with an actionable exit-2
+//!   message when out of range.
 
 use std::fs;
 use std::path::Path;
@@ -463,5 +466,69 @@ fn a_zero_concurrency_bound_still_drains_the_queue() {
     assert!(
         graph_revision(&tmp.path().join("api")) >= 1,
         "a zero bound is floored to one worker and the member is warmed"
+    );
+}
+
+/// The `[workspace.warm] concurrency` key survives the real binary end to end
+/// (S-322, FR-WS-01): a manifest declaring it enables without complaint and
+/// still carries the key afterwards.
+///
+/// Worth an end-to-end test on top of the unit coverage for one reason: the
+/// manifest parses under `deny_unknown_fields`, so an unregistered key does not
+/// merely lose the warm bound — it fails the whole manifest and takes the
+/// workspace back to single-root. The failure mode is total, so the acceptance
+/// is checked against the real parser through the real command.
+#[test]
+fn a_declared_warm_concurrency_survives_enablement_and_a_rerun() {
+    let tmp = two_member_fixture();
+    let manifest = tmp.path().join("logos.workspace.toml");
+    fs::write(
+        &manifest,
+        "[workspace]\nname = \"pec\"\nmembers = [\"api\"]\n\n[workspace.warm]\nconcurrency = 2\n",
+    )
+    .unwrap();
+
+    let out = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "a registered key must not fail the manifest: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let text = fs::read_to_string(&manifest).unwrap();
+    assert!(
+        text.contains("[workspace.warm]") && text.contains("concurrency = 2"),
+        "the operator's tuned bound survives the incremental re-write: {text}"
+    );
+    assert!(
+        text.contains("\"web\""),
+        "and `members` was still upserted: {text}"
+    );
+}
+
+/// An out-of-range value is rejected with an actionable message and exit 2
+/// (FR-CF-01, NFR-UX-02) — never silently floored or clamped by the bound
+/// resolution downstream.
+#[test]
+fn an_out_of_range_warm_concurrency_is_an_actionable_exit_2() {
+    let tmp = two_member_fixture();
+    fs::write(
+        tmp.path().join("logos.workspace.toml"),
+        "[workspace]\nname = \"pec\"\nmembers = [\"api\"]\n\n[workspace.warm]\nconcurrency = 0\n",
+    )
+    .unwrap();
+
+    let out = logos(tmp.path(), &["init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&out), 2, "a config fault is exit 2");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("workspace.warm.concurrency"),
+        "the message names the offending key: {stderr}"
+    );
+    assert!(
+        stderr.contains("at least 1"),
+        "and says what a legal value is: {stderr}"
     );
 }

@@ -12,10 +12,10 @@
 //!
 //! - [`effective_concurrency`] — the **effective-bound resolution** seam. K
 //!   defaults to `max(1, cores / 4)` capped at [`CONCURRENCY_CAP`]; the
-//!   `configured` argument is the per-workspace override channel. Today no
-//!   caller has one to pass (they pass `None`); the `[workspace.warm]
-//!   concurrency` manifest key of [FR-WS-01] lands behind this signature
-//!   without the queue below changing at all.
+//!   `configured` argument is the per-workspace override channel, fed by the
+//!   `[workspace.warm] concurrency` manifest key of [FR-WS-01] — registered and
+//!   range-validated at parse time ([`MANIFEST_CONCURRENCY_MAX`]), so what
+//!   arrives here is already known to be in range and is honoured verbatim.
 //! - [`warm_queue`] — the bounded queue itself: at most K member indexes in
 //!   flight, the next starting as each finishes, whatever N is.
 //!
@@ -80,6 +80,45 @@ use std::sync::Mutex;
 /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
 pub const CONCURRENCY_CAP: usize = 4;
 
+/// The largest K a `[workspace.warm] concurrency` manifest key may declare
+/// ([FR-WS-01], [BR-44]) — validated at parse time by
+/// [`manifest::parse`](super::manifest::parse), never clamped here.
+///
+/// Distinct from [`CONCURRENCY_CAP`], and deliberately larger. `CONCURRENCY_CAP`
+/// bounds the value this module *derives* for a host it knows nothing about, so
+/// it is conservative; this bounds what an operator may *declare* for a
+/// workspace they do know, so it must admit a genuine override on a large
+/// builder — a manifest override capped at the default's own cap could only ever
+/// lower K, which is not what FR-WS-01 promises.
+///
+/// It is a fixed constant rather than a host-core-derived one because a manifest
+/// is a checked-in file shared across machines: a ceiling that moved with
+/// `available_parallelism` would make the same `logos.workspace.toml` parse on
+/// the builder and fail on the laptop.
+///
+/// The number is `4 ×` [`CONCURRENCY_CAP`]: high enough that no reasonable
+/// deliberate override hits it, low enough to still reject the mistake this
+/// whole bound exists to correct — `concurrency = 84`, one per member, which is
+/// the unbounded fan-out under a new spelling. Each of the K is itself
+/// rayon-parallel over the full core count ([NFR-PE-08]), so K buys `K × cores`
+/// worker threads and up to `K ×` one member index's peak RSS ([NFR-PE-06]).
+///
+/// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
+/// [NFR-PE-06]: ../../../docs/specs/requirements/NFR-PE-06.md
+/// [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
+/// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
+pub const MANIFEST_CONCURRENCY_MAX: usize = 4 * CONCURRENCY_CAP;
+
+// The two ceilings must stay ordered, and the compiler is the right place to
+// say so: the manifest maximum bounds what an operator may *declare*, the cap
+// bounds what this module *derives*. Inverted by a future tuning, an override
+// could only ever lower K — the key would silently stop being the escape hatch
+// [FR-WS-01] promises while every parse test still passed.
+const _: () = assert!(
+    MANIFEST_CONCURRENCY_MAX > CONCURRENCY_CAP,
+    "a manifest override capped at the core-derived cap could never raise K"
+);
+
 /// The core-derived default bound: `max(1, cores / 4)`, capped at
 /// [`CONCURRENCY_CAP`] ([FR-WS-14]).
 ///
@@ -123,10 +162,15 @@ fn derive_concurrency(cores: usize) -> usize {
 /// `configured` is the per-workspace override seam: `None` takes
 /// [`default_concurrency`], `Some(k)` takes `k` (floored at 1 — a zero bound
 /// would stall the queue forever, so it can never be honoured literally).
-/// Every caller passes `None` today; [FR-WS-01]'s `[workspace.warm]
-/// concurrency` key becomes the `Some` source without the supervisor or
-/// [`warm_queue`] changing. Range validation of a manifest value belongs at
-/// parse time with an actionable message, not silently here.
+/// [FR-WS-01]'s `[workspace.warm] concurrency` key is the `Some` source, read
+/// off the manifest by [`Federation::warm_concurrency`](super::Federation#structfield.warm_concurrency)
+/// and passed down by the parent that spawns the supervisor.
+///
+/// The floor is a **backstop, not the validation**: a manifest declaring `0` is
+/// rejected at parse time with an actionable message ([`manifest::parse`](super::manifest::parse)),
+/// precisely so it never reaches here to be silently floored. What the floor
+/// covers is a programmatic caller — a future flag, a test — passing `0`
+/// directly, where stalling the queue forever is the worse failure.
 ///
 /// Whatever this returns is a **hard** ceiling: no member count, `--yes`, or
 /// manifest value may put more indexes in flight than the resolved K
@@ -346,6 +390,21 @@ mod tests {
                 "{cores} cores must derive K = {expected}"
             );
         }
+    }
+
+    /// The core-derived default must itself be a value a manifest could legally
+    /// declare — otherwise the default and the documented range disagree, and
+    /// an operator writing down what Logos already chose would be rejected.
+    ///
+    /// (The `MANIFEST_CONCURRENCY_MAX > CONCURRENCY_CAP` half of the invariant
+    /// is a `const` assertion beside the constants — the compiler proves it.)
+    #[test]
+    fn the_derived_default_is_a_legal_manifest_value() {
+        assert!(
+            (1..=MANIFEST_CONCURRENCY_MAX).contains(&default_concurrency()),
+            "derived {} outside the declarable range 1..={MANIFEST_CONCURRENCY_MAX}",
+            default_concurrency()
+        );
     }
 
     #[test]

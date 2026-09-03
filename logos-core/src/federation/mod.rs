@@ -115,7 +115,8 @@ pub use coverage::{
 };
 pub use governance::{workspace_governance, WorkspaceGovernance, WorkspaceViolation};
 pub use manifest::{
-    Governance, Link, NoCrossServiceCallers, ServiceBoundary, ServiceLayer, MANIFEST_FILENAME,
+    Governance, Link, NoCrossServiceCallers, ServiceBoundary, ServiceLayer, Warm,
+    MANIFEST_FILENAME,
 };
 pub use reach::{
     app_wide_reachability, AppWideReachability, AppWideVerdict, BoundedReachability, CoverageRider,
@@ -185,6 +186,26 @@ pub struct Federation {
     ///
     /// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
     pub governance: Governance,
+    /// The declared `[workspace.warm] concurrency` override, or `None` for the
+    /// core-derived default ([FR-WS-01], [FR-WS-14]).
+    ///
+    /// Carried on the federation rather than re-read from disk so the surface
+    /// that spawns the warm supervisor gets K from the same manifest parse that
+    /// resolved the member set — one read, one source of truth. Guaranteed in
+    /// `1..=`[`warm::MANIFEST_CONCURRENCY_MAX`] when `Some`: an out-of-range
+    /// value never survives [`manifest::parse`].
+    ///
+    /// This is the value as **declared**, not the resolved K: `None` means "the
+    /// core-derived default applies", which only
+    /// [`warm::effective_concurrency`] can turn into a number, and only on the
+    /// host that will run the warm. Skipped on serialisation when absent, so an
+    /// un-tuned workspace serialises byte-identically to before the key
+    /// existed.
+    ///
+    /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
+    /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_concurrency: Option<usize>,
 }
 
 /// Discover the workspace by walking **up** from `hint`'s resolved root
@@ -255,6 +276,9 @@ pub fn discover(hint: &Path) -> Result<Option<Federation>, ConfigError> {
         .filter(|name| members.iter().any(|m| &m.name == name));
 
     Ok(Some(Federation {
+        // First because it borrows `manifest`, which the fields below move out
+        // of field by field.
+        warm_concurrency: manifest.warm_concurrency(),
         name: manifest.workspace.name,
         root,
         members,
