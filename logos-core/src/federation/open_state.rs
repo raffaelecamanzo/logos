@@ -89,11 +89,8 @@ pub enum DegradedCause {
     /// that happened to be true the first time this was seen ([NFR-CC-04]).
     ///
     /// The variant and its wire key (`host-resource-limit`) are kept exactly as
-    /// they are. Telling the two conditions apart for real needs a readability
-    /// probe before classification *and* a second variant — a new key on every
-    /// degraded member row, which [CR-102] deliberately did not spend to
-    /// separate two conditions that share one remedy shape ("the store is fine,
-    /// look at the host"). See [`classify`] for that non-choice in full.
+    /// they are; see [`classify`] for why the two conditions are deliberately
+    /// not separated.
     ///
     /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
     /// [CR-102]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
@@ -124,6 +121,12 @@ impl DegradedCause {
     /// remedy names **both** — asserting the narrower one is the same class of
     /// misdiagnosis, merely relocated ([NFR-CC-04], [CR-102]).
     ///
+    /// Kept as tight as that allows, because [`DegradedRollup::notice`] repeats
+    /// this sentence **once per degraded member**: on the 63-of-84 shortfall
+    /// [CR-100] measured, every character here is paid 63 times, and a remedy
+    /// that is quieter to read is the other half of the same story.
+    ///
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
     /// [CR-102]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
@@ -131,14 +134,12 @@ impl DegradedCause {
     pub const fn message(self) -> &'static str {
         match self {
             Self::HostResourceLimit => {
-                "not a damaged store: the member's store is present and its graph intact, \
-                 so a re-index is not the remedy — what failed is this process's attempt \
-                 to open the file. Two conditions produce that identically and the \
-                 diagnostic separates neither, so both are named: the file permissions on \
-                 the member's `.logos/` directory and store, which must be readable by the \
-                 user running logos, and a host resource limit on file descriptors \
-                 (RLIMIT_NOFILE) — check the permissions, then raise `ulimit -n` or query \
-                 fewer members at once"
+                "not a damaged store: the store is present and its graph intact, so a \
+                 re-index is not the remedy — this process was refused when it opened the \
+                 file. Two causes fit that identically, so both are named: the file \
+                 permissions on the member's `.logos/`, and a host resource limit on file \
+                 descriptors (RLIMIT_NOFILE) — check the permissions, then raise \
+                 `ulimit -n` or query fewer members at once"
             }
             Self::StoreObstructed => {
                 "the member's `.logos/logos.db` path is occupied by something that is not a \
@@ -208,8 +209,9 @@ pub enum StoreFile {
 /// it in two of three states and, crucially, **not** in the third:
 ///
 /// - **`Present`** — a regular store file rules out "missing data", so the
-///   refusal came from the process's ability to open a file, which under a
-///   workspace is descriptor-bound ([NFR-PE-11]) ⇒ [`HostResourceLimit`].
+///   refusal came from this process's ability to open the file: descriptor-bound
+///   ([NFR-PE-11]) **or** permission-refused, which the diagnostic cannot
+///   separate (see the section below) ⇒ [`HostResourceLimit`].
 /// - **`Obstructed`** — a non-regular file at the path cannot be opened by
 ///   anything ⇒ [`StoreObstructed`], with the remedy being to clear the path.
 /// - **`Absent`** — **no cause is claimed.** The store is *created* on open
