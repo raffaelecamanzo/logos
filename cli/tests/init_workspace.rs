@@ -605,6 +605,14 @@ fn the_footprint_note_is_advisory_on_stderr_and_quiet_suppresses_it() {
         stderr.contains("fresh untracked `.logos/`") && stderr.contains("FR-IN-04"),
         "the operator is told what to commit and why: {stderr}"
     );
+    // This is a `--workspace` run at a parent-of-repos root — the one fixture
+    // where the FR-IN-08 nudge would fire if the short-circuit inside `nudge`
+    // ever stopped short-circuiting. Nobody needs to be told to run the command
+    // they just ran.
+    assert!(
+        !stderr.contains("parent folder of sibling repositories"),
+        "--workspace answers itself and is never nudged: {stderr}"
+    );
 
     // A fresh workspace under --quiet: the note is suppressed, and `--json`
     // still emits the essential report (FR-CL-02).
@@ -692,15 +700,35 @@ fn a_non_tty_init_at_a_parent_of_repos_root_never_prompts_and_never_reads_stdin(
         tmp.path().join(".logos").join("config.toml").is_file(),
         "the plain single-root init still completed"
     );
+
+    // `--quiet` does NOT silence it, deliberately and unlike the sibling
+    // footprint advisory one screen above (whose suppression *is* pinned, by
+    // `the_footprint_note_is_advisory_on_stderr_and_quiet_suppresses_it`). That
+    // asymmetry invites a "consistency fix" that would reinstate exactly the
+    // silence FR-IN-08 removes, so the difference is asserted rather than left
+    // to the rustdoc: an `init` that can only ever produce an empty index must
+    // say so (NFR-CC-04). `--quiet` protects stdout, which stays one document.
+    let quiet_tmp = two_member_fixture();
+    let quiet = run_with_stdin_held_open(quiet_tmp.path(), &["--json", "--quiet", "init"], "");
+    assert_eq!(exit_code(&quiet), 0, "{}", String::from_utf8_lossy(&quiet.stderr));
+    assert!(
+        String::from_utf8_lossy(&quiet.stderr).contains("parent folder of sibling repositories"),
+        "--quiet must not silence the nudge: {}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+    serde_json::from_slice::<serde_json::Value>(&quiet.stdout)
+        .expect("stdout is still exactly one JSON document under --quiet");
 }
 
 /// stdout stays byte-for-byte as before (FR-CL-02): the nudge is stderr-only,
 /// and the machine document `init` emits at a parent-of-repos root is the same
 /// document it emits at an ordinary repository root.
 ///
-/// Compared field-set to field-set rather than byte to byte on the raw payloads,
-/// because the report legitimately carries the differing root path — the
-/// assertion that matters is that the nudge adds nothing and removes nothing.
+/// Compared document-to-document rather than byte-to-byte on the raw payloads,
+/// because the report legitimately carries the differing root path: the key set
+/// must match exactly, and every root-independent value (`message`, `steps`)
+/// must match too. That second half is what makes the name true — a key-set
+/// comparison alone passes against a nudged run that changed a step.
 #[test]
 fn the_nudge_leaves_stdout_byte_for_byte_as_before() {
     let parent = two_member_fixture();
@@ -724,6 +752,15 @@ fn the_nudge_leaves_stdout_byte_for_byte_as_before() {
         k
     };
     assert_eq!(keys(&nudged_doc), keys(&plain_doc), "the nudge adds no stdout field");
+
+    // …and the same VALUES, not merely the same field names. Only `logos_dir`
+    // and `db_path` legitimately differ (they carry the root); `message` and the
+    // whole `steps` array are root-independent, so they are directly comparable.
+    // Without this, a nudged run that appended a step or flipped an `action`
+    // would keep the top-level key set identical and pass a test whose name
+    // promises a byte comparison.
+    assert_eq!(nudged_doc["message"], plain_doc["message"], "the nudge changes no init message");
+    assert_eq!(nudged_doc["steps"], plain_doc["steps"], "the nudge changes no init step");
 
     let raw = String::from_utf8_lossy(&nudged.stdout);
     for fragment in ["parent folder", "logos init --workspace", "enable a Logos workspace"] {
