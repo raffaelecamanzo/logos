@@ -592,6 +592,26 @@ pub struct DoctorReport {
     /// [FR-IX-11]: ../../../docs/specs/requirements/FR-IX-11.md
     #[serde(default)]
     pub doc_symlink_warnings: Vec<String>,
+    /// The zero-admission diagnostic ([FR-IX-13]): the rendered explanation for a
+    /// root that admitted no files because every immediate child was pruned as a
+    /// nested git boundary — a parent folder of sibling repositories — naming the
+    /// prune count, a bounded sample of the pruned names, and `logos init
+    /// --workspace` as the remedy. The identical line `index` emits as a warning
+    /// and `status` carries in its `warnings`, derived from the one shared helper
+    /// so the three surfaces cannot disagree.
+    ///
+    /// `None` — an honest absent, never an empty string ([NFR-CC-04]) — whenever
+    /// the root admitted files or pruned no immediate-child boundary, which is
+    /// every ordinary repository including one vendoring a submodule.
+    ///
+    /// Purely diagnostic, exactly like [`doc_symlink_warnings`](Self::doc_symlink_warnings):
+    /// it does **not** affect [`ok`](Self::ok) or the exit status, which still
+    /// moves on structural drift alone.
+    ///
+    /// [FR-IX-13]: ../../../docs/specs/requirements/FR-IX-13.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(default)]
+    pub zero_admission_warning: Option<String>,
     pub message: String,
 }
 

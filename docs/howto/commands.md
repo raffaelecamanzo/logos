@@ -265,6 +265,16 @@ fabricated `0`). The same three fields ride the MCP `status` tool and the web
 `/api/v1/overview` bundle, and surface on the Dashboard Graph card (see
 [Dashboard](usage.md)).
 
+If the graph is empty because you ran `logos index` at a **parent folder of
+sibling repositories** — every child pruned as a nested `.git` boundary —
+`warnings` carries the zero-admission diagnostic naming the prune count, a
+sample of the pruned directory names, and the remedy `logos init --workspace`
+([FR-IX-13](../specs/requirements/FR-IX-13.md)). It is the same line `index`
+emits and `doctor` reports in `zero_admission_warning`, derived from one shared
+helper, so you meet the same explanation whichever surface you reach for next.
+It is advisory: `status` has no exit code to move, and the diagnostic never
+becomes a rule finding or feeds the quality signal.
+
 ## Navigation
 
 ### `search`
@@ -853,18 +863,34 @@ filesystem walk — O(files) matcher checks against the already-indexed paths),
 cheap enough to run after every `index`/`sync` as a debug-build assertion.
 Drift exits 1.
 
-`--json` adds three additive fields alongside the pre-existing structural ones
+`--json` adds four additive fields alongside the pre-existing structural ones
 (`node_count`, `distinct_symbol_ids`, `duplicate_symbol_nodes`,
 `dangling_file_refs`, `dangling_edge_endpoints`, `orphan_shingles`): the exact,
 never-truncated `unadmitted_files` count and a capped, lexically-ordered
-`unadmitted_sample` of the offending paths, plus a **diagnostic-only**
-`doc_symlink_warnings` array. Each entry names a documentation directory-symlink
-that exists under your doc-include set but ended up **unindexed** — either
-because no sanctioned docs root (`.swe-skills`) is configured, or because the
-symlink target escapes the sanctioned containment (see
+`unadmitted_sample` of the offending paths, plus two **diagnostic-only**
+advisories — a `doc_symlink_warnings` array and a `zero_admission_warning`
+string. Each `doc_symlink_warnings` entry names a documentation
+directory-symlink that exists under your doc-include set but ended up
+**unindexed** — either because no sanctioned docs root (`.swe-skills`) is
+configured, or because the symlink target escapes the sanctioned containment (see
 [configuration.md § Documentation](configuration.md#documentation--indexing-markdown)).
 It is advisory: a populated `doc_symlink_warnings` **never** flips `ok` to `false`
 or changes the exit status — it flags docs you likely meant to index but aren't.
+`zero_admission_warning` is the other advisory, and answers the opposite
+question — why the graph is *empty* rather than why it holds too much. It is
+populated (otherwise `null`) when the root admitted **no** files because every
+immediate child was pruned as a nested `.git` boundary: a parent folder of
+sibling repositories. It names the prune count, a bounded sample of the pruned
+directory names, and the remedy — `logos init --workspace`
+([FR-IX-13](../specs/requirements/FR-IX-13.md),
+[CR-098](../requests/CR-098-nested-git-prune-diagnostic.md)). It is the **same
+line**, derived from the same helper, that `index` emits in its `warnings` and
+that `status` carries in its own `warnings` array, so the three surfaces cannot
+disagree about a root. Like `doc_symlink_warnings` it is advisory: it never
+flips `ok`, never changes the exit status, never becomes a rule finding, and
+never moves the quality signal — `doctor` still exits on structural or
+admission drift alone.
+
 A full `logos index` purges every unadmitted file (its inbound edges return to
 `unresolved_refs`), healing the admission drift.
 

@@ -224,7 +224,7 @@ impl ZeroAdmissionDiagnostic {
     /// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
     /// [`federation::discover_candidates`]: ../federation/fn.discover_candidates.html
     pub fn derive(admitted: usize, pruned: &[PathBuf]) -> Option<Self> {
-        if admitted > 0 {
+        if !Self::admits_diagnosis(admitted) {
             return None;
         }
         // Depth 1 == exactly one path component, i.e. an immediate child of the
@@ -237,6 +237,22 @@ impl ZeroAdmissionDiagnostic {
             pruned: immediate.count(),
             sample,
         })
+    }
+
+    /// Whether `admitted` is a count that could be diagnosed at all — the
+    /// **admission half** of [`derive`]'s gate, named so it has exactly one
+    /// owner.
+    ///
+    /// [`derive`](Self::derive) short-circuits on it, and a surface that must pay
+    /// filesystem I/O to obtain the prune record (`status`/`doctor`, which read a
+    /// persisted graph rather than a walk they just performed) consults it *before*
+    /// probing, so the normal path pays nothing ([NFR-PE-08]). Exposed as a
+    /// predicate rather than re-tested at each call site precisely so a cost guard
+    /// can never drift from the classification it guards.
+    ///
+    /// [NFR-PE-08]: ../../../../docs/specs/requirements/NFR-PE-08.md
+    pub const fn admits_diagnosis(admitted: usize) -> bool {
+        admitted == 0
     }
 }
 
@@ -438,17 +454,7 @@ pub(crate) fn discover_with_threads(
     // name paths outside the root. Both of those pass `None` instead.
     let recorder = Arc::new(PruneRecorder::new(root.clone()));
     let walk_recorder = Arc::clone(&recorder);
-    let walker = WalkBuilder::new(&root)
-        // Honour ignore files even outside a git repo, so discovery is
-        // deterministic on any tree (worktrees are git-backed; fixtures need not be).
-        .require_git(false)
-        .git_ignore(true)
-        .git_global(false)
-        .git_exclude(true)
-        .ignore(true)
-        .hidden(false) // dotfiles are visible unless gitignored — config decides.
-        .parents(false) // don't read ignore files above the root (containment).
-        .follow_links(false) // never leave the tree via a symlink (NFR-SE-04).
+    let walker = admission_walk_builder(&root)
         .threads(threads) // 0 = auto-size to cores (NFR-PE-08); tests pin a count.
         .filter_entry(move |entry| keep_dir(entry, &walk_ignored_dirs, Some(&walk_recorder)))
         .build_parallel();
@@ -895,6 +901,38 @@ fn discover_followed_symlink(
 /// wrong remedy.
 ///
 /// [FR-IX-13]: ../../../../docs/specs/requirements/FR-IX-13.md
+/// The walker settings every admission-relevant walk shares — the configuration
+/// half of the parity [`keep_dir`] provides for the pruning half.
+///
+/// The main discovery walk and the `status`/`doctor` probe
+/// ([`nested_git_prunes`]) must see the *same* children, including which ones the
+/// ignore files hide: a setting that differed between them could make the probe
+/// report a prune the walk never performed, and the whole point of deriving the
+/// zero-admission diagnostic once ([FR-IX-13]) is that no surface can classify a
+/// root differently. Owning the settings here makes that structural — the two
+/// cannot drift — where two copied builder chains could only be *tested* to agree.
+///
+/// Callers add what genuinely differs: the main walk its thread count, the probe
+/// its depth bound.
+///
+/// [FR-IX-13]: ../../../../docs/specs/requirements/FR-IX-13.md
+/// [NFR-SE-04]: ../../../../docs/specs/requirements/NFR-SE-04.md
+fn admission_walk_builder(root: &Path) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        // Honour ignore files even outside a git repo, so discovery is
+        // deterministic on any tree (worktrees are git-backed; fixtures need not be).
+        .require_git(false)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(true)
+        .ignore(true)
+        .hidden(false) // dotfiles are visible unless gitignored — config decides.
+        .parents(false) // don't read ignore files above the root (containment).
+        .follow_links(false); // never leave the tree via a symlink (NFR-SE-04).
+    builder
+}
+
 fn keep_dir(
     entry: &DirEntry,
     ignored_dirs: &HashSet<String>,
@@ -1133,6 +1171,90 @@ pub fn unindexed_doc_symlinks(
         classify_doc_dir_symlinks(&root, &doc_prefixes, &ignored_dirs, sanctioned.as_deref());
     unindexed.sort_by(|a, b| a.link.cmp(&b.link));
     Ok(unindexed)
+}
+
+/// The **immediate-child** directories a walk of `root` would prune as nested git
+/// boundaries ([FR-IX-13]) — the `status`/`doctor`-side twin of the record
+/// [`discover`] folds into its report, computed without a full index walk so both
+/// stay cheap diagnostics (the [`unindexed_doc_symlinks`] shape, for the same
+/// reason).
+///
+/// Bounded to **depth 1** deliberately, and that is not a weaker approximation of
+/// the full record: [`ZeroAdmissionDiagnostic::derive`] diagnoses depth-1 prunes
+/// only — the remedy it names, `logos init --workspace`, acts on a single-level
+/// `read_dir` — so a depth-1 walk yields exactly the subset the derivation reads
+/// and `derive` returns the identical value from either. What it buys is the cost:
+/// `doctor` documents itself as a pure read of the persisted graph that must stay
+/// cheap enough to run always-on ([NFR-RA-13]), and a full discovery walk on every
+/// `doctor` would break that contract.
+///
+/// Both halves of the parity are structural rather than asserted: pruning is
+/// [`keep_dir`] verbatim, and the walker settings come from the same
+/// [`admission_walk_builder`] the main walk uses, so the probe cannot classify a
+/// child differently from the walk it stands in for. The result is sorted and
+/// root-relative ([NFR-RA-06]).
+///
+/// # Errors
+/// - [`ConfigError::InvalidRoot`] if `root` is missing or not a directory.
+///
+/// [FR-IX-13]: ../../../../docs/specs/requirements/FR-IX-13.md
+/// [NFR-RA-06]: ../../../../docs/specs/requirements/NFR-RA-06.md
+/// [NFR-RA-13]: ../../../../docs/specs/requirements/NFR-RA-13.md
+pub fn nested_git_prunes(root: &Path, config: &Config) -> Result<Vec<PathBuf>, ConfigError> {
+    let root = root.canonicalize().map_err(|_| ConfigError::InvalidRoot {
+        path: root.to_path_buf(),
+    })?;
+    if !root.is_dir() {
+        return Err(ConfigError::InvalidRoot { path: root });
+    }
+
+    let ignored_dirs: HashSet<String> = config.semantics.ignored_dirs.iter().cloned().collect();
+    let recorder = Arc::new(PruneRecorder::new(root.clone()));
+    let walk_recorder = Arc::clone(&recorder);
+    let walker = admission_walk_builder(&root)
+        // The root plus its immediate children — nothing below, since nothing
+        // below can diagnose. This depth bound and the serial `build()` are the
+        // ONLY differences from the main walk; every ignore setting comes from the
+        // shared constructor, so the two cannot classify a child differently.
+        .max_depth(Some(1))
+        .filter_entry(move |entry| keep_dir(entry, &ignored_dirs, Some(&walk_recorder)))
+        .build();
+    // The prunes are the side effect of `filter_entry`; the yielded entries
+    // themselves are of no interest here. A per-entry error skips that entry
+    // without aborting, exactly as the main walk treats one.
+    for _entry in walker {}
+    Ok(recorder.take_sorted())
+}
+
+/// The zero-admission diagnostic for a surface reading a **persisted** graph
+/// ([FR-IX-13]) — the one seam `status` and `doctor` share, so neither can
+/// classify a root differently from the `index` that produced its graph.
+///
+/// `admitted` is the file count the surface itself reports (the store's indexed
+/// file count), the same post-admission quantity `index` derives from. The
+/// classification is [`ZeroAdmissionDiagnostic::derive`]'s alone — this only pairs
+/// it with the prune record a persisted-graph surface has to probe for
+/// ([`nested_git_prunes`]), guarded by [`ZeroAdmissionDiagnostic::admits_diagnosis`]
+/// so a root that admitted files never pays for the probe ([NFR-PE-08]).
+///
+/// Advisory: the caller renders it beside the numbers it explains and nothing
+/// else changes — no exit code, no rule finding, no quality signal ([FR-IX-13]).
+///
+/// # Errors
+/// - [`ConfigError::InvalidRoot`] if `root` is missing or not a directory.
+///
+/// [FR-IX-13]: ../../../../docs/specs/requirements/FR-IX-13.md
+/// [NFR-PE-08]: ../../../../docs/specs/requirements/NFR-PE-08.md
+pub fn zero_admission_diagnostic(
+    root: &Path,
+    config: &Config,
+    admitted: usize,
+) -> Result<Option<ZeroAdmissionDiagnostic>, ConfigError> {
+    if !ZeroAdmissionDiagnostic::admits_diagnosis(admitted) {
+        return Ok(None);
+    }
+    let pruned = nested_git_prunes(root, config)?;
+    Ok(ZeroAdmissionDiagnostic::derive(admitted, &pruned))
 }
 
 #[cfg(test)]
@@ -1462,6 +1584,157 @@ mod tests {
         let diagnostic = ZeroAdmissionDiagnostic::derive(0, &report.pruned_nested_git)
             .expect("keyed on the reported count, the root is diagnosed");
         assert_eq!(diagnostic.pruned, 5);
+    }
+
+    // ── The `status`/`doctor` probe: `nested_git_prunes` + `zero_admission_diagnostic`
+    //    ([FR-IX-13], S-320) ─────────────────────────────────────────────────────
+
+    #[test]
+    fn the_probe_records_the_same_immediate_prunes_as_the_full_walk() {
+        // S-320's single-derivation guarantee rests on this: `status`/`doctor` do
+        // not walk, they probe — and the probe must see exactly what the walk saw
+        // at depth 1, the only depth `derive` diagnoses. A nested repo one level
+        // DOWN is in the walk's record and out of the probe's, which is precisely
+        // the subset `derive` discards.
+        let (_tmp, root) = build_parent_of_repos(4);
+        // A depth-2 boundary: recorded by the walk, invisible (and irrelevant) to
+        // the probe, since `logos init --workspace` could not act on it.
+        write(&root.join("nest/deeper/.git/HEAD"), "ref: refs/heads/main\n");
+        let config = test_config(1 << 20);
+
+        let walked = discover_with_threads(&root, &config, 0).unwrap();
+        let probed = nested_git_prunes(&root, &config).unwrap();
+
+        let walked_depth1: Vec<PathBuf> = walked
+            .pruned_nested_git
+            .iter()
+            .filter(|p| p.components().count() == 1)
+            .cloned()
+            .collect();
+        assert_eq!(
+            probed, walked_depth1,
+            "the probe reproduces the walk's depth-1 prune record exactly"
+        );
+        assert_eq!(probed.len(), 4, "the four sibling repositories");
+        assert!(
+            walked.pruned_nested_git.iter().any(|p| p.components().count() > 1),
+            "the fixture really does contain a deeper boundary the walk records"
+        );
+    }
+
+    #[test]
+    fn the_probe_and_the_walk_agree_on_a_git_ignored_nested_repository() {
+        // The probe copies `discover`'s walker settings verbatim but builds a
+        // SERIAL walk where `discover` builds a parallel one, and a gitignored
+        // child is where the ignore matcher and `filter_entry` interact. Pin that
+        // the two still record the same thing, rather than trusting that the two
+        // builders order those two steps identically.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join(".gitignore"), "/hidden-svc\n");
+        write(&root.join("hidden-svc/.git/HEAD"), "ref: refs/heads/main\n");
+        write(&root.join("plain-svc/.git/HEAD"), "ref: refs/heads/main\n");
+        let config = test_config(1 << 20);
+
+        let walked: Vec<PathBuf> = discover_with_threads(&root, &config, 0)
+            .unwrap()
+            .pruned_nested_git
+            .into_iter()
+            .filter(|p| p.components().count() == 1)
+            .collect();
+        assert_eq!(
+            nested_git_prunes(&root, &config).unwrap(),
+            walked,
+            "probe and walk classify a git-ignored nested repository identically"
+        );
+    }
+
+    #[test]
+    fn the_probe_honours_ignored_dirs_exactly_as_the_walk_does() {
+        // `keep_dir` attributes a prune to the boundary rule only when the name is
+        // NOT in `ignored_dirs` — a vendored `node_modules` or a `.worktrees`
+        // checkout is pruned by name and would be a confidently wrong remedy. The
+        // probe reuses `keep_dir` verbatim, so it inherits that; pin it, because a
+        // probe that re-implemented the rule is exactly how the surfaces diverge.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join("svc/.git/HEAD"), "ref: refs/heads/main\n");
+        write(&root.join("target/.git/HEAD"), "ref: refs/heads/main\n");
+        let config = test_config(1 << 20); // `ignored_dirs` = {target, .git}
+
+        let probed = nested_git_prunes(&root, &config).unwrap();
+        assert_eq!(
+            probed,
+            vec![PathBuf::from("svc")],
+            "an `ignored_dirs` name carrying a `.git` is not a nested-git prune"
+        );
+        // …and the name promises a parity check, so actually run the walk: an
+        // absolute expected value alone would pass even if the two had diverged.
+        assert_eq!(
+            probed,
+            discover_with_threads(&root, &config, 0).unwrap().pruned_nested_git,
+            "the walk attributes the same prune to the same rule"
+        );
+    }
+
+    #[test]
+    fn the_surface_helper_agrees_with_the_walk_derivation() {
+        // FR-IX-13 AC3, the parity the story exists for, at the unit level: the
+        // value `status`/`doctor` obtain from the persisted-graph helper is the
+        // value `index` obtains from its own walk — the same struct, not merely the
+        // same rendering.
+        let (_tmp, root) = build_parent_of_repos(12);
+        let config = test_config(1 << 20);
+
+        let walked = discover_with_threads(&root, &config, 0).unwrap();
+        let from_index = ZeroAdmissionDiagnostic::derive(0, &walked.pruned_nested_git);
+        let from_surface = zero_admission_diagnostic(&root, &config, 0).unwrap();
+
+        assert_eq!(from_surface, from_index, "one derivation, two ways in");
+        assert_eq!(from_surface.expect("diagnosed").pruned, 12);
+    }
+
+    #[test]
+    fn the_surface_helper_is_silent_and_probe_free_when_files_were_admitted() {
+        // NFR-PE-08: an admitted root pays nothing — `admits_diagnosis` short-
+        // circuits before the probe. Asserted on a root that does NOT exist, so a
+        // helper that probed first would fail `InvalidRoot` instead of returning
+        // `None`; the cost guard is thereby observable, not just claimed.
+        let missing = PathBuf::from("/nonexistent/logos/s-320/probe/guard");
+        let config = test_config(1 << 20);
+
+        assert_eq!(
+            zero_admission_diagnostic(&missing, &config, 1).unwrap(),
+            None,
+            "an admitted count is answered without touching the filesystem"
+        );
+        assert!(
+            zero_admission_diagnostic(&missing, &config, 0).is_err(),
+            "and the zero-admission arm does reach the probe, which reports the bad root"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_repository_is_never_diagnosed_by_the_surface_helper() {
+        // FR-IX-13 AC / BR-43 on the `status`/`doctor` side: a repository that
+        // vendors a nested repository admits its own files, so neither the probe's
+        // record nor an admitted count can produce a diagnostic.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join("src/own.rs"), "pub fn own() {}\n");
+        write(&root.join("vendor/.git/HEAD"), "ref: refs/heads/main\n");
+        let config = test_config(1 << 20);
+
+        assert_eq!(
+            nested_git_prunes(&root, &config).unwrap(),
+            vec![PathBuf::from("vendor")],
+            "the prune record is still populated — the record is not the diagnosis"
+        );
+        assert_eq!(
+            zero_admission_diagnostic(&root, &config, 1).unwrap(),
+            None,
+            "but a root that admitted a file is never diagnosed"
+        );
     }
 
     #[test]

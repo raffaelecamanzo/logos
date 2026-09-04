@@ -2594,6 +2594,97 @@ impl Engine {
         Ok((runtime, registry, config))
     }
 
+    /// The zero-admission diagnostic for this engine's root ([FR-IX-13]) — the
+    /// single seam `status` ([FR-NV-07]) and `doctor` ([FR-GV-18]) both go
+    /// through, so the two persisted-graph surfaces and the `index` that produced
+    /// the graph cannot classify the same root differently.
+    ///
+    /// `admitted` is the indexed file count the calling surface reports — the same
+    /// post-admission quantity `index` derives from — so at a parent folder of
+    /// sibling repositories all three read `0` and render the identical line.
+    ///
+    /// **An empty store is not the same claim as an empty walk.** `index` knows it
+    /// admitted nothing because it just walked; `status` and `doctor` deliberately
+    /// do not walk (`status` uses the no-prologue runtime so it *reports* an
+    /// unindexed graph rather than silently building one, and `doctor` is a pure
+    /// read). So `admitted == 0` alone is also true of every root that has simply
+    /// never been indexed, where an ordinary repository with one top-level
+    /// submodule would be told it "looks like a parent folder of sibling
+    /// repositories" — the confidently-wrong instruction [`derive`]'s own contract
+    /// calls worse than the silence [FR-IX-13] exists to fix ([NFR-CC-04]), and
+    /// contradicting the `run `logos index`` remedy `status` prints in the same
+    /// payload. The persisted graph revision closes that gap: [FR-SY-09]/[ADR-32]
+    /// advance it once at the end of every **completed** index — including a
+    /// zero-admission one — and it reads `0` before the first, so `> 0` is exactly
+    /// "an index has run and this is what it produced". With it, the two surfaces
+    /// answer `index`'s question rather than a different one, which is what makes
+    /// the parity real instead of coincidental.
+    ///
+    /// **Infallible and advisory** ([ADR-14]): a failed revision read, a
+    /// missing/invalid `config.toml`, or an unreadable root yields `None` and a
+    /// logged warning rather than an error. That is what keeps the promise the
+    /// diagnostic makes — it never changes a command's exit code, so it must not
+    /// be able to fail one. The guards are ordered by cost: the free
+    /// [`admits_diagnosis`](crate::config::ZeroAdmissionDiagnostic::admits_diagnosis)
+    /// test, then one point query, then the config load, then the filesystem probe
+    /// — so an ordinary indexed root pays nothing beyond the first ([NFR-PE-08]).
+    ///
+    /// [FR-IX-13]: ../../../docs/specs/requirements/FR-IX-13.md
+    /// [FR-NV-07]: ../../../docs/specs/requirements/FR-NV-07.md
+    /// [FR-GV-18]: ../../../docs/specs/requirements/FR-GV-18.md
+    /// [FR-SY-09]: ../../../docs/specs/requirements/FR-SY-09.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
+    /// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
+    /// [ADR-32]: ../../../docs/specs/architecture/decisions/ADR-32.md
+    /// [`derive`]: crate::config::ZeroAdmissionDiagnostic::derive
+    pub(crate) fn zero_admission_diagnostic(
+        &self,
+        admitted: u64,
+    ) -> Option<crate::config::ZeroAdmissionDiagnostic> {
+        // A count beyond `usize` cannot be zero, so saturating is exact here:
+        // `admits_diagnosis` rejects it either way.
+        let admitted = usize::try_from(admitted).unwrap_or(usize::MAX);
+        if !crate::config::ZeroAdmissionDiagnostic::admits_diagnosis(admitted) {
+            return None;
+        }
+        if !self.has_completed_an_index() {
+            return None;
+        }
+        let config = crate::config::load_config_from_root(&self.root)
+            .inspect_err(|err| tracing::warn!("zero-admission diagnostic skipped: {err:#}"))
+            .ok()?;
+        crate::config::zero_admission_diagnostic(&self.root, &config, admitted)
+            .inspect_err(|err| tracing::warn!("zero-admission diagnostic skipped: {err:#}"))
+            .ok()
+            .flatten()
+    }
+
+    /// Whether a **completed** index has ever run against this store, read from
+    /// the persisted graph revision ([FR-SY-09], [ADR-32]): `0` before the first
+    /// index, advanced once at the end of every completed one.
+    ///
+    /// Distinguishes "the walk admitted nothing" from "nothing has walked yet" —
+    /// two states an empty store renders identically. A transient engine or a
+    /// failed read answers `false`: this only ever gates an advisory, so the safe
+    /// direction is silence.
+    ///
+    /// [FR-SY-09]: ../../../docs/specs/requirements/FR-SY-09.md
+    /// [ADR-32]: ../../../docs/specs/architecture/decisions/ADR-32.md
+    fn has_completed_an_index(&self) -> bool {
+        self.runtime
+            .as_ref()
+            .and_then(|runtime| {
+                runtime
+                    .submit_read(|store| store.graph_revision())
+                    .inspect_err(|err| {
+                        tracing::warn!("zero-admission diagnostic skipped: {err:#}");
+                    })
+                    .ok()
+            })
+            .is_some_and(|revision| revision > 0)
+    }
+
     /// Fallible body of [`index`](Self::index).
     fn run_index(&self) -> Result<IndexResult> {
         let (runtime, registry, config) = self.pipeline_ctx()?;

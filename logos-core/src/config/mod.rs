@@ -54,8 +54,8 @@ pub use chat::{
     DEFAULT_MAX_REPLANS, DEFAULT_MAX_SUBAGENT_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS,
 };
 pub use discovery::{
-    discover, unindexed_doc_symlinks, DiscoveryReport, DocSymlinkDrop, OversizeSkip,
-    UnindexedDocSymlink, ZeroAdmissionDiagnostic,
+    discover, nested_git_prunes, unindexed_doc_symlinks, zero_admission_diagnostic,
+    DiscoveryReport, DocSymlinkDrop, OversizeSkip, UnindexedDocSymlink, ZeroAdmissionDiagnostic,
 };
 pub use error::ConfigError;
 /// The validated glob compiler, shared with the annotation engine's layer

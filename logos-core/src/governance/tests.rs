@@ -2583,3 +2583,28 @@ fn doc_symlink_warning_is_diagnostic_only_and_never_flips_ok() {
     assert!(report.ok, "a doc-symlink warning is diagnostic only — `ok` is unaffected");
     assert!(report.faults.is_empty(), "the warning is not a fault");
 }
+
+// ── CR-098 / S-320 / FR-IX-13: the zero-admission diagnostic is diagnostic ────
+
+#[test]
+fn doctor_report_builder_leaves_the_zero_admission_warning_absent() {
+    // Same discipline as the FR-IX-11 twin above: the builder is shared with
+    // `verify` (as its embedded `structural`), and the FR-IX-13 explanation is a
+    // `doctor` surface — so the builder leaves it `None`, never an empty string
+    // (NFR-CC-04) and never a fault line.
+    let structural = StructuralReport {
+        node_count: 2,
+        distinct_symbol_ids: 2,
+        ..StructuralReport::default()
+    };
+    let report = doctor_report(structural, AdmissionCensus::default());
+    assert_eq!(report.zero_admission_warning, None, "builder does not populate the warning");
+    assert!(report.ok, "clean census is ok");
+}
+
+// NOTE: there is deliberately no unit twin asserting "attaching the warning does
+// not flip `ok`". Assigning a field and then reading a sibling runs no production
+// code, so such a test can only restate the struct layout. The property is pinned
+// where it can actually fail — `the_diagnostic_never_moves_doctors_exit_code` in
+// `logos-core/tests/indexing.rs`, which runs the real `doctor()` at a real
+// parent-of-repos root and asserts the warning is present AND `ok` holds.
