@@ -27,7 +27,7 @@
 //! [BR-35]: ../../../docs/specs/software-spec.md#326-web-ui
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Serialize;
 
@@ -517,21 +517,22 @@ fn read_to_string_if_present(path: &Path) -> Result<String, ConfigError> {
 /// Atomically replace `target` with `bytes` via write-temp-then-rename
 /// ([NFR-RA-07]). Returns the number of bytes written.
 ///
-/// The temp file is a **sibling** of `target` (same directory ⇒ same filesystem),
-/// so the `rename` is an atomic in-place swap rather than a cross-device copy: a
-/// concurrent reader and a crash both see either the whole old file or the whole
-/// new one, never a partial write. The temp is `sync`-ed before the rename so the
-/// new contents are durable on disk before they become visible. On any failure
-/// the temp is cleaned up and `target` is left untouched.
+/// The write-temp-then-rename mechanism, and every guarantee it carries, lives in
+/// [`crate::fs_atomic::publish`] — shared, because this is not the only file
+/// logos rewrites in place and a second hand-rolled copy has already drifted
+/// once (the federation warm sidecar of [FR-WS-17] dropped the thread id from
+/// its temp name). What stays here is what is genuinely this call site's: the
+/// `.logos/` parent creation for a fresh root, the [`ConfigError`] typing, and
+/// the byte count.
 ///
-/// `unix_mode` sets the **temp file's** Unix permission bits *at creation* (so
-/// the perms hold for the whole window the bytes exist on disk, and `rename`
-/// carries them to `target`). `None` leaves the OS default (umask-dependent) —
-/// correct for the world-readable checked-in policy files. The secret store
-/// passes `Some(0o600)` so the API key is never even briefly group/world-readable
-/// ([NFR-SE-07], defense-in-depth on the at-rest key). On non-Unix the mode is a
-/// no-op (the loopback-only host is the v1 trust boundary; OS-keychain/ACL
-/// storage is the deferred follow-up the NFR names).
+/// `unix_mode` is forwarded: `None` leaves the OS default (umask-dependent) —
+/// correct for the world-readable checked-in policy files — while the secret
+/// store passes `Some(0o600)` so the API key is never even briefly
+/// group/world-readable ([NFR-SE-07], defense-in-depth on the at-rest key). On
+/// non-Unix the mode is a no-op (the loopback-only host is the v1 trust
+/// boundary; OS-keychain/ACL storage is the deferred follow-up the NFR names).
+///
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
 fn atomic_write(target: &Path, bytes: &[u8], unix_mode: Option<u32>) -> Result<u64, ConfigError> {
     let write_err = |source: std::io::Error| ConfigError::Write {
         path: target.to_path_buf(),
@@ -539,79 +540,13 @@ fn atomic_write(target: &Path, bytes: &[u8], unix_mode: Option<u32>) -> Result<u
     };
 
     // Ensure the `.logos/` parent exists (a fresh root may not have it yet).
+    // This, the error typing and the byte count are what is genuinely THIS call
+    // site's; the publish itself belongs to every in-place rewrite alike.
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(write_err)?;
     }
-
-    // A sibling temp path, made unique by PID so two processes writing the same
-    // root never clobber each other's temp (the rename is still the only swap).
-    let tmp = sibling_tmp_path(target);
-
-    // Write + flush + fsync, then rename. A failure at any step cleans up the
-    // temp and propagates a typed Write error, leaving `target` byte-identical.
-    let result = (|| {
-        use std::io::Write as _;
-        let mut file = create_temp(&tmp, unix_mode)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&tmp, target)
-    })();
-
-    if let Err(source) = result {
-        let _ = fs::remove_file(&tmp);
-        return Err(write_err(source));
-    }
+    crate::fs_atomic::publish(target, bytes, unix_mode).map_err(write_err)?;
     Ok(bytes.len() as u64)
-}
-
-/// Create the temp file, honoring an explicit Unix permission mode at creation
-/// time. On Unix with `Some(mode)`, the file is opened `create_new`-equivalent
-/// (`create(true).truncate(true)`) with the mode applied via
-/// [`std::os::unix::fs::OpenOptionsExt`], so it is never momentarily readable at
-/// the default umask before a follow-up `chmod`. `None` (or non-Unix) falls back
-/// to [`fs::File::create`].
-fn create_temp(tmp: &Path, unix_mode: Option<u32>) -> std::io::Result<fs::File> {
-    #[cfg(unix)]
-    {
-        if let Some(mode) = unix_mode {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            return fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(mode)
-                .open(tmp);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = unix_mode; // mode is a Unix-only concept; ignored elsewhere.
-    fs::File::create(tmp)
-}
-
-/// A sibling temp path for `target`: `<target>.<pid>.<tid>.tmp`, in the same
-/// directory.
-///
-/// Keyed by **both** the process id and the thread id so two threads in the same
-/// process writing the same root (e.g. two concurrent surface requests) never
-/// compute the same temp path — without it, one thread's `File::create` would
-/// truncate the file the other is mid-`write_all` into, and the rename would
-/// publish corrupt bytes with no error. `rename` is still the only swap, so even
-/// concurrent writers each publish their own whole document, last-writer-wins.
-fn sibling_tmp_path(target: &Path) -> PathBuf {
-    let name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "config".to_string());
-    let tmp_name = format!(
-        ".{name}.{}.{:?}.tmp",
-        std::process::id(),
-        std::thread::current().id()
-    );
-    match target.parent() {
-        Some(parent) => parent.join(tmp_name),
-        None => PathBuf::from(tmp_name),
-    }
 }
 
 #[cfg(test)]

@@ -249,14 +249,14 @@ pub fn outcome_path(workspace_root: &Path) -> PathBuf {
 
 /// Write `outcomes` to `workspace_root`'s sidecar **atomically** ([FR-WS-17]).
 ///
-/// The bytes go to a sibling temp file in the same directory — same filesystem,
-/// so the `rename` is an in-place swap rather than a cross-device copy — which
-/// is `sync_all`-ed before the swap. A concurrent reader therefore sees either
-/// the whole previous record or the whole new one and never a partial one, and
-/// a crash mid-write leaves the previous record intact. The temp name carries
-/// the writing process's PID so two supervisors on one workspace cannot clobber
-/// each other's *temp*; the rename remains the only publish. Same shape, and
-/// the same reasons, as `config::writeback`'s policy-file write.
+/// The publish itself — sibling temp, `fsync`, `rename`, cleanup on failure —
+/// is [`crate::fs_atomic::publish`], shared with `config::writeback` rather
+/// than hand-rolled here. That sharing is not tidiness: this function first
+/// carried its own copy, and the copy silently dropped the thread id from the
+/// temp name, so two threads of one process publishing the same sidecar would
+/// have computed the same temp path and published spliced bytes with `Ok(())`
+/// returned to both. A concurrent reader sees the whole previous record or the
+/// whole new one, never a partial one.
 ///
 /// The version is stamped from [`OUTCOME_SCHEMA_VERSION`] rather than taken
 /// from the argument, so no caller can publish a record under a version it does
@@ -272,35 +272,12 @@ pub fn outcome_path(workspace_root: &Path) -> PathBuf {
 /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
 /// [NFR-RA-02]: ../../../docs/specs/requirements/NFR-RA-02.md
 pub fn write_outcomes(workspace_root: &Path, outcomes: &WarmOutcomes) -> std::io::Result<()> {
-    /// The bytes actually published: `outcomes`' members under the version
-    /// **this** build speaks, borrowed rather than cloned so stamping a large
-    /// roster costs nothing.
-    #[derive(Serialize)]
-    struct Stamped<'a> {
-        version: u32,
-        members: &'a BTreeMap<String, WarmOutcome>,
-    }
-
-    let target = outcome_path(workspace_root);
-    let bytes = serde_json::to_vec_pretty(&Stamped {
+    let bytes = serde_json::to_vec_pretty(&WarmOutcomes {
         version: OUTCOME_SCHEMA_VERSION,
-        members: &outcomes.members,
+        members: outcomes.members.clone(),
     })
     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    let tmp = workspace_root.join(format!("{OUTCOME_FILENAME}.{}.tmp", std::process::id()));
-
-    let result = (|| {
-        use std::io::Write as _;
-        let mut file = fs::File::create(&tmp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&tmp, &target)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
+    crate::fs_atomic::publish(&outcome_path(workspace_root), &bytes, None)
 }
 
 /// Read `workspace_root`'s sidecar, degrading to an **empty** record on
