@@ -5,6 +5,11 @@
 //! - the bounded warm supervisor (S-321, FR-WS-14) is hidden from help,
 //!   warms a 2-member fixture end to end, holds no store lock afterwards,
 //!   drains past a failing member, and re-runs only the newly approved delta;
+//! - the durable warm-outcome record (S-331, FR-WS-17) survives the supervisor:
+//!   a member whose index failed reads `degraded` with its recorded reason from
+//!   a **separate, later** `workspace status` process, a workspace with no
+//!   record reads byte-for-byte as it did before, and a corrupt one degrades
+//!   silently instead of failing the command;
 //! - an existing member's `.logos/config.toml` is never overwritten;
 //! - stdout stays machine-clean while the approval gate goes to stderr;
 //! - `--exclude` drops a candidate member;
@@ -879,3 +884,249 @@ fn a_missing_git_binary_suppresses_the_nudge_rather_than_inverting_it() {
     assert!(repo.join(".logos").join("config.toml").is_file());
 }
 
+// ── FR-WS-17: the durable warm-outcome record, across two processes ────────
+
+/// Every entry in `dir` with its byte length — enough to catch a file added,
+/// removed or rewritten inside a member store.
+fn store_listing(dir: &Path) -> Vec<(String, u64)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut listing: Vec<(String, u64)> = entries
+        .filter_map(Result::ok)
+        .map(|entry| {
+            let len = entry.metadata().map(|m| m.len()).unwrap_or_default();
+            (entry.file_name().to_string_lossy().into_owned(), len)
+        })
+        .collect();
+    listing.sort();
+    listing
+}
+
+/// A workspace whose manifest is written **by hand**, so no detached supervisor
+/// is ever spawned.
+///
+/// `init --workspace --yes` would spawn one, and it would race this test into
+/// indexing the very member the test needs to leave un-indexed — the assertion
+/// would then be decided by whichever process won, which is exactly the kind of
+/// flake a foreground `internal-warm` exists to avoid.
+fn hand_written_workspace() -> TempDir {
+    let tmp = two_member_fixture();
+    fs::write(
+        tmp.path().join("logos.workspace.toml"),
+        "[workspace]\nname = \"w\"\nmembers = [\"api\", \"web\"]\n",
+    )
+    .unwrap();
+    tmp
+}
+
+/// **The cold-process assertion** (FR-WS-17 AC1, BR-47): after a warm in which
+/// one member's index failed, and once the supervisor process has **exited**,
+/// a `workspace status` run from a *different* process reports that member
+/// `degraded` carrying the recorded reason.
+///
+/// Two real `logos` processes with nothing shared between them but the
+/// filesystem, which is the whole point: the supervisor used to record a failed
+/// member in an in-process summary printed to a stderr the detached spawn sends
+/// to `/dev/null`, keyed on absolute roots rather than the member names
+/// read-models join on. Every one of those is invisible here, so this test
+/// fails against the shipped-but-false behaviour and passes only against a
+/// record that is genuinely durable, genuinely at the workspace root, and
+/// genuinely keyed on the member name.
+///
+/// `web` fails the way `a_failing_member_degrades_without_stalling_or_aborting_the_queue`
+/// already fails a member — a malformed `config.toml`, the loud FR-CF-03 usage
+/// fault — which fails its *index* while leaving its store perfectly
+/// **openable**. That separation is deliberate: it is what makes the assertion
+/// about the warm axis rather than about member openability.
+#[test]
+fn a_failed_warm_is_degraded_in_a_later_cold_process() {
+    let tmp = hand_written_workspace();
+    let web = tmp.path().join("web");
+    fs::create_dir_all(web.join(".logos")).unwrap();
+    fs::write(web.join(".logos/config.toml"), "this is not [[[ toml\n").unwrap();
+
+    // Snapshot both member stores BEFORE the supervisor runs, so the
+    // no-member-store assertion below is over whatever the supervisor ADDED
+    // rather than over the one filename this story would have added.
+    let before: std::collections::BTreeMap<&str, Vec<String>> = ["api", "web"]
+        .into_iter()
+        .map(|m| {
+            let names = store_listing(&tmp.path().join(m).join(".logos"))
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            (m, names)
+        })
+        .collect();
+
+    // ── process 1: the supervisor, awaited so it has provably exited ──────
+    let warm = logos(
+        tmp.path(),
+        &[
+            "internal-warm",
+            "--concurrency",
+            "1",
+            "--",
+            tmp.path().join("api").to_str().unwrap(),
+            web.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        exit_code(&warm),
+        0,
+        "a failing member is never fatal to the warm: {}",
+        String::from_utf8_lossy(&warm.stderr)
+    );
+
+    // The record is beside the manifest and nowhere else (FR-WS-17 AC4,
+    // FR-WS-14's no-member-store property, kept literal).
+    assert!(
+        tmp.path().join(".logos.workspace.warm.json").is_file(),
+        "the outcome record must sit at the workspace root"
+    );
+    for member in ["api", "web"] {
+        // The property is "the supervisor adds no file of its OWN to a member
+        // store". It cannot be "no new file at all": a warm *is* a per-member
+        // `logos index` child, and that child is an ordinary invocation which
+        // legitimately creates its own `logos.db*` and — unlike the supervisor,
+        // which skips telemetry precisely so FR-WS-14's property stays literal
+        // for the supervisor process — its own `telemetry.db`. Both are the
+        // member's own files.
+        //
+        // So the assertion is over the DELTA against an ALLOWED set named here.
+        // Any other new name fails, whatever it is called; a `contains("warm")`
+        // filter would only ever have ruled out the one filename this story
+        // happens to add. The absolute form — that `record_outcomes` alone
+        // writes nothing whatsoever into a member — is asserted where it can be
+        // isolated from an indexer, in `federation::warm`'s
+        // `record_outcomes_writes_no_file_inside_any_member` and in
+        // `logos-core/tests/workspace_warm_outcome.rs`.
+        let store = tmp.path().join(member).join(".logos");
+        let seen: Vec<String> = store_listing(&store).into_iter().map(|(n, _)| n).collect();
+        let added: Vec<&String> = seen
+            .iter()
+            .filter(|name| !before[member].contains(name))
+            .filter(|name| !name.starts_with("logos.db") && name != &"telemetry.db")
+            .collect();
+        assert!(
+            added.is_empty(),
+            "the supervisor added non-store files inside {member}: {added:?}"
+        );
+    }
+
+    // ── process 2: a cold `workspace status` ──────────────────────────────
+    let out = logos(tmp.path(), &["--json", "workspace", "status"]);
+    let status: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("workspace status emits JSON");
+    let row = |member: &str| {
+        status["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["member"] == member)
+            .unwrap_or_else(|| panic!("no row for {member}: {status}"))
+            .clone()
+    };
+
+    let failed = row("web");
+    assert_eq!(failed["warm_state"], "degraded", "{status}");
+    assert_eq!(
+        failed["reason"], "index failed: exit status: 2",
+        "the reason recorded by the supervisor reaches the wire verbatim"
+    );
+    // The OPEN axis is untouched: `web`'s store opens fine, and the two axes
+    // stay separable (FR-WS-16).
+    assert_eq!(failed["open_state"], "opened");
+    // The member that warmed successfully is `warm` — and it is genuinely
+    // indexed, so this cell is not decided by the record.
+    assert_eq!(row("api")["warm_state"], "warm");
+
+    // The roll-up partition still holds and `warming` is still OMITTED rather
+    // than zeroed, no live supervisor signal existing (FR-WS-17 AC7,
+    // NFR-CC-04).
+    let rollup = &status["warm_rollup"];
+    assert_eq!(rollup["members"], 2);
+    assert_eq!(rollup["warm"], 1);
+    assert_eq!(rollup["degraded"], 1);
+    assert_eq!(rollup["deferred"], 0);
+    assert!(
+        rollup.get("warming").is_none(),
+        "the key must be absent, not null or 0: {rollup}"
+    );
+
+    // FR-WS-17 AC8: **no surface's exit code moves.** A degraded WARM state is
+    // not a degraded member — the exit code stays governed by member
+    // openability (FR-WS-16), and both members opened.
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "a degraded warm state must not move the exit code: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(status["degraded_rollup"]["opened"], 2);
+}
+
+/// FR-WS-17 AC5: with **no** record, `workspace status` is byte-for-byte what it
+/// was before CR-102 — asserted by comparing the same workspace's stdout with
+/// the record present-then-removed against its stdout before one ever existed.
+///
+/// The stronger half is that the two differ while the record IS there: without
+/// that, a derivation that ignored the record entirely would also pass.
+#[test]
+fn a_workspace_with_no_warm_record_reports_exactly_as_before() {
+    let tmp = hand_written_workspace();
+    let web = tmp.path().join("web");
+    fs::create_dir_all(web.join(".logos")).unwrap();
+    fs::write(web.join(".logos/config.toml"), "this is not [[[ toml\n").unwrap();
+
+    let before = logos(tmp.path(), &["--json", "workspace", "status"]);
+    assert_eq!(exit_code(&before), 0);
+
+    let warm = logos(
+        tmp.path(),
+        &["internal-warm", "--concurrency", "1", "--", web.to_str().unwrap()],
+    );
+    assert_eq!(exit_code(&warm), 0);
+    let with_record = logos(tmp.path(), &["--json", "workspace", "status"]);
+    assert_ne!(
+        with_record.stdout, before.stdout,
+        "the record must actually change the output, or the comparison below proves nothing"
+    );
+
+    fs::remove_file(tmp.path().join(".logos.workspace.warm.json")).unwrap();
+    let after = logos(tmp.path(), &["--json", "workspace", "status"]);
+
+    assert_eq!(
+        String::from_utf8_lossy(&after.stdout),
+        String::from_utf8_lossy(&before.stdout),
+        "no record ⇒ byte-identical pre-CR-102 output"
+    );
+    assert_eq!(exit_code(&after), exit_code(&before));
+}
+
+/// FR-WS-17 AC6 at the surface: a **corrupt** record degrades to index-presence
+/// derivation and never fails the command — same stdout as no record at all,
+/// same exit code, and the corrupt file is left exactly as found (the read-model
+/// does not repair or delete a file on the path of every `status`).
+#[test]
+fn a_corrupt_warm_record_never_fails_workspace_status() {
+    let tmp = hand_written_workspace();
+    let clean = logos(tmp.path(), &["--json", "workspace", "status"]);
+    assert_eq!(exit_code(&clean), 0);
+
+    let record = tmp.path().join(".logos.workspace.warm.json");
+    for garbage in ["{ not json at all", "", r#"{"version":9,"members":{}}"#] {
+        fs::write(&record, garbage).unwrap();
+
+        let out = logos(tmp.path(), &["--json", "workspace", "status"]);
+
+        assert_eq!(exit_code(&out), 0, "a corrupt record must never fail the command");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&clean.stdout),
+            "a corrupt record must read exactly as no record at all"
+        );
+        assert_eq!(fs::read_to_string(&record).unwrap(), garbage, "left untouched");
+    }
+}

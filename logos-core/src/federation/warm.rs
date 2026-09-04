@@ -7,8 +7,8 @@
 //! meant 84 concurrent rayon-parallel indexers, breaching [NFR-PE-06]'s 1 GB
 //! RSS cap ~84× and defeating [NFR-PE-08]'s no-contention premise.
 //!
-//! This module owns the two pieces of that correction that are business logic,
-//! not surface concerns:
+//! This module owns the pieces of that correction that are business logic, not
+//! surface concerns:
 //!
 //! - [`effective_concurrency`] — the **effective-bound resolution** seam. K
 //!   defaults to `max(1, cores / 4)` capped at [`CONCURRENCY_CAP`]; the
@@ -20,6 +20,13 @@
 //!   nothing here re-checks a ceiling, so a programmatic caller is trusted.
 //! - [`warm_queue`] — the bounded queue itself: at most K member indexes in
 //!   flight, the next starting as each finishes, whatever N is.
+//! - [`record_outcomes`] — the **durable readout** ([FR-WS-17], [BR-47]): the
+//!   pass's per-member outcomes filed beside the manifest at the workspace root,
+//!   keyed on the member names read-models join on, so a warm that failed is
+//!   still legible once this process has exited. Before it, a failed member was
+//!   recorded only in the in-process summary below and printed to a stderr the
+//!   real detached spawn sends to `/dev/null` — which is why three shipped
+//!   acceptance criteria promised a `degraded` state nothing could produce.
 //!
 //! # Why the queue takes its worker as a parameter
 //! Spawning and awaiting an `index` child process is surface work (the `cli`
@@ -64,14 +71,18 @@
 //! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 //! [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
 //! [FR-IX-07]: ../../../docs/specs/requirements/FR-IX-07.md
+//! [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
 //! [FR-IX-08]: ../../../docs/specs/requirements/FR-IX-08.md
 //! [NFR-PE-06]: ../../../docs/specs/requirements/NFR-PE-06.md
 //! [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
 //! [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
+//! [BR-47]: ../../../docs/specs/software-spec.md#327-workspace-federation
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+
+use super::warm_state;
 
 /// Hard cap on the core-derived default warm concurrency ([FR-WS-14]).
 ///
@@ -194,12 +205,16 @@ pub fn effective_concurrency(configured: Option<usize>) -> usize {
 /// degraded, and never appears here at all ([BR-44]).
 ///
 /// Not a serialized read-model: the summary is an in-process reporting value
-/// with no wire shape. [FR-WS-15]/[S-323] derives the user-facing
-/// `warm`/`deferred` labels from index presence, not from this, so a
-/// `Serialize` derive here would publish a shape nothing projects — and
-/// [`root`](Self::root) is a diagnostic label (an absolute path), deliberately
-/// NOT the workspace-relative member *name* every federation read-model keys
-/// on, so it is not join-compatible with `WorkspaceStatus` either.
+/// with no wire shape, so a `Serialize` derive here would publish a shape
+/// nothing projects. What a reader eventually sees is the **durable** record
+/// [`record_outcomes`] translates this into ([FR-WS-17]) — and the translation
+/// is the point: [`root`](Self::root) is a diagnostic label (an absolute path),
+/// deliberately NOT the workspace-relative member *name* every federation
+/// read-model keys on, so this value is not join-compatible with
+/// `WorkspaceStatus` and [`record_outcomes`] re-derives the name rather than
+/// carrying this string through.
+///
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
 ///
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
@@ -233,6 +248,147 @@ impl WarmSummary {
     pub fn degraded_count(&self) -> usize {
         self.members.iter().filter(|m| m.degraded.is_some()).count()
     }
+}
+
+/// Durably file `summary`'s outcomes beside the workspace manifest, so a warm
+/// that has finished is still readable once the supervisor has exited
+/// ([FR-WS-17], [BR-47]).
+///
+/// This is the **producer** [`warm_state`](super::warm_state) exists to read,
+/// and the one call the CLI supervisor makes: everything below — locating the
+/// workspace root, turning the summary's absolute roots into the member names
+/// read-models join on, merging with what is already recorded, and the atomic
+/// write — is business logic, so none of it lives in the adapter
+/// ([NFR-MA-02]).
+///
+/// # Why it re-derives the workspace root rather than being told it
+/// The supervisor is a detached child invoked with member roots and a bound,
+/// and nothing else ([`cli::workspace_init::supervisor_argv`]). Passing the
+/// workspace root down would widen that argv — a public-ish contract between
+/// two versions of this binary, since a supervisor spawned by an older `init`
+/// can outlive an upgrade — to carry a value that is *derivable*: the manifest
+/// is by construction at an ancestor of every member ([`super::discover`]
+/// enforces containment). Walking up for it costs one `stat` per ancestor and
+/// cannot disagree with the workspace the members actually belong to.
+///
+/// # Merge, not overwrite
+/// A warm covers the members `init --workspace` newly approved, not the whole
+/// roster ([`cli::workspace_init::run`] passes the delta). Overwriting would
+/// silently drop an earlier pass's outcomes and quietly relabel a member that
+/// failed last week back to `deferred`, so the existing record is read and
+/// overlaid. A record that is corrupt reads as empty
+/// ([`warm_state::read_outcomes`]) and is therefore replaced wholesale by this
+/// pass — the one place a bad sidecar is repaired, on the *write* path, never
+/// by the read-model. Two supervisors racing on one workspace resolve
+/// last-writer-wins
+/// per *file* — never a torn record, since the write is atomic — which is the
+/// right trade for evidence that is advisory by construction.
+///
+/// # Every failure is silent
+/// No manifest up-tree, an empty summary, a member whose name cannot be
+/// derived, an unwritable root: each simply files less evidence, and less
+/// evidence degrades `workspace status` to index presence, which is the
+/// pre-[FR-WS-17] behaviour rather than a fault ([NFR-RA-02]). A warm that
+/// indexed its members correctly must not be reported as having failed because
+/// the note about it could not be written.
+///
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+/// [NFR-MA-02]: ../../../docs/specs/requirements/NFR-MA-02.md
+/// [NFR-RA-02]: ../../../docs/specs/requirements/NFR-RA-02.md
+/// [BR-47]: ../../../docs/specs/software-spec.md#327-workspace-federation
+pub fn record_outcomes(summary: &WarmSummary) {
+    // The first member that resolves a workspace, not simply the first member:
+    // they all belong to the same one (a supervisor is spawned per workspace),
+    // so any of them answers — and asking only the first would forfeit the whole
+    // pass's evidence to one root that had since been moved or deleted.
+    let Some(workspace_root) = summary
+        .members
+        .iter()
+        .find_map(|member| workspace_root_of(Path::new(&member.root)))
+    else {
+        return;
+    };
+
+    // Name everything BEFORE touching the record: nothing nameable means there
+    // is no evidence to file, and publishing an empty record over a workspace
+    // that had none would create a sidecar out of a pass that learned nothing.
+    let named: Vec<(String, warm_state::WarmOutcome)> = summary
+        .members
+        .iter()
+        .filter_map(|member| {
+            // `member_name` is the SAME resolve→canonicalise→relativise the
+            // manifest parse derives `Member::name` with
+            // (`federation::discover`), called rather than re-implemented so a
+            // warm outcome can never be filed under a key no read-model looks
+            // up. A root that no longer resolves, or that escaped the
+            // workspace, yields no name and is skipped.
+            let name = super::member_name(&workspace_root, Path::new(&member.root))?;
+            let outcome = match &member.degraded {
+                Some(reason) => warm_state::WarmOutcome::Failed {
+                    reason: reason.clone(),
+                },
+                None => warm_state::WarmOutcome::Succeeded,
+            };
+            Some((name, outcome))
+        })
+        .collect();
+    if named.is_empty() {
+        return;
+    }
+
+    let mut outcomes = warm_state::read_outcomes(&workspace_root);
+    outcomes.members.extend(named);
+    if let Err(err) = warm_state::write_outcomes(&workspace_root, &outcomes) {
+        // Debug, not warn: this is advisory evidence on a detached background
+        // process whose stderr is `/dev/null`, so a louder level would reach
+        // nobody it could help while adding noise to a `--verbose` run. What it
+        // buys is a diagnosable trail for the one case that is otherwise
+        // completely silent — a read-only workspace root leaving every member
+        // `deferred` forever with no signal anywhere ([NFR-RA-02]).
+        tracing::debug!(
+            workspace = %workspace_root.display(),
+            error = %err,
+            "warm outcomes could not be recorded — warm state falls back to index presence"
+        );
+    }
+}
+
+/// The workspace root `member_root` belongs to: the directory of the nearest
+/// [`MANIFEST_FILENAME`](super::MANIFEST_FILENAME) **strictly above** it,
+/// canonicalised so it can be stripped from a canonical member path.
+///
+/// # Why the walk starts at the parent
+/// A member is never its own workspace root — [`member_name`](super::member_name)
+/// encodes exactly that, returning `None` for a path that relativises to the
+/// empty string. But [`Path::ancestors`] yields the path *itself* first, so a
+/// walk started at the member would adopt a member that happens to carry its own
+/// `logos.workspace.toml` — a nested workspace, and a shape
+/// [`super::discover`] explicitly contemplates, since it climbs *above* a
+/// member's git root to find the manifest.
+///
+/// Getting that wrong is not a mis-labelling, it is three failures at once: the
+/// adopted member names nothing (so every outcome in the pass is dropped), the
+/// real workspace's record is never written, and the sidecar is created **inside
+/// a member's working tree** — the one thing [FR-WS-17] AC4 and [FR-WS-14]'s
+/// no-member-store property forbid outright. Because the resolution takes the
+/// first member that answers, one such member would poison the whole pass.
+///
+/// # Why the manifest walk and not `discover`
+/// The root is all this needs, and [`super::discover`] additionally parses the
+/// manifest and re-resolves every member — which would make filing the outcomes
+/// of a completed warm fail on a manifest carrying a key this build does not
+/// know, exactly the loud posture that is right on a command's critical path and
+/// wrong for advisory evidence.
+///
+/// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+fn workspace_root_of(member_root: &Path) -> Option<PathBuf> {
+    let start = member_root
+        .canonicalize()
+        .unwrap_or_else(|_| member_root.to_path_buf());
+    let manifest = super::find_manifest_uptree(start.parent()?)?;
+    let dir = manifest.parent()?;
+    Some(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()))
 }
 
 /// Run `index_member` over `members` at a bounded concurrency of at most
@@ -639,4 +795,304 @@ mod tests {
             started.elapsed()
         );
     }
+
+    // ── record_outcomes: the durable producer (FR-WS-17) ───────────────────
+
+    /// A workspace root with a manifest and `names` as member directories,
+    /// returning the canonical root and the canonical member paths — the shape
+    /// the supervisor is handed (absolute roots, no names).
+    fn workspace(names: &[&str]) -> (tempfile::TempDir, PathBuf, Vec<PathBuf>) {
+        let dir = tempfile::tempdir().expect("workspace");
+        let root = dir.path().canonicalize().expect("canonical root");
+        std::fs::write(root.join(crate::federation::MANIFEST_FILENAME), "[workspace]\nname = \"w\"\n")
+            .expect("manifest");
+        let roots = names
+            .iter()
+            .map(|name| {
+                let member = root.join(name);
+                std::fs::create_dir_all(&member).expect("member dir");
+                member.canonicalize().expect("canonical member")
+            })
+            .collect();
+        (dir, root, roots)
+    }
+
+    /// A summary over `outcomes`, in the `(root, Option<reason>)` shape
+    /// `warm_queue` produces.
+    fn summary(outcomes: &[(&PathBuf, Option<&str>)]) -> WarmSummary {
+        WarmSummary {
+            concurrency: 2,
+            members: outcomes
+                .iter()
+                .map(|(root, degraded)| MemberWarm {
+                    root: root.display().to_string(),
+                    degraded: degraded.map(str::to_string),
+                })
+                .collect(),
+        }
+    }
+
+    /// The producer's whole contract in one assertion: outcomes land at the
+    /// **workspace root**, keyed by the **member name** read-models join on —
+    /// not by the absolute root the summary carries — with successes recorded
+    /// alongside failures ([FR-WS-17]).
+    #[test]
+    fn record_outcomes_files_every_outcome_under_its_member_name() {
+        // `services/web` is NESTED on purpose: a member name is a
+        // workspace-relative *path*, so the relativisation — not just the
+        // basename — is what a read-model joins on. A producer that filed
+        // `web` here would key on something `workspace status` never looks up,
+        // and a flat fixture cannot tell the two apart.
+        let (_dir, root, members) = workspace(&["api", "services/web"]);
+
+        record_outcomes(&summary(&[
+            (&members[0], None),
+            (&members[1], Some("index failed: exit status: 2")),
+        ]));
+
+        let record = warm_state::read_outcomes(&root);
+        assert_eq!(
+            record.members.get("api"),
+            Some(&warm_state::WarmOutcome::Succeeded),
+            "a SUCCESS is recorded too, not only failures"
+        );
+        assert_eq!(
+            record.members.get("services/web"),
+            Some(&warm_state::WarmOutcome::Failed {
+                reason: "index failed: exit status: 2".to_string()
+            }),
+            "a nested member keys on its full workspace-relative path, verbatim reason"
+        );
+        assert!(
+            !record.members.keys().any(|key| key.contains(std::path::MAIN_SEPARATOR)
+                && Path::new(key).is_absolute()),
+            "keys are member names, never the summary's absolute roots: {:?}",
+            record.members.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// **[FR-WS-14]'s no-member-store property, literal**: recording writes
+    /// nothing whatsoever inside any member directory — no `.logos`, no marker,
+    /// no temp file. The single sidecar at the workspace root is the whole
+    /// footprint.
+    ///
+    /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+    #[test]
+    fn record_outcomes_writes_no_file_inside_any_member() {
+        let (_dir, root, members) = workspace(&["api", "web"]);
+
+        record_outcomes(&summary(&[
+            (&members[0], None),
+            (&members[1], Some("boom")),
+        ]));
+
+        for member in &members {
+            let entries: Vec<String> = std::fs::read_dir(member)
+                .expect("member dir")
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                entries.is_empty(),
+                "the supervisor wrote inside {}: {entries:?}",
+                member.display()
+            );
+            assert!(!member.join(".logos").exists(), "no member store was created");
+        }
+
+        // …and exactly one new file at the workspace root, beside the manifest.
+        let mut at_root: Vec<String> = std::fs::read_dir(&root)
+            .expect("workspace root")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| !members.iter().any(|m| m.ends_with(name.as_str())))
+            .collect();
+        at_root.sort();
+        assert_eq!(
+            at_root,
+            [warm_state::OUTCOME_FILENAME, crate::federation::MANIFEST_FILENAME],
+            "one sidecar beside the manifest, and no temp residue"
+        );
+    }
+
+    /// A warm covers the members `init --workspace` newly approved, not the
+    /// whole roster — so recording **merges** rather than overwrites. Without
+    /// this, a second `init --workspace` adding one member would silently
+    /// relabel every previously-failed member back to `deferred`.
+    #[test]
+    fn record_outcomes_merges_with_what_is_already_recorded() {
+        let (_dir, root, members) = workspace(&["api", "web"]);
+
+        record_outcomes(&summary(&[(&members[0], Some("index failed"))]));
+        record_outcomes(&summary(&[(&members[1], None)]));
+
+        let record = warm_state::read_outcomes(&root);
+        assert_eq!(
+            record.members.keys().collect::<Vec<_>>(),
+            ["api", "web"],
+            "the earlier pass's outcome survives the later one"
+        );
+        assert_eq!(
+            record.members["api"],
+            warm_state::WarmOutcome::Failed {
+                reason: "index failed".to_string()
+            }
+        );
+    }
+
+    /// A re-warm of the same member **replaces** its outcome: the record is the
+    /// last warm's evidence, not an append-only history.
+    #[test]
+    fn a_later_pass_replaces_a_members_earlier_outcome() {
+        let (_dir, root, members) = workspace(&["api"]);
+
+        record_outcomes(&summary(&[(&members[0], Some("index failed"))]));
+        record_outcomes(&summary(&[(&members[0], None)]));
+
+        assert_eq!(
+            warm_state::read_outcomes(&root).members["api"],
+            warm_state::WarmOutcome::Succeeded
+        );
+    }
+
+    /// Every degenerate input is silent and writes nothing: an empty summary, a
+    /// member with no manifest anywhere up-tree (the single-root path, which has
+    /// no supervisor and no record at all). A warm that indexed correctly must
+    /// never be reported as failed because its note could not be filed
+    /// ([NFR-RA-02]).
+    ///
+    /// [NFR-RA-02]: ../../../docs/specs/requirements/NFR-RA-02.md
+    #[test]
+    fn recording_is_silent_and_writes_nothing_when_there_is_no_workspace() {
+        record_outcomes(&WarmSummary {
+            concurrency: 1,
+            members: Vec::new(),
+        });
+
+        let orphan = tempfile::tempdir().expect("orphan root");
+        let member = orphan.path().join("api");
+        std::fs::create_dir_all(&member).expect("member dir");
+        record_outcomes(&summary(&[(&member, Some("boom"))]));
+
+        assert!(
+            !warm_state::outcome_path(orphan.path()).exists(),
+            "no manifest up-tree ⇒ no record"
+        );
+        assert!(!member.join(warm_state::OUTCOME_FILENAME).exists());
+    }
+
+    /// A member that no longer resolves under the workspace is skipped, and its
+    /// neighbours are still filed — one unresolvable root never costs the whole
+    /// pass its evidence, even when it is the **first** in the queue and is
+    /// therefore also the first candidate for locating the workspace.
+    #[test]
+    fn an_unresolvable_member_is_skipped_not_fatal() {
+        let (_dir, root, members) = workspace(&["api"]);
+        // Outside the workspace entirely, so it can neither be named nor be the
+        // root's source: a leading member under the workspace would locate it
+        // by path alone and leave the fallback untested.
+        let elsewhere = tempfile::tempdir().expect("another root");
+        let stray = elsewhere.path().join("gone");
+
+        record_outcomes(&summary(&[(&stray, Some("spawn failed")), (&members[0], None)]));
+
+        let record = warm_state::read_outcomes(&root);
+        assert_eq!(
+            record.members.keys().collect::<Vec<_>>(),
+            ["api"],
+            "the resolvable member is still filed, at the right workspace"
+        );
+        assert!(
+            !warm_state::outcome_path(elsewhere.path()).exists(),
+            "and nothing is written at the stray member's own root"
+        );
+    }
+
+
+    /// A member carrying its **own** `logos.workspace.toml` — a nested
+    /// workspace — must not be mistaken for the workspace root.
+    ///
+    /// [`Path::ancestors`] yields the path itself first, so a manifest walk
+    /// started *at* the member adopts the member. That is not a mis-labelling:
+    /// the adopted member relativises to the empty string and therefore names
+    /// nothing, so every outcome in the pass is dropped, the real workspace's
+    /// record is never written, and the sidecar is created **inside a member's
+    /// working tree** — precisely what [FR-WS-17] AC4 and [FR-WS-14]'s
+    /// no-member-store property forbid. Because the root is taken from the
+    /// first member that answers, one such member poisons the whole pass.
+    ///
+    /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+    /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+    #[test]
+    fn a_member_with_its_own_manifest_is_not_mistaken_for_the_workspace_root() {
+        let (_dir, root, members) = workspace(&["api", "web"]);
+        std::fs::write(
+            members[0].join(crate::federation::MANIFEST_FILENAME),
+            "[workspace]\nname = \"nested\"\n",
+        )
+        .expect("a nested manifest inside a member");
+
+        record_outcomes(&summary(&[
+            (&members[0], Some("index failed")),
+            (&members[1], None),
+        ]));
+
+        assert!(
+            !warm_state::outcome_path(&members[0]).exists(),
+            "the sidecar must NEVER be written inside a member, whatever it contains"
+        );
+        let record = warm_state::read_outcomes(&root);
+        assert_eq!(
+            record.members.keys().collect::<Vec<_>>(),
+            ["api", "web"],
+            "the real workspace root still receives every outcome"
+        );
+    }
+
+
+    /// A pass in which **nothing** could be named files no record at all, rather
+    /// than publishing an empty one over a workspace that had none. An empty
+    /// record is behaviourally inert, but creating a sidecar out of a pass that
+    /// learned nothing is a footprint the story does not owe.
+    #[test]
+    fn a_pass_that_names_nothing_writes_no_record() {
+        let (_dir, root, _members) = workspace(&["api"]);
+        let elsewhere = tempfile::tempdir().expect("another root");
+        let stray = elsewhere.path().join("gone");
+
+        record_outcomes(&summary(&[(&stray, Some("spawn failed"))]));
+
+        assert!(
+            !warm_state::outcome_path(&root).exists(),
+            "no nameable member ⇒ no sidecar"
+        );
+    }
+
+    /// A workspace root the record cannot be **published** into is silent and
+    /// non-fatal — the other half of `record_outcomes`' "files less evidence,
+    /// never fails" contract. Only the *no-manifest* silence path was covered
+    /// before.
+    #[test]
+    fn an_unwritable_workspace_root_is_silent_and_never_panics() {
+        let (_dir, root, members) = workspace(&["api"]);
+        // A directory where the record belongs: `rename` onto it fails for any
+        // user, on any platform — no permission bit, so this is deterministic
+        // even for a root CI runner.
+        std::fs::create_dir(warm_state::outcome_path(&root)).expect("obstruct the sidecar");
+
+        record_outcomes(&summary(&[(&members[0], None)]));
+
+        assert!(
+            warm_state::outcome_path(&root).is_dir(),
+            "the obstruction is untouched and nothing panicked"
+        );
+        let strays: Vec<String> = std::fs::read_dir(&root)
+            .expect("root")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "a failed publish leaves no temp: {strays:?}");
+    }
+
 }

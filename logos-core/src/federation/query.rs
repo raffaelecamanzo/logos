@@ -544,23 +544,36 @@ where
 ///
 /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
 ///
-/// # The warm labelling costs nothing
-/// [`WarmEvidence::none`] is passed because no durable per-member warm record
-/// exists yet (see [`super::warm_state`]), so the labels are derived
-/// **entirely** from the freshness rows the first fan-out already produced. This
-/// adds no all-member walk, no engine construction, and no store read, which is
-/// what keeps the resident-engine ceiling of a `status` exactly what it was
+/// # The warm labelling costs one file read, and no engine
+/// The evidence is the durable warm-outcome sidecar at the workspace root
+/// ([FR-WS-17]) — **one** `read` of one small file, whatever N is, made before
+/// any fan-out. That once-per-command property is held **structurally**, by the
+/// read sitting here rather than inside the per-member labelling below, and is
+/// deliberately not asserted: moving it into the loop would produce
+/// byte-identical output, so a test could only catch it by counting syscalls,
+/// which is a heavier instrument than the invariant is worth. The labels then come entirely from it and from the freshness
+/// rows the first fan-out already produced: no all-member walk, no engine
+/// construction, no *store* read, and nothing opened per member, which is what
+/// keeps the resident-engine ceiling of a `status` exactly what it was
 /// ([NFR-PE-10], [NFR-PE-11]) — asserted at N = 72 in
-/// `tests/workspace_connection_budget.rs`. `warming` is consequently absent from
-/// the roll-up rather than reported as `0` ([NFR-CC-04]).
+/// `tests/workspace_connection_budget.rs`.
+///
+/// An absent or unreadable sidecar yields an empty record, which makes this
+/// evidence equal to [`WarmEvidence::none`] and the whole payload identical to
+/// what it was before [FR-WS-17] ([NFR-RA-02]). `warming` is absent from the
+/// roll-up either way: a *finished* outcome is not a live in-flight signal, and
+/// no such source exists ([NFR-CC-04]).
 ///
 /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
 /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+/// [NFR-RA-02]: ../../../docs/specs/requirements/NFR-RA-02.md
 pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
-    let evidence = WarmEvidence::none();
+    let evidence =
+        WarmEvidence::none().with_outcomes(&warm_state::read_outcomes(&registry.federation().root));
     let freshness = fan_status(registry);
     let coverage = cross_service_coverage(registry);
     let topics = workspace_topics(registry);
@@ -815,6 +828,27 @@ mod tests {
             ],
             "a classified cause is one extra key, never a rename of another"
         );
+
+        // EXTENDED for FR-WS-17, not relaxed: a member whose store opens and
+        // reads perfectly well while the durable record says its warm failed is
+        // a row shape that could not exist before the record did — `reason` now
+        // rides a row that keeps its `result` and is `opened` on the other
+        // axis. It is the *warm* axis' reason and nothing else: no `error`, no
+        // `degraded_*`, and the freshness payload untouched.
+        let warm_failed = MemberStatus::labelled(
+            fresh("api", false),
+            &WarmEvidence::none().with_failures([("api", "index failed: exit status: 2")]),
+            opened(),
+        );
+        assert_eq!(
+            keys(&warm_failed),
+            ["member", "open_state", "reason", "result", "warm_state"],
+            "a recorded warm failure adds exactly `reason` to a healthy row"
+        );
+        let value = serde_json::to_value(&warm_failed).unwrap();
+        assert_eq!(value["warm_state"], "degraded");
+        assert_eq!(value["open_state"], "opened", "the OPEN axis is untouched");
+        assert_eq!(value["reason"], "index failed: exit status: 2");
     }
 
     /// The two axes stay **separable**: a member that opens fine but has no index

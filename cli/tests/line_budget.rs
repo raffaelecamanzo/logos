@@ -209,8 +209,30 @@ fn adapter_lines() -> usize {
 /// lines to save six, so it makes the budget *worse*. Measured, not assumed. A
 /// future author should not re-derive it and assume otherwise.
 ///
-/// **One line of headroom remains.** The next adapter change almost certainly
-/// needs a real reduction first.
+/// **S-331 spent the last one: 824 → 825.** The durable warm-outcome record
+/// (FR-WS-17) needed exactly one adapter statement — `warm::record_outcomes(&summary)`
+/// in `run_supervisor`, immediately after the queue drains. Everything that call
+/// does is business logic and lives in `logos_core::federation::warm`: locating
+/// the workspace root by walking up for the manifest, turning the summary's
+/// absolute roots into the member names read-models join on, merging with the
+/// record already on disk, and the atomic sibling-temp-plus-rename write. The
+/// schema and the degrading read are `federation::warm_state`'s, and the
+/// consumer side never touches the adapter at all — `query::workspace_status`
+/// reads the record itself. Recorded, not laundered (CR-084 §6).
+///
+/// Also considered and **rejected** while looking for room: folding the
+/// supervisor's four-line stderr degraded-member loop into the same core call.
+/// It would have bought three lines, but that loop is the *foreground*
+/// diagnostic channel — a human running `internal-warm` directly — and it is
+/// asserted by `init_workspace.rs`'s failing-member test; moving it would give
+/// the core a `eprintln!` on a path that has no terminal in production. The
+/// budget is not worth buying with a worse seam.
+///
+/// **The budget is now exactly full at 825.** The next adapter change needs a
+/// real reduction first — and, per the S-321 note above, the next author should
+/// expect to find a duplication of core logic to delete, not surface to
+/// relocate. Relocating surface into the core has been tried twice here and was
+/// wrong both times.
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
