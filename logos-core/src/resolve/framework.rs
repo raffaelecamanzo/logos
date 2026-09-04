@@ -34,6 +34,14 @@
 //! prefix is not a resolvable literal) is written once, so a second prefixing
 //! dialect inherits all of it by naming the same captures and adding no code.
 //!
+//! # A promoted path has to be a path, once ([FR-FW-01], CR-110)
+//!
+//! The mirror of composition, and shared for the same reason: every plugin's
+//! captured path flows through [`drop_non_path_routes`], so a query pattern
+//! that matches an ordinary method call cannot turn a property key into an
+//! endpoint in any language. See that function for why the rule is "carries a
+//! `/`" rather than "begins with one".
+//!
 //! # Ledger-gated candidacy ([FR-FW-04])
 //!
 //! A file is a candidate iff its reference ledger names a framework its own
@@ -585,6 +593,11 @@ fn scan_source(parser: &mut Parser, plugin: &dyn LanguagePlugin, source: &str) -
     // then dropped; before dedup, so two paths that only differ before
     // composition collapse correctly once they carry the same prefix.
     compose_prefixes(&mut out);
+    // A promoted route's path has to be a path (CR-110). After composition,
+    // because composition is what turns a relative method path into a fuller one:
+    // Spring's `@GetMapping("users")` under `@RequestMapping("/api")` is a route,
+    // and only the joined `/api/users` should be judged.
+    drop_non_path_routes(&mut out.routes);
     // Overlapping declarative patterns (e.g. a handler-bearing and a
     // handler-less variant of the same registration shape) may both match one
     // site: collapse to one match per (method, path), preferring the one that
@@ -866,12 +879,17 @@ fn is_resolvable_prefix(literal: &str) -> bool {
 /// (`$BASE`, `${BASE}`). Both name a value this pass does not resolve.
 fn names_a_template_reference(literal: &str) -> bool {
     // Every `$`, not just the first: `/price$/x/${api.base}` names one.
-    literal.match_indices('$').any(|(at, _)| {
-        literal[at + 1..]
-            .chars()
-            .next()
-            .is_some_and(|next| next == '{' || next == '_' || next.is_alphabetic())
-    })
+    literal
+        .match_indices('$')
+        .any(|(at, _)| literal[at + 1..].chars().next().is_some_and(introduces_reference))
+}
+
+/// What a `$` has to be followed by to introduce a reference rather than be a
+/// literal dollar — the one definition [`names_a_template_reference`] and
+/// [`opens_with_template_reference`] both ask, so the two can never disagree
+/// about what a reference looks like.
+fn introduces_reference(next: char) -> bool {
+    next == '{' || next == '_' || next.is_alphabetic()
 }
 
 /// Join a route prefix and a method path with **exactly one** separator
@@ -907,6 +925,84 @@ fn join_route_path(prefix: &str, path: &str) -> String {
         prefix.trim_end_matches('/'),
         path.trim_start_matches('/')
     )
+}
+
+/// Drop every route whose composed path is not a URL path at all ([FR-FW-01],
+/// CR-110).
+///
+/// The **shared** half of CR-110's two constraints, and shared deliberately: a
+/// query pattern shaped like `<expr>.m("string")` matches any method call, so
+/// `state.get("active")` in a vendored bundle and `formGroup.get("year")` in an
+/// Angular component both promoted a `route` node — 37 of 142 across the
+/// observed workspace, and the two noisiest repos in it outranked every real
+/// API service on route count. Putting the rule here rather than in the
+/// TypeScript query is the point: every plugin shipping the `frameworks`
+/// capability inherits it, present and future, exactly as prefix composition is
+/// inherited. A per-query rule would protect one language and leave the same
+/// latent defect in the other nine.
+///
+/// # Why "is a path", not "is absolute"
+///
+/// CR-110 §3.2 asks for a leading `/`, on the stated premise that every
+/// framework in [FR-FW-03]'s ratified set registers absolute paths. That
+/// premise is false, and the repository's own fixtures disprove it: a Django
+/// URLconf registers `path("users/", index)` — relative by design, because the
+/// root URLconf's `include()` supplies the prefix — and ASP.NET Core's
+/// `[HttpGet("api/users")]` is relative for the same reason. Requiring a
+/// leading `/` would silently delete those frameworks' entire route surface,
+/// which is [FR-FW-01]'s *existing* acceptance criterion ("a route definition
+/// in each supported framework yields a `route` node") and a regression no
+/// acceptance criterion asked for.
+///
+/// So the rule is the one that separates the two populations honestly: a URL
+/// path is a sequence of `/`-separated segments, and every false positive
+/// observed is a bare single token — `active`, `year`, `codGestPEC`,
+/// `mce_marker` — that is a property key in every dialect and a path in none.
+/// All 37 are dropped; Django's `users/` and Spring's composed `/api/users`
+/// are not. The narrower gap this leaves — a lookup keyed on a `/`-bearing
+/// string, `cache.get("/cache/key")` — is what CR-110's *other* constraint,
+/// receiver scoping in the TypeScript and TSX queries, exists to close.
+///
+/// # No trace, not a refusal
+///
+/// A dropped candidate leaves **no** node and **no** [`RouteRefusal`].
+/// [FR-FW-05]'s `path-not-composed` vocabulary is for an endpoint Logos could
+/// not address; a property lookup was never an endpoint, and recording one
+/// would manufacture a coverage denominator out of ordinary code. That is also
+/// why this runs after [`compose_prefixes`]: composition decides the refusals,
+/// so nothing dropped here has already been counted.
+///
+/// [FR-FW-01]: ../../../docs/specs/requirements/FR-FW-01.md
+/// [FR-FW-03]: ../../../docs/specs/requirements/FR-FW-03.md
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+fn drop_non_path_routes(routes: &mut Vec<RouteMatch>) {
+    routes.retain(|route| is_a_url_path(&route.path));
+}
+
+/// `true` when a composed route path can be read as a URL path: it carries the
+/// `/` separator that makes it one, absolutely (`/users`) or relatively
+/// (`users/`, `api/users`).
+///
+/// The one exemption is a path *opening* with an unresolved template reference
+/// (`${api.base}`, `$BASE/users`): the separators may live inside the property,
+/// so such a path is not known to be anything, and [FR-FW-05] promotes it
+/// verbatim on purpose — resolving property sources is out of scope. The
+/// exemption is anchored at the start because that is the only position where a
+/// reference can hide the path's opening; `active` carries no reference at all,
+/// and neither does `year`.
+///
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+fn is_a_url_path(path: &str) -> bool {
+    path.contains('/') || opens_with_template_reference(path)
+}
+
+/// `true` when the text *begins* with a `$`-introduced reference — the
+/// start-anchored form of [`names_a_template_reference`], which asks the
+/// weaker "anywhere" question because a prefix is disqualified by a reference
+/// wherever it sits.
+fn opens_with_template_reference(path: &str) -> bool {
+    path.strip_prefix('$')
+        .is_some_and(|rest| rest.chars().next().is_some_and(introduces_reference))
 }
 
 /// Interpret one query match under the declarative capture contract; `true`

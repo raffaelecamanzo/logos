@@ -321,8 +321,12 @@ fn last_segment_strips_scoping() {
 fn raw_and_empty_string_literals_are_read_correctly() {
     let got = routes("fn f() { let _ = r.route(r\"/raw\", get(h)); }");
     assert_eq!(got[0].0, "/raw");
+    // An empty literal reads as an empty path — which is no path at all, so
+    // CR-110's guard promotes no route for it. Reading and promoting are
+    // separate questions: `an_empty_method_path_still_composes_onto_its_prefix`
+    // proves the literal is still read, by composing it onto a prefix.
     let empty = routes("fn f() { let _ = r.route(\"\", get(h)); }");
-    assert_eq!(empty[0].0, "");
+    assert!(empty.is_empty(), "{empty:?}");
 }
 
 // ── S-015: declarative-contract helpers ──────────────────────────────────────
@@ -1038,6 +1042,388 @@ class UserController {
         )],
         "a second language composes from its query alone"
     );
+}
+
+// ── CR-110: a promoted route's path has to be a path ─────────────────────────
+
+/// The guard's rule, stated directly on the predicate rather than through a
+/// grammar.
+///
+/// A URL path carries the `/` that makes it one — absolutely (`/users`) or
+/// relatively, which a Django URLconf and an ASP.NET Core attribute both
+/// register by design. A bare single token is a property key in every ratified
+/// dialect and a path in none, which is the whole of CR-110's observed
+/// population. An opening template reference is exempt: the separators may live
+/// inside the property, and [FR-FW-05] promotes those verbatim.
+///
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+#[test]
+fn only_a_slash_bearing_or_reference_opening_path_is_a_url_path() {
+    for path in [
+        "/",
+        "/users",
+        "/users/{id}",
+        // Django's URLconf and ASP.NET Core's attribute routes, relative by
+        // design — the shapes a leading-`/` rule would have deleted.
+        "users/",
+        "api/users",
+        "${api.base}/users",
+        "${api.base}",
+        "$BASE/x",
+    ] {
+        assert!(is_a_url_path(path), "{path} is a URL path");
+    }
+    // Every one of CR-110's 37 observed false positives is one of these: a bare
+    // token, with no separator and no reference.
+    for not in ["", "active", "year", "codGestPEC", "mce_marker", "__caret", "$"] {
+        assert!(!is_a_url_path(not), "{not} is not a URL path");
+    }
+    // The exemption is a *reference*, not a bare sigil: `$` alone, or followed
+    // by anything that cannot open an identifier, names nothing.
+    for not_a_reference in ["$", "$ x", "$1", "price$"] {
+        assert!(
+            !opens_with_template_reference(not_a_reference),
+            "{not_a_reference} opens no reference"
+        );
+    }
+}
+
+/// A relative registration from a framework that registers relatively survives
+/// the guard, end to end through its own query.
+///
+/// This is the conformance edge CR-110 §3.2's leading-`/` wording missed:
+/// [FR-FW-03] ratifies Django, whose URLconf paths take their prefix from the
+/// root `include()` and are therefore written relative. Deleting them would
+/// breach [FR-FW-01]'s existing criterion for a ratified framework.
+///
+/// [FR-FW-01]: ../../../docs/specs/requirements/FR-FW-01.md
+/// [FR-FW-03]: ../../../docs/specs/requirements/FR-FW-03.md
+#[test]
+#[cfg(feature = "lang-python")]
+fn a_relative_django_urlconf_path_survives_the_guard() {
+    let m = scan_lang(
+        "py",
+        "from django.urls import path\n\ndef index(request):\n    return None\n\nurlpatterns = [path(\"users/\", index)]\n",
+    );
+    assert_eq!(
+        route_triples(m),
+        vec![(
+            "users/".to_string(),
+            "ANY".to_string(),
+            Some("index".to_string())
+        )]
+    );
+}
+
+/// A dropped candidate leaves **nothing** — no route, and no refusal.
+/// [FR-FW-05]'s `path-not-composed` reason is for an endpoint Logos could not
+/// address; a property lookup was never an endpoint, and recording one would
+/// manufacture a coverage denominator out of ordinary code (CR-110 §10).
+///
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+#[test]
+fn a_path_that_is_no_path_is_dropped_without_a_coverage_reason() {
+    let m = scan("fn f() { let _ = r.route(\"active\", get(h)); }");
+    assert!(m.routes.is_empty(), "{:?}", m.routes);
+    assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+}
+
+/// The guard is **shared**, so it cannot be a query's private business: no
+/// shipped `frameworks.scm` may constrain `@fw.route.path`'s shape with a
+/// predicate of its own.
+///
+/// This is the testable face of "every plugin inherits it". A per-query
+/// `(#match? @fw.route.path "^/")` would satisfy one language's fixtures while
+/// leaving the same latent defect in the other nine, and would drift the moment
+/// the shared rule changed — which is exactly the failure CR-110 §10 rejected
+/// when it put the rule in the pass instead of the TypeScript query.
+#[test]
+fn no_frameworks_query_constrains_the_path_shape_itself() {
+    let mut checked = 0;
+    for entry in crate::plugin::grammars::compiled() {
+        for query in entry.embedded_queries {
+            if !query.relative_path.ends_with("frameworks.scm") {
+                continue;
+            }
+            for line in query_patterns(query.source).lines() {
+                let predicate =
+                    line.contains("#match?") || line.contains("#any-of?") || line.contains("#eq?");
+                assert!(
+                    !(predicate && line.contains("@fw.route.path")),
+                    "{}: the path-shape rule belongs to the shared pass, not this query: {line}",
+                    query.label
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no frameworks.scm was checked");
+}
+
+/// One guard, four capture dialects: a bare-token path promotes nothing
+/// whether it arrived through Rust's legacy structural anchor, Java's
+/// declarative annotation contract, Go's selector-call pattern, or TypeScript's
+/// Express call pattern. Four unrelated queries, one outcome — which is what
+/// "the rule lives in the pass" means in practice, and the closest a test can
+/// get to CR-110 AC5's "in **every** plugin shipping `frameworks`".
+///
+/// Go is here by name because AC8 names it: `hermodr-mirror`'s 23 Go routes are
+/// the workspace's control group, so the dialect that must be *unaffected* is
+/// also the one whose bare-token behaviour is worth pinning.
+#[test]
+#[cfg(all(
+    feature = "lang-java",
+    feature = "lang-go",
+    feature = "lang-typescript"
+))]
+fn a_bare_token_path_promotes_nothing_in_any_capture_dialect() {
+    let rust = scan("fn f() { let _ = r.route(\"users\", get(h)); }");
+    assert!(rust.routes.is_empty(), "rust: {:?}", rust.routes);
+
+    let java = scan_lang(
+        "java",
+        "@RestController\npublic class C {\n    @GetMapping(value = \"users\")\n    public String listUsers() { return \"\"; }\n}\n",
+    );
+    assert!(java.routes.is_empty(), "java: {:?}", java.routes);
+    assert!(java.refusals.is_empty(), "java: {:?}", java.refusals);
+
+    let go = scan_lang("go", "func main() { r.GET(\"users\", listUsers) }\n");
+    assert!(go.routes.is_empty(), "go: {:?}", go.routes);
+    assert!(go.refusals.is_empty(), "go: {:?}", go.refusals);
+
+    let ts = scan_lang("ts", "router.get(\"users\", listUsers);");
+    assert!(ts.routes.is_empty(), "ts: {:?}", ts.routes);
+}
+
+/// …and the same Go dialect still promotes an absolute route with its handler —
+/// the control half of CR-110 AC8, in miniature: the guard must cost
+/// `hermodr-mirror`'s 23 legitimate `net/http`/Gin routes nothing.
+#[test]
+#[cfg(feature = "lang-go")]
+fn an_absolute_go_route_is_untouched_by_the_guard() {
+    assert_eq!(
+        route_triples(scan_lang(
+            "go",
+            "func main() { r.GET(\"/users\", listUsers) }\n"
+        )),
+        vec![(
+            "/users".to_string(),
+            "GET".to_string(),
+            Some("listUsers".to_string())
+        )]
+    );
+}
+
+/// A bare-token method path under a resolvable prefix is a route — the guard
+/// reads the **composed** path, so Spring's `@RequestMapping("/api")` +
+/// `@GetMapping("users")` survives it, and an empty method path still composes
+/// to its prefix alone (the read this asserts is what
+/// `raw_and_empty_string_literals_are_read_correctly` defers to).
+#[test]
+#[cfg(feature = "lang-java")]
+fn an_empty_method_path_still_composes_onto_its_prefix() {
+    for (written, expected) in [("users", "/api/users"), ("", "/api")] {
+        let m = scan_lang(
+            "java",
+            &format!(
+                "@RequestMapping(\"/api\")\n@RestController\npublic class C {{\n    @GetMapping(\"{written}\")\n    public String h() {{ return \"\"; }}\n}}\n"
+            ),
+        );
+        assert_eq!(
+            route_triples(m),
+            vec![(
+                expected.to_string(),
+                "GET".to_string(),
+                Some("h".to_string())
+            )],
+            "written {written:?}"
+        );
+    }
+}
+
+/// The reference exemption, exercised end-to-end rather than only as a
+/// predicate: a method path that is *nothing but* an unresolved property
+/// placeholder still promotes, verbatim.
+///
+/// Worth its own scan because every other placeholder fixture in this file
+/// writes `${api.base}/users` — which carries a `/` and so clears
+/// [`is_a_url_path`] through the ordinary branch, leaving the exemption itself
+/// unproven. Here the `/` can only be inside the property, which is exactly the
+/// case [FR-FW-05] says to promote as written.
+///
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_slash_free_placeholder_path_still_promotes_verbatim() {
+    let m = scan_lang(
+        "java",
+        "@RestController\npublic class C {\n    @GetMapping(value = \"${api.base}\")\n    public String h() { return \"\"; }\n}\n",
+    );
+    assert_eq!(
+        route_triples(m),
+        vec![(
+            "${api.base}".to_string(),
+            "GET".to_string(),
+            Some("h".to_string())
+        )]
+    );
+}
+
+// ── CR-110: Express receiver scoping (TypeScript / TSX) ──────────────────────
+
+/// Both TS grammars ship the *same* framework query and must stay in step —
+/// `.tsx`/`.jsx` files parse with the sibling plugin, so a rule landed in one
+/// and not the other leaves half the TypeScript surface unfixed.
+#[cfg(feature = "lang-typescript")]
+const TS_EXTENSIONS: [&str; 2] = ["ts", "tsx"];
+
+/// The two shapes CR-110 was filed for, asserted as **absences**: [FR-FW-01]'s
+/// acceptance criterion only ever said what must be promoted, and that silence
+/// is what let `<expr>.get("string")` match an Angular control lookup and a
+/// vendored bundle's property read.
+///
+/// [FR-FW-01]: ../../../docs/specs/requirements/FR-FW-01.md
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_property_lookup_shaped_like_a_registration_promotes_no_route() {
+    for source in [
+        // The `pec-agid-statistics-informer` shape: an Angular `ParamMap` read.
+        "const year = params.get('year');",
+        // …and its reactive-form sibling, named in CR-110 §6.
+        "const y = formGroup.get('year');",
+        // The `styleguide` shape: 32 of these, from a vendored minified editor.
+        "if (self.state.get('active')) { run(); }",
+        "return this.state.get('checked');",
+    ] {
+        for ext in TS_EXTENSIONS {
+            let m = scan_lang(ext, source);
+            assert!(m.routes.is_empty(), "{ext} {source}: {:?}", m.routes);
+            assert!(m.refusals.is_empty(), "{ext} {source}: {:?}", m.refusals);
+        }
+    }
+}
+
+/// The receiver rule earns its keep on the case the shared path guard cannot
+/// see: a lookup keyed on a `/`-bearing string. `cache.get("/cache/key")` is a
+/// URL path by shape and still not a route.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_path_shaped_key_on_a_non_router_receiver_promotes_no_route() {
+    for ext in TS_EXTENSIONS {
+        let m = scan_lang(ext, "const hit = cache.get(\"/cache/key\");");
+        assert!(m.routes.is_empty(), "{ext}: {:?}", m.routes);
+    }
+}
+
+/// A **bare** `this` receiver is not a router for the handler-less pattern,
+/// and that exclusion is deliberate rather than an oversight in the name rule.
+///
+/// `this.get("active")` is textually indistinguishable from the property getter
+/// every class writes, which is the very shape CR-110 was filed about — so the
+/// receiver alternation names no bare `this` node, and the name rule could not
+/// match one anyway. The qualified spellings (`this.app`, `this.router`) are
+/// admitted, and are covered by
+/// `a_handler_less_registration_on_a_router_receiver_promotes_a_route_with_no_handler`.
+///
+/// Scoped to the handler-less pattern on purpose: `this.get("/x", handler)`
+/// names a handler, so it matches the handler-bearing pattern, which is
+/// unscoped by design and still promotes — asserted here so the boundary
+/// between the two patterns is pinned rather than assumed.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_bare_this_receiver_is_deliberately_not_a_router() {
+    for ext in TS_EXTENSIONS {
+        let handler_less = scan_lang(ext, "this.get(\"/x\");");
+        assert!(
+            handler_less.routes.is_empty(),
+            "{ext}: {:?}",
+            handler_less.routes
+        );
+        assert_eq!(
+            route_triples(scan_lang(ext, "this.get(\"/x\", handler);")),
+            vec![(
+                "/x".to_string(),
+                "GET".to_string(),
+                Some("handler".to_string())
+            )],
+            "{ext}: the handler-bearing pattern is unscoped by design"
+        );
+    }
+}
+
+/// [FR-FW-01]'s positive case, unchanged: a registration naming its handler
+/// still promotes a route with the edge to it.
+///
+/// [FR-FW-01]: ../../../docs/specs/requirements/FR-FW-01.md
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn an_express_registration_with_a_handler_still_promotes_a_route() {
+    for ext in TS_EXTENSIONS {
+        assert_eq!(
+            route_triples(scan_lang(ext, "app.get(\"/users\", listUsers);")),
+            vec![(
+                "/users".to_string(),
+                "GET".to_string(),
+                Some("listUsers".to_string())
+            )],
+            "{ext}"
+        );
+    }
+}
+
+/// …and the handler-less form still promotes a route with **no** fabricated
+/// handler edge ([NFR-RA-05]) — the reason the unscoped pattern exists at all.
+/// Asserted across the receiver spellings the name rule admits, so a narrowing
+/// of the regex cannot quietly drop a conventional Express app.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_handler_less_registration_on_a_router_receiver_promotes_a_route_with_no_handler() {
+    for receiver in [
+        "app",
+        "router",
+        "server",
+        "apiRouter",
+        "adminApp",
+        // The `…Server` suffix branch of the regex, which the other two
+        // suffix spellings do not cover.
+        "apiServer",
+        "this.app",
+    ] {
+        for ext in TS_EXTENSIONS {
+            let source = format!("{receiver}.get(\"/users\", (req, res) => res.send(1));");
+            assert_eq!(
+                route_triples(scan_lang(ext, &source)),
+                vec![("/users".to_string(), "GET".to_string(), None)],
+                "{ext} {receiver}"
+            );
+        }
+    }
+}
+
+/// The mounting verbs are subject to the same rule as the method verbs.
+///
+/// `use` and `all` map to `ANY` in the TypeScript descriptor's
+/// `[framework_methods]` table, and `router.use("/api", …)` is the single most
+/// common Express composition — so the receiver rule has to admit it on a
+/// router and refuse it on anything else, exactly as it does for `get`.
+/// Untested, a regex that happened to admit only the method verbs would leave
+/// the noisiest registration shape in Express unguarded.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn the_any_mapped_mounting_verbs_obey_the_same_receiver_rule() {
+    for verb in ["use", "all"] {
+        for ext in TS_EXTENSIONS {
+            assert_eq!(
+                route_triples(scan_lang(ext, &format!("router.{verb}(\"/api\");"))),
+                vec![("/api".to_string(), "ANY".to_string(), None)],
+                "{ext} router.{verb}"
+            );
+            let refused = scan_lang(ext, &format!("registry.{verb}(\"/api\");"));
+            assert!(refused.routes.is_empty(), "{ext} registry.{verb}: {:?}", refused.routes);
+        }
+    }
 }
 
 // ── Java Spring mapping annotations (S-328) ──────────────────────────────────
