@@ -1160,13 +1160,22 @@ fn no_frameworks_query_constrains_the_path_shape_itself() {
     assert!(checked > 0, "no frameworks.scm was checked");
 }
 
-/// One guard, several capture dialects: a bare-token path promotes nothing
+/// One guard, four capture dialects: a bare-token path promotes nothing
 /// whether it arrived through Rust's legacy structural anchor, Java's
-/// declarative annotation contract, or TypeScript's Express call pattern.
-/// Three unrelated queries, one outcome — which is what "the rule lives in the
-/// pass" means in practice.
+/// declarative annotation contract, Go's selector-call pattern, or TypeScript's
+/// Express call pattern. Four unrelated queries, one outcome — which is what
+/// "the rule lives in the pass" means in practice, and the closest a test can
+/// get to CR-110 AC5's "in **every** plugin shipping `frameworks`".
+///
+/// Go is here by name because AC8 names it: `hermodr-mirror`'s 23 Go routes are
+/// the workspace's control group, so the dialect that must be *unaffected* is
+/// also the one whose bare-token behaviour is worth pinning.
 #[test]
-#[cfg(all(feature = "lang-java", feature = "lang-typescript"))]
+#[cfg(all(
+    feature = "lang-java",
+    feature = "lang-go",
+    feature = "lang-typescript"
+))]
 fn a_bare_token_path_promotes_nothing_in_any_capture_dialect() {
     let rust = scan("fn f() { let _ = r.route(\"users\", get(h)); }");
     assert!(rust.routes.is_empty(), "rust: {:?}", rust.routes);
@@ -1178,8 +1187,31 @@ fn a_bare_token_path_promotes_nothing_in_any_capture_dialect() {
     assert!(java.routes.is_empty(), "java: {:?}", java.routes);
     assert!(java.refusals.is_empty(), "java: {:?}", java.refusals);
 
+    let go = scan_lang("go", "func main() { r.GET(\"users\", listUsers) }\n");
+    assert!(go.routes.is_empty(), "go: {:?}", go.routes);
+    assert!(go.refusals.is_empty(), "go: {:?}", go.refusals);
+
     let ts = scan_lang("ts", "router.get(\"users\", listUsers);");
     assert!(ts.routes.is_empty(), "ts: {:?}", ts.routes);
+}
+
+/// …and the same Go dialect still promotes an absolute route with its handler —
+/// the control half of CR-110 AC8, in miniature: the guard must cost
+/// `hermodr-mirror`'s 23 legitimate `net/http`/Gin routes nothing.
+#[test]
+#[cfg(feature = "lang-go")]
+fn an_absolute_go_route_is_untouched_by_the_guard() {
+    assert_eq!(
+        route_triples(scan_lang(
+            "go",
+            "func main() { r.GET(\"/users\", listUsers) }\n"
+        )),
+        vec![(
+            "/users".to_string(),
+            "GET".to_string(),
+            Some("listUsers".to_string())
+        )]
+    );
 }
 
 /// A bare-token method path under a resolvable prefix is a route — the guard
