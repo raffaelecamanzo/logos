@@ -256,10 +256,12 @@ async fn workspace_status_reports_name_members_and_coverage() {
         v["coverage"]["bound_ratio"], 1.0,
         "and this fixture DOES bind one reference, so the ratio is measured: {body}"
     );
-    // CR-111 / FR-WS-05: the ratio never travels bare on the web surface either —
-    // the same explicit denominator and composed summary the CLI `--json` and the
-    // SPA's coverage panel read, served from the identical `CrossServiceCoverage`
-    // read-model (one shared fixture expectation across all three sites).
+    // CR-111 / FR-WS-05: the ratio never travels bare on the web serve surface
+    // either — the identical `CrossServiceCoverage` type the CLI serializes and the
+    // SPA's coverage panel reads carries the same two fields here (this fixture's
+    // own small numbers: 1 of 1 measured, 0 excluded — the CR-111 pec-services
+    // numbers, 6 of 7 / 899 excluded, are pinned verbatim at the core unit-test and
+    // web-model/-view layers, where a 906-reference fixture is constructible).
     assert_eq!(v["coverage"]["bound_ratio_measured"], 1, "{body}");
     assert_eq!(
         v["coverage"]["bound_ratio_summary"],

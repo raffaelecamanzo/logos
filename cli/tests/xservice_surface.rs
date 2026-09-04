@@ -214,7 +214,9 @@ fn workspace_status_reports_freshness_and_three_state_coverage() {
     );
     assert_eq!(
         coverage["bound_ratio_summary"], "1.000 (1 of 1 measured; 1 excluded as no-provider-in-workspace)",
-        "the bound-ratio never travels bare, in `--json` exactly as at every other presentation site"
+        "the bound-ratio never travels bare in `--json` — this e2e fixture's own numbers (1 of 1, \
+         1 excluded); the CR-111 pec-services numbers (6 of 7, 899 excluded) are pinned verbatim at \
+         the core unit-test and web-model/-view layers, where a 906-reference fixture is constructible"
     );
 
     // The human rendering is the SAME read-model, pretty-printed (FR-CL-02) — one

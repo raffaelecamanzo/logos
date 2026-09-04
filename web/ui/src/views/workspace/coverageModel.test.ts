@@ -125,8 +125,11 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
 
   it("carries the server's explicit denominator and composed summary line VERBATIM", () => {
     // The exact CR-111 headline: bound: 6, ambiguous: 0, unbound: 1 (denominator 7),
-    // no_provider_in_workspace: 899 — pinned to the pec-services numbers so this
-    // fixture reconciles with the same figures asserted at the CLI and core layers.
+    // no_provider_in_workspace: 899 — the pec-services numbers, pinned verbatim here
+    // and at the core (`coverage.rs`) and `WorkspaceView.test.tsx` layers, where a
+    // 906-reference fixture is likewise constructible (unlike the CLI/web-serve
+    // integration tests, which drive a real indexed fixture and use its own, much
+    // smaller numbers).
     const model = buildCoverageDashboard(
       coverage([...bound("route", 6), ...unbound("route", "path-not-composed", 1), ...unbound("route", "no-provider-in-workspace", 899)], {
         bound: 6,
