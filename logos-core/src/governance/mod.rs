@@ -2721,7 +2721,24 @@ pub(crate) fn doctor(engine: &Engine) -> Result<DoctorReport> {
     // under the doc-include set but ended up unindexed. Diagnostic only — it does
     // not touch `report.ok`, so it never changes `doctor`'s exit status.
     report.doc_symlink_warnings = doc_symlink_warnings(engine)?;
+    // FR-IX-13: explain a root that admitted nothing because every immediate child
+    // was pruned as a nested git boundary — the parent-of-sibling-repositories
+    // shape, which is otherwise structurally *consistent* and so passes every check
+    // above while telling the user nothing. Diagnostic only, like the line before
+    // it: `report.ok` is untouched, so `doctor` still exits on structural drift
+    // alone. Derived through the engine seam `status` also uses, from the indexed
+    // file count, so the two persisted-graph surfaces and `index` agree by
+    // construction rather than by convention.
+    report.zero_admission_warning =
+        engine.zero_admission_diagnostic(indexed_file_count(engine)?).map(|d| d.to_string());
     Ok(report)
+}
+
+/// The store's indexed file count — the `admitted` input the zero-admission
+/// derivation keys on ([FR-IX-13]), read from the same RO pool the rest of
+/// `doctor` uses so the census and the diagnostic see one graph generation.
+fn indexed_file_count(engine: &Engine) -> Result<u64> {
+    Ok(quality_runtime(engine)?.submit_read(|store| store.counts())?.files)
 }
 
 /// The [FR-IX-11] unindexed-doc-symlink warnings for `doctor`, computed from the
@@ -2833,6 +2850,10 @@ fn doctor_report(report: StructuralReport, admission: AdmissionCensus) -> Doctor
         // this builder for its embedded `structural` field, leaves it empty — the
         // unindexed-doc-symlink diagnostic is an `index`/`doctor` surface ([FR-IX-11]).
         doc_symlink_warnings: Vec::new(),
+        // Populated by `doctor` for the same reason: `verify` embeds this builder's
+        // output as its `structural` field, and the zero-admission explanation is an
+        // `index`/`status`/`doctor` surface ([FR-IX-13]).
+        zero_admission_warning: None,
         message,
     }
 }

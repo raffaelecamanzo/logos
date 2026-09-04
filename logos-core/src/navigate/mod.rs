@@ -773,6 +773,17 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
         warnings.push(advisory);
     }
 
+    // The zero-admission diagnostic (FR-IX-13, CR-098): a user who gets a
+    // surprising empty index looks at `status` next, and without this meets the
+    // same silence one surface later — `indexed: false`, `resolution_coverage:
+    // 1.0`, no warning. Derived through the engine seam `doctor` also uses, from
+    // the file count THIS surface reports, so `index`, `status` and `doctor` render
+    // one identical line at the same root. Advisory only: it rides the existing
+    // ADR-14 degradation channel and moves nothing else.
+    if let Some(diagnostic) = engine.zero_admission_diagnostic(counts.files) {
+        warnings.push(diagnostic.to_string());
+    }
+
     // The source/test physical-LOC roll-up (CR-085, FR-IX-12). The total is the
     // ingested-LOC sum; the persisted `test_loc` bucket is the roll-up's presence
     // marker, so the counts are reported only when BOTH keys are present (a graph

@@ -2594,6 +2594,47 @@ impl Engine {
         Ok((runtime, registry, config))
     }
 
+    /// The zero-admission diagnostic for this engine's root ([FR-IX-13]) — the
+    /// single seam `status` ([FR-NV-07]) and `doctor` ([FR-GV-18]) both go
+    /// through, so the two persisted-graph surfaces and the `index` that produced
+    /// the graph cannot classify the same root differently.
+    ///
+    /// `admitted` is the indexed file count the calling surface reports — the same
+    /// post-admission quantity `index` derives from — so at a parent folder of
+    /// sibling repositories all three read `0` and render the identical line.
+    ///
+    /// **Infallible and advisory** ([ADR-14]): a missing/invalid `config.toml` or
+    /// an unreadable root yields `None` and a logged warning rather than an error.
+    /// That is what keeps the promise the diagnostic makes — it never changes a
+    /// command's exit code, so it must not be able to fail one. The
+    /// [`admits_diagnosis`](crate::config::ZeroAdmissionDiagnostic::admits_diagnosis)
+    /// guard runs before the config load, so an ordinary indexed root pays neither
+    /// the load nor the filesystem probe ([NFR-PE-08]).
+    ///
+    /// [FR-IX-13]: ../../../docs/specs/requirements/FR-IX-13.md
+    /// [FR-NV-07]: ../../../docs/specs/requirements/FR-NV-07.md
+    /// [FR-GV-18]: ../../../docs/specs/requirements/FR-GV-18.md
+    /// [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
+    /// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
+    pub(crate) fn zero_admission_diagnostic(
+        &self,
+        admitted: u64,
+    ) -> Option<crate::config::ZeroAdmissionDiagnostic> {
+        // A count beyond `usize` cannot be zero, so saturating is exact here:
+        // `admits_diagnosis` rejects it either way.
+        let admitted = usize::try_from(admitted).unwrap_or(usize::MAX);
+        if !crate::config::ZeroAdmissionDiagnostic::admits_diagnosis(admitted) {
+            return None;
+        }
+        let config = crate::config::load_config_from_root(&self.root)
+            .inspect_err(|err| tracing::warn!("zero-admission diagnostic skipped: {err:#}"))
+            .ok()?;
+        crate::config::zero_admission_diagnostic(&self.root, &config, admitted)
+            .inspect_err(|err| tracing::warn!("zero-admission diagnostic skipped: {err:#}"))
+            .ok()
+            .flatten()
+    }
+
     /// Fallible body of [`index`](Self::index).
     fn run_index(&self) -> Result<IndexResult> {
         let (runtime, registry, config) = self.pipeline_ctx()?;

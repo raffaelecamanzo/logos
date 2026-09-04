@@ -1193,3 +1193,189 @@ fn the_reconcile_walk_emits_the_diagnostic_exactly_once() {
         outcome.warnings
     );
 }
+
+// ---------------------------------------------------------------------------
+// S-320: the diagnostic reaches `status` and `doctor` from the one shared helper
+// ([FR-IX-13](../../docs/specs/requirements/FR-IX-13.md) AC3,
+//  [NFR-CC-04](../../docs/specs/requirements/NFR-CC-04.md)).
+// ---------------------------------------------------------------------------
+
+/// A parent folder of `n` sibling git repositories — the CR-098 shape: no file of
+/// the root's own, every child carrying a `.git` and therefore pruned.
+fn parent_of_sibling_repos(root: &Path, n: usize) {
+    for i in 0..n {
+        let svc = format!("svc-{i:02}");
+        write(root, &format!("{svc}/.git/HEAD"), "ref: refs/heads/main\n");
+        write(root, &format!("{svc}/src/lib.rs"), "pub fn f() {}\n");
+    }
+}
+
+/// The single warning `index` emits for the zero-admission shape.
+fn sole_prune_warning(warnings: &[String]) -> String {
+    let warned = prune_warnings(warnings);
+    assert_eq!(warned.len(), 1, "exactly one prune warning: {warnings:?}");
+    warned[0].clone()
+}
+
+#[test]
+fn index_status_and_doctor_agree_on_the_zero_admission_diagnostic() {
+    // FR-IX-13 AC3 — the story's central artifact. A user who gets a surprising
+    // empty index looks at `status` next, and `doctor` after that; before S-320
+    // both met the same silence one surface later, `doctor` passing because an
+    // empty graph is structurally consistent. All three now render the SAME line,
+    // and "the same" is asserted byte-for-byte between surfaces rather than by each
+    // matching a substring — a shared substring is exactly what two independent
+    // derivations would also produce.
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path();
+    parent_of_sibling_repos(root, 5);
+
+    let engine = Engine::start(root).expect("engine starts");
+    let indexed = engine.index();
+    assert_eq!(indexed.files_indexed, 0, "the CR-098 shape: nothing is admitted");
+    let from_index = sole_prune_warning(&indexed.warnings);
+
+    let status = engine.status();
+    let from_status = sole_prune_warning(&status.warnings);
+
+    let doctor = engine.doctor().expect("doctor runs");
+    let from_doctor = doctor
+        .zero_admission_warning
+        .clone()
+        .expect("doctor carries the zero-admission diagnostic");
+
+    assert_eq!(from_status, from_index, "`status` renders `index`'s exact line");
+    assert_eq!(from_doctor, from_index, "`doctor` renders `index`'s exact line");
+    // And that one line is the whole contract: count, bounded sample, elided
+    // remainder, and the remedy.
+    assert_eq!(
+        from_index.as_str(),
+        "discovery admitted no files: 5 directories were pruned as nested git boundaries \
+         (svc-00, svc-01, svc-02, \u{2026} +2 more). This looks like a parent folder of \
+         sibling repositories \u{2014} run `logos init --workspace` to index them as a \
+         federated workspace."
+    );
+}
+
+#[test]
+fn status_carries_the_diagnostic_in_both_human_and_json_output() {
+    // FR-IX-13 AC / S-320 AC1. Both CLI renderings of `status` serialise the same
+    // read-model (compact for `--json`, pretty for human), so asserting the
+    // diagnostic rides the serialised `warnings` array covers both — and pins that
+    // it is a `warnings` entry (FR-CL-02: stdout stays machine-clean, the
+    // diagnostic rides the existing array) rather than a new bespoke field.
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path();
+    parent_of_sibling_repos(root, 3);
+
+    let engine = Engine::start(root).expect("engine starts");
+    engine.index();
+    let status = engine.status();
+
+    assert!(!status.indexed, "the graph really is empty — the silence being explained");
+    let json = serde_json::to_value(&status).expect("status serialises");
+    let warnings: Vec<String> = serde_json::from_value(json["warnings"].clone())
+        .expect("`warnings` is an array of strings");
+    assert_eq!(
+        prune_warnings(&warnings).len(),
+        1,
+        "`--json` carries exactly one prune warning: {warnings:?}"
+    );
+    // The human rendering is the pretty form of the very same value.
+    let human = serde_json::to_string_pretty(&status).expect("status pretty-prints");
+    assert!(
+        human.contains("logos init --workspace"),
+        "the human rendering names the remedy too"
+    );
+}
+
+#[test]
+fn the_diagnostic_never_moves_doctors_exit_code() {
+    // S-320 AC2 / FR-CL-03: `doctor` exits on structural drift only. At a
+    // parent-of-repos root the graph is empty and therefore structurally perfect,
+    // so `ok` must stay true WHILE the diagnostic is present — the pairing is the
+    // assertion, since either half alone would pass on a root that simply had no
+    // diagnostic to report.
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path();
+    parent_of_sibling_repos(root, 4);
+
+    let engine = Engine::start(root).expect("engine starts");
+    engine.index();
+
+    let report = engine.doctor().expect("doctor runs");
+    assert!(
+        report.zero_admission_warning.is_some(),
+        "the diagnostic is present: {report:?}"
+    );
+    assert!(
+        report.ok,
+        "and `doctor` still passes — the diagnostic is not drift: {}",
+        report.message
+    );
+    assert!(report.faults.is_empty(), "it never becomes a fault line: {:?}", report.faults);
+    assert_eq!(report.unadmitted_files, 0, "and no admission drift is invented");
+}
+
+#[test]
+fn the_diagnostic_is_gate_neutral() {
+    // S-320 AC5 / FR-GV-02: the diagnostic is advisory — it never becomes a rule
+    // finding and never feeds the quality signal. Asserted at the root where it
+    // fires, so a leak into either channel would be caught here rather than
+    // silently shipped.
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path();
+    parent_of_sibling_repos(root, 4);
+
+    let engine = Engine::start(root).expect("engine starts");
+    engine.index();
+    assert!(
+        engine.doctor().expect("doctor runs").zero_admission_warning.is_some(),
+        "precondition: this root does produce the diagnostic"
+    );
+
+    let rules = engine.check_rules(None, false).expect("check_rules runs");
+    let leaked: Vec<_> = rules
+        .violations
+        .iter()
+        .filter(|v| format!("{v:?}").contains("logos init --workspace"))
+        .collect();
+    assert!(leaked.is_empty(), "the diagnostic never becomes a rule finding: {leaked:?}");
+
+    let scan = engine.scan(false).expect("scan runs");
+    assert!(
+        !serde_json::to_string(&scan).expect("scan serialises").contains("logos init --workspace"),
+        "and it never reaches the quality signal: {scan:?}"
+    );
+}
+
+#[test]
+fn an_ordinary_repository_is_silent_on_all_three_surfaces() {
+    // S-320 AC4 / BR-43: a repository that admits its own files — including one
+    // vendoring a nested repository, the shape that must never be diagnosed — emits
+    // the diagnostic nowhere. The negative half of the parity: agreement is only
+    // worth something if all three can also agree to say nothing.
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path();
+    write(root, "src/own.rs", "pub fn own() {}\n");
+    write(root, "vendor/dep/.git/HEAD", "ref: refs/heads/main\n");
+    write(root, "vendor/dep/src/dep.rs", "pub fn dep() {}\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let indexed = engine.index();
+    assert_eq!(indexed.files_indexed, 1, "the parent's own file is admitted");
+    assert!(indexed.warnings.is_empty(), "`index` is silent: {:?}", indexed.warnings);
+
+    let status = engine.status();
+    assert!(
+        prune_warnings(&status.warnings).is_empty(),
+        "`status` is silent: {:?}",
+        status.warnings
+    );
+
+    let report = engine.doctor().expect("doctor runs");
+    assert_eq!(
+        report.zero_admission_warning, None,
+        "`doctor` reports an honest absent, never an empty string (NFR-CC-04)"
+    );
+}
