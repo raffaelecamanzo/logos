@@ -40,6 +40,85 @@ Recommended `.gitignore` entries:
 `logos init` adds the `secrets.toml` entry for you; it is listed here so a
 hand-rolled `.gitignore` keeps the chat API key out of version control.
 
+## Workspace federation files — the manifest and the warm sidecar
+
+A **workspace** is a parent directory of sibling repositories, federated by
+[`logos init --workspace`](commands.md#init--i---hooks---workspace---yes---exclude-glob).
+Its configuration lives at the *parent*, one level above the per-member `.logos/`
+directories documented above — a member keeps its own `.logos/` and its own
+`config.toml`/`rules.toml`, unchanged.
+
+| Path (at the workspace root) | What it is | Check in? |
+|---|---|---|
+| `logos.workspace.toml` | The manifest: approved members plus your hand-written `default` / `autodiscover` / `[workspace.warm]` / `[[links]]` / `[governance]`. Re-running `init --workspace` preserves them verbatim. | Yes |
+| `.logos.workspace.warm.json` | Machine-written record of the last background warm's per-member outcome. Derived, host-local, safe to delete. | No |
+| `.mcp.json` | Gains a single `logos-workspace` server key, deliberately distinct from a member's own `logos` key so neither shadows the other. | Yes |
+
+**Unknown keys in the manifest fail loud.** It parses under `deny_unknown_fields`,
+so a typo rejects the whole file rather than being silently ignored — the same
+posture as `config.toml`.
+
+### `[workspace.warm]` — bounding the background index
+
+`init --workspace` returns immediately and hands indexing to a **single**
+detached supervisor that warms at most K members concurrently — one supervisor
+for the whole workspace, not one process per member. K defaults to
+`max(1, cores / 4)`, capped at **4**, deliberately conservative because it is
+derived for a host Logos knows nothing about.
+
+```toml
+members = ["archive-api", "mailbox-api"]
+
+[workspace.warm]
+# optional; default = max(1, cores / 4) capped at 4; explicit range 1..=16
+concurrency = 2
+```
+
+An explicit value is accepted in `1..=16` and **rejected at parse time** outside
+it, with the legal range named in the error. The ceiling is four times the
+derived cap: high enough to let someone who knows their host overrule a
+conservative default, low enough that a slipped digit fails instead of forking 200
+indexers. Know what you are buying — each of the K is a full `logos index` child
+that is itself parallel over your cores, so K costs roughly **K × cores** worker
+threads, not K.
+
+### The warm sidecar
+
+`.logos.workspace.warm.json` is how a *failed* background warm stays observable
+after the terminal that started it is closed. Without it, a member whose index
+genuinely failed reports `deferred` — "never attempted" — because the only
+evidence lived in a supervisor process that has since exited and whose stderr the
+detached spawn discards.
+
+Four properties are worth knowing, because they are what make the file safe to
+ignore:
+
+- **A live index always outranks the record.** If a member holds an index, it reads
+  `warm` even against a recorded failure, so a member indexed later by a re-run or
+  by lazy first-query indexing needs nothing cleared.
+- **It records successes as well as failures,** which is what lets a member that
+  indexed cleanly but holds no supported-language file read `warm` rather than
+  being misreported as never attempted.
+- **A corrupt, truncated or future-version file reads as no record at all** — never
+  an error. A bad sidecar can cost you evidence; it cannot fail a command. It is
+  repaired only by the next warm, never on the read path.
+- **It is never written inside a member's `.logos/`.** The supervisor holds no member
+  store, and that is a literal property rather than an accident of layout.
+
+Deleting it is always safe: status derivation falls back to index presence, which
+is exactly the behavior that predates the file.
+
+**One caveat.** Nothing currently adds it to a `.gitignore`. The workspace root can
+legitimately be a git working tree — `logos.workspace.toml` beside it is meant to be
+committed — so a `git add -A` there will pick the sidecar up. It is dot-prefixed and
+committing it is harmless (a live index outranks it, so a stale record from another
+machine cannot mislabel a member that has an index), but if your workspace root is
+tracked, add it yourself:
+
+```gitignore
+.logos.workspace.warm.json
+```
+
 ## `config.toml` — indexing and resolution policy
 
 Absent file (or absent fields) = defaults. **Unknown keys fail loud with
