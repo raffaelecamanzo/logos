@@ -21,6 +21,7 @@
 use std::fs;
 
 use logos_core::plugin::{LanguagePlugin, LanguageRegistry, PluginError};
+use logos_core::Engine;
 use tree_sitter::{Parser, QueryCursor, StreamingIterator};
 
 /// A small but structurally varied Rust sample: a struct, a function, an enum.
@@ -178,4 +179,43 @@ fn broken_on_disk_override_fails_fast_naming_the_file() {
         }
         other => panic!("expected QueryCompile error, got {other:?}"),
     }
+}
+
+/// S-340 / [FR-WS-08](../../docs/specs/requirements/FR-WS-08.md): a plugin's
+/// `invocations` capability with no loadable query file must fail the
+/// **verification preflight** `logos languages` surfaces — not degrade to a
+/// silently empty, healthy-looking listing (the failure mode that let the
+/// CR-108 capture gap go unnoticed). Rust already ships a real
+/// `invocations.scm`, so a broken on-disk override for it is a genuine,
+/// publicly-reachable way to make that exact capability's query unloadable.
+#[test]
+fn a_broken_invocations_override_surfaces_as_a_load_error_not_a_silent_empty_listing() {
+    let root = tempfile::tempdir().unwrap();
+    let qdir = root.path().join(".logos/plugins/rust/queries");
+    fs::create_dir_all(&qdir).unwrap();
+    // A query referencing a node type that does not exist in the grammar — the
+    // same "no loadable query file" shape as a missing/malformed embedded
+    // query, reached here through the public on-disk override path.
+    fs::write(
+        qdir.join("invocations.scm"),
+        "(no_such_node name: (identifier) @x)\n",
+    )
+    .unwrap();
+
+    let info = Engine::open(root.path()).languages();
+
+    assert!(
+        info.languages.is_empty() && info.skipped.is_empty(),
+        "a hard load failure must not report any language as loaded or merely \
+         skipped, got languages={:?} skipped={:?}",
+        info.languages,
+        info.skipped
+    );
+    let load_error = info
+        .load_error
+        .expect("the failed preflight must be named in the read-model, not silently blanked");
+    assert!(
+        load_error.contains("invocations.scm"),
+        "the load error must name the offending file, got {load_error:?}"
+    );
 }

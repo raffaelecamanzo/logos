@@ -463,6 +463,14 @@ fn language_composition_reflects_the_indexed_graph_without_writing() {
         registered.languages.len() > comp.languages.len(),
         "more grammars are registered than the project uses"
     );
+    // A healthy cached-registry load (the `Engine::start` path) must never carry
+    // a load failure (S-340) — pins the common path so a future edit to
+    // `Engine::languages_from` can't silently regress it.
+    assert!(
+        registered.load_error.is_none(),
+        "a healthy load must not report load_error, got {:?}",
+        registered.load_error
+    );
 
     // Repeated reads mutate no store: logos.db is byte-identical and no metric
     // snapshot is appended ([FR-UI-03] AC, [ADR-28]).
