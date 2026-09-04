@@ -38,9 +38,17 @@
 ; pattern above is deliberately left unscoped, so an unconventionally-named
 ; receiver still promotes every registration that names its handler; and the
 ; shared pass's path guard catches whatever the name rule admits.
+;
+; A **bare** `this` receiver is deliberately not admitted, which is why the
+; alternation names no `(this)`: `this.get("x")` in a class extending Router is
+; a real registration, but it is textually identical to the property getter
+; every other class writes, and admitting it would reopen the whole
+; false-positive class this pattern exists to close. `this.app.get(…)` and
+; `this.router.get(…)` — the qualified spellings — are admitted as
+; member expressions.
 ((call_expression
   function: (member_expression
-    object: [(identifier) (member_expression) (this)] @fw.route.receiver
+    object: [(identifier) (member_expression)] @fw.route.receiver
     property: (property_identifier) @fw.route.method)
   arguments: (arguments
     .

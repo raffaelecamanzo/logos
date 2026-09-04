@@ -1255,6 +1255,42 @@ fn a_path_shaped_key_on_a_non_router_receiver_promotes_no_route() {
     }
 }
 
+/// A **bare** `this` receiver is not a router for the handler-less pattern,
+/// and that exclusion is deliberate rather than an oversight in the name rule.
+///
+/// `this.get("active")` is textually indistinguishable from the property getter
+/// every class writes, which is the very shape CR-110 was filed about — so the
+/// receiver alternation names no bare `this` node, and the name rule could not
+/// match one anyway. The qualified spellings (`this.app`, `this.router`) are
+/// admitted, and are covered by
+/// `a_handler_less_registration_on_a_router_receiver_promotes_a_route_with_no_handler`.
+///
+/// Scoped to the handler-less pattern on purpose: `this.get("/x", handler)`
+/// names a handler, so it matches the handler-bearing pattern, which is
+/// unscoped by design and still promotes — asserted here so the boundary
+/// between the two patterns is pinned rather than assumed.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_bare_this_receiver_is_deliberately_not_a_router() {
+    for ext in TS_EXTENSIONS {
+        let handler_less = scan_lang(ext, "this.get(\"/x\");");
+        assert!(
+            handler_less.routes.is_empty(),
+            "{ext}: {:?}",
+            handler_less.routes
+        );
+        assert_eq!(
+            route_triples(scan_lang(ext, "this.get(\"/x\", handler);")),
+            vec![(
+                "/x".to_string(),
+                "GET".to_string(),
+                Some("handler".to_string())
+            )],
+            "{ext}: the handler-bearing pattern is unscoped by design"
+        );
+    }
+}
+
 /// [FR-FW-01]'s positive case, unchanged: a registration naming its handler
 /// still promotes a route with the edge to it.
 ///
