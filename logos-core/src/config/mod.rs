@@ -41,6 +41,7 @@ mod error;
 // `pub(crate)`: `federation::enable::candidates_for_approval` reuses
 // `globs::compile` for `--exclude` matching (FR-WS-02) rather than
 // hand-rolling a second `GlobSet` compiler.
+pub(crate) mod atomic;
 pub(crate) mod globs;
 mod rules;
 mod secrets;

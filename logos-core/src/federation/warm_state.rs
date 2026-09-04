@@ -251,7 +251,7 @@ pub fn outcome_path(workspace_root: &Path) -> PathBuf {
 /// Write `outcomes` to `workspace_root`'s sidecar **atomically** ([FR-WS-17]).
 ///
 /// The publish itself — sibling temp, `fsync`, `rename`, cleanup on failure —
-/// is [`crate::fs_atomic::publish`], shared with `config::writeback` rather
+/// is [`crate::config::atomic::publish`], shared with `config::writeback` rather
 /// than hand-rolled here. That sharing is not tidiness: this function first
 /// carried its own copy, and the copy silently dropped the thread id from the
 /// temp name, so two threads of one process publishing the same sidecar would
@@ -278,7 +278,7 @@ pub fn write_outcomes(workspace_root: &Path, outcomes: &WarmOutcomes) -> std::io
         members: outcomes.members.clone(),
     })
     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    crate::fs_atomic::publish(&outcome_path(workspace_root), &bytes, None)
+    crate::config::atomic::publish(&outcome_path(workspace_root), &bytes, None)
 }
 
 /// Read `workspace_root`'s sidecar, degrading to an **empty** record on

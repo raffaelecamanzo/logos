@@ -3,8 +3,8 @@
 //! ([NFR-RA-07]).
 //!
 //! # Why this is shared rather than written twice
-//! It was written twice. [`config::writeback`](crate::config::writeback) has
-//! published policy files this way since S-020, and
+//! It was written twice. [`writeback`](super::writeback) has published policy
+//! files this way since S-020, and
 //! [`federation::warm_state`](crate::federation::warm_state) needed the same
 //! guarantee for the warm-outcome sidecar ([FR-WS-17]) — and the second copy
 //! silently dropped the thread id from the temp name, reintroducing the exact
@@ -12,6 +12,10 @@
 //! failure mode a shared primitive prevents: not the cost of the duplication,
 //! but the *divergence*, which was invisible in review because both copies
 //! looked correct in isolation.
+//!
+//! It lives beside [`writeback`](super::writeback), the caller it was extracted
+//! from, rather than as a new top-level module: it is a small crate-internal
+//! mechanism, and federation already depends on `config`.
 //!
 //! # The guarantee, precisely
 //! A reader concurrent with a publish sees either the whole previous file or the
@@ -34,7 +38,7 @@
 //! workspace root that must already exist), and folding them in here would make
 //! this primitive answer to two vocabularies at once.
 //!
-//! [FR-WS-17]: ../../docs/specs/requirements/FR-WS-17.md
+//! [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
 
 use std::fs;
 use std::path::{Path, PathBuf};

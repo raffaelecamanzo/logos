@@ -518,7 +518,7 @@ fn read_to_string_if_present(path: &Path) -> Result<String, ConfigError> {
 /// ([NFR-RA-07]). Returns the number of bytes written.
 ///
 /// The write-temp-then-rename mechanism, and every guarantee it carries, lives in
-/// [`crate::fs_atomic::publish`] — shared, because this is not the only file
+/// [`super::atomic::publish`] — shared, because this is not the only file
 /// logos rewrites in place and a second hand-rolled copy has already drifted
 /// once (the federation warm sidecar of [FR-WS-17] dropped the thread id from
 /// its temp name). What stays here is what is genuinely this call site's: the
@@ -545,7 +545,7 @@ fn atomic_write(target: &Path, bytes: &[u8], unix_mode: Option<u32>) -> Result<u
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(write_err)?;
     }
-    crate::fs_atomic::publish(target, bytes, unix_mode).map_err(write_err)?;
+    super::atomic::publish(target, bytes, unix_mode).map_err(write_err)?;
     Ok(bytes.len() as u64)
 }
 

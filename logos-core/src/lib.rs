@@ -55,11 +55,6 @@ pub mod extract;
 /// (NFR-PE-11).
 #[allow(unsafe_code)]
 pub mod fdlimit;
-/// The single **atomic publish** primitive (write sibling temp → fsync →
-/// rename) shared by every file logos rewrites in place: the `config`
-/// policy/secret files and the federation warm-outcome sidecar (FR-WS-17).
-/// Crate-internal — a publish shape, not a public API.
-pub(crate) mod fs_atomic;
 /// Workspace **federation** (S-243, CR-061, ADR-52): the in-memory overlay that
 /// turns a parent folder of sibling repositories into one queryable workspace —
 /// `logos.workspace.toml` manifest parse + the up-tree `discover` walk that
