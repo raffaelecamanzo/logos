@@ -1241,6 +1241,34 @@ fn an_empty_method_path_still_composes_onto_its_prefix() {
     }
 }
 
+/// The reference exemption, exercised end-to-end rather than only as a
+/// predicate: a method path that is *nothing but* an unresolved property
+/// placeholder still promotes, verbatim.
+///
+/// Worth its own scan because every other placeholder fixture in this file
+/// writes `${api.base}/users` — which carries a `/` and so clears
+/// [`is_a_url_path`] through the ordinary branch, leaving the exemption itself
+/// unproven. Here the `/` can only be inside the property, which is exactly the
+/// case [FR-FW-05] says to promote as written.
+///
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_slash_free_placeholder_path_still_promotes_verbatim() {
+    let m = scan_lang(
+        "java",
+        "@RestController\npublic class C {\n    @GetMapping(value = \"${api.base}\")\n    public String h() { return \"\"; }\n}\n",
+    );
+    assert_eq!(
+        route_triples(m),
+        vec![(
+            "${api.base}".to_string(),
+            "GET".to_string(),
+            Some("h".to_string())
+        )]
+    );
+}
+
 // ── CR-110: Express receiver scoping (TypeScript / TSX) ──────────────────────
 
 /// Both TS grammars ship the *same* framework query and must stay in step —
@@ -1352,7 +1380,17 @@ fn an_express_registration_with_a_handler_still_promotes_a_route() {
 #[test]
 #[cfg(feature = "lang-typescript")]
 fn a_handler_less_registration_on_a_router_receiver_promotes_a_route_with_no_handler() {
-    for receiver in ["app", "router", "server", "apiRouter", "adminApp", "this.app"] {
+    for receiver in [
+        "app",
+        "router",
+        "server",
+        "apiRouter",
+        "adminApp",
+        // The `…Server` suffix branch of the regex, which the other two
+        // suffix spellings do not cover.
+        "apiServer",
+        "this.app",
+    ] {
         for ext in TS_EXTENSIONS {
             let source = format!("{receiver}.get(\"/users\", (req, res) => res.send(1));");
             assert_eq!(
@@ -1360,6 +1398,30 @@ fn a_handler_less_registration_on_a_router_receiver_promotes_a_route_with_no_han
                 vec![("/users".to_string(), "GET".to_string(), None)],
                 "{ext} {receiver}"
             );
+        }
+    }
+}
+
+/// The mounting verbs are subject to the same rule as the method verbs.
+///
+/// `use` and `all` map to `ANY` in the TypeScript descriptor's
+/// `[framework_methods]` table, and `router.use("/api", …)` is the single most
+/// common Express composition — so the receiver rule has to admit it on a
+/// router and refuse it on anything else, exactly as it does for `get`.
+/// Untested, a regex that happened to admit only the method verbs would leave
+/// the noisiest registration shape in Express unguarded.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn the_any_mapped_mounting_verbs_obey_the_same_receiver_rule() {
+    for verb in ["use", "all"] {
+        for ext in TS_EXTENSIONS {
+            assert_eq!(
+                route_triples(scan_lang(ext, &format!("router.{verb}(\"/api\");"))),
+                vec![("/api".to_string(), "ANY".to_string(), None)],
+                "{ext} router.{verb}"
+            );
+            let refused = scan_lang(ext, &format!("registry.{verb}(\"/api\");"));
+            assert!(refused.routes.is_empty(), "{ext} registry.{verb}: {:?}", refused.routes);
         }
     }
 }
