@@ -127,6 +127,38 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm
     Ok(0)
 }
 
+/// The plain-`logos init` parent-of-repos nudge (FR-IN-08): explain the shape
+/// on stderr, and on a TTY offer to take the FR-WS-02 enablement path instead —
+/// returning whether the caller should. `false` at any other root, where
+/// nothing is printed and nothing is asked.
+///
+/// **The non-TTY contract is the load-bearing part.** `ask` is
+/// [`crate::ask`], which returns its default *without prompting and without
+/// reading stdin* when stdin is not a terminal — so an unattended dev-pane or
+/// CI `logos init` prints the explanation and completes the plain single-root
+/// init rather than wedging forever on a prompt. It is injected (like `gate`'s
+/// `approve` above) so that contract is assertable without a terminal: the unit
+/// test below passes an `ask` that behaves exactly as the non-TTY one does.
+///
+/// The default is **decline** — `false`, not `gate`'s `true`. Enabling a
+/// workspace writes to N sibling repositories; a prompt the operator did not
+/// ask for must not do that by timing out into yes.
+///
+/// Deliberately **not** `--quiet`-suppressed, unlike `run`'s footprint notice
+/// above. That one is advisory about a side effect; this one is the whole
+/// reason the command's own output is misleading — an `init` that can only ever
+/// produce an empty index must say so (NFR-CC-04), and silencing it under
+/// `--quiet` reinstates exactly the silence FR-IN-08 exists to remove. stdout is
+/// unaffected either way (FR-CL-02), which is what `--quiet` actually protects.
+///
+/// Composition lives in the core ([`enable::ParentOfRepos`]); this only renders
+/// and prompts (NFR-MA-02).
+pub(crate) fn nudge(root: &Path, ask: fn(&str, bool) -> bool) -> bool {
+    let Some(shape) = enable::ParentOfRepos::detect(root) else { return false };
+    eprintln!("{shape}");
+    ask(&shape.question(), false)
+}
+
 /// Filter `candidates` down to the approved set: `--yes` accepts every one
 /// without prompting (the scriptable path); otherwise each is offered to
 /// `approve` (the real gate calls [`ask`] — a stderr y/n prompt, defaulting
@@ -601,5 +633,101 @@ mod tests {
     #[test]
     fn the_supervisor_over_an_empty_queue_exits_zero() {
         assert_eq!(run_supervisor(&[], Some(2)), 0);
+    }
+
+    // ── the plain-`init` parent-of-repos nudge (FR-IN-08) ─────────────────
+
+    /// **The load-bearing non-TTY assertion.** `crate::ask` returns its default
+    /// without prompting and without touching stdin when stdin is not a
+    /// terminal; this passes an `ask` that does exactly that, and the answer is
+    /// decline. So an unattended dev-pane or CI `logos init` at a parent-of-repos
+    /// root explains itself and completes the plain single-root init — it cannot
+    /// wedge on a prompt, and it cannot silently enable a workspace across N
+    /// sibling repositories either.
+    ///
+    /// The real binary's behaviour is pinned end to end in
+    /// `cli/tests/init_workspace.rs`; this pins the *decision* at the seam,
+    /// where a change of default would otherwise pass unnoticed.
+    #[test]
+    fn a_non_tty_ask_declines_and_still_gets_the_explanation() {
+        let tmp = fixture(&["api", "web"]);
+        // Exactly what `crate::ask` does on a non-TTY: yield the default,
+        // reading nothing.
+        assert!(
+            !nudge(tmp.path(), |_, default| default),
+            "a non-TTY answer is the default, and the default is decline"
+        );
+    }
+
+    /// On a TTY the offer is a real offer: accepting routes the caller into the
+    /// FR-WS-02 enablement path.
+    #[test]
+    fn accepting_the_offer_reports_true() {
+        let tmp = fixture(&["api", "web"]);
+        assert!(nudge(tmp.path(), |_, _| true), "an accepted offer branches to --workspace");
+    }
+
+    /// …and the question the operator is asked names the stake, so "yes" is
+    /// informed about how many repositories it is about to touch.
+    #[test]
+    fn the_offer_names_how_many_repositories_it_would_enable() {
+        use std::sync::Mutex;
+        static ASKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+        fn record(question: &str, default: bool) -> bool {
+            ASKED.lock().unwrap().push(question.to_string());
+            default
+        }
+
+        let tmp = fixture(&["api", "web"]);
+        ASKED.lock().unwrap().clear();
+        assert!(!nudge(tmp.path(), record));
+
+        let asked = ASKED.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "asked exactly once, not once per member: {asked:?}");
+        assert!(asked[0].contains("2 member repositories"), "{}", asked[0]);
+    }
+
+    /// At an ordinary git repository root there is no nudge and no prompt —
+    /// asserted by the `ask` never being consulted, which is the only way to
+    /// tell "declined" from "never offered".
+    #[test]
+    fn an_ordinary_repository_root_is_never_nudged_and_never_asked() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static ASKS: AtomicUsize = AtomicUsize::new(0);
+
+        fn count(_q: &str, _d: bool) -> bool {
+            ASKS.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+
+        // A repository that even *contains* sibling checkouts: only its own
+        // git-top-level status separates it from the parent-of-repos shape.
+        let tmp = fixture(&["api"]);
+        let repo = tmp.path().join("api");
+        std::fs::create_dir_all(repo.join("vendor")).unwrap();
+        git(&repo.join("vendor"), &["init", "-q", "-b", "main"]);
+
+        ASKS.store(0, Ordering::SeqCst);
+        assert!(!nudge(&repo, count), "a repository root is not the shape");
+        assert_eq!(ASKS.load(Ordering::SeqCst), 0, "no prompt is ever reached there");
+    }
+
+    /// An accepted offer must actually produce a workspace — the two halves the
+    /// dispatch line joins, composed here. A real pty is deliberately not used:
+    /// the TTY branch of `crate::ask` is stdlib `IsTerminal`, and pulling a pty
+    /// dependency in to re-test it would test the standard library rather than
+    /// this story.
+    #[test]
+    fn an_accepted_offer_leads_to_a_written_workspace_manifest() {
+        let tmp = fixture(&["api", "web"]);
+        assert!(nudge(tmp.path(), |_, _| true));
+
+        let out = Output { json: true, quiet: true };
+        assert_eq!(run(tmp.path(), true, &[], &out, |_, _| true).unwrap(), 0);
+        assert!(
+            tmp.path().join(logos_core::federation::MANIFEST_FILENAME).is_file(),
+            "accepting writes logos.workspace.toml via the FR-WS-02 path"
+        );
     }
 }

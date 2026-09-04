@@ -192,6 +192,25 @@ fn adapter_lines() -> usize {
 /// `--concurrency`), inverting the seam `warm_queue`'s spawn closure exists to
 /// hold. The adapter is genuinely thin at this point; the next author needing
 /// room should expect to find a duplication, not a relocation.
+///
+/// **S-319 spent five of those six: 819 → 824.** The `logos init`
+/// parent-of-repos nudge (FR-IN-08) needed exactly two irreducible adapter
+/// statements — print a pre-composed line, ask a y/n — plus the `let`-else that
+/// declines every other root. Detection, the explanation prose and the offer
+/// text are all composed in `logos_core::federation::enable::ParentOfRepos`;
+/// the dispatch wiring cost nothing, being a modification of the existing
+/// `if workspace {` condition. Recorded, not laundered (CR-084 §6).
+///
+/// Also considered and **rejected** while looking for room: adding an
+/// `Engine::open`-flavoured `Output::open_query` chokepoint to fold the two
+/// hand-rolled `stats`/`languages` arms into the `query`/`try_query` family.
+/// It reads like the duplication the paragraph above predicts, and it is one —
+/// but under this file's multi-line-signature convention the helper costs eight
+/// lines to save six, so it makes the budget *worse*. Measured, not assumed. A
+/// future author should not re-derive it and assume otherwise.
+///
+/// **One line of headroom remains.** The next adapter change almost certainly
+/// needs a real reduction first.
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();

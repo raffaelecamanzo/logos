@@ -36,7 +36,12 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             yes,
             exclude,
         } => {
-            if workspace {
+            // `||` short-circuits, so `--workspace` never pays for detection and
+            // never sees the nudge; a plain `init` at a parent-of-repos root gets
+            // the stderr explanation and, on a TTY only, the offer (FR-IN-08).
+            // Declining — the default, and the whole of the non-TTY path — falls
+            // through to the unchanged single-root `init` below.
+            if workspace || crate::workspace_init::nudge(root, crate::ask) {
                 crate::workspace_init::run(root, yes, &exclude, out, crate::workspace_init::spawn_supervisor)
             } else {
                 out.print(&Engine::init_with(root, &init_options(interactive, hooks))?)?;
