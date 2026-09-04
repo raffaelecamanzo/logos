@@ -271,6 +271,21 @@ struct Admission {
     ///
     /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
     worker_pool: WeakWorkerPool,
+    /// Members whose open failure has already been **announced** on the human
+    /// diagnostic channel, so one broken member costs one line per command
+    /// rather than one per member walk ([FR-WS-16], [NFR-CC-04]).
+    ///
+    /// Separate from [`opens`](Self::opens) because the two answer different
+    /// questions: `opens` records what the *latest attempt* did (and so must be
+    /// overwritten by a later attempt), while this records what the *operator has
+    /// already been told* (and so must not be). `workspace status` makes **four**
+    /// all-member walks, and the first of them channels its failure into the
+    /// member row's `error` rather than onto the diagnostic channel — so without
+    /// this latch the remaining three each emitted the same `WARN`.
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    announced: HashSet<String>,
 }
 
 impl Admission {
@@ -307,6 +322,24 @@ impl Admission {
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     fn record_open(&mut self, member: &str, failure: Option<String>) {
         self.opens.insert(member.to_string(), failure);
+    }
+
+    /// The diagnostic this command already recorded for a **failed** open of
+    /// `member`, or `None` if its latest attempt succeeded or it was never
+    /// attempted.
+    ///
+    /// Distinguishes `Some(Some(_))` (attempted and failed) from `Some(None)`
+    /// (attempted and opened) and from absence (never attempted) — the same
+    /// three-way split [`opens`](Self::opens) exists for, flattened to the one
+    /// question a re-attempt needs answered.
+    fn recorded_failure(&self, member: &str) -> Option<String> {
+        self.opens.get(member)?.clone()
+    }
+
+    /// Whether `member`'s open failure still needs announcing — `true` the first
+    /// time it is asked in this command, `false` after ([FR-WS-16]).
+    fn announce_once(&mut self, member: &str) -> bool {
+        self.announced.insert(member.to_string())
     }
 }
 
@@ -744,9 +777,101 @@ impl<E: MemberEngine> EngineRegistry<E> {
             .iter()
             .map(|member| MemberScoped {
                 member: member.name.clone(),
-                value: self.engine_for(&member.name).map(|engine| f(member, &engine)),
+                value: self
+                    .open_for_walk(&member.name)
+                    .map(|engine| f(member, &engine)),
             })
             .collect()
+    }
+
+    /// [`engine_for`](Self::engine_for) for an all-member **walk**: a member
+    /// whose open already failed in this command is not attempted again, its
+    /// recorded diagnostic being replayed instead ([FR-WS-16], [NFR-PE-10]).
+    ///
+    /// # Why the suppression lives on the walk and not on `engine_for`
+    /// A read-model like [`workspace_status`](super::query::workspace_status)
+    /// makes **four** all-member walks (`coverage` reads twice), and a member
+    /// that failed to open on the first would not have succeeded on the second —
+    /// so the three retries bought nothing and cost one wasted open and one
+    /// duplicate diagnostic each ([CRA-06]). A direct [`engine_for`](Self::engine_for), by contrast, is a
+    /// caller asking for **one named member**, and it keeps its real attempt:
+    /// the ledger's last-write-wins contract (a member that failed once and
+    /// opened later is not degraded) is a property of that path, and nothing
+    /// here changes it.
+    ///
+    /// # Scoped to the one-shot registry, deliberately
+    /// A [`RegistryMode::Serve`] registry outlives every answer it serves, so
+    /// suppressing there would leave one transiently-unavailable member reported
+    /// degraded until the process restarted; serve therefore keeps re-attempting,
+    /// and a fresh command retries for the same reason.
+    ///
+    /// The scope is therefore the **registry's lifetime**, and it equals "one
+    /// command" only because the sole production [`RegistryMode::Lazy`]
+    /// construction — `cli::xservice::registry` — builds one per command and
+    /// drops it. That is the scope [CRA-06] accepted the loss of a mid-command
+    /// recovery for; it is a property of the *caller*, not something this mode
+    /// enforces. `Lazy` records construction and watch policy, not lifetime, so
+    /// a caller that holds a `Lazy` registry across many answers (nothing in the
+    /// product does; `mcp::LogosMcp::federated` and `web::workspace_router` would
+    /// both accept one) gets a latch for that whole lifetime. Hold a `Serve`
+    /// registry there, or mint a per-answer scope, rather than widening this.
+    ///
+    /// [CRA-06]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    fn open_for_walk(&self, member: &str) -> Result<Arc<E>> {
+        // Two statements deliberately: the admission guard is a temporary in
+        // this `let`, so it drops at the `;` — before the `engine_for` below
+        // re-acquires it. Folding this into `match self.lock_admission()…` would
+        // hold the guard across that call and deadlock every walk on its first
+        // member, because the mutex is not reentrant (the same hazard the
+        // `evict_to` / `drop(evicted)` pair above is split in two for).
+        let replay = if self.mode == RegistryMode::Lazy {
+            self.lock_admission().recorded_failure(member)
+        } else {
+            None
+        };
+        match replay {
+            // The recorded string is the `{err:#}` rendering the failing attempt
+            // produced, so the replay renders identically under `{:#}` — the only
+            // form any fan-out consumer uses. It is a single-message error, so
+            // the source chain and any downcast to the root cause are NOT
+            // replayed; a consumer that needs those must read the ledger's own
+            // entry from the attempt that made them.
+            Some(diagnostic) => Err(anyhow::anyhow!("{diagnostic}")),
+            None => self.engine_for(member),
+        }
+    }
+
+    /// Whether `member`'s open failure should be **announced** on the human
+    /// diagnostic channel now ([FR-WS-16], [NFR-CC-04]).
+    ///
+    /// `true` the first time this registry is asked about `member`, `false`
+    /// afterwards — so one unopenable member costs one diagnostic line per
+    /// command, not one per all-member walk. The emitter, not the registry,
+    /// decides *what* to say; the registry only owns the fact that it has
+    /// already been said, because that fact has to be shared by every walk and
+    /// the ledger it belongs beside already lives here.
+    ///
+    /// Under [`RegistryMode::Serve`] every ask is answered `true`: that registry
+    /// outlives its answers, so latching would silence a member that keeps
+    /// failing across requests — the same reason
+    /// [`open_for_walk`](Self::open_for_walk) does not suppress there.
+    ///
+    /// Deliberately **not** part of this crate's public API, and not merely for
+    /// hygiene: it is a predicate with a side effect — asking consumes the
+    /// latch — so an outside caller reading it as a query would silently
+    /// swallow the real emitter's line. `pub(super)` reaches every module that
+    /// legitimately emits a degraded diagnostic (`bridge`, and through it
+    /// `coverage`, `topics`, `reach`) and nothing else.
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub(super) fn announce_open_failure(&self, member: &str) -> bool {
+        if self.mode != RegistryMode::Lazy {
+            return true;
+        }
+        self.lock_admission().announce_once(member)
     }
 
     /// The members with a resident (constructed) engine right now, sorted by
@@ -1619,6 +1744,292 @@ mod tests {
             !notice.contains("logos index"),
             "and no re-index remedy is invented from an absent store: {notice}"
         );
+    }
+
+    /// [CR-102] AC3: an unopenable member is attempted **once per command**,
+    /// however many all-member walks that command makes ([FR-WS-16],
+    /// [NFR-PE-10]).
+    ///
+    /// Three fan-outs stand in for `workspace status`'s freshness, coverage and
+    /// topic walks. The shipped code re-attempted the failed member on each, so
+    /// one broken member cost three opens and three identical diagnostics —
+    /// `3 × N` on a workspace of N. The failure is still reported on every walk
+    /// (each fan-out returns its `Err`, so no read-model silently gains a member
+    /// it did not read), and the ledger still reads `degraded`; what is spent
+    /// once is the open.
+    ///
+    /// [CR-102]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    #[test]
+    fn a_failed_member_is_attempted_once_per_command_across_every_walk() {
+        let registry = EngineRegistry::<UnopenableEngine>::with_budget(
+            fed(&["a", "b"]),
+            RegistryMode::Lazy,
+            roomy_budget(),
+        );
+
+        for walk in 1..=3 {
+            let results = registry.fan_out(|_, _| ());
+            assert!(
+                results.iter().all(|scoped| scoped.value.is_err()),
+                "walk {walk} still reports both members as Err rather than \
+                 silently counting them"
+            );
+            assert_eq!(
+                registry.start_failures(),
+                2,
+                "after {walk} walk(s) each member has been ATTEMPTED once, not once \
+                 per walk"
+            );
+        }
+
+        // The replayed Err is the diagnostic the real attempt produced, so a
+        // later walk's error channel reads exactly as the first walk's did.
+        let replayed = registry.fan_out(|_, _| ());
+        let err = replayed[0].value.as_ref().expect_err("still degraded");
+        assert!(
+            format!("{err:#}").contains("unable to open database file"),
+            "the recorded diagnostic is replayed verbatim, not replaced by a \
+             suppression notice: {err:#}"
+        );
+
+        // And the ledger is untouched by the suppression: both members read
+        // degraded, named, exactly as they did when every walk re-attempted.
+        let states = registry.open_states();
+        assert!(states.iter().all(|open| open.state.is_degraded()));
+        assert_eq!(
+            super::super::open_state::rollup(&states).degraded_members,
+            ["a", "b"],
+            "the answer is as degraded as it always was"
+        );
+    }
+
+    /// A member that **opened on one walk and failed on a later one** is really
+    /// re-attempted by that later walk, ends the command degraded, and is
+    /// announced by the walk that actually failed — then replayed for the rest.
+    ///
+    /// The branch this pins is [`Admission::recorded_failure`]'s middle state.
+    /// `opens` holds `Option<Option<String>>`, and an *opened* member is
+    /// `Some(None)` — which must read as "nothing to replay", so the next walk
+    /// attempts for real. Flattening that to a key-presence check, or caching
+    /// successes into the replay path, would make an opened-then-failed member
+    /// report `opened` for the whole answer: the wrong exit code and a coverage
+    /// figure counting a member nobody read ([FR-WS-16], [NFR-CC-04]). Every
+    /// other test here starts from a member that fails on its *first* attempt,
+    /// so none of them can see that.
+    ///
+    /// Load-bearing for a real fan-out under descriptor pressure, which is
+    /// exactly how [CR-100] failed: members opened until the descriptor table
+    /// ran out partway through, so the members walked early succeeded and the
+    /// later walks did not.
+    ///
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn a_member_that_opened_first_and_failed_later_is_degraded_and_announced_once() {
+        reset_spies();
+        thread_local! {
+            /// Starts still allowed before the store "closes" under us.
+            static STARTS_LEFT: Cell<usize> = const { Cell::new(1) };
+        }
+        struct LateFailingEngine;
+        impl MemberEngine for LateFailingEngine {
+            type Watcher = ();
+            fn start(
+                _root: &Path,
+                _read_connections: usize,
+                _worker_pool: SharedWorkerPool,
+            ) -> Result<Arc<Self>> {
+                if STARTS_LEFT.with(Cell::get) == 0 {
+                    anyhow::bail!("Too many open files (os error 24)");
+                }
+                STARTS_LEFT.with(|c| c.set(c.get() - 1));
+                Ok(Arc::new(LateFailingEngine))
+            }
+            fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
+                Ok(())
+            }
+        }
+
+        let registry = EngineRegistry::<LateFailingEngine>::with_budget(
+            fed(&["a"]),
+            RegistryMode::Lazy,
+            roomy_budget(),
+        );
+
+        // Walk 1: the member opens on its one allowed start, so its ledger entry
+        // is `Some(None)` — attempted, and succeeded.
+        assert!(
+            registry.fan_out(|_, _| ()).iter().all(|s| s.value.is_ok()),
+            "walk 1 opens the member"
+        );
+        assert_eq!(open_state(&registry.open_states(), "a"), MemberOpenState::Opened);
+        assert_eq!(registry.start_failures(), 0, "nothing has failed yet");
+
+        // The budget reclaims it — the normal operation of a workspace larger
+        // than the residency cap, which is how CR-100 failed partway through a
+        // walk. The next touch must therefore really re-open it.
+        registry.evict_to_capacity(0);
+        assert_eq!(registry.resident_count(), 0);
+
+        // Walk 2: `Some(None)` must read as "nothing to replay", so this walk
+        // attempts for real — and now the store will not open.
+        assert!(
+            registry.fan_out(|_, _| ()).iter().all(|s| s.value.is_err()),
+            "an OPENED member is re-attempted by a later walk, never replayed"
+        );
+        assert_eq!(
+            registry.start_failures(),
+            1,
+            "walk 2 really re-opened rather than reusing walk 1's success"
+        );
+        assert!(
+            open_state(&registry.open_states(), "a").is_degraded(),
+            "and the ledger records the LATEST attempt, so the answer is degraded"
+        );
+
+        // The walk that actually failed is the one that speaks, and only it.
+        assert!(registry.announce_open_failure("a"), "announced by the failing walk");
+        assert!(!registry.announce_open_failure("a"), "and not again");
+
+        // Walk 3: now there IS a recorded failure, so it is replayed with no
+        // further open attempt.
+        assert!(registry.fan_out(|_, _| ()).iter().all(|s| s.value.is_err()));
+        assert_eq!(
+            registry.start_failures(),
+            1,
+            "once a failure is recorded, later walks replay instead of re-opening"
+        );
+    }
+
+    /// [CRA-06]: a **fresh** command retries, so a transient condition clears on
+    /// the next invocation.
+    ///
+    /// A CLI one-shot builds its registry per command, so a new registry over
+    /// the same workspace is what "the next `logos workspace status`" *is*. The
+    /// engine here fails only its first start per registry, so a suppression
+    /// that outlived the command would leave the member degraded forever — and
+    /// the second registry's success is the proof it does not.
+    ///
+    /// [CRA-06]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
+    #[test]
+    fn a_fresh_command_retries_a_member_the_previous_one_gave_up_on() {
+        thread_local! {
+            /// Failures still owed, so the FIRST attempt of each registry below
+            /// fails and its retry succeeds.
+            static FAIL_NEXT: Cell<usize> = const { Cell::new(1) };
+        }
+        struct OnceFailingEngine;
+        impl MemberEngine for OnceFailingEngine {
+            type Watcher = ();
+            fn start(
+                _root: &Path,
+                _read_connections: usize,
+                _worker_pool: SharedWorkerPool,
+            ) -> Result<Arc<Self>> {
+                if FAIL_NEXT.with(Cell::get) > 0 {
+                    FAIL_NEXT.with(|c| c.set(c.get() - 1));
+                    anyhow::bail!("Too many open files (os error 24)");
+                }
+                Ok(Arc::new(OnceFailingEngine))
+            }
+            fn watch(self: &Arc<Self>) -> Result<Self::Watcher> {
+                Ok(())
+            }
+        }
+
+        // Command 1: three walks, one attempt, and the member stays degraded for
+        // this whole answer — the loss CRA-06 accepted.
+        let first = EngineRegistry::<OnceFailingEngine>::with_budget(
+            fed(&["a"]),
+            RegistryMode::Lazy,
+            roomy_budget(),
+        );
+        for _ in 0..3 {
+            assert!(first.fan_out(|_, _| ()).iter().all(|s| s.value.is_err()));
+        }
+        assert_eq!(first.start_failures(), 1, "one attempt for the whole command");
+        assert!(open_state(&first.open_states(), "a").is_degraded());
+
+        // Command 2: a fresh registry, so the member is attempted again and the
+        // transient condition clears.
+        FAIL_NEXT.with(|c| c.set(1));
+        let second = EngineRegistry::<OnceFailingEngine>::with_budget(
+            fed(&["a"]),
+            RegistryMode::Lazy,
+            roomy_budget(),
+        );
+        assert!(
+            second.fan_out(|_, _| ()).iter().all(|s| s.value.is_err()),
+            "the fresh command's first walk hits the same transient failure"
+        );
+        assert!(
+            second.engine_for("a").is_ok(),
+            "and a directly-named member is still really attempted, so the \
+             transient condition clears"
+        );
+        assert_eq!(
+            open_state(&second.open_states(), "a"),
+            MemberOpenState::Opened,
+            "the retry's success is what the answer rests on"
+        );
+    }
+
+    /// The human diagnostic is announced **once** per command and, under serve,
+    /// every time — the latch is scoped to the one-shot registry, which is
+    /// built and dropped per command ([FR-WS-16], [NFR-CC-04]).
+    ///
+    /// Asserted on the registry seam rather than on captured log output, because
+    /// what the seam guarantees is *shared across every emitter*: the coverage
+    /// tier's two reads and the topic read all ask the same latch, so no future
+    /// walk can reintroduce a duplicate by warning on its own.
+    #[test]
+    fn an_open_failure_is_announced_once_per_command_and_always_under_serve() {
+        let one_shot = lazy(&["a", "b"]);
+        assert!(one_shot.announce_open_failure("a"), "the operator is told once");
+        assert!(
+            !one_shot.announce_open_failure("a"),
+            "and not again by the next walk of the same command"
+        );
+        assert!(
+            one_shot.announce_open_failure("b"),
+            "the latch is per member, not per command"
+        );
+
+        // Serve outlives its answers, so latching there would silence a member
+        // that keeps failing across requests.
+        let serving = serve(&["a"]);
+        assert!(serving.announce_open_failure("a"));
+        assert!(
+            serving.announce_open_failure("a"),
+            "a long-lived registry keeps reporting a member that keeps failing"
+        );
+    }
+
+    /// A **serve** registry re-attempts a failed member on every walk: it
+    /// outlives each answer it serves, so suppressing across it would report a
+    /// transiently-broken member degraded until the process restarted.
+    #[test]
+    fn a_serve_registry_keeps_re_attempting_a_failed_member() {
+        let registry = EngineRegistry::<UnopenableEngine>::with_budget(
+            fed(&["a"]),
+            RegistryMode::Serve,
+            roomy_budget(),
+        );
+        // `with_budget` warms eagerly under serve, which is itself one attempt.
+        let warmed = registry.start_failures();
+        assert_eq!(warmed, 1, "the eager warm attempted the member once");
+
+        for walk in 1..=3 {
+            assert!(registry.fan_out(|_, _| ()).iter().all(|s| s.value.is_err()));
+            assert_eq!(
+                registry.start_failures(),
+                warmed + walk,
+                "walk {walk} really re-attempted under serve"
+            );
+        }
     }
 
     /// A member that failed once and **opened later** is no longer degraded, and
