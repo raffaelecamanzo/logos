@@ -1192,6 +1192,10 @@ fn discover_candidates(
     for drop in &report.unindexed_doc_symlinks {
         warnings.push(drop.to_string());
     }
+    // The prune record outlives `report.files`, which the candidate loop below
+    // consumes; the zero-admission diagnostic is derived after it, from the
+    // *candidate* count (see the emission at the end of this function).
+    let pruned_nested_git = report.pruned_nested_git;
     // `discover` walks the canonicalised root and yields paths beneath it.
     let canon_root = root
         .canonicalize()
@@ -1217,6 +1221,26 @@ fn discover_candidates(
         if admits_file(registry, doc_globs.as_ref(), config_globs.as_ref(), langs.as_ref(), &rel) {
             candidates.push(Candidate { abs, rel });
         }
+    }
+
+    // Zero-admission diagnostic ([FR-IX-13], [CR-098]). A parent folder of sibling
+    // repositories has every child pruned as a nested git boundary and so reports
+    // `files_indexed: 0`, `coverage: 1.0`, empty `warnings` and exit 0 — every
+    // signal consistent with success.
+    //
+    // Emitted here, the single discovery site `index`, the governance reconcile
+    // walk and the navigation prologue already share, so exactly one warning is
+    // produced per command; the derivation itself lives in [config] so no surface
+    // can classify differently. Keyed on `candidates.len()` — the post-admission
+    // count `files_indexed` is computed from — and NOT on the raw walk count: with
+    // the default `include = ["**"]` a lone `LICENSE` or `.DS_Store` at the root
+    // sits in `report.files` while `files_indexed` is still 0, and keying on the
+    // walk would leave exactly the reported root silent.
+    if let Some(diagnostic) = config::ZeroAdmissionDiagnostic::derive(
+        candidates.len(),
+        &pruned_nested_git,
+    ) {
+        warnings.push(diagnostic.to_string());
     }
     Ok(candidates)
 }

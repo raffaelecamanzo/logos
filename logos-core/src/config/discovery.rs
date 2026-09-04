@@ -31,7 +31,19 @@
 //! posture. Source-code discovery is untouched. See [`contained_dir_target`] and
 //! [`discover_followed_symlink`].
 //!
+//! # Legibility of the nested-git prune ([FR-IX-13])
+//! The `ignored_dirs` and nested-`.git` prunes above are silent by design — a
+//! walk that names every skipped directory is unreadable. But a **parent folder
+//! of sibling repositories** has *every* child pruned as a nested git boundary,
+//! so discovery admits nothing and the index reports `files_indexed: 0` with an
+//! empty `warnings` array: every signal consistent with success. Discovery
+//! therefore records each nested-git prune ([`DiscoveryReport::pruned_nested_git`])
+//! and derives the explanation once ([`ZeroAdmissionDiagnostic`]), which the
+//! surfaces render. The admission rule is untouched — this makes it legible,
+//! never permissive.
+//!
 //! [FR-IX-02]: ../../../../docs/specs/requirements/FR-IX-02.md
+//! [FR-IX-13]: ../../../../docs/specs/requirements/FR-IX-13.md
 //! [FR-IX-10]: ../../../../docs/specs/requirements/FR-IX-10.md
 //! [FR-CF-02]: ../../../../docs/specs/requirements/FR-CF-02.md
 //! [FR-CF-04]: ../../../../docs/specs/requirements/FR-CF-04.md
@@ -42,7 +54,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
 
 use globset::GlobSet;
 use ignore::{DirEntry, WalkBuilder, WalkState};
@@ -130,6 +142,132 @@ impl fmt::Display for UnindexedDocSymlink {
     }
 }
 
+/// The diagnostic for a **zero-admission** discovery walk behind nested-git
+/// boundary prunes ([FR-IX-13]) — the canonical "this is a parent folder of
+/// sibling repositories" explanation.
+///
+/// This is the **one** derivation, deliberately built here in the config
+/// component rather than at any emission site: `index`/`sync` fold it into their
+/// `warnings`, and `status`/`doctor` render the same value, so the surfaces
+/// cannot disagree (the `discover`/`doctor` parity discipline [FR-IX-11]
+/// established). [`ZeroAdmissionDiagnostic::derive`] is the **only** way to
+/// construct one — deliberately the single entry point, so a surface cannot pick
+/// up a subtly different gate — and its `None` arm *is* the condition, so no
+/// caller re-implements it.
+///
+/// Advisory only: it never changes an exit code, never becomes a rule finding,
+/// and never feeds the quality signal ([FR-IX-13], [FR-CL-03]).
+///
+/// [FR-IX-13]: ../../../../docs/specs/requirements/FR-IX-13.md
+/// [FR-IX-11]: ../../../../docs/specs/requirements/FR-IX-11.md
+/// [FR-CL-03]: ../../../../docs/specs/requirements/FR-CL-03.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZeroAdmissionDiagnostic {
+    /// How many directories the walk pruned as nested git boundaries.
+    pub pruned: usize,
+    /// A bounded, sorted sample of those directories' root-relative names — at
+    /// most [`ZeroAdmissionDiagnostic::SAMPLE_LIMIT`] of them, so an 84-member
+    /// parent folder yields a readable line rather than a wall of names.
+    pub sample: Vec<String>,
+}
+
+impl ZeroAdmissionDiagnostic {
+    /// How many pruned directory names the rendered diagnostic lists before
+    /// eliding the remainder as `… +N more`.
+    pub const SAMPLE_LIMIT: usize = 3;
+
+    /// The remedy the diagnostic names — workspace enablement ([FR-WS-02]).
+    ///
+    /// [FR-WS-02]: ../../../../docs/specs/requirements/FR-WS-02.md
+    pub const REMEDY: &'static str = "logos init --workspace";
+
+    /// Derive the diagnostic from the number of files the command will report as
+    /// indexed and the walk's recorded nested-git prunes ([FR-IX-13]).
+    ///
+    /// `admitted` must be the count the surface itself will report — the
+    /// **post-admission** candidate count where the caller has one, *not*
+    /// [`DiscoveryReport::files`]`.len()`. The two differ: discovery's default
+    /// `include` is `**`, so a single non-indexable file at the root (a
+    /// `LICENSE`, a `.DS_Store`) sits in `files` while the pipeline's
+    /// `admits_file` filter rejects it and `files_indexed` is still `0`. Keying
+    /// on the raw walk count would leave exactly the parent-of-repos root
+    /// [CR-098] reports silent whenever such a file exists.
+    ///
+    /// `Some` **iff** the command admitted zero files *and* pruned at least one
+    /// **immediate-child** nested git boundary. Each half matters:
+    /// - a repository that legitimately vendors a submodule admits its own files,
+    ///   so it is never diagnosed and its `warnings` stay byte-for-byte as before
+    ///   ([BR-43]);
+    /// - an empty or wholly-excluded root with no prune has a different cause,
+    ///   which this diagnostic must not misattribute.
+    ///
+    /// **Only depth-1 prunes diagnose**, though [`DiscoveryReport::pruned_nested_git`]
+    /// records every depth. The message names a specific shape (a parent folder of
+    /// sibling repositories) and a specific remedy, and that remedy is
+    /// `logos init --workspace`, whose candidate discovery
+    /// ([`federation::discover_candidates`]) is a **single-level** `read_dir`. A
+    /// root shaped `<root>/repos/{a,b,c}/.git` admits nothing and prunes three
+    /// directories, but enabling a workspace there would find **zero** members —
+    /// so diagnosing it would hand the user a confidently wrong instruction, which
+    /// is worse than the silence [FR-IX-13] exists to fix ([NFR-CC-04]). Filtering
+    /// here rather than at the recording site keeps the record a faithful superset
+    /// while the *diagnosis* stays exactly as narrow as the remedy it names.
+    ///
+    /// `pruned` is expected sorted (discovery sorts it); the sample is taken from
+    /// the filtered head, so the rendered text is thread-count-independent
+    /// ([NFR-RA-06]). This runs **only** on the zero-admission branch, so the
+    /// normal indexing path pays nothing ([NFR-PE-08]).
+    ///
+    /// [BR-43]: ../../../../docs/specs/software-spec.md
+    /// [NFR-RA-06]: ../../../../docs/specs/requirements/NFR-RA-06.md
+    /// [NFR-PE-08]: ../../../../docs/specs/requirements/NFR-PE-08.md
+    /// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+    /// [`federation::discover_candidates`]: ../federation/fn.discover_candidates.html
+    pub fn derive(admitted: usize, pruned: &[PathBuf]) -> Option<Self> {
+        if admitted > 0 {
+            return None;
+        }
+        // Depth 1 == exactly one path component, i.e. an immediate child of the
+        // walk root — the only shape `logos init --workspace` can act on.
+        let mut immediate = pruned.iter().filter(|p| p.components().count() == 1).peekable();
+        immediate.peek()?;
+        let sample: Vec<String> =
+            immediate.clone().take(Self::SAMPLE_LIMIT).map(|p| to_forward_slash(p)).collect();
+        Some(Self {
+            pruned: immediate.count(),
+            sample,
+        })
+    }
+}
+
+impl fmt::Display for ZeroAdmissionDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The noun travels with the verb: "1 directory was pruned as a nested git
+        // boundary", never "…as nested git boundaries".
+        write!(
+            f,
+            "discovery admitted no files: {} {} ({}",
+            self.pruned,
+            if self.pruned == 1 {
+                "directory was pruned as a nested git boundary"
+            } else {
+                "directories were pruned as nested git boundaries"
+            },
+            self.sample.join(", "),
+        )?;
+        let elided = self.pruned.saturating_sub(self.sample.len());
+        if elided > 0 {
+            write!(f, ", … +{elided} more")?;
+        }
+        write!(
+            f,
+            "). This looks like a parent folder of sibling repositories — run \
+             `{}` to index them as a federated workspace.",
+            Self::REMEDY,
+        )
+    }
+}
+
 /// The result of a discovery walk.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiscoveryReport {
@@ -142,6 +280,25 @@ pub struct DiscoveryReport {
     /// when documentation is disabled, when no doc symlink exists, or when every
     /// doc symlink was followed and indexed.
     pub unindexed_doc_symlinks: Vec<UnindexedDocSymlink>,
+    /// Directories the main walk pruned as **nested git boundaries** — root-
+    /// relative, sorted, thread-count-independent ([FR-IX-13], [NFR-RA-06]).
+    ///
+    /// Recorded unconditionally so the record is available to any surface, but
+    /// only *diagnosed* on the zero-admission branch — see
+    /// [`ZeroAdmissionDiagnostic::derive`]. Only the `.git`-boundary rule
+    /// contributes: a directory pruned because its **name** is in `ignored_dirs`
+    /// is a different rule and is not recorded here, even when it happens to
+    /// contain a `.git` — a `.git`-bearing `node_modules` is not a workspace
+    /// member, and naming it would produce a confidently wrong remedy.
+    ///
+    /// Every depth is recorded, not just immediate children: a `.git`-bearing
+    /// directory nested under a plain one is the same boundary and belongs in the
+    /// same record. Note the record is deliberately **wider than the diagnosis** —
+    /// [`ZeroAdmissionDiagnostic::derive`] diagnoses only depth-1 prunes, because
+    /// that is the only shape its remedy can act on.
+    ///
+    /// [CR-098]: ../../../../docs/requests/CR-098-nested-git-prune-diagnostic.md
+    pub pruned_nested_git: Vec<PathBuf>,
 }
 
 impl DiscoveryReport {
@@ -151,6 +308,68 @@ impl DiscoveryReport {
     /// emission site) lets the core own and test the notice contract.
     pub fn notices(&self) -> impl Iterator<Item = String> + '_ {
         self.skipped_oversize.iter().map(ToString::to_string)
+    }
+}
+
+/// Thread-safe collector of the nested-git-boundary prunes a walk performs,
+/// owning the root it relativises against.
+///
+/// The main pass's `filter_entry` runs on every walker thread, so the record has
+/// to be shared. A `Mutex` rather than a second `mpsc` channel alongside [`Found`]:
+/// a sender captured in `filter_entry` is a second, non-obvious holder that the
+/// receive loop's termination depends on, so a later change to the walker's shape
+/// would turn a diagnostic into a hang — whereas a lock can only ever drop an
+/// entry. The lock is off the per-file path either way (one acquisition per
+/// nested repository, never per file, [NFR-PE-08]). Order out of the mutex is
+/// arbitrary; [`PruneRecorder::take_sorted`] is what makes the record
+/// thread-count-independent ([NFR-RA-06]).
+#[derive(Debug)]
+struct PruneRecorder {
+    /// The canonical walk root every recorded path is made relative to.
+    root: PathBuf,
+    dirs: Mutex<Vec<PathBuf>>,
+}
+
+impl PruneRecorder {
+    fn new(root: PathBuf) -> Self {
+        Self { root, dirs: Mutex::new(Vec::new()) }
+    }
+
+    /// Record `path` (absolute) as pruned, stored root-relative.
+    ///
+    /// A path that fails to relativise under the root is dropped rather than
+    /// recorded absolute — the record is a set of in-tree names, and containment
+    /// ([NFR-SE-04]) means no absolute host path may reach a rendered warning.
+    /// A poisoned lock recovers the data it carries rather than discarding it.
+    /// Neither fault fails the walk: this is a diagnostic, never a reason to
+    /// abort ([ADR-14] degradation channel).
+    ///
+    /// [ADR-14]: ../../../../docs/specs/architecture/decisions/ADR-14.md
+    /// [NFR-SE-04]: ../../../../docs/specs/requirements/NFR-SE-04.md
+    fn record(&self, path: &Path) {
+        let Ok(rel) = path.strip_prefix(&self.root) else {
+            return;
+        };
+        self.dirs.lock().unwrap_or_else(PoisonError::into_inner).push(rel.to_path_buf());
+    }
+
+    /// Take the recorded prunes, sorted and deduplicated — the report's
+    /// thread-count-independent form.
+    ///
+    /// Taken through the lock rather than by consuming an `Arc`, so no ownership
+    /// dance and no unreachable fallback arm: the walk's `filter_entry` closure
+    /// still holds a clone at this point in principle, and whether it does is an
+    /// implementation detail of [`ignore`] this code should not depend on.
+    ///
+    /// The walk visits each directory once, so the dedup is defensive rather than
+    /// load-bearing; it is here because the diagnostic *counts* this set, and a
+    /// count a user reads must not be inflatable by a repeat visit.
+    fn take_sorted(&self) -> Vec<PathBuf> {
+        let mut dirs =
+            std::mem::take(&mut *self.dirs.lock().unwrap_or_else(PoisonError::into_inner));
+        dirs.sort();
+        dirs.dedup();
+        dirs
     }
 }
 
@@ -212,6 +431,13 @@ pub(crate) fn discover_with_threads(
     // The main walker's `filter_entry` takes ownership of the ignored-dir set; the
     // post-pass sub-walk needs it too, so clone one for the closure.
     let walk_ignored_dirs = ignored_dirs.clone();
+    // Nested-git-boundary prunes are recorded by the **main pass only** ([FR-IX-13]):
+    // the record answers "what did this project root drop?", so a prune inside a
+    // sanctioned docs-symlink target (`discover_followed_symlink`) or seen again by
+    // the doc-symlink detection re-walk (`keep_detection`) would double-count and
+    // name paths outside the root. Both of those pass `None` instead.
+    let recorder = Arc::new(PruneRecorder::new(root.clone()));
+    let walk_recorder = Arc::clone(&recorder);
     let walker = WalkBuilder::new(&root)
         // Honour ignore files even outside a git repo, so discovery is
         // deterministic on any tree (worktrees are git-backed; fixtures need not be).
@@ -224,7 +450,7 @@ pub(crate) fn discover_with_threads(
         .parents(false) // don't read ignore files above the root (containment).
         .follow_links(false) // never leave the tree via a symlink (NFR-SE-04).
         .threads(threads) // 0 = auto-size to cores (NFR-PE-08); tests pin a count.
-        .filter_entry(move |entry| keep_dir(entry, &walk_ignored_dirs))
+        .filter_entry(move |entry| keep_dir(entry, &walk_ignored_dirs, Some(&walk_recorder)))
         .build_parallel();
 
     // Each walker thread owns a cloned `Sender`; admitted entries and oversize
@@ -405,11 +631,13 @@ pub(crate) fn discover_with_threads(
     files.sort();
     skipped_oversize.sort_by(|a, b| a.path.cmp(&b.path));
     unindexed_doc_symlinks.sort_by(|a, b| a.link.cmp(&b.link));
+    let pruned_nested_git = recorder.take_sorted();
 
     Ok(DiscoveryReport {
         files,
         skipped_oversize,
         unindexed_doc_symlinks,
+        pruned_nested_git,
     })
 }
 
@@ -583,7 +811,7 @@ fn discover_followed_symlink(
         .hidden(false)
         .parents(false) // don't read ignore files above the sanctioned target.
         .follow_links(false) // never chain out of the sanctioned tree via a nested symlink.
-        .filter_entry(move |entry| keep_dir(entry, &pruned)) // same pruning as the main pass.
+        .filter_entry(move |entry| keep_dir(entry, &pruned, None)) // same pruning, no record.
         .build();
 
     for result in walker {
@@ -652,14 +880,35 @@ fn discover_followed_symlink(
 /// Factored out of both `filter_entry` closures so the two passes' pruning is
 /// provably identical rather than a comment asserting it ([NFR-SE-04] nested-
 /// boundary containment).
-fn keep_dir(entry: &DirEntry, ignored_dirs: &HashSet<String>) -> bool {
+///
+/// `recorder` makes the first rule *legible* without making it permissive
+/// ([FR-IX-13]): when `Some(..)`, each nested-git prune is recorded root-relative
+/// for the zero-admission diagnostic. Passing `None` (the two non-main passes)
+/// records nothing; **the admission decision is identical either way** — the
+/// recorder is a pure side effect, never an input to the rule.
+///
+/// The two rules stay in their historical order (a `.git` boundary is pruned even
+/// under an `ignored_dirs` name), but the *record* is attributed to the boundary
+/// rule only: an `ignored_dirs` directory that happens to carry a `.git` — a
+/// vendored `node_modules`, a `.worktrees` checkout — is pruned by name, is not a
+/// workspace member, and naming it in the diagnostic would produce a confidently
+/// wrong remedy.
+///
+/// [FR-IX-13]: ../../../../docs/specs/requirements/FR-IX-13.md
+fn keep_dir(
+    entry: &DirEntry,
+    ignored_dirs: &HashSet<String>,
+    recorder: Option<&PruneRecorder>,
+) -> bool {
     if entry.depth() > 0 && entry.file_type().is_some_and(|ft| ft.is_dir()) {
+        let name_ignored = entry.file_name().to_str().is_some_and(|n| ignored_dirs.contains(n));
         if entry.path().join(".git").exists() {
+            if let (Some(recorder), false) = (recorder, name_ignored) {
+                recorder.record(entry.path());
+            }
             return false;
         }
-        if let Some(name) = entry.file_name().to_str() {
-            return !ignored_dirs.contains(name);
-        }
+        return !name_ignored;
     }
     true
 }
@@ -745,7 +994,7 @@ fn keep_detection(
     prefixes: &[PathBuf],
     root: &Path,
 ) -> bool {
-    if !keep_dir(entry, ignored_dirs) {
+    if !keep_dir(entry, ignored_dirs, None) {
         return false;
     }
     if entry.depth() == 0 {
@@ -971,6 +1220,248 @@ mod tests {
                 "worker count {n} changed the discovery report (NFR-RA-06)"
             );
         }
+    }
+
+    /// A parent-of-sibling-repositories root: no file of its own, N children each
+    /// carrying a `.git` entry (so each is pruned as a nested git boundary).
+    fn build_parent_of_repos(children: usize) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        for i in 0..children {
+            let child = root.join(format!("svc-{i:02}"));
+            write(&child.join(".git/HEAD"), "ref: refs/heads/main\n");
+            write(&child.join("src/lib.rs"), "pub fn f() {}\n");
+        }
+        (tmp, root)
+    }
+
+    #[test]
+    fn nested_git_prunes_are_recorded_root_relative_and_sorted() {
+        // FR-IX-13: discovery records every directory it pruned as a nested git
+        // boundary — the raw material the zero-admission diagnostic derives from.
+        // `ignored_dirs` name-matches are NOT nested-git prunes and must not leak in.
+        let (_tmp, root) = build_fixture();
+        let config = test_config(1 << 20);
+
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        assert_eq!(
+            report.pruned_nested_git,
+            vec![PathBuf::from("vendored")],
+            "only the `.git`-bearing directory is recorded, root-relative"
+        );
+    }
+
+    #[test]
+    fn nested_git_prune_record_is_identical_across_worker_counts() {
+        // NFR-RA-06: the recorded prune set is sorted and thread-count-independent,
+        // pinned across the same worker sweep as every other discovery output.
+        let (_tmp, root) = build_parent_of_repos(12);
+        let config = test_config(1 << 20);
+
+        let baseline = discover_with_threads(&root, &config, WORKER_COUNTS[0]).unwrap();
+        assert!(baseline.files.is_empty(), "a parent-of-repos root admits nothing");
+        assert_eq!(baseline.pruned_nested_git.len(), 12, "every child is recorded");
+        let mut sorted = baseline.pruned_nested_git.clone();
+        sorted.sort();
+        assert_eq!(baseline.pruned_nested_git, sorted, "the prune record is sorted");
+
+        for &n in &WORKER_COUNTS[1..] {
+            let report = discover_with_threads(&root, &config, n).unwrap();
+            assert_eq!(
+                report.pruned_nested_git, baseline.pruned_nested_git,
+                "worker count {n} changed the recorded prune set (NFR-RA-06)"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_admission_diagnostic_names_count_sample_and_remedy() {
+        // FR-IX-13: the one derivation. On a zero-admission walk behind nested-git
+        // prunes it yields a diagnostic carrying the prune count, a bounded sample
+        // of the pruned directory names, and `logos init --workspace` as the remedy.
+        let (_tmp, root) = build_parent_of_repos(12);
+        let config = test_config(1 << 20);
+
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        let diagnostic =
+            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+                .expect("a zero-admission walk behind nested-git prunes is diagnosed");
+
+        assert_eq!(diagnostic.pruned, 12);
+        assert_eq!(
+            diagnostic.sample,
+            vec!["svc-00".to_string(), "svc-01".to_string(), "svc-02".to_string()],
+            "the sample is the first `SAMPLE_LIMIT` names in the record's sorted order"
+        );
+
+        let rendered = diagnostic.to_string();
+        assert!(rendered.contains("12"), "the prune count is named: {rendered}");
+        assert!(rendered.contains("svc-00"), "a sample name is named: {rendered}");
+        assert!(rendered.contains("+9 more"), "the elided remainder is counted: {rendered}");
+        assert!(
+            rendered.contains("logos init --workspace"),
+            "the remedy is named: {rendered}"
+        );
+    }
+
+    #[test]
+    fn zero_admission_diagnostic_sample_is_unbounded_below_the_limit() {
+        // A small parent-of-repos root names every pruned directory and adds no
+        // "+N more" tail — the bound is a cap, not a fixed-width truncation.
+        let (_tmp, root) = build_parent_of_repos(2);
+        let config = test_config(1 << 20);
+
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        let diagnostic =
+            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+                .expect("two pruned children still diagnose");
+
+        assert_eq!(diagnostic.sample, vec!["svc-00".to_string(), "svc-01".to_string()]);
+        let rendered = diagnostic.to_string();
+        assert!(!rendered.contains("more"), "no elision tail when nothing is elided: {rendered}");
+    }
+
+    #[test]
+    fn a_repo_admitting_its_own_files_is_not_diagnosed() {
+        // FR-IX-13 / BR-43: a normal repository that legitimately vendors a nested
+        // repository admits its own files, so the diagnostic never fires — the
+        // prune record stays in the report but no surface warns.
+        let (_tmp, root) = build_fixture();
+        let config = test_config(1 << 20);
+
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        assert!(!report.files.is_empty(), "the parent repo admits its own files");
+        assert!(!report.pruned_nested_git.is_empty(), "the record is still populated");
+        assert!(
+            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+                .is_none(),
+            "a repo that admits files is never diagnosed (BR-43)"
+        );
+    }
+
+    #[test]
+    fn an_empty_root_with_no_prunes_is_not_diagnosed() {
+        // Zero admission alone is not the signal — an empty (or wholly excluded)
+        // root with no nested-git prune has a different cause and stays undiagnosed.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join("notes.txt"), "not a source file\n");
+        let config = Config {
+            include: vec!["**/*.rs".to_string()],
+            exclude: vec![],
+            ..Config::default()
+        };
+
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        assert!(report.files.is_empty());
+        assert!(report.pruned_nested_git.is_empty());
+        assert!(ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+            .is_none());
+    }
+
+    #[test]
+    fn zero_admission_diagnostic_renders_the_singular_prune() {
+        // A root with a single pruned child is a realistic first-contact shape, and
+        // it is the only case that renders the singular arm — the noun has to
+        // travel with the verb ("a nested git boundary", not "boundaries").
+        let (_tmp, root) = build_parent_of_repos(1);
+        let config = test_config(1 << 20);
+
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        let diagnostic =
+            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+                .expect("a single pruned child still diagnoses");
+
+        assert_eq!(diagnostic.pruned, 1);
+        let rendered = diagnostic.to_string();
+        assert!(
+            rendered.contains("1 directory was pruned as a nested git boundary ("),
+            "the singular arm agrees with itself: {rendered}"
+        );
+        assert!(!rendered.contains("more"), "nothing to elide: {rendered}");
+    }
+
+    #[test]
+    fn only_immediate_children_diagnose_though_every_depth_is_recorded() {
+        // FR-IX-13 / NFR-CC-04: the message names a remedy — `logos init
+        // --workspace` — whose candidate discovery is a single-level `read_dir`.
+        // At `<root>/repos/{alpha,beta}/.git` enabling a workspace would find zero
+        // members, so diagnosing it would hand the user a confidently wrong
+        // instruction. The prunes are still RECORDED (the record is a faithful
+        // superset); only the diagnosis is narrowed to what the remedy can act on.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join("repos/alpha/.git/HEAD"), "ref: refs/heads/main\n");
+        write(&root.join("repos/alpha/src/lib.rs"), "pub fn a() {}\n");
+        write(&root.join("repos/beta/.git/HEAD"), "ref: refs/heads/main\n");
+        let config = test_config(1 << 20);
+
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        assert!(report.files.is_empty(), "the wrapper root admits nothing either");
+        assert_eq!(
+            report.pruned_nested_git,
+            vec![PathBuf::from("repos/alpha"), PathBuf::from("repos/beta")],
+            "depth-2 boundaries are still recorded, root-relative and sorted"
+        );
+        assert!(
+            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+                .is_none(),
+            "a wrapper directory over sibling repos is NOT diagnosed — \
+             `logos init --workspace` would find no members there"
+        );
+    }
+
+    #[test]
+    fn an_ignored_dir_carrying_a_git_entry_is_not_recorded_as_a_boundary() {
+        // A `.git`-bearing `node_modules` is pruned by NAME, not by the boundary
+        // rule, and is not a workspace member — recording it would make the
+        // diagnostic recommend `logos init --workspace` for a dependency tree.
+        // Admission is unaffected either way: both rules prune.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join("target/.git/HEAD"), "ref: refs/heads/main\n");
+        write(&root.join("target/generated.rs"), "pub fn gen() {}\n");
+        let mut config = test_config(1 << 20);
+        config.semantics.ignored_dirs = vec!["target".to_string()];
+
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        assert!(report.files.is_empty(), "the ignored dir is still pruned");
+        assert!(
+            report.pruned_nested_git.is_empty(),
+            "an `ignored_dirs` name match is not a nested-git prune: {:?}",
+            report.pruned_nested_git
+        );
+        assert!(
+            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+                .is_none(),
+            "and so it is never diagnosed as a parent-of-repos root"
+        );
+    }
+
+    #[test]
+    fn the_diagnostic_keys_on_the_admitted_count_not_the_raw_walk_count() {
+        // The regression that made this a review fix: discovery's default
+        // `include` is `**`, so a lone non-indexable file at a parent-of-repos
+        // root (a `LICENSE`, a macOS `.DS_Store`) lands in `files` while the
+        // pipeline's `admits_file` filter rejects it and `files_indexed` is still
+        // 0. Keying the gate on `files.len()` would leave exactly the root CR-098
+        // reports silent. The helper takes the count the surface will report, so
+        // passing that count still diagnoses.
+        let (_tmp, root) = build_parent_of_repos(5);
+        write(&root.join(".DS_Store"), "\0\0not source\n");
+        let config = test_config(1 << 20);
+
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        assert_eq!(report.files.len(), 1, "the stray file IS admitted by the walk");
+        assert!(
+            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+                .is_none(),
+            "keying on the raw walk count is what went wrong — it suppresses"
+        );
+        // The pipeline passes its post-admission candidate count, which is 0 here.
+        let diagnostic = ZeroAdmissionDiagnostic::derive(0, &report.pruned_nested_git)
+            .expect("keyed on the reported count, the root is diagnosed");
+        assert_eq!(diagnostic.pruned, 5);
     }
 
     #[test]

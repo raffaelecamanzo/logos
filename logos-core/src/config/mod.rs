@@ -55,7 +55,7 @@ pub use chat::{
 };
 pub use discovery::{
     discover, unindexed_doc_symlinks, DiscoveryReport, DocSymlinkDrop, OversizeSkip,
-    UnindexedDocSymlink,
+    UnindexedDocSymlink, ZeroAdmissionDiagnostic,
 };
 pub use error::ConfigError;
 /// The validated glob compiler, shared with the annotation engine's layer

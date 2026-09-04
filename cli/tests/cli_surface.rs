@@ -178,6 +178,43 @@ fn success_exits_zero_with_machine_readable_json() {
 }
 
 #[test]
+fn zero_admission_index_warns_but_still_exits_zero() {
+    // FR-IX-13 AC1 + FR-CL-03: at a parent folder of sibling git repositories
+    // every child is pruned as a nested git boundary, so `index --json` reports
+    // `files_indexed: 0` with exactly one warning naming the prune count, a
+    // bounded sample and `logos init --workspace` — and still exits 0. The
+    // diagnostic is advisory: it must never move the exit code (CR-098).
+    let tmp = TempDir::new().unwrap();
+    for i in 0..5 {
+        let svc = format!("svc-{i:02}");
+        write(tmp.path(), &format!("{svc}/.git/HEAD"), "ref: refs/heads/main\n");
+        write(tmp.path(), &format!("{svc}/src/lib.rs"), "pub fn f() {}\n");
+    }
+
+    let out = logos(tmp.path(), &["index", "--json"]);
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "a zero-admission index still exits 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout is one JSON document");
+    assert_eq!(json["files_indexed"], 0, "nothing is admitted: {json}");
+
+    let warnings = json["warnings"].as_array().expect("warnings array: {json}");
+    let named: Vec<&str> = warnings
+        .iter()
+        .filter_map(|w| w.as_str())
+        .filter(|w| w.contains("logos init --workspace"))
+        .collect();
+    assert_eq!(named.len(), 1, "exactly one prune warning: {warnings:?}");
+    assert!(named[0].contains("5 directories were pruned"), "count named: {}", named[0]);
+    assert!(named[0].contains("svc-00"), "bounded sample given: {}", named[0]);
+}
+
+#[test]
 fn usage_errors_exit_two() {
     let tmp = TempDir::new().unwrap();
     // Unknown subcommand, missing required argument, bad --kind value, and
