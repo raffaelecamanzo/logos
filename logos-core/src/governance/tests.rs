@@ -2602,19 +2602,9 @@ fn doctor_report_builder_leaves_the_zero_admission_warning_absent() {
     assert!(report.ok, "clean census is ok");
 }
 
-#[test]
-fn the_zero_admission_warning_is_diagnostic_only_and_never_flips_ok() {
-    // FR-IX-13 / S-320 AC2: `doctor` exits on structural drift only. An empty graph
-    // at a parent-of-repos root is structurally perfect, so attaching the
-    // explanation (as `doctor` does) must leave both the verdict and the fault list
-    // untouched — the diagnostic explains the emptiness, it does not condemn it.
-    let report_before = doctor_report(StructuralReport::default(), AdmissionCensus::default());
-    let mut report = doctor_report(StructuralReport::default(), AdmissionCensus::default());
-    report.zero_admission_warning = Some(
-        "discovery admitted no files: 5 directories were pruned as nested git boundaries …"
-            .to_string(),
-    );
-    assert_eq!(report.ok, report_before.ok, "the verdict is unmoved by the diagnostic");
-    assert!(report.ok, "and an empty, structurally-sound graph is ok");
-    assert!(report.faults.is_empty(), "the diagnostic is not a fault");
-}
+// NOTE: there is deliberately no unit twin asserting "attaching the warning does
+// not flip `ok`". Assigning a field and then reading a sibling runs no production
+// code, so such a test can only restate the struct layout. The property is pinned
+// where it can actually fail — `the_diagnostic_never_moves_doctors_exit_code` in
+// `logos-core/tests/indexing.rs`, which runs the real `doctor()` at a real
+// parent-of-repos root and asserts the warning is present AND `ok` holds.

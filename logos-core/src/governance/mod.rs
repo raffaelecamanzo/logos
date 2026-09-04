@@ -2700,6 +2700,28 @@ fn structural_check(engine: &Engine) -> Result<StructuralReport> {
     quality_runtime(engine)?.submit_read(|store| store.structural_check())
 }
 
+/// The structural census **and** the indexed file count in ONE store access —
+/// the census `doctor` reports and the `admitted` input its [FR-IX-13]
+/// zero-admission diagnostic keys on ([FR-GV-18], [NFR-RA-13]).
+///
+/// Read together deliberately, the same discipline (and for the same reason) as
+/// [`navigate::status`](crate::navigate)'s paired LOC keys: `submit_read` checks
+/// out a pooled connection per call, so two calls can straddle a concurrent
+/// index's commit — and a report that pairs `node_count: 1500` with "discovery
+/// admitted no files" is worse than either number alone. One connection closes
+/// that window.
+///
+/// [FR-IX-13]: ../../../docs/specs/requirements/FR-IX-13.md
+/// [FR-GV-18]: ../../../docs/specs/requirements/FR-GV-18.md
+/// [NFR-RA-13]: ../../../docs/specs/requirements/NFR-RA-13.md
+fn structural_check_and_file_count(engine: &Engine) -> Result<(StructuralReport, u64)> {
+    quality_runtime(engine)?.submit_read(|store| {
+        let structural = store.structural_check()?;
+        let files = store.counts()?.files;
+        Ok((structural, files))
+    })
+}
+
 /// `doctor` — the fast structural-integrity check ([FR-GV-18], [NFR-RA-13],
 /// [ADR-46]): asserts one node per `symbol_id` and zero orphan rows in O(a
 /// handful of indexed queries), reporting the verdict. Exits 1 on drift (the
@@ -2716,7 +2738,8 @@ fn structural_check(engine: &Engine) -> Result<StructuralReport> {
 /// [NFR-RA-13]: ../../../docs/specs/requirements/NFR-RA-13.md
 /// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
 pub(crate) fn doctor(engine: &Engine) -> Result<DoctorReport> {
-    let mut report = doctor_report(structural_check(engine)?, admission_tripwire(engine)?);
+    let (structural, indexed_files) = structural_check_and_file_count(engine)?;
+    let mut report = doctor_report(structural, admission_tripwire(engine)?);
     // FR-IX-11: warn (path + reason) when a documentation directory-symlink exists
     // under the doc-include set but ended up unindexed. Diagnostic only — it does
     // not touch `report.ok`, so it never changes `doctor`'s exit status.
@@ -2727,18 +2750,13 @@ pub(crate) fn doctor(engine: &Engine) -> Result<DoctorReport> {
     // above while telling the user nothing. Diagnostic only, like the line before
     // it: `report.ok` is untouched, so `doctor` still exits on structural drift
     // alone. Derived through the engine seam `status` also uses, from the indexed
-    // file count, so the two persisted-graph surfaces and `index` agree by
-    // construction rather than by convention.
+    // file count — read on the SAME connection as the census above, so the two
+    // cannot describe different graph generations — so the two persisted-graph
+    // surfaces and `index` agree by construction rather than by convention. The
+    // seam is infallible, so this advisory adds no way for `doctor` to fail.
     report.zero_admission_warning =
-        engine.zero_admission_diagnostic(indexed_file_count(engine)?).map(|d| d.to_string());
+        engine.zero_admission_diagnostic(indexed_files).map(|d| d.to_string());
     Ok(report)
-}
-
-/// The store's indexed file count — the `admitted` input the zero-admission
-/// derivation keys on ([FR-IX-13]), read from the same RO pool the rest of
-/// `doctor` uses so the census and the diagnostic see one graph generation.
-fn indexed_file_count(engine: &Engine) -> Result<u64> {
-    Ok(quality_runtime(engine)?.submit_read(|store| store.counts())?.files)
 }
 
 /// The [FR-IX-11] unindexed-doc-symlink warnings for `doctor`, computed from the
