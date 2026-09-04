@@ -12,6 +12,12 @@
 //! - the `[workspace.warm] concurrency` key (S-322, FR-WS-01) is accepted, is
 //!   preserved across a re-run, and is rejected with an actionable exit-2
 //!   message when out of range.
+//!
+//! …and, at the other end of the same feature, the **plain** `logos init`
+//! nudge that points a user at all of the above (S-319, FR-IN-08): at a
+//! parent-of-repos root a non-TTY run never prompts and never reads stdin,
+//! stdout stays byte-for-byte as before, an ordinary repository root gets
+//! nothing, and a re-run stays non-clobbering.
 
 use std::fs;
 use std::path::Path;
@@ -599,6 +605,14 @@ fn the_footprint_note_is_advisory_on_stderr_and_quiet_suppresses_it() {
         stderr.contains("fresh untracked `.logos/`") && stderr.contains("FR-IN-04"),
         "the operator is told what to commit and why: {stderr}"
     );
+    // This is a `--workspace` run at a parent-of-repos root — the one fixture
+    // where the FR-IN-08 nudge would fire if the short-circuit inside `nudge`
+    // ever stopped short-circuiting. Nobody needs to be told to run the command
+    // they just ran.
+    assert!(
+        !stderr.contains("parent folder of sibling repositories"),
+        "--workspace answers itself and is never nudged: {stderr}"
+    );
 
     // A fresh workspace under --quiet: the note is suppressed, and `--json`
     // still emits the essential report (FR-CL-02).
@@ -610,3 +624,258 @@ fn the_footprint_note_is_advisory_on_stderr_and_quiet_suppresses_it() {
     let report: serde_json::Value = serde_json::from_slice(&quiet.stdout).unwrap();
     assert_eq!(report["footprint"]["fresh"], 2, "the machine payload is unaffected");
 }
+
+// ── the plain-`logos init` parent-of-repos nudge (S-319, FR-IN-08) ─────────
+
+/// Run the real binary with stdin held open as a pipe nobody writes to after
+/// the initial nudge answer, polling for exit rather than waiting — so a
+/// command that *does* read stdin blocks forever and this fails on the
+/// deadline instead of hanging the suite.
+///
+/// This is the only shape that can prove the load-bearing claim. `output()`
+/// hands the child an already-closed stdin, so a `read_line` there returns
+/// EOF immediately and a wedging implementation would still pass.
+fn run_with_stdin_held_open(project: &Path, args: &[&str], feed: &str) -> Output {
+    use std::io::Write;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_logos"))
+        .arg("--project")
+        .arg(project)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the logos binary runs");
+
+    // Held for the whole run: dropping it would close the pipe and hand a
+    // blocked `read_line` the EOF that lets it finish, silently defeating the test.
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    // An answer that would enable a workspace if it were ever read. That it is
+    // *not* is half the assertion.
+    stdin.write_all(feed.as_bytes()).expect("the pipe accepts the answer");
+    stdin.flush().ok();
+
+    let deadline = Instant::now() + std::time::Duration::from_secs(60);
+    while child.try_wait().expect("the child is waitable").is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "`logos init` never exited with stdin open — it prompted or read stdin on a \
+             non-TTY, which is exactly the wedge unattended dev-pane and CI spawns hit"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    drop(stdin);
+    child.wait_with_output().expect("the finished child yields its output")
+}
+
+/// **The mandatory non-TTY test** (FR-IN-08, S-319). At a parent-of-repos root
+/// an unattended `logos init`:
+/// - never prompts and never reads stdin (proved by exiting with the pipe open,
+///   and by the fed `y` having no effect);
+/// - explains the shape on stderr, naming `logos init --workspace`;
+/// - completes the plain single-root `init`.
+#[test]
+fn a_non_tty_init_at_a_parent_of_repos_root_never_prompts_and_never_reads_stdin() {
+    let tmp = two_member_fixture();
+    let out = run_with_stdin_held_open(tmp.path(), &["--json", "init"], "y\ny\ny\n");
+
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("parent folder of sibling repositories")
+            && stderr.contains("logos init --workspace"),
+        "the shape and the remedy are explained on stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("[y/N]") && !stderr.contains("[Y/n]"),
+        "no prompt is rendered on a non-TTY: {stderr}"
+    );
+    assert!(
+        !tmp.path().join("logos.workspace.toml").exists(),
+        "the fed `y` was never read — a non-TTY must never auto-enable a workspace"
+    );
+    assert!(
+        tmp.path().join(".logos").join("config.toml").is_file(),
+        "the plain single-root init still completed"
+    );
+
+    // `--quiet` does NOT silence it, deliberately and unlike the sibling
+    // footprint advisory one screen above (whose suppression *is* pinned, by
+    // `the_footprint_note_is_advisory_on_stderr_and_quiet_suppresses_it`). That
+    // asymmetry invites a "consistency fix" that would reinstate exactly the
+    // silence FR-IN-08 removes, so the difference is asserted rather than left
+    // to the rustdoc: an `init` that can only ever produce an empty index must
+    // say so (NFR-CC-04). `--quiet` protects stdout, which stays one document.
+    let quiet_tmp = two_member_fixture();
+    let quiet = run_with_stdin_held_open(quiet_tmp.path(), &["--json", "--quiet", "init"], "");
+    assert_eq!(exit_code(&quiet), 0, "{}", String::from_utf8_lossy(&quiet.stderr));
+    assert!(
+        String::from_utf8_lossy(&quiet.stderr).contains("parent folder of sibling repositories"),
+        "--quiet must not silence the nudge: {}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+    serde_json::from_slice::<serde_json::Value>(&quiet.stdout)
+        .expect("stdout is still exactly one JSON document under --quiet");
+}
+
+/// stdout stays byte-for-byte as before (FR-CL-02): the nudge is stderr-only,
+/// and the machine document `init` emits at a parent-of-repos root is the same
+/// document it emits at an ordinary repository root.
+///
+/// Compared document-to-document rather than byte-to-byte on the raw payloads,
+/// because the report legitimately carries the differing root path: the key set
+/// must match exactly, and every root-independent value (`message`, `steps`)
+/// must match too. That second half is what makes the name true — a key-set
+/// comparison alone passes against a nudged run that changed a step.
+#[test]
+fn the_nudge_leaves_stdout_byte_for_byte_as_before() {
+    let parent = two_member_fixture();
+    let nudged = run_with_stdin_held_open(parent.path(), &["--json", "init"], "");
+    assert_eq!(exit_code(&nudged), 0);
+
+    let ordinary = TempDir::new().unwrap();
+    init_repo(ordinary.path());
+    let plain = logos(ordinary.path(), &["--json", "init"]);
+    assert_eq!(exit_code(&plain), 0);
+
+    let as_value = |bytes: &[u8]| -> serde_json::Value {
+        serde_json::from_slice(bytes).expect("stdout is exactly one JSON document")
+    };
+    let nudged_doc = as_value(&nudged.stdout);
+    let plain_doc = as_value(&plain.stdout);
+
+    let keys = |v: &serde_json::Value| -> Vec<String> {
+        let mut k: Vec<String> = v.as_object().expect("an object").keys().cloned().collect();
+        k.sort();
+        k
+    };
+    assert_eq!(keys(&nudged_doc), keys(&plain_doc), "the nudge adds no stdout field");
+
+    // …and the same VALUES, not merely the same field names. Only `logos_dir`
+    // and `db_path` legitimately differ (they carry the root); `message` and the
+    // whole `steps` array are root-independent, so they are directly comparable.
+    // Without this, a nudged run that appended a step or flipped an `action`
+    // would keep the top-level key set identical and pass a test whose name
+    // promises a byte comparison.
+    assert_eq!(nudged_doc["message"], plain_doc["message"], "the nudge changes no init message");
+    assert_eq!(nudged_doc["steps"], plain_doc["steps"], "the nudge changes no init step");
+
+    let raw = String::from_utf8_lossy(&nudged.stdout);
+    for fragment in ["parent folder", "logos init --workspace", "enable a Logos workspace"] {
+        assert!(!raw.contains(fragment), "the nudge is stderr-only, not on stdout: {raw}");
+    }
+}
+
+/// At an ordinary git repository root there is no nudge and no prompt — the
+/// negative case, asserted on a repository that even contains a nested
+/// checkout, since only its own git-top-level status separates the two shapes.
+#[test]
+fn an_ordinary_repository_root_gets_no_nudge_and_no_prompt() {
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path());
+    init_repo(&tmp.path().join("vendor"));
+
+    let out = run_with_stdin_held_open(tmp.path(), &["--json", "init"], "y\n");
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for fragment in ["parent folder", "enable a Logos workspace", "[y/N]"] {
+        assert!(!stderr.contains(fragment), "no nudge at a repository root: {stderr}");
+    }
+    assert!(!tmp.path().join("logos.workspace.toml").exists());
+}
+
+/// Re-running `init` at a parent-of-repos root stays non-clobbering
+/// (FR-IN-01): the second run reports `config.toml`/`rules.toml` unchanged and
+/// leaves an operator's edits in place. The nudge changes nothing about the
+/// init step sequence — asserted with a real edit, because "reported unchanged"
+/// and "actually unchanged" are separable failures.
+#[test]
+fn rerunning_init_at_a_parent_of_repos_root_stays_non_clobbering() {
+    let tmp = two_member_fixture();
+    let first = run_with_stdin_held_open(tmp.path(), &["--json", "init"], "");
+    assert_eq!(exit_code(&first), 0, "{}", String::from_utf8_lossy(&first.stderr));
+
+    let config = tmp.path().join(".logos").join("config.toml");
+    let rules = tmp.path().join(".logos").join("rules.toml");
+    let edited = format!("{}\n# operator edit\n", fs::read_to_string(&config).unwrap());
+    fs::write(&config, &edited).unwrap();
+    let rules_before = fs::read_to_string(&rules).unwrap();
+
+    let second = run_with_stdin_held_open(tmp.path(), &["--json", "init"], "");
+    assert_eq!(exit_code(&second), 0, "{}", String::from_utf8_lossy(&second.stderr));
+
+    let report: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    let steps = report["steps"].as_array().expect("the init report lists its steps");
+    for target in [".logos/config.toml", ".logos/rules.toml"] {
+        let step = steps
+            .iter()
+            .find(|s| s["target"].as_str() == Some(target))
+            .unwrap_or_else(|| panic!("the report names {target}: {report}"));
+        assert_eq!(step["action"], "unchanged", "{target} is reported unchanged: {step}");
+    }
+    assert_eq!(fs::read_to_string(&config).unwrap(), edited, "the operator edit survives");
+    assert_eq!(fs::read_to_string(&rules).unwrap(), rules_before, "rules.toml is untouched");
+
+    // Still the plain single-root init on both runs — the nudge never enabled anything.
+    assert!(!tmp.path().join("logos.workspace.toml").exists());
+}
+
+/// **Regression (review finding).** A missing `git` binary must *suppress* the
+/// diagnosis, never invert it.
+///
+/// `is_git_root` collapses "git is absent" into `false` — safe for an admission
+/// filter, inverting for a negative inference. Read through it, `detect`'s first
+/// guard never tripped without git, so an **ordinary repository root** holding
+/// one already-indexed subdirectory (someone ran `logos init` in `./frontend`)
+/// was announced as "a parent folder of sibling repositories … not a repository
+/// itself" and, on a TTY, offered federation — which would write
+/// `logos.workspace.toml` into a real repository and enrol its own subdirectory
+/// as a member. Reproduced against the built binary before the fix.
+///
+/// `PATH` is set on the **child** only, so nothing here mutates this process's
+/// environment and the test is safe under libtest's parallel threads.
+#[test]
+fn a_missing_git_binary_suppresses_the_nudge_rather_than_inverting_it() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    // The child that makes the shape mis-fire: not a git root, but already
+    // indexed, so `discover_candidates` still admits it as a member.
+    let indexed = repo.join("frontend");
+    fs::create_dir_all(indexed.join(".logos")).unwrap();
+    fs::write(indexed.join(".logos/logos.db"), b"").unwrap();
+
+    // An empty directory as PATH: `git` is unreachable, and `logos` itself is
+    // invoked by absolute path so it still runs.
+    let no_git = tmp.path().join("empty-path");
+    fs::create_dir_all(&no_git).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_logos"))
+        .arg("--project")
+        .arg(&repo)
+        .args(["--json", "init"])
+        .env("PATH", &no_git)
+        .output()
+        .expect("the logos binary runs without git on PATH");
+
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("parent folder of sibling repositories"),
+        "an unanswerable git question must not be read as `not a repository`: {stderr}"
+    );
+    assert!(
+        !stderr.contains("enable a Logos workspace"),
+        "and must never reach the offer: {stderr}"
+    );
+    assert!(
+        !repo.join("logos.workspace.toml").exists(),
+        "no workspace manifest may be written inside a real repository"
+    );
+    // The plain single-root init still completed — suppressing the nudge does
+    // not suppress the command.
+    assert!(repo.join(".logos").join("config.toml").is_file());
+}
+

@@ -11,17 +11,27 @@
 //! ([FR-IN-04]). Enabling N members legitimately dirties N repositories — the
 //! defect this answers was the silence about it, not the ignore rules.
 //!
+//! The same enablement path is what a plain `logos init` should have taken
+//! when it was run one directory too high, so the detection of that shape
+//! ([`ParentOfRepos`], [FR-IN-08]) lives here too — composed here and merely
+//! rendered by the adapter ([NFR-MA-02]), and built out of the candidate scan
+//! below rather than a second git-root implementation.
+//!
 //! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 //! [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
+//! [FR-IN-08]: ../../../docs/specs/requirements/FR-IN-08.md
+//! [NFR-MA-02]: ../../../docs/specs/requirements/NFR-MA-02.md
 
+use std::fmt;
 use std::path::Path;
 
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::config::globs;
+use crate::config::{globs, ZeroAdmissionDiagnostic};
 use crate::init::{self, InitOptions};
 use crate::models::pipeline::{InitAction, InitResult, InitStep};
+use crate::workspace::git_root_known;
 
 use super::{discover_candidates, Member};
 
@@ -205,6 +215,158 @@ fn footprint(members: &[MemberReport]) -> WorkingTreeFootprint {
         }
     }
     report
+}
+
+/// The **parent-of-repos** shape a plain `logos init` can land in ([FR-IN-08]):
+/// the root is not itself a git top-level, and at least one immediate child is.
+///
+/// `init` succeeds there and creates a store that can never admit a file — the
+/// discovery walk prunes every nested git boundary, so the run reports
+/// `files_indexed: 0`, `coverage: 1.0` and exit 0, every signal consistent with
+/// success ([FR-IX-13]). The whole Workspace Federation feature set is invisible
+/// at exactly the root where it is the answer, so this states the shape and
+/// names [`ZeroAdmissionDiagnostic::REMEDY`] — the same remedy string `index`
+/// already prints, so the two surfaces cannot drift apart.
+///
+/// **Detection reuses the federation primitives rather than re-deriving either
+/// half** ([FR-WS-01]): [`git_root_known`] answers "is the root a repository?",
+/// and [`discover_candidates`] — literally `init --workspace`'s own candidate
+/// scan — answers "is any immediate child one?". That reuse is load-bearing, not
+/// tidy: the nudge names `init --workspace` as the remedy, so the shape it fires
+/// on must be exactly the shape that command can act on. A hand-rolled
+/// `child.join(".git").exists()` test would diverge on both sides — it would
+/// miss an already-indexed non-git member (which `discover_candidates` admits)
+/// and fire on a bare `.git` file layout the candidate scan would then reject,
+/// handing the operator a confidently wrong instruction, which is worse than the
+/// silence this exists to fix ([NFR-CC-04]).
+///
+/// Reusing the primitive is necessary but was not sufficient: the *tri-state*
+/// one is required. [`crate::workspace::is_git_root`] collapses "git is absent"
+/// into `false`, which is the safe direction for an admission filter and the
+/// **inverting** direction for this negative inference — with no `git` on PATH
+/// every root answered "not a repository", so an ordinary repository holding one
+/// already-indexed subdirectory was diagnosed as a parent folder of sibling
+/// repositories and offered federation. Hence [`git_root_known`], and hence the
+/// `!= Some(false)` guard below rather than a `!`.
+///
+/// [FR-IN-08]: ../../../docs/specs/requirements/FR-IN-08.md
+/// [FR-IX-13]: ../../../docs/specs/requirements/FR-IX-13.md
+/// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentOfRepos {
+    /// The members `logos init --workspace` would offer here, in
+    /// [`discover_candidates`]' deterministic name order ([NFR-RA-06]) — the
+    /// list the approval gate itself would show, not a re-derived one.
+    pub candidates: Vec<Member>,
+}
+
+impl ParentOfRepos {
+    /// How many candidate names the explanation lists before eliding the rest
+    /// as `… +N more` — the 84-member workspace behind [CR-098] must yield a
+    /// readable line, not a wall of names. Deliberately the same bound
+    /// [`ZeroAdmissionDiagnostic::SAMPLE_LIMIT`] uses, so the `init` nudge and
+    /// the `index` warning elide alike.
+    ///
+    /// [CR-098]: ../../../docs/requests/CR-098-nested-git-prune-diagnostic.md
+    pub const SAMPLE_LIMIT: usize = ZeroAdmissionDiagnostic::SAMPLE_LIMIT;
+
+    /// `Some` **iff** `root` is not a git top-level and the candidate scan finds
+    /// at least one member there.
+    ///
+    /// Both halves matter. An ordinary repository root is a git top-level, so it
+    /// is never diagnosed however many sibling repositories it contains — that
+    /// is the negative case [FR-IN-08] names. An empty folder, or one whose
+    /// children are plain directories, has no candidates and a different cause,
+    /// which this must not misattribute.
+    ///
+    /// The `root` handed in is already git-top-level-resolved by
+    /// [`crate::workspace::resolve_root`] at the CLI boundary, so a *sub*
+    /// directory of a repository arrives here as its repository root and is
+    /// correctly declined.
+    ///
+    /// [FR-IN-08]: ../../../docs/specs/requirements/FR-IN-08.md
+    #[must_use]
+    pub fn detect(root: &Path) -> Option<Self> {
+        // `Some(false)` — git ran and said "not a repository top level" — is the
+        // ONLY answer this may fire on. `Some(true)` is an ordinary repository
+        // root; `None` means the `git` binary is absent, so every path answers
+        // the same and the negative inference inverts. Read through the
+        // `bool`-collapsing `is_git_root`, a missing git turned this diagnosis
+        // on an ordinary repository root that happened to hold one indexed
+        // subdirectory — the confidently-wrong instruction the type's docs
+        // above claim the primitive reuse prevents.
+        if git_root_known(root) != Some(false) {
+            return None;
+        }
+        let candidates = discover_candidates(root);
+        (!candidates.is_empty()).then_some(Self { candidates })
+    }
+
+    /// The y/n question the TTY offer asks, stating the stake (how many
+    /// repositories would be enabled) so the answer is informed.
+    ///
+    /// Separate from the [`fmt::Display`] explanation because the two have
+    /// different fates: the explanation always prints, the question only on a
+    /// TTY ([FR-IN-08]).
+    ///
+    /// `host_setup_requested` says the invocation asked for the [FR-IN-02]
+    /// host-integration steps (`--interactive` / `--hooks`), which the
+    /// [FR-WS-02] path does not apply — it inits every member with
+    /// [`InitOptions::default`] and injects only the workspace MCP entry at the
+    /// parent. Saying so **here** matters because this question is the moment of
+    /// consent: `logos init -i` is what the installation guide tells a new user
+    /// to run, so at a parent-of-repos root a bare "yes" would otherwise trade
+    /// the managed CLAUDE.md block, the wiki skill and the quality-report hook
+    /// away without ever naming them. A "yes" is consent to change the *scope*
+    /// of the init, not to silently cancel the flags the user typed.
+    ///
+    /// [FR-IN-02]: ../../../docs/specs/requirements/FR-IN-02.md
+    /// [FR-IN-08]: ../../../docs/specs/requirements/FR-IN-08.md
+    /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
+    #[must_use]
+    pub fn question(&self, host_setup_requested: bool) -> String {
+        format!(
+            "enable a Logos workspace here instead ({} member {}{})?",
+            self.candidates.len(),
+            if self.candidates.len() == 1 {
+                "repository"
+            } else {
+                "repositories"
+            },
+            if host_setup_requested {
+                ", without the --interactive/--hooks host setup"
+            } else {
+                ""
+            },
+        )
+    }
+}
+
+impl fmt::Display for ParentOfRepos {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sample: Vec<&str> = self
+            .candidates
+            .iter()
+            .take(Self::SAMPLE_LIMIT)
+            .map(|m| m.name.as_str())
+            .collect();
+        write!(
+            f,
+            "logos init: this looks like a parent folder of sibling repositories ({}",
+            sample.join(", "),
+        )?;
+        let elided = self.candidates.len() - sample.len();
+        if elided > 0 {
+            write!(f, ", … +{elided} more")?;
+        }
+        write!(
+            f,
+            "), not a repository itself — a single-root index here would admit no \
+             files. Run `{}` to index them as a federated workspace.",
+            ZeroAdmissionDiagnostic::REMEDY,
+        )
+    }
 }
 
 /// Candidate members not already part of the workspace, after dropping
@@ -629,5 +791,165 @@ mod tests {
         assert!(!ignored(".logos/config.toml"), "config.toml must stay committable");
         assert!(!ignored(".logos/rules.toml"), "rules.toml must stay committable");
         assert!(ignored(".logos/logos.db"), "the derived store is ignored");
+    }
+
+    // ── ParentOfRepos: the `logos init` nudge shape (FR-IN-08) ────────────
+
+    /// The positive case: a parent folder of sibling repositories, which is not
+    /// itself a repository. `init` there builds a store that can never admit a
+    /// file, and this is the detection that makes that sayable.
+    #[test]
+    fn a_parent_of_sibling_repos_is_detected_with_its_candidates() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(&tmp.path().join("api"));
+        init_repo(&tmp.path().join("web"));
+
+        let shape = ParentOfRepos::detect(tmp.path()).expect("the parent-of-repos shape");
+        let names: Vec<&str> = shape.candidates.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["api", "web"], "the members `--workspace` would offer, in name order");
+    }
+
+    /// The negative case [FR-IN-08] names outright: at an ordinary git
+    /// repository root nothing fires — including one that *contains* sibling
+    /// repositories (a vendored dependency, a submodule), where only the
+    /// root's own git-top-level status separates "wrong directory" from
+    /// "ordinary repository with nested checkouts".
+    ///
+    /// [FR-IN-08]: ../../../docs/specs/requirements/FR-IN-08.md
+    #[test]
+    fn an_ordinary_git_repository_root_is_never_detected() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("app");
+        init_repo(&root);
+        assert!(ParentOfRepos::detect(&root).is_none(), "a bare repository root is not the shape");
+
+        init_repo(&root.join("vendor"));
+        assert!(
+            ParentOfRepos::detect(&root).is_none(),
+            "a repository holding a nested checkout is still a repository, not a parent of repos"
+        );
+    }
+
+    /// A non-repository folder with no member candidates has a different cause
+    /// (empty, or holding plain directories), which the nudge must not
+    /// misattribute — naming `init --workspace` there would find zero members.
+    #[test]
+    fn a_plain_folder_without_candidates_is_not_detected() {
+        let tmp = TempDir::new().unwrap();
+        assert!(ParentOfRepos::detect(tmp.path()).is_none(), "an empty folder is not the shape");
+
+        fs::create_dir_all(tmp.path().join("notes/deep")).unwrap();
+        fs::write(tmp.path().join("notes/a.md"), "x\n").unwrap();
+        assert!(
+            ParentOfRepos::detect(tmp.path()).is_none(),
+            "plain child directories are not member candidates"
+        );
+    }
+
+    /// **The structural assertion for the reuse requirement.** Detection does
+    /// not re-derive the candidate set: what it reports IS
+    /// [`discover_candidates`]' output at the same root.
+    ///
+    /// Asserted over the shape that discriminates — a child that is *not* a git
+    /// root but already carries `.logos/logos.db`, which the federation
+    /// primitive admits as a member and any hand-rolled `.git`-existence test
+    /// would silently drop. A second implementation therefore cannot pass this
+    /// while a genuine delegation cannot fail it.
+    #[test]
+    fn detection_reuses_the_federation_candidate_scan_rather_than_a_second_derivation() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(&tmp.path().join("api"));
+        // A non-git, already-indexed sibling: a member to `discover_candidates`,
+        // invisible to a `.git`-existence check.
+        let indexed = tmp.path().join("legacy");
+        fs::create_dir_all(indexed.join(".logos")).unwrap();
+        fs::write(indexed.join(".logos/logos.db"), b"").unwrap();
+
+        let shape = ParentOfRepos::detect(tmp.path()).expect("the parent-of-repos shape");
+        assert_eq!(
+            shape.candidates,
+            discover_candidates(tmp.path()),
+            "the reported members are the federation primitive's own output, not a re-derivation"
+        );
+        let names: Vec<&str> = shape.candidates.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["api", "legacy"], "the already-indexed non-git sibling counts");
+    }
+
+    /// The explanation states the shape, samples the members, and names the
+    /// remedy — reusing `index`'s own remedy constant so the two surfaces
+    /// cannot drift into naming different commands.
+    #[test]
+    fn the_explanation_states_the_shape_and_names_the_shared_remedy() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(&tmp.path().join("api"));
+        init_repo(&tmp.path().join("web"));
+
+        let text = ParentOfRepos::detect(tmp.path()).unwrap().to_string();
+        assert!(text.contains("parent folder of sibling repositories"), "{text}");
+        assert!(text.contains("api, web"), "the members are named: {text}");
+        assert!(text.contains(ZeroAdmissionDiagnostic::REMEDY), "the remedy is named: {text}");
+        assert!(!text.contains("more"), "nothing is elided below the sample limit: {text}");
+    }
+
+    /// Beyond the sample limit the remainder is elided rather than dumped — the
+    /// 84-member workspace behind CR-098 must produce one readable line.
+    #[test]
+    fn the_explanation_elides_members_past_the_sample_limit() {
+        let tmp = TempDir::new().unwrap();
+        let names: Vec<String> = (0..6).map(|i| format!("svc-{i}")).collect();
+        for name in &names {
+            init_repo(&tmp.path().join(name));
+        }
+
+        let shape = ParentOfRepos::detect(tmp.path()).unwrap();
+        let text = shape.to_string();
+        assert_eq!(shape.candidates.len(), 6);
+
+        // Driven by the constant, not by a copy of its value: the sample bound
+        // and the elided remainder must move together if it is ever retuned.
+        let limit = ParentOfRepos::SAMPLE_LIMIT;
+        let named = names[..limit].join(", ");
+        assert!(text.contains(&named), "the first {limit} are named: {text}");
+        assert!(
+            text.contains(&format!(", … +{} more", names.len() - limit)),
+            "the remainder is elided: {text}"
+        );
+        assert!(!text.contains(&names[limit]), "an elided member is not also named: {text}");
+    }
+
+    /// The offer states the stake, and agrees in number with itself.
+    #[test]
+    fn the_question_states_how_many_repositories_would_be_enabled() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(&tmp.path().join("api"));
+        assert_eq!(
+            ParentOfRepos::detect(tmp.path()).unwrap().question(false),
+            "enable a Logos workspace here instead (1 member repository)?"
+        );
+
+        init_repo(&tmp.path().join("web"));
+        assert_eq!(
+            ParentOfRepos::detect(tmp.path()).unwrap().question(false),
+            "enable a Logos workspace here instead (2 member repositories)?"
+        );
+    }
+
+    /// `logos init -i` accepted at a parent-of-repos root silently drops the
+    /// host-integration steps `-i` exists to install, because the FR-WS-02 path
+    /// inits members with `InitOptions::default()`. The offer must say so before
+    /// the user answers — the whole point of the nudge is to be non-surprising.
+    #[test]
+    fn the_question_names_the_host_setup_an_accepted_offer_would_not_apply() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(&tmp.path().join("api"));
+        let shape = ParentOfRepos::detect(tmp.path()).unwrap();
+
+        let asked = shape.question(true);
+        assert!(
+            asked.contains("without the --interactive/--hooks host setup"),
+            "an accepted offer must not trade `-i` away silently: {asked}"
+        );
+        // …and stays out of the way when the user asked for no such thing.
+        assert!(!shape.question(false).contains("--interactive"), "unasked-for noise");
     }
 }
