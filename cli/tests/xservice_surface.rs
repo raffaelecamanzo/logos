@@ -121,9 +121,25 @@ fn init_repo(dir: &Path) {
     sh_git(dir, &["commit", "-q", "-m", "init"]);
 }
 
-/// Build the two-member workspace: `api` (OpenAPI consumer) + `web` (axum
-/// provider), each an indexed git repo, with the manifest at the parent.
-fn workspace() -> TempDir {
+/// An OpenAPI spec whose sole operation, `/orphan`, matches no route anywhere in
+/// the workspace — the near-degenerate CR-111/S-327 case: every cross-boundary
+/// reference lands in the `no-provider-in-workspace` bucket, so the bound-ratio
+/// denominator is zero.
+const ORPHAN_OPENAPI_YAML: &str = "\
+openapi: 3.0.3
+info:
+  title: Orphan API
+  version: 1.0.0
+paths:
+  /orphan:
+    get:
+      summary: No provider anywhere in the workspace
+";
+
+/// Build a two-member workspace: `api` (an OpenAPI consumer built from `openapi`)
+/// and `web` (the fixed axum provider), each an indexed git repo, with the
+/// manifest at the parent.
+fn workspace_with_openapi(openapi: &str) -> TempDir {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let api = root.join("api");
@@ -131,7 +147,7 @@ fn workspace() -> TempDir {
 
     init_repo(&api);
     init_repo(&web);
-    write(&api, "api/openapi.yaml", OPENAPI_YAML);
+    write(&api, "api/openapi.yaml", openapi);
     write(&web, "src/main.rs", AXUM_MAIN);
 
     // Index each member through the real binary (E2E, no library dependency).
@@ -144,6 +160,12 @@ fn workspace() -> TempDir {
     )
     .unwrap();
     tmp
+}
+
+/// Build the two-member workspace: `api` (OpenAPI consumer) + `web` (axum
+/// provider), each an indexed git repo, with the manifest at the parent.
+fn workspace() -> TempDir {
+    workspace_with_openapi(OPENAPI_YAML)
 }
 
 /// AC2: `workspace status` reports per-member freshness and the 3-state
@@ -202,6 +224,27 @@ fn workspace_status_reports_freshness_and_three_state_coverage() {
     let human: Value = serde_json::from_str(&String::from_utf8(human.stdout).unwrap())
         .expect("the human rendering is the same read-model, pretty-printed");
     assert_eq!(human["coverage"], *coverage, "human and --json carry the identical coverage summary");
+}
+
+/// CR-111 / S-327: a workspace whose only cross-boundary reference has no
+/// provider anywhere reports a zero denominator — `bound_ratio` absent — and the
+/// excluded count is STILL reported, never suppressed alongside the absent ratio.
+#[test]
+fn workspace_status_reports_the_excluded_count_when_the_bound_ratio_is_absent() {
+    let tmp = workspace_with_openapi(ORPHAN_OPENAPI_YAML);
+    let status = logos_json(tmp.path(), &["workspace", "status"]);
+    let coverage = &status["coverage"];
+
+    assert!(
+        coverage.get("bound_ratio").is_none(),
+        "a zero denominator is absent, never a fabricated score: {coverage}"
+    );
+    assert_eq!(coverage["bound_ratio_measured"], 0);
+    assert_eq!(coverage["no_provider_in_workspace"], 1);
+    assert_eq!(
+        coverage["bound_ratio_summary"], "0 of 0 measured; 1 excluded as no-provider-in-workspace",
+        "the excluded count is reported even though the ratio itself is absent"
+    );
 }
 
 // ── S-323: per-member warm state and roll-up (FR-WS-15, BR-44, NFR-CC-04) ──

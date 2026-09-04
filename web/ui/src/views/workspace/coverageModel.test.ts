@@ -153,6 +153,13 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
       coverage([], { bound: 9, ambiguous: 1, no_provider_in_workspace: 2, bound_ratio_measured: 10 }),
     );
     expect(healthy.ratioDominatedByExcluded).toBe(false);
+
+    // The boundary: excluded EQUALS measured. "Dominates" means outweighs, not
+    // ties — pins the strict `>` comparison against an accidental `>=`.
+    const tied = buildCoverageDashboard(
+      coverage([], { bound: 6, unbound: 1, no_provider_in_workspace: 7, bound_ratio_measured: 7 }),
+    );
+    expect(tied.ratioDominatedByExcluded).toBe(false);
   });
 
   it("still exposes the denominator and excluded count when the ratio itself is absent (S-327)", () => {
