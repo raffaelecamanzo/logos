@@ -22,12 +22,30 @@
 ; …and the handler-less form (inline closures, middleware chains): the route
 ; node is still promoted, with no fabricated edge (NFR-RA-05). Overlap with
 ; the pattern above collapses in the pass (dedup prefers the proven handler).
-(call_expression
+;
+; The receiver is scoped to an Express router (CR-110). Unscoped, this pattern
+; matched **any** `<expr>.get("string")` call — an Angular `formGroup.get("year")`
+; control lookup and a `state.get("active")` property read in a vendored bundle
+; both promoted a route — and the repo-scoped `framework_detectors` gate does not
+; bound it: one React dependency admits extraction across the whole repo,
+; vendored assets included.
+;
+; What this can and cannot assert: a tree-sitter pattern is local, so it cannot
+; resolve `app` back to its `express()`/`express.Router()` binding. The
+; constraint is therefore on the receiver's conventional *name* — `app`,
+; `router`, `server`, or a camelCase `…Router`/`…App`/`…Server`, in either case,
+; optionally member-qualified (`this.app`, `self.router`). The handler-bearing
+; pattern above is deliberately left unscoped, so an unconventionally-named
+; receiver still promotes every registration that names its handler; and the
+; shared pass's path guard catches whatever the name rule admits.
+((call_expression
   function: (member_expression
+    object: [(identifier) (member_expression) (this)] @fw.route.receiver
     property: (property_identifier) @fw.route.method)
   arguments: (arguments
     .
     (string) @fw.route.path))
+  (#match? @fw.route.receiver "(^|\\.)([Aa]pp|[Rr]outer|[Ss]erver|[A-Za-z_$][A-Za-z0-9_$]*(Router|App|Server))$"))
 
 ; Next.js/React component: an exported PascalCase function declaration —
 ; the UI building block (FR-FW-02, UAT-FW-02).
