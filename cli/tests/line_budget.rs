@@ -193,7 +193,18 @@ fn adapter_lines() -> usize {
 /// hold. The adapter is genuinely thin at this point; the next author needing
 /// room should expect to find a duplication, not a relocation.
 ///
-/// **S-319 spent five of those six: 819 → 824.** The `logos init`
+/// **S-333 spent three of the nine first, ahead of S-319: 816 → 819.** The
+/// `init --workspace` working-tree footprint notice (FR-WS-02, FR-IN-04)
+/// needed exactly one adapter statement — `if let Some(notice) =
+/// report.footprint.notice().filter(|_| !out.quiet) { eprintln!("{notice}"); }`
+/// in `run` — everything else (the count, the committed/ignored split, the
+/// prose) composed in `logos_core::federation::enable`/`init`. This is the
+/// sprint's first writer of the three-writer sequence on this file (Iteration
+/// 1, ahead of S-319 and S-331 below); it is recorded here, not laundered into
+/// the pre-existing "819" figure above, which describes the state *after* this
+/// spend, not before it. Recorded, not laundered (CR-084 §6).
+///
+/// **S-319 spent five of the remaining six: 819 → 824.** The `logos init`
 /// parent-of-repos nudge (FR-IN-08) needed exactly two irreducible adapter
 /// statements — print a pre-composed line, ask a y/n — plus the `let`-else that
 /// declines every other root. Detection, the explanation prose and the offer
