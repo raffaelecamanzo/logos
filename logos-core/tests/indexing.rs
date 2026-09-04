@@ -1281,12 +1281,10 @@ fn status_carries_the_diagnostic_in_both_human_and_json_output() {
         1,
         "`--json` carries exactly one prune warning: {warnings:?}"
     );
-    // The human rendering is the pretty form of the very same value.
-    let human = serde_json::to_string_pretty(&status).expect("status pretty-prints");
-    assert!(
-        human.contains("logos init --workspace"),
-        "the human rendering names the remedy too"
-    );
+    // The human rendering needs no separate assertion: `Output::print` emits
+    // `to_string_pretty` of this same value, so it differs from the `--json` form
+    // above only in whitespace. Asserting on it would re-test serde's pretty
+    // printer, not this change.
 }
 
 #[test]
@@ -1315,6 +1313,69 @@ fn the_diagnostic_never_moves_doctors_exit_code() {
     );
     assert!(report.faults.is_empty(), "it never becomes a fault line: {:?}", report.faults);
     assert_eq!(report.unadmitted_files, 0, "and no admission drift is invented");
+}
+
+#[test]
+fn a_never_indexed_root_is_not_diagnosed_by_status_or_doctor() {
+    // Regression (review fix): `index` knows it admitted nothing because it just
+    // walked. `status`/`doctor` deliberately do not walk, so an empty store is
+    // ambiguous — "the walk admitted nothing" and "nothing has walked yet" look
+    // identical. Keyed on the count alone, an ORDINARY repository with one
+    // top-level submodule was told, before its first `logos index`, that it "looks
+    // like a parent folder of sibling repositories — run `logos init --workspace`":
+    // the confidently-wrong remedy FR-IX-13 exists to avoid, contradicting the
+    // `run `logos index`` advice `status` prints in the same payload, and a genuine
+    // divergence from `index`, which says nothing about this root.
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path();
+    write(root, "src/lib.rs", "pub fn f() {}\n");
+    write(root, "subrepo/.git/HEAD", "ref: refs/heads/main\n");
+
+    let engine = Engine::start(root).expect("engine starts");
+
+    // BEFORE any index: the store is empty and the depth-1 prune record is
+    // populated — the exact state that used to produce the false diagnostic.
+    let status = engine.status();
+    assert!(!status.indexed, "precondition: nothing has been indexed yet");
+    assert!(
+        prune_warnings(&status.warnings).is_empty(),
+        "a never-indexed root is not a zero-admission verdict: {:?}",
+        status.warnings
+    );
+    assert_eq!(
+        engine.doctor().expect("doctor runs").zero_admission_warning,
+        None,
+        "and `doctor` says nothing about it either"
+    );
+
+    // AFTER indexing: `index` admits the root's own file and stays silent, and so
+    // do the other two — the three agree at both moments, which is the point.
+    let indexed = engine.index();
+    assert_eq!(indexed.files_indexed, 1, "the root's own file is admitted");
+    assert!(prune_warnings(&indexed.warnings).is_empty(), "{:?}", indexed.warnings);
+    assert!(prune_warnings(&engine.status().warnings).is_empty());
+    assert_eq!(engine.doctor().expect("doctor runs").zero_admission_warning, None);
+}
+
+#[test]
+fn the_diagnostic_survives_the_completed_index_gate_at_a_parent_of_repos_root() {
+    // The other half of the regression above: the gate must not silence the case
+    // the story exists for. A zero-admission index still advances the persisted
+    // graph revision (FR-SY-09/ADR-32 — it runs at the end of every COMPLETED
+    // index, admissions or not), so the real CR-098 root stays diagnosed.
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path();
+    parent_of_sibling_repos(root, 3);
+
+    let engine = Engine::start(root).expect("engine starts");
+    assert_eq!(engine.index().files_indexed, 0, "nothing is admitted");
+
+    assert_eq!(
+        prune_warnings(&engine.status().warnings).len(),
+        1,
+        "the gate lets the genuine zero-admission verdict through"
+    );
+    assert!(engine.doctor().expect("doctor runs").zero_admission_warning.is_some());
 }
 
 #[test]
@@ -1358,12 +1419,27 @@ fn an_ordinary_repository_is_silent_on_all_three_surfaces() {
     let tmp = TempDir::new().expect("temp root");
     let root = tmp.path();
     write(root, "src/own.rs", "pub fn own() {}\n");
-    write(root, "vendor/dep/.git/HEAD", "ref: refs/heads/main\n");
-    write(root, "vendor/dep/src/dep.rs", "pub fn dep() {}\n");
+    // The nested repository sits at DEPTH 1 under a name that is not in the
+    // default `ignored_dirs` — deliberately, and the test is worthless otherwise.
+    // At `vendor/dep/.git` the prune is depth 2 (which `derive` filters out) AND
+    // `vendor` is a default-ignored name (so it is not even recorded as a boundary
+    // prune): the surfaces would then be silent for reasons that have nothing to
+    // do with the admitted-count guard this test exists to pin, and it would pass
+    // with that guard deleted.
+    write(root, "subrepo/.git/HEAD", "ref: refs/heads/main\n");
+    write(root, "subrepo/src/dep.rs", "pub fn dep() {}\n");
 
     let engine = Engine::start(root).expect("engine starts");
     let indexed = engine.index();
     assert_eq!(indexed.files_indexed, 1, "the parent's own file is admitted");
+    // The prune record IS populated at depth 1 — so only the admitted count can be
+    // what keeps all three surfaces quiet.
+    let config = logos_core::config::load_config_from_root(root).expect("config loads");
+    assert_eq!(
+        logos_core::config::nested_git_prunes(root, &config).expect("probe runs"),
+        vec![PathBuf::from("subrepo")],
+        "the fixture really does present a depth-1 nested-git boundary"
+    );
     assert!(indexed.warnings.is_empty(), "`index` is silent: {:?}", indexed.warnings);
 
     let status = engine.status();
