@@ -51,7 +51,7 @@ pub(crate) const SUPERVISOR_COMMAND: &str = "internal-warm";
 /// waits behind the bound, or hasn't finished before first real use still
 /// indexes correctly via the engine's lazy `ensure_indexed` fallback
 /// (FR-IX-07), so this command never needs to wait on it.
-pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm: fn(&[Member]) -> bool) -> Result<i32> {
+pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm: fn(&[Member], Option<usize>) -> bool) -> Result<i32> {
     let existing = federation::discover(root)?;
     let workspace_root = existing
         .as_ref()
@@ -69,9 +69,15 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm
         .and_then(|n| n.to_str())
         .unwrap_or("workspace")
         .to_string();
-    let (name, already) = match existing {
-        Some(f) => (f.name, f.members),
-        None => (default_name, Vec::new()),
+    // `warm_concurrency` rides along: the `[workspace.warm] concurrency`
+    // override is read off the manifest by `federation::discover` (S-322,
+    // FR-WS-01), so the value reaches the spawn from the same parse that
+    // resolved the member set. `None` on a first run is correct rather than a
+    // gap — a manifest that does not exist yet declares no override, and the
+    // one this command writes never invents the table.
+    let (name, already, declared_k) = match existing {
+        Some(f) => (f.name, f.members, f.warm_concurrency),
+        None => (default_name, Vec::new(), None),
     };
     let already_names: Vec<String> = already.iter().map(|m| m.name.clone()).collect();
 
@@ -102,7 +108,7 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm
     // ONE call with the whole delta — never a per-member loop, which is the
     // exact shape this story replaced. Injected (like `gate`'s `approve`) so a
     // test can assert the call count and the slice it received.
-    warm(&approved_new);
+    warm(&approved_new, declared_k);
 
     out.print(&report)?;
     Ok(0)
@@ -132,13 +138,18 @@ fn gate(candidates: &[Member], yes: bool, mut approve: impl FnMut(&Member) -> bo
 /// (FR-WS-02) *and* the warm must outlive it — a thread would be killed with
 /// the process, a spawned child is reparented. The effective bound is resolved
 /// **here**, in the parent that owns the workspace context, and passed down as
-/// `--concurrency`, so the manifest override of FR-WS-01/S-322 lands at this
-/// one call without the supervisor changing.
+/// `--concurrency`: the FR-WS-01 `[workspace.warm] concurrency` override lands
+/// at this one call, and the supervisor honours whatever argv it is given.
+///
+/// `declared_k` is the workspace's `[workspace.warm] concurrency`, already
+/// range-validated at manifest parse time (FR-WS-01, S-322); `None` takes the
+/// core-derived default. Resolution stays in the core
+/// (`warm::effective_concurrency`) — this call site only forwards.
 ///
 /// Best-effort throughout: an unresolvable `current_exe`, an OS out of
 /// processes, or an empty delta simply leaves those members on the lazy
 /// `ensure_indexed` fallback (FR-IX-07) — never fatal to the command.
-pub(crate) fn spawn_supervisor(members: &[Member]) -> bool {
+pub(crate) fn spawn_supervisor(members: &[Member], declared_k: Option<usize>) -> bool {
     if members.is_empty() {
         return false;
     }
@@ -146,7 +157,7 @@ pub(crate) fn spawn_supervisor(members: &[Member]) -> bool {
         return false;
     };
     let mut cmd = Command::new(exe);
-    cmd.args(supervisor_argv(members, warm::effective_concurrency(None)))
+    cmd.args(supervisor_argv(members, declared_k))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -169,14 +180,21 @@ pub(crate) fn spawn_supervisor(members: &[Member]) -> bool {
 /// invocation — rather than the loop bound of N invocations — is what makes
 /// the process count `1 + K` instead of `N` (FR-WS-14, BR-44); factored out so
 /// that property is directly assertable without spawning anything.
-fn supervisor_argv(members: &[Member], bound: usize) -> Vec<OsString> {
+///
+/// Resolution happens **here** rather than at the spawn site for the same
+/// reason: `declared_k` is the raw `[workspace.warm] concurrency` (S-322), and
+/// taking it un-resolved is what lets a test assert that a declared K reaches
+/// the argv — and that an absent one falls back to the core-derived default —
+/// without a process. Resolving at the caller left the only line the story
+/// exists for outside every test's reach.
+fn supervisor_argv(members: &[Member], declared_k: Option<usize>) -> Vec<OsString> {
     // Everything after `--` is a positional, whatever it starts with. Member
     // roots are canonical absolute paths today, so no current root can look like
     // a flag — but the whole failure mode of this argv is invisibility (the
     // child's stderr is /dev/null and nobody reads its exit code), so a root
     // such as `-legacy` would silently exit 2 and lose the entire warm rather
     // than fail loudly. One token buys immunity.
-    let k = bound.to_string();
+    let k = warm::effective_concurrency(declared_k).to_string();
     [SUPERVISOR_COMMAND, "--concurrency", &k, "--"]
         .into_iter()
         .map(OsString::from)
@@ -338,7 +356,7 @@ mod tests {
     #[test]
     fn the_whole_delta_becomes_a_single_supervisor_command_line() {
         let members: Vec<Member> = (0..5).map(|i| member(&format!("m{i}"))).collect();
-        let argv = supervisor_argv(&members, 3);
+        let argv = supervisor_argv(&members, Some(3));
 
         let rendered: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
@@ -358,7 +376,7 @@ mod tests {
 
         let members = vec![member("-legacy"), member("--weird")];
         let mut full = vec![OsString::from("logos")];
-        full.extend(supervisor_argv(&members, 1));
+        full.extend(supervisor_argv(&members, Some(1)));
 
         let cli = crate::Cli::try_parse_from(full).expect("a hyphen-leading root still parses");
         let crate::Commands::InternalWarm { members: parsed, .. } = cli.command else {
@@ -373,7 +391,7 @@ mod tests {
     #[test]
     fn the_argv_carries_every_member_of_a_large_delta() {
         let members: Vec<Member> = (0..200).map(|i| member(&format!("m{i}"))).collect();
-        let argv = supervisor_argv(&members, 4);
+        let argv = supervisor_argv(&members, Some(4));
         assert_eq!(argv.len(), 204, "4 head tokens + 200 members, one command line");
     }
 
@@ -386,7 +404,7 @@ mod tests {
 
         let members = vec![member("api"), member("web")];
         let mut full = vec![OsString::from("logos")];
-        full.extend(supervisor_argv(&members, 2));
+        full.extend(supervisor_argv(&members, Some(2)));
 
         let cli = crate::Cli::try_parse_from(full).expect("the spawned argv parses");
         let crate::Commands::InternalWarm {
@@ -410,7 +428,7 @@ mod tests {
     #[test]
     fn no_newly_approved_members_spawns_no_supervisor() {
         assert!(
-            !spawn_supervisor(&[]),
+            !spawn_supervisor(&[], None),
             "an empty delta must spawn nothing at all"
         );
     }
@@ -453,7 +471,7 @@ mod tests {
         use std::sync::Mutex;
         static SEEN: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
 
-        fn record(members: &[Member]) -> bool {
+        fn record(members: &[Member], _k: Option<usize>) -> bool {
             SEEN.lock()
                 .unwrap()
                 .push(members.iter().map(|m| m.name.clone()).collect());
@@ -476,6 +494,56 @@ mod tests {
         assert_eq!(names, ["api", "web"], "the single invocation carries the whole delta");
     }
 
+    /// The declared `[workspace.warm] concurrency` is the K the supervisor
+    /// actually honours (S-322, FR-WS-01, BR-44) — asserted end to end at this
+    /// seam, because every link in the chain is individually plausible while
+    /// the chain is broken: the key can parse, ride the `Federation`, and still
+    /// never reach the argv if this call site forwards `None`.
+    #[test]
+    fn a_declared_warm_concurrency_reaches_the_supervisor_argv() {
+        use std::sync::Mutex;
+        static SEEN: Mutex<Vec<Option<usize>>> = Mutex::new(Vec::new());
+
+        fn record(_members: &[Member], k: Option<usize>) -> bool {
+            SEEN.lock().unwrap().push(k);
+            true
+        }
+
+        let tmp = fixture(&["api", "web"]);
+        // A hand-written manifest declaring the override, with no members yet:
+        // both siblings are still a fresh delta, so the warm is invoked.
+        std::fs::write(
+            tmp.path().join(logos_core::federation::MANIFEST_FILENAME),
+            "[workspace]\nname = \"pec\"\n\n[workspace.warm]\nconcurrency = 2\n",
+        )
+        .unwrap();
+
+        SEEN.lock().unwrap().clear();
+        let out = Output { json: true, quiet: true };
+        assert_eq!(run(tmp.path(), true, &[], &out, record).unwrap(), 0);
+
+        let seen = SEEN.lock().unwrap().clone();
+        assert_eq!(seen, [Some(2)], "the declared override reaches the warm");
+
+        // …and survives resolution into the argv the supervisor is spawned with.
+        // Asserted through `supervisor_argv` itself, which owns the resolution
+        // `spawn_supervisor` hands it: re-composing `effective_concurrency` in
+        // the test body instead would assert the test's own arithmetic, and
+        // left `spawn_supervisor` forwarding `None` undetectable.
+        let argv = supervisor_argv(&[member("api")], Some(2));
+        assert_eq!(argv[1], OsString::from("--concurrency"));
+        assert_eq!(argv[2], OsString::from("2"), "the declared K, not the default");
+
+        // The other direction, which is what makes the assertion above mean
+        // something: no declaration resolves to the core-derived default.
+        let argv = supervisor_argv(&[member("api")], None);
+        assert_eq!(
+            argv[2],
+            OsString::from(warm::default_concurrency().to_string()),
+            "absent ⇒ the core-derived default"
+        );
+    }
+
     /// A re-run warms only the newly approved delta — the already-manifested
     /// members were warmed (or fell back to lazy indexing) on the run that
     /// first added them. Handing the supervisor the full member set instead is
@@ -485,7 +553,7 @@ mod tests {
         use std::sync::Mutex;
         static SEEN: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
 
-        fn record(members: &[Member]) -> bool {
+        fn record(members: &[Member], _k: Option<usize>) -> bool {
             SEEN.lock()
                 .unwrap()
                 .push(members.iter().map(|m| m.name.clone()).collect());

@@ -213,6 +213,7 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
         default: None,
         links: Vec::new(),
         governance: Default::default(),
+        warm_concurrency: None,
     };
     let registry =
         EngineRegistry::<Engine>::with_budget(federation, RegistryMode::Lazy, budget);

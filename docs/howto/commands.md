@@ -136,7 +136,8 @@ it from the directory that contains your service repos. It:
 3. **Initialises each member** — runs the ordinary per-member `init`
    (write-if-absent, **never** clobbering an existing member config).
 4. **Writes the manifest** — a `logos.workspace.toml` at the parent listing the
-   approved members, plus your hand-written `default`/`autodiscover`/`[[links]]`
+   approved members, plus your hand-written
+   `default`/`autodiscover`/`[workspace.warm]`/`[[links]]`/`[governance]`
    preserved verbatim on a re-run.
 5. **Injects one MCP entry** — a single `logos-workspace` server key in the
    parent `.mcp.json` (distinct from the per-repo `logos` key so a member's own
@@ -147,7 +148,38 @@ detached supervisor** warms the approved members through a bounded queue — at
 most `max(1, cores / 4)` members index concurrently, capped at 4
 ([FR-WS-14](../specs/requirements/FR-WS-14.md)). It is one supervisor for the
 whole workspace, not one process per member: an 86-member workspace warms four
-at a time, not 86 at once. A member that has not finished warming still indexes
+at a time, not 86 at once.
+
+**Tuning the warm bound.** The default is deliberately conservative because it
+is derived for a host Logos knows nothing about. To set it yourself, add an
+optional table to `logos.workspace.toml`
+([FR-WS-01](../specs/requirements/FR-WS-01.md)):
+
+```toml
+[workspace]
+name    = "pec-services"
+members = ["archive-api", "mailbox-api"]
+
+[workspace.warm]
+# optional; default = max(1, cores / 4), capped at 4
+concurrency = 2
+```
+
+Know what you are buying. Each of the K is a full `logos index` child that is
+itself parallel over your cores, so K costs roughly **K × cores worker threads**
+and up to **K × one member index's peak memory** — which is exactly why the
+default divides by four instead of scaling with the host. Legal values are
+`1`–`16`. `0` or anything above `16` is rejected when the manifest loads, with a
+message naming the key and the legal range; a non-integer is rejected as a type
+error naming the key and its line. Either way it is exit code 2 and never a
+quiet clamp to something you did not ask for. Note that the manifest is read on
+the path of *every* command, so a rejected value fails all of them until you fix
+it — the same as any other malformed key. Omit the key
+or the whole table for the default. Whatever resolves is a **hard** ceiling: no
+member count and no `--yes` puts more indexes in flight than K
+([BR-44](../specs/software-spec.md#327-workspace-federation)). The key is
+operator-authored — `logos init --workspace` never writes it, and never erases
+it on a re-run. A member that has not finished warming still indexes
 correctly on first real use (lazy `ensure_indexed`). A member that fails to
 *initialise* — a manifest or MCP step — is reported **degraded** without
 aborting the others. A member whose **warm** fails after the command has

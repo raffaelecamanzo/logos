@@ -15,9 +15,22 @@
 //! surfaces map to exit code 2. A *missing* manifest is **not** a fault — it is
 //! the single-root case, handled one level up as `Ok(None)`.
 //!
+//! `deny_unknown_fields` makes registration **load-bearing**: every key an
+//! operator may write has to be declared here or the manifest is rejected
+//! whole. `[workspace.warm] concurrency` ([`Warm`], [FR-WS-14]) is the current
+//! example — unregistered, a manifest carrying it did not merely lose its warm
+//! bound, it took the whole workspace back to single-root behind an exit-2
+//! config error.
+//!
+//! Ranges `serde` cannot express are checked by `Manifest::validate` at the end
+//! of [`parse`], so an out-of-range value is a load-time
+//! [`ConfigError::InvalidValue`] with an actionable message rather than
+//! something a downstream default silently clamps.
+//!
 //! [federation component]: ../../../docs/specs/architecture/components/federation.md
 //! [config component]: ../../../docs/specs/architecture/components/config.md
 //! [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
+//! [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
 //! [FR-CF-01]: ../../../docs/specs/requirements/FR-CF-01.md
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
@@ -83,6 +96,92 @@ pub struct Manifest {
     /// authoring state.
     #[serde(default, skip_serializing_if = "Governance::is_unset")]
     pub governance: Governance,
+}
+
+impl Manifest {
+    /// The declared warm-concurrency override, or `None` for the core-derived
+    /// default ([FR-WS-01], [FR-WS-14]).
+    ///
+    /// The `Some` source of
+    /// [`warm::effective_concurrency`](super::warm::effective_concurrency).
+    /// Reading it through one accessor is what lets a bare `[workspace.warm]`
+    /// (table present, key absent) mean exactly what an absent table means,
+    /// without every caller having to flatten two `Option`s the same way.
+    ///
+    /// In `1..=`[`warm::MANIFEST_CONCURRENCY_MAX`](super::warm::MANIFEST_CONCURRENCY_MAX)
+    /// **when the `Manifest` came from [`parse`]** — that is the only
+    /// constructor that validates. The bound is not enforced by the type:
+    /// [`Warm::concurrency`] is a plain `pub Option<usize>`, so a
+    /// programmatically built `Manifest` can carry anything, and
+    /// [`warm::effective_concurrency`](super::warm::effective_concurrency)
+    /// applies no ceiling. Stated precisely because an unconditional
+    /// "guaranteed" here is what would stop the next author from re-checking.
+    ///
+    /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
+    /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+    #[must_use]
+    pub fn warm_concurrency(&self) -> Option<usize> {
+        self.workspace.warm.and_then(|w| w.concurrency)
+    }
+
+    /// Validate the ranges `serde` cannot express, at load ([FR-WS-01],
+    /// [FR-CF-01], [NFR-UX-02]).
+    ///
+    /// Serde already rejects a non-integer `concurrency` by type, with the
+    /// offending key and line — actionable as-is. What it cannot say is that
+    /// `0` would stall the queue forever and that a value one-per-member
+    /// recreates the very fan-out [BR-44] bounds, so those are checked here and
+    /// reported as [`ConfigError::InvalidValue`] (exit 2). Rejecting **at parse
+    /// time** is the point: [`warm::effective_concurrency`](super::warm::effective_concurrency)
+    /// floors a zero, so a value left unvalidated here would be silently
+    /// clamped rather than corrected by whoever wrote it.
+    ///
+    /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
+    /// [FR-CF-01]: ../../../docs/specs/requirements/FR-CF-01.md
+    /// [NFR-UX-02]: ../../../docs/specs/requirements/NFR-UX-02.md
+    /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    fn validate(&self) -> Result<(), ConfigError> {
+        let Some(k) = self.warm_concurrency() else {
+            return Ok(());
+        };
+        /// The smallest declarable bound. 1, not 0: a zero bound could never
+        /// drain the queue, so it can never be honoured literally.
+        const LEGAL_MIN: usize = 1;
+
+        if (LEGAL_MIN..=super::warm::MANIFEST_CONCURRENCY_MAX).contains(&k) {
+            return Ok(());
+        }
+        Err(ConfigError::InvalidValue {
+            key: "workspace.warm.concurrency".to_string(),
+            // Both branches name the whole legal range, not just the bound
+            // that was breached. Naming only the floor once let the zero
+            // message mention `CONCURRENCY_CAP` (the *default's* cap) and
+            // nothing else, which reads as "4 is the highest I may declare"
+            // when the ceiling is four times that. The core-derived default is
+            // reported as the resolved number for this host rather than as the
+            // `cores / 4` formula, which lives in `warm::derive_concurrency`
+            // and would make this message lie the moment it retunes.
+            message: format!(
+                "{k} is outside the valid range {}..={} — {}. Omit the key \
+                 entirely for the core-derived default ({} on this host).",
+                LEGAL_MIN,
+                super::warm::MANIFEST_CONCURRENCY_MAX,
+                if k < LEGAL_MIN {
+                    "a bound of 0 would stall the background warm forever".to_string()
+                } else {
+                    format!(
+                        "each concurrent member index is itself parallel over the \
+                         host's cores, so K costs K × cores worker threads and up \
+                         to K × one index's peak memory; a value near the member \
+                         count is the unbounded fan-out the bound exists to \
+                         prevent (the default is capped at {})",
+                        super::warm::CONCURRENCY_CAP
+                    )
+                },
+                super::warm::default_concurrency()
+            ),
+        })
+    }
 }
 
 /// The `[governance]` table — the workspace-level rule family ([FR-WS-13]).
@@ -243,6 +342,55 @@ pub struct WorkspaceSection {
     /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autodiscover: Option<Autodiscover>,
+    /// The optional `[workspace.warm]` table — the per-workspace override of
+    /// the background index warm's concurrency bound ([FR-WS-01], [FR-WS-14]).
+    ///
+    /// Absent on every manifest written before this key existed, and on every
+    /// manifest `logos init --workspace` writes: the table is operator-authored
+    /// only, and an absent one means "use the core-derived default", not
+    /// "concurrency = 0".
+    ///
+    /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
+    /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warm: Option<Warm>,
+}
+
+/// The `[workspace.warm]` sub-table ([FR-WS-01], [FR-WS-14], [BR-44]).
+///
+/// Every field is optional, so a bare `[workspace.warm]` is valid and inert —
+/// the same "documented but currently off" posture
+/// `[workspace.autodiscover] enabled = false` has, and a natural intermediate
+/// authoring state — while a manifest without the table parses byte-for-byte as
+/// it did before. Why registering it at all is load-bearing under
+/// `deny_unknown_fields` is stated in the module docs.
+///
+/// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
+/// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+/// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Warm {
+    /// `concurrency = N` — how many member indexes the warm supervisor may run
+    /// at once, overriding the core-derived `max(1, cores / 4)` default
+    /// ([`warm::default_concurrency`](super::warm::default_concurrency)).
+    ///
+    /// K is not free — it buys `K × cores` worker threads and up to `K ×` one
+    /// member index's peak RSS, which is why it is range-checked rather than
+    /// accepted verbatim. That cost model, and the reasoning behind the
+    /// ceiling, is stated once at
+    /// [`warm::MANIFEST_CONCURRENCY_MAX`](super::warm::MANIFEST_CONCURRENCY_MAX);
+    /// `docs/howto/commands.md` states it for the operator.
+    ///
+    /// Whatever resolves from this is a **hard** ceiling: no member count and no
+    /// `--yes` can put more indexes in flight ([BR-44]).
+    ///
+    /// Omit the key (or the whole table) for the default. `None` here — a bare
+    /// table — is "no override", never zero.
+    ///
+    /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<usize>,
 }
 
 /// The `[workspace.autodiscover]` sub-table ([FR-WS-01]).
@@ -295,8 +443,13 @@ pub struct Link {
 /// # Errors
 /// - [`ConfigError::Io`] if the file cannot be read (it was located by the
 ///   up-tree walk, so a read failure is a real fault, not "no manifest").
-/// - [`ConfigError::Parse`] if the TOML is syntactically invalid or contains an
-///   unknown key (`deny_unknown_fields`) — surfaced as exit code 2 ([FR-CF-01]).
+/// - [`ConfigError::Parse`] if the TOML is syntactically invalid, contains an
+///   unknown key (`deny_unknown_fields`), or gives a key a value of the wrong
+///   type — surfaced as exit code 2 ([FR-CF-01]).
+/// - [`ConfigError::InvalidValue`] if a well-typed value is out of range —
+///   today `[workspace.warm] concurrency` outside
+///   `1..=`[`warm::MANIFEST_CONCURRENCY_MAX`](super::warm::MANIFEST_CONCURRENCY_MAX)
+///   ([`Manifest::validate`], also exit code 2).
 ///
 /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
 /// [FR-CF-01]: ../../../docs/specs/requirements/FR-CF-01.md
@@ -305,24 +458,32 @@ pub fn parse(path: &Path) -> Result<Manifest, ConfigError> {
         path: path.to_path_buf(),
         source,
     })?;
-    toml::from_str(&text).map_err(|source| ConfigError::Parse {
+    let manifest: Manifest = toml::from_str(&text).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
         source,
-    })
+    })?;
+    manifest.validate()?;
+    Ok(manifest)
 }
 
 /// Create or incrementally update the manifest at `root` from the approved
 /// member-name set (`logos init --workspace`, [FR-WS-02]): a fresh manifest is
 /// created with `name` and `members`; an existing one keeps its `name`,
-/// `default`, `autodiscover`, and `links` untouched and only has `members`
-/// upserted (sorted, de-duplicated). A result byte-identical to what's already
+/// `default`, `autodiscover`, `warm`, `links`, and `governance` untouched and
+/// only has `members` upserted (sorted, de-duplicated). A result byte-identical to what's already
 /// on disk reports [`InitAction::Unchanged`] without writing — the
 /// write-if-different extension of [FR-IN-01]'s write-if-absent posture,
 /// applied to the one field this command owns.
 ///
 /// # Errors
-/// [`ConfigError::Io`]/[`ConfigError::Parse`] reading a malformed existing
-/// manifest; [`ConfigError::Write`] if the write itself fails.
+/// [`ConfigError::Io`]/[`ConfigError::Parse`]/[`ConfigError::InvalidValue`]
+/// reading a malformed existing manifest — it is read through [`parse`], so a
+/// re-run over an out-of-range manifest fails loud rather than rewriting it;
+/// [`ConfigError::Write`] if the write itself fails.
+///
+/// Because the existing manifest is validated on the way in, everything this
+/// function carries forward is already in range: it can never write a manifest
+/// its own [`parse`] would reject.
 ///
 /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 /// [FR-IN-01]: ../../../docs/specs/requirements/FR-IN-01.md
@@ -346,6 +507,13 @@ pub fn upsert(root: &Path, name: &str, members: &[String]) -> Result<InitStep, C
             members,
             default: existing.as_ref().and_then(|m| m.workspace.default.clone()),
             autodiscover: existing.as_ref().and_then(|m| m.workspace.autodiscover.clone()),
+            // Operator-authored tuning this command does not own, carried
+            // across for the same reason `name` and `autodiscover` are: `upsert`
+            // rebuilds the whole struct, so a field not named here is silently
+            // erased on the next `logos init --workspace` re-run ([FR-WS-01]).
+            // The bare table is preserved too, not only a set key — see
+            // `Governance::is_unset` for the same distinction stated at length.
+            warm: existing.as_ref().and_then(|m| m.workspace.warm),
         },
         links: existing.as_ref().map_or_else(Vec::new, |m| m.links.clone()),
         // Like `links`, the workspace rule family is user-authored policy this
@@ -358,8 +526,9 @@ pub fn upsert(root: &Path, name: &str, members: &[String]) -> Result<InitStep, C
     };
 
     // The struct holds no maps/floats — every field is a String, Vec<String>,
-    // Option<String>, Option<Autodiscover>, or a Vec of Link/governance tables of
-    // the same — so TOML serialisation cannot fail in practice.
+    // Option<String>, Option<Autodiscover>, Option<Warm> (an Option<usize>), or
+    // a Vec of Link/governance tables of the same — so TOML serialisation cannot
+    // fail in practice.
     let text = toml::to_string_pretty(&manifest)
         .expect("Manifest holds only TOML-representable scalar/table fields");
 
@@ -399,6 +568,8 @@ mod tests {
 
     use std::fs;
     use tempfile::TempDir;
+
+    use crate::federation::warm;
 
     /// Write `body` to `<tmp>/logos.workspace.toml` and return its path.
     fn write_manifest(tmp: &TempDir, body: &str) -> std::path::PathBuf {
@@ -738,5 +909,288 @@ mod tests {
 
         let err = parse(&path).expect_err("an unknown rule key must fail loud");
         assert_eq!(err.exit_code(), 2);
+    }
+
+    // ── the `[workspace.warm]` table (S-322, CR-099, FR-WS-01) ────────────
+
+    /// The declared table parses and `warm_concurrency` reads the override —
+    /// the value [`warm::effective_concurrency`] takes as its `Some` source.
+    #[test]
+    fn parses_the_workspace_warm_concurrency_key() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(
+            &tmp,
+            "[workspace]\nname = \"pec\"\nmembers = [\"api\"]\n\n[workspace.warm]\nconcurrency = 2\n",
+        );
+        let m = parse(&path).expect("a declared warm bound parses");
+        assert_eq!(m.workspace.warm.expect("present").concurrency, Some(2));
+        assert_eq!(m.warm_concurrency(), Some(2));
+        assert_eq!(
+            warm::effective_concurrency(m.warm_concurrency()),
+            2,
+            "the declared value is the K the supervisor honours (BR-44)"
+        );
+    }
+
+    /// A manifest **without** the table parses exactly as before: no override,
+    /// so the core-derived default applies — and nothing is invented on write.
+    #[test]
+    fn a_manifest_without_the_warm_table_declares_no_override() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(&tmp, "[workspace]\nname = \"solo\"\nmembers = [\"api\"]\n");
+        let m = parse(&path).expect("a pre-key manifest keeps working");
+        assert!(m.workspace.warm.is_none());
+        assert_eq!(m.warm_concurrency(), None);
+        assert_eq!(
+            warm::effective_concurrency(m.warm_concurrency()),
+            warm::default_concurrency(),
+            "absent ⇒ the core-derived default"
+        );
+
+        // The write side of "unchanged": an absent table is never materialised,
+        // so `upsert` over a pre-key manifest cannot introduce one.
+        let text = toml::to_string_pretty(&m).unwrap();
+        assert!(!text.contains("warm"), "no phantom table on write: {text}");
+    }
+
+    /// A bare `[workspace.warm]` is valid and declares no override — the same
+    /// "documented but inert" posture `[workspace.autodiscover] enabled = false`
+    /// has. It must not be mistaken for `concurrency = 0`.
+    #[test]
+    fn a_bare_warm_table_is_valid_and_declares_no_override() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(&tmp, "[workspace]\nname = \"a\"\n\n[workspace.warm]\n");
+        let m = parse(&path).expect("a bare table is valid");
+        assert!(m.workspace.warm.is_some(), "the table itself is carried");
+        assert_eq!(m.warm_concurrency(), None, "but it declares no override");
+    }
+
+    /// `concurrency = 0` is rejected at parse time with an actionable message —
+    /// never silently floored to 1 by [`warm::effective_concurrency`], which is
+    /// where a zero would otherwise disappear.
+    #[test]
+    fn a_zero_warm_concurrency_is_rejected_not_silently_floored() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(
+            &tmp,
+            "[workspace]\nname = \"a\"\n\n[workspace.warm]\nconcurrency = 0\n",
+        );
+        let err = parse(&path).expect_err("zero must fail loud");
+        let ConfigError::InvalidValue { ref key, ref message } = err else {
+            panic!("expected an InvalidValue, got {err:?}");
+        };
+        assert_eq!(key, "workspace.warm.concurrency");
+        assert!(
+            message.contains(&format!("1..={}", warm::MANIFEST_CONCURRENCY_MAX)),
+            "names the whole legal range, not just the bound breached: {message}"
+        );
+        assert!(
+            message.contains("stall"),
+            "and why zero specifically cannot be honoured: {message}"
+        );
+        assert!(
+            message.contains("Omit the key"),
+            "and how to get the default instead: {message}"
+        );
+        // A wrapped literal that lost its `\` continuations reads as a run of
+        // spaces on the operator's terminal. Cheap to assert, and it is how
+        // this very message was caught garbled before review.
+        assert!(!message.contains("  "), "message is not garbled: {message:?}");
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    /// A value above [`warm::MANIFEST_CONCURRENCY_MAX`] is rejected at parse
+    /// time — `concurrency = 84` (one per member) is exactly the unbounded
+    /// fan-out BR-44 exists to prevent, so it must not be accepted verbatim.
+    #[test]
+    fn a_warm_concurrency_above_the_maximum_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(
+            &tmp,
+            &format!(
+                "[workspace]\nname = \"a\"\n\n[workspace.warm]\nconcurrency = {}\n",
+                warm::MANIFEST_CONCURRENCY_MAX + 1
+            ),
+        );
+        let err = parse(&path).expect_err("an out-of-range bound must fail loud");
+        let ConfigError::InvalidValue { ref key, ref message } = err else {
+            panic!("expected an InvalidValue, got {err:?}");
+        };
+        assert_eq!(key, "workspace.warm.concurrency");
+        assert!(
+            message.contains(&warm::MANIFEST_CONCURRENCY_MAX.to_string()),
+            "names the ceiling: {message}"
+        );
+        assert!(
+            message.contains(&(warm::MANIFEST_CONCURRENCY_MAX + 1).to_string()),
+            "names the rejected value: {message}"
+        );
+        assert!(
+            message.contains(&format!("1..={}", warm::MANIFEST_CONCURRENCY_MAX)),
+            "names the whole legal range: {message}"
+        );
+        assert!(!message.contains("  "), "message is not garbled: {message:?}");
+    }
+
+    /// Both ends of the accepted range parse — the rejection is a range check,
+    /// not an off-by-one that also refuses the legal boundary.
+    #[test]
+    fn the_warm_concurrency_range_boundaries_are_accepted() {
+        for k in [1, warm::MANIFEST_CONCURRENCY_MAX] {
+            let tmp = TempDir::new().unwrap();
+            let path = write_manifest(
+                &tmp,
+                &format!("[workspace]\nname = \"a\"\n\n[workspace.warm]\nconcurrency = {k}\n"),
+            );
+            assert_eq!(
+                parse(&path)
+                    .expect("a boundary value is legal")
+                    .warm_concurrency(),
+                Some(k)
+            );
+        }
+    }
+
+    /// A non-integer value is a parse error (serde's own type rejection),
+    /// carrying the offending key and line — never coerced, never clamped.
+    #[test]
+    fn a_non_integer_warm_concurrency_is_a_parse_error() {
+        for bad in ["\"two\"", "2.5", "true", "-1"] {
+            let tmp = TempDir::new().unwrap();
+            let path = write_manifest(
+                &tmp,
+                &format!("[workspace]\nname = \"a\"\n\n[workspace.warm]\nconcurrency = {bad}\n"),
+            );
+            let err = parse(&path).expect_err("a non-integer must be rejected");
+            assert!(
+                matches!(err, ConfigError::Parse { .. }),
+                "{bad} must be a parse error, got {err:?}"
+            );
+            // The doc promises the offending key reaches the operator. It does
+            // so only through toml's rendered source snippet, so pin that
+            // rather than the variant alone — losing the span would leave the
+            // message un-actionable with every other assertion still green.
+            let text = err.to_string();
+            assert!(
+                text.contains("concurrency"),
+                "{bad} must name the offending key: {text}"
+            );
+            assert_eq!(err.exit_code(), 2);
+        }
+    }
+
+    /// A value beyond the integer type is still a clean exit-2 config fault,
+    /// not a panic or a wrap-around.
+    ///
+    /// Only the exit code is asserted: which variant it lands in is
+    /// target-width dependent — on a 64-bit host `i64::MAX` deserialises into
+    /// `usize` and is caught by the range check as `InvalidValue`, while on a
+    /// 32-bit target serde rejects it by type as `Parse` first. Both are exit
+    /// 2 with the key named, which is the property that matters.
+    #[test]
+    fn an_integer_beyond_the_type_is_still_a_clean_exit_2() {
+        for bad in ["9223372036854775807", "99999999999999999999"] {
+            let tmp = TempDir::new().unwrap();
+            let path = write_manifest(
+                &tmp,
+                &format!("[workspace]\nname = \"a\"\n\n[workspace.warm]\nconcurrency = {bad}\n"),
+            );
+            let err = parse(&path).expect_err("an oversized integer must be rejected");
+            assert_eq!(err.exit_code(), 2, "{bad}: {err}");
+        }
+    }
+
+    /// An unknown key inside `[workspace.warm]` fails loud — the table is
+    /// registered under `deny_unknown_fields` like every other.
+    #[test]
+    fn an_unknown_warm_key_fails_loud() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(
+            &tmp,
+            "[workspace]\nname = \"a\"\n\n[workspace.warm]\nconcurrancy = 2\n",
+        );
+        assert!(matches!(parse(&path), Err(ConfigError::Parse { .. })));
+    }
+
+    /// `upsert` preserves the key across an incremental re-run — the same
+    /// preservation `name`, `default`, `autodiscover` and `links` already get.
+    /// The command owns `members` and nothing else.
+    #[test]
+    fn upsert_preserves_the_warm_concurrency_key() {
+        let tmp = TempDir::new().unwrap();
+        write_manifest(
+            &tmp,
+            "[workspace]\nname = \"pec\"\nmembers = [\"api\"]\n\n[workspace.warm]\nconcurrency = 3\n",
+        );
+
+        let step = upsert(tmp.path(), "ignored", &["api".into(), "web".into()]).expect("updates");
+        assert_eq!(step.action, InitAction::Updated);
+
+        let m = parse(&tmp.path().join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(m.workspace.members, ["api", "web"], "members are upserted");
+        assert_eq!(
+            m.warm_concurrency(),
+            Some(3),
+            "a re-run must not erase the operator's tuned bound"
+        );
+    }
+
+    /// Every optional table at once survives an `upsert` re-write together.
+    ///
+    /// Not redundant with the per-section preservation tests: `upsert` rebuilds
+    /// the struct and re-serialises it, and TOML requires a table's scalar keys
+    /// to precede its sub-tables. A field order that round-trips with **one**
+    /// sub-table can still emit unparseable TOML with two, and the manifest
+    /// this key is for is exactly the one that already declares the others.
+    #[test]
+    fn upsert_round_trips_a_manifest_declaring_every_optional_table() {
+        let tmp = TempDir::new().unwrap();
+        write_manifest(
+            &tmp,
+            "[workspace]\nname = \"pec\"\nmembers = [\"api\"]\ndefault = \"api\"\n\n\
+             [workspace.autodiscover]\nenabled = false\n\n\
+             [workspace.warm]\nconcurrency = 2\n\n\
+             [[links]]\nrelation = \"http_call\"\nfrom = \"web::c\"\nto = \"api::h\"\n\n\
+             [[governance.service_layers]]\nname = \"core\"\nmembers = [\"api\"]\n",
+        );
+
+        upsert(tmp.path(), "ignored", &["api".into(), "web".into()]).expect("updates");
+
+        // Re-parsing is the assertion that matters: it proves the re-written
+        // TOML is still valid, not merely that a struct field was copied.
+        let m = parse(&tmp.path().join(MANIFEST_FILENAME)).expect("the re-write is valid TOML");
+        assert_eq!(m.workspace.members, ["api", "web"]);
+        assert_eq!(m.workspace.default.as_deref(), Some("api"));
+        assert!(!m.workspace.autodiscover.as_ref().expect("kept").enabled);
+        assert_eq!(m.warm_concurrency(), Some(2));
+        assert_eq!(m.links.len(), 1);
+        assert_eq!(m.governance.service_layers.len(), 1);
+
+        // And the rewrite is a fixed point. Re-parsing proves the output is
+        // valid; this proves it is *settled* — without it, a serialisation that
+        // never converges would rewrite the operator's tuned manifest on every
+        // `logos init --workspace` and never once report `Unchanged`.
+        let step = upsert(tmp.path(), "ignored", &["api".into(), "web".into()])
+            .expect("a settled manifest re-runs clean");
+        assert_eq!(step.action, InitAction::Unchanged);
+    }
+
+    /// A bare table survives `upsert` too: it is user-authored content, the
+    /// same reason a layers-only `[governance]` is round-tripped rather than
+    /// silently deleted on the next `logos init --workspace`.
+    #[test]
+    fn upsert_preserves_a_bare_warm_table() {
+        let tmp = TempDir::new().unwrap();
+        write_manifest(
+            &tmp,
+            "[workspace]\nname = \"pec\"\nmembers = [\"api\"]\n\n[workspace.warm]\n",
+        );
+        upsert(tmp.path(), "ignored", &["api".into()]).expect("upserts");
+
+        let m = parse(&tmp.path().join(MANIFEST_FILENAME)).unwrap();
+        assert!(
+            m.workspace.warm.is_some(),
+            "the declared table is carried through"
+        );
     }
 }

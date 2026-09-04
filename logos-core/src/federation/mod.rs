@@ -185,6 +185,30 @@ pub struct Federation {
     ///
     /// [FR-WS-13]: ../../../docs/specs/requirements/FR-WS-13.md
     pub governance: Governance,
+    /// The declared `[workspace.warm] concurrency` override, or `None` for the
+    /// core-derived default ([FR-WS-01], [FR-WS-14]).
+    ///
+    /// Carried on the federation rather than re-read from disk so the surface
+    /// that spawns the warm supervisor gets K from the same manifest parse that
+    /// resolved the member set — one read, one source of truth.
+    ///
+    /// In `1..=`[`warm::MANIFEST_CONCURRENCY_MAX`] when it came from
+    /// [`discover`], which validates via [`manifest::parse`]. The field is
+    /// `pub` on a struct built by literal in tests across several crates, so
+    /// that is a property of the producer, not of the type — see
+    /// [`manifest::Manifest::warm_concurrency`].
+    ///
+    /// This is the value as **declared**, not the resolved K: `None` means "the
+    /// core-derived default applies", which only
+    /// [`warm::effective_concurrency`] can turn into a number, and only on the
+    /// host that will run the warm. Skipped on serialisation when absent, so an
+    /// un-tuned workspace serialises byte-identically to before the key
+    /// existed.
+    ///
+    /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
+    /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_concurrency: Option<usize>,
 }
 
 /// Discover the workspace by walking **up** from `hint`'s resolved root
@@ -206,9 +230,15 @@ pub struct Federation {
 ///
 /// # Errors
 /// Returns a [`ConfigError`] (exit code 2) when a manifest **is** found but is
-/// unreadable ([`ConfigError::Io`]) or malformed / has an unknown key
-/// ([`ConfigError::Parse`]) — a discovered-but-broken manifest fails loud rather
-/// than silently degrading to single-root ([ADR-14]).
+/// unreadable ([`ConfigError::Io`]), malformed / has an unknown key or a
+/// wrong-typed value ([`ConfigError::Parse`]), or gives a key an out-of-range
+/// value ([`ConfigError::InvalidValue`]) — a discovered-but-broken manifest
+/// fails loud rather than silently degrading to single-root ([ADR-14]).
+///
+/// Note the reach: this walk is on the path of **every** command, so a manifest
+/// rejected here fails all of them, not just the one that would have used the
+/// offending key. That is the intended posture, and it is why the messages name
+/// the key and what a legal value is.
 ///
 /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
 /// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
@@ -254,6 +284,10 @@ pub fn discover(hint: &Path) -> Result<Option<Federation>, ConfigError> {
         .and_then(|spec| member_name(&root, &root.join(spec)))
         .filter(|name| members.iter().any(|m| &m.name == name));
 
+    // Read before the literal moves `manifest` apart field by field, the same
+    // reason `members` and `default` above are locals rather than inline.
+    let warm_concurrency = manifest.warm_concurrency();
+
     Ok(Some(Federation {
         name: manifest.workspace.name,
         root,
@@ -261,6 +295,7 @@ pub fn discover(hint: &Path) -> Result<Option<Federation>, ConfigError> {
         default,
         links: manifest.links,
         governance: manifest.governance,
+        warm_concurrency,
     }))
 }
 

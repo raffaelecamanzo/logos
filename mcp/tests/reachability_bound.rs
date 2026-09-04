@@ -76,6 +76,7 @@ fn registry(root: &Path, members: Vec<Member>) -> EngineRegistry<Engine> {
         default: None,
         links: Vec::new(),
         governance: Default::default(),
+        warm_concurrency: None,
     };
     EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy)
 }
