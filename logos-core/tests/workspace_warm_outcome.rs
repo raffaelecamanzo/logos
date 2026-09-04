@@ -117,17 +117,22 @@ fn warm_state_of<'a>(status: &'a WorkspaceStatus, member: &str) -> &'a MemberWar
         .warm
 }
 
-/// **The story's core assertion** ([FR-WS-17] AC1): after a warm in which one
-/// member's index failed, and once the supervisor has exited, `workspace
-/// status` from a cold process reports that member `degraded` **carrying the
-/// recorded reason**.
+/// [FR-WS-17] AC1 at the **filesystem** join: after a warm in which one member's
+/// index failed, a `workspace status` sharing nothing with the producer but the
+/// disk reports that member `degraded` **carrying the recorded reason**.
 ///
 /// The supervisor's side is confined to its own scope and dropped before the
 /// reading side exists, so nothing but the sidecar can carry the fact across.
 /// Deleting the `record_outcomes` call, keying the record on absolute roots, or
 /// writing it anywhere a `workspace status` does not look all fail here.
+///
+/// Named for a cold *registry*, not a cold process, because that is what it is:
+/// both halves run in one process, so a hypothetical in-process memo of the
+/// record would still pass. The genuine process-boundary proof — two real
+/// `logos` binaries, the producer provably exited — is
+/// `cli/tests/init_workspace.rs::a_failed_warm_is_degraded_in_a_later_cold_process`.
 #[test]
-fn a_failed_warm_reports_degraded_from_a_cold_process_with_its_reason() {
+fn a_failed_warm_reports_degraded_from_a_cold_registry_with_its_reason() {
     let (_dir, root, members) = workspace(&[("api", false), ("web", false)]);
 
     // ── the supervisor process ────────────────────────────────────────────
@@ -236,6 +241,15 @@ fn a_workspace_with_no_record_is_byte_identical_to_before() {
         read_outcomes(&root).members.contains_key("web"),
         "the record must actually have been written, or this proves nothing"
     );
+    // The differential: while the record IS there the payload must DIFFER.
+    // Without it, a build that never read the sidecar would pass the equality
+    // below just as happily.
+    let with_record = serde_json::to_value(status_from_a_cold_start(&root, &members)).expect("json");
+    assert_ne!(
+        with_record, before,
+        "the record must actually be consumed, or the equality below proves nothing"
+    );
+
     std::fs::remove_file(root.join(OUTCOME_FILENAME)).expect("remove the record");
 
     let after = serde_json::to_value(status_from_a_cold_start(&root, &members)).expect("json");
@@ -267,7 +281,11 @@ fn a_corrupt_record_degrades_the_read_model_without_failing_it() {
     })
     .expect("json");
 
+    // The `good` record is in the table as a CONTROL: it must NOT read as
+    // healthy. Without it, every row below is satisfied by a build that ignores
+    // the sidecar entirely, and the whole test is vacuous.
     for (case, bytes) in [
+        ("a well-formed record (control)", good.clone()),
         ("malformed", "{ not json".to_string()),
         ("truncated", good[..good.len() / 2].to_string()),
         ("empty", String::new()),
@@ -286,6 +304,13 @@ fn a_corrupt_record_degrades_the_read_model_without_failing_it() {
 
         let status = serde_json::to_value(status_from_a_cold_start(&root, &members)).expect("json");
 
+        if case == "a well-formed record (control)" {
+            assert_ne!(
+                status, healthy,
+                "the control must be consumed — otherwise every row below is vacuous"
+            );
+            continue;
+        }
         assert_eq!(status, healthy, "{case} must read exactly as no record at all");
     }
 }

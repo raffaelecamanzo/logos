@@ -838,7 +838,12 @@ mod tests {
     /// alongside failures ([FR-WS-17]).
     #[test]
     fn record_outcomes_files_every_outcome_under_its_member_name() {
-        let (_dir, root, members) = workspace(&["api", "web"]);
+        // `services/web` is NESTED on purpose: a member name is a
+        // workspace-relative *path*, so the relativisation — not just the
+        // basename — is what a read-model joins on. A producer that filed
+        // `web` here would key on something `workspace status` never looks up,
+        // and a flat fixture cannot tell the two apart.
+        let (_dir, root, members) = workspace(&["api", "services/web"]);
 
         record_outcomes(&summary(&[
             (&members[0], None),
@@ -852,11 +857,11 @@ mod tests {
             "a SUCCESS is recorded too, not only failures"
         );
         assert_eq!(
-            record.members.get("web"),
+            record.members.get("services/web"),
             Some(&warm_state::WarmOutcome::Failed {
                 reason: "index failed: exit status: 2".to_string()
             }),
-            "the reason is carried verbatim"
+            "a nested member keys on its full workspace-relative path, verbatim reason"
         );
         assert!(
             !record.members.keys().any(|key| key.contains(std::path::MAIN_SEPARATOR)

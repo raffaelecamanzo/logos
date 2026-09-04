@@ -239,17 +239,6 @@ impl Default for WarmOutcomes {
     }
 }
 
-impl WarmOutcomes {
-    /// Whether the record names no member at all — the "no record" case, which
-    /// derives exactly as it did before [FR-WS-17] existed.
-    ///
-    /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.members.is_empty()
-    }
-}
-
 /// Where the sidecar lives for `workspace_root` — beside the manifest, never
 /// inside a member ([FR-WS-17]).
 ///
@@ -1105,7 +1094,7 @@ mod tests {
 
             let read = read_outcomes(dir.path());
 
-            assert!(read.is_empty(), "{case} must yield no members");
+            assert!(read.members.is_empty(), "{case} must yield no members");
             assert_eq!(
                 WarmEvidence::none().with_outcomes(&read),
                 WarmEvidence::none(),
@@ -1123,7 +1112,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("workspace root");
 
         let read = read_outcomes(dir.path());
-        assert!(read.is_empty());
+        assert!(read.members.is_empty());
         assert_eq!(
             WarmEvidence::none().with_outcomes(&read),
             WarmEvidence::none(),
@@ -1208,7 +1197,14 @@ mod tests {
             }
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
             let reads = reader.join().expect("reader");
-            assert!(reads > 0, "the reader must actually have run");
+            // Not `> 0`: a single read landing entirely between two publishes
+            // would satisfy that while proving nothing. The writer phase is 50
+            // `sync_all`s, so a reader that genuinely interleaved completes many
+            // times its own count — this asserts overlap, not mere existence.
+            assert!(
+                reads >= 50,
+                "the reader must have interleaved with the writes, not run beside them: {reads}"
+            );
         });
 
         let leftovers: Vec<String> = std::fs::read_dir(&root)
@@ -1308,7 +1304,7 @@ mod tests {
 
         let read = read_outcomes(dir.path());
 
-        assert!(read.is_empty(), "an oversized record yields no members");
+        assert!(read.members.is_empty(), "an oversized record yields no members");
         assert_eq!(
             std::fs::metadata(&path).expect("sidecar").len(),
             MAX_RECORD_BYTES + 1,

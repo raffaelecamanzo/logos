@@ -886,6 +886,23 @@ fn a_missing_git_binary_suppresses_the_nudge_rather_than_inverting_it() {
 
 // ── FR-WS-17: the durable warm-outcome record, across two processes ────────
 
+/// Every entry in `dir` with its byte length — enough to catch a file added,
+/// removed or rewritten inside a member store.
+fn store_listing(dir: &Path) -> Vec<(String, u64)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut listing: Vec<(String, u64)> = entries
+        .filter_map(Result::ok)
+        .map(|entry| {
+            let len = entry.metadata().map(|m| m.len()).unwrap_or_default();
+            (entry.file_name().to_string_lossy().into_owned(), len)
+        })
+        .collect();
+    listing.sort();
+    listing
+}
+
 /// A workspace whose manifest is written **by hand**, so no detached supervisor
 /// is ever spawned.
 ///
@@ -929,6 +946,20 @@ fn a_failed_warm_is_degraded_in_a_later_cold_process() {
     fs::create_dir_all(web.join(".logos")).unwrap();
     fs::write(web.join(".logos/config.toml"), "this is not [[[ toml\n").unwrap();
 
+    // Snapshot both member stores BEFORE the supervisor runs, so the
+    // no-member-store assertion below is over whatever the supervisor ADDED
+    // rather than over the one filename this story would have added.
+    let before: std::collections::BTreeMap<&str, Vec<String>> = ["api", "web"]
+        .into_iter()
+        .map(|m| {
+            let names = store_listing(&tmp.path().join(m).join(".logos"))
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            (m, names)
+        })
+        .collect();
+
     // ── process 1: the supervisor, awaited so it has provably exited ──────
     let warm = logos(
         tmp.path(),
@@ -955,14 +986,33 @@ fn a_failed_warm_is_degraded_in_a_later_cold_process() {
         "the outcome record must sit at the workspace root"
     );
     for member in ["api", "web"] {
+        // The property is "the supervisor adds no file of its OWN to a member
+        // store". It cannot be "no new file at all": a warm *is* a per-member
+        // `logos index` child, and that child is an ordinary invocation which
+        // legitimately creates its own `logos.db*` and — unlike the supervisor,
+        // which skips telemetry precisely so FR-WS-14's property stays literal
+        // for the supervisor process — its own `telemetry.db`. Both are the
+        // member's own files.
+        //
+        // So the assertion is over the DELTA against an ALLOWED set named here.
+        // Any other new name fails, whatever it is called; a `contains("warm")`
+        // filter would only ever have ruled out the one filename this story
+        // happens to add. The absolute form — that `record_outcomes` alone
+        // writes nothing whatsoever into a member — is asserted where it can be
+        // isolated from an indexer, in `federation::warm`'s
+        // `record_outcomes_writes_no_file_inside_any_member` and in
+        // `logos-core/tests/workspace_warm_outcome.rs`.
         let store = tmp.path().join(member).join(".logos");
-        let strays: Vec<String> = fs::read_dir(&store)
-            .expect("member store")
-            .filter_map(Result::ok)
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.contains("warm"))
+        let seen: Vec<String> = store_listing(&store).into_iter().map(|(n, _)| n).collect();
+        let added: Vec<&String> = seen
+            .iter()
+            .filter(|name| !before[member].contains(name))
+            .filter(|name| !name.starts_with("logos.db") && name != &"telemetry.db")
             .collect();
-        assert!(strays.is_empty(), "the supervisor wrote inside {member}: {strays:?}");
+        assert!(
+            added.is_empty(),
+            "the supervisor added non-store files inside {member}: {added:?}"
+        );
     }
 
     // ── process 2: a cold `workspace status` ──────────────────────────────
