@@ -122,6 +122,28 @@ and the session-start quality-report hook *reports*. The CI leg (and the
 release-only *bless* with `logos gate --save`) is documented in
 [CI integration](ci-integration.md).
 
+**The parent-of-repos nudge (no flag needed)** — a **plain** `logos init`, with
+no `--workspace`, still detects when it is being run one directory too high: a
+root that is not itself a git repository but whose immediate children are
+([FR-IN-08](../specs/requirements/FR-IN-08.md)). Left alone, that shape used to
+succeed silently and create a store that could never admit anything (the
+zero-admission defect [`status`/`doctor` also diagnose](#status), below). Now
+it explains the shape on **stderr**, naming `logos init --workspace` as the
+fix, and — **on a TTY only** — offers to take that path instead; declining
+(the default) or answering non-interactively (CI, a piped shell, a dev-pane
+spawn) both fall through to the ordinary single-root `init` with **no prompt
+and no stdin read**, so an unattended invocation can never wedge on it. stdout
+is byte-for-byte the same either way — the nudge and the offer are entirely a
+stderr conversation, and `--quiet` does not suppress it (unlike the workspace
+footprint notice below): it is the reason the command's own successful-looking
+output would otherwise mislead. Accepting on a TTY runs the same
+[FR-WS-02](../specs/requirements/FR-WS-02.md) enablement path `--workspace`
+takes — which, like an explicit `logos init --workspace -i`, drops `-i`/
+`--hooks` rather than applying them per member; the offer names that trade-off
+before you answer, so accepting is an informed choice, not a silent downgrade.
+At an ordinary repository root, or on a re-run once a `logos.workspace.toml`
+already exists, nothing fires.
+
 **Workspace (`--workspace`)** — turns a parent folder of sibling repositories
 into a **Logos workspace** ([FR-WS-02](../specs/requirements/FR-WS-02.md)). Run
 it from the directory that contains your service repos. It:
@@ -606,6 +628,20 @@ A member with no index yet is `deferred` / `opened` — honest and
 **non-alarming**, it indexes lazily on its first query. A member whose store
 cannot be opened is `degraded` on both, with a `degraded_reason` and, where the
 diagnostic identifies one, a `degraded_cause`:
+
+Three similarly-named fields can appear on a degraded row, and each answers a
+different question: `error` is the row's canonical single fact (its verbatim
+engine diagnostic) when a consumer wants just one field; `degraded_reason` /
+`degraded_cause` / `degraded_diagnostic` appear only when `open_state` is
+`degraded` (below); and `reason` appears only when `warm_state` is `degraded`,
+carrying why the warm attempt failed. Because the two axes are derived
+independently, a member can be `degraded` on `warm_state` alone (its store
+opens fine, but a durable record beside the manifest says its last warm
+failed) — that row carries `reason` with no `degraded_reason` at all. A member
+whose store cannot be opened is `degraded` on both, and there `reason` prefers
+the durable record over this run's own open failure when one exists, so
+`reason` and `degraded_reason` can legitimately name two *different*
+failures — a recorded one and a live one — on the same row.
 
 - `host-resource-limit` — the process ran out of file descriptors
   (`RLIMIT_NOFILE`). The member's store is present and its graph intact, so
