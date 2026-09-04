@@ -547,7 +547,11 @@ where
 /// # The warm labelling costs one file read, and no engine
 /// The evidence is the durable warm-outcome sidecar at the workspace root
 /// ([FR-WS-17]) — **one** `read` of one small file, whatever N is, made before
-/// any fan-out. The labels then come entirely from it and from the freshness
+/// any fan-out. That once-per-command property is held **structurally**, by the
+/// read sitting here rather than inside the per-member labelling below, and is
+/// deliberately not asserted: moving it into the loop would produce
+/// byte-identical output, so a test could only catch it by counting syscalls,
+/// which is a heavier instrument than the invariant is worth. The labels then come entirely from it and from the freshness
 /// rows the first fan-out already produced: no all-member walk, no engine
 /// construction, no *store* read, and nothing opened per member, which is what
 /// keeps the resident-engine ceiling of a `status` exactly what it was

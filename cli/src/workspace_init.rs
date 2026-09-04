@@ -282,9 +282,10 @@ fn supervisor_argv(members: &[Member], declared_k: Option<usize>) -> Vec<OsStrin
 /// never changes the exit code, and an unresolvable `current_exe` warms
 /// nothing while still returning 0: nothing reads a detached child's status,
 /// and correctness is carried by FR-IX-07, not by the warm. The stderr report
-/// therefore exists for a foreground/diagnostic invocation — in the real
-/// detached spawn it goes to `/dev/null`, and the durable per-member readout
-/// is S-323's. Killing the supervisor leaves members it never reached on the
+/// therefore exists only for a foreground/diagnostic invocation — in the real
+/// detached spawn it goes to `/dev/null`. The **durable** per-member readout is
+/// `warm::record_outcomes` below (FR-WS-17), which is what a later `workspace
+/// status` actually reads. Killing the supervisor leaves members it never reached on the
 /// FR-IX-07 lazy path, exactly as an unspawned child does; a member killed
 /// *mid*-index is the one case that path does not fully cover (see
 /// [`warm`]'s module docs), which is why the spawn takes its own process group.

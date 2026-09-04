@@ -7,8 +7,8 @@
 //! meant 84 concurrent rayon-parallel indexers, breaching [NFR-PE-06]'s 1 GB
 //! RSS cap ~84× and defeating [NFR-PE-08]'s no-contention premise.
 //!
-//! This module owns the two pieces of that correction that are business logic,
-//! not surface concerns:
+//! This module owns the pieces of that correction that are business logic, not
+//! surface concerns:
 //!
 //! - [`effective_concurrency`] — the **effective-bound resolution** seam. K
 //!   defaults to `max(1, cores / 4)` capped at [`CONCURRENCY_CAP`]; the
@@ -20,6 +20,13 @@
 //!   nothing here re-checks a ceiling, so a programmatic caller is trusted.
 //! - [`warm_queue`] — the bounded queue itself: at most K member indexes in
 //!   flight, the next starting as each finishes, whatever N is.
+//! - [`record_outcomes`] — the **durable readout** ([FR-WS-17], [BR-47]): the
+//!   pass's per-member outcomes filed beside the manifest at the workspace root,
+//!   keyed on the member names read-models join on, so a warm that failed is
+//!   still legible once this process has exited. Before it, a failed member was
+//!   recorded only in the in-process summary below and printed to a stderr the
+//!   real detached spawn sends to `/dev/null` — which is why three shipped
+//!   acceptance criteria promised a `degraded` state nothing could produce.
 //!
 //! # Why the queue takes its worker as a parameter
 //! Spawning and awaiting an `index` child process is surface work (the `cli`
@@ -64,10 +71,12 @@
 //! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 //! [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
 //! [FR-IX-07]: ../../../docs/specs/requirements/FR-IX-07.md
+//! [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
 //! [FR-IX-08]: ../../../docs/specs/requirements/FR-IX-08.md
 //! [NFR-PE-06]: ../../../docs/specs/requirements/NFR-PE-06.md
 //! [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
 //! [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
+//! [BR-47]: ../../../docs/specs/software-spec.md#327-workspace-federation
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -196,12 +205,16 @@ pub fn effective_concurrency(configured: Option<usize>) -> usize {
 /// degraded, and never appears here at all ([BR-44]).
 ///
 /// Not a serialized read-model: the summary is an in-process reporting value
-/// with no wire shape. [FR-WS-15]/[S-323] derives the user-facing
-/// `warm`/`deferred` labels from index presence, not from this, so a
-/// `Serialize` derive here would publish a shape nothing projects — and
-/// [`root`](Self::root) is a diagnostic label (an absolute path), deliberately
-/// NOT the workspace-relative member *name* every federation read-model keys
-/// on, so it is not join-compatible with `WorkspaceStatus` either.
+/// with no wire shape, so a `Serialize` derive here would publish a shape
+/// nothing projects. What a reader eventually sees is the **durable** record
+/// [`record_outcomes`] translates this into ([FR-WS-17]) — and the translation
+/// is the point: [`root`](Self::root) is a diagnostic label (an absolute path),
+/// deliberately NOT the workspace-relative member *name* every federation
+/// read-model keys on, so this value is not join-compatible with
+/// `WorkspaceStatus` and [`record_outcomes`] re-derives the name rather than
+/// carrying this string through.
+///
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
 ///
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
