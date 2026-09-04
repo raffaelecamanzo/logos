@@ -663,6 +663,61 @@ mod tests {
         );
     }
 
+    /// A plugin declaring the `invocations` capability with no loadable query
+    /// file must fail the load outright, not degrade to silent no-capture
+    /// (S-340, [FR-WS-08], [FR-PL-03]). The descriptor's `[queries]` entry
+    /// points at a relative path with no matching [`grammars::EmbeddedQuery`] —
+    /// the shape a language would ship if its `invocations.scm` were forgotten
+    /// from `grammars::compiled` while its `plugin.toml` already claimed the
+    /// capability. This is a hard [`PluginError`], distinct from the ABI-mismatch
+    /// skip-and-warn path ([FR-PL-03]): a missing query is a descriptor bug, not
+    /// a version disagreement, so it must never be silently tolerated.
+    ///
+    /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+    /// [FR-PL-03]: ../../../docs/specs/requirements/FR-PL-03.md
+    #[test]
+    fn a_plugin_declaring_invocations_with_no_embedded_query_fails_the_load() {
+        const MISSING_QUERY_MANIFEST: &str = r#"
+            name = "toyinvocations"
+            extensions = ["tia"]
+            module_separator = "."
+            abi_version = 15
+            capabilities = ["symbols", "invocations"]
+            [queries]
+            symbols = "queries/symbols.scm"
+            invocations = "queries/invocations.scm"
+        "#;
+        let entry = GrammarEntry {
+            manifest_label: "toyinvocations/plugin.toml",
+            manifest_toml: MISSING_QUERY_MANIFEST,
+            language: tree_sitter_rust::LANGUAGE,
+            // Only `symbols` is embedded — `invocations` has no backing source,
+            // exactly as if the language's `.scm` file were never wired into
+            // `grammars::compiled`.
+            embedded_queries: &[grammars::EmbeddedQuery {
+                relative_path: "queries/symbols.scm",
+                label: "toyinvocations/queries/symbols.scm",
+                source: "(function_item name: (identifier) @f)",
+            }],
+        };
+        let mut entries = grammars::compiled();
+        entries.push(entry);
+
+        let err = LanguageRegistry::load_from(&entries, AbiRange::runtime(), None, &mut |_| {})
+            .expect_err("a declared-but-unloadable `invocations` query must fail the load");
+
+        match err {
+            PluginError::Manifest { file, detail } => {
+                assert_eq!(file, "toyinvocations/plugin.toml");
+                assert!(
+                    detail.contains("invocations"),
+                    "error must name the offending capability, got {detail:?}"
+                );
+            }
+            other => panic!("expected Manifest error, got {other:?}"),
+        }
+    }
+
     #[test]
     fn narrow_abi_range_skips_an_in_spec_grammar() {
         // A runtime that understands no real ABI (1..=2) can load none of the

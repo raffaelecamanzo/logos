@@ -805,6 +805,18 @@ pub struct LanguagesInfo {
     pub languages: Vec<LanguageDescriptor>,
     /// Grammars skipped at load (ABI mismatch). Empty in the healthy case.
     pub skipped: Vec<SkippedLanguage>,
+    /// Set when the registry failed to load at all — a malformed descriptor or
+    /// a query that fails to compile (typically a declared capability with no
+    /// loadable query file, or a broken on-disk override), naming the offending
+    /// file (FR-PL-02, FR-PL-03, S-340). Distinct from an ABI mismatch
+    /// ([`skipped`](Self::skipped)), which disables only the affected grammar:
+    /// this is a hard failure of the *entire* registry, so `languages` and
+    /// `skipped` are both empty alongside it — an honest failed preflight, never
+    /// an empty-but-healthy-looking listing ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_error: Option<String>,
 }
 
 /// Descriptor for one registered language/grammar (FR-PL-06).

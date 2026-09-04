@@ -1089,8 +1089,16 @@ impl Engine {
     ///
     /// A load failure (a malformed descriptor or a query that fails to compile,
     /// typically in a user-supplied override) is reported to stderr naming the
-    /// file (FR-PL-02) and yields an empty listing rather than a panic, since the
-    /// Engine surface is infallible until error types land (ADR-14).
+    /// file (FR-PL-02) and surfaced in [`LanguagesInfo::load_error`] rather than
+    /// a panic, since the Engine surface is infallible until error types land
+    /// (ADR-14). The failure is named in the read-model itself (S-340,
+    /// [NFR-CC-04]) rather than degraded to an empty-but-healthy-looking
+    /// listing — the failure mode that hid the [FR-WS-08] capture gap: a
+    /// registry-wide load failure and a project with no plugins at all were
+    /// otherwise indistinguishable.
+    ///
+    /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub fn languages(&self) -> LanguagesInfo {
         use crate::plugin::LanguageRegistry;
 
@@ -1105,7 +1113,10 @@ impl Engine {
                 Ok(registry) => Self::languages_from(&registry),
                 Err(err) => {
                     tracing::warn!("could not load plugin registry: {err}");
-                    LanguagesInfo::default()
+                    LanguagesInfo {
+                        load_error: Some(err.to_string()),
+                        ..LanguagesInfo::default()
+                    }
                 }
             }
         })
@@ -1145,7 +1156,11 @@ impl Engine {
             })
             .collect();
 
-        LanguagesInfo { languages, skipped }
+        LanguagesInfo {
+            languages,
+            skipped,
+            load_error: None,
+        }
     }
 
     /// The resolved worktree root (ADR-15).
