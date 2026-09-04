@@ -127,18 +127,28 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm
     Ok(0)
 }
 
-/// The plain-`logos init` parent-of-repos nudge (FR-IN-08): explain the shape
-/// on stderr, and on a TTY offer to take the FR-WS-02 enablement path instead —
-/// returning whether the caller should. `false` at any other root, where
-/// nothing is printed and nothing is asked.
+/// **Should this invocation take the FR-WS-02 workspace path?** The whole
+/// `init` routing decision, in one testable unit: `true` outright for an
+/// explicit `--workspace`, otherwise the FR-IN-08 parent-of-repos nudge —
+/// explain the shape on stderr, and on a TTY offer to take that path instead.
+/// `false` at any other root, where nothing is printed and nothing is asked.
+///
+/// `--workspace` is answered **before** `detect` is called, so the explicit flag
+/// still pays nothing for detection and never sees the nudge. That short-circuit
+/// used to live in `dispatch`'s `workspace || nudge(..)`, where no test could
+/// reach it: every integration test runs non-TTY, so `nudge` returned `false`
+/// regardless and `if workspace || { nudge(..); false }` would have passed the
+/// entire suite while the TTY offer silently stopped routing anywhere. Folding
+/// the disjunction in makes both arms assertable without a terminal.
 ///
 /// **The non-TTY contract is the load-bearing part.** `ask` is
 /// [`crate::ask`], which returns its default *without prompting and without
 /// reading stdin* when stdin is not a terminal — so an unattended dev-pane or
 /// CI `logos init` prints the explanation and completes the plain single-root
 /// init rather than wedging forever on a prompt. It is injected (like `gate`'s
-/// `approve` above) so that contract is assertable without a terminal: the unit
-/// test below passes an `ask` that behaves exactly as the non-TTY one does.
+/// `approve` above, and with the same `impl FnMut` bound) so that contract is
+/// assertable without a terminal: the unit test below passes an `ask` that
+/// behaves exactly as the non-TTY one does.
 ///
 /// The default is **decline** — `false`, not `gate`'s `true`. Enabling a
 /// workspace writes to N sibling repositories; a prompt the operator did not
@@ -153,8 +163,11 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm
 ///
 /// Composition lives in the core ([`enable::ParentOfRepos`]); this only renders
 /// and prompts (NFR-MA-02).
-pub(crate) fn nudge(root: &Path, ask: fn(&str, bool) -> bool) -> bool {
-    let Some(shape) = enable::ParentOfRepos::detect(root) else { return false };
+pub(crate) fn nudge(root: &Path, workspace: bool, mut ask: impl FnMut(&str, bool) -> bool) -> bool {
+    // `then` keeps `detect` lazy, so `--workspace` spawns no `git` at all; the
+    // `else` arm then answers `workspace` itself — `true` for the explicit flag,
+    // `false` for a root that is not the shape.
+    let Some(shape) = (!workspace).then(|| enable::ParentOfRepos::detect(root)).flatten() else { return workspace };
     eprintln!("{shape}");
     ask(&shape.question(), false)
 }
@@ -649,12 +662,12 @@ mod tests {
     /// `cli/tests/init_workspace.rs`; this pins the *decision* at the seam,
     /// where a change of default would otherwise pass unnoticed.
     #[test]
-    fn a_non_tty_ask_declines_and_still_gets_the_explanation() {
+    fn a_non_tty_ask_declines_into_the_plain_init() {
         let tmp = fixture(&["api", "web"]);
         // Exactly what `crate::ask` does on a non-TTY: yield the default,
         // reading nothing.
         assert!(
-            !nudge(tmp.path(), |_, default| default),
+            !nudge(tmp.path(), false, |_, default| default),
             "a non-TTY answer is the default, and the default is decline"
         );
     }
@@ -664,26 +677,47 @@ mod tests {
     #[test]
     fn accepting_the_offer_reports_true() {
         let tmp = fixture(&["api", "web"]);
-        assert!(nudge(tmp.path(), |_, _| true), "an accepted offer branches to --workspace");
+        assert!(nudge(tmp.path(), false, |_, _| true), "an accepted offer branches to --workspace");
+    }
+
+    /// An explicit `--workspace` is answered `true` **without** detecting: no
+    /// explanation, no offer, and — the half that used to be untestable — no
+    /// candidate scan at all. Asserted at a parent-of-repos root, the one place
+    /// where a detection that did run would visibly fire.
+    #[test]
+    fn an_explicit_workspace_flag_short_circuits_before_any_detection() {
+        let tmp = fixture(&["api", "web"]);
+        let mut asked = 0;
+        assert!(
+            nudge(tmp.path(), true, |_, _| {
+                asked += 1;
+                false
+            }),
+            "--workspace routes to the enablement path on its own"
+        );
+        assert_eq!(asked, 0, "and is never offered a choice it did not ask for");
+    }
+
+    /// The other short-circuit arm: not `--workspace`, not the shape ⇒ `false`,
+    /// which is what keeps an ordinary `logos init` on the plain path.
+    #[test]
+    fn neither_the_flag_nor_the_shape_declines() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("notes")).unwrap();
+        assert!(!nudge(tmp.path(), false, |_, _| true), "no flag and no shape ⇒ plain init");
     }
 
     /// …and the question the operator is asked names the stake, so "yes" is
     /// informed about how many repositories it is about to touch.
     #[test]
     fn the_offer_names_how_many_repositories_it_would_enable() {
-        use std::sync::Mutex;
-        static ASKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-        fn record(question: &str, default: bool) -> bool {
-            ASKED.lock().unwrap().push(question.to_string());
-            default
-        }
-
         let tmp = fixture(&["api", "web"]);
-        ASKED.lock().unwrap().clear();
-        assert!(!nudge(tmp.path(), record));
+        let mut asked: Vec<String> = Vec::new();
+        assert!(!nudge(tmp.path(), false, |q, d| {
+            asked.push(q.to_string());
+            d
+        }));
 
-        let asked = ASKED.lock().unwrap().clone();
         assert_eq!(asked.len(), 1, "asked exactly once, not once per member: {asked:?}");
         assert!(asked[0].contains("2 member repositories"), "{}", asked[0]);
     }
@@ -693,14 +727,6 @@ mod tests {
     /// tell "declined" from "never offered".
     #[test]
     fn an_ordinary_repository_root_is_never_nudged_and_never_asked() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static ASKS: AtomicUsize = AtomicUsize::new(0);
-
-        fn count(_q: &str, _d: bool) -> bool {
-            ASKS.fetch_add(1, Ordering::SeqCst);
-            true
-        }
-
         // A repository that even *contains* sibling checkouts: only its own
         // git-top-level status separates it from the parent-of-repos shape.
         let tmp = fixture(&["api"]);
@@ -708,9 +734,15 @@ mod tests {
         std::fs::create_dir_all(repo.join("vendor")).unwrap();
         git(&repo.join("vendor"), &["init", "-q", "-b", "main"]);
 
-        ASKS.store(0, Ordering::SeqCst);
-        assert!(!nudge(&repo, count), "a repository root is not the shape");
-        assert_eq!(ASKS.load(Ordering::SeqCst), 0, "no prompt is ever reached there");
+        let mut asks = 0;
+        assert!(
+            !nudge(&repo, false, |_, _| {
+                asks += 1;
+                true
+            }),
+            "a repository root is not the shape"
+        );
+        assert_eq!(asks, 0, "no prompt is ever reached there");
     }
 
     /// An accepted offer must actually produce a workspace — the two halves the
@@ -721,7 +753,7 @@ mod tests {
     #[test]
     fn an_accepted_offer_leads_to_a_written_workspace_manifest() {
         let tmp = fixture(&["api", "web"]);
-        assert!(nudge(tmp.path(), |_, _| true));
+        assert!(nudge(tmp.path(), false, |_, _| true));
 
         let out = Output { json: true, quiet: true };
         assert_eq!(run(tmp.path(), true, &[], &out, |_, _| true).unwrap(), 0);
