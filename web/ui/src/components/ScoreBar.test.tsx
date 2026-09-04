@@ -32,10 +32,11 @@ describe("ScoreBar (S-187, FR-UI-23 / ADR-44)", () => {
       cleanup();
       return name;
     };
-    const tones = ["default", "poor", "average", "good", "excellent", "magnitude"] as const;
+    const tones = ["default", "poor", "average", "good", "excellent", "magnitude", "muted"] as const;
     const classes = tones.map(cls);
-    // Every tone yields a non-empty class, and the six are mutually distinct (so the
-    // BR-34 bands and the neutral magnitude fill never collapse to one colour).
+    // Every tone yields a non-empty class, and the seven are mutually distinct (so
+    // the BR-34 bands, the neutral magnitude fill, and the CR-111 muted fill never
+    // collapse to one colour).
     expect(classes.every((c) => c.length > 0)).toBe(true);
     expect(new Set(classes).size).toBe(tones.length);
   });

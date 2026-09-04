@@ -75,12 +75,28 @@ async fn get_user() {}
 fn app() -> Router { Router::new().route("/users/{id}", get(get_user)) }
 "#;
 
-/// Build a two-member workspace: `api` (OpenAPI consumer) + `web` (axum provider),
-/// each an indexed git repo, with the manifest at the parent naming `api` default.
-fn workspace() -> TempDir {
+/// An OpenAPI spec whose sole operation, `/orphan`, matches no route anywhere in
+/// the workspace — the near-degenerate CR-111/S-327 case: every cross-boundary
+/// reference lands in the `no-provider-in-workspace` bucket, so the bound-ratio
+/// denominator is zero.
+const ORPHAN_OPENAPI_YAML: &str = "\
+openapi: 3.0.3
+info:
+  title: Orphan API
+  version: 1.0.0
+paths:
+  /orphan:
+    get:
+      summary: No provider anywhere in the workspace
+";
+
+/// Build a two-member workspace: `api` (an OpenAPI consumer built from `openapi`)
+/// and `web` (the fixed axum provider), each an indexed git repo, with the
+/// manifest at the parent naming `api` default.
+fn workspace_with_openapi(openapi: &str) -> TempDir {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
-    init_repo(&root.join("api"), "api/openapi.yaml", OPENAPI_YAML);
+    init_repo(&root.join("api"), "api/openapi.yaml", openapi);
     init_repo(&root.join("web"), "src/main.rs", AXUM_MAIN);
     // Index each member so `workspace status` reports index freshness.
     Engine::start(root.join("api")).expect("api engine").index();
@@ -91,6 +107,12 @@ fn workspace() -> TempDir {
     )
     .unwrap();
     tmp
+}
+
+/// Build a two-member workspace: `api` (OpenAPI consumer) + `web` (axum provider),
+/// each an indexed git repo, with the manifest at the parent naming `api` default.
+fn workspace() -> TempDir {
+    workspace_with_openapi(OPENAPI_YAML)
 }
 
 fn get(path: &str) -> Request<Body> {
@@ -234,6 +256,18 @@ async fn workspace_status_reports_name_members_and_coverage() {
         v["coverage"]["bound_ratio"], 1.0,
         "and this fixture DOES bind one reference, so the ratio is measured: {body}"
     );
+    // CR-111 / FR-WS-05: the ratio never travels bare on the web serve surface
+    // either — the identical `CrossServiceCoverage` type the CLI serializes and the
+    // SPA's coverage panel reads carries the same two fields here (this fixture's
+    // own small numbers: 1 of 1 measured, 0 excluded — the CR-111 pec-services
+    // numbers, 6 of 7 / 899 excluded, are pinned verbatim at the core unit-test and
+    // web-model/-view layers, where a 906-reference fixture is constructible).
+    assert_eq!(v["coverage"]["bound_ratio_measured"], 1, "{body}");
+    assert_eq!(
+        v["coverage"]["bound_ratio_summary"],
+        "1.000 (1 of 1 measured; 0 excluded as no-provider-in-workspace)",
+        "{body}"
+    );
     // S-323: the warm state rides the same rows the web surface already serves —
     // one read-model, so the shell sees exactly what `logos workspace status`
     // prints ([FR-WS-15]). `warming` is absent, never a fabricated 0 ([NFR-CC-04]).
@@ -275,6 +309,32 @@ async fn workspace_status_reports_name_members_and_coverage() {
     assert_eq!(v["coverage"]["members_read"], 2, "{body}");
     assert_eq!(v["coverage"]["members_total"], 2, "{body}");
     assert_eq!(v["coverage"]["covers_all_members"], true, "{body}");
+}
+
+/// CR-111 / S-327, over the web serve surface: a workspace whose only
+/// cross-boundary reference has no provider anywhere reports a zero denominator —
+/// `bound_ratio` absent — and the excluded count is STILL reported, never
+/// suppressed alongside the absent ratio.
+#[tokio::test]
+async fn workspace_status_reports_the_excluded_count_when_the_bound_ratio_is_absent() {
+    let tmp = workspace_with_openapi(ORPHAN_OPENAPI_YAML);
+    let router = ws_router(&tmp);
+    let resp = router.oneshot(get("/api/v1/workspace/status")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert!(
+        v["coverage"].get("bound_ratio").is_none(),
+        "a zero denominator is absent, never a fabricated score: {body}"
+    );
+    assert_eq!(v["coverage"]["bound_ratio_measured"], 0, "{body}");
+    assert_eq!(v["coverage"]["no_provider_in_workspace"], 1, "{body}");
+    assert_eq!(
+        v["coverage"]["bound_ratio_summary"],
+        "0 of 0 measured; 1 excluded as no-provider-in-workspace",
+        "the excluded count is reported even though the ratio itself is absent: {body}"
+    );
 }
 
 /// **The degraded shape over the web surface ([FR-WS-16]).**

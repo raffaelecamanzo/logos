@@ -83,3 +83,13 @@
 .magnitude::-moz-meter-bar {
   background: var(--text-2);
 }
+
+/* muted (CR-111) — a ratio computed over a negligible denominator (the excluded
+   bucket dominates it) never fills as a confident score; same de-emphasized
+   token as `.muted` text (`--text-2`, "n/a"/secondary) rather than any green. */
+.muted::-webkit-meter-optimum-value {
+  background: var(--text-2);
+}
+.muted::-moz-meter-bar {
+  background: var(--text-2);
+}

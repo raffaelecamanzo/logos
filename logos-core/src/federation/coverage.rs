@@ -226,6 +226,34 @@ pub struct CrossServiceCoverage {
     /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound_ratio: Option<f64>,
+    /// The denominator [`bound_ratio`](Self::bound_ratio) was computed over —
+    /// `bound + ambiguous + unbound`, explicitly, so a `--json` consumer reads
+    /// the ratio's scale without re-implementing the sum itself ([CR-111]).
+    ///
+    /// Present even when `bound_ratio` is absent (a zero denominator serializes
+    /// this as `0`): the ratio's own scale is exactly the fact a bare `0.857`
+    /// hides, and [`no_provider_in_workspace`](Self::no_provider_in_workspace)
+    /// beside it is the excluded count the ratio never carried before this
+    /// field existed ([FR-WS-05], [ADR-53]).
+    ///
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+    pub bound_ratio_measured: u64,
+    /// The bound-ratio, never presented bare ([FR-WS-05], [CR-111]): the ratio's
+    /// own value (when present) followed by its denominator and the count
+    /// excluded as `no-provider-in-workspace` — e.g. `"0.857 (6 of 7 measured; 899
+    /// excluded as no-provider-in-workspace)"`, or, on an absent ratio, `"0 of 0
+    /// measured; 899 excluded as no-provider-in-workspace"` (S-327: the excluded
+    /// count is reported regardless of whether anything was measured).
+    ///
+    /// Both `workspace status`'s human and `--json` renderings serialize this
+    /// same field — one line, in both outputs, that can never regress on one
+    /// surface while the other stays honest ([CR-111] §4.4).
+    ///
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+    pub bound_ratio_summary: String,
     /// Members whose contract surface this summary actually read.
     pub members_read: u64,
     /// Members declared in the workspace — the roster this summary was computed
@@ -446,6 +474,8 @@ impl Tally {
         self.references.sort_by(|a, b| a.from.cmp(&b.from));
         let denom = self.bound + self.ambiguous + self.unbound;
         let bound_ratio = (denom > 0).then(|| self.bound as f64 / denom as f64);
+        let bound_ratio_summary =
+            summarize_bound_ratio(self.bound, denom, self.no_provider_in_workspace, bound_ratio);
         CrossServiceCoverage {
             references: self.references,
             bound: self.bound,
@@ -453,10 +483,32 @@ impl Tally {
             unbound: self.unbound,
             no_provider_in_workspace: self.no_provider_in_workspace,
             bound_ratio,
+            bound_ratio_measured: denom,
+            bound_ratio_summary,
             members_read: members_read as u64,
             members_total: members_total as u64,
             covers_all_members: members_read == members_total,
         }
+    }
+}
+
+/// Compose the [`CrossServiceCoverage::bound_ratio_summary`] line: the ratio's
+/// own value — when present — followed by the denominator it was computed over
+/// and the count excluded as `no-provider-in-workspace`, so the ratio is never
+/// presented bare at any presentation site ([FR-WS-05], [CR-111]).
+///
+/// The excluded count is reported even when `ratio` is `None` (a zero
+/// denominator, [S-327]): "0 of 0 measured, N excluded" is the informative
+/// statement, and suppressing both leaves a reader with nothing.
+///
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+/// [S-327]: ../../../docs/planning/journal.md#s-327-absent-bound-ratio-on-a-zero-denominator
+fn summarize_bound_ratio(bound: u64, denom: u64, excluded: u64, ratio: Option<f64>) -> String {
+    let measured = format!("{bound} of {denom} measured");
+    match ratio {
+        Some(r) => format!("{r:.3} ({measured}; {excluded} excluded as no-provider-in-workspace)"),
+        None => format!("{measured}; {excluded} excluded as no-provider-in-workspace"),
     }
 }
 
@@ -1057,6 +1109,71 @@ mod tests {
         assert_eq!(cov.unbound, 1);
         assert_eq!(cov.no_provider_in_workspace, 1);
         assert_eq!(cov.bound_ratio, Some(1.0 / 3.0), "1 bound of 3 counted (bound+ambiguous+unbound)");
+        assert_eq!(
+            cov.bound_ratio_measured, 3,
+            "the explicit denominator field agrees with the ratio it was computed over (CR-111)"
+        );
+        assert_eq!(
+            cov.bound_ratio_summary, "0.333 (1 of 3 measured; 1 excluded as no-provider-in-workspace)",
+            "the ratio is never presented without its denominator and excluded count (CR-111)"
+        );
+    }
+
+    // ── CR-111 / FR-WS-05: the bound-ratio never travels without its scale ────
+
+    /// The motivating near-degenerate case itself, at the `Tally` level (a full
+    /// 906-reference fixture is impractical to construct here — this pins the
+    /// exact `pec-services` figures [CR-111] observed: `bound: 6, ambiguous: 0,
+    /// unbound: 1, no_provider_in_workspace: 899`).
+    ///
+    /// A denominator of 7 against 899 exclusions is not `0/0`, so it slipped
+    /// past the [S-327] zero-denominator guard while misleading just as
+    /// effectively — this is the exact shape that guard does not catch.
+    ///
+    /// [S-327]: ../../../docs/planning/journal.md#s-327-absent-bound-ratio-on-a-zero-denominator
+    #[test]
+    fn bound_ratio_summary_states_the_pec_services_near_degenerate_case() {
+        let tally = Tally {
+            bound: 6,
+            ambiguous: 0,
+            unbound: 1,
+            no_provider_in_workspace: 899,
+            references: Vec::new(),
+        };
+        let cov = tally.finish(83, 83);
+
+        assert_eq!(cov.bound_ratio, Some(6.0 / 7.0));
+        assert_eq!(cov.bound_ratio_measured, 7);
+        assert_eq!(cov.no_provider_in_workspace, 899);
+        assert_eq!(
+            cov.bound_ratio_summary,
+            "0.857 (6 of 7 measured; 899 excluded as no-provider-in-workspace)",
+            "the exact CR-111 headline: correct AND legible, describing 7 of 906 references"
+        );
+    }
+
+    /// [S-327]'s zero-denominator case still reports the excluded count: "0 of 0
+    /// measured, N excluded" is the informative statement, and suppressing both
+    /// leaves a reader with nothing (CR-111 §4.4).
+    ///
+    /// [S-327]: ../../../docs/planning/journal.md#s-327-absent-bound-ratio-on-a-zero-denominator
+    #[test]
+    fn bound_ratio_summary_reports_the_excluded_count_when_the_ratio_is_absent() {
+        let tally = Tally {
+            bound: 0,
+            ambiguous: 0,
+            unbound: 0,
+            no_provider_in_workspace: 899,
+            references: Vec::new(),
+        };
+        let cov = tally.finish(1, 1);
+
+        assert_eq!(cov.bound_ratio, None, "a zero denominator is absent, never a fabricated score");
+        assert_eq!(cov.bound_ratio_measured, 0);
+        assert_eq!(
+            cov.bound_ratio_summary, "0 of 0 measured; 899 excluded as no-provider-in-workspace",
+            "the excluded count is STILL reported when the ratio itself is absent"
+        );
     }
 
     /// A `ProtoService`/`GqlType` surface node carries no portable HTTP key in

@@ -7,15 +7,25 @@
  * overflowing the track (mirrors the Rust helper).
  *
  * Tone is a fixed enumeration so each tint is its own CSS-module class (no inline
- * colour): `default` green, the four BR-34 quality bands (poor → excellent), and
- * `magnitude` (a neutral fill for a raw count — never read as a "pass" green).
+ * colour): `default` green, the four BR-34 quality bands (poor → excellent),
+ * `magnitude` (a neutral fill for a raw count — never read as a "pass" green),
+ * and `muted` (CR-111: a ratio computed over a negligible denominator renders
+ * de-emphasized rather than a confident fill — the score-bar analogue of the §1
+ * rule that an empty chart is never shown as a result).
  * Coverage/test bars stay `default` green and raw (never banded — BR-28).
  */
 
 import styles from "./ScoreBar.module.css";
 
-/** The score-bar fill tone (BR-34 bands + neutral magnitude). */
-export type ScoreBarTone = "default" | "poor" | "average" | "good" | "excellent" | "magnitude";
+/** The score-bar fill tone (BR-34 bands + neutral magnitude + honest `muted`). */
+export type ScoreBarTone =
+  | "default"
+  | "poor"
+  | "average"
+  | "good"
+  | "excellent"
+  | "magnitude"
+  | "muted";
 
 export interface ScoreBarProps {
   /** The figure to plot; clamped to `[0, max]`. */
