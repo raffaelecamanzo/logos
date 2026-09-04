@@ -933,6 +933,28 @@ fn admission_walk_builder(root: &Path) -> WalkBuilder {
     builder
 }
 
+/// A directory whose `.git` entry `keep_dir` treats as a nested-git boundary
+/// need not be a directory [`crate::workspace::git_root_known`]/
+/// [`super::super::federation::discover_candidates`] would also accept as a
+/// workspace member: this check is `entry.path().join(".git").exists()` — no
+/// git subprocess — while the candidate-discovery path this diagnostic's
+/// remedy points to (`logos init --workspace`, via
+/// [`ParentOfRepos::detect`](crate::federation::enable::ParentOfRepos::detect))
+/// runs `git rev-parse --show-toplevel` per candidate. An incomplete or
+/// corrupted `.git` (a partial checkout, a stripped archive) can therefore be
+/// pruned and diagnosed here while `discover_candidates` declines to admit it
+/// as a member — the same "confidently wrong instruction" hazard
+/// `ParentOfRepos::detect`'s own docs describe for a hand-rolled existence
+/// check, reintroduced from the other side. Accepted, not fixed: this walk
+/// runs on every directory of every `index`/`sync` ([NFR-PE-08]), so paying a
+/// `git` subprocess per directory here — the cost `discover_candidates`
+/// accepts as a one-shot `init`-time scan — would be a real regression, not a
+/// parity improvement. No test exercises both mechanisms against the same
+/// malformed-`.git` fixture; the sprint's own `build_parent_of_repos`-style
+/// fixtures use a bare `.git/HEAD` write rather than `git init`, so they
+/// cannot see this either.
+///
+/// [NFR-PE-08]: ../../../../docs/specs/requirements/NFR-PE-08.md
 fn keep_dir(
     entry: &DirEntry,
     ignored_dirs: &HashSet<String>,
