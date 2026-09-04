@@ -234,6 +234,16 @@ async fn workspace_status_reports_name_members_and_coverage() {
         v["coverage"]["bound_ratio"], 1.0,
         "and this fixture DOES bind one reference, so the ratio is measured: {body}"
     );
+    // CR-111 / FR-WS-05: the ratio never travels bare on the web surface either —
+    // the same explicit denominator and composed summary the CLI `--json` and the
+    // SPA's coverage panel read, served from the identical `CrossServiceCoverage`
+    // read-model (one shared fixture expectation across all three sites).
+    assert_eq!(v["coverage"]["bound_ratio_measured"], 1, "{body}");
+    assert_eq!(
+        v["coverage"]["bound_ratio_summary"],
+        "1.000 (1 of 1 measured; 0 excluded as no-provider-in-workspace)",
+        "{body}"
+    );
     // S-323: the warm state rides the same rows the web surface already serves —
     // one read-model, so the shell sees exactly what `logos workspace status`
     // prints ([FR-WS-15]). `warming` is absent, never a fabricated 0 ([NFR-CC-04]).

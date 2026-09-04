@@ -31,6 +31,8 @@ export const EMPTY_COVERAGE: CrossServiceCoverage = {
   ambiguous: 0,
   unbound: 0,
   no_provider_in_workspace: 0,
+  bound_ratio_measured: 0,
+  bound_ratio_summary: "0 of 0 measured; 0 excluded as no-provider-in-workspace",
   members_read: 2,
   members_total: 2,
   covers_all_members: true,

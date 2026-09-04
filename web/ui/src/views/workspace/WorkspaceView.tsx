@@ -460,11 +460,20 @@ function CoveragePanel({
             </span>
           ) : (
             <>
-              <ScoreBar value={dashboard.boundRatio} max={1} label={pct(dashboard.boundRatio)} />
+              <ScoreBar
+                value={dashboard.boundRatio}
+                max={1}
+                tone={dashboard.ratioDominatedByExcluded ? "muted" : "default"}
+                label={pct(dashboard.boundRatio)}
+              />
               <span className="mono">{pct(dashboard.boundRatio)} bound</span>
             </>
           )}
         </div>
+        {/* CR-111: the ratio is never presented without its denominator and excluded
+            count — the server's own composed line, adjacent to the bar, verbatim
+            (the same "displayed, never recomputed" discipline as the ratio itself). */}
+        <p className="muted mono">{dashboard.boundRatioSummary}</p>
         <CoverageShortfall dashboard={dashboard} degraded={degraded} />
         <p className="muted">
           {dashboard.bound} bound · {dashboard.ambiguous} ambiguous · {dashboard.unbound} unbound ·{" "}

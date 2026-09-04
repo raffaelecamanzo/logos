@@ -109,6 +109,22 @@ export interface CoverageDashboard {
   /** References with no provider anywhere in this workspace — reported beside the
    *  ratio, deliberately outside its denominator (ADR-53). */
   noProviderInWorkspace: number;
+  /** The denominator `boundRatio` was computed over (`bound + ambiguous +
+   *  unbound`), carried verbatim from the server's explicit field rather than
+   *  summed here — the same "displayed, never recomputed" discipline as
+   *  `boundRatio` itself (CR-111). Present even when `boundRatio` is `null`. */
+  boundRatioMeasured: number;
+  /** The bound-ratio's server-composed "never bare" line — its value (when
+   *  present) plus the denominator and excluded count, verbatim (CR-111). */
+  boundRatioSummary: string;
+  /** Whether the excluded (`no-provider-in-workspace`) bucket dominates the
+   *  measured denominator — the score bar renders muted rather than a
+   *  confident fill when this is true, so a ratio computed over a sliver of
+   *  the workspace never LOOKS like a healthy score (CR-111, frontend-design.md
+   *  §4.17). `false` whenever nothing is excluded, even over a zero
+   *  denominator — muting is about the excluded bucket's WEIGHT, not about
+   *  whether a bar is drawn at all (that's `boundRatio === null`). */
+  ratioDominatedByExcluded: boolean;
   /** One row per relation arm, in arm-name order. */
   arms: ArmCoverage[];
   /** No cross-boundary reference exists at all — the honest awaiting-data state. */
@@ -175,6 +191,13 @@ export function buildCoverageDashboard(coverage: CrossServiceCoverage): Coverage
     ambiguous: coverage.ambiguous,
     unbound: coverage.unbound,
     noProviderInWorkspace: coverage.no_provider_in_workspace,
+    boundRatioMeasured: coverage.bound_ratio_measured,
+    boundRatioSummary: coverage.bound_ratio_summary,
+    // "Dominates" = the excluded bucket outweighs what was actually measured —
+    // the pec-services shape this CR fixes (7 measured, 899 excluded). Not the
+    // zero-denominator case alone: a workspace with 0 measured and 0 excluded
+    // (nothing to bind at all) is `isEmpty`, not a dominated ratio.
+    ratioDominatedByExcluded: coverage.no_provider_in_workspace > coverage.bound_ratio_measured,
     arms: [...byArm.values()].sort((a, b) => a.relation.localeCompare(b.relation)),
     isEmpty: coverage.references.length === 0,
     // No `??` fallbacks: these three are non-optional in `CrossServiceCoverage`

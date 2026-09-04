@@ -30,6 +30,8 @@ function coverage(references: ReferenceCoverage[], summary: Partial<CrossService
     unbound: 0,
     no_provider_in_workspace: 0,
     bound_ratio: 1,
+    bound_ratio_measured: 0,
+    bound_ratio_summary: "",
     members_read: 2,
     members_total: 2,
     covers_all_members: true,
@@ -117,6 +119,54 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
     );
     expect(model.boundRatio).toBe(0.5);
     expect(model.noProviderInWorkspace).toBe(3);
+  });
+
+  // ── CR-111 / FR-WS-05: the bound-ratio never travels without its scale ─────
+
+  it("carries the server's explicit denominator and composed summary line VERBATIM", () => {
+    // The exact CR-111 headline: bound: 6, ambiguous: 0, unbound: 1 (denominator 7),
+    // no_provider_in_workspace: 899 — pinned to the pec-services numbers so this
+    // fixture reconciles with the same figures asserted at the CLI and core layers.
+    const model = buildCoverageDashboard(
+      coverage([...bound("route", 6), ...unbound("route", "path-not-composed", 1), ...unbound("route", "no-provider-in-workspace", 899)], {
+        bound: 6,
+        unbound: 1,
+        no_provider_in_workspace: 899,
+        bound_ratio: 6 / 7,
+        bound_ratio_measured: 7,
+        bound_ratio_summary: "0.857 (6 of 7 measured; 899 excluded as no-provider-in-workspace)",
+      }),
+    );
+    expect(model.boundRatioMeasured).toBe(7);
+    expect(model.boundRatioSummary).toBe(
+      "0.857 (6 of 7 measured; 899 excluded as no-provider-in-workspace)",
+    );
+  });
+
+  it("flags the ratio as dominated-by-excluded when the excluded bucket outweighs the denominator", () => {
+    const dominated = buildCoverageDashboard(
+      coverage([], { bound: 6, unbound: 1, no_provider_in_workspace: 899, bound_ratio_measured: 7 }),
+    );
+    expect(dominated.ratioDominatedByExcluded).toBe(true);
+
+    const healthy = buildCoverageDashboard(
+      coverage([], { bound: 9, ambiguous: 1, no_provider_in_workspace: 2, bound_ratio_measured: 10 }),
+    );
+    expect(healthy.ratioDominatedByExcluded).toBe(false);
+  });
+
+  it("still exposes the denominator and excluded count when the ratio itself is absent (S-327)", () => {
+    const { bound_ratio: _omitted, ...withoutRatio } = coverage([], {
+      no_provider_in_workspace: 899,
+      bound_ratio_measured: 0,
+      bound_ratio_summary: "0 of 0 measured; 899 excluded as no-provider-in-workspace",
+    });
+    const model = buildCoverageDashboard(withoutRatio as CrossServiceCoverage);
+
+    expect(model.boundRatio).toBeNull();
+    expect(model.boundRatioMeasured).toBe(0);
+    expect(model.boundRatioSummary).toBe("0 of 0 measured; 899 excluded as no-provider-in-workspace");
+    expect(model.ratioDominatedByExcluded).toBe(true);
   });
 
   it("is honestly empty when the workspace has no cross-boundary reference at all", () => {

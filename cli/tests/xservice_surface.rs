@@ -182,6 +182,26 @@ fn workspace_status_reports_freshness_and_three_state_coverage() {
         coverage["bound_ratio"], 1.0,
         "no-provider references never depress the bound-ratio (ADR-53)"
     );
+
+    // CR-111 / FR-WS-05: the ratio is never presented without its denominator and
+    // excluded count — `--json` carries both as explicit additive fields, and every
+    // pre-existing field above is unchanged.
+    assert_eq!(
+        coverage["bound_ratio_measured"], 1,
+        "the explicit denominator (bound+ambiguous+unbound) a machine consumer need not re-derive"
+    );
+    assert_eq!(
+        coverage["bound_ratio_summary"], "1.000 (1 of 1 measured; 1 excluded as no-provider-in-workspace)",
+        "the bound-ratio never travels bare, in `--json` exactly as at every other presentation site"
+    );
+
+    // The human rendering is the SAME read-model, pretty-printed (FR-CL-02) — one
+    // shared fixture expectation for the CLI human line and `--json`, so neither can
+    // regress independently (CR-111 §4.4).
+    let human = logos(tmp.path(), &["workspace", "status"]);
+    let human: Value = serde_json::from_str(&String::from_utf8(human.stdout).unwrap())
+        .expect("the human rendering is the same read-model, pretty-printed");
+    assert_eq!(human["coverage"], *coverage, "human and --json carry the identical coverage summary");
 }
 
 // ── S-323: per-member warm state and roll-up (FR-WS-15, BR-44, NFR-CC-04) ──

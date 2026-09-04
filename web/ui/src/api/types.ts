@@ -1051,6 +1051,18 @@ export interface CrossServiceCoverage {
    *  perfect ratio (CR-100). A UI must render absence as "not measured", never as an
    *  empty or a full bar. */
   bound_ratio?: number;
+  /** The denominator `bound_ratio` was computed over — `bound + ambiguous +
+   *  unbound`, explicit rather than derived, so a consumer of this wire shape
+   *  need not re-implement the sum (CR-111). Present even when `bound_ratio`
+   *  is absent (a zero denominator serializes this as `0`). */
+  bound_ratio_measured: number;
+  /** The bound-ratio never presented bare (FR-WS-05, CR-111): its own value —
+   *  when present — followed by its denominator and the count excluded as
+   *  `no-provider-in-workspace`, e.g. `"0.857 (6 of 7 measured; 899 excluded as
+   *  no-provider-in-workspace)"`, or, on an absent ratio, `"0 of 0 measured; 899
+   *  excluded as no-provider-in-workspace"` (S-327: the excluded count is
+   *  reported regardless of whether anything was measured). */
+  bound_ratio_summary: string;
   /** Members whose contract surface this summary actually read. */
   members_read: number;
   /** Members in the workspace roster this summary was computed over. */

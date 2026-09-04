@@ -69,6 +69,8 @@ const COVERAGE: CrossServiceCoverage = {
   unbound: 1,
   no_provider_in_workspace: 2,
   bound_ratio: 0.3333,
+  bound_ratio_measured: 3,
+  bound_ratio_summary: "0.333 (1 of 3 measured; 2 excluded as no-provider-in-workspace)",
   members_read: 2,
   members_total: 2,
   covers_all_members: true,
@@ -340,6 +342,8 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
         ambiguous: 0,
         unbound: 0,
         no_provider_in_workspace: 2,
+        bound_ratio_measured: 0,
+        bound_ratio_summary: "0 of 0 measured; 2 excluded as no-provider-in-workspace",
       } as typeof COVERAGE,
     });
     mount();
@@ -347,6 +351,53 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     expect(await screen.findByText(/bound ratio not measured/i)).toBeInTheDocument();
     expect(screen.queryByText(/0\.0% bound/)).toBeNull();
     expect(screen.queryByText(/100\.0% bound/)).toBeNull();
+    // CR-111: the excluded count is STILL reported when the ratio itself is absent
+    // (S-327) — the server's composed line renders regardless.
+    expect(
+      await screen.findByText("0 of 0 measured; 2 excluded as no-provider-in-workspace"),
+    ).toBeInTheDocument();
+  });
+
+  // ── CR-111 / FR-WS-05: the bound-ratio never travels without its scale ─────
+
+  it("presents the denominator and excluded count adjacent to the score bar", async () => {
+    stubApi({ coverage: COVERAGE });
+    mount();
+
+    expect(
+      await screen.findByText("0.333 (1 of 3 measured; 2 excluded as no-provider-in-workspace)"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the score bar MUTED rather than a confident fill when the excluded bucket dominates the denominator", async () => {
+    // The pec-services shape this CR fixes: 6 bound, 1 unbound (denominator 7),
+    // 899 excluded — the excluded bucket vastly outweighs what was measured.
+    const dominated = {
+      ...COVERAGE,
+      bound: 6,
+      ambiguous: 0,
+      unbound: 1,
+      no_provider_in_workspace: 899,
+      bound_ratio: 6 / 7,
+      bound_ratio_measured: 7,
+      bound_ratio_summary: "0.857 (6 of 7 measured; 899 excluded as no-provider-in-workspace)",
+    };
+    stubApi({ coverage: dominated });
+    const { container } = mount();
+    await screen.findByText("0.857 (6 of 7 measured; 899 excluded as no-provider-in-workspace)");
+    const mutedClass = container.querySelector("meter")?.className;
+    cleanup();
+
+    // The complement: a healthy ratio (excluded well below the denominator) fills
+    // with the confident `default` tone, a DIFFERENT class from the muted one above.
+    stubApi({ coverage: COVERAGE });
+    const { container: healthyContainer } = mount();
+    await screen.findByText("0.333 (1 of 3 measured; 2 excluded as no-provider-in-workspace)");
+    const defaultClass = healthyContainer.querySelector("meter")?.className;
+
+    expect(mutedClass).toBeTruthy();
+    expect(defaultClass).toBeTruthy();
+    expect(mutedClass).not.toBe(defaultClass);
   });
 
   it("labels a partially-opened workspace as covering fewer than all members", async () => {
