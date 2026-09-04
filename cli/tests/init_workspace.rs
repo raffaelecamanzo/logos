@@ -786,3 +786,59 @@ fn rerunning_init_at_a_parent_of_repos_root_stays_non_clobbering() {
     assert!(!tmp.path().join("logos.workspace.toml").exists());
 }
 
+/// **Regression (review finding).** A missing `git` binary must *suppress* the
+/// diagnosis, never invert it.
+///
+/// `is_git_root` collapses "git is absent" into `false` — safe for an admission
+/// filter, inverting for a negative inference. Read through it, `detect`'s first
+/// guard never tripped without git, so an **ordinary repository root** holding
+/// one already-indexed subdirectory (someone ran `logos init` in `./frontend`)
+/// was announced as "a parent folder of sibling repositories … not a repository
+/// itself" and, on a TTY, offered federation — which would write
+/// `logos.workspace.toml` into a real repository and enrol its own subdirectory
+/// as a member. Reproduced against the built binary before the fix.
+///
+/// `PATH` is set on the **child** only, so nothing here mutates this process's
+/// environment and the test is safe under libtest's parallel threads.
+#[test]
+fn a_missing_git_binary_suppresses_the_nudge_rather_than_inverting_it() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    // The child that makes the shape mis-fire: not a git root, but already
+    // indexed, so `discover_candidates` still admits it as a member.
+    let indexed = repo.join("frontend");
+    fs::create_dir_all(indexed.join(".logos")).unwrap();
+    fs::write(indexed.join(".logos/logos.db"), b"").unwrap();
+
+    // An empty directory as PATH: `git` is unreachable, and `logos` itself is
+    // invoked by absolute path so it still runs.
+    let no_git = tmp.path().join("empty-path");
+    fs::create_dir_all(&no_git).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_logos"))
+        .arg("--project")
+        .arg(&repo)
+        .args(["--json", "init"])
+        .env("PATH", &no_git)
+        .output()
+        .expect("the logos binary runs without git on PATH");
+
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("parent folder of sibling repositories"),
+        "an unanswerable git question must not be read as `not a repository`: {stderr}"
+    );
+    assert!(
+        !stderr.contains("enable a Logos workspace"),
+        "and must never reach the offer: {stderr}"
+    );
+    assert!(
+        !repo.join("logos.workspace.toml").exists(),
+        "no workspace manifest may be written inside a real repository"
+    );
+    // The plain single-root init still completed — suppressing the nudge does
+    // not suppress the command.
+    assert!(repo.join(".logos").join("config.toml").is_file());
+}
+

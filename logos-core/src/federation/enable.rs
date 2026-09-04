@@ -31,7 +31,7 @@ use serde::Serialize;
 use crate::config::{globs, ZeroAdmissionDiagnostic};
 use crate::init::{self, InitOptions};
 use crate::models::pipeline::{InitAction, InitResult, InitStep};
-use crate::workspace::is_git_root;
+use crate::workspace::git_root_known;
 
 use super::{discover_candidates, Member};
 
@@ -229,16 +229,25 @@ fn footprint(members: &[MemberReport]) -> WorkingTreeFootprint {
 /// already prints, so the two surfaces cannot drift apart.
 ///
 /// **Detection reuses the federation primitives rather than re-deriving either
-/// half** ([FR-WS-01]): [`is_git_root`] answers "is the root a repository?", and
-/// [`discover_candidates`] — literally `init --workspace`'s own candidate scan —
-/// answers "is any immediate child one?". That reuse is load-bearing, not tidy:
-/// the nudge names `init --workspace` as the remedy, so the shape it fires on
-/// must be exactly the shape that command can act on. A hand-rolled
+/// half** ([FR-WS-01]): [`git_root_known`] answers "is the root a repository?",
+/// and [`discover_candidates`] — literally `init --workspace`'s own candidate
+/// scan — answers "is any immediate child one?". That reuse is load-bearing, not
+/// tidy: the nudge names `init --workspace` as the remedy, so the shape it fires
+/// on must be exactly the shape that command can act on. A hand-rolled
 /// `child.join(".git").exists()` test would diverge on both sides — it would
 /// miss an already-indexed non-git member (which `discover_candidates` admits)
 /// and fire on a bare `.git` file layout the candidate scan would then reject,
 /// handing the operator a confidently wrong instruction, which is worse than the
 /// silence this exists to fix ([NFR-CC-04]).
+///
+/// Reusing the primitive is necessary but was not sufficient: the *tri-state*
+/// one is required. [`crate::workspace::is_git_root`] collapses "git is absent"
+/// into `false`, which is the safe direction for an admission filter and the
+/// **inverting** direction for this negative inference — with no `git` on PATH
+/// every root answered "not a repository", so an ordinary repository holding one
+/// already-indexed subdirectory was diagnosed as a parent folder of sibling
+/// repositories and offered federation. Hence [`git_root_known`], and hence the
+/// `!= Some(false)` guard below rather than a `!`.
 ///
 /// [FR-IN-08]: ../../../docs/specs/requirements/FR-IN-08.md
 /// [FR-IX-13]: ../../../docs/specs/requirements/FR-IX-13.md
@@ -279,7 +288,15 @@ impl ParentOfRepos {
     /// [FR-IN-08]: ../../../docs/specs/requirements/FR-IN-08.md
     #[must_use]
     pub fn detect(root: &Path) -> Option<Self> {
-        if is_git_root(root) {
+        // `Some(false)` — git ran and said "not a repository top level" — is the
+        // ONLY answer this may fire on. `Some(true)` is an ordinary repository
+        // root; `None` means the `git` binary is absent, so every path answers
+        // the same and the negative inference inverts. Read through the
+        // `bool`-collapsing `is_git_root`, a missing git turned this diagnosis
+        // on an ordinary repository root that happened to hold one indexed
+        // subdirectory — the confidently-wrong instruction the type's docs
+        // above claim the primitive reuse prevents.
+        if git_root_known(root) != Some(false) {
             return None;
         }
         let candidates = discover_candidates(root);

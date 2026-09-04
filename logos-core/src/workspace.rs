@@ -91,9 +91,38 @@ pub fn resolve_root(hint: &Path) -> PathBuf {
 ///
 /// [FR-WS-01]: ../../docs/specs/requirements/FR-WS-01.md
 pub fn is_git_root(path: &Path) -> bool {
+    git_root_known(path) == Some(true)
+}
+
+/// As [`is_git_root`], but keeping **"git could not answer"** distinct from
+/// **"no"** ([FR-WS-01]).
+///
+/// - `Some(true)` — git ran and `path` is a working-tree top level.
+/// - `Some(false)` — git ran and said it is not.
+/// - `None` — the `git` binary is absent from PATH, so the question is
+///   *unanswered*.
+///
+/// [`is_git_root`] collapses `None` into `false` because its callers are
+/// admission filters: with no git, [`super::federation::discover_candidates`]
+/// admitting nothing is the safe direction. A caller that instead branches on
+/// the **negative** — "this root is not a repository, therefore …" — must not
+/// collapse it, because without git *every* path answers `false` and the
+/// inference silently inverts. [`ParentOfRepos::detect`] is exactly such a
+/// caller: read through `is_git_root`, a missing git binary made it diagnose an
+/// ordinary repository root as a parent folder of sibling repositories.
+///
+/// [`resolve_root`] already draws this distinction (it warns via
+/// [`git_is_missing`] rather than treating absence as "not a repo"); this is the
+/// same distinction, returned rather than logged.
+///
+/// [`ParentOfRepos::detect`]: super::federation::enable::ParentOfRepos::detect
+/// [FR-WS-01]: ../../docs/specs/requirements/FR-WS-01.md
+#[must_use]
+pub fn git_root_known(path: &Path) -> Option<bool> {
     match git(path, &["rev-parse", "--show-toplevel"]) {
-        Ok(top) if !top.is_empty() => paths_equal(&PathBuf::from(top), path),
-        _ => false,
+        Ok(top) if !top.is_empty() => Some(paths_equal(&PathBuf::from(top), path)),
+        Err(err) if git_is_missing(&err) => None,
+        _ => Some(false),
     }
 }
 
