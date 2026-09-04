@@ -672,27 +672,17 @@ fn extract_one(
 /// would be captured, normalize, and fabricate a cross-service edge — exactly
 /// what never-fabricate forbids ([NFR-RA-05]).
 ///
-/// # The shared negative-case fixture contract (S-340, [FR-WS-08])
-///
-/// Defined once in [FR-WS-08]'s "Shared negative-case fixture contract"
-/// section for every per-language `invocations.scm` story (S-341..S-348) to
-/// reference rather than re-derive:
-///
-/// 1. A same-shaped **non-HTTP receiver call** (`cache.get("k")`) emits no
-///    reference — enforced by this function's ledger gate above, per language
-///    via that language's own [`http_client_crates`](crate::resolve::http_client_call::http_client_crates)
-///    row.
-/// 2. A **base-URL-composed or bare-variable path** emits no reference and
-///    surfaces `base-url-runtime`.
-/// 3. An **absolute-but-non-normalizing path** emits no reference and
-///    surfaces `path-not-composed`.
-///
-/// Cases 2 and 3 are already generic and fixture-pinned in
-/// [`resolve::http_client_call::classify_client_call`](crate::resolve::http_client_call::classify_client_call);
-/// a language story's fixtures only need to prove its query populates the
-/// `invoke.http.method` / `invoke.http.arg` capture names correctly for its
-/// own idioms ([`collect_invocation_sites`]) — never re-implement the
-/// classification.
+/// See [FR-WS-08]'s "Shared negative-case fixture contract" section (S-340)
+/// for the three negative cases every per-language `invocations.scm` story
+/// (S-341..S-348) must fixture — defined there once, not restated here, so
+/// the two can't drift. Cases 2-3 (base-url-runtime / path-not-composed) are
+/// already generic in [`resolve::http_client_call::classify_client_call`](crate::resolve::http_client_call::classify_client_call); a
+/// language story's own fixtures only need to prove its query populates the
+/// `invoke.http.method` / `invoke.http.arg` capture names correctly
+/// ([`collect_invocation_sites`]) — never re-implement the classification.
+/// Case 1 (a same-shaped non-HTTP receiver call) is per-language, gated by
+/// this function's ledger check above via
+/// [`http_client_crates`](crate::resolve::http_client_call::http_client_crates).
 ///
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
