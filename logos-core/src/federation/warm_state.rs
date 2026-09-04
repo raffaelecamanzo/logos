@@ -164,6 +164,18 @@ pub const OUTCOME_FILENAME: &str = ".logos.workspace.warm.json";
 /// [NFR-RA-02]: ../../../docs/specs/requirements/NFR-RA-02.md
 pub const OUTCOME_SCHEMA_VERSION: u32 = 1;
 
+/// The largest sidecar [`read_outcomes`] will read into memory.
+///
+/// A backstop, not a limit anyone should meet: one member entry is well under
+/// 200 bytes even with a verbose failure reason, so 8 MiB admits a roster two
+/// orders of magnitude larger than the 86-member workspace this feature was
+/// built for. Its purpose is that an implausible file at that path degrades to
+/// no record rather than allocating whatever it finds on the path of every
+/// `workspace status` ([NFR-RA-02]).
+///
+/// [NFR-RA-02]: ../../../docs/specs/requirements/NFR-RA-02.md
+const MAX_RECORD_BYTES: u64 = 8 * 1024 * 1024;
+
 /// What the warm did to one member ([FR-WS-17]).
 ///
 /// Recording **success** as well as failure is the half that is easy to skip
@@ -296,19 +308,47 @@ pub fn write_outcomes(workspace_root: &Path, outcomes: &WarmOutcomes) -> std::io
 /// atomically anyway — because a read-model that silently rewrote a file on the
 /// path of every `status` would be a far worse surprise than a stale one.
 ///
+/// # The size guard
+/// This runs on **every** `workspace status`, including the MCP tool and the
+/// HTTP surface, and `fs::read` allocates whatever it finds. Reading an
+/// implausibly large file at that path into memory is the one input that could
+/// turn "degrade quietly" into an abort, which would break the very guarantee
+/// this function exists to make. [`MAX_RECORD_BYTES`] is the cheap backstop:
+/// orders of magnitude above any real roster, and an oversized file degrades
+/// exactly like a malformed one.
+///
 /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
 /// [NFR-RA-02]: ../../../docs/specs/requirements/NFR-RA-02.md
 #[must_use]
 pub fn read_outcomes(workspace_root: &Path) -> WarmOutcomes {
-    let Ok(bytes) = fs::read(outcome_path(workspace_root)) else {
+    let path = outcome_path(workspace_root);
+    let oversized = fs::metadata(&path).is_ok_and(|meta| meta.len() > MAX_RECORD_BYTES);
+    if oversized {
+        tracing::debug!(
+            record = %path.display(),
+            "warm-outcome record is implausibly large — ignoring it"
+        );
+        return WarmOutcomes::default();
+    }
+    let Ok(bytes) = fs::read(&path) else {
         return WarmOutcomes::default();
     };
     let Ok(outcomes) = serde_json::from_slice::<WarmOutcomes>(&bytes) else {
+        tracing::debug!(
+            record = %path.display(),
+            "warm-outcome record is unreadable — warm state falls back to index presence"
+        );
         return WarmOutcomes::default();
     };
     if outcomes.version == OUTCOME_SCHEMA_VERSION {
         outcomes
     } else {
+        tracing::debug!(
+            record = %path.display(),
+            version = outcomes.version,
+            expected = OUTCOME_SCHEMA_VERSION,
+            "warm-outcome record speaks a schema version this build does not"
+        );
         WarmOutcomes::default()
     }
 }
@@ -1245,6 +1285,72 @@ mod tests {
         );
         assert_eq!(value["members"]["web"]["outcome"], "failed");
         assert_eq!(value["members"]["web"]["reason"], "boom");
+    }
+
+
+    /// An implausibly large file at the sidecar's path degrades like any other
+    /// unusable record instead of being read into memory.
+    ///
+    /// [`read_outcomes`] runs on every `workspace status`, including the MCP
+    /// tool and the HTTP surface, so an unbounded `fs::read` there is the one
+    /// input that could turn "degrade quietly" into an abort — breaking the
+    /// guarantee the function exists to make ([NFR-RA-02]).
+    ///
+    /// A **sparse** file, so the assertion costs no disk: the guard reads the
+    /// length from metadata and never opens it.
+    #[test]
+    fn an_implausibly_large_record_is_ignored_rather_than_read_into_memory() {
+        let dir = tempfile::tempdir().expect("workspace root");
+        let path = outcome_path(dir.path());
+        let file = std::fs::File::create(&path).expect("sidecar");
+        file.set_len(MAX_RECORD_BYTES + 1).expect("sparse length");
+        drop(file);
+
+        let read = read_outcomes(dir.path());
+
+        assert!(read.is_empty(), "an oversized record yields no members");
+        assert_eq!(
+            std::fs::metadata(&path).expect("sidecar").len(),
+            MAX_RECORD_BYTES + 1,
+            "and, like every other unusable record, it is left untouched"
+        );
+    }
+
+    /// A record right **at** the cap is still read — the guard rejects only what
+    /// exceeds it, so the boundary is not off by one in the direction that would
+    /// silently discard a legitimate roster.
+    #[test]
+    fn a_record_at_the_size_cap_is_still_read() {
+        let dir = tempfile::tempdir().expect("workspace root");
+        let record = outcomes([("api", None)]);
+        write_outcomes(dir.path(), &record).expect("write");
+        assert!(
+            std::fs::metadata(outcome_path(dir.path())).unwrap().len() <= MAX_RECORD_BYTES,
+            "a real record is nowhere near the cap"
+        );
+
+        assert_eq!(read_outcomes(dir.path()), record);
+    }
+
+    /// A failed write returns the error and leaves no temp behind — the error
+    /// path of [`write_outcomes`]' documented contract, which no test reached
+    /// while every call site used `.expect("write")`.
+    #[test]
+    fn a_failed_write_returns_the_error_and_leaves_no_temp_behind() {
+        let dir = tempfile::tempdir().expect("workspace root");
+        // `rename` onto a directory cannot succeed for any user, on any
+        // platform — deterministic where a permission bit is not.
+        std::fs::create_dir(outcome_path(dir.path())).expect("obstruct the sidecar");
+
+        assert!(write_outcomes(dir.path(), &outcomes([("api", None)])).is_err());
+
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("root")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp left behind: {leftovers:?}");
     }
 
 }

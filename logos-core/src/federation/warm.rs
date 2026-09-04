@@ -296,27 +296,48 @@ pub fn record_outcomes(summary: &WarmSummary) {
         return;
     };
 
-    let mut outcomes = warm_state::read_outcomes(&workspace_root);
-    for member in &summary.members {
-        // `member_name` is the SAME resolve→canonicalise→relativise the manifest
-        // parse derives `Member::name` with (`federation::discover`), called
-        // rather than re-implemented so a warm outcome can never be filed under
-        // a key no read-model looks up. A root that no longer resolves, or that
-        // escaped the workspace, yields no name and is skipped.
-        let Some(name) = super::member_name(&workspace_root, Path::new(&member.root)) else {
-            continue;
-        };
-        outcomes.members.insert(
-            name,
-            match &member.degraded {
+    // Name everything BEFORE touching the record: nothing nameable means there
+    // is no evidence to file, and publishing an empty record over a workspace
+    // that had none would create a sidecar out of a pass that learned nothing.
+    let named: Vec<(String, warm_state::WarmOutcome)> = summary
+        .members
+        .iter()
+        .filter_map(|member| {
+            // `member_name` is the SAME resolve→canonicalise→relativise the
+            // manifest parse derives `Member::name` with
+            // (`federation::discover`), called rather than re-implemented so a
+            // warm outcome can never be filed under a key no read-model looks
+            // up. A root that no longer resolves, or that escaped the
+            // workspace, yields no name and is skipped.
+            let name = super::member_name(&workspace_root, Path::new(&member.root))?;
+            let outcome = match &member.degraded {
                 Some(reason) => warm_state::WarmOutcome::Failed {
                     reason: reason.clone(),
                 },
                 None => warm_state::WarmOutcome::Succeeded,
-            },
+            };
+            Some((name, outcome))
+        })
+        .collect();
+    if named.is_empty() {
+        return;
+    }
+
+    let mut outcomes = warm_state::read_outcomes(&workspace_root);
+    outcomes.members.extend(named);
+    if let Err(err) = warm_state::write_outcomes(&workspace_root, &outcomes) {
+        // Debug, not warn: this is advisory evidence on a detached background
+        // process whose stderr is `/dev/null`, so a louder level would reach
+        // nobody it could help while adding noise to a `--verbose` run. What it
+        // buys is a diagnosable trail for the one case that is otherwise
+        // completely silent — a read-only workspace root leaving every member
+        // `deferred` forever with no signal anywhere ([NFR-RA-02]).
+        tracing::debug!(
+            workspace = %workspace_root.display(),
+            error = %err,
+            "warm outcomes could not be recorded — warm state falls back to index presence"
         );
     }
-    let _ = warm_state::write_outcomes(&workspace_root, &outcomes);
 }
 
 /// The workspace root `member_root` belongs to: the directory of the nearest
@@ -1008,6 +1029,52 @@ mod tests {
             ["api", "web"],
             "the real workspace root still receives every outcome"
         );
+    }
+
+
+    /// A pass in which **nothing** could be named files no record at all, rather
+    /// than publishing an empty one over a workspace that had none. An empty
+    /// record is behaviourally inert, but creating a sidecar out of a pass that
+    /// learned nothing is a footprint the story does not owe.
+    #[test]
+    fn a_pass_that_names_nothing_writes_no_record() {
+        let (_dir, root, _members) = workspace(&["api"]);
+        let elsewhere = tempfile::tempdir().expect("another root");
+        let stray = elsewhere.path().join("gone");
+
+        record_outcomes(&summary(&[(&stray, Some("spawn failed"))]));
+
+        assert!(
+            !warm_state::outcome_path(&root).exists(),
+            "no nameable member ⇒ no sidecar"
+        );
+    }
+
+    /// A workspace root the record cannot be **published** into is silent and
+    /// non-fatal — the other half of `record_outcomes`' "files less evidence,
+    /// never fails" contract. Only the *no-manifest* silence path was covered
+    /// before.
+    #[test]
+    fn an_unwritable_workspace_root_is_silent_and_never_panics() {
+        let (_dir, root, members) = workspace(&["api"]);
+        // A directory where the record belongs: `rename` onto it fails for any
+        // user, on any platform — no permission bit, so this is deterministic
+        // even for a root CI runner.
+        std::fs::create_dir(warm_state::outcome_path(&root)).expect("obstruct the sidecar");
+
+        record_outcomes(&summary(&[(&members[0], None)]));
+
+        assert!(
+            warm_state::outcome_path(&root).is_dir(),
+            "the obstruction is untouched and nothing panicked"
+        );
+        let strays: Vec<String> = std::fs::read_dir(&root)
+            .expect("root")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "a failed publish leaves no temp: {strays:?}");
     }
 
 }
