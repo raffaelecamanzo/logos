@@ -51,6 +51,11 @@ pub(crate) const SUPERVISOR_COMMAND: &str = "internal-warm";
 /// waits behind the bound, or hasn't finished before first real use still
 /// indexes correctly via the engine's lazy `ensure_indexed` fallback
 /// (FR-IX-07), so this command never needs to wait on it.
+///
+/// The report carries [`enable::WorkingTreeFootprint`] — enabling N members
+/// dirties N repositories, and that no longer goes unsaid (FR-WS-02,
+/// FR-IN-04). Its one-line prose form goes to stderr, so stdout stays exactly
+/// one machine document.
 pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm: fn(&[Member], Option<usize>) -> bool) -> Result<i32> {
     let existing = federation::discover(root)?;
     let workspace_root = existing
@@ -111,6 +116,14 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm
     warm(&approved_new, declared_k);
 
     out.print(&report)?;
+    // The footprint rides the report itself, so both the human and `--json`
+    // forms carry it. This extra line is the *prose* half — pre-composed by the
+    // core (NFR-MA-02), and on stderr so stdout stays exactly one machine
+    // document (FR-CL-02), the same split `xservice::run_workspace` uses for the
+    // degraded roll-up.
+    if let Some(notice) = report.footprint.notice().filter(|_| !out.quiet) {
+        eprintln!("{notice}");
+    }
     Ok(0)
 }
 

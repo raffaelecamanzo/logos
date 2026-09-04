@@ -191,6 +191,21 @@ incremental — `manifest`/`mcp` actions report `unchanged` and no duplicate MCP
 entry is written. When no sibling repos are found, nothing is written and the
 command exits 0.
 
+The report also states the **working-tree footprint** the command left behind
+([FR-WS-02](../specs/requirements/FR-WS-02.md)) — enabling 84 members
+legitimately makes 84 repositories git-dirty, and that should not go unsaid. A
+`footprint` object in the report (both `--json` and the default rendering)
+counts the members that now carry a `fresh` untracked `.logos/`, those that
+already had one (`unchanged`), and any `degraded` ones, and names both halves of
+[FR-IN-04](../specs/requirements/FR-IN-04.md): what is meant to be `committed`
+inside `.logos/` (`config.toml`, `rules.toml`, `.gitignore` — the policy that
+travels with each repository) and what the generated `.logos/.gitignore` already
+`ignored` (`logos.db*`, `telemetry.db*`, `secrets.toml`, …). A one-line prose
+summary of the same goes to **stderr** whenever at least one member is fresh, so
+stdout stays exactly one machine document; `--quiet` suppresses that line and
+leaves the payload untouched. Nothing about what `init` writes changed — no
+member's tracked files, and no member's own `.gitignore`, are touched.
+
 > **Federation is an in-memory overlay, never a graph union.** Each member keeps
 > its own `.logos/logos.db` and its single-root behaviour unchanged; the
 > workspace is assembled on demand and never persisted across a database

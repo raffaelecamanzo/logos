@@ -77,6 +77,7 @@ fn federation(root: &Path, members: Vec<Member>) -> Federation {
         default: None,
         links: Vec::new(),
         governance: Default::default(),
+        warm_concurrency: None,
     }
 }
 

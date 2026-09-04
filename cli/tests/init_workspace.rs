@@ -540,3 +540,73 @@ fn an_out_of_range_warm_concurrency_is_an_actionable_exit_2() {
         "and how to get the core-derived default instead: {stderr}"
     );
 }
+
+// ── the working-tree footprint (S-333, FR-WS-02, FR-IN-04) ──────────────────
+
+/// Enabling N members leaves N repositories git-dirty; the report says so, in
+/// **both** renderings. `--json` and the human form print the same read-model
+/// through the same printer, so a footprint present in one but not the other
+/// would mean a rendering path composed its own — which is exactly what
+/// NFR-MA-02 forbids the adapter to do.
+#[test]
+fn both_output_forms_carry_the_enablement_footprint() {
+    let tmp = two_member_fixture();
+
+    let machine = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&machine), 0, "{}", String::from_utf8_lossy(&machine.stderr));
+    let json: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(json["footprint"]["fresh"], 2, "both members are newly dirtied");
+    assert_eq!(json["footprint"]["unchanged"], 0);
+    let committed: Vec<&str> = json["footprint"]["committed"]
+        .as_array()
+        .expect("the committed half of FR-IN-04 is stated")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(committed.contains(&".logos/config.toml"), "{committed:?}");
+    assert!(
+        json["footprint"]["ignored"]
+            .as_array()
+            .expect("the ignored half too")
+            .iter()
+            .any(|v| v == "logos.db*"),
+        "{json}"
+    );
+
+    // The human form of a *second*, third-member run: same field, same shape.
+    let batch = tmp.path().join("batch");
+    init_repo(&batch);
+    let human = logos(tmp.path(), &["init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&human), 0, "{}", String::from_utf8_lossy(&human.stderr));
+    let pretty: serde_json::Value = serde_json::from_slice(&human.stdout)
+        .expect("the human rendering is pretty JSON, not prose");
+    assert_eq!(pretty["footprint"]["fresh"], 1, "only the new member is fresh");
+    assert_eq!(pretty["footprint"]["unchanged"], 2, "the enabled pair already had one");
+}
+
+/// The prose half goes to stderr: stdout stays exactly one machine document
+/// (FR-CL-02), and `--quiet` silences the note without emptying the report.
+#[test]
+fn the_footprint_note_is_advisory_on_stderr_and_quiet_suppresses_it() {
+    let tmp = two_member_fixture();
+    let out = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&out), 0);
+
+    serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .expect("stdout is exactly one JSON document, the note is not on it");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("fresh untracked `.logos/`") && stderr.contains("FR-IN-04"),
+        "the operator is told what to commit and why: {stderr}"
+    );
+
+    // A fresh workspace under --quiet: the note is suppressed, and `--json`
+    // still emits the essential report (FR-CL-02).
+    let quiet_tmp = two_member_fixture();
+    let quiet = logos(quiet_tmp.path(), &["--json", "--quiet", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&quiet), 0);
+    let stderr = String::from_utf8_lossy(&quiet.stderr);
+    assert!(!stderr.contains("fresh untracked"), "--quiet silences the advisory: {stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&quiet.stdout).unwrap();
+    assert_eq!(report["footprint"]["fresh"], 2, "the machine payload is unaffected");
+}
