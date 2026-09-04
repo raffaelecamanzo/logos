@@ -164,6 +164,84 @@ fn a_failed_warm_reports_degraded_from_a_cold_registry_with_its_reason() {
     assert_eq!(status.warm_rollup.deferred, 0);
 }
 
+/// Make `member`'s store present but unopenable — a directory where its
+/// database file belongs. Deterministic on every platform and every user,
+/// including a root CI runner for whom a permission bit would open fine.
+///
+/// Duplicated from `workspace_degraded_report.rs` rather than shared: each
+/// `tests/*.rs` file is its own binary, and this whole file already accepts
+/// its own copies of comparable fixtures (`workspace`, `summary`) for the
+/// same reason.
+fn obstruct_store(member: &Member) {
+    let store = member.root.join(".logos").join("logos.db");
+    std::fs::create_dir_all(&store).expect("a directory where the store belongs");
+}
+
+/// One member row from a `workspace status`, as a consumer reads it.
+fn member_row(status: &WorkspaceStatus, member: &str) -> serde_json::Value {
+    let value = serde_json::to_value(status).expect("status serialises");
+    value["members"]
+        .as_array()
+        .expect("a member table")
+        .iter()
+        .find(|row| row["member"] == member)
+        .unwrap_or_else(|| panic!("{member} is in the roster: {value}"))
+        .clone()
+}
+
+/// [FR-WS-16] and [FR-WS-17] together, through the real read-model rather than
+/// `derive_state`'s pure truth table: a member whose store is **live-broken**
+/// this run ([`obstruct_store`], S-332's fixture) AND whose **durable record**
+/// says a past warm failed, for a *different* reason.
+///
+/// `derive_state`'s own precedence table says the durable record outranks the
+/// transient open error for `warm_state`'s `reason` — pinned in
+/// `federation::warm_state`'s unit tests — but nothing before this test built
+/// that combination through a real obstructed store and a real on-disk record
+/// at once, so a regression that let the live error leak into `reason`, or the
+/// record leak into `degraded_reason`, could ship unnoticed: every existing
+/// fixture in this file leaves `open_state` healthy, and every one in
+/// `workspace_degraded_report.rs` leaves no outcome record on disk.
+#[test]
+fn a_member_can_be_degraded_on_both_axes_with_two_different_reasons() {
+    let (_dir, root, members) = workspace(&[("api", true), ("web", false)]);
+    let web = &members[1];
+
+    obstruct_store(web);
+    record_outcomes(&summary(&[(web, Some("index failed: exit status: 2"))]));
+
+    let status = status_from_a_cold_start(&root, &members);
+
+    assert_eq!(
+        warm_state_of(&status, "web"),
+        &MemberWarmState::Degraded {
+            reason: "index failed: exit status: 2".to_string()
+        },
+        "the WARM axis reads the durable record, not this run's own open failure"
+    );
+
+    let row = member_row(&status, "web");
+    assert_eq!(row["warm_state"], "degraded");
+    assert_eq!(row["open_state"], "degraded");
+    assert_eq!(
+        row["reason"], "index failed: exit status: 2",
+        "the warm axis' reason is the durable record's, verbatim"
+    );
+    let live_error = row["degraded_reason"]
+        .as_str()
+        .expect("the open axis carries its own live diagnostic");
+    assert!(
+        live_error.contains("not a regular file"),
+        "the OPEN axis' reason is this run's own obstruction, not the record: {live_error}"
+    );
+    assert_ne!(
+        row["reason"], row["degraded_reason"],
+        "two independent facts about the same member — a recorded warm failure \
+         and a live open failure — must not collapse into one string just \
+         because they happen to be reported on the same row"
+    );
+}
+
 /// [BR-47]'s truth table over the **real** read-model, not the pure derivation:
 /// four members, four states, one `workspace status`.
 ///
