@@ -310,16 +310,34 @@ impl ParentOfRepos {
     /// different fates: the explanation always prints, the question only on a
     /// TTY ([FR-IN-08]).
     ///
+    /// `host_setup_requested` says the invocation asked for the [FR-IN-02]
+    /// host-integration steps (`--interactive` / `--hooks`), which the
+    /// [FR-WS-02] path does not apply — it inits every member with
+    /// [`InitOptions::default`] and injects only the workspace MCP entry at the
+    /// parent. Saying so **here** matters because this question is the moment of
+    /// consent: `logos init -i` is what the installation guide tells a new user
+    /// to run, so at a parent-of-repos root a bare "yes" would otherwise trade
+    /// the managed CLAUDE.md block, the wiki skill and the quality-report hook
+    /// away without ever naming them. A "yes" is consent to change the *scope*
+    /// of the init, not to silently cancel the flags the user typed.
+    ///
+    /// [FR-IN-02]: ../../../docs/specs/requirements/FR-IN-02.md
     /// [FR-IN-08]: ../../../docs/specs/requirements/FR-IN-08.md
+    /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
     #[must_use]
-    pub fn question(&self) -> String {
+    pub fn question(&self, host_setup_requested: bool) -> String {
         format!(
-            "enable a Logos workspace here instead ({} member {})?",
+            "enable a Logos workspace here instead ({} member {}{})?",
             self.candidates.len(),
             if self.candidates.len() == 1 {
                 "repository"
             } else {
                 "repositories"
+            },
+            if host_setup_requested {
+                ", without the --interactive/--hooks host setup"
+            } else {
+                ""
             },
         )
     }
@@ -905,14 +923,33 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         init_repo(&tmp.path().join("api"));
         assert_eq!(
-            ParentOfRepos::detect(tmp.path()).unwrap().question(),
+            ParentOfRepos::detect(tmp.path()).unwrap().question(false),
             "enable a Logos workspace here instead (1 member repository)?"
         );
 
         init_repo(&tmp.path().join("web"));
         assert_eq!(
-            ParentOfRepos::detect(tmp.path()).unwrap().question(),
+            ParentOfRepos::detect(tmp.path()).unwrap().question(false),
             "enable a Logos workspace here instead (2 member repositories)?"
         );
+    }
+
+    /// `logos init -i` accepted at a parent-of-repos root silently drops the
+    /// host-integration steps `-i` exists to install, because the FR-WS-02 path
+    /// inits members with `InitOptions::default()`. The offer must say so before
+    /// the user answers — the whole point of the nudge is to be non-surprising.
+    #[test]
+    fn the_question_names_the_host_setup_an_accepted_offer_would_not_apply() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(&tmp.path().join("api"));
+        let shape = ParentOfRepos::detect(tmp.path()).unwrap();
+
+        let asked = shape.question(true);
+        assert!(
+            asked.contains("without the --interactive/--hooks host setup"),
+            "an accepted offer must not trade `-i` away silently: {asked}"
+        );
+        // …and stays out of the way when the user asked for no such thing.
+        assert!(!shape.question(false).contains("--interactive"), "unasked-for noise");
     }
 }

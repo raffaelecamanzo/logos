@@ -161,15 +161,21 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm
 /// `--quiet` reinstates exactly the silence FR-IN-08 exists to remove. stdout is
 /// unaffected either way (FR-CL-02), which is what `--quiet` actually protects.
 ///
+/// `host_setup` is `--interactive || --hooks`: the FR-WS-02 path applies neither
+/// (it inits members with `InitOptions::default()`), so the offer names what a
+/// "yes" would drop rather than trading it away silently. It is passed rather
+/// than decided here because the *sentence* is core-composed like the rest
+/// (NFR-MA-02) — the adapter only knows which flags the user typed.
+///
 /// Composition lives in the core ([`enable::ParentOfRepos`]); this only renders
 /// and prompts (NFR-MA-02).
-pub(crate) fn nudge(root: &Path, workspace: bool, mut ask: impl FnMut(&str, bool) -> bool) -> bool {
+pub(crate) fn nudge(root: &Path, workspace: bool, host_setup: bool, mut ask: impl FnMut(&str, bool) -> bool) -> bool {
     // `then` keeps `detect` lazy, so `--workspace` spawns no `git` at all; the
     // `else` arm then answers `workspace` itself — `true` for the explicit flag,
     // `false` for a root that is not the shape.
     let Some(shape) = (!workspace).then(|| enable::ParentOfRepos::detect(root)).flatten() else { return workspace };
     eprintln!("{shape}");
-    ask(&shape.question(), false)
+    ask(&shape.question(host_setup), false)
 }
 
 /// Filter `candidates` down to the approved set: `--yes` accepts every one
@@ -667,7 +673,7 @@ mod tests {
         // Exactly what `crate::ask` does on a non-TTY: yield the default,
         // reading nothing.
         assert!(
-            !nudge(tmp.path(), false, |_, default| default),
+            !nudge(tmp.path(), false, false, |_, default| default),
             "a non-TTY answer is the default, and the default is decline"
         );
     }
@@ -677,7 +683,7 @@ mod tests {
     #[test]
     fn accepting_the_offer_reports_true() {
         let tmp = fixture(&["api", "web"]);
-        assert!(nudge(tmp.path(), false, |_, _| true), "an accepted offer branches to --workspace");
+        assert!(nudge(tmp.path(), false, false, |_, _| true), "an accepted offer branches to --workspace");
     }
 
     /// An explicit `--workspace` is answered `true` **without** detecting: no
@@ -689,7 +695,7 @@ mod tests {
         let tmp = fixture(&["api", "web"]);
         let mut asked = 0;
         assert!(
-            nudge(tmp.path(), true, |_, _| {
+            nudge(tmp.path(), true, false, |_, _| {
                 asked += 1;
                 false
             }),
@@ -704,7 +710,7 @@ mod tests {
     fn neither_the_flag_nor_the_shape_declines() {
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join("notes")).unwrap();
-        assert!(!nudge(tmp.path(), false, |_, _| true), "no flag and no shape ⇒ plain init");
+        assert!(!nudge(tmp.path(), false, false, |_, _| true), "no flag and no shape ⇒ plain init");
     }
 
     /// …and the question the operator is asked names the stake, so "yes" is
@@ -713,7 +719,7 @@ mod tests {
     fn the_offer_names_how_many_repositories_it_would_enable() {
         let tmp = fixture(&["api", "web"]);
         let mut asked: Vec<String> = Vec::new();
-        assert!(!nudge(tmp.path(), false, |q, d| {
+        assert!(!nudge(tmp.path(), false, false, |q, d| {
             asked.push(q.to_string());
             d
         }));
@@ -736,7 +742,7 @@ mod tests {
 
         let mut asks = 0;
         assert!(
-            !nudge(&repo, false, |_, _| {
+            !nudge(&repo, false, false, |_, _| {
                 asks += 1;
                 true
             }),
@@ -753,7 +759,7 @@ mod tests {
     #[test]
     fn an_accepted_offer_leads_to_a_written_workspace_manifest() {
         let tmp = fixture(&["api", "web"]);
-        assert!(nudge(tmp.path(), false, |_, _| true));
+        assert!(nudge(tmp.path(), false, false, |_, _| true));
 
         let out = Output { json: true, quiet: true };
         assert_eq!(run(tmp.path(), true, &[], &out, |_, _| true).unwrap(), 0);
