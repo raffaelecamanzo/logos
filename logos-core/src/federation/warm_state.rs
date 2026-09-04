@@ -12,46 +12,51 @@
 //! Only one of the four states is derivable from the store alone. `warm` is
 //! "this member's graph holds at least one indexed file"
 //! ([`StatusInfo::indexed`](crate::models::StatusInfo::indexed)) and `deferred`
-//! is its complement; but *being indexed right now* and *was attempted and
-//! failed* are facts about a **process**, not about a store, and no such fact is
-//! recorded durably today — the bounded supervisor reports a failed member on a
-//! stderr that the real detached spawn sends to `/dev/null`
-//! (`cli::workspace_init::run_supervisor`).
+//! used to be its complement; but *being indexed right now* and *was attempted
+//! and failed* are facts about a **process**, not about a store. So the
+//! derivation takes them as an explicit [`WarmEvidence`] input:
 //!
-//! So the derivation takes those two facts as an explicit [`WarmEvidence`]
-//! input, and today's only caller passes [`WarmEvidence::none`]:
-//!
-//! - **`warming` is omitted, never inferred** ([NFR-CC-04]). With no in-flight
-//!   signal the roll-up's `warming` key is *absent from the JSON* rather than a
-//!   fabricated `0`, and [`MemberWarmState::Warming`] is unreachable — not by a
-//!   convention a later edit can forget, but because nothing short of
-//!   [`WarmEvidence::with_in_flight`] can put a member in the in-flight set,
-//!   and no caller calls it yet.
-//! - **A failed member is `degraded`, never `deferred`** ([BR-44]). Two failure
-//!   channels reach here durably, and both map to `degraded`: a member whose
-//!   engine could not be **started**, and a member that started but whose
-//!   **freshness read** failed. The second one takes care — [`Engine::status`](crate::Engine::status)
+//! - **`warming` is omitted, never inferred** ([NFR-CC-04]). No live in-flight
+//!   signal source exists, so the roll-up's `warming` key is *absent from the
+//!   JSON* rather than a fabricated `0`, and [`MemberWarmState::Warming`] is
+//!   unreachable — not by a convention a later edit can forget, but because
+//!   nothing short of [`WarmEvidence::with_in_flight`] can put a member in the
+//!   in-flight set, and no production caller calls it.
+//! - **A failed member is `degraded`, never `deferred`** ([BR-44]). Three
+//!   channels reach here durably and all map to `degraded`: a member whose
+//!   engine could not be **started**, a member that started but whose
+//!   **freshness read** failed, and a member whose **warm** was attempted and
+//!   failed. The second takes care — [`Engine::status`](crate::Engine::status)
 //!   is infallible and degrades to a *defaulted* [`StatusInfo`](crate::models::StatusInfo) whose
 //!   `indexed: false` is indistinguishable from an honestly empty graph — so
 //!   [`workspace_status`](super::query::workspace_status) fans
 //!   [`Engine::try_status`](crate::Engine::try_status) and folds its `Err` into the per-member error
 //!   channel instead.
 //!
-//!   What is **not** yet distinguishable is a warm that was attempted and
-//!   failed while the member's store still opens and reads cleanly: that is
-//!   indistinguishable from a member the queue never reached, and
-//!   [`WarmEvidence::with_failures`] is the seam that closes the gap the moment
-//!   a durable per-member warm-failure record exists. Adding it is a change of
-//!   *input*, not of this module's shape or of the read-model's wire format.
+//! # The record this module reads ([FR-WS-17])
+//! The third channel is the durable one, and it is owned here: [`WarmOutcomes`]
+//! is the sidecar's schema, [`write_outcomes`] its atomic write and
+//! [`read_outcomes`] its degrade-to-empty read. It sits at the **workspace
+//! root** beside the manifest, keyed on [`Member::name`](super::Member::name),
+//! and nothing is ever written inside a member's `.logos/` — [FR-WS-14]'s
+//! no-member-store property stays literal.
 //!
-//! # One residual gap, stated rather than papered over
-//! `warm` is index **presence**, per [FR-WS-15]. A member the warm reached and
-//! indexed successfully but which contains no supported-language files holds no
-//! indexed file, so it reports `deferred` — "never attempted" — permanently. The
-//! requirement itself equates `warm` with index presence, so this is not fixed
-//! here; naming it is the honest alternative to a heuristic that would guess at
-//! *why* a graph is empty ([NFR-CC-04]). It belongs to the same human decision
-//! as the warm-failure producer above.
+//! It records **outcomes**, not only failures, and that closes what used to be
+//! this module's stated residual gap: a member the warm indexed successfully
+//! that contains no supported-language file holds no indexed file, so index
+//! presence alone reports it `deferred` — "never attempted" — permanently. A
+//! recorded success says the warm *completed*, which is the fact `deferred` was
+//! asserting the opposite of. One mechanism answers both halves ([FR-WS-17]).
+//!
+//! Where the record and the store disagree, the **store wins** ([BR-47]): a
+//! member that demonstrably holds a graph is never reported degraded, so a
+//! member indexed later by a re-run or by the lazy [FR-IX-07] fallback reads
+//! `warm` again and no code path has to remember to clear anything. The record
+//! is evidence, not a latch.
+//!
+//! A workspace with **no** record derives from index presence alone, exactly as
+//! every build before [FR-WS-17] did — which is also what a malformed,
+//! truncated or unreadable one degrades to ([NFR-RA-02]).
 //!
 //! # No engines are constructed to answer
 //! Every function here is pure, over values a `workspace status` walk has
@@ -60,15 +65,22 @@
 //! resident-engine ceiling is exactly what the fan-out it rides on already
 //! paid ([NFR-PE-11]).
 //!
+//! [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
 //! [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+//! [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+//! [FR-IX-07]: ../../../docs/specs/requirements/FR-IX-07.md
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 //! [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 //! [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+//! [NFR-RA-02]: ../../../docs/specs/requirements/NFR-RA-02.md
 //! [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
+//! [BR-47]: ../../../docs/specs/software-spec.md#327-workspace-federation
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// One member's warm state as `workspace status` reports it ([FR-WS-15]).
 ///
@@ -118,17 +130,228 @@ pub enum MemberWarmState {
     },
 }
 
+// ── the durable warm-outcome record (FR-WS-17, BR-47) ──────────────────────
+
+/// The warm-outcome sidecar's filename, at the **workspace root** beside
+/// [`MANIFEST_FILENAME`](super::MANIFEST_FILENAME) ([FR-WS-17]).
+///
+/// At the workspace root and nowhere else: [FR-WS-14] makes "the supervisor
+/// holds no member store" a *literal* property — the supervisor skips even
+/// telemetry initialisation for it — so a per-member marker inside each
+/// member's `.logos/` would have to amend that requirement rather than
+/// implement this one ([CR-102] §5.1 CRA-01). One sidecar also costs one write
+/// per pass instead of N, and keys on the workspace-relative member name every
+/// federation read-model already joins on rather than on an absolute root.
+///
+/// Dot-prefixed and not the manifest's `.toml`: the manifest is a checked-in
+/// file an operator edits, this is machine-written state about the last warm on
+/// *this* machine. Nothing reads it but [`read_outcomes`], and its absence is a
+/// first-class state (`deferred` by index presence alone), so it is safe to
+/// delete and pointless to commit.
+///
+/// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+/// [CR-102]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
+pub const OUTCOME_FILENAME: &str = ".logos.workspace.warm.json";
+
+/// The schema version [`write_outcomes`] stamps and [`read_outcomes`] requires.
+///
+/// Load-bearing rather than decorative: a record whose `version` is not this
+/// one reads as **no record at all**, so a future schema that changes what a
+/// member entry *means* degrades an old reader to index-presence derivation
+/// instead of letting it misread new bytes under old rules ([NFR-RA-02]).
+///
+/// [NFR-RA-02]: ../../../docs/specs/requirements/NFR-RA-02.md
+pub const OUTCOME_SCHEMA_VERSION: u32 = 1;
+
+/// What the warm did to one member ([FR-WS-17]).
+///
+/// Recording **success** as well as failure is the half that is easy to skip
+/// and cannot be: a failure-only marker cannot describe a member the warm
+/// indexed perfectly well that holds no supported-language file, and that
+/// member is misreported `deferred` — "never attempted" — by the same
+/// index-presence equation a failure-only record was meant to fix. One
+/// mechanism answers both ([FR-WS-17] Notes).
+///
+/// Internally tagged on `outcome`, the same dialect
+/// [`MemberWarmState`] and [`MemberOutcome`](super::enable::MemberOutcome)
+/// speak.
+///
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "lowercase")]
+pub enum WarmOutcome {
+    /// The member's index ran to completion. Says nothing about whether it
+    /// *found* anything — a member with no supported-language file succeeds
+    /// here and holds no indexed file, which is exactly the case index presence
+    /// alone gets wrong.
+    Succeeded,
+    /// The member's index or its spawn failed, with the reason verbatim.
+    Failed {
+        /// Why the warm failed, as the supervisor recorded it.
+        reason: String,
+    },
+}
+
+/// The sidecar itself: one warm outcome per member name ([FR-WS-17]).
+///
+/// Keyed by [`Member::name`](super::Member::name) — the workspace-relative path
+/// every federation read-model joins on — deliberately **not** by the absolute
+/// root [`WarmSummary`](super::warm::WarmSummary) carries, which is a
+/// diagnostic label and not join-compatible with anything.
+///
+/// A [`BTreeMap`] so the serialised bytes are ordered and a re-write that
+/// changed nothing produces an identical file.
+///
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WarmOutcomes {
+    /// The schema version — [`OUTCOME_SCHEMA_VERSION`] on anything this code
+    /// wrote, and the gate [`read_outcomes`] checks before believing a word of
+    /// the rest.
+    pub version: u32,
+    /// Member name → what the warm did to it.
+    #[serde(default)]
+    pub members: BTreeMap<String, WarmOutcome>,
+}
+
+impl Default for WarmOutcomes {
+    /// An empty record **at the current schema version** — the value
+    /// [`read_outcomes`] returns for every degrade, and the base a merge starts
+    /// from, so a written record can never carry a stale or zero version.
+    fn default() -> Self {
+        Self {
+            version: OUTCOME_SCHEMA_VERSION,
+            members: BTreeMap::new(),
+        }
+    }
+}
+
+impl WarmOutcomes {
+    /// Whether the record names no member at all — the "no record" case, which
+    /// derives exactly as it did before [FR-WS-17] existed.
+    ///
+    /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+}
+
+/// Where the sidecar lives for `workspace_root` — beside the manifest, never
+/// inside a member ([FR-WS-17]).
+///
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+#[must_use]
+pub fn outcome_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(OUTCOME_FILENAME)
+}
+
+/// Write `outcomes` to `workspace_root`'s sidecar **atomically** ([FR-WS-17]).
+///
+/// The bytes go to a sibling temp file in the same directory — same filesystem,
+/// so the `rename` is an in-place swap rather than a cross-device copy — which
+/// is `sync_all`-ed before the swap. A concurrent reader therefore sees either
+/// the whole previous record or the whole new one and never a partial one, and
+/// a crash mid-write leaves the previous record intact. The temp name carries
+/// the writing process's PID so two supervisors on one workspace cannot clobber
+/// each other's *temp*; the rename remains the only publish. Same shape, and
+/// the same reasons, as `config::writeback`'s policy-file write.
+///
+/// The version is stamped from [`OUTCOME_SCHEMA_VERSION`] rather than taken
+/// from the argument, so no caller can publish a record under a version it does
+/// not actually speak.
+///
+/// # Errors
+/// Any I/O failure — an unwritable workspace root, a full disk. Every caller
+/// discards it: the record is *evidence*, and a warm whose evidence could not
+/// be filed still warmed the members. Losing it degrades `workspace status` to
+/// index presence, which is the pre-[FR-WS-17] behaviour, not a fault
+/// ([NFR-RA-02]).
+///
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+/// [NFR-RA-02]: ../../../docs/specs/requirements/NFR-RA-02.md
+pub fn write_outcomes(workspace_root: &Path, outcomes: &WarmOutcomes) -> std::io::Result<()> {
+    /// The bytes actually published: `outcomes`' members under the version
+    /// **this** build speaks, borrowed rather than cloned so stamping a large
+    /// roster costs nothing.
+    #[derive(Serialize)]
+    struct Stamped<'a> {
+        version: u32,
+        members: &'a BTreeMap<String, WarmOutcome>,
+    }
+
+    let target = outcome_path(workspace_root);
+    let bytes = serde_json::to_vec_pretty(&Stamped {
+        version: OUTCOME_SCHEMA_VERSION,
+        members: &outcomes.members,
+    })
+    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    let tmp = workspace_root.join(format!("{OUTCOME_FILENAME}.{}.tmp", std::process::id()));
+
+    let result = (|| {
+        use std::io::Write as _;
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, &target)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// Read `workspace_root`'s sidecar, degrading to an **empty** record on
+/// anything at all ([FR-WS-17], [NFR-RA-02]).
+///
+/// Infallible by design, and that is the requirement rather than a convenience:
+/// no `workspace status`, MCP call or HTTP read may fail because a piece of
+/// *advisory* evidence is absent, unreadable, truncated, malformed, or written
+/// under a schema version this build does not speak. Every one of those cases
+/// returns [`WarmOutcomes::default`], which makes the derivation fall back to
+/// index presence — precisely the behaviour of every build before the record
+/// existed.
+///
+/// Note what is deliberately **not** here: no repair, no deletion, no warning.
+/// A corrupt sidecar is left exactly as found — the next warm overwrites it
+/// atomically anyway — because a read-model that silently rewrote a file on the
+/// path of every `status` would be a far worse surprise than a stale one.
+///
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+/// [NFR-RA-02]: ../../../docs/specs/requirements/NFR-RA-02.md
+#[must_use]
+pub fn read_outcomes(workspace_root: &Path) -> WarmOutcomes {
+    let Ok(bytes) = fs::read(outcome_path(workspace_root)) else {
+        return WarmOutcomes::default();
+    };
+    let Ok(outcomes) = serde_json::from_slice::<WarmOutcomes>(&bytes) else {
+        return WarmOutcomes::default();
+    };
+    if outcomes.version == OUTCOME_SCHEMA_VERSION {
+        outcomes
+    } else {
+        WarmOutcomes::default()
+    }
+}
+
 /// The live warm facts a `workspace status` read has available — the seam that
 /// keeps `warming` and warm-failure **inputs** rather than guesses
 /// ([NFR-CC-04], [BR-44]).
 ///
-/// Today's only caller passes [`none`](Self::none): no durable per-member warm
-/// record exists, so `warming` is omitted and only an unopenable member reads
-/// `degraded`. When the supervisor gains one (a small per-member marker it
-/// writes, say), the change is `WarmEvidence::none()` → a populated value at the
-/// call site; neither [`derive_state`] nor [`rollup`] nor the wire format
-/// moves.
+/// The **warm** halves now have a real source: [`with_outcomes`](Self::with_outcomes)
+/// over the durable sidecar [`read_outcomes`] returns ([FR-WS-17]). `warming`
+/// still has none — no live supervisor signal exists — so it stays omitted, and
+/// [`MemberWarmState::Warming`] stays unreachable in production, not by a
+/// convention a later edit can forget but because nothing short of
+/// [`with_in_flight`](Self::with_in_flight) can populate the in-flight set.
 ///
+/// An **empty** record — no sidecar, or one that failed to read — leaves this
+/// value equal to [`none`](Self::none), which is what makes a workspace without
+/// a record derive exactly as it did before [FR-WS-17] ([FR-WS-17] AC5).
+///
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -143,16 +366,34 @@ pub struct WarmEvidence {
     ///
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     in_flight: Option<BTreeSet<String>>,
-    /// Member name → why its warm was attempted and failed. Empty today; the
-    /// input a durable per-member warm-failure record feeds ([BR-44]).
+    /// Member name → why its warm was attempted and failed, from the durable
+    /// record ([FR-WS-17], [BR-44]).
     ///
+    /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
     /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
     failed: BTreeMap<String, String>,
+    /// Member names whose warm was attempted and **succeeded**, from the same
+    /// record.
+    ///
+    /// Carried separately from `failed` rather than derived as its complement,
+    /// because the complement of "failed" over the roster is "failed or never
+    /// recorded", and those are the two states this set exists to tell apart: a
+    /// recorded success with an empty graph is `warm` (the warm completed and
+    /// the member holds nothing indexable), whereas no record at all is
+    /// `deferred` ([FR-WS-17], [BR-47]).
+    ///
+    /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+    /// [BR-47]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    succeeded: BTreeSet<String>,
 }
 
 impl WarmEvidence {
-    /// No live signal at all: `warming` is omitted and only a member that could
-    /// not be opened reads `degraded` ([NFR-CC-04]).
+    /// No evidence at all: `warming` is omitted and only a member that could
+    /// not be opened reads `degraded` ([NFR-CC-04]). The value a workspace with
+    /// no durable record derives from, byte-identical to the pre-[FR-WS-17]
+    /// behaviour.
+    ///
+    /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
     ///
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     #[must_use]
@@ -176,7 +417,11 @@ impl WarmEvidence {
     }
 
     /// Declare the members whose warm was attempted and **failed**, with each
-    /// reason — the future durable warm-failure input ([BR-44]).
+    /// reason ([BR-44]).
+    ///
+    /// The failure half of [`with_outcomes`](Self::with_outcomes), kept as its
+    /// own constructor so the derivation's precedence table can be exercised
+    /// one channel at a time.
     ///
     /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[must_use]
@@ -190,6 +435,36 @@ impl WarmEvidence {
             .into_iter()
             .map(|(member, reason)| (member.into(), reason.into()))
             .collect();
+        self
+    }
+
+    /// Take both warm halves from a durable [`WarmOutcomes`] record — the
+    /// production input [`read_outcomes`] supplies ([FR-WS-17], [BR-47]).
+    ///
+    /// An empty record (absent, unreadable, or malformed — [`read_outcomes`]
+    /// returns the same value for all three) leaves this evidence equal to
+    /// [`none`](Self::none), so nothing about the derivation, the roll-up or the
+    /// wire format moves for a workspace that has no record ([FR-WS-17] AC5).
+    ///
+    /// Recording a success is **not** the same as declaring a live signal:
+    /// `warming` stays absent, because a finished outcome says nothing about
+    /// what is in flight *now* ([NFR-CC-04]).
+    ///
+    /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [BR-47]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[must_use]
+    pub fn with_outcomes(mut self, outcomes: &WarmOutcomes) -> Self {
+        for (member, outcome) in &outcomes.members {
+            match outcome {
+                WarmOutcome::Succeeded => {
+                    self.succeeded.insert(member.clone());
+                }
+                WarmOutcome::Failed { reason } => {
+                    self.failed.insert(member.clone(), reason.clone());
+                }
+            }
+        }
         self
     }
 
@@ -218,6 +493,15 @@ impl WarmEvidence {
     fn failure(&self, member: &str) -> Option<&str> {
         self.failed.get(member).map(String::as_str)
     }
+
+    /// Whether a durable record says `member`'s warm **completed**. The one
+    /// fact that separates "indexed nothing because there was nothing to index"
+    /// from "never attempted" ([BR-47]).
+    ///
+    /// [BR-47]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    fn succeeded(&self, member: &str) -> bool {
+        self.succeeded.contains(member)
+    }
 }
 
 /// Derive one member's warm state from its index presence and the available
@@ -235,43 +519,63 @@ impl WarmEvidence {
 /// [`Engine::try_status`](crate::Engine::try_status) rather than the degrading [`Engine::status`](crate::Engine::status).
 ///
 /// # Precedence
-/// There are **four** inputs, not three, because failure arrives on two
-/// channels. In order:
+/// **Demonstrated index presence outranks the durable record** ([BR-47]): a
+/// member whose graph holds indexed files is `warm` whatever the record says,
+/// so a member indexed later — by a re-run, or lazily on first query
+/// ([FR-IX-07]) — reads `warm` again with nothing having to *clear* a stale
+/// failure. That is what makes the record safe to keep: it is evidence, not a
+/// latch, and no code path anywhere has to remember to delete it.
 ///
-/// 1. `evidence.failure(member)` — a durable record that this member's warm was
-///    attempted and failed.
-/// 2. `indexed == Err(reason)` — the member could not be read at all.
-/// 3. `evidence.is_warming(member)` — a live in-flight signal.
-/// 4. `indexed == Ok(_)` — index presence.
+/// Note the exact scope of that rule. It is index **presence** — `Ok(true)` —
+/// that beats a record, not an `Err`: a member whose store could not be read at
+/// all has demonstrated nothing, so the record still speaks for it. In order:
+///
+/// 1. `indexed == Ok(true)` combined with a recorded failure — the record is
+///    stale, and index presence wins ([BR-47]).
+/// 2. `evidence.failure(member)` — a durable record that this member's warm was
+///    attempted and failed, for every other index reading.
+/// 3. `indexed == Err(reason)` — the member could not be read at all.
+/// 4. `evidence.is_warming(member)` — a live in-flight signal.
+/// 5. `indexed == Ok(true)` — index presence.
+/// 6. `evidence.succeeded(member)` — a durable record that the warm completed:
+///    `warm`, not `deferred`, for a member that holds no supported-language
+///    file and therefore no indexed file ([FR-WS-17]).
+/// 7. `Ok(false)` with no record at all — `deferred`, never attempted.
 ///
 /// In-flight outranks index presence deliberately: a full index persists in
 /// bounded chunks ([FR-IX-08]), so a member being indexed right now can already
 /// hold files — reporting it `warm` would claim a completed index that is still
-/// running. Recorded failure outranks both: a member whose warm failed part-way
-/// has exactly that partial index, which is precisely why it must not read
-/// `warm`.
+/// running.
 ///
-/// The two failure channels rank **above** the in-flight signal, so a member
-/// that a live signal calls in-flight while its store cannot be read reports
-/// `degraded`, not `warming`. That ordering is unobservable today (nothing
-/// populates the in-flight set) and is pinned by the precedence table test so
-/// whichever way a future signal source wants it, the change is deliberate. Of
-/// the two failure channels the *durable record* wins, so its reason — not the
-/// transient open error — is the one that reaches the wire.
+/// A recorded failure ranks **above** the in-flight signal, so a member a live
+/// signal calls in-flight while the record says its last warm failed reports
+/// `degraded` rather than `warming` — and above the unreadable-store channel,
+/// so the *durable* reason, not the transient open error, is the one that
+/// reaches the wire. Both orderings are unobservable today (nothing populates
+/// the in-flight set) and both are pinned by the precedence table test, so
+/// whichever way a future signal source wants them, the change is deliberate.
 ///
 /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+/// [FR-IX-07]: ../../../docs/specs/requirements/FR-IX-07.md
 /// [FR-IX-08]: ../../../docs/specs/requirements/FR-IX-08.md
 /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [BR-47]: ../../../docs/specs/software-spec.md#327-workspace-federation
 #[must_use]
 pub fn derive_state(
     member: &str,
     indexed: Result<bool, &str>,
     evidence: &WarmEvidence,
 ) -> MemberWarmState {
-    if let Some(reason) = evidence.failure(member) {
-        return MemberWarmState::Degraded {
-            reason: reason.to_string(),
-        };
+    // The BR-47 rule, and the only guard on the record: a member that
+    // demonstrably holds a graph is never reported degraded, so a stale record
+    // is outvoted by the store rather than having to be cleared.
+    if !matches!(indexed, Ok(true)) {
+        if let Some(reason) = evidence.failure(member) {
+            return MemberWarmState::Degraded {
+                reason: reason.to_string(),
+            };
+        }
     }
     match indexed {
         Err(reason) => MemberWarmState::Degraded {
@@ -279,6 +583,10 @@ pub fn derive_state(
         },
         Ok(_) if evidence.is_warming(member) => MemberWarmState::Warming,
         Ok(true) => MemberWarmState::Warm,
+        // A recorded success with an empty graph is a *completed* warm over a
+        // member that holds nothing indexable — `warm`, not the "never
+        // attempted" claim `deferred` makes ([FR-WS-17]).
+        Ok(false) if evidence.succeeded(member) => MemberWarmState::Warm,
         Ok(false) => MemberWarmState::Deferred,
     }
 }
@@ -355,6 +663,26 @@ pub fn rollup<'a>(
 mod tests {
     use super::*;
 
+    /// A record built from `(member, Some(reason) => failed | None => succeeded)`
+    /// pairs — the shape most of these assertions want, without a `BTreeMap`
+    /// literal in each.
+    fn outcomes<'a>(entries: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) -> WarmOutcomes {
+        WarmOutcomes {
+            members: entries
+                .into_iter()
+                .map(|(member, reason)| {
+                    let outcome = reason.map_or(WarmOutcome::Succeeded, |reason| {
+                        WarmOutcome::Failed {
+                            reason: reason.to_string(),
+                        }
+                    });
+                    (member.to_string(), outcome)
+                })
+                .collect(),
+            ..WarmOutcomes::default()
+        }
+    }
+
     /// The whole derivation as a table: index presence × evidence → label.
     /// A table rather than one test per state, because the *precedence* between
     /// the three inputs is the rule under test and only a table pins it.
@@ -363,6 +691,7 @@ mod tests {
         let none = WarmEvidence::none();
         let warming = WarmEvidence::none().with_in_flight(["api"]);
         let failed = WarmEvidence::none().with_failures([("api", "store is corrupt")]);
+        let succeeded = WarmEvidence::none().with_outcomes(&outcomes([("api", None)]));
         // Both signals on the SAME member — the cells where precedence is
         // actually contested rather than merely stated.
         let both = WarmEvidence::none()
@@ -387,9 +716,26 @@ mod tests {
             // (FR-IX-08) is already `indexed` while still running.
             ("indexed, in flight", &warming, Ok(true), MemberWarmState::Warming),
             ("empty, in flight", &warming, Ok(false), MemberWarmState::Warming),
-            // Recorded failure outranks everything, partial index included.
-            ("indexed, warm failed", &failed, Ok(true), degraded.clone()),
+            // BR-47: demonstrated index presence outranks the record. A member
+            // that holds a graph is `warm` even against a stale failure, which
+            // is what makes the record safe to never clear.
+            ("indexed, warm failed", &failed, Ok(true), MemberWarmState::Warm),
             ("empty, warm failed", &failed, Ok(false), degraded.clone()),
+            // A recorded SUCCESS with an empty graph is `warm`, not the "never
+            // attempted" claim `deferred` makes: the warm completed and the
+            // member holds nothing indexable (FR-WS-17).
+            ("empty, warm succeeded", &succeeded, Ok(false), MemberWarmState::Warm),
+            ("indexed, warm succeeded", &succeeded, Ok(true), MemberWarmState::Warm),
+            // A success record does NOT rescue an unreadable store: the member
+            // demonstrated nothing, so the open failure still speaks.
+            (
+                "unopenable, warm succeeded",
+                &succeeded,
+                Err("engine start failed"),
+                MemberWarmState::Degraded {
+                    reason: "engine start failed".to_string(),
+                },
+            ),
             // ── the contested cells ────────────────────────────────────────
             // An unreadable member outranks a live in-flight signal: reordering
             // the `Err` arm below the `is_warming` guard fails here.
@@ -403,7 +749,15 @@ mod tests {
             ),
             // Recorded failure outranks the in-flight signal on the same member.
             ("in flight and warm failed", &both, Ok(false), degraded.clone()),
-            ("in flight and warm failed, indexed", &both, Ok(true), degraded.clone()),
+            // …but index presence outranks BOTH (BR-47): a member holding a
+            // graph while a live signal says it is being re-indexed is
+            // `warming`, and in no case `degraded`.
+            (
+                "in flight and warm failed, indexed",
+                &both,
+                Ok(true),
+                MemberWarmState::Warming,
+            ),
             // Both failure channels at once: the DURABLE record's reason wins,
             // not the transient open error — observable, so pinned.
             (
@@ -428,12 +782,15 @@ mod tests {
         assert_eq!(derive_state("svc", Ok(true), &evidence), MemberWarmState::Warm);
         assert_eq!(derive_state("svc", Ok(false), &evidence), MemberWarmState::Deferred);
         assert_eq!(derive_state("api", Ok(false), &evidence), MemberWarmState::Warming);
+        // `web` is named by the failure record, so it is degraded — but only
+        // while it has no index of its own to argue with ([BR-47]).
         assert_eq!(
-            derive_state("web", Ok(true), &evidence),
+            derive_state("web", Ok(false), &evidence),
             MemberWarmState::Degraded {
                 reason: "spawn failed".to_string()
             }
         );
+        assert_eq!(derive_state("web", Ok(true), &evidence), MemberWarmState::Warm);
     }
 
     /// [BR-44]'s distinction, stated as its own assertion: a member that failed
@@ -617,4 +974,300 @@ mod tests {
             assert_eq!(value["warm_state"], word, "{state:?}");
         }
     }
+
+    // ── FR-WS-17: the durable outcome record ───────────────────────────────
+
+    /// [BR-47]'s truth table verbatim, as the story states it — the four cases
+    /// the requirement enumerates, asserted as one block so the *rule* is
+    /// reviewable against the spec rather than scattered across four tests.
+    ///
+    /// It overlaps the precedence table above on purpose: that one pins the
+    /// ordering of every input pair including the contested and currently
+    /// unobservable ones, this one pins the four combinations a user can
+    /// actually produce today.
+    ///
+    /// [BR-47]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[test]
+    fn br47_truth_table() {
+        let failed = |reason: &str| MemberWarmState::Degraded {
+            reason: reason.to_string(),
+        };
+
+        // 1. The warm succeeded but the member holds no supported-language
+        //    file: `warm`, never `deferred`.
+        let record = outcomes([("api", None)]);
+        let evidence = WarmEvidence::none().with_outcomes(&record);
+        assert_eq!(derive_state("api", Ok(false), &evidence), MemberWarmState::Warm);
+
+        // 2. Neither record nor index: `deferred`.
+        let evidence = WarmEvidence::none().with_outcomes(&WarmOutcomes::default());
+        assert_eq!(
+            derive_state("api", Ok(false), &evidence),
+            MemberWarmState::Deferred
+        );
+
+        // 3. The graph holds indexed files: `warm`, EVEN AGAINST a stale record
+        //    saying the warm failed.
+        let record = outcomes([("api", Some("index failed: exit status: 2"))]);
+        let evidence = WarmEvidence::none().with_outcomes(&record);
+        assert_eq!(derive_state("api", Ok(true), &evidence), MemberWarmState::Warm);
+
+        // 4. A recorded failure with no index: `degraded`, carrying the
+        //    RECORDED reason verbatim.
+        assert_eq!(
+            derive_state("api", Ok(false), &evidence),
+            failed("index failed: exit status: 2")
+        );
+    }
+
+    /// The record round-trips through the sidecar: what was written is what is
+    /// read back, keys and reasons intact.
+    #[test]
+    fn a_written_record_reads_back_identically() {
+        let dir = tempfile::tempdir().expect("workspace root");
+        let written = outcomes([
+            ("api", None),
+            ("services/web", Some("spawn failed: No such file")),
+        ]);
+
+        write_outcomes(dir.path(), &written).expect("write");
+        let read = read_outcomes(dir.path());
+
+        assert_eq!(read, written);
+        assert_eq!(read.version, OUTCOME_SCHEMA_VERSION);
+        assert!(
+            dir.path().join(OUTCOME_FILENAME).is_file(),
+            "the sidecar lives beside the manifest, under its own name"
+        );
+    }
+
+    /// The version is stamped by the writer, not taken from the caller — so no
+    /// caller can publish a record under a version it does not speak.
+    #[test]
+    fn the_writer_stamps_the_current_schema_version_whatever_it_was_handed() {
+        let dir = tempfile::tempdir().expect("workspace root");
+        let mut lying = outcomes([("api", None)]);
+        lying.version = 99;
+
+        write_outcomes(dir.path(), &lying).expect("write");
+
+        assert_eq!(read_outcomes(dir.path()).version, OUTCOME_SCHEMA_VERSION);
+    }
+
+    /// **[NFR-RA-02]**: every way a record can be unusable degrades to the empty
+    /// record — which is index-presence derivation, i.e. the pre-[FR-WS-17]
+    /// behaviour — and none of them panics or errors.
+    ///
+    /// A table rather than four tests, because "all of these behave the same"
+    /// IS the property: a future reader that grew a distinct error path for one
+    /// of them fails here.
+    ///
+    /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+    /// [NFR-RA-02]: ../../../docs/specs/requirements/NFR-RA-02.md
+    #[test]
+    fn an_unusable_record_degrades_to_the_empty_one_and_never_fails() {
+        let good = serde_json::to_string(&outcomes([("api", None)])).unwrap();
+        let truncated = &good[..good.len() / 2];
+
+        for (case, bytes) in [
+            ("malformed", "{ not json at all".to_string()),
+            ("truncated", truncated.to_string()),
+            ("empty file", String::new()),
+            ("right shape, wrong types", r#"{"version":1,"members":[]}"#.to_string()),
+            (
+                "a future schema version",
+                r#"{"version":2,"members":{"api":{"outcome":"succeeded"}}}"#.to_string(),
+            ),
+            (
+                "an unknown outcome word",
+                r#"{"version":1,"members":{"api":{"outcome":"exploded"}}}"#.to_string(),
+            ),
+        ] {
+            let dir = tempfile::tempdir().expect("workspace root");
+            std::fs::write(dir.path().join(OUTCOME_FILENAME), &bytes).expect("corrupt sidecar");
+
+            let read = read_outcomes(dir.path());
+
+            assert!(read.is_empty(), "{case} must yield no members");
+            assert_eq!(
+                WarmEvidence::none().with_outcomes(&read),
+                WarmEvidence::none(),
+                "{case} must derive exactly as a workspace with no record does"
+            );
+        }
+    }
+
+    /// An **absent** sidecar — the overwhelmingly common case, and the one
+    /// [FR-WS-17] AC5 pins: identical derivation to a build without the record.
+    ///
+    /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+    #[test]
+    fn no_record_at_all_derives_exactly_as_before_the_record_existed() {
+        let dir = tempfile::tempdir().expect("workspace root");
+
+        let read = read_outcomes(dir.path());
+        assert!(read.is_empty());
+        assert_eq!(
+            WarmEvidence::none().with_outcomes(&read),
+            WarmEvidence::none(),
+            "an empty record is not evidence"
+        );
+
+        // And the observable end of it: same labels, same roll-up, `warming`
+        // still omitted rather than zeroed.
+        let evidence = WarmEvidence::none().with_outcomes(&read);
+        let states: Vec<MemberWarmState> = [("api", Ok(true)), ("web", Ok(false))]
+            .into_iter()
+            .map(|(m, indexed)| derive_state(m, indexed, &evidence))
+            .collect();
+        assert_eq!(states, [MemberWarmState::Warm, MemberWarmState::Deferred]);
+        assert_eq!(rollup(&states, &evidence).warming, None);
+    }
+
+    /// A corrupt sidecar is left **exactly** as found: the read-model does not
+    /// repair, delete or rewrite a file on the path of every `status`.
+    #[test]
+    fn reading_a_corrupt_record_leaves_the_file_untouched() {
+        let dir = tempfile::tempdir().expect("workspace root");
+        let path = dir.path().join(OUTCOME_FILENAME);
+        std::fs::write(&path, "{ garbage").expect("corrupt sidecar");
+
+        let _ = read_outcomes(dir.path());
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ garbage");
+    }
+
+    /// The write is **atomic**: a reader running concurrently with a long series
+    /// of writes observes a whole record every time, never a partial one, and
+    /// no temp file survives the pass.
+    ///
+    /// The mechanism is a sibling temp plus `rename`, so the assertion that
+    /// matters is that no read ever lands on a half-written file. Replacing the
+    /// write with a plain `File::create` + `write_all` on the target fails this
+    /// reliably.
+    #[test]
+    fn a_concurrent_reader_never_observes_a_partial_record() {
+        let dir = tempfile::tempdir().expect("workspace root");
+        let root = dir.path().to_path_buf();
+        // A big enough record that a non-atomic write would be split across
+        // several `write` syscalls and caught mid-flight.
+        let bulky: Vec<(String, Option<String>)> = (0..400)
+            .map(|i| (format!("member-{i:04}"), Some("x".repeat(200))))
+            .collect();
+        let record = WarmOutcomes {
+            version: OUTCOME_SCHEMA_VERSION,
+            members: bulky
+                .iter()
+                .map(|(name, reason)| {
+                    (
+                        name.clone(),
+                        WarmOutcome::Failed {
+                            reason: reason.clone().unwrap(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        write_outcomes(&root, &record).expect("seed");
+
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut reads = 0_usize;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let read = read_outcomes(&root);
+                    assert_eq!(
+                        read.members.len(),
+                        400,
+                        "a reader saw a partial record: {} members",
+                        read.members.len()
+                    );
+                    reads += 1;
+                }
+                reads
+            });
+            for _ in 0..50 {
+                write_outcomes(&root, &record).expect("write");
+            }
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let reads = reader.join().expect("reader");
+            assert!(reads > 0, "the reader must actually have run");
+        });
+
+        let leftovers: Vec<String> = std::fs::read_dir(&root)
+            .expect("root")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+    }
+
+    /// A record naming members the workspace does not have, or omitting ones it
+    /// does, changes nothing for the members it does not name — the record is
+    /// per-member evidence, not a workspace-wide verdict.
+    #[test]
+    fn the_record_speaks_only_for_the_members_it_names() {
+        let record = outcomes([("api", Some("index failed"))]);
+        let evidence = WarmEvidence::none().with_outcomes(&record);
+
+        assert_eq!(derive_state("web", Ok(false), &evidence), MemberWarmState::Deferred);
+        assert_eq!(derive_state("web", Ok(true), &evidence), MemberWarmState::Warm);
+        assert_eq!(
+            derive_state("api", Ok(false), &evidence),
+            MemberWarmState::Degraded {
+                reason: "index failed".to_string()
+            }
+        );
+    }
+
+    /// The roll-up partition survives the new evidence source, and `warming` is
+    /// still **omitted** — a finished outcome is not a live in-flight signal
+    /// ([NFR-CC-04], [FR-WS-17] AC7).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn a_record_never_makes_the_rollup_report_warming() {
+        let record = outcomes([
+            ("api", Some("index failed")),
+            ("web", None),
+            ("svc", None),
+        ]);
+        let evidence = WarmEvidence::none().with_outcomes(&record);
+        let states: Vec<MemberWarmState> = [("api", Ok(false)), ("web", Ok(false)), ("svc", Ok(true))]
+            .into_iter()
+            .map(|(m, indexed)| derive_state(m, indexed, &evidence))
+            .collect();
+
+        let rollup = rollup(&states, &evidence);
+
+        assert_eq!(rollup.warming, None, "an outcome is not an in-flight signal");
+        assert_eq!((rollup.members, rollup.warm, rollup.deferred, rollup.degraded), (3, 2, 0, 1));
+        assert_eq!(
+            rollup.warm + rollup.warming.unwrap_or(0) + rollup.deferred + rollup.degraded,
+            rollup.members,
+            "the counts must still partition the member set"
+        );
+        let value = serde_json::to_value(&rollup).unwrap();
+        assert!(value.get("warming").is_none(), "the key stays absent: {value}");
+    }
+
+    /// The record's own wire shape, pinned against literals: a schema change is
+    /// a failing test rather than a silently unreadable sidecar on every
+    /// machine that upgraded.
+    #[test]
+    fn the_record_serialises_to_its_documented_shape() {
+        let value = serde_json::to_value(outcomes([("api", None), ("web", Some("boom"))])).unwrap();
+
+        assert_eq!(value["version"], OUTCOME_SCHEMA_VERSION);
+        assert_eq!(value["members"]["api"]["outcome"], "succeeded");
+        assert_eq!(
+            value["members"]["api"].as_object().unwrap().len(),
+            1,
+            "a success is a bare label, no reason key"
+        );
+        assert_eq!(value["members"]["web"]["outcome"], "failed");
+        assert_eq!(value["members"]["web"]["reason"], "boom");
+    }
+
 }

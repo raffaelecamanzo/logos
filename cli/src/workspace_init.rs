@@ -294,6 +294,12 @@ pub(crate) fn run_supervisor(members: &[PathBuf], concurrency: Option<usize>) ->
     };
     let bound = warm::effective_concurrency(concurrency);
     let summary = warm::warm_queue(members, bound, |root| index_member(&exe, root));
+    // The DURABLE readout (FR-WS-17): one delegating call, because everything it
+    // does — locating the workspace root, keying on member names, merging with
+    // what is already recorded, the atomic write — is business logic and lives
+    // in `logos_core::federation::warm` (NFR-MA-02). The stderr loop below is
+    // the foreground/diagnostic channel and stays as it was.
+    warm::record_outcomes(&summary);
     for m in &summary.members {
         if let Some(reason) = &m.degraded {
             eprintln!("logos workspace warm: {} degraded — {reason}", m.root);
