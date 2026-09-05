@@ -226,16 +226,22 @@ fn async_suffixed_verb_method_calls_are_explicitly_refused() {
         "headAsync",
         "optionsAsync",
     ] {
-        assert!(
-            client_calls(&format!(
-                r#"
+        // `$client->get('/probe')` is the positive control: it proves the
+        // file WAS scanned, so `{method}(...)`'s absence is the verb check
+        // refusing a structurally-matched call — not a closed ledger gate.
+        let facts = client_calls(&format!(
+            r#"
 $client = new Client();
 $client->{method}('/users');
+$client->get('/probe');
 "#
-            ))
-            .is_empty(),
+        ));
+        assert_eq!(
+            facts,
+            ["GET /probe"],
             "{method} must be refused (Async-suffixed method-name verb, a \
-             stated ceiling), not silently captured with the wrong verb"
+             stated ceiling), not silently captured with the wrong verb, and \
+             the file was genuinely scanned: {facts:?}"
         );
     }
 }
