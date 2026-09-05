@@ -675,6 +675,24 @@ fn extract_one(
 /// would be captured, normalize, and fabricate a cross-service edge — exactly
 /// what never-fabricate forbids ([NFR-RA-05]).
 ///
+/// The gate is **independent evidence only when every detector row is a name the
+/// call shape itself cannot supply.** A detector is matched against the head of a
+/// canonical reference *target*, not against an import specifier specifically, so
+/// a **bare-identifier** row also matches a plain-call and — in a name-only
+/// reference dialect such as TypeScript's — a member-call name. A row like
+/// `fetch` (S-343: a global, imported from nothing) therefore makes the gate
+/// **non-independent**: the very call the query is about is the ledger evidence
+/// that opens it, and a file declaring its own local `fetch` self-satisfies it.
+///
+/// A language adding such a row owes the compensating scope in its own
+/// `invocations.scm`: **every pattern anchored to a named client**, and it must
+/// **not** ship the broad `<receiver>.<method>(<arg>)` anchor Rust relies on this
+/// gate to bound — with a tautological gate behind it, that anchor reopens the
+/// CR-110 fabrication class (`formGroup.get("year")`, `cache.get("/cache/key")`)
+/// with nothing standing behind it but the leading-`/` requirement and
+/// `route_key` ([NFR-RA-05]). The row's own descriptor states which of its
+/// entries are in this position (see `plugins/typescript/plugin.toml`).
+///
 /// The gate is **file-grained**, so it is a cross-file guarantee only: the same
 /// incidental call *inside* a genuine client file still captures. That residual
 /// is the documented ADR-54 accuracy ceiling (see `HTTP_METHODS`), pinned by
@@ -1113,6 +1131,19 @@ fn is_http_method(name: &str) -> bool {
 /// so the arm refuses it rather than guessing a target. A node that exposes no
 /// content children (e.g. a raw-string form) falls back to trimming its quote and
 /// prefix characters.
+///
+/// The content-child kind names below are the extension point when a grammar
+/// names them differently (S-345). Go 0.25 calls them
+/// `interpreted_string_literal_content` / `raw_string_literal_content`; **C#
+/// 0.23 calls them `string_literal_content` / `raw_string_content`**, so
+/// [S-346] must add that pair here rather than rediscovering this. A grammar
+/// whose names are missing from the list does not merely lose the literal — its
+/// every literal reads as *dynamic*, so the whole language's arm silently
+/// captures nothing. Pass the **literal** node, never a content child: an
+/// already-unquoted content child takes the no-children fallback below, whose
+/// quote/`#` trimming would corrupt a path ending in one of those characters.
+///
+/// [S-346]: ../../../docs/planning/journal.md#s-346-c-http-client-call-capture
 fn static_string_literal(node: Node<'_>, source: &[u8]) -> Option<String> {
     if !node.kind().contains("string") {
         return None;
@@ -1124,7 +1155,11 @@ fn static_string_literal(node: Node<'_>, source: &[u8]) -> Option<String> {
         saw_child = true;
         match child.kind() {
             // Static literal-content fragments and escapes across grammars.
-            "string_content" | "string_fragment" | "escape_sequence" => {
+            "string_content"
+            | "string_fragment"
+            | "escape_sequence"
+            | "interpreted_string_literal_content"
+            | "raw_string_literal_content" => {
                 content.push_str(child.utf8_text(source).ok()?);
             }
             // An interpolation / template substitution / expansion → dynamic.
@@ -1144,14 +1179,39 @@ fn static_string_literal(node: Node<'_>, source: &[u8]) -> Option<String> {
     (!content.is_empty()).then_some(content)
 }
 
+/// The capture-name prefix whose **suffix is the HTTP verb** —
+/// `@invoke.http.method.get` declares "this shape is a GET" (S-343).
+///
+/// The escape hatch for a call shape that spells no verb anywhere in its source
+/// and therefore has no node for [`collect_invocation_sites`] to read one from:
+/// a bare `fetch("/users")` is a `GET` by the WHATWG Fetch standard, not by
+/// inference. Because the verb rides the capture name it is stated *in the
+/// plugin's own `.scm`*, per pattern, visible in review — never a core-side
+/// default silently applied to every verb-less match ([NFR-RA-05]). It is
+/// gated by [`is_http_method`] like any other verb, and an explicit
+/// `@invoke.http.method` node always outranks it.
+///
+/// This is **not** the mechanism for a verb whose text is merely non-canonical
+/// (a C# `GetAsync`, S-346): there the verb *is* in the source and wants a
+/// text normalizer, not a per-pattern constant.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+const DECLARED_METHOD_PREFIX: &str = "invoke.http.method.";
+
 /// Collect the file's outbound **HTTP client-call** invocation sites from the
 /// `invocations` query matches (S-252, [FR-WS-08], [ADR-54]).
 ///
 /// The code-side twin of [`collect_refs`] for the pluggable invocation-arm
-/// contract: each match anchors a `<receiver>.<method>(<first-arg>)` call; a site
-/// is emitted only when the method is an HTTP verb ([`is_http_method`]). The first
-/// argument becomes the arm's slots — a static string literal fills the `path`
-/// slot ([`PATH_SLOT`](crate::resolve::http_client_call::PATH_SLOT)); any other
+/// contract. The dispatch is **receiver-agnostic**: it reads only the capture
+/// names, never the shape around them, so a *free-function* anchor
+/// (`fetch("/users", {method: "POST"})`, S-343) is carried by exactly the same
+/// code as the receiver-method anchor Rust's query uses (`client.get("/p")`) —
+/// the finding S-344 (Python `requests.get` / `httpx.request`) consumes rather
+/// than re-derives. A site is emitted only when the method is an HTTP verb
+/// ([`is_http_method`]), read from the `@invoke.http.method` node or, for a
+/// shape that spells none, declared by a [`DECLARED_METHOD_PREFIX`] capture
+/// name. The first argument becomes the arm's slots — a static string literal
+/// fills the `path` slot ([`PATH_SLOT`](crate::resolve::http_client_call::PATH_SLOT)); any other
 /// shape sets the dynamic-path marker
 /// ([`DYNAMIC_PATH_SLOT`](crate::resolve::http_client_call::DYNAMIC_PATH_SLOT)) so
 /// the arm's normalizer refuses it as base-url-runtime. The sites are funnelled
@@ -1198,30 +1258,60 @@ fn collect_invocation_sites(
     let mut matches = cursor.matches(query, root, source);
     while let Some(m) = matches.next() {
         let mut method_node = None;
+        let mut declared_method = None;
         let mut arg_node = None;
         for cap in m.captures {
-            match capture_names[cap.index as usize] {
+            let name = capture_names[cap.index as usize];
+            match name {
                 "invoke.http.method" => method_node = Some(cap.node),
                 "invoke.http.arg" => arg_node = Some(cap.node),
-                _ => {}
+                // `@invoke.http.method.<verb>` — the verb declared by the
+                // capture name for a shape that spells no verb in its source.
+                // First declaration wins: a droppable on-disk query (FR-PL-04)
+                // could bind two conflicting verbs to one match, and resolving
+                // that by capture order would make the verb depend on node
+                // position. First-wins is deterministic and inspectable.
+                _ => {
+                    if let Some(verb) = name.strip_prefix(DECLARED_METHOD_PREFIX) {
+                        declared_method.get_or_insert(verb);
+                    }
+                }
             }
         }
-        let (Some(method_node), Some(arg_node)) = (method_node, arg_node) else {
+        let Some(arg_node) = arg_node else {
             continue;
         };
-        let Ok(method) = method_node.utf8_text(source) else {
-            continue;
+        // A verb read from the source always wins over a name-declared one, so a
+        // query that binds both can never downgrade a spelled-out `POST` to the
+        // shape's declared default ([NFR-RA-05]).
+        let method = match method_node {
+            Some(node) => {
+                let Ok(text) = node.utf8_text(source) else {
+                    continue;
+                };
+                text.trim()
+            }
+            None => {
+                let Some(verb) = declared_method else {
+                    continue;
+                };
+                verb
+            }
         };
-        let method = method.trim();
         // Narrow the broad method-call anchor to HTTP verbs (a map/collection
-        // `.get(...)` is not an outbound call).
+        // `.get(...)` is not an outbound call). A name-declared verb passes the
+        // same gate, so a typo'd capture name captures nothing rather than
+        // inventing a method.
         if !is_http_method(method) {
             continue;
         }
-        let Some(source_symbol) = enclosing_symbol(method_node) else {
+        // Attribute to the verb node when the source spells one, else to the
+        // path argument — the site's only other node.
+        let anchor = method_node.unwrap_or(arg_node);
+        let Some(source_symbol) = enclosing_symbol(anchor) else {
             continue; // no attributable scope
         };
-        let line = method_node.start_position().row as u32 + 1;
+        let line = anchor.start_position().row as u32 + 1;
 
         let mut slots = std::collections::BTreeMap::new();
         slots.insert(METHOD_SLOT.to_string(), method.to_string());

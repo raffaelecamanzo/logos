@@ -14,7 +14,7 @@ module_separator = "."
 # tree-sitter-go 0.25 is generated against ABI 15.
 abi_version = 15
 
-capabilities = ["symbols", "references", "frameworks"]
+capabilities = ["symbols", "references", "frameworks", "invocations"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # `case` covers both switch and select arms.
@@ -39,10 +39,30 @@ test_convention = "go-test-func"
 # "github.com/gin-gonic/gin").
 framework_detectors = ["net::http", "github::com::gin-gonic::gin"]
 
+# Canonical reference prefixes whose presence in a file's ledger makes the file
+# an outbound **HTTP client-call** candidate (S-345, CR-108, FR-WS-08) — the
+# consumer-side twin of `framework_detectors`. `net/http` is the whole of
+# FR-WS-08's normative Go row: the stdlib client, no third party.
+#
+# The import canonicalises to the ledger target `net::http`, and the detector is
+# matched at a SEGMENT BOUNDARY (`resolve::matches_detector`), so this row admits
+# `net::http` and `net::http::httptest` while excluding the sibling `net::url` /
+# `net::mail` packages. Naming the root `net` instead would make any `net/url`
+# importer a candidate, where a plain `cache.Get("/admin/users")` clears the verb
+# and static-absolute-path filters and WOULD fabricate a cross-service edge — the
+# gate is what stops it, not those filters (NFR-RA-05, FR-WS-08 negative case 1).
+http_client_detectors = ["net::http"]
+
 [queries]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"
 frameworks = "queries/frameworks.scm"
+# Outbound `net/http` client-call arm (S-345, CR-108, FR-WS-08): the
+# verb-as-method-name forms (`http.Get`, `http.Post`) and the
+# verb-as-constructor-argument form (`http.NewRequest("GET", …)`). Its two
+# structural discriminators keep a route REGISTRATION — syntactically the same
+# shape — from being read as an outbound call; see the query header.
+invocations = "queries/invocations.scm"
 # Captured `@fw.route.method` text → HTTP method (S-015). Gin's router verbs
 # name themselves; net/http registrations (`HandleFunc`/`Handle`) and Gin's
 # `Any` carry no single verb.
