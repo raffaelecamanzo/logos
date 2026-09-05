@@ -114,6 +114,21 @@ pub(crate) const MATRIX: &[Case] = &[
         consumer: "GET /v1/x/{id}",
         expect: Expect::Ambiguous,
     },
+    // Buckets of three: the precedence rule must discard *every* less specific
+    // provider, not merely the last one seen, and must not rescue an already
+    // ambiguous concrete set.
+    Case {
+        name: "one exact-method provider supersedes several wildcard siblings",
+        providers: &["ANY /v1/x/{id}", "ANY /v1/x/{userId}", "GET /v1/x/{u}"],
+        consumer: "GET /v1/x/{id}",
+        expect: Expect::Binds(2),
+    },
+    Case {
+        name: "a wildcard sibling neither rescues nor worsens an ambiguous concrete pair",
+        providers: &["GET /v1/x/{id}", "ANY /v1/x/{u}", "GET /v1/x/{userId}"],
+        consumer: "GET /v1/x/{id}",
+        expect: Expect::Ambiguous,
+    },
     // ── A method mismatch still never binds ─────────────────────────────────
     Case {
         name: "a concrete method mismatch still never binds",
