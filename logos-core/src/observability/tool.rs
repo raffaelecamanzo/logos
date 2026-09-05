@@ -13,7 +13,17 @@
 //! helpers accept. Two build-time properties follow:
 //!
 //! 1. A new engine chokepoint cannot emit telemetry without adding a variant —
-//!    there is no `&str` door left open.
+//!    `traced*` accepts nothing else, so there is no `&str` door left open on
+//!    the chokepoint path.
+//!
+//!    The **one** sanctioned exception is the debounced watcher
+//!    ([`crate::watch`]), which emits `watch_sync` and `watch_coverage_ingest`
+//!    with a bare `tracing::info!` because it needs a per-event `surface` field
+//!    the helpers cannot express (S-022). Those two sites name
+//!    `Tool::…::as_str()` rather than a literal, so the registry is still the
+//!    single source of tool names — but there the compiler does not enforce it,
+//!    and a future third raw site would not be caught. Prefer `traced*`; if you
+//!    genuinely cannot, name a `Tool` and say why here.
 //! 2. [`Tool::event_class`] is an **exhaustive match with no wildcard arm**, so
 //!    a new variant fails the build until it is classified. `unclassified_tool_
 //!    fails_the_build` (in [`super::tests`]) additionally scans this file's
@@ -335,7 +345,7 @@ pub(crate) fn self_referential_tools() -> Vec<&'static str> {
 /// # Why interpolation is safe here
 ///
 /// The interpolated values are `&'static str` literals from a closed enum —
-/// never user input, never a stored value. `tool_wire_names_are_sql_safe` pins
+/// never user input, never a stored value. `every_registered_tool_is_classified_and_sql_safe` pins
 /// them to `[a-z][a-z0-9_]*`, so the fragment cannot carry a quote, and the
 /// guard fails the build's test run if a future wire name ever could.
 ///
