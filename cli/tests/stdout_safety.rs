@@ -99,4 +99,65 @@ fn stats_reports_usage_recorded_by_prior_commands() {
     ] {
         assert!(stats[field].as_u64().is_some(), "{field} present: {stats}");
     }
+
+    // ── FR-OB-11, asserted through the real binary ────────────────────────
+    //
+    // "`logos stats --json` reports per-tool counts split by dev/`main` origin,
+    // and a class for every tool." The temp dir is not a git worktree, so both
+    // runs stamp `origin = "main"`.
+    let cross_tab = stats["calls_by_tool_origin"]
+        .as_array()
+        .expect("calls_by_tool_origin present");
+    let cell = cross_tab
+        .iter()
+        .find(|c| c["tool"] == "languages")
+        .unwrap_or_else(|| panic!("the cross-tab names the tool that ran: {stats}"));
+    assert_eq!(cell["origin"], "main", "outside a worktree, calls are main: {stats}");
+    assert!(cell["calls"].as_u64().is_some_and(|n| n >= 2), "{stats}");
+    // `languages` reports Logos's own grammar registry — a `read-model` class,
+    // yet a counted event (the two classifications are independent axes).
+    assert_eq!(cell["class"], "read-model", "{stats}");
+
+    let by_class = stats["calls_by_class"]
+        .as_array()
+        .expect("calls_by_class present");
+    assert!(
+        by_class
+            .iter()
+            .any(|c| c["class"] == "read-model" && c["origin"] == "main"),
+        "the class × origin dogfood table is populated: {stats}"
+    );
+
+    // Every tool the read-model reports carries a class — the label rides the
+    // existing raw-plus-rollup shape, so this holds for aged-out days too.
+    for usage in stats["calls_by_tool"].as_array().expect("calls_by_tool present") {
+        assert!(
+            usage["class"].as_str().is_some_and(|c| !c.is_empty()),
+            "{} carries a class: {stats}",
+            usage["tool"]
+        );
+    }
+
+    // "The payload states its own coverage limits" — an unlabelled figure is
+    // what NFR-CC-04 forbids.
+    let coverage = &stats["attribution_coverage"];
+    assert_eq!(coverage["raw_events_only"], true, "{stats}");
+    assert_eq!(coverage["legacy_null_origin_folds_into_main"], true, "{stats}");
+    assert_eq!(coverage["requested_window_days"], 7, "{stats}");
+    assert_eq!(coverage["covered_window_days"], 7, "{stats}");
+    assert_eq!(coverage["truncated_by_retention"], false, "{stats}");
+    assert!(
+        coverage["notes"].as_array().is_some_and(|n| n.len() >= 3),
+        "the limits are stated as prose too: {stats}"
+    );
+
+    // A window past raw retention names the window it actually covers.
+    let out = logos(dir.path(), &["stats", "--json", "--window", "365"]);
+    assert!(out.status.success(), "stats --window 365 exits 0");
+    let wide: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("clean JSON");
+    let coverage = &wide["attribution_coverage"];
+    assert_eq!(coverage["requested_window_days"], 365, "{wide}");
+    assert_eq!(coverage["covered_window_days"], 90, "{wide}");
+    assert_eq!(coverage["truncated_by_retention"], true, "{wide}");
 }

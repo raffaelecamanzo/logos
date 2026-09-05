@@ -434,15 +434,43 @@ change to that symbol may oblige updating. The inverse of
 logos stats [--window <DAYS>]                           # default 7
 ```
 
-Aggregated local telemetry: calls per tool split by surface (`cli`/`mcp`/`watcher`),
-ok-rates, latency p50/p95/p99, and reads/tokens-saved estimates. `--json` also
-carries `activity_by_day` (a per-UTC-day activity series over the window,
-oldest-first) and `calls_by_origin` (a per-`origin` usage breakdown, where
-`origin` is a worktree's branch name or `"main"`). Reads only `telemetry.db` —
-works without an index. **Web-dashboard activity (`surface="web"`) is excluded
+Aggregated local telemetry: calls per tool split by surface (`cli`/`mcp`/`web`/
+`chat`/`watcher`), ok-rates, latency p50/p95/p99, and reads/tokens-saved
+estimates. `--json` also carries `activity_by_day` (a per-UTC-day activity series
+over the window, oldest-first) and `calls_by_origin` (a per-`origin` usage
+breakdown, where `origin` is a worktree's branch name or `"main"`). Reads only
+`telemetry.db` — works without an index. **Self-referential reads are excluded
 from every figure** — totals, per-tool, daily series, origin split, latency, and
-the estimate — because serving the dashboard emits its own telemetry, so counting
-it would only measure viewing, not tool value.
+the estimate — because a request whose subject is Logos's own state (`stats`
+reading the telemetry store, the shell's `status` readout) measures the
+measurement, not tool value. The exclusion is per *event*, keyed on the tool, so
+it applies on every surface: a CLI `logos stats` is no less self-referential than
+a dashboard render, while a graph query issued *through* the dashboard counts
+normally.
+
+**Attribution: which tools, from where, of what kind.** `--json` carries two
+further projections:
+
+- `calls_by_tool_origin` — the tool × origin cross-tab: per-tool counts split by
+  the same `dev`/`main` buckets as `calls_by_origin`, so *"which navigation came
+  from dev panes?"* is answerable from the payload. Neither older breakdown can
+  answer it alone (`calls_by_tool` has no origin; `calls_by_origin` has no tool).
+- `calls_by_class` — the same cells rolled up to the tool class, which is a
+  sprint dogfood table without hand-classifying anything.
+
+Every tool carries a `class` — `navigation`, `quality-gate`, `session-gate`,
+`engine-internal`, `read-model`, or `unregistered` for a name written by an older
+build that the current registry no longer knows (counted as recorded, with its
+class honestly unknown). The `class` on `calls_by_tool` covers raw events *and*
+rolled-up days; the two projections above do not (see below).
+
+`attribution_coverage` states those limits in the payload rather than leaving
+them to this page: `raw_events_only` (always true — `daily_rollup` is keyed
+`(day, surface, tool)` and carries no `origin`), `requested_window_days` vs
+`covered_window_days` with `truncated_by_retention` (raw events are kept ~90
+days, so a 365-day request covers only the most recent 90 in these two
+projections), and `legacy_null_origin_folds_into_main`. `notes` carries the same
+limits as display-ready prose.
 
 **Telemetry is repo-global and durable across worktrees.** The store lives at
 the **primary** repository's `.logos/telemetry.db`, resolved via

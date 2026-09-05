@@ -775,6 +775,41 @@ pub struct StatsInfo {
     /// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub calls_by_origin: Vec<OriginUsage>,
+    /// **Tool × origin cross-tab** ([FR-OB-11]): per-tool call counts split by
+    /// the same dev-vs-`main` bucket as [`StatsInfo::calls_by_origin`], so
+    /// *"which navigation came from dev panes?"* is answerable — neither
+    /// `calls_by_tool` (surface × tool, no origin) nor `calls_by_origin`
+    /// (origin, no tool) can answer it alone. Sorted by tool, then origin
+    /// (`"dev"` before `"main"`) ([NFR-RA-06]).
+    ///
+    /// **Raw events only**, for the same reason as `calls_by_origin`:
+    /// `daily_rollup` carries no `origin` column. See
+    /// [`StatsInfo::attribution_coverage`], which states that limit in the
+    /// payload rather than leaving it to documentation ([NFR-CC-04]).
+    ///
+    /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    pub calls_by_tool_origin: Vec<ToolOriginUsage>,
+    /// The same cross-tab rolled up to [`ToolUsage::class`] × origin — the
+    /// dogfood table ([NFR-OO-03]) as `stats` output rather than hand-written
+    /// prose ([FR-OB-11]). Derived from `calls_by_tool_origin`, so it carries
+    /// exactly the same coverage limits. Sorted by class, then origin.
+    ///
+    /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+    /// [NFR-OO-03]: ../../../docs/specs/requirements/NFR-OO-03.md
+    pub calls_by_class: Vec<ClassUsage>,
+    /// What the two attribution projections above actually cover ([FR-OB-11]).
+    ///
+    /// An unlabelled figure is what [NFR-CC-04] forbids, and these two carry
+    /// three limits a reader cannot infer from the numbers: they are
+    /// raw-events-only, they therefore cover at most the raw retention window
+    /// however long a window was asked for, and legacy `NULL` origins fold into
+    /// `"main"`. Stated in the payload, not in documentation.
+    ///
+    /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub attribution_coverage: AttributionCoverage,
     /// Degradations (e.g. no telemetry recorded yet), never an error.
     pub warnings: Vec<String>,
 }
@@ -786,8 +821,111 @@ pub struct ToolUsage {
     pub surface: String,
     /// Engine method or pipeline pass name.
     pub tool: String,
+    /// The tool's class ([FR-OB-11]): `"navigation"`, `"quality-gate"`,
+    /// `"session-gate"`, `"engine-internal"`, `"read-model"`, or
+    /// `"unregistered"` for a name written by an older build that today's
+    /// registry no longer knows — such rows are counted rather than rewritten,
+    /// so an honest "unknown" beats a guessed class ([NFR-CC-04]).
+    ///
+    /// A label on the existing raw-plus-rollup counts, so unlike
+    /// [`StatsInfo::calls_by_tool_origin`] it is **not** raw-events-only: every
+    /// tool this read-model reports carries a class.
+    ///
+    /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub class: String,
     pub calls: u64,
     pub ok_calls: u64,
+}
+
+/// One cell of the tool × origin cross-tab ([FR-OB-11]): a tool's calls within
+/// one dev-vs-`main` bucket. Raw events only — see
+/// [`StatsInfo::attribution_coverage`].
+///
+/// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+#[derive(Debug, Default, Serialize)]
+pub struct ToolOriginUsage {
+    /// Engine method or pipeline pass name.
+    pub tool: String,
+    /// The tool's class, as [`ToolUsage::class`].
+    pub class: String,
+    /// The dev-vs-`main` bucket — `"dev"` (all worktree branches) or `"main"`.
+    pub origin: String,
+    pub calls: u64,
+    pub ok_calls: u64,
+}
+
+/// One cell of the class × origin breakdown ([FR-OB-11]) — the cross-tab rolled
+/// up to [`ToolUsage::class`]. Raw events only, as the cross-tab it derives from.
+///
+/// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+#[derive(Debug, Default, Serialize)]
+pub struct ClassUsage {
+    /// The tool class, as [`ToolUsage::class`].
+    pub class: String,
+    /// The dev-vs-`main` bucket — `"dev"` or `"main"`.
+    pub origin: String,
+    pub calls: u64,
+    pub ok_calls: u64,
+}
+
+/// What [`StatsInfo::calls_by_tool_origin`] and [`StatsInfo::calls_by_class`]
+/// actually cover ([FR-OB-11], [NFR-CC-04]).
+///
+/// Every field is a statement the payload makes about itself, so a consumer
+/// rendering either projection can label it without consulting documentation —
+/// the honest-omission posture [FR-OB-08] already set for `calls_by_origin`.
+///
+/// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
+/// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Serialize)]
+pub struct AttributionCoverage {
+    /// Always `true`: `daily_rollup` is keyed `(day, surface, tool)` and carries
+    /// no `origin` column, so a rolled-up day contributes to `calls_total` and
+    /// `activity_by_day` but is **absent** from both attribution projections
+    /// rather than mis-attributed.
+    pub raw_events_only: bool,
+    /// The window the caller asked for, echoing [`StatsInfo::window_days`].
+    pub requested_window_days: u32,
+    /// The window the two projections actually cover: `requested_window_days`
+    /// capped at the raw-event retention horizon (~90 days, [NFR-OO-04]), past
+    /// which raw rows have been folded into `daily_rollup` and deleted.
+    pub covered_window_days: u32,
+    /// `true` when `covered_window_days < requested_window_days` — the request
+    /// reached past retention and the attribution projections are narrower than
+    /// the rest of the read-model.
+    pub truncated_by_retention: bool,
+    /// Always `true`: rows written before the [FR-OB-08] migration have
+    /// `origin IS NULL` and fold into `"main"` via `COALESCE(origin,'main')`,
+    /// inflating the historical `"main"` bucket.
+    ///
+    /// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
+    pub legacy_null_origin_folds_into_main: bool,
+    /// The same limits as display-ready prose, for a surface that renders the
+    /// projections without re-deriving the wording ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub notes: Vec<String>,
+}
+
+/// The two structural limits hold even on a zeroed read-model — a degraded
+/// `stats` (unreadable store) must not answer `raw_events_only: false`, which
+/// would be a claim, not an absence ([NFR-CC-04]). The window figures are `0`
+/// there because no window was covered.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+impl Default for AttributionCoverage {
+    fn default() -> Self {
+        Self {
+            raw_events_only: true,
+            requested_window_days: 0,
+            covered_window_days: 0,
+            truncated_by_retention: false,
+            legacy_null_origin_folds_into_main: true,
+            notes: Vec::new(),
+        }
+    }
 }
 
 /// One UTC day's activity in the stats window ([FR-OB-04]): total calls and the

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use tracing_subscriber::layer::SubscriberExt;
 
 use super::layer::{spawn_writer, TelemetryLayer, TelemetrySink};
-use super::stats::stats_from;
-use super::tool::{self_referential_tools, EventClass, Tool};
+use super::stats::{reads_saved_per_call, stats_from};
+use super::tool::{self_referential_tools, EventClass, Tool, ToolClass, UNREGISTERED_CLASS};
 use super::{
     db, in_surface, telemetry_logos_dir, telemetry_origin, traced, EventRecord, Surface,
     TELEMETRY_TARGET,
@@ -477,41 +477,156 @@ fn every_registered_tool_is_classified_and_sql_safe() {
     );
 }
 
-/// **An unclassified tool must fail the build.** That property is delivered by
-/// `Tool::event_class` being an exhaustive `match` with no wildcard arm — the
-/// compiler then refuses to build until a newly-registered tool is classified.
+/// **An unclassified tool must fail the build**, on *both* classification axes:
+/// `Tool::event_class` ([FR-OB-09]) and `Tool::tool_class` ([FR-OB-11], whose
+/// criteria repeat the requirement verbatim — "an unclassified tool fails the
+/// build rather than defaulting silently"). Each is an exhaustive `match` with
+/// no wildcard arm, so the compiler refuses to build until a newly-registered
+/// tool is classified twice.
 ///
-/// A single `_ =>` arm silently destroys it while still compiling, restoring
+/// A single `_ =>` arm silently destroys that while still compiling, restoring
 /// exactly the closed-list defect CR-091 was filed about. Nothing in rustc
-/// guards against *adding* a wildcard, so this scans the source and does.
+/// guards against *adding* a wildcard, so this scans the source and does — for
+/// both matches, because a guard that named only the first would let the second
+/// acquire the very defect this test exists to prevent.
 #[test]
 fn unclassified_tool_fails_the_build() {
     let source = include_str!("tool.rs");
-    let body = source
-        .split_once("pub(crate) const fn event_class(self) -> EventClass {")
-        .expect("the classification function is where this test believes it is")
-        .1;
-    let body = body
-        .split_once("\n    }\n")
-        .expect("the classification function is brace-delimited")
-        .0;
+    let matches: [(&str, &str); 2] = [
+        (
+            "Tool::event_class",
+            "pub(crate) const fn event_class(self) -> EventClass {",
+        ),
+        (
+            "Tool::tool_class",
+            "pub(crate) const fn tool_class(self) -> ToolClass {",
+        ),
+    ];
 
-    for forbidden in ["_ =>", "_=>"] {
+    for (name, signature) in matches {
+        let body = source
+            .split_once(signature)
+            .unwrap_or_else(|| panic!("{name} is where this test believes it is"))
+            .1;
+        let body = body
+            .split_once("\n    }\n")
+            .unwrap_or_else(|| panic!("{name} is brace-delimited"))
+            .0;
+
+        for forbidden in ["_ =>", "_=>"] {
+            assert!(
+                !body.contains(forbidden),
+                "`{forbidden}` in {name} defeats the build-time completeness \
+                 guarantee (FR-OB-09, FR-OB-11): a new tool would take a silent \
+                 default instead of failing to compile"
+            );
+        }
+        // Every arm names variants explicitly, so the registry's size is a floor
+        // on how many times `Tool::` appears in the body.
+        let mentions = body.matches("Tool::").count();
         assert!(
-            !body.contains(forbidden),
-            "`{forbidden}` in Tool::event_class defeats the build-time \
-             completeness guarantee (FR-OB-09): a new tool would take a silent \
-             default instead of failing to compile"
+            mentions >= Tool::ALL.len(),
+            "each of the {} registered tools is named in {name} ({mentions} mentions)",
+            Tool::ALL.len()
         );
     }
-    // Every arm names variants explicitly, so the registry's size is a floor on
-    // how many times `Tool::` appears in the body.
-    let mentions = body.matches("Tool::").count();
+}
+
+/// Every registered tool carries one of the **five** [FR-OB-11] classes, the
+/// labels are exactly that vocabulary, and none of the five is dead.
+///
+/// Totality is the compiler's job (an exhaustive match); what this adds is that
+/// the *wire* vocabulary the read-model publishes is the closed set the
+/// requirement names — a sixth label would reach the Statistics tab and a
+/// dogfood table as a silently new category — and that every class is actually
+/// reachable, which catches a class that exists only in the enum.
+#[test]
+fn every_registered_tool_carries_one_of_the_five_classes() {
+    const VOCABULARY: [&str; 5] = [
+        "navigation",
+        "quality-gate",
+        "session-gate",
+        "engine-internal",
+        "read-model",
+    ];
+
+    let mut seen: Vec<&str> = Vec::new();
+    for tool in Tool::ALL {
+        let label = tool.tool_class().as_str();
+        assert!(
+            VOCABULARY.contains(&label),
+            "{} is classified {label:?}, outside the FR-OB-11 vocabulary {VOCABULARY:?}",
+            tool.as_str()
+        );
+        if !seen.contains(&label) {
+            seen.push(label);
+        }
+    }
+    for class in VOCABULARY {
+        assert!(
+            seen.contains(&class),
+            "no registered tool is classified {class:?} — a dead class in the \
+             read-model's vocabulary"
+        );
+    }
     assert!(
-        mentions >= Tool::ALL.len(),
-        "each of the {} registered tools is named in the match ({mentions} mentions)",
-        Tool::ALL.len()
+        !VOCABULARY.contains(&UNREGISTERED_CLASS),
+        "the fallback label for a retired tool name must stay outside the five \
+         classes, or a live tool could fall into it"
     );
+}
+
+/// The two classifications are independent axes, with one invariant binding
+/// them: **everything excluded as self-referential is a read-model call.**
+///
+/// The converse deliberately does not hold — `languages` is a `read-model` class
+/// yet an `EngineQuery` event (S-304 reclassified it after the exclusion set was
+/// shown to be an understatement). Asserting the direction that *is* required
+/// stops the two matches drifting into contradiction without forcing them to
+/// answer the same question.
+#[test]
+fn the_two_classifications_agree_where_they_must() {
+    for tool in Tool::ALL {
+        if matches!(tool.event_class(), EventClass::ReadModelRequest) {
+            assert_eq!(
+                tool.tool_class(),
+                ToolClass::ReadModel,
+                "{} is excluded as self-referential but not classed read-model",
+                tool.as_str()
+            );
+        }
+    }
+    // …and the converse is genuinely false, so the test above is not vacuously
+    // asserting an identity between the two axes.
+    assert_eq!(Tool::Languages.tool_class(), ToolClass::ReadModel);
+    assert_eq!(Tool::Languages.event_class(), EventClass::EngineQuery);
+}
+
+/// Every tool the reads-saved weight table pays for is classified `navigation`.
+///
+/// [FR-OB-11] promotes the distinction that lived *only* in that table onto the
+/// read-model. The two are not the same list — `implements` is navigation and
+/// carries no ratified weight — so the binding is directional: a non-zero weight
+/// implies the navigation class. Without this, the weights (a `&str` match with
+/// a wildcard, by necessity — it also sees retired names) could pay a tool the
+/// class calls engine-internal, and the dogfood table would contradict the
+/// headline estimate computed from the same window.
+#[test]
+fn every_weighted_tool_is_classified_navigation() {
+    let mut weighted = 0;
+    for tool in Tool::ALL {
+        if reads_saved_per_call(tool.as_str()) > 0 {
+            weighted += 1;
+            assert_eq!(
+                tool.tool_class(),
+                ToolClass::Navigation,
+                "{} carries a reads-saved weight but is classified {:?}",
+                tool.as_str(),
+                tool.tool_class()
+            );
+        }
+    }
+    assert!(weighted >= 7, "the weight table is populated ({weighted} tools)");
 }
 
 /// The [FR-OB-09] headline: a graph query issued through the SPA **appears** in
@@ -1302,6 +1417,19 @@ fn stats_without_a_telemetry_db_degrades_with_a_warning() {
         info.activity_by_day.is_empty() && info.calls_by_origin.is_empty(),
         "the additive series/breakdown default empty, not fabricated (NFR-CC-04)"
     );
+    assert!(
+        info.calls_by_tool_origin.is_empty() && info.calls_by_class.is_empty(),
+        "the attribution projections default empty too"
+    );
+    // The coverage labels are structural, not measured, so a degraded read-model
+    // still states them — a consumer rendering an empty cross-tab must not be
+    // told `raw_events_only: false`, which would be a claim rather than an
+    // absence (FR-OB-11, NFR-CC-04).
+    assert!(info.attribution_coverage.raw_events_only);
+    assert!(info.attribution_coverage.legacy_null_origin_folds_into_main);
+    assert_eq!(info.attribution_coverage.requested_window_days, 7);
+    assert_eq!(info.attribution_coverage.covered_window_days, 7);
+    assert_eq!(info.attribution_coverage.notes.len(), 3);
 }
 
 // ── Shared telemetry-store resolution (ADR-50, FR-OB-07) ───────────────────
@@ -1458,5 +1586,374 @@ fn telemetry_origin_from_a_detached_worktree_is_main() {
         telemetry_origin(&wt),
         "main",
         "a detached worktree HEAD degrades to main, not the literal HEAD"
+    );
+}
+
+// ── The tool × origin cross-tab and the tool class (FR-OB-11) ──────────────
+
+/// **The headline [FR-OB-11] criterion.** `logos stats --json` reports per-tool
+/// counts split by dev/`main` origin, and a class for every tool.
+///
+/// Neither existing shape can answer *"which navigation came from dev panes?"*:
+/// `calls_by_tool` groups by surface and tool with no origin, `calls_by_origin`
+/// by origin with no tool. The fixture makes that concrete — `search` runs on
+/// **both** sides and `index` only on `main`, so a cross-tab that merely echoed
+/// either existing breakdown would fail here. Both are asserted still populated:
+/// the Statistics tab reads them and must keep working across this change.
+#[test]
+fn the_cross_tab_splits_each_tool_by_dev_and_main_origin() {
+    let mut conn = db::open_in_memory();
+    let on = |branch: &str, tool: &str, ok: bool| EventRecord {
+        at: NOW - 60,
+        surface: "mcp",
+        tool: tool.to_string(),
+        duration_ms: 5,
+        ok,
+        origin: branch.to_string(),
+    };
+    db::write_batch(
+        &mut conn,
+        &[
+            // Dev panes: two branches, three `search` calls (one failed) + `context`.
+            on("sprint-64-I2-S2", "search", true),
+            on("sprint-64-I2-S2", "search", false),
+            on("sprint-64-I1-S3", "search", true),
+            on("sprint-64-I1-S3", "context", true),
+            // main: one `search` and one `index`.
+            record("search", 10, true, NOW - 60),
+            record("index", 20, true, NOW - 60),
+        ],
+    )
+    .unwrap();
+
+    let info = stats_from(&conn, 7, NOW).unwrap();
+
+    // The cross-tab: (tool, origin) cells, tool-then-origin ordered.
+    let cells: Vec<(&str, &str, &str, u64, u64)> = info
+        .calls_by_tool_origin
+        .iter()
+        .map(|c| {
+            (
+                c.tool.as_str(),
+                c.origin.as_str(),
+                c.class.as_str(),
+                c.calls,
+                c.ok_calls,
+            )
+        })
+        .collect();
+    assert_eq!(
+        cells,
+        vec![
+            ("context", "dev", "navigation", 1, 1),
+            ("index", "main", "engine-internal", 1, 1),
+            ("search", "dev", "navigation", 3, 2),
+            ("search", "main", "navigation", 1, 1),
+        ],
+        "one cell per (tool, origin), each carrying its class"
+    );
+
+    // The question the caveat said was unanswerable, now answerable from the
+    // payload alone: navigation issued from dev panes.
+    let dev_navigation: u64 = info
+        .calls_by_tool_origin
+        .iter()
+        .filter(|c| c.origin == "dev" && c.class == "navigation")
+        .map(|c| c.calls)
+        .sum();
+    assert_eq!(dev_navigation, 4, "3 search + 1 context, all from worktrees");
+
+    // Both pre-existing shapes survive unchanged in meaning — the Statistics tab
+    // reads these and must keep working (FR-OB-11 AC 5).
+    let by_surface_tool: Vec<(&str, &str)> = info
+        .calls_by_tool
+        .iter()
+        .map(|u| (u.surface.as_str(), u.tool.as_str()))
+        .collect();
+    assert_eq!(
+        by_surface_tool,
+        vec![
+            ("cli", "index"),
+            ("cli", "search"),
+            ("mcp", "context"),
+            ("mcp", "search"),
+        ],
+        "still surface × tool with no origin — the shape the Statistics tab reads"
+    );
+    assert_eq!(info.calls_by_origin.len(), 2, "dev + main, as before");
+    assert_eq!(info.calls_by_origin[0].origin, "dev");
+    assert_eq!(info.calls_by_origin[0].calls, 4);
+    assert_eq!(info.calls_by_origin[1].calls, 2);
+    assert_eq!(info.calls_total, 6);
+
+    // …and every tool in the existing breakdown now carries a class too, so the
+    // label covers the full raw-plus-rollup coverage, not only the cross-tab.
+    let classed: Vec<(&str, &str)> = info
+        .calls_by_tool
+        .iter()
+        .map(|u| (u.tool.as_str(), u.class.as_str()))
+        .collect();
+    assert!(classed.contains(&("search", "navigation")), "got {classed:?}");
+    assert!(classed.contains(&("index", "engine-internal")), "got {classed:?}");
+    assert!(classed.contains(&("context", "navigation")), "got {classed:?}");
+}
+
+/// **Reproducing a hand-written sprint dogfood table requires no manual
+/// classification** — the story's closing criterion. `calls_by_class` is that
+/// table: class × origin, straight out of `stats`.
+///
+/// The fixture spans four of the five classes on both sides of the split, so a
+/// rollup that lost the class or the origin dimension collapses visibly.
+#[test]
+fn the_class_breakdown_is_the_dogfood_table() {
+    let mut conn = db::open_in_memory();
+    let on = |branch: &str, tool: &str| EventRecord {
+        at: NOW - 60,
+        surface: "mcp",
+        tool: tool.to_string(),
+        duration_ms: 5,
+        ok: true,
+        origin: branch.to_string(),
+    };
+    db::write_batch(
+        &mut conn,
+        &[
+            // Dev pane: two navigation calls, a session gate, a quality gate.
+            on("sprint-64-I2-S2", "context"),
+            on("sprint-64-I2-S2", "callers"),
+            on("sprint-64-I2-S2", "session_end"),
+            on("sprint-64-I2-S2", "check_rules"),
+            // main: one navigation call and the indexing that fed it.
+            record("search", 10, true, NOW - 60),
+            record("sync", 20, true, NOW - 60),
+        ],
+    )
+    .unwrap();
+
+    let info = stats_from(&conn, 7, NOW).unwrap();
+
+    let table: Vec<(&str, &str, u64)> = info
+        .calls_by_class
+        .iter()
+        .map(|c| (c.class.as_str(), c.origin.as_str(), c.calls))
+        .collect();
+    assert_eq!(
+        table,
+        vec![
+            ("engine-internal", "main", 1),
+            ("navigation", "dev", 2),
+            ("navigation", "main", 1),
+            ("quality-gate", "dev", 1),
+            ("session-gate", "dev", 1),
+        ],
+        "class × origin, deterministically ordered (NFR-RA-06)"
+    );
+
+    // The rollup is exactly the cross-tab's rollup — same rows, same coverage.
+    let cross_tab_total: u64 = info.calls_by_tool_origin.iter().map(|c| c.calls).sum();
+    let class_total: u64 = info.calls_by_class.iter().map(|c| c.calls).sum();
+    assert_eq!(class_total, cross_tab_total, "derived, not separately queried");
+    assert_eq!(class_total, 6);
+}
+
+/// **The payload states its own coverage limits** ([FR-OB-11], [NFR-CC-04]) —
+/// and the raw-events-only claim is *true*, not merely asserted: the fixture
+/// puts a rollup day inside the window and shows it counted in `calls_total`
+/// while absent from both attribution projections.
+///
+/// An unlabelled figure is what NFR-CC-04 forbids; a labelled one whose label
+/// is wrong is worse, so the claim and the behaviour are checked together.
+#[test]
+fn the_attribution_projections_state_their_coverage_limits() {
+    let mut conn = db::open_in_memory();
+    db::write_batch(&mut conn, &[record("search", 10, true, NOW - 60)]).unwrap();
+    // A rolled-up day inside the window: no `origin` column, so it can appear in
+    // the totals but must not be attributed to either bucket.
+    conn.execute(
+        "INSERT INTO daily_rollup (day, surface, tool, calls, ok_calls,
+                                   total_duration_ms, max_duration_ms)
+         VALUES (date(?1, 'unixepoch'), 'mcp', 'context', 4, 4, 120, 40)",
+        [NOW - 2 * 86_400],
+    )
+    .unwrap();
+
+    let info = stats_from(&conn, 7, NOW).unwrap();
+    let coverage = &info.attribution_coverage;
+
+    // The claim.
+    assert!(coverage.raw_events_only);
+    assert!(coverage.legacy_null_origin_folds_into_main);
+    assert_eq!(coverage.requested_window_days, 7);
+    assert_eq!(coverage.covered_window_days, 7, "7 days is inside retention");
+    assert!(!coverage.truncated_by_retention);
+    let prose = coverage.notes.join(" ");
+    assert!(prose.contains("raw events only"), "got {:?}", coverage.notes);
+    assert!(prose.contains("daily_rollup"), "got {:?}", coverage.notes);
+    assert!(prose.contains("origin IS NULL"), "got {:?}", coverage.notes);
+
+    // The behaviour the claim describes: the rollup day is in the totals…
+    assert_eq!(info.calls_total, 5, "1 raw + 4 rolled up");
+    assert!(info.calls_by_tool.iter().any(|u| u.tool == "context"));
+    // …and absent from both attribution projections rather than mis-attributed.
+    let cross_tab: Vec<&str> = info
+        .calls_by_tool_origin
+        .iter()
+        .map(|c| c.tool.as_str())
+        .collect();
+    assert_eq!(cross_tab, vec!["search"], "the rolled-up tool is honestly absent");
+    let attributed: u64 = info.calls_by_class.iter().map(|c| c.calls).sum();
+    assert_eq!(attributed, 1, "attribution covers raw events only");
+}
+
+/// When the requested window reaches past raw retention, the payload **names the
+/// window the attribution projections actually cover** rather than implying they
+/// span the request ([FR-OB-11] AC 2).
+#[test]
+fn a_window_past_retention_reports_the_window_it_actually_covers() {
+    let conn = db::open_in_memory();
+    let info = stats_from(&conn, 365, NOW).unwrap();
+    let coverage = &info.attribution_coverage;
+
+    assert_eq!(coverage.requested_window_days, 365);
+    assert_eq!(
+        coverage.covered_window_days,
+        db::RETENTION_DAYS,
+        "capped at the raw-retention horizon"
+    );
+    assert!(coverage.truncated_by_retention);
+    let prose = coverage.notes.join(" ");
+    assert!(
+        prose.contains("most recent 90 of the 365-day window"),
+        "the covered window is named, not merely flagged: {:?}",
+        coverage.notes
+    );
+    assert!(
+        prose.contains("reaches past raw retention"),
+        "the divergence from the rest of the read-model is stated: {:?}",
+        coverage.notes
+    );
+
+    // A window inside retention says so without the extra caveat.
+    let inside = stats_from(&conn, 7, NOW).unwrap().attribution_coverage;
+    assert_eq!(inside.notes.len(), 3, "no truncation note: {:?}", inside.notes);
+}
+
+/// Legacy `NULL` origins fold into `"main"` in the cross-tab exactly as they do
+/// in `calls_by_origin` (FR-OB-08) — the projection never leaks a NULL origin,
+/// and `attribution_coverage` says so in the payload.
+#[test]
+fn the_cross_tab_folds_legacy_null_origins_into_main() {
+    let mut conn = db::open_in_memory_v1();
+    // Two rows written under the v1 schema, before the `origin` column existed.
+    conn.execute(
+        "INSERT INTO events (at, surface, tool, duration_ms, ok)
+         VALUES (?1, 'cli', 'search', 12, 1), (?1, 'cli', 'search', 8, 1)",
+        [NOW - 60],
+    )
+    .unwrap();
+    db::migrate(&mut conn).expect("v2 migration");
+    // A post-migration row explicitly stamped "main".
+    db::write_batch(&mut conn, &[record("search", 10, true, NOW - 60)]).unwrap();
+
+    let info = stats_from(&conn, 7, NOW).unwrap();
+
+    assert_eq!(info.calls_by_tool_origin.len(), 1, "all fold into one cell");
+    assert_eq!(info.calls_by_tool_origin[0].tool, "search");
+    assert_eq!(info.calls_by_tool_origin[0].origin, "main");
+    assert_eq!(info.calls_by_tool_origin[0].calls, 3, "2 legacy NULL + 1 stamped");
+    assert!(
+        info.attribution_coverage.legacy_null_origin_folds_into_main,
+        "and the payload says the historical main bucket is inflated"
+    );
+}
+
+/// A tool name today's registry does not know — written by an older build and
+/// since retired — is **counted and labelled `unregistered`**, not dropped and
+/// not guessed into one of the five classes.
+///
+/// This is the read-side twin of `an_unregistered_historical_tool_is_still_counted`:
+/// history is reported as recorded, and the one thing the read-model cannot know
+/// about it (its class) is stated as unknown ([NFR-CC-04]).
+#[test]
+fn a_retired_tool_name_is_counted_and_labelled_unregistered() {
+    let mut conn = db::open_in_memory();
+    db::write_batch(
+        &mut conn,
+        &[
+            record("a_tool_from_an_older_build", 10, true, NOW - 60),
+            record("search", 10, true, NOW - 60),
+        ],
+    )
+    .unwrap();
+
+    let info = stats_from(&conn, 7, NOW).unwrap();
+
+    assert_eq!(info.calls_total, 2, "the retired name is counted, not dropped");
+    let retired = info
+        .calls_by_tool_origin
+        .iter()
+        .find(|c| c.tool == "a_tool_from_an_older_build")
+        .expect("the retired tool has a cross-tab cell");
+    assert_eq!(retired.class, UNREGISTERED_CLASS);
+    assert_eq!(retired.origin, "main");
+    // …and it rolls up under its own label rather than inflating a real class.
+    let unregistered: Vec<&str> = info
+        .calls_by_class
+        .iter()
+        .map(|c| c.class.as_str())
+        .filter(|c| *c == UNREGISTERED_CLASS)
+        .collect();
+    assert_eq!(unregistered, vec![UNREGISTERED_CLASS]);
+    assert!(
+        info.calls_by_tool
+            .iter()
+            .any(|u| u.tool == "a_tool_from_an_older_build" && u.class == UNREGISTERED_CLASS),
+        "the label reaches the existing shape too: {:?}",
+        info.calls_by_tool
+    );
+}
+
+/// The self-referential exclusion reaches the two new projections too — a leak
+/// here would put `stats`/`status` back into the usage figures through a side
+/// door, which is the whole defect CR-091 was filed about ([FR-OB-09]).
+#[test]
+fn the_exclusion_reaches_the_cross_tab_and_the_class_breakdown() {
+    let mut conn = db::open_in_memory();
+    let noise = |tool: &str| EventRecord {
+        at: NOW - 60,
+        surface: "web",
+        tool: tool.to_string(),
+        duration_ms: 5,
+        ok: true,
+        // A distinct origin, so a leak would add a whole `dev` column.
+        origin: "some-worktree-branch".to_string(),
+    };
+    db::write_batch(
+        &mut conn,
+        &[
+            record("search", 10, true, NOW - 60),
+            noise("stats"),
+            noise("status"),
+        ],
+    )
+    .unwrap();
+
+    let info = stats_from(&conn, 7, NOW).unwrap();
+
+    let tools: Vec<&str> = info
+        .calls_by_tool_origin
+        .iter()
+        .map(|c| c.tool.as_str())
+        .collect();
+    assert_eq!(tools, vec!["search"], "self-referential rows leaked: {tools:?}");
+    let classes: Vec<(&str, &str)> = info
+        .calls_by_class
+        .iter()
+        .map(|c| (c.class.as_str(), c.origin.as_str()))
+        .collect();
+    assert_eq!(
+        classes,
+        vec![("navigation", "main")],
+        "the read-model class must not appear via the class breakdown"
     );
 }

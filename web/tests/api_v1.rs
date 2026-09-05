@@ -297,7 +297,10 @@ async fn statistics_endpoint_serializes_the_enriched_read_model_and_honors_windo
     let router = web::router(engine);
 
     // The enriched read-model shape the Statistics tab reads — the S-233 additions
-    // (`activity_by_day`, `calls_by_origin`) alongside the pre-existing fields.
+    // (`activity_by_day`, `calls_by_origin`) alongside the pre-existing fields,
+    // plus the [FR-OB-11] attribution projections. The pre-existing keys are
+    // asserted alongside the new ones deliberately: the cross-tab is additive and
+    // the tab must keep working across the change.
     let resp = router.clone().oneshot(get("/api/v1/statistics")).await.unwrap();
     let (status, body, headers) = body_string(resp).await;
     assert_eq!(status, StatusCode::OK, "statistics answers 200");
@@ -309,9 +312,19 @@ async fn statistics_endpoint_serializes_the_enriched_read_model_and_honors_windo
         "\"tokens_saved_estimate\"",
         "\"activity_by_day\"",
         "\"calls_by_origin\"",
+        "\"calls_by_tool_origin\"",
+        "\"calls_by_class\"",
+        "\"attribution_coverage\"",
     ] {
         assert!(body.contains(key), "statistics carries {key}: {body}");
     }
+    // The coverage limits reach the HTTP surface, not just the core read-model —
+    // [S-306] renders them from here ([NFR-CC-04]).
+    assert!(
+        body.contains("\"raw_events_only\":true")
+            && body.contains("\"legacy_null_origin_folds_into_main\":true"),
+        "the attribution projections state their own limits: {body}"
+    );
     // The default window is 7 ([FR-OB-04]).
     assert!(body.contains("\"window_days\":7"), "the default window is 7: {body}");
 
