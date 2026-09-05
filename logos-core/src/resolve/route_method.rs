@@ -14,9 +14,9 @@
 //! genuinely serves every verb. A provider index keyed on the whole
 //! `(method, template)` tuple can never match it: tuple equality has no notion of
 //! a wildcard, so 92 of 105 normalizable providers in the measured workspace
-//! matched nothing. The fix is therefore a change to the **index shape** — both
-//! candidate-selection sites bucket their providers on the normalized template
-//! **alone** and resolve the method here, over that bucket's candidates
+//! matched nothing. The fix is therefore a change to the **index shape** — every
+//! candidate-selection site buckets its providers on the normalized template
+//! **alone** and resolves the method here, over that bucket's candidates
 //! ([FR-WS-04], [ADR-52]).
 //!
 //! # The rule ([FR-CG-09])

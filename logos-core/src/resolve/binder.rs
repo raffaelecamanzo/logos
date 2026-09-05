@@ -1292,7 +1292,9 @@ impl Ctx<'_> {
             (EdgeKind::ArtifactBinding, RefForm::Method) => self.resolve_code_type_name(&r.target),
             // The OpenAPI `ApiOperation`→`route` match (S-069): the target is the
             // operation rendered `"METHOD /template"`, bound to the one route
-            // whose method and positionally-normalized template match exactly.
+            // whose positionally-normalized template matches and whose method
+            // serves it — `ANY` is a wildcard, and an exact-method route outranks
+            // it ([CR-109]; see `resolve_route`).
             (EdgeKind::ArtifactBinding, RefForm::Path) => self.resolve_route(&r.target),
             // Other (kind, form) shapes are consumer-story extension points:
             // unbound here, never fabricated.
@@ -1512,9 +1514,9 @@ impl Ctx<'_> {
     /// catch-all/regex route is absent from the index entirely, so it is never
     /// approximately matched.
     ///
-    /// The cross-member bridge ([`crate::federation::bridge`]) narrows its own
-    /// provider bucket through the very same rule, so the two sites cannot drift
-    /// on which input binds ([ADR-52]).
+    /// The cross-member bridge ([`crate::federation::bridge`]) and the coverage
+    /// read-model narrow their own provider buckets through the very same rule,
+    /// so no two of the three sites can drift on which input binds ([ADR-52]).
     ///
     /// [CR-109]: ../../../docs/requests/CR-109-wildcard-method-route-matching.md
     /// [FR-CG-09]: ../../../docs/specs/requirements/FR-CG-09.md
