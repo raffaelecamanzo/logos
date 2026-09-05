@@ -1651,22 +1651,30 @@ export async function raw() { return axios.get("/files/{*rest}"); }"#,
     }
 }
 
-/// Drive `collect_invocation_sites` directly for a TypeScript fixture, returning
-/// the raw slots the query hands the shared interpreter.
+/// Drive `collect_invocation_sites` directly for a fixture in the language owning
+/// `ext`, returning the raw slots that language's query hands the shared
+/// interpreter.
 ///
 /// The refs-level helpers can only see what survived classification, so they
 /// cannot distinguish "the query never matched" from "the interpreter refused
 /// it" — and only the second surfaces a coverage reason. Every negative case
 /// whose contract names a specific reason is pinned through this.
-#[cfg(feature = "lang-typescript")]
-fn ts_invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::InvocationSite> {
+///
+/// This is why a language arm's slot-level tests live in this module rather than
+/// beside the rest of its suite in `tests/`: both
+/// [`collect_invocation_sites`] and
+/// [`classify_client_call`](crate::resolve::http_client_call::classify_client_call)
+/// are crate-private, and widening them to `pub` for a test would be a worse
+/// trade than the module gate documented on `extract::tests`.
+#[cfg(any(feature = "lang-typescript", feature = "lang-go"))]
+fn invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::InvocationSite> {
     let reg = registry();
     let plugin = reg
         .for_extension(ext)
         .unwrap_or_else(|| panic!("{ext} grammar"));
     let query = plugin
         .query("invocations")
-        .expect("both TypeScript plugins ship an invocations query");
+        .unwrap_or_else(|| panic!("the {ext} plugin ships an invocations query"));
     let ctx = SymbolContext::cargo("logos-core", "0.1.0");
     let facts = extract(&FileInput::new(format!("src/client.{ext}"), source), plugin, &ctx);
     // Borrow a real file-module symbol so the site has an attributable scope.
@@ -1689,6 +1697,12 @@ fn ts_invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::I
         &[],
         Some(&module),
     )
+}
+
+/// [`invocation_sites`] for a TypeScript fixture (S-343's original spelling).
+#[cfg(feature = "lang-typescript")]
+fn ts_invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::InvocationSite> {
+    invocation_sites(ext, source)
 }
 
 /// FR-WS-08 shared negative-case contract, case 2 — pinned at the level the
@@ -2010,6 +2024,119 @@ fn a_verb_less_call_is_attributed_to_the_call_not_to_its_argument() {
             "the reference is attributed to its enclosing declaration, not the \
              file module ({ext}): {:?}",
             refs[0].source
+        );
+    }
+}
+
+
+// ── S-345 / FR-WS-08 / CR-108: Go slot-level refusal reasons ────────────────
+//
+// The rest of the Go arm's suite lives in `tests/go_invocations.rs`. These two
+// stay here because they need the crate-private `collect_invocation_sites` and
+// `classify_client_call` — see [`invocation_sites`]. They are the Go twins of
+// `a_template_literal_reaches_the_interpreter_as_a_dynamic_path` and
+// `a_non_normalizing_absolute_path_reaches_the_interpreter_as_a_static_path`.
+
+/// FR-WS-08 shared negative case 2 for **Go**, pinned at slot level.
+///
+/// `tests/go_invocations.rs::a_runtime_composed_path_is_not_captured` proves
+/// only that a runtime-composed path emits nothing — which is equally true if
+/// the query never matched it. The contract's actual obligation is that the
+/// query DOES hand the site over, carrying the dynamic-path marker, so the
+/// refusal is `base-url-runtime` rather than a silent non-match. The Go query
+/// header states exactly this ("A composed path still yields a SITE, so the arm
+/// classifies it base-url-runtime instead of never seeing it"); without this
+/// test that claim is unpinned, and narrowing the query's `(_) @invoke.http.arg`
+/// to a string-literal alternation — a plausible "tighten the anchor" edit —
+/// would delete Go's coverage reasons with every existing test still green.
+#[test]
+#[cfg(feature = "lang-go")]
+fn a_runtime_composed_go_path_reaches_the_interpreter_as_a_dynamic_path() {
+    use crate::resolve::http_client_call::{DYNAMIC_PATH_SLOT, METHOD_SLOT, PATH_SLOT};
+
+    // Both Go anchor shapes: verb-as-method-name and verb-as-constructor-arg.
+    for (body, verb) in [
+        ("http.Get(url)", "Get"),
+        (r#"req, _ := http.NewRequest("GET", url, nil); c.Do(req)"#, "GET"),
+    ] {
+        let source = format!(
+            r#"package client
+
+import "net/http"
+
+func Fetch(c *http.Client, url string) {{
+	{body}
+}}
+"#
+        );
+        let sites = invocation_sites("go", &source);
+        assert_eq!(sites.len(), 1, "exactly one invocation site for {body:?}");
+        let slots = &sites[0].slots;
+        assert_eq!(
+            slots.get(METHOD_SLOT).map(String::as_str),
+            Some(verb),
+            "the verb still reaches the interpreter — only the path is dynamic"
+        );
+        assert!(
+            slots.contains_key(DYNAMIC_PATH_SLOT),
+            "a runtime-composed path must carry the dynamic-path marker (that \
+             marker is what makes the refusal `base-url-runtime` rather than a \
+             silent non-match) for {body:?}: {slots:?}"
+        );
+        assert!(
+            !slots.contains_key(PATH_SLOT),
+            "no static path is guessed from a composed one: {slots:?}"
+        );
+        assert!(
+            crate::resolve::http_client_call::render_client_call_target(slots).is_none(),
+            "and the interpreter therefore renders no target"
+        );
+    }
+}
+
+/// FR-WS-08 shared negative case 3 for **Go**, pinned at slot level — and the
+/// relative-literal case beside it, which refuses for a *different* reason.
+///
+/// The refs-level Go tests prove only that both emit nothing, so they cannot
+/// show that the two carry distinct coverage reasons. Case 3's whole point is
+/// the distinct reason, so it is asserted where the reason exists: the query
+/// hands over a **static** `path` slot, and the refusal comes from classifying
+/// it, not from failing to match.
+#[test]
+#[cfg(feature = "lang-go")]
+fn a_non_normalizing_go_path_reaches_the_interpreter_as_a_static_path() {
+    use crate::resolve::http_client_call::{
+        classify_client_call, ClientCallRefusal, DYNAMIC_PATH_SLOT, PATH_SLOT,
+    };
+
+    for (literal, refusal) in [
+        ("/v{version}/users", ClientCallRefusal::PathNotComposed),
+        ("users/{id}", ClientCallRefusal::BaseUrlRuntime),
+    ] {
+        let source = format!(
+            r#"package client
+
+import "net/http"
+
+func ListUsers() {{ http.Get("{literal}") }}
+"#
+        );
+        let sites = invocation_sites("go", &source);
+        assert_eq!(sites.len(), 1, "one site reaches the interpreter for {literal}");
+        let slots = &sites[0].slots;
+        assert_eq!(
+            slots.get(PATH_SLOT).map(String::as_str),
+            Some(literal),
+            "the static literal is handed over verbatim, not pre-judged: {slots:?}"
+        );
+        assert!(
+            !slots.contains_key(DYNAMIC_PATH_SLOT),
+            "a static literal never carries the dynamic marker: {slots:?}"
+        );
+        assert_eq!(
+            classify_client_call(slots),
+            Err(refusal),
+            "the interpreter's own refusal reason for {literal}"
         );
     }
 }

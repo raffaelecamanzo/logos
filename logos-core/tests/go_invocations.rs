@@ -219,8 +219,12 @@ func CreateUser() { http.Post("/users", "application/json", nil) }
         "the content-type argument never becomes a second reference"
     );
 
-    // …and in a value position, where the constructor-argument pattern is live
-    // and the same adjacent pair is therefore actually evaluated.
+    // …and with the response bound, which is the far more common spelling. (An
+    // earlier draft justified this fixture by the constructor-argument pattern
+    // being "live in a value position" — it is not: that pattern is pinned by
+    // `#eq? @_pkg "http"` + `#any-of? @_fn "NewRequest" …`, so `http.Post` never
+    // reaches it in any position. The value-position discriminator was the
+    // ABANDONED draft; see the query header.)
     let bound = extract_go(
         r#"package client
 
@@ -329,20 +333,40 @@ func ListUsers() { http.Get("/v{version}/users") }
 /// cross-service edge ([FR-WS-08] shared negative case 1, [NFR-RA-05]).
 #[test]
 fn a_route_shaped_get_outside_a_net_http_file_is_not_captured() {
-    let facts = extract_go(
-        r#"package authz
-
-type Perms struct{}
+    const BODY: &str = r#"type Perms struct{}
 
 func (p Perms) Get(k string) bool { return false }
 
 func Authorize(p Perms) { p.Get("/admin/users") }
-"#,
-    );
+"#;
+
+    let facts = extract_go(&format!("package authz\n\n{BODY}"));
     assert!(
         client_call_targets(&facts).is_empty(),
         "a non-client file never emits an outbound-call ref: {:?}",
         client_call_targets(&facts)
+    );
+
+    // Positive control, and the ADR-54 ceiling in the same fixture. The source
+    // is byte-identical but for the `net/http` import, so the emptiness above is
+    // attributable to `capture_http_client_call_arm`'s ledger gate and to
+    // nothing else — without this, the test would still pass with the gate
+    // deleted if some other filter happened to reject `p.Get`.
+    //
+    // What it captures is the documented ADR-54 accuracy ceiling: the gate is
+    // FILE-grained, so this same incidental call INSIDE a genuine client file
+    // does capture. Under-capture is safe, over-capture is not, and the residual
+    // is stated rather than worked around — the Java arm pins the identical
+    // ceiling in `a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling`.
+    let gated = extract_go(&format!(
+        "package authz\n\nimport \"net/http\"\n\nvar _ = http.StatusOK\n\n{BODY}"
+    ));
+    assert_eq!(
+        client_call_targets(&gated),
+        vec!["GET /admin/users".to_string()],
+        "the same source with the client import DOES capture — the ledger gate \
+         is the only difference between these two cases, and the residual is \
+         ADR-54's stated file-grained ceiling"
     );
 }
 
@@ -513,6 +537,22 @@ fn go_client_calls_bind_go_routes_in_another_member() {
     let coverage = cross_service_coverage(&registry);
     assert_eq!(coverage.bound, 2, "both static calls are bound");
     assert_eq!(coverage.ambiguous, 0);
+    // Pin the whole census, not just the bound bucket: a phantom third
+    // reference landing in `unbound` (or a real one silently reclassified into
+    // `no_provider_in_workspace`) would otherwise go unremarked while
+    // `bound == 2` still held.
+    assert_eq!(
+        coverage.references.len(),
+        2,
+        "exactly two client-call references reach the bridge — the \
+         fmt.Sprintf-composed call is refused before it becomes one: {:?}",
+        coverage.references
+    );
+    assert_eq!(coverage.unbound, 0, "neither reference is left unbound");
+    assert_eq!(
+        coverage.no_provider_in_workspace, 0,
+        "both routes exist in member `api`"
+    );
 }
 
 // ── Stated ceiling: the named-constant verb ([ADR-54]) ──────────────────────
@@ -596,12 +636,19 @@ func main() {
 	r.POST("/users", listUsers)
 	r.Handle("GET", "/orders/{id}", listUsers)
 	r.GET("/legacy", func(c *gin.Context) {})
+	http.Get("/probe")
 }
 "#,
     );
-    assert!(
-        client_call_targets(&facts).is_empty(),
-        "a provider's own registrations are never outbound calls: {:?}",
+    // The `http.Get` is the positive control: it proves the file WAS scanned, so
+    // the four registrations above are empty because the query's discriminators
+    // rejected them — not because a later tightening of `http_client_detectors`
+    // quietly closed the gate on the whole fixture.
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /probe".to_string()],
+        "a provider's own registrations are never outbound calls, and the file \
+         was genuinely scanned: {:?}",
         client_call_targets(&facts)
     );
 }
@@ -629,12 +676,16 @@ func mount(r *gin.Engine) gin.IRoutes {
 	_ = routes
 	return r.Handle("POST", "/orders", listUsers)
 }
+
+func probe() { http.Get("/probe") }
 "#,
     );
-    assert!(
-        client_call_targets(&facts).is_empty(),
+    // Positive control — see the sibling test above.
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /probe".to_string()],
         "a registration whose result is bound or returned is still not an \
-         outbound call: {:?}",
+         outbound call, and the file was genuinely scanned: {:?}",
         client_call_targets(&facts)
     );
 }
@@ -662,12 +713,16 @@ func TestListUsers(t *testing.T) {
 	req := httptest.NewRequest("GET", "/users", nil)
 	rr := httptest.NewRecorder()
 	ListUsers(rr, req)
+	http.Get("/probe")
 }
 "#,
     );
-    assert!(
-        client_call_targets(&facts).is_empty(),
-        "a server-side test request is never an outbound call: {:?}",
+    // Positive control — see `a_route_registration_in_a_net_http_file_…`.
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /probe".to_string()],
+        "a server-side test request is never an outbound call, and the file was \
+         genuinely scanned: {:?}",
         client_call_targets(&facts)
     );
 }
@@ -689,13 +744,16 @@ import (
 func Probe(c *http.Client) {
 	cmd := exec.Command("curl", "-X", "GET", "/v1/ping")
 	_ = cmd
+	http.Get("/probe")
 }
 "#,
     );
-    assert!(
-        client_call_targets(&facts).is_empty(),
+    // Positive control — see `a_route_registration_in_a_net_http_file_…`.
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /probe".to_string()],
         "only http.NewRequest/NewRequestWithContext anchor the constructor \
-         form: {:?}",
+         form, and the file was genuinely scanned: {:?}",
         client_call_targets(&facts)
     );
 }
