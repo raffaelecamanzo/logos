@@ -14,18 +14,24 @@ use agent_core::{governance_toolset, graph_toolset};
 use logos_core::Engine;
 use serde_json::Value;
 
-/// A fixture project with a three-function call chain (`alpha → beta → gamma`)
-/// so the graph tools have real symbols and edges to resolve.
-fn fixture_engine() -> (Arc<Engine>, tempfile::TempDir) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir_all(dir.path().join("src")).expect("mkdir src");
+/// Write the shared three-function call chain (`alpha → beta → gamma`) fixture
+/// source into `dir` — no cycles, so a `max_cycles` constraint never fires on it.
+fn write_alpha_beta_gamma_fixture(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir.join("src")).expect("mkdir src");
     std::fs::write(
-        dir.path().join("src/lib.rs"),
+        dir.join("src/lib.rs"),
         "pub fn alpha() { beta(); }\n\
          pub fn beta() { gamma(); }\n\
          pub fn gamma() {}\n",
     )
     .expect("write fixture");
+}
+
+/// A fixture project with a three-function call chain (`alpha → beta → gamma`)
+/// so the graph tools have real symbols and edges to resolve.
+fn fixture_engine() -> (Arc<Engine>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_alpha_beta_gamma_fixture(dir.path());
     let engine = Engine::start(dir.path()).expect("engine start");
     (Arc::new(engine), dir)
 }
@@ -37,14 +43,7 @@ fn clean_fixture_engine_with_rules() -> (Arc<Engine>, tempfile::TempDir) {
     std::fs::create_dir_all(dir.path().join(".logos")).expect("mkdir .logos");
     std::fs::write(dir.path().join(".logos/rules.toml"), "[constraints]\nmax_cycles = 0\n")
         .expect("write rules.toml");
-    std::fs::create_dir_all(dir.path().join("src")).expect("mkdir src");
-    std::fs::write(
-        dir.path().join("src/lib.rs"),
-        "pub fn alpha() { beta(); }\n\
-         pub fn beta() { gamma(); }\n\
-         pub fn gamma() {}\n",
-    )
-    .expect("write fixture");
+    write_alpha_beta_gamma_fixture(dir.path());
     let engine = Engine::start(dir.path()).expect("engine start");
     (Arc::new(engine), dir)
 }
