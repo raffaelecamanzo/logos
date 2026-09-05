@@ -251,7 +251,7 @@ impl Engine {
         let seed = if db_path.exists() {
             None
         } else {
-            crate::workspace::seed_source(&root).and_then(
+            let seed = crate::workspace::seed_source(&root).and_then(
                 |seed| match crate::graph_store::seed_copy(&seed.db_path, &db_path) {
                     Ok(()) => {
                         tracing::info!(
@@ -271,7 +271,48 @@ impl Engine {
                         None
                     }
                 },
-            )
+            );
+
+            // Governance-contract seeding ([FR-WT-06], CR-112): independent of
+            // whether the graph-store copy above succeeded — a `rules.toml`
+            // carried into a DB-less worktree is worth having even if the
+            // graph seed failed, and vice versa. `.logos/` is conventionally
+            // gitignored, so without this the seeded graph would have no
+            // architecture contract and every governance evaluation inside
+            // the worktree would be vacuous. Each file is copied verbatim
+            // (never parsed or rewritten), so no copied value can become an
+            // absolute path into the primary checkout (FR-IN-06).
+            if let Some(primary) = crate::workspace::primary_root(&root) {
+                let contract = crate::workspace::seed_contract(&primary, &root);
+                for (name, outcome) in [
+                    ("rules.toml", contract.rules),
+                    ("config.toml", contract.config),
+                ] {
+                    match outcome {
+                        crate::workspace::ContractFileOutcome::Copied => {
+                            tracing::info!(
+                                file = name,
+                                primary = %primary.display(),
+                                "seeded the governance contract file from the primary checkout (FR-WT-06)"
+                            );
+                        }
+                        crate::workspace::ContractFileOutcome::Absent => {}
+                        crate::workspace::ContractFileOutcome::Failed => {
+                            // Fail-soft, matching the graph-store seed above
+                            // (ADR-11): the worktree stays usable, just
+                            // without this policy file.
+                            tracing::warn!(
+                                file = name,
+                                primary = %primary.display(),
+                                "seeding {name} from the primary checkout failed; the \
+                                 worktree's governance contract may be incomplete"
+                            );
+                        }
+                    }
+                }
+            }
+
+            seed
         };
 
         let runtime = Runtime::open_with_config(&db_path, runtime).with_context(|| {

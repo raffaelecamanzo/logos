@@ -258,3 +258,116 @@ fn outside_git_the_hint_directory_is_the_root() {
     assert!(has_fn(&engine, "plain_fn"));
     assert!(tmp.path().join(".logos/logos.db").exists());
 }
+
+// ── FR-WT-06 / CR-112: worktree seeding carries the governance contract ───
+
+/// A committed repo with `.logos/` **wholesale** gitignored — the common,
+/// naive convention CR-112 exists for (a blanket `.logos/` line, not the
+/// granular `.logos/.gitignore` `logos init` generates). Unlike
+/// [`repo_fixture`], no policy file here is ever git-tracked, so a linked
+/// worktree's only path to one is the seed copying it.
+fn gitignored_repo_fixture() -> (TempDir, PathBuf) {
+    let tmp = TempDir::new().expect("temp root");
+    let main = tmp.path().join("main");
+    write(&main, "src/lib.rs", "pub fn seeded_fn() {}\n");
+    write(&main, ".gitignore", ".logos/\n");
+    sh_git(&main, &["init", "-q", "-b", "main"]);
+    sh_git(&main, &["add", "."]);
+    sh_git(&main, &["commit", "-q", "-m", "initial"]);
+    (tmp, main)
+}
+
+/// A minimal but real layered contract — two layers plus a boundary between
+/// them — the same shape `logos-core/tests/governance.rs` uses.
+const LAYERED_RULES: &str = "\
+[[layers]]
+name  = \"domain\"
+paths = [\"src/domain_*.rs\"]
+order = 1
+
+[[layers]]
+name  = \"presentation\"
+paths = [\"src/ui_*.rs\"]
+order = 2
+
+[[boundaries]]
+from   = \"domain\"
+to     = \"presentation\"
+reason = \"the domain must not reach upward into presentation\"
+";
+
+/// [FR-WT-06] AC1: seeding a DB-less worktree from a primary checkout that
+/// has `.logos/rules.toml` yields a worktree where `check_rules` reports the
+/// SAME `checked_rules` count as the primary at the same commit. The
+/// contract never traveled through git (it is gitignored), so parity here
+/// can only come from the seed's own copy — and the copy is byte-identical,
+/// never rewritten ([FR-IN-06]).
+#[test]
+fn worktree_seed_carries_the_governance_contract_with_checked_rules_parity() {
+    let (tmp, main) = gitignored_repo_fixture();
+    write(&main, ".logos/rules.toml", LAYERED_RULES);
+
+    let primary_checked_rules = {
+        let engine = Engine::start(&main).expect("primary engine starts");
+        let report = engine
+            .check_rules(None, true)
+            .expect("primary check_rules runs");
+        assert!(report.rules_present, "the primary has an authored contract");
+        report.checked_rules
+    };
+    assert!(main.join(".logos/logos.db").exists());
+
+    let wt = add_worktree(&tmp, &main);
+    assert!(
+        !wt.join(".logos/rules.toml").exists(),
+        "rules.toml is gitignored — it must not have traveled through git"
+    );
+
+    // First use in the DB-less worktree: the seed copies the graph AND the
+    // governance contract (FR-WT-06).
+    let engine = Engine::start(&wt).expect("worktree engine starts");
+    assert_eq!(
+        fs::read_to_string(wt.join(".logos/rules.toml")).unwrap(),
+        fs::read_to_string(main.join(".logos/rules.toml")).unwrap(),
+        "the seeded rules.toml is byte-identical to the primary's — never rewritten (FR-IN-06)"
+    );
+
+    let wt_report = engine
+        .check_rules(None, true)
+        .expect("worktree check_rules runs");
+    assert!(wt_report.rules_present, "the seeded worktree has a contract");
+    assert_eq!(
+        wt_report.checked_rules, primary_checked_rules,
+        "the worktree evaluates the SAME rule count as the primary at the same commit"
+    );
+}
+
+/// [FR-WT-06] AC2: a primary checkout with no contract seeds a worktree with
+/// no contract — the seed copies, it never fabricates.
+#[test]
+fn worktree_seed_with_no_primary_contract_fabricates_nothing() {
+    let (tmp, main) = gitignored_repo_fixture(); // no rules.toml ever written
+
+    {
+        let engine = Engine::start(&main).expect("primary engine starts");
+        let report = engine
+            .check_rules(None, true)
+            .expect("primary check_rules runs");
+        assert!(!report.rules_present, "no contract was ever authored");
+    }
+
+    let wt = add_worktree(&tmp, &main);
+    let engine = Engine::start(&wt).expect("worktree engine starts");
+    assert!(
+        !wt.join(".logos/rules.toml").exists(),
+        "nothing to copy, and the seed fabricates nothing"
+    );
+    let report = engine
+        .check_rules(None, true)
+        .expect("worktree check_rules runs");
+    assert!(
+        !report.rules_present,
+        "the seeded worktree reports the same absent-contract state as the primary"
+    );
+    assert_eq!(report.checked_rules, 0);
+}
