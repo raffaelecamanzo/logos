@@ -873,3 +873,24 @@ pub struct SkippedLanguage {
     pub name: String,
     pub reason: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`RulesReport::exit_code`]'s FR-GV-22 projection, in isolation from the
+    /// engine/CLI plumbing that otherwise only exercises it transitively: a
+    /// clean, loaded contract exits 0; a violation exits 1 whether or not a
+    /// contract was loaded (a real finding always wins over "absent"); no
+    /// contract and nothing else fired exits 4, collapsed to 0 by
+    /// `allow_absent` for callers that have deliberately authored none.
+    #[test]
+    fn rules_report_exit_code_projects_the_three_states() {
+        let report = |passed| RulesReport { passed, ..Default::default() };
+        assert_eq!(report(Some(true)).exit_code(false), 0);
+        assert_eq!(report(Some(false)).exit_code(false), 1);
+        assert_eq!(report(Some(false)).exit_code(true), 1);
+        assert_eq!(report(None).exit_code(false), 4);
+        assert_eq!(report(None).exit_code(true), 0);
+    }
+}
