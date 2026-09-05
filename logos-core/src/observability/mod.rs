@@ -141,6 +141,43 @@ pub enum Surface {
     Chat,
 }
 
+/// The surface a **process** serves — the argument [`init`] takes.
+///
+/// [`Surface`] is the full vocabulary of values that can appear in the store's
+/// `surface` column, and since [FR-OB-09] that vocabulary includes values no
+/// process ever *is*: the watcher and the chat agent both run inside another
+/// surface's process and are reached only through a per-event override. Letting
+/// `init` take a bare `Surface` would make `init(Surface::Chat, root)` a
+/// compiling, silently wrong call that stamps every event in the process
+/// `chat`.
+///
+/// So the two roles get two types. This one is closed over the three real
+/// process surfaces and converts into [`Surface`] one-way, which makes the
+/// invariant the enum's doc used to merely assert into one the compiler keeps —
+/// the same discipline [`Tool::event_class`](tool::Tool::event_class) applies to
+/// classification.
+///
+/// [FR-OB-09]: ../../../docs/specs/requirements/FR-OB-09.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessSurface {
+    /// The `logos` CLI binary.
+    Cli,
+    /// The `serve --mcp` stdio server.
+    Mcp,
+    /// The `serve --ui` localhost web dashboard (CR-012, feature-gated).
+    Web,
+}
+
+impl From<ProcessSurface> for Surface {
+    fn from(surface: ProcessSurface) -> Self {
+        match surface {
+            ProcessSurface::Cli => Surface::Cli,
+            ProcessSurface::Mcp => Surface::Mcp,
+            ProcessSurface::Web => Surface::Web,
+        }
+    }
+}
+
 impl Surface {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -324,7 +361,7 @@ fn telemetry_origin_for(primary: Option<&Path>, root: &Path) -> String {
 ///
 /// [ADR-50]: ../../../docs/specs/architecture/decisions/ADR-50.md
 /// [FR-OB-07]: ../../../docs/specs/requirements/FR-OB-07.md
-pub fn init(surface: Surface, root: &Path) -> TelemetryGuard {
+pub fn init(surface: ProcessSurface, root: &Path) -> TelemetryGuard {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     // Human logs: stderr, never stdout (NFR-RA-01) — a stray stdout byte
     // corrupts the MCP JSON-RPC stream (RK-02).
@@ -342,7 +379,7 @@ pub fn init(surface: Surface, root: &Path) -> TelemetryGuard {
         // the active path, so a telemetry-less run never pays the git cost.
         let origin = telemetry_origin_for(primary.as_deref(), root);
         let (sink, guard) = layer::spawn_writer(logos_dir.join(TELEMETRY_DB_FILENAME));
-        let telemetry = layer::TelemetryLayer::new(surface, origin, sink)
+        let telemetry = layer::TelemetryLayer::new(surface.into(), origin, sink)
             .with_filter(filter_fn(|meta| meta.target() == TELEMETRY_TARGET));
         (Some(telemetry), guard)
     } else {

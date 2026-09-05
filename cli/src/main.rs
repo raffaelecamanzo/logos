@@ -528,9 +528,9 @@ fn run(cli: Cli) -> Result<i32> {
         // A web-only serve session stamps surface=web; any session that owns
         // stdout for MCP (including the combined one) stamps surface=mcp.
         #[cfg(feature = "ui")]
-        Commands::Serve { mcp: false, ui: true, .. } => observability::Surface::Web,
-        Commands::Serve { .. } => observability::Surface::Mcp,
-        _ => observability::Surface::Cli,
+        Commands::Serve { mcp: false, ui: true, .. } => observability::ProcessSurface::Web,
+        Commands::Serve { .. } => observability::ProcessSurface::Mcp,
+        _ => observability::ProcessSurface::Cli,
     };
     // The warm supervisor (FR-WS-14) is the one arm that initialises NOTHING:
     // it emits no telemetry event (no `traced` span is reachable from it — it
