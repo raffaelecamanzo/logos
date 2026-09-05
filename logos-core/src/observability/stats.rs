@@ -390,7 +390,7 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
 /// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
 /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-fn attribution_coverage(window_days: u32) -> AttributionCoverage {
+pub(crate) fn attribution_coverage(window_days: u32) -> AttributionCoverage {
     let covered_window_days = window_days.min(super::db::RETENTION_DAYS);
     let truncated_by_retention = covered_window_days < window_days;
     let mut notes = vec![

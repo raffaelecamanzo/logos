@@ -1957,3 +1957,36 @@ fn the_exclusion_reaches_the_cross_tab_and_the_class_breakdown() {
         "the read-model class must not appear via the class breakdown"
     );
 }
+
+/// **Both degradations state the same limits.** A missing `telemetry.db` and an
+/// unreadable one reach the read-model by different paths — `stats()`'s early
+/// return and `Engine::stats`'s `unwrap_or_else` — and only the first was
+/// wired to `attribution_coverage` at first pass.
+///
+/// The limits are structural (properties of `daily_rollup`'s schema, not of the
+/// data), so they hold on both, and a surface rendering `notes` must not fall
+/// silent on exactly the payload least worth trusting ([NFR-CC-04]). This pins
+/// the pure function both paths now share, and the `Default` that backstops it.
+#[test]
+fn a_degraded_read_model_still_states_its_coverage_limits() {
+    // The shared pure function: the caller's window is echoed, not zeroed.
+    let coverage = super::attribution_coverage(30);
+    assert!(coverage.raw_events_only);
+    assert!(coverage.legacy_null_origin_folds_into_main);
+    assert_eq!(coverage.requested_window_days, 30);
+    assert_eq!(coverage.covered_window_days, 30);
+    assert_eq!(coverage.notes.len(), 3, "the prose survives degradation");
+
+    // The `Default` backstop: `Engine::stats` builds its fallback with
+    // `..StatsInfo::default()`, so a derived `Default` would answer
+    // `raw_events_only: false` — a *claim* about the schema, not an absence,
+    // which is the failure NFR-CC-04 names. Zeroed windows are correct there
+    // (no window was covered); the two structural booleans are not.
+    let zeroed = crate::models::quality::AttributionCoverage::default();
+    assert!(
+        zeroed.raw_events_only && zeroed.legacy_null_origin_folds_into_main,
+        "a zeroed coverage struct states an absence, never `raw_events_only: false`"
+    );
+    assert_eq!((zeroed.requested_window_days, zeroed.covered_window_days), (0, 0));
+    assert!(!zeroed.truncated_by_retention);
+}

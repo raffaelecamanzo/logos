@@ -1084,7 +1084,18 @@ impl Engine {
         })
         .unwrap_or_else(|err| {
             tracing::warn!("stats failed: {err:#}");
+            // An unreadable store degrades like a missing one ([FR-OB-11]): the
+            // window the caller asked for is echoed, and the attribution coverage
+            // limits are still stated. They are structural — properties of
+            // `daily_rollup`'s schema, not of the data — so they hold whether or
+            // not the store could be read, and a surface rendering them must not
+            // fall silent on exactly the payload least worth trusting
+            // ([NFR-CC-04]).
+            let window_days =
+                window_days.unwrap_or(crate::observability::DEFAULT_STATS_WINDOW_DAYS);
             StatsInfo {
+                window_days,
+                attribution_coverage: crate::observability::attribution_coverage(window_days),
                 warnings: vec![format!("stats failed: {err}")],
                 ..StatsInfo::default()
             }
