@@ -83,29 +83,15 @@ HttpHead = "HEAD"
 Route = "ANY"
 
 # Captured `@invoke.http.method` text → HTTP method for the CLIENT side (S-346,
-# CR-108, FR-WS-08) — the consumer-side twin of `[framework_methods]`, and it
-# plays both of that table's roles.
+# CR-108, FR-WS-08). The mechanism — normalizer, filter, exact-match lookup, and
+# why an empty table is a pass-through — is stated once on
+# `PluginManifest::invocation_methods`; why the FILTER half is what makes this
+# language's receiver-method anchor safe is stated once in the header of
+# `queries/invocations.scm`. This block records only what is C#-specific.
 #
-# NORMALIZER. `extract::is_http_method` speaks bare verbs (`get`, `post`, …), and
-# C# spells neither of its two verb positions that way: the method name carries an
-# `Async` SUFFIX (`GetAsync`), and the constructor-argument form holds the verb in
-# a NAMED CONSTANT (`HttpMethod.Get`). One table resolves both — which is exactly
-# the ceiling S-345 deferred to this story. Lookup is case-insensitive, so
-# `getasync` and `GetAsync` are the same row.
-#
-# FILTER. A captured text with no row here is dropped before `is_http_method`
-# ever sees it. That is what makes the receiver-method anchor safe in this
-# language: ASP.NET Core's minimal-API route REGISTRATIONS parse identically to a
-# client call (`app.MapGet("/users", Handler)` is `<recv>.<name>(<literal>,
-# <ident>)`, the same tree as `client.PostAsync("/users", content)`), and a
-# `_cache.Get("/health")` would otherwise clear the bare-verb filter outright.
-# Neither `MapGet` nor `Get` is a row, so neither can become a phantom outbound
-# call that binds another member's route (NFR-RA-05, FR-WS-08 negative case 1).
-# The C# registration and client vocabularies are DISJOINT (`Map*` vs `*Async`),
-# so this name pin is a real discriminator, not a receiver-name heuristic.
-#
-# Values are still passed through `is_http_method`, so a mistyped verb captures
-# nothing rather than inventing a method.
+# C# spells its verbs in two positions, neither of them a bare verb: an `Async`
+# SUFFIX on the method name (`GetAsync`), and a NAMED CONSTANT in a constructor
+# argument (`HttpMethod.Get`) — the ceiling S-345 deferred to this table.
 #
 # Deliberately absent: bare-verb identity rows (`Get = "GET"`). Adding them to
 # unlock `new HttpRequestMessage(new HttpMethod("GET"), "/p")` would re-admit

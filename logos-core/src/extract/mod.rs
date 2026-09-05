@@ -1136,23 +1136,21 @@ fn is_http_method(name: &str) -> bool {
 /// Resolve a captured `@invoke.http.method` text through the plugin descriptor's
 /// `[invocation_methods]` table (S-346, [CR-108], [FR-WS-08]).
 ///
-/// An **empty** table is the pass-through default: the captured text is the verb,
-/// which is what Rust, Go, Java and TypeScript rely on. A **non-empty** table is
-/// both normalizer and filter, exactly like `[framework_methods]` on the provider
-/// side — a text with no row is `None` and the site is dropped.
+/// The table plays the **same two roles** as `[framework_methods]` on the
+/// provider side — normalizer and recognised-token filter — and the lookup is
+/// the same plain, case-sensitive exact match (`resolve::framework`'s
+/// `methods.get(text.trim())`). One deliberate difference: an **empty** table
+/// here is a pass-through, whereas an empty `framework_methods` promotes
+/// nothing. The pass-through is what every language whose verbs are already
+/// bare relies on (Rust, Go, Java, TypeScript), so their arms are untouched by
+/// this mechanism.
 ///
 /// The filter half is what lets C# ship a `<receiver>.<method>(<arg>)` anchor
-/// safely: `MapGet` (an ASP.NET Core route *registration*, syntactically
-/// identical to a client call) and a bare `cache.Get("/health")` are both absent
-/// from the table, so neither reaches [`is_http_method`] at all ([NFR-RA-05]).
-///
-/// Lookup is case-insensitive — exact first, then a fold — so `getasync` and
-/// `GetAsync` are one row. `PluginManifest::validate` refuses a descriptor whose
-/// keys collide under that fold, so the fallback scan can never be ambiguous.
+/// safely — see `plugins/c-sharp/queries/invocations.scm`, which states that
+/// argument once for the language that owns it.
 ///
 /// [CR-108]: ../../../docs/requests/CR-108-per-language-http-client-call-capture.md
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
-/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 fn normalize_invocation_method<'a>(
     table: &'a std::collections::BTreeMap<String, String>,
     text: &'a str,
@@ -1160,15 +1158,7 @@ fn normalize_invocation_method<'a>(
     if table.is_empty() {
         return Some(text);
     }
-    table
-        .get(text)
-        .or_else(|| {
-            table
-                .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case(text))
-                .map(|(_, value)| value)
-        })
-        .map(String::as_str)
+    table.get(text).map(String::as_str)
 }
 
 /// The **static** content of a string-literal node, or `None` when the argument
@@ -1181,8 +1171,8 @@ fn normalize_invocation_method<'a>(
 /// text is the concatenation of its literal-content children; **any** other child
 /// (an interpolation / substitution / expansion) makes the whole literal dynamic,
 /// so the arm refuses it rather than guessing a target. A node that exposes no
-/// content children (e.g. a raw-string form) falls back to trimming its quote and
-/// prefix characters.
+/// content children (e.g. Rust's raw string, or C#'s `verbatim_string_literal`)
+/// falls back to unwrapping its quotes.
 ///
 /// The content-child kind names below are where a grammar that names them
 /// differently gets added (S-345). Go 0.25 calls them
@@ -1217,6 +1207,12 @@ fn normalize_invocation_method<'a>(
 /// inferred from the second language to need it. The budget line stays open, and
 /// the flat union above is still a union, never a `match language {…}`.
 ///
+/// One latent note for whoever pays it: `raw_string_content` is also a
+/// tree-sitter-cpp node kind. That is inert today — C++ ships no `invocations`
+/// capability, and this function has one caller — but a future C++ arm would
+/// also meet `raw_string_delimiter`, which falls to the dynamic arm, so its
+/// raw-string paths would read as composed until that name is added too.
+///
 /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
 /// [S-346]: ../../../docs/planning/journal.md#s-346-c-http-client-call-capture
 fn static_string_literal(node: Node<'_>, source: &[u8]) -> Option<String> {
@@ -1250,14 +1246,27 @@ fn static_string_literal(node: Node<'_>, source: &[u8]) -> Option<String> {
         }
     }
     if !saw_child {
-        // A literal whose grammar exposes no content node (e.g. a raw string,
-        // or C#'s `verbatim_string_literal` — `@"/users"`, S-346): strip the
-        // surrounding quote and literal-prefix characters.
+        // A literal whose grammar exposes no content node (e.g. Rust's raw
+        // string, or C#'s `verbatim_string_literal` — `@"/users"`, S-346):
+        // strip the literal-prefix characters, then the quotes.
         let raw = node.utf8_text(source).ok()?;
-        content.push_str(
-            raw.trim_start_matches(['r', 'b', '#', '@'])
-                .trim_matches(['"', '\'', '`', '#']),
-        );
+        let body = raw.trim_start_matches(['r', 'b', '#', '@']);
+        // A body that opens and closes on the SAME quote is unwrapped by exactly
+        // one character each side, so a path whose last character happens to be
+        // a delimiter survives (`@"/tag/#"` is `/tag/#`, not `/tag/`). The
+        // greedy trim below is kept only for the multi-character fences it was
+        // written for (Rust's `r#"…"#`, where the two ends differ), which cannot
+        // be unwrapped one-for-one (S-346).
+        let first = body.chars().next();
+        let unwrapped = match (first, body.chars().next_back()) {
+            (Some(open @ ('"' | '\'' | '`')), Some(close))
+                if open == close && body.chars().count() >= 2 =>
+            {
+                &body[open.len_utf8()..body.len() - close.len_utf8()]
+            }
+            _ => body.trim_matches(['"', '\'', '`', '#']),
+        };
+        content.push_str(unwrapped);
     }
     let content = content.trim().to_string();
     (!content.is_empty()).then_some(content)

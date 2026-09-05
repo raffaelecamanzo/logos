@@ -53,10 +53,7 @@ pub struct Semantics {
     /// framework contract (S-015; see [`PluginManifest::framework_methods`]).
     pub framework_methods: std::collections::BTreeMap<String, String>,
     /// Captured `@invoke.http.method` text → HTTP method for the **client-call**
-    /// arm (S-346; see [`PluginManifest::invocation_methods`]) — normalizer and
-    /// recognised-verb filter in one. Empty (the default) leaves the captured
-    /// text untouched, which is what every language whose verbs are already bare
-    /// relies on.
+    /// arm (S-346; see [`PluginManifest::invocation_methods`]).
     pub invocation_methods: std::collections::BTreeMap<String, String>,
     /// How this language marks a declaration exported (S-015, [FR-AN-01]).
     ///

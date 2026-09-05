@@ -282,8 +282,9 @@ pub struct PluginManifest {
     ///
     /// C# is the first such language and the reason this field exists: its verbs
     /// carry an `Async` suffix (`GetAsync`) or live in a named constant
-    /// (`HttpMethod.Get`), and `is_http_method` speaks only bare verbs. Lookup is
-    /// case-insensitive, so `getasync` and `GetAsync` are the same row.
+    /// (`HttpMethod.Get`), and `is_http_method` speaks only bare verbs. Keys are
+    /// matched **exactly**, like `framework_methods`, so a row spells the token
+    /// as the language's own API does.
     ///
     /// The mapped value is **still** passed through `is_http_method`, so a
     /// mistyped value (`"GTE"`) captures nothing rather than inventing a method
@@ -673,23 +674,6 @@ impl PluginManifest {
                     .to_string(),
             );
         }
-        // `[invocation_methods]` is looked up case-insensitively, so two keys
-        // differing only in case are an ambiguity the descriptor author did not
-        // intend. Resolving it by map order would make the captured verb depend
-        // on TOML key ordering; refuse instead.
-        let mut folded: Vec<String> = self
-            .invocation_methods
-            .keys()
-            .map(|k| k.to_ascii_lowercase())
-            .collect();
-        folded.sort();
-        if let Some(dup) = folded.windows(2).find(|w| w[0] == w[1]) {
-            return bail(format!(
-                "`[invocation_methods]` keys are matched case-insensitively, so \
-                 '{}' is declared twice",
-                dup[0]
-            ));
-        }
         Ok(())
     }
 }
@@ -727,6 +711,7 @@ mod tests {
         assert!(m.framework_detectors.is_empty());
         assert!(m.http_client_detectors.is_empty());
         assert!(m.framework_methods.is_empty());
+        assert!(m.invocation_methods.is_empty());
         assert_eq!(m.export_convention, ExportConvention::All);
         // A descriptor that declares no test idiom defaults to None — the
         // optional-evidence contract (FR-EX-06, NFR-MA-01).
@@ -1298,29 +1283,11 @@ mod tests {
         assert!(err.to_string().contains("whitespace"), "got: {err}");
     }
 
-    /// `[invocation_methods]` is looked up case-insensitively (S-346), so two
-    /// keys that differ only in case would make the resolved verb depend on map
-    /// order. Refuse the descriptor instead of picking one.
+    /// A declared table parses, including a dotted key (C#'s `HttpMethod.Get`),
+    /// which TOML requires to be quoted (S-346). The empty default is pinned by
+    /// [`parses_a_well_formed_descriptor`], beside its sibling fields.
     #[test]
-    fn case_colliding_invocation_method_keys_are_rejected() {
-        let toml = r#"
-            name = "x"
-            extensions = ["x"]
-            module_separator = "."
-            abi_version = 15
-            capabilities = []
-            [invocation_methods]
-            GetAsync = "GET"
-            getasync = "POST"
-        "#;
-        let err = PluginManifest::parse("x/plugin.toml", toml).unwrap_err();
-        assert!(err.to_string().contains("getasync"), "got: {err}");
-    }
-
-    /// The table is optional and defaults empty — every language whose verbs are
-    /// already bare relies on that pass-through (S-346).
-    #[test]
-    fn invocation_methods_defaults_empty_and_parses_when_declared() {
+    fn a_declared_invocation_methods_table_parses() {
         let toml = r#"
             name = "x"
             extensions = ["x"]
