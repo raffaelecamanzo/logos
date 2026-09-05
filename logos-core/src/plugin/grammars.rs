@@ -557,6 +557,14 @@ fn c_sharp_entry() -> GrammarEntry {
                 label: "c-sharp/queries/frameworks.scm",
                 source: include_str!("../../plugins/c-sharp/queries/frameworks.scm"),
             },
+            // The outbound `HttpClient` client-call arm (S-346, [FR-WS-08],
+            // [CR-108]): the consumer side of the route key `frameworks`
+            // promotes on the provider side.
+            EmbeddedQuery {
+                relative_path: "queries/invocations.scm",
+                label: "c-sharp/queries/invocations.scm",
+                source: include_str!("../../plugins/c-sharp/queries/invocations.scm"),
+            },
         ],
     }
 }

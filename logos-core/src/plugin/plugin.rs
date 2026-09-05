@@ -52,6 +52,9 @@ pub struct Semantics {
     /// Captured `@fw.route.method` text → HTTP method for the declarative
     /// framework contract (S-015; see [`PluginManifest::framework_methods`]).
     pub framework_methods: std::collections::BTreeMap<String, String>,
+    /// Captured `@invoke.http.method` text → HTTP method for the **client-call**
+    /// arm (S-346; see [`PluginManifest::invocation_methods`]).
+    pub invocation_methods: std::collections::BTreeMap<String, String>,
     /// How this language marks a declaration exported (S-015, [FR-AN-01]).
     ///
     /// [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
@@ -219,6 +222,7 @@ impl CompiledPlugin {
             framework_detectors: manifest.framework_detectors,
             http_client_detectors: manifest.http_client_detectors,
             framework_methods: manifest.framework_methods,
+            invocation_methods: manifest.invocation_methods,
             export_convention: manifest.export_convention,
             test_convention: manifest.test_convention,
             reachability: manifest.reachability,

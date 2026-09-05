@@ -267,6 +267,34 @@ pub struct PluginManifest {
     /// [FR-FW-01]: ../../../docs/specs/requirements/FR-FW-01.md
     #[serde(default)]
     pub framework_methods: BTreeMap<String, String>,
+    /// Captured `@invoke.http.method` text → upper-cased HTTP method for the
+    /// **consumer** side (S-346, [CR-108], [FR-WS-08]) — the client-call twin of
+    /// [`framework_methods`](Self::framework_methods), and it plays the same
+    /// two roles: it *normalizes* a verb whose source spelling is not a bare
+    /// HTTP verb, and it *filters*, because a captured text with no entry here
+    /// is dropped.
+    ///
+    /// **Empty (the default) means "no normalization and no filter"**: the
+    /// captured text goes straight to `extract::is_http_method`, which is what
+    /// every language whose verbs are already bare spells (Rust, Go, Java,
+    /// TypeScript) relies on. Only a language that declares rows opts into the
+    /// filter.
+    ///
+    /// C# is the first such language and the reason this field exists: its verbs
+    /// carry an `Async` suffix (`GetAsync`) or live in a named constant
+    /// (`HttpMethod.Get`), and `is_http_method` speaks only bare verbs. Keys are
+    /// matched **exactly**, like `framework_methods`, so a row spells the token
+    /// as the language's own API does.
+    ///
+    /// The mapped value is **still** passed through `is_http_method`, so a
+    /// mistyped value (`"GTE"`) captures nothing rather than inventing a method
+    /// ([NFR-RA-05]).
+    ///
+    /// [CR-108]: ../../../docs/requests/CR-108-per-language-http-client-call-capture.md
+    /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[serde(default)]
+    pub invocation_methods: BTreeMap<String, String>,
     /// How this language marks a declaration exported ([`ExportConvention`]).
     /// Defaults to [`ExportConvention::All`] when omitted.
     #[serde(default)]
@@ -683,6 +711,7 @@ mod tests {
         assert!(m.framework_detectors.is_empty());
         assert!(m.http_client_detectors.is_empty());
         assert!(m.framework_methods.is_empty());
+        assert!(m.invocation_methods.is_empty());
         assert_eq!(m.export_convention, ExportConvention::All);
         // A descriptor that declares no test idiom defaults to None — the
         // optional-evidence contract (FR-EX-06, NFR-MA-01).
@@ -1252,6 +1281,26 @@ mod tests {
         "#;
         let err = PluginManifest::parse("x/plugin.toml", toml).unwrap_err();
         assert!(err.to_string().contains("whitespace"), "got: {err}");
+    }
+
+    /// A declared table parses, including a dotted key (C#'s `HttpMethod.Get`),
+    /// which TOML requires to be quoted (S-346). The empty default is pinned by
+    /// [`parses_a_well_formed_descriptor`], beside its sibling fields.
+    #[test]
+    fn a_declared_invocation_methods_table_parses() {
+        let toml = r#"
+            name = "x"
+            extensions = ["x"]
+            module_separator = "."
+            abi_version = 15
+            capabilities = []
+            [invocation_methods]
+            GetAsync = "GET"
+            "HttpMethod.Get" = "GET"
+        "#;
+        let m = PluginManifest::parse("x/plugin.toml", toml).expect("parses");
+        assert_eq!(m.invocation_methods.get("GetAsync").unwrap(), "GET");
+        assert_eq!(m.invocation_methods.get("HttpMethod.Get").unwrap(), "GET");
     }
 
     /// Declaring `invocations` with no detector set is a permanently no-op arm:
