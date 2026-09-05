@@ -53,17 +53,10 @@ framework_detectors = ["fastapi", "django"]
 # for the general rule this row does NOT need the compensating scope for).
 #
 # `queries/invocations.scm` still anchors every pattern to a named client
-# (`requests`/`httpx` for the free-function form, a `session`/`client` naming
-# convention for the receiver form) rather than shipping Rust's broad
-# `<receiver>.<method>(<arg>)` anchor. That choice is defensive, not obliged by
-# this row: FastAPI and Flask both ship a route-registration API
-# (`@app.get("/users")`) that is syntactically identical to a client call
-# (`session.get("/users")`), and a service making outbound calls commonly
-# imports `requests`/`httpx` in the very file that also registers its own
-# routes. A conventional app/router/blueprint variable name never matches the
-# receiver anchors below, so the registration decorator is excluded by
-# construction — see the query header and
-# `a_fastapi_or_flask_route_decorator_is_never_captured_as_a_client_call`.
+# rather than shipping Rust's broad `<receiver>.<method>(<arg>)` anchor — a
+# defensive choice this row does not oblige, made because FastAPI/Flask's own
+# route-registration API is syntactically identical to a client call. See that
+# file's header for the full rationale and its test pins.
 http_client_detectors = ["requests", "httpx"]
 
 [queries]
