@@ -699,11 +699,12 @@ fn capture_http_client_call_arm(
     let Some(inv_query) = plugin.query("invocations") else {
         return;
     };
-    let detectors = crate::resolve::http_client_call::http_client_crates(plugin.name());
+    let detectors = &plugin.semantics().http_client_detectors;
     let is_http_client_file = !detectors.is_empty()
         && facts.refs.iter().any(|r| {
-            let head = r.target.split("::").next().unwrap_or_default();
-            detectors.contains(&head)
+            detectors
+                .iter()
+                .any(|d| crate::resolve::http_client_call::matches_client_detector(&r.target, d))
         });
     if !is_http_client_file {
         return;

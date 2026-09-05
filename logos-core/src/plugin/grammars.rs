@@ -405,6 +405,14 @@ fn java_entry() -> GrammarEntry {
                 label: "java/queries/frameworks.scm",
                 source: include_str!("../../plugins/java/queries/frameworks.scm"),
             },
+            // The outbound HTTP client-call arm (S-341, [CR-108], [FR-WS-08]):
+            // RestClient/WebClient fluent chains, the `java.net.http.HttpClient`
+            // builder, and the plain receiver-method idiom.
+            EmbeddedQuery {
+                relative_path: "queries/invocations.scm",
+                label: "java/queries/invocations.scm",
+                source: include_str!("../../plugins/java/queries/invocations.scm"),
+            },
             // The message-broker publish/subscribe invocation arm (S-254,
             // [FR-WS-10]): a per-language `.scm` is the entire capture surface.
             EmbeddedQuery {

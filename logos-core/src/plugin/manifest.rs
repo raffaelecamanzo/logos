@@ -236,6 +236,22 @@ pub struct PluginManifest {
     /// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
     #[serde(default)]
     pub framework_detectors: Vec<String>,
+    /// Canonical (`::`-joined) reference-path prefixes whose presence in a
+    /// file's ledger makes the file an **HTTP client-call** candidate (S-341,
+    /// [CR-108], [FR-WS-08]) — the consumer-side twin of `framework_detectors`,
+    /// e.g. `["reqwest", "hyper"]` or
+    /// `["org::springframework::web::client", "java::net::http"]`. Empty = this
+    /// language captures no outbound calls, so its `invocations` query (if any)
+    /// never runs.
+    ///
+    /// Declarative for the same reason the framework detectors are: the shared
+    /// interpreter must be driven by descriptor data, never by a branch on which
+    /// language it is looking at (`resolve::framework::tests::jvm_parity`).
+    ///
+    /// [CR-108]: ../../../docs/requests/CR-108-per-language-http-client-call-capture.md
+    /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+    #[serde(default)]
+    pub http_client_detectors: Vec<String>,
     /// Captured `@fw.route.method` text → upper-cased HTTP method (`"GET"`, …,
     /// `"ANY"`) for the declarative framework-query contract (S-015,
     /// [FR-FW-01]). A captured method text with no entry here is dropped — the
@@ -590,6 +606,12 @@ impl PluginManifest {
         // file into a framework candidate — a descriptor bug worth failing on.
         if self.framework_detectors.iter().any(|d| d.trim().is_empty()) {
             return bail("`framework_detectors` entries must not be empty".to_string());
+        }
+        // Same trap on the consumer side: an empty client detector would make
+        // every file an outbound-call candidate, which is exactly the
+        // over-capture the ledger gate exists to prevent ([NFR-RA-05]).
+        if self.http_client_detectors.iter().any(|d| d.trim().is_empty()) {
+            return bail("`http_client_detectors` entries must not be empty".to_string());
         }
         Ok(())
     }

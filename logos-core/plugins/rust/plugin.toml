@@ -78,6 +78,15 @@ reachability = true
 # core's framework pass reads this instead of a hardcoded crate list.
 framework_detectors = ["axum", "actix_web"]
 
+# Canonical reference prefixes whose presence in a file's ledger makes the file
+# an outbound **HTTP client-call** candidate (S-341, CR-108, FR-WS-08) — the
+# consumer-side twin of `framework_detectors`, and the gate that stops the broad
+# `<receiver>.<method>(<arg>)` anchor turning an incidental collection `.get("/x")`
+# into a fabricated cross-service edge (NFR-RA-05). Lifted out of
+# `resolve::http_client_call` so the shared interpreter carries no per-language
+# branch (NFR-MA-01).
+http_client_detectors = ["reqwest", "hyper", "isahc", "ureq", "awc", "surf"]
+
 # Maps a capability to the `.scm` query file (resolved relative to this
 # descriptor's directory, embedded or on-disk override). A query that fails to
 # compile fails fast naming this file (FR-PL-02).
