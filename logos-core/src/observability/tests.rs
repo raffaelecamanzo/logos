@@ -489,9 +489,51 @@ fn every_registered_tool_is_classified_and_sql_safe() {
 /// guards against *adding* a wildcard, so this scans the source and does — for
 /// both matches, because a guard that named only the first would let the second
 /// acquire the very defect this test exists to prevent.
+///
+/// # The guard is set equality, not a count
+///
+/// An earlier form asserted `body.matches("Tool::").count() >= Tool::ALL.len()`
+/// and rejected the two literal spellings `_ =>` / `_=>`. Both halves were
+/// evadable, and by the same developer action:
+///
+/// - a **named** catch-all (`other => ToolClass::EngineInternal`) is not a `_`,
+///   so the literal scan missed it, and
+/// - the `>=` count could be restored to the new floor by a *comment* naming the
+///   unclassified variant — a mention is not a classification.
+///
+/// So the body is stripped of comments and the set of variants **named in code**
+/// is compared for equality with the registry. A variant that reaches a fallback
+/// arm is then simply absent from the set, whatever the fallback is spelled, and
+/// prose cannot put it back. The wildcard scan is kept and widened to any
+/// lone-`_` or lone-lowercase-identifier arm pattern, so the failure names the
+/// cause rather than only the symptom.
 #[test]
 fn unclassified_tool_fails_the_build() {
+    /// Everything from `//` to end-of-line, removed. Neither body contains a
+    /// string literal, so there is no `//`-inside-a-string case to mishandle.
+    fn strip_comments(body: &str) -> String {
+        body.lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every `Tool::<Variant>` named in `code`, as a set.
+    fn variants_named_in(code: &str) -> std::collections::BTreeSet<String> {
+        code.match_indices("Tool::")
+            .map(|(at, marker)| {
+                code[at + marker.len()..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect::<String>()
+            })
+            .filter(|ident| !ident.is_empty())
+            .collect()
+    }
+
     let source = include_str!("tool.rs");
+    let registry: std::collections::BTreeSet<String> =
+        Tool::ALL.iter().map(|t| format!("{t:?}")).collect();
     let matches: [(&str, &str); 2] = [
         (
             "Tool::event_class",
@@ -508,26 +550,44 @@ fn unclassified_tool_fails_the_build() {
             .split_once(signature)
             .unwrap_or_else(|| panic!("{name} is where this test believes it is"))
             .1;
+        // The match arms close at 8-space indent, so `"\n    }\n"` is the
+        // function's own closing brace and nothing inside it. If either function
+        // ever moves to module level this split would run past the end — hence
+        // the set equality below, which fails loudly instead of drifting.
         let body = body
             .split_once("\n    }\n")
             .unwrap_or_else(|| panic!("{name} is brace-delimited"))
             .0;
+        let code = strip_comments(body);
 
-        for forbidden in ["_ =>", "_=>"] {
+        // No fallback arm, however it is spelled: a lone `_` or a lone lowercase
+        // binding on the left of `=>` matches every remaining variant.
+        for line in code.lines() {
+            let Some((pattern, _)) = line.split_once("=>") else {
+                continue;
+            };
+            let pattern = pattern.trim().trim_start_matches('|').trim();
+            let is_catch_all = pattern == "_"
+                || (!pattern.is_empty()
+                    && pattern.starts_with(|c: char| c.is_ascii_lowercase())
+                    && pattern.chars().all(|c| c.is_alphanumeric() || c == '_'));
             assert!(
-                !body.contains(forbidden),
-                "`{forbidden}` in {name} defeats the build-time completeness \
-                 guarantee (FR-OB-09, FR-OB-11): a new tool would take a silent \
-                 default instead of failing to compile"
+                !is_catch_all,
+                "`{pattern} =>` in {name} is a catch-all arm; it defeats the \
+                 build-time completeness guarantee (FR-OB-09, FR-OB-11) by giving \
+                 a new tool a silent default instead of failing to compile"
             );
         }
-        // Every arm names variants explicitly, so the registry's size is a floor
-        // on how many times `Tool::` appears in the body.
-        let mentions = body.matches("Tool::").count();
-        assert!(
-            mentions >= Tool::ALL.len(),
-            "each of the {} registered tools is named in {name} ({mentions} mentions)",
-            Tool::ALL.len()
+
+        // Every registered variant is named in an arm, and nothing else is. A
+        // variant left to a fallback is absent from this set; a retired variant
+        // still named here is a leftover. Comments are stripped, so prose about
+        // a variant cannot stand in for classifying it.
+        assert_eq!(
+            variants_named_in(&code),
+            registry,
+            "{name} must name exactly the {} registered tools",
+            registry.len()
         );
     }
 }
