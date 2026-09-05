@@ -41,6 +41,7 @@ impl NoSymbolsPlugin {
                 framework_detectors: Vec::new(),
                 http_client_detectors: Vec::new(),
                 framework_methods: std::collections::BTreeMap::new(),
+                invocation_methods: std::collections::BTreeMap::new(),
                 export_convention: crate::plugin::ExportConvention::All,
                 test_convention: crate::plugin::TestConvention::None,
                 reachability: false,
@@ -1696,6 +1697,9 @@ fn invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::Invo
         &[],
         &[],
         Some(&module),
+        // The pass-through default: these fixtures assert the dispatch itself,
+        // not a descriptor's `[invocation_methods]` normalization (S-346).
+        &std::collections::BTreeMap::new(),
     )
 }
 
@@ -1913,6 +1917,7 @@ fn a_name_declared_verb_is_gated_and_outranked_by_a_source_read_one() {
             &[],
             &[],
             Some(&module),
+            &std::collections::BTreeMap::new(),
         )
     };
 

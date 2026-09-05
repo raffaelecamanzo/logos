@@ -747,7 +747,15 @@ fn capture_http_client_call_arm(
     if !is_http_client_file {
         return;
     }
-    let sites = collect_invocation_sites(inv_query, root, source, decls, symbols, file_module);
+    let sites = collect_invocation_sites(
+        inv_query,
+        root,
+        source,
+        decls,
+        symbols,
+        file_module,
+        &plugin.semantics().invocation_methods,
+    );
     if sites.is_empty() {
         return;
     }
@@ -1125,6 +1133,44 @@ fn is_http_method(name: &str) -> bool {
         .any(|m| name.eq_ignore_ascii_case(m))
 }
 
+/// Resolve a captured `@invoke.http.method` text through the plugin descriptor's
+/// `[invocation_methods]` table (S-346, [CR-108], [FR-WS-08]).
+///
+/// An **empty** table is the pass-through default: the captured text is the verb,
+/// which is what Rust, Go, Java and TypeScript rely on. A **non-empty** table is
+/// both normalizer and filter, exactly like `[framework_methods]` on the provider
+/// side — a text with no row is `None` and the site is dropped.
+///
+/// The filter half is what lets C# ship a `<receiver>.<method>(<arg>)` anchor
+/// safely: `MapGet` (an ASP.NET Core route *registration*, syntactically
+/// identical to a client call) and a bare `cache.Get("/health")` are both absent
+/// from the table, so neither reaches [`is_http_method`] at all ([NFR-RA-05]).
+///
+/// Lookup is case-insensitive — exact first, then a fold — so `getasync` and
+/// `GetAsync` are one row. `PluginManifest::validate` refuses a descriptor whose
+/// keys collide under that fold, so the fallback scan can never be ambiguous.
+///
+/// [CR-108]: ../../../docs/requests/CR-108-per-language-http-client-call-capture.md
+/// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn normalize_invocation_method<'a>(
+    table: &'a std::collections::BTreeMap<String, String>,
+    text: &'a str,
+) -> Option<&'a str> {
+    if table.is_empty() {
+        return Some(text);
+    }
+    table
+        .get(text)
+        .or_else(|| {
+            table
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(text))
+                .map(|(_, value)| value)
+        })
+        .map(String::as_str)
+}
+
 /// The **static** content of a string-literal node, or `None` when the argument
 /// is not a static literal (a bare variable, a `format!`, a concatenation) or is
 /// an interpolated/templated string with runtime substitutions ([NFR-RA-05]).
@@ -1140,12 +1186,14 @@ fn is_http_method(name: &str) -> bool {
 ///
 /// The content-child kind names below are where a grammar that names them
 /// differently gets added (S-345). Go 0.25 calls them
-/// `interpreted_string_literal_content` / `raw_string_literal_content`; **C#
-/// 0.23 calls them `string_literal_content` / `raw_string_content`**, so
-/// [S-346] must add that pair here rather than rediscovering this. A grammar
-/// whose names are missing from the list does not merely lose the literal — its
-/// every literal reads as *dynamic*, so the whole language's arm silently
-/// captures nothing. Pass the **literal** node, never a content child: an
+/// `interpreted_string_literal_content` / `raw_string_literal_content`; C# 0.23
+/// calls them `string_literal_content` / `raw_string_content`, and additionally
+/// spells a raw literal's `"""` fences as the named `raw_string_start` /
+/// `raw_string_end` — carried in the skip arm, since a delimiter is neither
+/// content nor evidence of dynamism ([S-346] added all four). A grammar whose
+/// names are missing from the list does not merely lose the literal — its every
+/// literal reads as *dynamic*, so the whole language's arm silently captures
+/// nothing. Pass the **literal** node, never a content child: an
 /// already-unquoted content child takes the no-children fallback below, whose
 /// quote/`#` trimming would corrupt a path ending in one of those characters.
 ///
@@ -1158,7 +1206,16 @@ fn is_http_method(name: &str) -> bool {
 /// field. Lifting these names into a descriptor field beside them is the right
 /// end state; it is deliberately NOT done here, because it is an
 /// every-plugin change that belongs to a CR rather than to an integration
-/// session porting two arms. S-346 should either pay it or restate it.
+/// session porting two arms.
+///
+/// **[S-346] restates the debt rather than paying it**, and the reason is that
+/// paying it here would have made it *worse*: C# needed four kind names, one of
+/// which (`raw_string_start`) is a *delimiter to skip*, not content. A single
+/// descriptor list of "content kinds" cannot express that third state, so the
+/// declarative field this paragraph proposes would need to be two fields — a
+/// shape worth designing against every grammar at once in its own CR, not
+/// inferred from the second language to need it. The budget line stays open, and
+/// the flat union above is still a union, never a `match language {…}`.
 ///
 /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
 /// [S-346]: ../../../docs/planning/journal.md#s-346-c-http-client-call-capture
@@ -1177,19 +1234,28 @@ fn static_string_literal(node: Node<'_>, source: &[u8]) -> Option<String> {
             | "string_fragment"
             | "escape_sequence"
             | "interpreted_string_literal_content"
-            | "raw_string_literal_content" => {
+            | "raw_string_literal_content"
+            // C# 0.23 (S-346).
+            | "string_literal_content"
+            | "raw_string_content" => {
                 content.push_str(child.utf8_text(source).ok()?);
             }
+            // Named delimiter tokens that carry no content: C# spells the
+            // `"""` fences of a raw string literal as named nodes, so they must
+            // be skipped rather than either concatenated (they would corrupt
+            // the path) or treated as dynamic (S-346).
+            "raw_string_start" | "raw_string_end" => {}
             // An interpolation / template substitution / expansion → dynamic.
             _ => return None,
         }
     }
     if !saw_child {
-        // A literal whose grammar exposes no content node (e.g. a raw string):
-        // strip the surrounding quote and literal-prefix characters.
+        // A literal whose grammar exposes no content node (e.g. a raw string,
+        // or C#'s `verbatim_string_literal` — `@"/users"`, S-346): strip the
+        // surrounding quote and literal-prefix characters.
         let raw = node.utf8_text(source).ok()?;
         content.push_str(
-            raw.trim_start_matches(['r', 'b', '#'])
+            raw.trim_start_matches(['r', 'b', '#', '@'])
                 .trim_matches(['"', '\'', '`', '#']),
         );
     }
@@ -1228,7 +1294,12 @@ const DECLARED_METHOD_PREFIX: &str = "invoke.http.method.";
 /// than re-derives. A site is emitted only when the method is an HTTP verb
 /// ([`is_http_method`]), read from the `@invoke.http.method` node or, for a
 /// shape that spells none, declared by a [`DECLARED_METHOD_PREFIX`] capture
-/// name. The first argument becomes the arm's slots — a static string literal
+/// name. A verb read from a node first passes through the descriptor's
+/// `[invocation_methods]` table ([`normalize_invocation_method`], S-346), which
+/// is how a non-canonical spelling (`GetAsync`, `HttpMethod.Get`) reaches
+/// [`is_http_method`] at all — and, for a language that declares one, how a
+/// non-client spelling (`MapGet`) is filtered out before it can. The first
+/// argument becomes the arm's slots — a static string literal
 /// fills the `path` slot ([`PATH_SLOT`](crate::resolve::http_client_call::PATH_SLOT)); any other
 /// shape sets the dynamic-path marker
 /// ([`DYNAMIC_PATH_SLOT`](crate::resolve::http_client_call::DYNAMIC_PATH_SLOT)) so
@@ -1247,6 +1318,7 @@ fn collect_invocation_sites(
     decls: &[Decl<'_>],
     symbols: &[Option<LogosSymbol>],
     file_module: Option<&LogosSymbol>,
+    invocation_methods: &std::collections::BTreeMap<String, String>,
 ) -> Vec<crate::extract::config::InvocationSite> {
     use crate::resolve::http_client_call::{DYNAMIC_PATH_SLOT, METHOD_SLOT, PATH_SLOT};
 
@@ -1309,7 +1381,15 @@ fn collect_invocation_sites(
                 let Ok(text) = node.utf8_text(source) else {
                     continue;
                 };
-                text.trim()
+                // Resolve the source spelling through the descriptor's
+                // `[invocation_methods]` table (S-346). Empty table = the text
+                // itself; non-empty = normalizer AND filter, so an unlisted
+                // spelling (`MapGet`, a bare `Get`) is dropped here.
+                let Some(method) = normalize_invocation_method(invocation_methods, text.trim())
+                else {
+                    continue;
+                };
+                method
             }
             None => {
                 let Some((verb, _)) = declared_method else {
