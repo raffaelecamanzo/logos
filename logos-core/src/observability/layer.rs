@@ -152,7 +152,7 @@ struct TelemetryVisitor {
     tool: Option<String>,
     duration_ms: Option<u64>,
     ok: Option<bool>,
-    surface_override: Option<&'static str>,
+    surface_override: Option<Surface>,
 }
 
 impl Visit for TelemetryVisitor {
@@ -160,13 +160,20 @@ impl Visit for TelemetryVisitor {
         if field.name() == "tool" {
             self.tool = Some(value.to_string());
         }
-        // Per-event surface override (S-022): the debounced watcher runs
-        // *inside* the `serve --mcp` process (whose process-level surface is
-        // `mcp`) but its syncs must be attributable as `surface=watcher` per
-        // the filesystem-watcher integration spec. Only the sanctioned value
-        // is honoured — an arbitrary string cannot invent a surface.
-        if field.name() == "surface" && value == "watcher" {
-            self.surface_override = Some("watcher");
+        // Per-event surface override, named on the event itself (S-022,
+        // generalised by [FR-OB-09]): the debounced watcher runs *inside* the
+        // `serve --mcp` process (whose process-level surface is `mcp`) but its
+        // syncs must be attributable as `surface=watcher` per the
+        // filesystem-watcher integration spec. Only a value [`Surface`] already
+        // declares is honoured — an arbitrary string cannot invent a surface.
+        //
+        // The other half of the same mechanism is ambient rather than
+        // field-borne: see [`super::in_surface`], which an adapter that does not
+        // emit the event itself (the chat agent) enters at its call boundary.
+        //
+        // [FR-OB-09]: ../../../docs/specs/requirements/FR-OB-09.md
+        if field.name() == "surface" {
+            self.surface_override = Surface::from_wire(value);
         }
     }
 
@@ -193,12 +200,23 @@ impl TelemetryVisitor {
     /// a malformed event is dropped, never half-recorded.
     ///
     /// `origin` is the process-wide increment stamp ([FR-OB-08]); the
-    /// per-event `surface_override` (the watcher, S-022) is applied
-    /// independently, so the two never interfere.
+    /// per-event surface override is applied independently, so the two never
+    /// interfere.
+    ///
+    /// Override precedence, narrowest first: a `surface` field named **on the
+    /// event** (the watcher, S-022) wins over the **ambient** scope an adapter
+    /// entered at its call boundary ([`super::in_surface`] — the chat agent),
+    /// which in turn wins over the per-process stamp ([FR-OB-03]). The event's
+    /// own field is the most specific statement available, so it is honoured
+    /// even inside a scope.
     fn into_record(self, surface: Surface, origin: &str) -> Option<EventRecord> {
+        let attributed = self
+            .surface_override
+            .or_else(super::ambient_surface)
+            .unwrap_or(surface);
         Some(EventRecord {
             at: now_unix(),
-            surface: self.surface_override.unwrap_or(surface.as_str()),
+            surface: attributed.as_str(),
             tool: self.tool?,
             duration_ms: self.duration_ms?,
             ok: self.ok?,

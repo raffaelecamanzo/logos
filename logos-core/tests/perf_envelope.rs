@@ -65,7 +65,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-use logos_core::observability::{self, Surface};
+use logos_core::observability::{self, ProcessSurface};
 use logos_core::{Engine, Granularity};
 
 // ── Tolerance & sizing knobs ────────────────────────────────────────────────
@@ -227,7 +227,7 @@ fn perf_envelope_full_budget() {
     // writer exactly as the CLI adapter does — and needs `.logos/` to exist for
     // the telemetry store, which `Engine::start` would otherwise create after.
     std::fs::create_dir_all(root.join(".logos")).expect("pre-create .logos");
-    let guard = observability::init(Surface::Cli, &root);
+    let guard = observability::init(ProcessSurface::Cli, &root);
     let engine = Arc::new(Engine::start(&root).expect("engine starts"));
 
     // ── NFR-PE-02: cold index ≤ 30 s ────────────────────────────────────────
@@ -513,7 +513,7 @@ fn cold_index_phase_baseline() {
     // telemetry number is the honest one). `.logos/` must exist before `init`
     // installs the telemetry writer.
     std::fs::create_dir_all(root.join(".logos")).expect("pre-create .logos");
-    let guard = observability::init(Surface::Cli, &root);
+    let guard = observability::init(ProcessSurface::Cli, &root);
     let engine = Engine::start(&root).expect("engine starts");
 
     // The cold index — a fresh store, first index() is the cold path.

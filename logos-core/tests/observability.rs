@@ -30,7 +30,7 @@ use std::fs;
 
 use tempfile::TempDir;
 
-use logos_core::observability::{self, Surface};
+use logos_core::observability::{self, ProcessSurface};
 use logos_core::Engine;
 
 #[test]
@@ -57,7 +57,7 @@ fn telemetry_persists_survives_reindex_and_feeds_stats() {
     .expect("write fixture");
 
     // The adapter wiring: install the global subscriber + telemetry writer.
-    let guard = observability::init(Surface::Cli, root);
+    let guard = observability::init(ProcessSurface::Cli, root);
 
     {
         let engine = Engine::start(root).expect("engine starts");

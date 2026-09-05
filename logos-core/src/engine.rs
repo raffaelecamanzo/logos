@@ -38,6 +38,7 @@ use crate::models::{
         SessionInfo, SkippedLanguage, StatsInfo, VerifyReport,
     },
 };
+use crate::observability::Tool;
 use crate::runtime::{Runtime, RuntimeConfig, SharedWorkerPool};
 
 /// Thick-core engine — the single public façade over all Logos operations.
@@ -494,7 +495,7 @@ impl Engine {
     /// Returns an error if `.logos/` cannot be created, the store cannot be
     /// opened/migrated, or a Logos-owned artifact cannot be written.
     pub fn init_with(root: impl AsRef<Path>, options: &InitOptions) -> Result<InitResult> {
-        crate::observability::traced("init", || {
+        crate::observability::traced(Tool::Init, || {
             // Resolve the hint exactly as `start` will ([ADR-15], [FR-WT-01]) so
             // the reported paths match where the store actually lands.
             let root = &crate::workspace::resolve_root(root.as_ref());
@@ -551,7 +552,7 @@ impl Engine {
         kind: Option<NodeKind>,
         limit: Option<usize>,
     ) -> SearchResult {
-        crate::observability::traced("search", || {
+        crate::observability::traced(Tool::Search, || {
             crate::navigate::search(self, query, kind, limit)
         })
         .unwrap_or_else(|err| {
@@ -575,7 +576,7 @@ impl Engine {
         max_nodes: Option<usize>,
         include_code: bool,
     ) -> ContextBundle {
-        crate::observability::traced("context", || {
+        crate::observability::traced(Tool::Context, || {
             crate::navigate::context(self, task, max_nodes, include_code)
         })
         .unwrap_or_else(|err| {
@@ -591,7 +592,7 @@ impl Engine {
     /// Neighbourhood exploration around `query`: source grouped by file, at
     /// most `max_files` (default 10) groups (FR-NV-03).
     pub fn explore(&self, query: &str, max_files: Option<usize>) -> ExploreResult {
-        crate::observability::traced("explore", || {
+        crate::observability::traced(Tool::Explore, || {
             crate::navigate::explore(self, query, max_files)
         })
         .unwrap_or_else(|err| {
@@ -607,7 +608,7 @@ impl Engine {
     /// Full node info for a single `symbol`: metadata, immediate edges, and
     /// code opt-in (FR-NV-04).
     pub fn node(&self, symbol: &str, include_code: bool) -> NodeInfo {
-        crate::observability::traced("node", || crate::navigate::node(self, symbol, include_code))
+        crate::observability::traced(Tool::Node, || crate::navigate::node(self, symbol, include_code))
             .unwrap_or_else(|err| {
                 tracing::warn!("node failed: {err:#}");
                 NodeInfo {
@@ -620,7 +621,7 @@ impl Engine {
 
     /// Direct callers of `symbol`, at most `limit` (default 50) (FR-NV-05).
     pub fn callers(&self, symbol: &str, limit: Option<usize>) -> CallersResult {
-        crate::observability::traced("callers", || crate::navigate::callers(self, symbol, limit))
+        crate::observability::traced(Tool::Callers, || crate::navigate::callers(self, symbol, limit))
             .unwrap_or_else(|err| {
                 tracing::warn!("callers failed: {err:#}");
                 CallersResult {
@@ -633,7 +634,7 @@ impl Engine {
 
     /// Direct callees of `symbol`, at most `limit` (default 50) (FR-NV-05).
     pub fn callees(&self, symbol: &str, limit: Option<usize>) -> CalleesResult {
-        crate::observability::traced("callees", || crate::navigate::callees(self, symbol, limit))
+        crate::observability::traced(Tool::Callees, || crate::navigate::callees(self, symbol, limit))
             .unwrap_or_else(|err| {
                 tracing::warn!("callees failed: {err:#}");
                 CalleesResult {
@@ -648,7 +649,7 @@ impl Engine {
     /// (FR-NV-06, DL-03): upstream "breaks if changed", downstream
     /// "depends on", bounded by `depth` (default 3).
     pub fn impact(&self, symbol: &str, depth: Option<usize>) -> ImpactResult {
-        crate::observability::traced("impact", || crate::navigate::impact(self, symbol, depth))
+        crate::observability::traced(Tool::Impact, || crate::navigate::impact(self, symbol, depth))
             .unwrap_or_else(|err| {
                 tracing::warn!("impact failed: {err:#}");
                 ImpactResult {
@@ -664,7 +665,7 @@ impl Engine {
     /// Empty (never an error) when no such edge exists; "did you mean"
     /// suggestions when the doc node is unknown (FR-NV-09).
     pub fn implements(&self, doc: &str) -> ImplementorsResult {
-        crate::observability::traced("implements", || crate::navigate::implements(self, doc))
+        crate::observability::traced(Tool::Implements, || crate::navigate::implements(self, doc))
             .unwrap_or_else(|err| {
                 tracing::warn!("implements failed: {err:#}");
                 ImplementorsResult {
@@ -680,7 +681,7 @@ impl Engine {
     /// error) when no doc references it; suggestions when the symbol is
     /// unknown (FR-NV-09).
     pub fn referencing_docs(&self, symbol: &str) -> ReferencingDocsResult {
-        crate::observability::traced("referencing_docs", || {
+        crate::observability::traced(Tool::ReferencingDocs, || {
             crate::navigate::referencing_docs(self, symbol)
         })
         .unwrap_or_else(|err| {
@@ -698,7 +699,7 @@ impl Engine {
     /// calls/imports/references — on any of `files`. `tests_only` narrows the
     /// closure to test-marked files.
     pub fn affected(&self, files: &[String], tests_only: bool) -> AffectedResult {
-        crate::observability::traced("affected", || {
+        crate::observability::traced(Tool::Affected, || {
             crate::navigate::affected(self, files, tests_only)
         })
         .unwrap_or_else(|err| {
@@ -748,7 +749,7 @@ impl Engine {
     /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub fn try_status(&self) -> Result<StatusInfo> {
-        crate::observability::traced("status", || crate::navigate::status(self))
+        crate::observability::traced(Tool::Status, || crate::navigate::status(self))
     }
 
     /// Read-only graph-elements accessor feeding the web surface's interactive
@@ -811,7 +812,7 @@ impl Engine {
         granularity: Option<GraphGranularity>,
         intent_overlay: bool,
     ) -> GraphElements {
-        crate::observability::traced("graph_elements", || {
+        crate::observability::traced(Tool::GraphElements, || {
             crate::navigate::graph_elements(
                 self,
                 seed,
@@ -843,7 +844,7 @@ impl Engine {
     /// failure is logged to stderr and returned as an [`IndexResult`] carrying
     /// the reason in `warnings` rather than panicking.
     pub fn index(&self) -> IndexResult {
-        match crate::observability::traced("index", || self.run_index()) {
+        match crate::observability::traced(Tool::Index, || self.run_index()) {
             Ok(result) => result,
             Err(err) => degraded_index(&err),
         }
@@ -855,7 +856,7 @@ impl Engine {
     /// infallible-surface posture as [`index`](Self::index): a failure is logged
     /// and surfaced in the [`SyncResult`] `warnings`.
     pub fn sync(&self, paths: &[PathBuf]) -> SyncResult {
-        match crate::observability::traced("sync", || self.run_sync(paths)) {
+        match crate::observability::traced(Tool::Sync, || self.run_sync(paths)) {
             Ok(result) => result,
             Err(err) => degraded_sync(&err),
         }
@@ -872,7 +873,7 @@ impl Engine {
     /// [`IndexResult`] of the index that ran, or a zero-valued result when the
     /// graph was already populated.
     pub fn ensure_indexed(&self) -> IndexResult {
-        match crate::observability::traced("ensure_indexed", || self.run_ensure_indexed()) {
+        match crate::observability::traced(Tool::EnsureIndexed, || self.run_ensure_indexed()) {
             Ok(Some(result)) => result,
             Ok(None) => IndexResult::default(),
             Err(err) => degraded_index(&err),
@@ -903,7 +904,7 @@ impl Engine {
     /// usage exit 2), or a failed write batch.
     pub fn scan(&self, reconcile: bool) -> Result<ScanResult> {
         self.governance.record_scan(reconcile);
-        crate::observability::traced("scan", || crate::governance::scan(self, reconcile))
+        crate::observability::traced(Tool::Scan, || crate::governance::scan(self, reconcile))
     }
 
     /// Re-scan with the same parameters as the last [`scan`](Self::scan)
@@ -913,7 +914,7 @@ impl Engine {
     /// Same as [`scan`](Self::scan).
     pub fn rescan(&self) -> Result<ScanResult> {
         let reconcile = self.governance.last_scan_reconcile();
-        crate::observability::traced("rescan", || crate::governance::scan(self, reconcile))
+        crate::observability::traced(Tool::Rescan, || crate::governance::scan(self, reconcile))
     }
 
     /// Gate check (FR-GV-04/05, BR-10): compute a fresh snapshot (always
@@ -926,7 +927,7 @@ impl Engine {
     /// Returns an error on a structural failure (transient engine, store
     /// fault, failed write batch).
     pub fn gate(&self, threshold: Option<u32>, save: bool, reconcile: bool) -> Result<GateResult> {
-        crate::observability::traced("gate", || {
+        crate::observability::traced(Tool::Gate, || {
             crate::governance::gate(self, threshold, save, reconcile)
         })
     }
@@ -941,7 +942,7 @@ impl Engine {
     /// Returns an error on a structural failure; an invalid contract is a
     /// [`ConfigError`](crate::config::ConfigError) (usage exit 2).
     pub fn check_rules(&self, rules_path: Option<&Path>, reconcile: bool) -> Result<RulesReport> {
-        crate::observability::traced("check_rules", || {
+        crate::observability::traced(Tool::CheckRules, || {
             crate::governance::check_rules(self, rules_path, reconcile)
         })
     }
@@ -953,7 +954,7 @@ impl Engine {
     /// # Errors
     /// Returns an error for a transient engine or on a read failure.
     pub fn evolution(&self, limit: Option<u32>) -> Result<EvolutionReport> {
-        crate::observability::traced("evolution", || crate::governance::evolution(self, limit))
+        crate::observability::traced(Tool::Evolution, || crate::governance::evolution(self, limit))
     }
 
     /// Dependency structure matrix (FR-GV-07): cell `(i, j)` counts dep
@@ -967,7 +968,7 @@ impl Engine {
         granularity: Option<crate::governance::DsmGranularity>,
         reconcile: bool,
     ) -> Result<DsmReport> {
-        crate::observability::traced("dsm", || {
+        crate::observability::traced(Tool::Dsm, || {
             crate::governance::dsm(self, granularity, reconcile)
         })
     }
@@ -979,7 +980,7 @@ impl Engine {
     /// # Errors
     /// Returns an error on a structural failure.
     pub fn doc_gaps(&self, limit: Option<u32>, reconcile: bool) -> Result<DocGapsReport> {
-        crate::observability::traced("doc_gaps", || {
+        crate::observability::traced(Tool::DocGaps, || {
             crate::governance::doc_gaps(self, limit, reconcile)
         })
     }
@@ -994,7 +995,7 @@ impl Engine {
     /// Returns an error on a structural failure (an FTS desync is *reported*
     /// in the read-model, not an error — `health` exists to diagnose it).
     pub fn health(&self, reconcile: bool) -> Result<HealthInfo> {
-        crate::observability::traced("health", || crate::governance::health(self, reconcile))
+        crate::observability::traced(Tool::Health, || crate::governance::health(self, reconcile))
     }
 
     /// The fast **structural-integrity + admission-tripwire** check (CR-052,
@@ -1015,7 +1016,7 @@ impl Engine {
     /// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
     /// [ADR-48]: ../../../docs/specs/architecture/decisions/ADR-48.md
     pub fn doctor(&self) -> Result<DoctorReport> {
-        crate::observability::traced("doctor", || crate::governance::doctor(self))
+        crate::observability::traced(Tool::Doctor, || crate::governance::doctor(self))
     }
 
     /// The on-demand **deep** consistency check (CR-052, [FR-GV-19], [NFR-RA-06],
@@ -1040,7 +1041,7 @@ impl Engine {
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     /// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
     pub fn verify(&self) -> Result<VerifyReport> {
-        crate::observability::traced("verify", || crate::governance::verify(self))
+        crate::observability::traced(Tool::Verify, || crate::governance::verify(self))
     }
 
     /// Begin a quality session (FR-GV-04): the MCP spelling of
@@ -1050,7 +1051,7 @@ impl Engine {
     /// # Errors
     /// Returns an error on a structural failure.
     pub fn session_start(&self) -> Result<SessionInfo> {
-        crate::observability::traced("session_start", || crate::governance::session_start(self))
+        crate::observability::traced(Tool::SessionStart, || crate::governance::session_start(self))
     }
 
     /// End the quality session (FR-GV-05): re-score and compare to the
@@ -1059,7 +1060,7 @@ impl Engine {
     /// # Errors
     /// Returns an error on a structural failure.
     pub fn session_end(&self) -> Result<GateResult> {
-        crate::observability::traced("session_end", || {
+        crate::observability::traced(Tool::SessionEnd, || {
             crate::governance::gate(self, None, false, true)
         })
     }
@@ -1078,7 +1079,7 @@ impl Engine {
     /// [FR-OB-04]: ../../../docs/specs/requirements/FR-OB-04.md
     /// [NFR-OO-03]: ../../../docs/specs/requirements/NFR-OO-03.md
     pub fn stats(&self, window_days: Option<u32>) -> StatsInfo {
-        let mut info = crate::observability::traced("stats", || {
+        let mut info = crate::observability::traced(Tool::Stats, || {
             crate::observability::stats(&self.root, window_days)
         })
         .unwrap_or_else(|err| {
@@ -1147,7 +1148,7 @@ impl Engine {
     pub fn languages(&self) -> LanguagesInfo {
         use crate::plugin::LanguageRegistry;
 
-        crate::observability::traced_infallible("languages", || {
+        crate::observability::traced_infallible(Tool::Languages, || {
             // Prefer the cached registry (the started-engine path); fall back
             // to a fresh load for a transient engine that holds none.
             if let Some(registry) = self.registry.as_ref() {
@@ -1322,7 +1323,7 @@ impl Engine {
         untested: bool,
         production_scope: bool,
     ) -> Result<crate::history::HotspotReport> {
-        crate::observability::traced("hotspots", || {
+        crate::observability::traced(Tool::Hotspots, || {
             // Churn axis: the temporal tier (mines lazily, computes per file).
             let temporal = self.temporal_report()?;
             self.rank_hotspots(temporal, limit, untested, production_scope)
@@ -1426,7 +1427,7 @@ impl Engine {
     /// Returns an error only on a transient engine (no runtime) or a store-read
     /// failure — never from compute (there is none).
     pub fn latest_metrics(&self) -> Result<Option<MetricSnapshot>> {
-        crate::observability::traced("latest_metrics", || {
+        crate::observability::traced(Tool::LatestMetrics, || {
             crate::governance::latest_metrics(self)
         })
     }
@@ -1440,7 +1441,7 @@ impl Engine {
     /// # Errors
     /// Returns an error only on a transient engine or a store-read failure.
     pub fn latest_scan(&self) -> Result<ScanResult> {
-        crate::observability::traced("latest_scan", || crate::governance::latest_scan(self))
+        crate::observability::traced(Tool::LatestScan, || crate::governance::latest_scan(self))
     }
 
     /// The read-only gate **verdict** ([ADR-28]): compare the last persisted
@@ -1451,7 +1452,7 @@ impl Engine {
     /// # Errors
     /// Returns an error only on a transient engine or a store-read failure.
     pub fn latest_gate(&self) -> Result<GateResult> {
-        crate::observability::traced("latest_gate", || crate::governance::latest_gate(self))
+        crate::observability::traced(Tool::LatestGate, || crate::governance::latest_gate(self))
     }
 
     /// The **non-persisting** quality readout for the report tier ([FR-IN-07],
@@ -1486,7 +1487,7 @@ impl Engine {
     /// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
     /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
     pub fn quality_readout(&self) -> Result<QualityReadout> {
-        crate::observability::traced("quality_readout", || {
+        crate::observability::traced(Tool::QualityReadout, || {
             crate::governance::quality_readout(self, crate::governance::readout::message_cap())
         })
     }
@@ -1525,7 +1526,7 @@ impl Engine {
     ///
     /// [CR-018]: ../../../docs/requests/CR-018-web-dashboard-write-on-read.md
     pub fn latest_temporal_report(&self) -> Result<crate::history::TemporalReport> {
-        crate::observability::traced("latest_temporal_report", || {
+        crate::observability::traced(Tool::LatestTemporalReport, || {
             let rules = crate::config::load_rules_from_root(&self.root)?;
             crate::history::latest_temporal_report(&self.root, &rules.history.effective())
         })
@@ -1549,7 +1550,7 @@ impl Engine {
         untested: bool,
         production_scope: bool,
     ) -> Result<crate::history::HotspotReport> {
-        crate::observability::traced("latest_hotspots", || {
+        crate::observability::traced(Tool::LatestHotspots, || {
             let temporal = self.latest_temporal_report()?;
             self.rank_hotspots(temporal, limit, untested, production_scope)
         })
@@ -1582,7 +1583,7 @@ impl Engine {
     /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
     /// [CR-021]: ../../../docs/requests/CR-021-dashboard-redesign-quality-coverage-rollups.md
     pub fn language_composition(&self) -> Result<LanguageComposition> {
-        crate::observability::traced("language_composition", || {
+        crate::observability::traced(Tool::LanguageComposition, || {
             let db_path = self.root.join(".logos").join("logos.db");
             if !db_path.is_file() {
                 // Un-indexed root: an empty composition, not an error ([FR-UI-10]).
@@ -1621,7 +1622,7 @@ impl Engine {
         report_path: &Path,
         format: Option<&str>,
     ) -> Result<crate::history::IngestSummary> {
-        crate::observability::traced("coverage_ingest", || {
+        crate::observability::traced(Tool::CoverageIngest, || {
             let format_override = Self::parse_coverage_format(format)?;
             // One `config.toml` read resolves the `[coverage_ingest]` table that
             // both the format default and the provenance hash derive from — never
@@ -1714,7 +1715,7 @@ impl Engine {
     /// [FR-SY-06]: ../../../docs/specs/requirements/FR-SY-06.md
     /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
     pub fn coverage_ingest_auto(&self, artifact: &Path) -> Result<crate::history::IngestSummary> {
-        crate::observability::traced("coverage_ingest_auto", || {
+        crate::observability::traced(Tool::CoverageIngestAuto, || {
             // One config read drives both the configured format and the snapshot
             // hash — the same `ingest_cfg` instance flows into both, so the parse
             // format and the recorded provenance can never disagree.
@@ -1746,7 +1747,7 @@ impl Engine {
     /// [ADR-38]: ../../../docs/specs/architecture/decisions/ADR-38.md
     /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
     pub fn coverage_refresh(&self) -> Result<crate::history::CoverageRefreshSummary> {
-        crate::observability::traced("coverage_refresh", || {
+        crate::observability::traced(Tool::CoverageRefresh, || {
             let config = crate::config::load_config_from_root(&self.root)?;
             let ingest_cfg = config.coverage_ingest.effective();
             let command = ingest_cfg.refresh_cmd.clone().ok_or_else(|| {
@@ -1828,7 +1829,7 @@ impl Engine {
     /// [FR-CV-05]: ../../../docs/specs/requirements/FR-CV-05.md
     /// [FR-CV-06]: ../../../docs/specs/requirements/FR-CV-06.md
     pub fn coverage_status(&self) -> Result<crate::history::CoverageStatus> {
-        crate::observability::traced("coverage_status", || {
+        crate::observability::traced(Tool::CoverageStatus, || {
             crate::history::coverage::status(&self.root)
         })
     }
@@ -1862,7 +1863,7 @@ impl Engine {
         anchors: &[String],
         generator: &str,
     ) -> Result<crate::wiki::WriteSummary> {
-        crate::observability::traced("wiki_write", || {
+        crate::observability::traced(Tool::WikiWrite, || {
             let runtime = self.nav_runtime_no_prologue()?;
             let head = crate::wiki::head_sha(&self.root).unwrap_or_default();
             let mut conn = crate::wiki::open(&self.root)?;
@@ -1905,7 +1906,7 @@ impl Engine {
     /// [FR-WK-07]: ../../../docs/specs/requirements/FR-WK-07.md
     /// [ADR-23]: ../../../docs/specs/architecture/decisions/ADR-23.md
     pub fn wiki_read(&self, slug: &str) -> Result<Option<crate::wiki::WikiPage>> {
-        crate::observability::traced("wiki_read", || {
+        crate::observability::traced(Tool::WikiRead, || {
             let runtime = self.nav_runtime_no_prologue()?;
             let mut conn = crate::wiki::open(&self.root)?;
             runtime.submit_read(|store| {
@@ -1921,7 +1922,7 @@ impl Engine {
     /// Returns an error when no page with that slug exists — a non-zero exit so a
     /// typo'd delete is loud, never a silent no-op.
     pub fn wiki_delete(&self, slug: &str) -> Result<()> {
-        crate::observability::traced("wiki_delete", || {
+        crate::observability::traced(Tool::WikiDelete, || {
             let conn = crate::wiki::open(&self.root)?;
             crate::wiki::delete(&conn, slug)
         })
@@ -1933,7 +1934,7 @@ impl Engine {
     /// # Errors
     /// Returns an error only on an unexpected store failure.
     pub fn wiki_pruned_log(&self) -> Result<Vec<crate::wiki::PrunedPage>> {
-        crate::observability::traced("wiki_pruned_log", || {
+        crate::observability::traced(Tool::WikiPrunedLog, || {
             let conn = crate::wiki::open(&self.root)?;
             crate::wiki::pruned_log(&conn)
         })
@@ -1959,7 +1960,7 @@ impl Engine {
     /// [ADR-23]: ../../../docs/specs/architecture/decisions/ADR-23.md
     /// [BR-29]: ../../../docs/specs/software-spec.md#324-source-wiki
     pub fn wiki_search(&self, query: &str, list: bool) -> Result<Vec<crate::wiki::WikiHit>> {
-        crate::observability::traced("wiki_search", || {
+        crate::observability::traced(Tool::WikiSearch, || {
             let runtime = self.nav_runtime_no_prologue()?;
             let conn = crate::wiki::open(&self.root)?;
             runtime.submit_read(|store| {
@@ -2002,7 +2003,7 @@ impl Engine {
     /// [FR-WK-09]: ../../../docs/specs/requirements/FR-WK-09.md
     /// [FR-WK-17]: ../../../docs/specs/requirements/FR-WK-17.md
     pub fn wiki_status(&self) -> Result<crate::wiki::WikiStatus> {
-        crate::observability::traced("wiki_status", || {
+        crate::observability::traced(Tool::WikiStatus, || {
             let runtime = self.nav_runtime_no_prologue()?;
             let conn = crate::wiki::open(&self.root)?;
             // The revision-stale re-queue dampening threshold ([FR-WK-17],
@@ -2061,7 +2062,7 @@ impl Engine {
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     /// [ADR-33]: ../../../docs/specs/architecture/decisions/ADR-33.md
     pub fn wiki_generate(&self) -> Result<crate::wiki::WikiGenerationQueue> {
-        crate::observability::traced("wiki_generate", || {
+        crate::observability::traced(Tool::WikiGenerate, || {
             let runtime = self.nav_runtime_no_prologue()?;
             let conn = crate::wiki::open(&self.root)?;
             // Same dampening threshold `wiki_status` resolves ([FR-WK-17]) — the
@@ -2105,7 +2106,7 @@ impl Engine {
     /// [ADR-32]: ../../../docs/specs/architecture/decisions/ADR-32.md
     /// [BR-29]: ../../../docs/specs/software-spec.md#324-source-wiki
     pub fn wiki_native(&self) -> Result<crate::wiki::NativeWiki> {
-        crate::observability::traced("wiki_native", || {
+        crate::observability::traced(Tool::WikiNative, || {
             let runtime = self.nav_runtime_no_prologue()?;
             let revision = runtime.submit_read(|store| store.graph_revision())?;
 
@@ -2152,7 +2153,7 @@ impl Engine {
         // every other Engine accessor — `traced_infallible` because the presence
         // check cannot fail (a missing directory reads as `false`), matching the
         // `languages()` infallible-accessor precedent.
-        crate::observability::traced_infallible("wiki_doc_category_present", || {
+        crate::observability::traced_infallible(Tool::WikiDocCategoryPresent, || {
             category.present_under(&self.root)
         })
     }
@@ -2186,7 +2187,7 @@ impl Engine {
     pub fn wiki_srs_mode(&self) -> bool {
         // `traced_infallible` like `wiki_doc_category_present` — the gate is a pure
         // local-FS read that cannot fail (a missing artifact reads as Case 2).
-        crate::observability::traced_infallible("wiki_srs_mode", || {
+        crate::observability::traced_infallible(Tool::WikiSrsMode, || {
             crate::wiki::wiki_srs_mode(&self.root)
         })
     }
@@ -2215,7 +2216,7 @@ impl Engine {
     /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
     /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
     pub fn wiki_guide_pages(&self) -> Vec<(String, String)> {
-        crate::observability::traced_infallible("wiki_guide_pages", || {
+        crate::observability::traced_infallible(Tool::WikiGuidePages, || {
             crate::wiki::wiki_guide_pages(&self.root)
         })
     }
@@ -2247,7 +2248,7 @@ impl Engine {
     /// [FR-WK-20]: ../../../docs/specs/requirements/FR-WK-20.md
     /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
     pub fn wiki_reconcile(&self) -> Result<Vec<String>> {
-        crate::observability::traced("wiki_reconcile", || {
+        crate::observability::traced(Tool::WikiReconcile, || {
             let mut conn = crate::wiki::open(&self.root)?;
             crate::wiki::reconcile(&mut conn, &self.root)
         })
@@ -2292,7 +2293,7 @@ impl Engine {
     /// [ADR-57]: ../../../docs/specs/architecture/decisions/ADR-57.md
     /// [CR-062]: ../../../docs/requests/CR-062-wiki-present-authored-docs.md
     pub fn wiki_materialize(&self) -> Result<crate::wiki::MaterializeSummary> {
-        crate::observability::traced("wiki_materialize", || {
+        crate::observability::traced(Tool::WikiMaterialize, || {
             // Case 2: presentation is a Case-1 operation — write nothing, sweep
             // nothing, so the agent-inference path is untouched ([FR-WK-21]).
             if !crate::wiki::wiki_srs_mode(&self.root) {
@@ -2335,7 +2336,7 @@ impl Engine {
         dir: Option<&Path>,
         force: bool,
     ) -> Result<crate::wiki::EmitSummary> {
-        crate::observability::traced("wiki_skill_emit", || {
+        crate::observability::traced(Tool::WikiSkillEmit, || {
             crate::wiki::materialize_skill(dir.unwrap_or(&self.root), force)
         })
     }
@@ -2363,7 +2364,7 @@ impl Engine {
     /// [ADR-49]: ../../../docs/specs/architecture/decisions/ADR-49.md
     /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
     pub fn wiki_quality_report_hook_emit(&self, force: bool) -> Result<crate::wiki::HookEmitSummary> {
-        crate::observability::traced("wiki_quality_report_hook_emit", || {
+        crate::observability::traced(Tool::WikiQualityReportHookEmit, || {
             crate::wiki::materialize_quality_report_hook(&self.root, force)
         })
     }
@@ -2389,7 +2390,7 @@ impl Engine {
     /// [CR-025]: ../../../docs/requests/CR-025-interactive-config-editing.md
     /// [NFR-DM-04]: ../../../docs/specs/requirements/NFR-DM-04.md
     pub fn config_read(&self) -> Result<crate::config::ConfigReadModel> {
-        crate::observability::traced("config_read", || {
+        crate::observability::traced(Tool::ConfigRead, || {
             Ok(crate::config::read_documents(&self.root)?)
         })
     }
@@ -2429,7 +2430,7 @@ impl Engine {
         file: crate::config::PolicyFile,
         candidate: &str,
     ) -> Result<crate::config::ConfigWriteOutcome> {
-        crate::observability::traced("config_write", || {
+        crate::observability::traced(Tool::ConfigWrite, || {
             let outcome = match file {
                 crate::config::PolicyFile::Config => {
                     crate::config::write_config(&self.root, candidate)?
@@ -2465,7 +2466,7 @@ impl Engine {
         &self,
         api_key: &str,
     ) -> Result<crate::config::SecretWriteOutcome> {
-        crate::observability::traced("config_write_secret", || {
+        crate::observability::traced(Tool::ConfigWriteSecret, || {
             Ok(crate::config::write_secret(&self.root, api_key)?)
         })
     }
@@ -2516,7 +2517,7 @@ impl Engine {
         file: crate::config::PolicyFile,
     ) -> Result<crate::config::ConfigApplyOutcome> {
         use crate::config::{ConfigApplyOutcome, PolicyFile};
-        crate::observability::traced("config_apply", || match file {
+        crate::observability::traced(Tool::ConfigApply, || match file {
             PolicyFile::Config => {
                 let outcome = self.run_reconcile()?;
                 Ok(ConfigApplyOutcome::Reconciled {
@@ -2789,7 +2790,7 @@ impl Engine {
     ///
     /// [FR-WT-03]: ../../../docs/specs/requirements/FR-WT-03.md
     fn reconcile_seed_diff(&self, seed: &crate::workspace::SeedSource) {
-        let outcome = crate::observability::traced("worktree_seed", || {
+        let outcome = crate::observability::traced(Tool::WorktreeSeed, || {
             let paths = crate::workspace::diff_from_primary(&self.root, &seed.head)?;
             if paths.is_empty() {
                 return Ok(SyncResult::default());
@@ -2835,7 +2836,7 @@ impl Engine {
     ///
     /// [FR-SY-08]: ../../../docs/specs/requirements/FR-SY-08.md
     fn run_prologue_purge(&self) {
-        let outcome = crate::observability::traced("nav_prologue_purge", || {
+        let outcome = crate::observability::traced(Tool::NavProloguePurge, || {
             let (runtime, registry, config) = self.pipeline_ctx()?;
             crate::pipeline::purge_on_config_change(runtime, registry, &self.root, &config)
         });

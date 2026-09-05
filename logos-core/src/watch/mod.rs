@@ -682,21 +682,47 @@ fn spawn_sync_worker(
                 };
                 for artifact in artifacts {
                     counters.coverage_ingests_run.fetch_add(1, Ordering::AcqRel);
-                    match engine.coverage_ingest_auto(&artifact) {
+                    let ingest_started = Instant::now();
+                    let ingest_outcome = engine.coverage_ingest_auto(&artifact);
+                    let ingest_ms = ingest_started.elapsed().as_millis() as u64;
+                    match ingest_outcome {
                         Ok(summary) => tracing::info!(
                             target: crate::observability::TELEMETRY_TARGET,
-                            tool = "watch_coverage_ingest",
-                            surface = "watcher",
+                            tool = crate::observability::Tool::WatchCoverageIngest.as_str(),
+                            surface = crate::observability::Surface::Watcher.as_str(),
+                            // `duration_ms`/`ok` complete the emission helper's
+                            // field shape. Without them the layer drops the
+                            // event as malformed, so before S-304 this
+                            // telemetry point recorded nothing at all.
+                            duration_ms = ingest_ms,
+                            ok = true,
                             artifact = %artifact.display(),
                             matched_files = summary.matched_files,
                             "watcher auto-ingested a coverage artifact",
                         ),
-                        Err(e) => tracing::warn!(
-                            target: "logos::watch",
-                            surface = "watcher",
-                            artifact = %artifact.display(),
-                            "auto coverage ingest failed (degraded to a warning; sync unaffected): {e:#}",
-                        ),
+                        Err(e) => {
+                            // The human log keeps the cause; telemetry keeps the
+                            // outcome. Both are needed: without the telemetry
+                            // event a failed ingest is invisible to `stats`, so
+                            // the tool would report `ok_calls == calls` forever —
+                            // a fabricated 100% success rate ([NFR-CC-04]). The
+                            // success arm above records, so this one must too.
+                            tracing::warn!(
+                                target: "logos::watch",
+                                surface = crate::observability::Surface::Watcher.as_str(),
+                                artifact = %artifact.display(),
+                                "auto coverage ingest failed (degraded to a warning; sync unaffected): {e:#}",
+                            );
+                            tracing::info!(
+                                target: crate::observability::TELEMETRY_TARGET,
+                                tool = crate::observability::Tool::WatchCoverageIngest.as_str(),
+                                surface = crate::observability::Surface::Watcher.as_str(),
+                                duration_ms = ingest_ms,
+                                ok = false,
+                                artifact = %artifact.display(),
+                                "watcher coverage ingest failed",
+                            );
+                        }
                     }
                 }
 
@@ -724,8 +750,8 @@ fn spawn_sync_worker(
                     // counting the operation.
                     tracing::info!(
                         target: crate::observability::TELEMETRY_TARGET,
-                        tool = "watch_sync",
-                        surface = "watcher",
+                        tool = crate::observability::Tool::WatchSync.as_str(),
+                        surface = crate::observability::Surface::Watcher.as_str(),
                         duration_ms,
                         ok = result.warnings.is_empty(),
                         files,

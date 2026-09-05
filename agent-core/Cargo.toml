@@ -30,7 +30,11 @@ rig-core   = "0.39"
 # core query (no new public Engine method). logos-core is already the root of
 # the default tree, so depending on it here adds nothing to the carve-out; the
 # HTTP machinery stays in rig alone.
-logos-core = { path = "../logos-core", default-features = false }
+# `agents` adds no dependency — it declares the override-only
+# `observability::Surface::Chat` this crate's tool layer attributes its engine
+# calls to (S-304, FR-OB-10). Enabled unconditionally: this crate exists only
+# in an agents build, so the variant is absent exactly when the agent is.
+logos-core = { path = "../logos-core", default-features = false, features = ["agents"] }
 # Serde derive for the provider config DTOs, the mock's raw-response type
 # (rig's CompletionModel requires Serialize + DeserializeOwned associated
 # types), and the tool argument/output DTOs. Already in the workspace graph via

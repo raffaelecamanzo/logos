@@ -47,7 +47,7 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-use logos_core::observability::{self, Surface};
+use logos_core::observability::{self, ProcessSurface};
 use logos_core::Engine;
 
 /// The branch the linked worktree is built on — the increment its telemetry is
@@ -153,7 +153,7 @@ fn worktree_telemetry_writes_through_to_primary_and_survives_teardown() {
     // `init(&wt)` resolves the primary once and, being in a linked worktree,
     // (a) points the telemetry writer at the PRIMARY's `.logos/telemetry.db`
     // and (b) stamps every event this process emits with the worktree's branch.
-    let guard = observability::init(Surface::Cli, &wt);
+    let guard = observability::init(ProcessSurface::Cli, &wt);
     {
         let engine = Engine::start(&wt).expect("worktree engine starts (seeded from primary)");
         // A couple of navigation calls from inside the worktree — each funnels

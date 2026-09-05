@@ -33,6 +33,7 @@
 mod db;
 mod layer;
 mod stats;
+mod tool;
 
 #[cfg(test)]
 mod tests;
@@ -46,6 +47,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
 
 pub use layer::TelemetryGuard;
+pub(crate) use tool::Tool;
 
 /// The reserved target tagging events for the telemetry layer ([FR-OB-03]).
 /// Everything else on the stream is human-log material for the stderr layer.
@@ -98,10 +100,66 @@ fn telemetry_logos_dir_for(primary: Option<&Path>, root: &Path) -> PathBuf {
     root.join(".logos")
 }
 
-/// Which adapter surface this process serves — stamped onto every telemetry
-/// record so `stats` can break usage down by tool *and* surface ([FR-OB-04]).
+/// Which adapter surface an event is attributed to — stamped onto every
+/// telemetry record so `stats` can break usage down by tool *and* surface
+/// ([FR-OB-04]).
+///
+/// The first three are **process** surfaces: one is chosen at [`init`] and
+/// stamped on every event the process emits ([FR-OB-03]). The remainder are
+/// **override-only** surfaces, for adapters that run *inside* another surface's
+/// process and would otherwise be indistinguishable from it — they are never
+/// passed to [`init`], only to [`in_surface`] (or, for the watcher, named on the
+/// event itself). Keeping them in the same enum means this type lists every
+/// value that can appear in the store's `surface` column, so the read-model and
+/// the writers cannot disagree about the vocabulary.
+///
+/// [FR-OB-03]: ../../../docs/specs/requirements/FR-OB-03.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
+    /// The `logos` CLI binary. A process surface.
+    Cli,
+    /// The `serve --mcp` stdio server. A process surface.
+    Mcp,
+    /// The `serve --ui` localhost web dashboard (CR-012, feature-gated). A
+    /// process surface.
+    Web,
+    /// The debounced filesystem watcher (S-022). Override-only: it runs inside
+    /// the `serve --mcp` process, whose process surface is [`Surface::Mcp`].
+    Watcher,
+    /// The in-process chat agent ([FR-OB-10]). Override-only: it reaches the
+    /// engine through the web adapter, so without this it is indistinguishable
+    /// from a human browsing the dashboard — and *"Logos's own agent navigated
+    /// the graph"* is a different claim from *"a developer did"*.
+    ///
+    /// Gated with the agent substrate it describes, so the surface is **absent**
+    /// — not merely never emitted — in a build without `agents` ([FR-OB-10],
+    /// [NFR-SE-01]).
+    ///
+    /// [FR-OB-10]: ../../../docs/specs/requirements/FR-OB-10.md
+    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
+    #[cfg(feature = "agents")]
+    Chat,
+}
+
+/// The surface a **process** serves — the argument [`init`] takes.
+///
+/// [`Surface`] is the full vocabulary of values that can appear in the store's
+/// `surface` column, and since [FR-OB-09] that vocabulary includes values no
+/// process ever *is*: the watcher and the chat agent both run inside another
+/// surface's process and are reached only through a per-event override. Letting
+/// `init` take a bare `Surface` would make `init(Surface::Chat, root)` a
+/// compiling, silently wrong call that stamps every event in the process
+/// `chat`.
+///
+/// So the two roles get two types. This one is closed over the three real
+/// process surfaces and converts into [`Surface`] one-way, which makes the
+/// invariant the enum's doc used to merely assert into one the compiler keeps —
+/// the same discipline [`Tool::event_class`](tool::Tool::event_class) applies to
+/// classification.
+///
+/// [FR-OB-09]: ../../../docs/specs/requirements/FR-OB-09.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessSurface {
     /// The `logos` CLI binary.
     Cli,
     /// The `serve --mcp` stdio server.
@@ -110,14 +168,118 @@ pub enum Surface {
     Web,
 }
 
+impl From<ProcessSurface> for Surface {
+    fn from(surface: ProcessSurface) -> Self {
+        match surface {
+            ProcessSurface::Cli => Surface::Cli,
+            ProcessSurface::Mcp => Surface::Mcp,
+            ProcessSurface::Web => Surface::Web,
+        }
+    }
+}
+
 impl Surface {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Surface::Cli => "cli",
             Surface::Mcp => "mcp",
             Surface::Web => "web",
+            Surface::Watcher => "watcher",
+            #[cfg(feature = "agents")]
+            Surface::Chat => "chat",
         }
     }
+
+    /// Every surface value that can reach the store — the closed vocabulary the
+    /// per-event override is sanctioned against.
+    const ALL: &'static [Surface] = &[
+        Surface::Cli,
+        Surface::Mcp,
+        Surface::Web,
+        Surface::Watcher,
+        #[cfg(feature = "agents")]
+        Surface::Chat,
+    ];
+
+    /// The surface named by an on-event `surface = "…"` field, or `None` for an
+    /// unknown value.
+    ///
+    /// This is what bounds the per-event override ([FR-OB-03]): an arbitrary
+    /// string cannot invent a surface, only name one this enum already declares.
+    fn from_wire(value: &str) -> Option<Surface> {
+        Surface::ALL.iter().copied().find(|s| s.as_str() == value)
+    }
+}
+
+// ── The generalised per-event surface override ([FR-OB-03], [FR-OB-09]) ──────
+//
+// `surface` is stamped once per process, which is why the read-model's old
+// blanket `surface <> 'web'` filter could not tell a dashboard render from a
+// graph query issued by the same `serve --ui` process (CR-091). The watcher
+// already had the escape hatch — it names `surface = "watcher"` on the event
+// itself — but an adapter that does not *emit* the event cannot use that: the
+// chat agent's telemetry is emitted deep inside the engine chokepoint it calls,
+// with no field of its own to set.
+//
+// `in_surface` generalises the override into an ambient, thread-scoped one an
+// adapter enters **once at its route/call boundary**. Resolution therefore
+// happens per request, never per engine call, and costs one thread-local `Cell`
+// read on the emission path (NFR-OO-02 is unchanged).
+
+thread_local! {
+    /// The surface override in force on this thread, if any.
+    static SURFACE_OVERRIDE: std::cell::Cell<Option<Surface>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Restores the previous override on drop, so a panic inside the scoped call
+/// cannot leave a thread mis-attributing every later event.
+struct SurfaceScope(Option<Surface>);
+
+impl Drop for SurfaceScope {
+    fn drop(&mut self) {
+        SURFACE_OVERRIDE.with(|s| s.set(self.0));
+    }
+}
+
+/// Run `f` with every telemetry event emitted **on this thread** attributed to
+/// `surface` instead of the process surface ([FR-OB-03], [FR-OB-09]).
+///
+/// The adapter/route-boundary seam: an adapter that runs inside another
+/// surface's process enters this once per request — the chat agent wraps the
+/// blocking engine call its tool layer submits, so every event that call
+/// produces lands under [`Surface::Chat`] without a single engine chokepoint
+/// knowing the agent exists ([ADR-01]).
+///
+/// Scoping is **per thread**, matching where the events are emitted: the
+/// adapters bridge to the synchronous core with `spawn_blocking` ([ADR-03]), so
+/// the scope must be entered *inside* that closure, not around the `await`.
+/// Nesting restores the outer scope on exit, including on unwind.
+///
+/// [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
+/// [ADR-03]: ../../../docs/specs/architecture/decisions/ADR-03.md
+/// [FR-OB-09]: ../../../docs/specs/requirements/FR-OB-09.md
+pub fn in_surface<T>(surface: Surface, f: impl FnOnce() -> T) -> T {
+    let previous = SURFACE_OVERRIDE.with(|s| s.replace(Some(surface)));
+    let _restore = SurfaceScope(previous);
+    f()
+}
+
+/// The ambient override in force on the emitting thread, if any.
+fn ambient_surface() -> Option<Surface> {
+    SURFACE_OVERRIDE.with(|s| s.get())
+}
+
+/// The surface override in force on the calling thread, if any — the
+/// introspection half of [`in_surface`].
+///
+/// An adapter that installs a boundary scope uses this to prove it: the effect
+/// of [`in_surface`] is otherwise visible only inside the telemetry layer, which
+/// is private, so without this the *"my tool calls are attributed to my
+/// surface"* contract could only be asserted indirectly. Returns `None` on the
+/// process surface.
+pub fn current_surface_override() -> Option<Surface> {
+    ambient_surface()
 }
 
 /// One telemetry record — the row shape of `telemetry.db`'s `events` table.
@@ -199,7 +361,7 @@ fn telemetry_origin_for(primary: Option<&Path>, root: &Path) -> String {
 ///
 /// [ADR-50]: ../../../docs/specs/architecture/decisions/ADR-50.md
 /// [FR-OB-07]: ../../../docs/specs/requirements/FR-OB-07.md
-pub fn init(surface: Surface, root: &Path) -> TelemetryGuard {
+pub fn init(surface: ProcessSurface, root: &Path) -> TelemetryGuard {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     // Human logs: stderr, never stdout (NFR-RA-01) — a stray stdout byte
     // corrupts the MCP JSON-RPC stream (RK-02).
@@ -217,7 +379,7 @@ pub fn init(surface: Surface, root: &Path) -> TelemetryGuard {
         // the active path, so a telemetry-less run never pays the git cost.
         let origin = telemetry_origin_for(primary.as_deref(), root);
         let (sink, guard) = layer::spawn_writer(logos_dir.join(TELEMETRY_DB_FILENAME));
-        let telemetry = layer::TelemetryLayer::new(surface, origin, sink)
+        let telemetry = layer::TelemetryLayer::new(surface.into(), origin, sink)
             .with_filter(filter_fn(|meta| meta.target() == TELEMETRY_TARGET));
         (Some(telemetry), guard)
     } else {
@@ -246,7 +408,8 @@ pub fn init(surface: Surface, root: &Path) -> TelemetryGuard {
 ///
 /// [FR-OB-06]: ../../../docs/specs/requirements/FR-OB-06.md
 /// [FR-OB-01]: ../../../docs/specs/requirements/FR-OB-01.md
-fn traced_inner<T>(tool: &'static str, f: impl FnOnce() -> Result<T>) -> (Result<T>, u64) {
+fn traced_inner<T>(tool: Tool, f: impl FnOnce() -> Result<T>) -> (Result<T>, u64) {
+    let tool = tool.as_str();
     let span = tracing::info_span!("logos", tool);
     let _enter = span.enter();
     let start = Instant::now();
@@ -269,7 +432,7 @@ fn traced_inner<T>(tool: &'static str, f: impl FnOnce() -> Result<T>) -> (Result
 ///
 /// Every Engine chokepoint method and pipeline pass funnels through here —
 /// sinks differ, call sites don't ([ADR-13]).
-pub(crate) fn traced<T>(tool: &'static str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(crate) fn traced<T>(tool: Tool, f: impl FnOnce() -> Result<T>) -> Result<T> {
     traced_inner(tool, f).0
 }
 
@@ -283,7 +446,7 @@ pub(crate) fn traced<T>(tool: &'static str, f: impl FnOnce() -> Result<T>) -> Re
 ///
 /// [FR-OB-06]: ../../../docs/specs/requirements/FR-OB-06.md
 pub(crate) fn traced_timed<T>(
-    tool: &'static str,
+    tool: Tool,
     f: impl FnOnce() -> Result<T>,
 ) -> (Result<T>, u64) {
     traced_inner(tool, f)
@@ -292,7 +455,7 @@ pub(crate) fn traced_timed<T>(
 /// [`traced`] for chokepoint calls that cannot fail (their result type has
 /// no error half — e.g. `languages`, which degrades internally). Records
 /// `ok = true` always.
-pub(crate) fn traced_infallible<T>(tool: &'static str, f: impl FnOnce() -> T) -> T {
+pub(crate) fn traced_infallible<T>(tool: Tool, f: impl FnOnce() -> T) -> T {
     match traced(tool, || Ok(f())) {
         Ok(value) => value,
         // The closure above always returns Ok.
@@ -305,7 +468,7 @@ pub(crate) fn traced_infallible<T>(tool: &'static str, f: impl FnOnce() -> T) ->
 /// for the [FR-OB-06] per-phase breakdown.
 ///
 /// [FR-OB-06]: ../../../docs/specs/requirements/FR-OB-06.md
-pub(crate) fn traced_infallible_timed<T>(tool: &'static str, f: impl FnOnce() -> T) -> (T, u64) {
+pub(crate) fn traced_infallible_timed<T>(tool: Tool, f: impl FnOnce() -> T) -> (T, u64) {
     let (result, duration_ms) = traced_inner(tool, || Ok(f()));
     match result {
         Ok(value) => (value, duration_ms),

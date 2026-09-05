@@ -250,6 +250,14 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [features]
+# The agent carve-out marker (CR-078, ADR-60, FR-OB-10). It adds NO dependency:
+# its only effect is to declare `observability::Surface::Chat`, the override-only
+# surface the in-process chat agent attributes its engine calls to. `agent-core`
+# turns it on, and `agent-core` itself reaches the binary only through `web`'s
+# own `agents` feature — so in a build without agents the variant is **absent**
+# rather than present-and-never-emitted, which is what FR-OB-10 asks for. The
+# no-network fitness function is unaffected: no crate enters the graph here.
+agents = []
 # The default build links the five v1 grammars (FR-PL-01). Each language is a
 # feature line + a `plugins/<lang>/` asset dir + one gated row in
 # `plugin::grammars::compiled`, touching no other core source (NFR-MA-01).
