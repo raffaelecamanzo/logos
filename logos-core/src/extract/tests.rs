@@ -1814,17 +1814,25 @@ fn a_method_less_fetch_init_object_is_the_stated_ceiling() {
     );
 }
 
-/// The two guarantees `DECLARED_METHOD_PREFIX` states in its rustdoc, pinned
+/// The three guarantees `DECLARED_METHOD_PREFIX` states in its rustdoc, pinned
 /// directly rather than through whatever the shipped `.scm` files happen to
-/// contain — no shipped query exercises either branch, so both are otherwise
-/// dead to the suite.
+/// contain — no shipped query exercises the failure or precedence branches, so
+/// they are otherwise dead to the suite.
 ///
 /// These are core-level claims against [NFR-RA-05]: a name-declared verb must
 /// pass the same `is_http_method` gate as a source-read one (so a typo captures
-/// nothing rather than inventing a method), and a verb spelled in the source
-/// must always outrank one declared by a capture name (so a query binding both
-/// can never downgrade a real `POST` to a shape's default).
+/// nothing rather than inventing a method); a verb spelled in the source must
+/// always outrank one declared by a capture name (so a query binding both can
+/// never downgrade a real `POST` to a shape's default); and when a query binds
+/// two conflicting declared verbs to one match, the **first declaration wins**
+/// — chosen so the resolved verb never depends on node position, which a
+/// droppable on-disk query ([FR-PL-04]) makes a reachable case.
 ///
+/// Runs against the `ts` grammar alone on purpose, unlike every other test in
+/// this section: its subject is the core dispatch driven by ad-hoc queries, not
+/// plugin data, so the TSX `Language` would re-prove the same core code.
+///
+/// [FR-PL-04]: ../../../docs/specs/requirements/FR-PL-04.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 #[test]
 #[cfg(feature = "lang-typescript")]
@@ -1899,4 +1907,74 @@ fn a_name_declared_verb_is_gated_and_outranked_by_a_source_read_one() {
         "the source-read POST outranks the name-declared GET — a query binding \
          both must never downgrade a spelled-out verb"
     );
+
+    // Two conflicting DECLARED verbs on one match: the first capture declaration
+    // wins, so the resolved verb never depends on which node tree-sitter reports
+    // first. Both captures are real HTTP verbs, so `is_http_method` cannot be
+    // what decides it.
+    let first_wins = sites(
+        r#"(call_expression
+             function: (identifier) @invoke.http.method.head
+             arguments: (arguments
+               . (_) @invoke.http.arg
+               . (object) @invoke.http.method.put))"#,
+    );
+    assert_eq!(first_wins.len(), 1, "one site");
+    assert_eq!(
+        first_wins[0].slots.get(METHOD_SLOT).map(String::as_str),
+        Some("head"),
+        "the FIRST name-declared verb wins — resolving by capture order would \
+         make the verb depend on node position (FR-PL-04 droppable queries)"
+    );
+}
+
+/// A verb-less shape reports the **call's** line, not its path argument's
+/// ([FR-WS-08], [NFR-RA-05]).
+///
+/// The name-declared branch has no `@invoke.http.method` node to attribute to,
+/// so `collect_invocation_sites` anchors on the node the declaring capture bound
+/// — for the shipped `fetch` pattern, the callee. Anchoring on the path argument
+/// instead put a wrapped call's reference one line below the call, disagreeing
+/// with every method-bearing shape and with the other four language arms, and
+/// sending anyone navigating from the reference to the wrong line.
+///
+/// Also pins the site's owning symbol, which the same anchor decides: the two
+/// travel together, so a regression in one is a regression in both.
+///
+/// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_verb_less_call_is_attributed_to_the_call_not_to_its_argument() {
+    // The call opens on line 2; its sole argument is on line 3.
+    const WRAPPED: &str = r#"export async function listUsers() {
+    return fetch(
+        "/users"
+    );
+}"#;
+
+    // Driven through the real `extract` path, not `ts_invocation_sites`: that
+    // helper passes empty `decls`/`symbols`, so every site there falls back to
+    // the file module and the enclosing-symbol half would be unfalsifiable.
+    for ext in TS_EXTENSIONS {
+        let facts = extract_lang(ext, &format!("src/client.{ext}"), WRAPPED);
+        let refs: Vec<_> = facts
+            .refs
+            .iter()
+            .filter(|r| r.relation == Some(crate::model::ArtifactRelation::HttpClientCall))
+            .collect();
+        assert_eq!(refs.len(), 1, "one client-call reference in {ext}");
+        assert_eq!(refs[0].target, "GET /users", "{ext}");
+        assert_eq!(
+            refs[0].line, 2,
+            "the reference reports the `fetch` line, not the wrapped \
+             argument's line 3 ({ext})"
+        );
+        assert!(
+            refs[0].source.to_string().contains("listUsers"),
+            "the reference is attributed to its enclosing declaration, not the \
+             file module ({ext}): {:?}",
+            refs[0].source
+        );
+    }
 }

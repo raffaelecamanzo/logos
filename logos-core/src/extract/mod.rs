@@ -1267,13 +1267,15 @@ fn collect_invocation_sites(
                 "invoke.http.arg" => arg_node = Some(cap.node),
                 // `@invoke.http.method.<verb>` — the verb declared by the
                 // capture name for a shape that spells no verb in its source.
+                // The node is kept alongside the verb purely for attribution
+                // (see the `anchor` below); the verb itself comes from the name.
                 // First declaration wins: a droppable on-disk query (FR-PL-04)
                 // could bind two conflicting verbs to one match, and resolving
                 // that by capture order would make the verb depend on node
                 // position. First-wins is deterministic and inspectable.
                 _ => {
                     if let Some(verb) = name.strip_prefix(DECLARED_METHOD_PREFIX) {
-                        declared_method.get_or_insert(verb);
+                        declared_method.get_or_insert((verb, cap.node));
                     }
                 }
             }
@@ -1292,7 +1294,7 @@ fn collect_invocation_sites(
                 text.trim()
             }
             None => {
-                let Some(verb) = declared_method else {
+                let Some((verb, _)) = declared_method else {
                     continue;
                 };
                 verb
@@ -1305,9 +1307,17 @@ fn collect_invocation_sites(
         if !is_http_method(method) {
             continue;
         }
-        // Attribute to the verb node when the source spells one, else to the
-        // path argument — the site's only other node.
-        let anchor = method_node.unwrap_or(arg_node);
+        // Attribute to the node the verb came from, so a site's reported line is
+        // the CALL's line for every shape. A name-declared verb still has a node
+        // — the capture that carried the name (typically the callee itself) —
+        // and using it keeps a verb-less `fetch(\n  "/p"\n)` reported on the
+        // `fetch` line rather than on the wrapped argument's, which is where
+        // every method-bearing shape reports. The path argument is the last
+        // resort, for a hypothetical query that binds a declared verb to nothing
+        // but the argument itself.
+        let anchor = method_node
+            .or(declared_method.map(|(_, node)| node))
+            .unwrap_or(arg_node);
         let Some(source_symbol) = enclosing_symbol(anchor) else {
             continue; // no attributable scope
         };
