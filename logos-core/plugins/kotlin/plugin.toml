@@ -22,7 +22,7 @@ module_separator = "."
 # tree-sitter-kotlin-ng 1.1 is generated against ABI 14.
 abi_version = 14
 
-capabilities = ["symbols", "references", "frameworks"]
+capabilities = ["symbols", "references", "frameworks", "invocations"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # Kotlin's anonymous control-flow/operator tokens: `when` replaces `switch`
@@ -52,10 +52,50 @@ test_convention = "kotlin-annotations"
 # prefix covers both, reused verbatim from the Java detector.
 framework_detectors = ["org::springframework"]
 
+# Canonical reference prefixes gating outbound **HTTP client-call** capture
+# (S-342, CR-108, FR-WS-08): FR-WS-08's normative Kotlin row is the same JVM
+# client set Java binds — RestClient, WebClient, RestTemplate and
+# `java.net.http.HttpClient` — so the rows are the Java plugin's verbatim, and
+# deliberately so: two languages compiling against the same JARs must gate on
+# the same packages or the same source would be a client call in one and not in
+# the other.
+#
+# Kotlin's `import org.springframework.web.client.RestClient` canonicalises to
+# the ledger target `org::springframework::web::client::RestClient` exactly as
+# Java's does (`module_separator = "."`, `references.scm`'s `@ref.import`), and
+# `resolve::matches_detector` matches at a `::` SEGMENT BOUNDARY. So these rows
+# admit the client packages while excluding their siblings — notably
+# `org::springframework::boot::test::web::client::TestRestTemplate`, which is
+# NOT under `org::springframework::web::client`.
+#
+# Named at package-prefix grain on purpose: `org::springframework` alone would
+# admit every Spring file and `java` alone every Kotlin file using the JDK,
+# which is exactly the over-capture this gate exists to prevent (NFR-RA-05).
+# Every row is multi-segment, never a bare identifier, so the gate is
+# independent evidence rather than something the call shape itself can supply
+# (see the `capture_http_client_call_arm` rustdoc for that rule).
+http_client_detectors = [
+  # `RestClient` and `RestTemplate`.
+  "org::springframework::web::client",
+  # `WebClient` (spring-webflux).
+  "org::springframework::web::reactive::function::client",
+  # `HttpClient` / `HttpRequest` / `HttpResponse` (JDK 11+).
+  "java::net::http",
+]
+
 [queries]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"
 frameworks = "queries/frameworks.scm"
+# Outbound HTTP client-call arm (S-342, CR-108, FR-WS-08): the RestClient/
+# WebClient fluent chain, the `java.net.http.HttpClient` builder in both orders,
+# and the plain receiver-method idiom (positional and named-argument forms).
+# Anchors only — the HTTP-verb and static-literal decisions stay in the generic
+# dispatch and `resolve::http_client_call`. Its receiver, argument-arity and
+# call-position rules keep a route REGISTRATION — syntactically the same shape,
+# and in Kotlin routinely written with a trailing lambda — from being read as an
+# outbound call; see the query header.
+invocations = "queries/invocations.scm"
 # Captured `@fw.route.method` annotation name → HTTP method (S-055), identical
 # to the Java Spring mapping. `@RequestMapping` declares no single verb.
 [framework_methods]

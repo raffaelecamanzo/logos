@@ -482,10 +482,12 @@ fn c_entry() -> GrammarEntry {
 /// Uses `tree_sitter_kotlin_ng::LANGUAGE` — the maintained
 /// `tree-sitter-grammars/tree-sitter-kotlin` crate exposed as a `LanguageFn` at
 /// ABI 14, the same decoupling the five v1 code grammars use ([ADR-09]). Ships
-/// the full three-query code-grammar set (symbols/references/frameworks),
-/// exactly like [`java_entry`].
+/// the full code-grammar query set (symbols/references/frameworks) plus the
+/// outbound HTTP client-call arm (`invocations`, S-342/[CR-108]) — exactly like
+/// [`java_entry`], whose JVM client APIs Kotlin binds.
 ///
 /// [CR-009]: ../../../docs/requests/CR-009-seven-language-plugins.md
+/// [CR-108]: ../../../docs/requests/CR-108-per-language-http-client-call-capture.md
 #[cfg(feature = "lang-kotlin")]
 fn kotlin_entry() -> GrammarEntry {
     GrammarEntry {
@@ -507,6 +509,11 @@ fn kotlin_entry() -> GrammarEntry {
                 relative_path: "queries/frameworks.scm",
                 label: "kotlin/queries/frameworks.scm",
                 source: include_str!("../../plugins/kotlin/queries/frameworks.scm"),
+            },
+            EmbeddedQuery {
+                relative_path: "queries/invocations.scm",
+                label: "kotlin/queries/invocations.scm",
+                source: include_str!("../../plugins/kotlin/queries/invocations.scm"),
             },
         ],
     }

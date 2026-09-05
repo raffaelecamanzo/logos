@@ -1666,7 +1666,7 @@ export async function raw() { return axios.get("/files/{*rest}"); }"#,
 /// [`classify_client_call`](crate::resolve::http_client_call::classify_client_call)
 /// are crate-private, and widening them to `pub` for a test would be a worse
 /// trade than the module gate documented on `extract::tests`.
-#[cfg(any(feature = "lang-typescript", feature = "lang-go"))]
+#[cfg(any(feature = "lang-typescript", feature = "lang-go", feature = "lang-kotlin"))]
 fn invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::InvocationSite> {
     let reg = registry();
     let plugin = reg
@@ -2122,6 +2122,124 @@ func ListUsers() {{ http.Get("{literal}") }}
 "#
         );
         let sites = invocation_sites("go", &source);
+        assert_eq!(sites.len(), 1, "one site reaches the interpreter for {literal}");
+        let slots = &sites[0].slots;
+        assert_eq!(
+            slots.get(PATH_SLOT).map(String::as_str),
+            Some(literal),
+            "the static literal is handed over verbatim, not pre-judged: {slots:?}"
+        );
+        assert!(
+            !slots.contains_key(DYNAMIC_PATH_SLOT),
+            "a static literal never carries the dynamic marker: {slots:?}"
+        );
+        assert_eq!(
+            classify_client_call(slots),
+            Err(refusal),
+            "the interpreter's own refusal reason for {literal}"
+        );
+    }
+}
+
+
+// ── S-342 / FR-WS-08 / CR-108: Kotlin slot-level refusal reasons ────────────
+//
+// The rest of the Kotlin arm's suite lives in `tests/kotlin_http_client_call.rs`.
+// These two stay here for the same reason the Go pair above does — they need the
+// crate-private `collect_invocation_sites` and `classify_client_call`.
+//
+// Kotlin needs them more than its siblings do. `tree-sitter-kotlin-ng` does not
+// model a bare `$name` interpolation: it splits the fragment at the `$` into
+// plain `string_content` children, which `static_string_literal` happily
+// concatenates back into what looks like a static literal. The query's answer is
+// a `(#not-match? … "[$]")` guard plus a companion pattern that re-captures the
+// ARGUMENT node so the site is still handed over as dynamic. Every refs-level
+// assertion for that is `.is_empty()`, which is equally satisfied by "the query
+// never matched" — so without these tests the companion pattern could be deleted
+// and Kotlin would lose its coverage reasons silently.
+
+/// FR-WS-08 shared negative case 2 for **Kotlin**, pinned at slot level.
+///
+/// Both interpolation spellings must reach the interpreter carrying the
+/// dynamic-path marker: the braced `${…}` form (which the grammar models as an
+/// `interpolation` node) and the bare `$name` form (which it does not model at
+/// all). The third fixture is the one that motivates the guard — an interpolated
+/// path that reads back **absolute**, and so would otherwise be bound as a static
+/// template rather than refused.
+#[test]
+#[cfg(feature = "lang-kotlin")]
+fn a_kotlin_string_template_reaches_the_interpreter_as_a_dynamic_path() {
+    use crate::resolve::http_client_call::{DYNAMIC_PATH_SLOT, METHOD_SLOT, PATH_SLOT};
+
+    for literal in ["\"$base/users\"", "\"${base}/users\"", "\"/users/$id/roles\"", "path"] {
+        let source = format!(
+            r#"package client
+
+import org.springframework.web.client.RestClient
+
+class Calls(private val restClient: RestClient, private val base: String) {{
+    fun fetch(id: String, path: String): String =
+        restClient.get().uri({literal}).retrieve().body(String::class.java)
+}}
+"#
+        );
+        let sites = invocation_sites("kt", &source);
+        assert_eq!(sites.len(), 1, "exactly one invocation site for {literal}");
+        let slots = &sites[0].slots;
+        assert_eq!(
+            slots.get(METHOD_SLOT).map(String::as_str),
+            Some("get"),
+            "the verb still reaches the interpreter — only the path is dynamic"
+        );
+        assert!(
+            slots.contains_key(DYNAMIC_PATH_SLOT),
+            "a runtime-composed Kotlin path must carry the dynamic-path marker \
+             (that marker is what makes the refusal `base-url-runtime` rather \
+             than a silent non-match) for {literal}: {slots:?}"
+        );
+        assert!(
+            !slots.contains_key(PATH_SLOT),
+            "no static path is guessed from a composed one: {slots:?}"
+        );
+        assert_eq!(
+            crate::resolve::http_client_call::classify_client_call(slots),
+            Err(crate::resolve::http_client_call::ClientCallRefusal::BaseUrlRuntime),
+            "and the interpreter's reason is base-url-runtime for {literal}"
+        );
+    }
+}
+
+/// FR-WS-08 shared negative case 3 for **Kotlin**, pinned at slot level — and
+/// the relative-literal case beside it, which refuses for a *different* reason.
+///
+/// The refs-level tests prove only that both emit nothing, so they cannot show
+/// that the two carry distinct coverage reasons. Case 3's whole point is the
+/// distinct reason, so it is asserted where the reason exists: the query hands
+/// over a **static** `path` slot, and the refusal comes from classifying it, not
+/// from failing to match.
+#[test]
+#[cfg(feature = "lang-kotlin")]
+fn a_non_normalizing_kotlin_path_reaches_the_interpreter_as_a_static_path() {
+    use crate::resolve::http_client_call::{
+        classify_client_call, ClientCallRefusal, DYNAMIC_PATH_SLOT, PATH_SLOT,
+    };
+
+    for (literal, refusal) in [
+        ("/files/**", ClientCallRefusal::PathNotComposed),
+        ("users/me", ClientCallRefusal::BaseUrlRuntime),
+    ] {
+        let source = format!(
+            r#"package client
+
+import org.springframework.web.client.RestClient
+
+class Calls(private val restClient: RestClient) {{
+    fun fetch(): String =
+        restClient.get().uri("{literal}").retrieve().body(String::class.java)
+}}
+"#
+        );
+        let sites = invocation_sites("kt", &source);
         assert_eq!(sites.len(), 1, "one site reaches the interpreter for {literal}");
         let slots = &sites[0].slots;
         assert_eq!(
