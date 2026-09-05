@@ -269,7 +269,19 @@
 ;
 ;    (c) is why this appears as four near-identical branches: the position is the
 ;    parent, and a query can only state a parent positively.
-[
+;
+;    The whole alternation and its two predicates are wrapped in ONE outer
+;    `(...)`. That grouping is load-bearing, not cosmetic: a predicate written at
+;    column 0 after a closing `]` starts a NEW pattern as far as tree-sitter's
+;    parser is concerned, so it constrains nothing. Without the wrapper both
+;    guards below silently detach — verified: `RequestPredicates.GET("/users")`
+;    (a route REGISTRATION), `Paths.get("/etc/hosts")` (a filesystem path) and
+;    `restTemplate.delete("/carts/$id")` (a runtime-composed template) were all
+;    captured as outbound calls, which is the exact NFR-RA-05 fabrication this
+;    file exists to prevent. Pinned by
+;    `a_class_qualified_receiver_is_never_captured` and
+;    `an_interpolated_path_on_the_receiver_method_idiom_emits_no_reference`.
+([
   ; `restTemplate.delete("/carts/{id}")` as a statement in a block.
   (block
     (call_expression
@@ -287,7 +299,7 @@
           .)
         .)
       .))
-  ; `fun drop(id: String) = restTemplate.delete("/carts/$id")` — expression body.
+  ; `fun drop(id: String) = restTemplate.delete("/carts/{id}")` — expression body.
   (function_body
     (call_expression
       (navigation_expression
@@ -340,9 +352,9 @@
           .)
         .)
       .))
-]
-(#match? @_recv "^[a-z_]")
-(#not-match? @invoke.http.arg "[$]")
+ ]
+ (#match? @_recv "^[a-z_]")
+ (#not-match? @invoke.http.arg "[$]"))
 
 ; ── Stated coverage ceilings (ADR-54: recorded, never worked around) ────────
 ;
