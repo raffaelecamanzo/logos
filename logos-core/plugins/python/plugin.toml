@@ -15,7 +15,7 @@ module_separator = "."
 # against the compiled grammar (FR-PL-03, NFR-PC-03).
 abi_version = 15
 
-capabilities = ["symbols", "references", "frameworks"]
+capabilities = ["symbols", "references", "frameworks", "invocations"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # Anonymous-token kinds in the Python grammar: branching keywords, loop
@@ -42,10 +42,34 @@ test_convention = "python-test"
 # (FR-FW-04 ledger-gated candidacy).
 framework_detectors = ["fastapi", "django"]
 
+# Canonical reference prefixes whose presence in a file's ledger makes the file
+# an outbound **HTTP client-call** candidate (S-344, CR-108, FR-WS-08) — the
+# consumer-side twin of `framework_detectors`. FR-WS-08's normative Python row
+# is `requests` and `httpx`, both genuine import module names (`import
+# requests`, `import httpx`) — canonicalised by `references.scm`'s `@ref.import`
+# capture into exactly these ledger targets — so, unlike TypeScript's `fetch`
+# row, neither is a bare-identifier detector and the gate stays independent of
+# the calls this arm itself captures (see `extract::capture_http_client_call_arm`
+# for the general rule this row does NOT need the compensating scope for).
+#
+# `queries/invocations.scm` still anchors every pattern to a named client
+# rather than shipping Rust's broad `<receiver>.<method>(<arg>)` anchor — a
+# defensive choice this row does not oblige, made because FastAPI/Flask's own
+# route-registration API is syntactically identical to a client call. See that
+# file's header for the full rationale and its test pins.
+http_client_detectors = ["requests", "httpx"]
+
 [queries]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"
 frameworks = "queries/frameworks.scm"
+# Outbound HTTP client-call arm (S-344, CR-108, FR-WS-08): `requests`/`httpx`
+# module-level free functions and the `Session`/`Client` receiver idiom,
+# including the inline `httpx.Client().get(…)` construction-and-call chain and
+# an `await`-wrapped async client call. Anchors only — the HTTP-verb and
+# static-literal decisions stay in the generic dispatch and
+# `resolve::http_client_call`.
+invocations = "queries/invocations.scm"
 # Captured `@fw.route.method` text → HTTP method (the declarative framework
 # contract, S-015). FastAPI decorator names map to their verb; Django URLconf
 # registrations (`path`/`re_path`) carry no verb, so they map to ANY.
