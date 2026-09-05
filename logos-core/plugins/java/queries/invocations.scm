@@ -60,11 +60,13 @@
   arguments: (argument_list
     .
     (method_invocation
+      object: (identifier) @_uri_type
       name: (identifier) @_create
       arguments: (argument_list
         .
         (string_literal) @invoke.http.arg)))
   (#eq? @_uri_ctor "uri")
+  (#eq? @_uri_type "URI")
   (#eq? @_create "create"))
 
 ; 3. `uri`-then-verb with the path wrapped in `URI.create(…)` — the canonical
@@ -78,55 +80,94 @@
     arguments: (argument_list
       .
       (method_invocation
+        object: (identifier) @_uri_type_outer
         name: (identifier) @_create_outer
         arguments: (argument_list
           .
           (string_literal) @invoke.http.arg))))
   name: (identifier) @invoke.http.method
   (#eq? @_uri_outer "uri")
+  (#eq? @_uri_type_outer "URI")
   (#eq? @_create_outer "create"))
 
-; 4. The plain receiver-method idiom, identical to the Rust arm's single pattern:
+; 4. The plain receiver-method idiom — the Rust arm's single pattern, ported:
 ;      restTemplate.delete("/carts/{id}")
 ;      restTemplate.put("/carts/{id}", body)
-;      anyClientWrapper.get("/health")
-;    Broad by design — the HTTP-verb check and the static-literal check narrow it
-;    in code, and the file-level ledger gate (`http_client_crates`) keeps it from
-;    ever firing outside a real HTTP-client file (FR-WS-08 negative case 1).
+;      this.anyClientWrapper.get("/health")
+;
+;    A **receiver is required**, and its name must start lower-case. Java's
+;    `method_invocation` makes `object:` optional, so an unconstrained pattern
+;    also matches the receiver-less and class-qualified static-import idioms that
+;    dominate Java routing and test DSLs — and those are not outbound calls at
+;    all. Two of them invert direction outright, recording a *provider* route
+;    declaration as an *outbound* call and (via the `invocation` intake) seeding a
+;    false app-wide reachability root:
+;
+;      RouterFunctions.route(GET("/users"), h)   ; a route DECLARATION
+;      RequestPredicates.GET("/users")           ; the same, qualified
+;      mockMvc.perform(get("/api/users"))        ; MockMvcRequestBuilders
+;      stubFor(get("/api/users").willReturn(ok)) ; WireMock
+;      rest("/api").get("/{id}")                 ; Apache Camel route DSL
+;
+;    None is stopped by the other three guards: the file-level ledger gate is a
+;    co-locator here (a client test stubs the downstream it calls; a WebFlux BFF
+;    holds both a WebClient and functional routes), `is_http_method` is
+;    case-insensitive so the DSL's `GET(...)` passes, and the literals are
+;    absolute and normalize cleanly. Requiring a lower-case-initial receiver —
+;    a variable or field, never a class — refuses all five (NFR-RA-05: fabricating
+;    an edge is far worse than missing one). The cost is a stated ceiling: a
+;    chained receiver (`getClient().get("/p")`) is not captured.
 (method_invocation
+  object: (identifier) @_recv
   name: (identifier) @invoke.http.method
   arguments: (argument_list
     .
-    (_) @invoke.http.arg))
+    (_) @invoke.http.arg)
+  (#match? @_recv "^[a-z_$]"))
+
+; 4b. The same idiom through a field access — `this.restTemplate.delete("/p")`,
+;     the ordinary Spring injected-field shape, whose `object:` is a
+;     `field_access` rather than a bare identifier.
+(method_invocation
+  object: (field_access
+    field: (identifier) @_recv_field)
+  name: (identifier) @invoke.http.method
+  arguments: (argument_list
+    .
+    (_) @invoke.http.arg)
+  (#match? @_recv_field "^[a-z_$]"))
 
 ; ── Stated coverage ceilings (ADR-54: recorded, never worked around) ─────────
 ;
-; These Java idioms are NOT captured, because the arm's `@invoke.http.method`
-; slot needs a node whose *text* is literally an HTTP verb, and they encode the
-; verb somewhere a query cannot rewrite:
+; NOT captured. Each one is asserted as **zero** in
+; logos-core/tests/java_http_client_call.rs §3 — the tests are the enforcement,
+; this list is only the index, so a ceiling cannot quietly become a lie:
 ;
-;   * `RestTemplate`'s verb-suffixed methods — `getForObject("/p", X.class)`,
-;     `getForEntity`, `postForObject`, `postForEntity`, `postForLocation`,
-;     `patchForObject`, `headForHeaders`, `optionsForAllow`. The captured
-;     identifier reads `getForObject`, which is not an HTTP verb, so the generic
-;     dispatch drops the site. (`put`/`delete` ARE bare verbs and are captured by
-;     pattern 4.)
-;   * `RestTemplate.exchange("/p", HttpMethod.GET, …)` — the verb is a *second*
-;     argument, and the arm's vocabulary reads only the first.
-;   * OpenFeign `@FeignClient` interfaces — the verb is an annotation name
-;     (`@GetMapping`) on a `method_declaration` with no call-site receiver at
-;     all; there is no `method_invocation` to anchor on. Parse-tree evidence in
-;     the S-341 implementation notes.
-;   * `HttpRequest.newBuilder().uri(…).header(…).GET()` — an intervening builder
-;     call separates the two links patterns 2/3 require, and
-;     `HttpRequest.newBuilder(URI.create("/p"))` carries no verb link at all.
-;   * OkHttp `new Request.Builder().url("/p").get()` — outside FR-WS-08's
-;     normative Java row.
+;   * `RestTemplate`'s verb-suffixed methods (`getForObject`, `getForEntity`,
+;     `postForObject`, `postForEntity`, `postForLocation`, `patchForObject`,
+;     `headForHeaders`, `optionsForAllow`) and `exchange`. (`put`/`delete` ARE
+;     bare verbs and ARE captured, by pattern 4.)
+;   * OpenFeign `@FeignClient` interfaces.
+;   * A JDK builder whose `.uri(…)` and verb links are separated, and
+;     `HttpRequest.newBuilder(URI.create("/p"))`, which has no verb link.
+;   * A Java text block (`"""…"""`) path literal — statically present, but
+;     `static_string_literal` does not recognise `multiline_string_fragment`.
+;   * A chained receiver (`getClient().get("/p")`), by pattern 4's receiver rule.
+;   * OkHttp and Apache HttpClient — outside FR-WS-08's normative Java row.
 ;
-; Lifting the first three needs a descriptor-level method-alias table (a
-; `[framework_methods]`-style `getForObject → GET` / `GetMapping → GET` map read
-; by `collect_invocation_sites`) — a capture-vocabulary widening, deliberately
-; deferred rather than invented here (CR-108 CRA-05).
+; The first two share one root cause: the arm's `@invoke.http.method` slot needs
+; a node whose *text* is literally an HTTP verb, and these encode it in a method
+; name (`getForObject`) or an annotation name (`@GetMapping`). Lifting them needs
+; a descriptor-level method-alias table (a `[framework_methods]`-style
+; `getForObject → GET` map read by `collect_invocation_sites`) — a
+; capture-vocabulary widening, deliberately deferred rather than invented here
+; (CR-108 CRA-05). Parse-tree evidence in the S-341 implementation notes.
+;
+; One ceiling is an OVER-capture, not an under-capture: the ledger gate is
+; file-grained, so a route-shaped collection call inside a genuine client file
+; (`perms.get("/admin/users")`) still captures. Inherited from the Rust arm and
+; likewise pinned by a test; no query can separate it from `client.get(…)`
+; without receiver typing.
 ;
 ; Like every capability query this file is droppable-on-disk: a copy at
 ; `.logos/plugins/java/queries/invocations.scm` shadows it without a rebuild

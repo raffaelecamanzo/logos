@@ -33,7 +33,7 @@ use std::fs;
 use logos_core::Engine;
 
 /// The `import`s that make a file a client-call candidate under the arm's
-/// ledger gate (`resolve::http_client_call::http_client_crates`) — the
+/// ledger gate (this plugin's own `http_client_detectors` descriptor rows) — the
 /// consumer-side twin of [FR-FW-04]'s framework candidacy. Prepended to every
 /// positive fixture; deliberately **absent** from the negative-case-1 fixture.
 const CLIENT_IMPORTS: &str = r#"
@@ -208,6 +208,42 @@ public class Calls {
     );
 }
 
+/// **Stated over-capture ceiling** — the ledger gate is *file*-grained, so the
+/// negative case above holds only across files. Inside a file that already
+/// references a client package, a same-shaped collection call with a
+/// route-shaped key still captures.
+///
+/// Inherited verbatim from the Rust arm, whose `HTTP_METHODS` rustdoc already
+/// records it ("a genuine HTTP-client file that also does an incidental
+/// `/`-keyed collection `.get` is a documented accuracy ceiling") — no query
+/// can distinguish `perms.get("/admin/users")` from `client.get("/admin/users")`
+/// without receiver typing. Pinned here rather than left to prose so that
+/// narrowing it later is a deliberate change, and so a reader of the test above
+/// cannot mistake the file-level gate for a general guarantee.
+///
+/// This is the consumer-side twin of the provider-side false positives
+/// [S-350](../../docs/planning/journal.md) removed; whether to close it is a
+/// sprint-review decision, recorded in the S-341 implementation notes.
+#[test]
+fn a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling() {
+    assert_eq!(
+        client_calls(
+            r#"
+public class Calls {
+    private RestClient restClient;
+    private java.util.Map<String, String> perms;
+    String notACall() {
+        return perms.get("/admin/users");
+    }
+}
+"#
+        ),
+        ["GET /admin/users"],
+        "file-grained gate: a route-shaped collection key inside a client file \
+         is still captured — the documented ADR-54 accuracy ceiling"
+    );
+}
+
 /// Shared negative case **2** — `base-url-runtime`. A bare-variable path and a
 /// base-URL-composed one each emit **no** reference. The classification itself
 /// is generic and already fixture-pinned in
@@ -230,12 +266,54 @@ public class Calls {
     String relative() {
         return restClient.get().uri("users/me").retrieve().body(String.class);
     }
+    String propertyPlaceholder() {
+        return restClient.get().uri("${users.service.url}/users").retrieve().body(String.class);
+    }
+    String builderLambda() {
+        return restClient.get().uri(b -> b.path("/users").build()).retrieve().body(String.class);
+    }
+    String helperCall(String id) {
+        return restClient.get().uri(buildUserUrl(id)).retrieve().body(String.class);
+    }
 }
 "#
         )
         .is_empty(),
-        "a bare variable, a concatenation, and a relative literal are each \
+        "a bare variable, a concatenation, a relative literal, a `$` \
+         placeholder literal, a builder lambda and a helper-method call are \
+         each \
          base-url-runtime — no reference, no ledger entry, no approximate bind"
+    );
+}
+
+/// The three shapes above are not hypothetical: they are what the real
+/// `pec-services` estate is made of. Measured across its 2 447 Java files,
+/// **0 of 124** `.uri(…)` arguments is a string literal of any kind — 68 are
+/// bare variables or constant fields, 39 are helper-method calls and 13 are
+/// builder lambdas. Pinning the dominant shapes here is what stops a later
+/// story "improving" one of them into a fabricated bind ([ADR-54] keeps
+/// base-URL composition out of scope precisely because composing it would be
+/// fabrication).
+///
+/// An absolute literal carrying a `${…}` segment takes the *other* refusal
+/// path — it is absolute, so it reaches the template normalizer and is refused
+/// as `path-not-composed` rather than `base-url-runtime`. Both refuse; the
+/// distinction matters only to the coverage vocabulary.
+#[test]
+fn an_interpolated_segment_in_an_absolute_path_is_also_refused() {
+    assert!(
+        client_calls(
+            r#"
+public class Calls {
+    private RestClient restClient;
+    String interpolatedSegment() {
+        return restClient.get().uri("/api/${version}/users").retrieve().body(String.class);
+    }
+}
+"#
+        )
+        .is_empty(),
+        "an absolute literal whose segment is interpolated does not normalize"
     );
 }
 
@@ -256,6 +334,70 @@ public class Calls {
         )
         .is_empty(),
         "a catch-all template is honestly unbound, never approximately matched"
+    );
+}
+
+/// A receiver-less or class-qualified verb call is **never** an outbound call
+/// ([NFR-RA-05]). Java's `method_invocation` makes `object:` optional, so the
+/// plain receiver-method pattern would otherwise match the static-import idioms
+/// that dominate Java routing and test DSLs — inside a file that passes the
+/// ledger gate, which these routinely do (a client test stubs the downstream it
+/// calls; a WebFlux BFF holds both a `WebClient` and functional routes).
+///
+/// Two of these invert direction outright: `RouterFunctions`/`RequestPredicates`
+/// declare a **provider** route, so capturing them would record a service as
+/// calling its own endpoint and — via the `invocation` intake — seed a false
+/// app-wide reachability root ([FR-WS-12]).
+#[test]
+fn receiver_less_and_class_qualified_verb_calls_are_never_captured() {
+    for (label, body) in [
+        (
+            "RouterFunctions route declaration (a provider, not a call)",
+            r#"Object routes() { return RouterFunctions.route(GET("/users"), handler::all); }"#,
+        ),
+        (
+            "RequestPredicates, class-qualified",
+            r#"Object routes() { return route(RequestPredicates.GET("/users"), handler::all); }"#,
+        ),
+        (
+            "MockMvcRequestBuilders static import",
+            r#"void t() throws Exception { mockMvc.perform(get("/api/users")); }"#,
+        ),
+        (
+            "WireMock stubFor",
+            r#"void t() { stubFor(get("/api/users").willReturn(ok())); }"#,
+        ),
+        (
+            "Apache Camel rest DSL (a chained, non-identifier receiver)",
+            r#"void t() { rest("/api").get("/{id}").to("direct:x"); }"#,
+        ),
+    ] {
+        assert!(
+            client_calls(&format!(
+                "public class Calls {{ private RestClient restClient; {body} }}"
+            ))
+            .is_empty(),
+            "{label} must emit no outbound call"
+        );
+    }
+}
+
+/// `URI.create(…)` is anchored on its **receiver type**, so an unrelated
+/// `create` factory does not smuggle a path into the JDK-builder patterns.
+#[test]
+fn only_uri_create_unwraps_a_builder_path() {
+    assert!(
+        client_calls(
+            r#"
+public class Calls {
+    HttpRequest a() {
+        return HttpRequest.newBuilder().GET().uri(MyFactory.create("/internal/{id}"));
+    }
+}
+"#
+        )
+        .is_empty(),
+        "`MyFactory.create(…)` is not `URI.create(…)` — no path is unwrapped"
     );
 }
 
@@ -289,6 +431,25 @@ public class Calls {
         "`getForObject` is not an HTTP verb and `exchange` carries its verb in a \
          second argument — both need a descriptor-level method-alias table the \
          arm does not have (CR-108 CRA-05), so they stay honestly uncaptured"
+    );
+}
+
+/// **Ceiling.** A Java *text block* (`"""…"""`) path literal is statically
+/// present but not captured: `static_string_literal` accepts only
+/// `string_content` / `string_fragment` / `escape_sequence` children, and a text
+/// block's `multiline_string_fragment` falls through to the dynamic branch. The
+/// site is therefore refused as `base-url-runtime` — an honest refusal, but for
+/// the wrong stated reason, since the path is fully static. Under-capture is
+/// safe ([NFR-RA-05]); recorded here so it is a known ceiling rather than a
+/// silent one.
+#[test]
+fn a_text_block_path_literal_is_a_stated_ceiling() {
+    assert!(
+        client_calls(
+            "\npublic class Calls {\n    private RestClient restClient;\n    String a() {\n        return restClient.get().uri(\"\"\"\n/users/{id}\"\"\").retrieve().body(String.class);\n    }\n}\n"
+        )
+        .is_empty(),
+        "a text-block literal is not recognised as a static string"
     );
 }
 
