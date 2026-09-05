@@ -81,12 +81,13 @@ fn client_call_targets(facts: &Facts) -> Vec<String> {
 
 // ── AC1: the four `Async`-suffixed verbs ────────────────────────────────────
 
-/// `GetAsync`, `PostAsync`, `PutAsync` and `DeleteAsync` each yield exactly one
-/// reference with the `Async` suffix stripped and the verb upper-cased — the
-/// whole point of the `[invocation_methods]` normalizer, since `getasync` is not
-/// one of `extract::is_http_method`'s bare verbs.
+/// The AC's four verbs (`GetAsync`, `PostAsync`, `PutAsync`, `DeleteAsync`)
+/// plus `PatchAsync` each yield exactly one reference with the `Async` suffix
+/// stripped and the verb upper-cased — the whole point of the
+/// `[invocation_methods]` normalizer, since `GetAsync` is not one of
+/// `extract::is_http_method`'s bare verbs.
 #[test]
-fn the_four_async_suffixed_verbs_each_capture_with_the_suffix_stripped() {
+fn the_async_suffixed_verbs_each_capture_with_the_suffix_stripped() {
     for (call, expected) in [
         (r#"client.GetAsync("/users");"#, "GET /users"),
         (r#"client.PostAsync("/users", content);"#, "POST /users"),
@@ -117,16 +118,24 @@ fn an_awaited_and_bound_call_captures_identically() {
     assert_eq!(client_call_targets(&facts), vec!["GET /users".to_string()]);
 }
 
-/// The `[invocation_methods]` lookup is case-insensitive, so the descriptor's
-/// source-faithful `GetAsync` row is the same row as `getasync` — the mapping the
-/// story's acceptance criterion names.
+/// The `[invocation_methods]` lookup is an EXACT match, like its provider-side
+/// sibling `[framework_methods]` (`resolve::framework`'s `methods.get(...)`).
+/// C# is case-sensitive, so a row spells the token exactly as the API does and
+/// there is no case variation to absorb — a spelling that is not a row captures
+/// nothing rather than being folded into one.
 #[test]
-fn the_normalizer_lookup_is_case_insensitive() {
-    let facts = extract_cs(&client_file(r#"        client.getasync("/users");"#));
+fn the_normalizer_lookup_is_an_exact_match() {
+    // Not compilable C# — `HttpClient` exposes no `getasync` — which is the
+    // point: the table is not a fuzzy matcher, and the positive control proves
+    // the file was scanned.
+    let facts = extract_cs(&client_file(
+        "        client.getasync(\"/lower\");\n\
+         \x20       client.GetAsync(\"/users\");",
+    ));
     assert_eq!(
         client_call_targets(&facts),
         vec!["GET /users".to_string()],
-        "`getasync` and `GetAsync` are one row"
+        "only the exact `GetAsync` row resolves"
     );
 }
 
@@ -170,6 +179,88 @@ fn verbatim_and_raw_string_paths_are_static_literals() {
         client_call_targets(&raw),
         vec!["GET /users".to_string()],
         "a raw literal's `\"\"\"` fences are delimiters, not content and not dynamism"
+    );
+}
+
+/// The C# twin of `go_invocations.rs::a_path_literal_ending_in_a_trimmed_character_is_not_corrupted`,
+/// and the language where it actually bites: `verbatim_string_literal` is a LEAF
+/// (no named children), so `@"…"` is the one realistic C# path spelling that
+/// takes `static_string_literal`'s no-children fallback — the branch whose trim
+/// set this story extended. A greedy trim silently turned `@"/tag/#"` into
+/// `/tag/`, a WRONG template rather than an absent one, which could bind a real
+/// `/tag/` route ([NFR-RA-05]).
+///
+/// Both spellings of the same path must agree.
+#[test]
+fn a_verbatim_path_ending_in_a_trimmed_character_is_not_corrupted() {
+    let verbatim = extract_cs(&client_file(r#"        client.GetAsync(@"/tag/#");"#));
+    assert_eq!(
+        client_call_targets(&verbatim),
+        vec!["GET /tag/#".to_string()],
+        "the trailing `#` survives the fallback's unwrap — a trimmed path would \
+         be a different route"
+    );
+
+    let plain = extract_cs(&client_file(r#"        client.GetAsync("/tag/#");"#));
+    assert_eq!(
+        client_call_targets(&plain),
+        client_call_targets(&verbatim),
+        "the verbatim and plain spellings of one path must not disagree"
+    );
+}
+
+/// **Every declared `[invocation_methods]` row is exercised.** The table is
+/// declarative data, so both typo classes fail SILENTLY: a mistyped key
+/// (`GetStrngAsync`) means those calls are never captured, and a mistyped value
+/// (`"GTE"`) is dropped by `is_http_method` — the behaviour `plugin.toml` and
+/// `PluginManifest::invocation_methods` both document and nothing asserted.
+///
+/// Driven off the loaded descriptor rather than a hardcoded list, so a row added
+/// without a fixture fails here rather than shipping untested.
+#[test]
+fn every_declared_invocation_method_row_captures_its_verb() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+    let table = reg
+        .for_extension("cs")
+        .expect("c-sharp grammar")
+        .semantics()
+        .invocation_methods
+        .clone();
+    assert!(!table.is_empty(), "C# declares the table this story added");
+
+    for (token, verb) in &table {
+        // A dotted key is a named constant in the `HttpRequestMessage`
+        // constructor; a bare key is a method name.
+        let call = if token.contains('.') {
+            format!("        client.SendAsync(new HttpRequestMessage({token}, \"/probe\"));")
+        } else {
+            format!("        client.{token}(\"/probe\");")
+        };
+        let facts = extract_cs(&client_file(&call));
+        assert_eq!(
+            client_call_targets(&facts),
+            vec![format!("{verb} /probe")],
+            "row `{token} = \"{verb}\"` must capture; a key or value typo is \
+             otherwise silent"
+        );
+    }
+}
+
+/// `client?.GetAsync("/users")` — the null-conditional receiver is idiomatic C#
+/// and parses as a `member_binding_expression`, a different node kind from the
+/// `member_access_expression` the main pattern anchors on. Its own pattern, so
+/// the shape is captured rather than silently missed.
+#[test]
+fn a_null_conditional_receiver_captures_identically() {
+    let facts = extract_cs(&client_file(
+        "        client?.GetAsync(\"/users\");\n\
+         \x20       client?.GetFromJsonAsync<User>(\"/orders\");",
+    ));
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /orders".to_string(), "GET /users".to_string()],
+        "both null-conditional spellings capture"
     );
 }
 
@@ -218,11 +309,14 @@ fn the_split_request_then_send_spelling_captures_through_the_same_anchor() {
 #[test]
 fn a_same_shaped_construction_of_another_type_is_not_captured() {
     let facts = extract_cs(&client_file(
-        r#"        var entry = new CacheEntry(HttpMethod.Get, "/users");"#,
+        "        var entry = new CacheEntry(HttpMethod.Get, \"/users\");\n\
+         \x20       client.GetAsync(\"/probe\");",
     ));
-    assert!(
-        client_call_targets(&facts).is_empty(),
-        "only `HttpRequestMessage` is an outbound request: {:?}",
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /probe".to_string()],
+        "only `HttpRequestMessage` is an outbound request, and the file was \
+         genuinely scanned: {:?}",
         client_call_targets(&facts)
     );
 }
@@ -235,11 +329,14 @@ fn a_same_shaped_construction_of_another_type_is_not_captured() {
 #[test]
 fn a_literal_verb_http_method_construction_is_a_stated_ceiling_not_a_capture() {
     let facts = extract_cs(&client_file(
-        r#"        client.SendAsync(new HttpRequestMessage(new HttpMethod("GET"), "/users"));"#,
+        "        client.SendAsync(new HttpRequestMessage(new HttpMethod(\"GET\"), \"/users\"));\n\
+         \x20       client.GetAsync(\"/probe\");",
     ));
-    assert!(
-        client_call_targets(&facts).is_empty(),
-        "honestly uncaptured rather than bought at the price of bare-verb rows: {:?}",
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /probe".to_string()],
+        "honestly uncaptured rather than bought at the price of bare-verb rows, \
+         and the file was genuinely scanned: {:?}",
         client_call_targets(&facts)
     );
 }
@@ -426,12 +523,16 @@ fn a_controller_verb_attribute_is_not_an_outbound_call() {
     let facts = extract_cs(
         "using System.Net.Http;\nusing Microsoft.AspNetCore.Mvc;\n\n\
          [ApiController]\npublic class UsersController\n{\n\
+         \x20   private HttpClient client;\n\
          \x20   [HttpGet(\"/users\")]\n    public void List() {}\n\
-         \x20   [HttpPost(\"/users\")]\n    public void Create() {}\n}\n",
+         \x20   [HttpPost(\"/users\")]\n    public void Create() {}\n\
+         \x20   public void Probe() { client.GetAsync(\"/probe\"); }\n}\n",
     );
-    assert!(
-        client_call_targets(&facts).is_empty(),
-        "a verb attribute is a provider declaration, not a call: {:?}",
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /probe".to_string()],
+        "a verb attribute is a provider declaration, not a call, and the file \
+         was genuinely scanned: {:?}",
         client_call_targets(&facts)
     );
 }
@@ -445,12 +546,19 @@ fn a_controller_verb_attribute_is_not_an_outbound_call() {
 /// depends on, and a future edit to `plugins/go/plugin.toml` should fail here
 /// with the reason rather than only there with a target mismatch.
 #[test]
-#[cfg(all(feature = "lang-go", feature = "lang-java", feature = "lang-rust"))]
+#[cfg(all(
+    feature = "lang-go",
+    feature = "lang-java",
+    feature = "lang-rust",
+    feature = "lang-typescript"
+))]
 fn only_c_sharp_declares_an_invocation_methods_table() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
 
-    for ext in ["go", "java", "rs"] {
+    // Every other language that ships `invocations` — each relies on the
+    // empty-table pass-through.
+    for ext in ["go", "java", "rs", "ts", "tsx"] {
         let plugin = reg.for_extension(ext).expect("grammar is compiled in");
         assert!(
             plugin.semantics().invocation_methods.is_empty(),
