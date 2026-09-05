@@ -362,9 +362,15 @@ pub struct MetricRegression {
 /// Architecture-rules compliance report (FR-GV-02).
 #[derive(Debug, Default, Serialize)]
 pub struct RulesReport {
-    /// `false` when any violation has `severity == "error"` — the `check`
-    /// exit-1 discriminator (FR-GV-03).
-    pub passed: bool,
+    /// `Some(false)` when any violation has `severity == "error"` — the
+    /// `check` exit-1 discriminator (FR-GV-03); `Some(true)` when nothing did.
+    /// `None` when no `rules.toml` contract was loaded and nothing else
+    /// (an always-on structural/admission fold-in, [FR-GV-18]/[FR-GV-20])
+    /// fired either — a verdict over an empty evaluated set is not a verdict
+    /// ([FR-GV-22], [NFR-CC-04]). The CLI's three-state `check` exit-code
+    /// discriminator: `Some(true)` → 0, `Some(false)` → 1, `None` → 4 (`4`
+    /// collapses to `0` under its `--allow-no-rules` opt-out).
+    pub passed: Option<bool>,
     /// Active rules evaluated: set constraints + layer ordering (when layers
     /// are declared) + one per boundary + one per forbidden-import + one per
     /// require-tested contract + one per require-documented contract.
@@ -380,6 +386,20 @@ pub struct RulesReport {
     pub freshness: String,
     /// Degradations — never an error.
     pub warnings: Vec<String>,
+}
+
+impl RulesReport {
+    /// The `check` exit-code projection (FR-GV-22 / FR-CL-03): 0/1/4,
+    /// collapsed to 0 by `allow_absent` for callers that have deliberately
+    /// authored no contract yet.
+    pub fn exit_code(&self, allow_absent: bool) -> i32 {
+        match self.passed {
+            Some(true) => 0,
+            Some(false) => 1,
+            None if allow_absent => 0,
+            None => 4,
+        }
+    }
 }
 
 /// Signal evolution over stored snapshots (FR-GV-06).
@@ -852,4 +872,25 @@ pub struct LanguageDescriptor {
 pub struct SkippedLanguage {
     pub name: String,
     pub reason: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`RulesReport::exit_code`]'s FR-GV-22 projection, in isolation from the
+    /// engine/CLI plumbing that otherwise only exercises it transitively: a
+    /// clean, loaded contract exits 0; a violation exits 1 whether or not a
+    /// contract was loaded (a real finding always wins over "absent"); no
+    /// contract and nothing else fired exits 4, collapsed to 0 by
+    /// `allow_absent` for callers that have deliberately authored none.
+    #[test]
+    fn rules_report_exit_code_projects_the_three_states() {
+        let report = |passed| RulesReport { passed, ..Default::default() };
+        assert_eq!(report(Some(true)).exit_code(false), 0);
+        assert_eq!(report(Some(false)).exit_code(false), 1);
+        assert_eq!(report(Some(false)).exit_code(true), 1);
+        assert_eq!(report(None).exit_code(false), 4);
+        assert_eq!(report(None).exit_code(true), 0);
+    }
 }

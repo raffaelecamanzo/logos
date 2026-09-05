@@ -2156,13 +2156,27 @@ pub(crate) fn check_rules(
         });
     }
 
+    // Honest "is a contract authored?" signal (NFR-CC-04): the empty contract
+    // that a missing default file compiles to carries the `ABSENT_RULES_HASH`
+    // sentinel; any loaded file hashes to its content.
+    let rules_present = compiled.hash != ABSENT_RULES_HASH;
+    let has_error = violations.iter().any(|v| v.severity == SEVERITY_ERROR);
+    // FR-GV-22 / NFR-CC-04: a verdict over an empty evaluated set is not a
+    // verdict. `rules_present` alone would misreport "nothing was evaluated"
+    // when an always-on fold-in (FR-GV-18 structural / FR-GV-20 admission)
+    // fired anyway, so a real violation still yields `Some(false)` even with
+    // no contract loaded — only the truly empty case (no contract, nothing
+    // fired) reports `None`.
+    let passed = if rules_present || has_error {
+        Some(!has_error)
+    } else {
+        None
+    };
+
     Ok(RulesReport {
-        passed: !violations.iter().any(|v| v.severity == SEVERITY_ERROR),
+        passed,
         checked_rules,
-        // Honest "is a contract authored?" signal (NFR-CC-04): the empty
-        // contract that a missing default file compiles to carries the
-        // `ABSENT_RULES_HASH` sentinel; any loaded file hashes to its content.
-        rules_present: compiled.hash != ABSENT_RULES_HASH,
+        rules_present,
         violations,
         freshness: fresh.line(),
         warnings: fresh.warnings,

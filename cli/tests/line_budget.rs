@@ -239,7 +239,19 @@ fn adapter_lines() -> usize {
 /// the core a `eprintln!` on a path that has no terminal in production. The
 /// budget is not worth buying with a worse seam.
 ///
-/// **The budget is now exactly full at 825.** The next adapter change needs a
+/// **S-352/CR-112 825→841** for the `check` absent-contract exit state
+/// (FR-GV-22): the `--allow-no-rules` opt-out flag declaration (+2, one
+/// `#[arg(long)]` bool) and the `Output::report_check` chokepoint (+13) that
+/// replaces `check`'s use of the shared `report_gate` — its verdict is a
+/// tri-state `Option<bool>`, not the plain bool `report_gate`'s callers
+/// supply, and its human rendering must name the absent-contract condition
+/// instead of the pretty-printed report. Both are irreducible surface: the
+/// exit-code projection itself lives in `logos_core` as
+/// `RulesReport::exit_code` (verified by `logos check`), so nothing here is a
+/// duplication waiting to be deleted — the adapter only picks the flag and
+/// the rendering. Recorded, not laundered (CR-084 §6).
+///
+/// **The budget is now exactly full at 841.** The next adapter change needs a
 /// real reduction first — and, per the S-321 note above, the next author should
 /// expect to find a duplication of core logic to delete, not surface to
 /// relocate. Relocating surface into the core has been tried twice here and was
@@ -248,8 +260,8 @@ fn adapter_lines() -> usize {
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 825,
-        "cli adapter exceeds the 825 production-LOC budget (NFR-MA-02): \
+        lines <= 841,
+        "cli adapter exceeds the 841 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

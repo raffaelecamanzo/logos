@@ -109,8 +109,9 @@ fn check_rules_flags_the_layered_violation_and_rerun_is_identical() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     let report = engine.check_rules(None, true).expect("check_rules runs");
-    assert!(
-        !report.passed,
+    assert_eq!(
+        report.passed,
+        Some(false),
         "an error violation must fail the check (FR-GV-03 exit-1 path)"
     );
     assert!(report.checked_rules >= 2, "ordering + boundary are active");
@@ -151,11 +152,14 @@ fn check_rules_flags_the_layered_violation_and_rerun_is_identical() {
 }
 
 #[test]
-fn a_clean_project_passes_check_rules() {
+fn a_project_with_no_contract_reports_no_verdict() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let report = engine.check_rules(None, true).expect("check_rules runs");
-    assert!(report.passed, "no contract → nothing violated");
+    assert_eq!(
+        report.passed, None,
+        "no contract, nothing else fired → no verdict, not a clean pass (FR-GV-22)"
+    );
     assert_eq!(
         report.checked_rules, 0,
         "no active rules without rules.toml"
@@ -226,9 +230,10 @@ fn structural_drift_hard_fails_the_gate_and_check_rules_even_when_the_signal_hol
     assert!(clean_gate.passed, "clean graph passes: {}", clean_gate.message);
     assert!(clean_gate.structural_faults.is_empty());
     let baseline_signal = clean_gate.signal;
-    assert!(
+    assert_eq!(
         engine.check_rules(None, false).expect("check_rules").passed,
-        "clean graph passes check_rules"
+        None,
+        "clean graph, no contract, nothing fired → no verdict yet (FR-GV-22)"
     );
     assert!(engine.doctor().expect("doctor").ok);
 
@@ -253,9 +258,11 @@ fn structural_drift_hard_fails_the_gate_and_check_rules_even_when_the_signal_hol
         gate.structural_faults
     );
 
-    // check_rules exits 1 with an error-severity structural finding (FR-GV-02).
+    // check_rules exits 1 with an error-severity structural finding (FR-GV-02),
+    // even with no rules.toml loaded — the always-on fold-in still yields a
+    // real verdict (FR-GV-22: not an empty evaluated set).
     let check = engine.check_rules(None, false).expect("check_rules runs");
-    assert!(!check.passed, "structural drift fails check_rules");
+    assert_eq!(check.passed, Some(false), "structural drift fails check_rules");
     assert!(
         check.violations.iter().any(|v| {
             v.rule == "graph-structural-integrity" && v.severity == "error"
@@ -329,7 +336,11 @@ fn admission_drift_hard_fails_the_gate_check_rules_and_health_with_the_signal_un
     assert!(clean_gate.passed, "clean graph passes: {}", clean_gate.message);
     assert!(clean_gate.structural_faults.is_empty());
     let baseline_signal = clean_gate.signal;
-    assert!(engine.check_rules(None, false).expect("check_rules").passed);
+    assert_eq!(
+        engine.check_rules(None, false).expect("check_rules").passed,
+        None,
+        "clean graph, no contract, nothing fired → no verdict yet (FR-GV-22)"
+    );
     assert!(engine.doctor().expect("doctor").ok);
 
     let path = inject_unadmitted_file(tmp.path());
@@ -350,9 +361,10 @@ fn admission_drift_hard_fails_the_gate_check_rules_and_health_with_the_signal_un
         gate.structural_faults
     );
 
-    // check_rules exits 1 with a distinct error-severity admission finding.
+    // check_rules exits 1 with a distinct error-severity admission finding,
+    // even with no rules.toml loaded (FR-GV-22: not an empty evaluated set).
     let check = engine.check_rules(None, false).expect("check_rules runs");
-    assert!(!check.passed, "admission drift fails check_rules");
+    assert_eq!(check.passed, Some(false), "admission drift fails check_rules");
     assert!(
         check.violations.iter().any(|v| {
             v.rule == "graph-admission-drift" && v.severity == "error" && v.message.contains(path)
@@ -1047,8 +1059,9 @@ fn check_rules_enforces_a_structural_budget_and_relaxing_passes() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     let report = engine.check_rules(None, true).expect("check_rules runs");
-    assert!(
-        !report.passed,
+    assert_eq!(
+        report.passed,
+        Some(false),
         "a depth-5 function violates max_nesting_depth=4: {:?}",
         report.violations
     );
@@ -1068,8 +1081,9 @@ fn check_rules_enforces_a_structural_budget_and_relaxing_passes() {
         "[constraints]\nmax_nesting_depth = 10\n",
     );
     let relaxed = engine.check_rules(None, true).expect("check_rules runs");
-    assert!(
+    assert_eq!(
         relaxed.passed,
+        Some(true),
         "a relaxed budget admits the fixture: {:?}",
         relaxed.violations
     );
@@ -1514,8 +1528,9 @@ fn coupling_budget_flags_an_over_coupled_hub_and_rerun_is_identical() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     let report = engine.check_rules(None, true).expect("check_rules runs");
-    assert!(
-        !report.passed,
+    assert_eq!(
+        report.passed,
+        Some(false),
         "the over-coupled hub fails the check (exit 1)"
     );
     let hub = report
@@ -1571,7 +1586,7 @@ fn orphan_two() {}
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let report = engine.check_rules(None, true).expect("check_rules runs");
 
-    assert!(!report.passed, "two dead functions over max_dead = 1 fails");
+    assert_eq!(report.passed, Some(false), "two dead functions over max_dead = 1 fails");
     let dead = report
         .violations
         .iter()
@@ -1601,7 +1616,7 @@ fn budgets_are_orthogonal_to_the_metrics_gate() {
     let engine = Engine::start(with.path()).expect("engine starts");
     // The budgets fire here — but the metric signal must not move.
     let report = engine.check_rules(None, true).expect("check_rules runs");
-    assert!(!report.passed, "the budgets are active and flag the hub");
+    assert_eq!(report.passed, Some(false), "the budgets are active and flag the hub");
     let signal_with = engine.gate(None, false, true).expect("gate runs").signal;
 
     assert_eq!(
@@ -1650,8 +1665,9 @@ fn check_rules_flags_a_forbidden_import_and_materialises_one_edge() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     let report = engine.check_rules(None, true).expect("check_rules runs");
-    assert!(
-        !report.passed,
+    assert_eq!(
+        report.passed,
+        Some(false),
         "a forbidden import fails the check (FR-GV-03)"
     );
     assert!(
@@ -1743,8 +1759,9 @@ to   = \"src/db_*.rs\"
         "an import that misses the `to` glob is not flagged: {:?}",
         report.violations
     );
-    assert!(
+    assert_eq!(
         report.passed,
+        Some(true),
         "no other rule is active, so the check passes"
     );
 }
@@ -1819,8 +1836,9 @@ fn check_rules_flags_an_uncovered_exported_symbol_with_its_reason_and_caveat() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     let report = engine.check_rules(None, true).expect("check_rules runs");
-    assert!(
-        !report.passed,
+    assert_eq!(
+        report.passed,
+        Some(false),
         "an uncovered exported symbol fails the check (FR-GV-03)"
     );
     assert!(
@@ -2045,8 +2063,9 @@ fn check_rules_flags_an_undocumented_exported_symbol_with_its_reason() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     let report = engine.check_rules(None, true).expect("check_rules runs");
-    assert!(
-        !report.passed,
+    assert_eq!(
+        report.passed,
+        Some(false),
         "an undocumented exported symbol fails the check (FR-GV-03)"
     );
 
