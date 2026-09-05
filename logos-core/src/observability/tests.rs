@@ -1727,26 +1727,31 @@ fn the_cross_tab_splits_each_tool_by_dev_and_main_origin() {
 /// table: class × origin, straight out of `stats`.
 ///
 /// The fixture spans four of the five classes on both sides of the split, so a
-/// rollup that lost the class or the origin dimension collapses visibly.
+/// rollup that lost the class or the origin dimension collapses visibly — and
+/// one dev-pane navigation call **fails**, so the rollup's `ok_calls`
+/// accumulator is pinned separately from `calls`. Folding `calls` into both (the
+/// half-fix S-304's review caught on `watch_coverage_ingest`) would otherwise
+/// report a fabricated 100 % success rate forever ([NFR-CC-04]).
 #[test]
 fn the_class_breakdown_is_the_dogfood_table() {
     let mut conn = db::open_in_memory();
-    let on = |branch: &str, tool: &str| EventRecord {
+    let on = |branch: &str, tool: &str, ok: bool| EventRecord {
         at: NOW - 60,
         surface: "mcp",
         tool: tool.to_string(),
         duration_ms: 5,
-        ok: true,
+        ok,
         origin: branch.to_string(),
     };
     db::write_batch(
         &mut conn,
         &[
-            // Dev pane: two navigation calls, a session gate, a quality gate.
-            on("sprint-64-I2-S2", "context"),
-            on("sprint-64-I2-S2", "callers"),
-            on("sprint-64-I2-S2", "session_end"),
-            on("sprint-64-I2-S2", "check_rules"),
+            // Dev pane: two navigation calls (one failed), a session gate and a
+            // quality gate.
+            on("sprint-64-I2-S2", "context", true),
+            on("sprint-64-I2-S2", "callers", false),
+            on("sprint-64-I2-S2", "session_end", true),
+            on("sprint-64-I2-S2", "check_rules", true),
             // main: one navigation call and the indexing that fed it.
             record("search", 10, true, NOW - 60),
             record("sync", 20, true, NOW - 60),
@@ -1756,21 +1761,23 @@ fn the_class_breakdown_is_the_dogfood_table() {
 
     let info = stats_from(&conn, 7, NOW).unwrap();
 
-    let table: Vec<(&str, &str, u64)> = info
+    let table: Vec<(&str, &str, u64, u64)> = info
         .calls_by_class
         .iter()
-        .map(|c| (c.class.as_str(), c.origin.as_str(), c.calls))
+        .map(|c| (c.class.as_str(), c.origin.as_str(), c.calls, c.ok_calls))
         .collect();
     assert_eq!(
         table,
         vec![
-            ("engine-internal", "main", 1),
-            ("navigation", "dev", 2),
-            ("navigation", "main", 1),
-            ("quality-gate", "dev", 1),
-            ("session-gate", "dev", 1),
+            ("engine-internal", "main", 1, 1),
+            // Two dev-pane navigation calls, one of them successful — `ok_calls`
+            // accumulates from `ok_calls`, never from `calls`.
+            ("navigation", "dev", 2, 1),
+            ("navigation", "main", 1, 1),
+            ("quality-gate", "dev", 1, 1),
+            ("session-gate", "dev", 1, 1),
         ],
-        "class × origin, deterministically ordered (NFR-RA-06)"
+        "class × origin with an honest ok-rate, deterministically ordered (NFR-RA-06)"
     );
 
     // The rollup is exactly the cross-tab's rollup — same rows, same coverage.
