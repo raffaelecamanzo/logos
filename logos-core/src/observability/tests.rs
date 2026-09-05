@@ -1823,13 +1823,22 @@ fn a_window_past_retention_reports_the_window_it_actually_covers() {
     assert!(coverage.truncated_by_retention);
     let prose = coverage.notes.join(" ");
     assert!(
-        prose.contains("most recent 90 of the 365-day window"),
+        prose.contains("guaranteed only the most recent 90"),
         "the covered window is named, not merely flagged: {:?}",
         coverage.notes
     );
     assert!(
         prose.contains("reaches past raw retention"),
         "the divergence from the rest of the read-model is stated: {:?}",
+        coverage.notes
+    );
+    // …and named as a floor, because pruning is flush-triggered: a long-lived
+    // process may still hold older raw events, so the projections can cover more
+    // than the figure claims. Under-stating is the safe direction (NFR-CC-04),
+    // but the payload must not present a bound as a measurement.
+    assert!(
+        prose.contains("treat `covered_window_days` as a floor"),
+        "the figure is labelled a floor, not the measured coverage: {:?}",
         coverage.notes
     );
 

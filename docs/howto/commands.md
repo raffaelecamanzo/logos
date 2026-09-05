@@ -466,11 +466,18 @@ rolled-up days; the two projections above do not (see below).
 
 `attribution_coverage` states those limits in the payload rather than leaving
 them to this page: `raw_events_only` (always true — `daily_rollup` is keyed
-`(day, surface, tool)` and carries no `origin`), `requested_window_days` vs
-`covered_window_days` with `truncated_by_retention` (raw events are kept ~90
-days, so a 365-day request covers only the most recent 90 in these two
-projections), and `legacy_null_origin_folds_into_main`. `notes` carries the same
-limits as display-ready prose.
+`(day, surface, tool)` and carries no `origin`; `calls_by_origin` shares this
+limit, the totals and `activity_by_day` do not), `requested_window_days` vs
+`covered_window_days` with `truncated_by_retention`, and
+`legacy_null_origin_folds_into_main`. `notes` carries the same limits as
+display-ready prose.
+
+`covered_window_days` is a **guaranteed floor, not a measurement**: raw events
+are kept ~90 days, so a 365-day request is guaranteed only the most recent 90 in
+these projections — but pruning is flush-triggered rather than time-driven, so a
+long-lived `serve` process may still hold older raw events and cover more.
+Under-stating is deliberate; never read the figure as the coverage actually
+achieved.
 
 **Telemetry is repo-global and durable across worktrees.** The store lives at
 the **primary** repository's `.logos/telemetry.db`, resolved via

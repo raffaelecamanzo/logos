@@ -387,6 +387,15 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
 /// `daily_rollup`'s schema and the [FR-OB-08] migration — so this is a pure
 /// function of the requested window rather than something measured per query.
 ///
+/// `covered_window_days` is therefore a **guaranteed floor, not a measurement**.
+/// Pruning is flush-triggered ([`super::db::rollup_and_prune`] runs from the
+/// writer, not from a clock), so a long-lived process can still hold raw events
+/// older than the retention horizon and the projections then cover more than
+/// this claims. Under-stating is the safe direction ([NFR-CC-04]) and measuring
+/// instead would be worse: `MIN(at)` on a three-day-old store would report
+/// "covers 3 of 7 days", conflating how much history exists with how much of the
+/// window these projections are able to see.
+///
 /// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
 /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
@@ -396,11 +405,13 @@ pub(crate) fn attribution_coverage(window_days: u32) -> AttributionCoverage {
     let mut notes = vec![
         "`calls_by_tool_origin` and `calls_by_class` are computed from raw events only: \
          `daily_rollup` is keyed (day, surface, tool) and carries no origin column, so a \
-         rolled-up day is absent from both rather than mis-attributed."
+         rolled-up day is absent from both rather than mis-attributed. `calls_by_origin` \
+         shares this limit; the totals, `calls_by_tool` and `activity_by_day` do not."
             .to_string(),
         format!(
-            "Raw events are retained for about {} days, so these two projections cover the \
-             most recent {covered_window_days} of the {window_days}-day window.",
+            "Raw events are retained for about {} days, so these projections are guaranteed \
+             to cover only the most recent {} days of any window.",
+            super::db::RETENTION_DAYS,
             super::db::RETENTION_DAYS,
         ),
         "Events written before the origin stamp existed have origin IS NULL and fold into \
@@ -410,8 +421,10 @@ pub(crate) fn attribution_coverage(window_days: u32) -> AttributionCoverage {
     if truncated_by_retention {
         notes.push(format!(
             "The requested window reaches past raw retention: `calls_total`, `calls_by_tool` \
-             and `activity_by_day` cover all {window_days} days, the two attribution \
-             projections only {covered_window_days}.",
+             and `activity_by_day` cover all {window_days} days, while the raw-events-only \
+             projections are guaranteed only the most recent {covered_window_days}. They may \
+             cover more — pruning is flush-triggered, not time-driven — so treat \
+             `covered_window_days` as a floor.",
         ));
     }
     AttributionCoverage {

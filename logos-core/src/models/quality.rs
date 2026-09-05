@@ -888,13 +888,24 @@ pub struct AttributionCoverage {
     pub raw_events_only: bool,
     /// The window the caller asked for, echoing [`StatsInfo::window_days`].
     pub requested_window_days: u32,
-    /// The window the two projections actually cover: `requested_window_days`
-    /// capped at the raw-event retention horizon (~90 days, [NFR-OO-04]), past
-    /// which raw rows have been folded into `daily_rollup` and deleted.
+    /// The window the two projections are **guaranteed** to cover:
+    /// `requested_window_days` capped at the raw-event retention horizon
+    /// (~90 days, [NFR-OO-04]), past which raw rows become eligible to be folded
+    /// into `daily_rollup` and deleted.
+    ///
+    /// A floor, not a measurement. Pruning is flush-triggered rather than
+    /// time-driven, so a store that has not flushed recently still holds older
+    /// raw events and the projections then cover more than this says.
+    /// Under-stating is the safe direction ([NFR-CC-04]).
+    ///
+    /// [NFR-OO-04]: ../../../docs/specs/requirements/NFR-OO-04.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub covered_window_days: u32,
     /// `true` when `covered_window_days < requested_window_days` — the request
-    /// reached past retention and the attribution projections are narrower than
-    /// the rest of the read-model.
+    /// reached past the retention horizon, so the attribution projections are
+    /// guaranteed less of the window than the rest of the read-model. Like
+    /// `covered_window_days` this follows from the request, not from the data:
+    /// a store younger than the horizon may still have covered it in full.
     pub truncated_by_retention: bool,
     /// Always `true`: rows written before the [FR-OB-08] migration have
     /// `origin IS NULL` and fold into `"main"` via `COALESCE(origin,'main')`,
