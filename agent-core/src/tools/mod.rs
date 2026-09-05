@@ -80,9 +80,34 @@ where
     T: Send + 'static,
     F: FnOnce(&Engine) -> T + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || call(&engine))
+    tokio::task::spawn_blocking(move || in_chat_surface(|| call(&engine)))
         .await
         .map_err(|err| ToolCallError::Runtime(err.to_string()))
+}
+
+/// Attribute everything `call` emits to [`Surface::Chat`] ([FR-OB-10]).
+///
+/// This function — together with its twin in [`run_engine_result`] — is the
+/// **entire** chat-surface seam: the two places every agent tool reaches the
+/// engine through. Resolution therefore happens once per tool call at this
+/// adapter boundary, never inside a chokepoint, so the engine stays unaware the
+/// agent exists ([ADR-01]) and the hot path is unchanged ([NFR-OO-02]).
+///
+/// It must run *inside* the `spawn_blocking` closure, not around the `await`:
+/// [`logos_core::observability::in_surface`] scopes per thread, and the blocking
+/// pool is where the engine — and so the telemetry event — actually runs.
+///
+/// Without it the agent's queries carry the process surface, `web`, and are
+/// indistinguishable from a human browsing the dashboard. *"Logos's own agent
+/// navigated the graph N times"* and *"a developer did"* are different claims,
+/// and a figure that silently sums them answers neither ([NFR-CC-04]).
+///
+/// [FR-OB-10]: ../../../docs/specs/requirements/FR-OB-10.md
+/// [NFR-OO-02]: ../../../docs/specs/requirements/NFR-OO-02.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
+fn in_chat_surface<T>(call: impl FnOnce() -> T) -> T {
+    logos_core::observability::in_surface(logos_core::observability::Surface::Chat, call)
 }
 
 /// Run a **fallible** `Engine` read-model on the blocking pool (ADR-03).
@@ -96,7 +121,7 @@ where
     T: Send + 'static,
     F: FnOnce(&Engine) -> anyhow::Result<T> + Send + 'static,
 {
-    match tokio::task::spawn_blocking(move || call(&engine)).await {
+    match tokio::task::spawn_blocking(move || in_chat_surface(|| call(&engine))).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(err)) => Err(ToolCallError::Engine(err)),
         Err(err) => Err(ToolCallError::Runtime(err.to_string())),
@@ -197,4 +222,54 @@ pub fn source_toolset(sandbox: Arc<Sandbox>) -> ToolSet {
         .static_tool(source::Grep::new(sandbox.clone()))
         .static_tool(source::Glob::new(sandbox))
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use logos_core::observability::Surface;
+
+    /// Both engine bridges install the [`Surface::Chat`] boundary scope
+    /// ([FR-OB-10]), and they install it **inside** the blocking closure — where
+    /// the engine (and so the telemetry event) actually runs.
+    ///
+    /// Asserting it here rather than in `logos-core` is the point: the core
+    /// proves the scope *works*, this proves the chat agent *enters* it. The
+    /// probe closure stands in for a real tool body, which is exactly what these
+    /// bridges hand to the engine.
+    ///
+    /// [FR-OB-10]: ../../../docs/specs/requirements/FR-OB-10.md
+    #[tokio::test]
+    async fn both_engine_bridges_run_under_the_chat_surface() {
+        let dir = tempfile::tempdir().expect("temp project root");
+        let engine = Arc::new(Engine::open(dir.path()));
+
+        let seen = run_engine(engine.clone(), |_| {
+            logos_core::observability::current_surface_override()
+        })
+        .await
+        .expect("the infallible bridge completes");
+        assert_eq!(
+            seen,
+            Some(Surface::Chat),
+            "run_engine attributes the call to the chat surface"
+        );
+
+        let seen = run_engine_result(engine, |_| {
+            Ok(logos_core::observability::current_surface_override())
+        })
+        .await
+        .expect("the fallible bridge completes");
+        assert_eq!(
+            seen,
+            Some(Surface::Chat),
+            "run_engine_result attributes the call to the chat surface"
+        );
+
+        assert_eq!(
+            logos_core::observability::current_surface_override(),
+            None,
+            "and the scope does not leak back to the caller's thread"
+        );
+    }
 }

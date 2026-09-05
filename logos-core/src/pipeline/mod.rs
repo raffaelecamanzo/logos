@@ -78,6 +78,7 @@ use crate::models::pipeline::{
     AnnotationStats, DispatchStats, FrameworkStats, IndexResult, PhaseDurations, ResolutionStats,
     SyncResult,
 };
+use crate::observability::Tool;
 use crate::plugin::LanguageRegistry;
 use crate::runtime::Runtime;
 
@@ -146,12 +147,12 @@ pub fn index(
     // — the same measurement that reaches telemetry is handed back here, never
     // a parallel timing path (NFR-OO-01).
     let (candidates, discover_ms) = {
-        let (res, ms) = crate::observability::traced_timed("discover", || {
+        let (res, ms) = crate::observability::traced_timed(Tool::Discover, || {
             discover_candidates(root, config, registry, &mut warnings)
         });
         (res?, ms)
     };
-    let (loaded, load_ms) = crate::observability::traced_infallible_timed("load", || {
+    let (loaded, load_ms) = crate::observability::traced_infallible_timed(Tool::Load, || {
         load_files(runtime, &candidates, &mut warnings, &mut files_failed)
     });
 
@@ -648,7 +649,7 @@ pub fn sync(
     let ctx = SymbolContext::default();
     // Pass 1 over the dirty set — instrumented like the full-index path
     // (FR-OB-01: the three pipeline passes emit through the single seam).
-    let mut facts = crate::observability::traced_infallible("extract", || {
+    let mut facts = crate::observability::traced_infallible(Tool::Extract, || {
         runtime
             .worker_pool()
             .install(|| extract_files(&inputs, registry, &ctx))
@@ -1339,7 +1340,7 @@ fn extract_and_persist(
     // Run the rayon-parallel extraction on the core-owned worker pool (AQ-04),
     // not the global rayon pool, so all CPU parallelism shares one pool.
     // Pass 1 is one of the instrumented pipeline passes (FR-OB-01).
-    let (mut facts, extract_ms) = crate::observability::traced_infallible_timed("extract", || {
+    let (mut facts, extract_ms) = crate::observability::traced_infallible_timed(Tool::Extract, || {
         runtime
             .worker_pool()
             .install(|| extract_files(&inputs, registry, &ctx))
@@ -1359,7 +1360,7 @@ fn extract_and_persist(
     // closure (no per-file clone), and one round-trip per chunk instead of one
     // per file. Timed distinctly from extraction through the same seam
     // (FR-OB-01) so the cold-index profiler still attributes the write cost.
-    let (outcome, persist_ms) = crate::observability::traced_timed("persist", || {
+    let (outcome, persist_ms) = crate::observability::traced_timed(Tool::Persist, || {
         persist_facts_chunked(
             runtime,
             &mut facts,
@@ -1674,7 +1675,7 @@ fn resolve_pass(
     // is `None` on a full index (re-bind the whole ledger) and `Some` on a sync
     // (re-bind only the change-affected rows, CR-015). The measured wall-clock
     // rides back for the per-phase index breakdown (FR-OB-06, CR-057).
-    let (res, ms) = crate::observability::traced_timed("resolve", || {
+    let (res, ms) = crate::observability::traced_timed(Tool::Resolve, || {
         crate::resolve::run(runtime, policy, delta)
     });
     Ok((res?, ms))
@@ -1840,7 +1841,7 @@ fn annotate_pass(
     // a full `index` writes every node — the compute stays whole-graph either way
     // (S-024-HF). The measured wall-clock rides back for the per-phase index
     // breakdown (FR-OB-06, CR-057).
-    let (res, ms) = crate::observability::traced_timed("annotate", || {
+    let (res, ms) = crate::observability::traced_timed(Tool::Annotate, || {
         let rules = config::load_rules_from_root(root)?;
         // CR-043 / ADR-39: dead-code reachability is computed only for languages
         // that declare the reachability capability on their descriptor; the

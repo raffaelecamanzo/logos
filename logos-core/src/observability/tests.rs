@@ -12,8 +12,10 @@ use tracing_subscriber::layer::SubscriberExt;
 
 use super::layer::{spawn_writer, TelemetryLayer, TelemetrySink};
 use super::stats::stats_from;
+use super::tool::{self_referential_tools, EventClass, Tool};
 use super::{
-    db, telemetry_logos_dir, telemetry_origin, traced, EventRecord, Surface, TELEMETRY_TARGET,
+    db, in_surface, telemetry_logos_dir, telemetry_origin, traced, EventRecord, Surface,
+    TELEMETRY_TARGET,
 };
 
 /// An event record `secs_ago` seconds before the fixed "now" used in tests.
@@ -259,9 +261,9 @@ fn traced_emits_one_record_through_the_layer() {
         .with(TelemetryLayer::new(Surface::Mcp, "feature".to_string(), sink));
 
     tracing::subscriber::with_default(subscriber, || {
-        let ok = traced("callers", || Ok(42)).unwrap();
+        let ok = traced(Tool::Callers, || Ok(42)).unwrap();
         assert_eq!(ok, 42, "traced is transparent to the wrapped result");
-        let err = traced("impact", || Err::<(), _>(anyhow::anyhow!("boom")));
+        let err = traced(Tool::Impact, || Err::<(), _>(anyhow::anyhow!("boom")));
         assert!(err.is_err(), "traced propagates the error untouched");
         // A human-log event without the telemetry target must not record.
         tracing::warn!(tool = "not-telemetry", "plain log line");
@@ -423,89 +425,388 @@ fn stats_reports_usage_percentiles_and_saved_estimates() {
     assert!(info.warnings.is_empty());
 }
 
-/// Web-dashboard activity (`surface="web"`) is excluded from **every** figure —
-/// totals, per-tool usage, the daily series, the origin split, latency, and the
-/// saved estimate (HF-1). Viewing the stats emits `surface="web"` events, so
-/// counting them would be self-referential noise. The web rows are seeded with
-/// large durations, a navigation tool, and a distinct origin so that a dropped
-/// filter on *any* query would visibly leak; a non-web (`mcp`) rollup row on the
-/// same day proves the exclusion is web-specific, not a blanket rollup drop.
-#[test]
-fn web_surface_activity_is_excluded_from_all_stats() {
-    // The SQL filter pins the literal `'web'` to the enum — guard against drift.
-    assert_eq!(Surface::Web.as_str(), "web");
+// ── Per-event classification (FR-OB-09) + the chat surface (FR-OB-10) ──────
 
+/// Every registered tool carries a classification, and every wire name is a
+/// bare snake_case identifier.
+///
+/// The second half is what lets [`tool::engine_query_predicate`] interpolate
+/// the excluded names into SQL rather than bind them: the values are compile-
+/// time literals from a closed enum, and this pins them to a shape that cannot
+/// carry a quote. If a future wire name breaks that shape, this fails before the
+/// interpolation can.
+#[test]
+fn every_registered_tool_is_classified_and_sql_safe() {
+    assert!(!Tool::ALL.is_empty(), "the registry is populated");
+
+    let mut names: Vec<&str> = Tool::ALL.iter().map(|t| t.as_str()).collect();
+    let total = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), total, "wire names are unique");
+
+    for tool in Tool::ALL {
+        let name = tool.as_str();
+        assert!(!name.is_empty(), "{tool:?} has a wire name");
+        let mut chars = name.chars();
+        assert!(
+            chars.next().is_some_and(|c| c.is_ascii_lowercase()),
+            "{name} starts with a lowercase ascii letter"
+        );
+        assert!(
+            chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            "{name} is [a-z0-9_] throughout — SQL-safe to interpolate"
+        );
+        // The classification is total by construction (an exhaustive match), so
+        // what this asserts is that calling it is infallible for every variant.
+        let _: EventClass = tool.event_class();
+    }
+
+    // The two AC-named exclusions are present, and the set stays deliberately
+    // small — the exclusion corrects an overstatement, it must not create an
+    // understatement (NFR-CC-04).
+    let excluded = self_referential_tools();
+    assert!(excluded.contains(&"stats"), "got {excluded:?}");
+    assert!(excluded.contains(&"status"), "got {excluded:?}");
+    assert_eq!(
+        excluded,
+        vec!["stats", "status"],
+        "the set is exactly the two the acceptance criteria name — the exclusion \
+         corrects an overstatement and must not create an understatement \
+         (NFR-CC-04); widening it is a specification decision, not a code one"
+    );
+}
+
+/// **An unclassified tool must fail the build.** That property is delivered by
+/// `Tool::event_class` being an exhaustive `match` with no wildcard arm — the
+/// compiler then refuses to build until a newly-registered tool is classified.
+///
+/// A single `_ =>` arm silently destroys it while still compiling, restoring
+/// exactly the closed-list defect CR-091 was filed about. Nothing in rustc
+/// guards against *adding* a wildcard, so this scans the source and does.
+#[test]
+fn unclassified_tool_fails_the_build() {
+    let source = include_str!("tool.rs");
+    let body = source
+        .split_once("pub(crate) const fn event_class(self) -> EventClass {")
+        .expect("the classification function is where this test believes it is")
+        .1;
+    let body = body
+        .split_once("\n    }\n")
+        .expect("the classification function is brace-delimited")
+        .0;
+
+    for forbidden in ["_ =>", "_=>"] {
+        assert!(
+            !body.contains(forbidden),
+            "`{forbidden}` in Tool::event_class defeats the build-time \
+             completeness guarantee (FR-OB-09): a new tool would take a silent \
+             default instead of failing to compile"
+        );
+    }
+    // Every arm names variants explicitly, so the registry's size is a floor on
+    // how many times `Tool::` appears in the body.
+    let mentions = body.matches("Tool::").count();
+    assert!(
+        mentions >= Tool::ALL.len(),
+        "each of the {} registered tools is named in the match ({mentions} mentions)",
+        Tool::ALL.len()
+    );
+}
+
+/// The [FR-OB-09] headline: a graph query issued through the SPA **appears** in
+/// the usage figures; a Statistics-tab render does not; and a CLI `logos stats`
+/// invocation does not either — the exclusion is per event and applies on every
+/// surface, not to a surface.
+///
+/// The old blanket `surface <> 'web'` filter got two of these three wrong: it
+/// discarded the SPA's navigation and counted the CLI's self-measurement.
+#[test]
+fn spa_navigation_counts_while_self_referential_reads_do_not() {
     let mut conn = db::open_in_memory();
-    // Real tool use: 3 cli `search` calls, origin "main".
+    let event = |surface: &'static str, tool: &str| EventRecord {
+        at: NOW - 60,
+        surface,
+        tool: tool.to_string(),
+        duration_ms: 10,
+        ok: true,
+        origin: "main".to_string(),
+    };
     db::write_batch(
         &mut conn,
         &[
-            record("search", 10, true, NOW - 60),
-            record("search", 20, true, NOW - 60),
-            record("search", 30, true, NOW - 60),
+            // A graph query the user issued through the SPA.
+            event("web", "search"),
+            // The Statistics tab rendering itself.
+            event("web", "stats"),
+            // The app shell's header graph-state readout (FR-UI-34) — issued by
+            // navigation, asked for by nobody.
+            event("web", "status"),
+            // `logos stats` from the CLI: no less self-referential.
+            event("cli", "stats"),
+            // A genuine CLI navigation call.
+            event("cli", "callers"),
         ],
-    )
-    .unwrap();
-    // Dashboard noise: 4 web `context` calls (5 reads each if leaked), a huge
-    // duration (would dominate percentiles), and a web-only origin (would add a
-    // group). Every one must be excluded.
-    let web: Vec<EventRecord> = (0..4)
-        .map(|_| EventRecord {
-            at: NOW - 60,
-            surface: "web",
-            tool: "context".to_string(),
-            duration_ms: 5_000,
-            ok: true,
-            origin: "web-only".to_string(),
-        })
-        .collect();
-    db::write_batch(&mut conn, &web).unwrap();
-    // A rollup day in the window: a web row (excluded) beside an mcp row (kept),
-    // so the daily series and usage counts see only the mcp contribution.
-    conn.execute(
-        "INSERT INTO daily_rollup (day, surface, tool, calls, ok_calls,
-                                   total_duration_ms, max_duration_ms)
-         VALUES (date(?1, 'unixepoch'), 'web', 'impact', 9, 9, 900, 500)",
-        [NOW - 86_400],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO daily_rollup (day, surface, tool, calls, ok_calls,
-                                   total_duration_ms, max_duration_ms)
-         VALUES (date(?1, 'unixepoch'), 'mcp', 'node', 2, 2, 40, 30)",
-        [NOW - 86_400],
     )
     .unwrap();
 
     let info = stats_from(&conn, 7, NOW).expect("stats compute");
 
-    // Totals & per-tool: cli search (3) + mcp node rollup (2) only.
-    assert_eq!(info.calls_total, 5, "web raw (4) and web rollup (9) excluded");
+    let counted: Vec<(&str, &str)> = info
+        .calls_by_tool
+        .iter()
+        .map(|u| (u.surface.as_str(), u.tool.as_str()))
+        .collect();
     assert!(
-        info.calls_by_tool.iter().all(|u| u.surface != "web"),
-        "no web surface in the per-tool breakdown: {:?}",
-        info.calls_by_tool
+        counted.contains(&("web", "search")),
+        "SPA navigation is real tool use: {counted:?}"
     );
     assert!(
-        info.calls_by_tool
-            .iter()
-            .all(|u| u.tool != "context" && u.tool != "impact"),
-        "web-only tools never appear"
+        counted.contains(&("cli", "callers")),
+        "CLI navigation still counts: {counted:?}"
     );
-    // Origin split: only the cli "main" events; the web-only origin is gone.
-    assert_eq!(info.calls_by_origin.len(), 1);
-    assert_eq!(info.calls_by_origin[0].origin, "main");
-    assert_eq!(info.calls_by_origin[0].calls, 3);
-    // Daily series: raw cli day (3) + rollup mcp day (2); no web anywhere.
-    let day_total: u64 = info.activity_by_day.iter().map(|d| d.calls).sum();
-    assert_eq!(info.activity_by_day.len(), 2, "two distinct days");
-    assert_eq!(day_total, 5, "web calls excluded from the daily series");
-    // Latency: only the cli durations (10/20/30); the 5000 ms web calls are gone.
-    assert!(info.latency_p99_ms <= 30, "web latency excluded");
-    // Estimate: search 3×2 + node 2×2 = 10 reads; web `context` (4×5) excluded.
-    assert_eq!(info.reads_saved_estimate, 10);
-    assert_eq!(info.tokens_saved_estimate, 10 * 1_500);
-    assert!(info.warnings.is_empty());
+    assert!(
+        !counted.iter().any(|(_, tool)| *tool == "stats"),
+        "no stats read counts, on any surface: {counted:?}"
+    );
+    assert!(
+        !counted.iter().any(|(_, tool)| *tool == "status"),
+        "the shell's status readout counts nowhere: {counted:?}"
+    );
+    assert_eq!(info.calls_total, 2, "exactly the two navigation calls");
+}
+
+/// The same exclusion reaches `daily_rollup`, whose rows carry `tool` too — so a
+/// window long enough to touch rolled-up days applies one rule, not two.
+#[test]
+fn the_self_referential_exclusion_reaches_rollup_rows() {
+    let conn = db::open_in_memory();
+    for (surface, tool, calls) in [("web", "stats", 40), ("web", "impact", 6)] {
+        conn.execute(
+            "INSERT INTO daily_rollup (day, surface, tool, calls, ok_calls,
+                                       total_duration_ms, max_duration_ms)
+             VALUES (date(?1, 'unixepoch'), ?2, ?3, ?4, ?4, 100, 50)",
+            rusqlite::params![NOW - 86_400, surface, tool, calls],
+        )
+        .unwrap();
+    }
+
+    let info = stats_from(&conn, 7, NOW).expect("stats compute");
+
+    assert_eq!(info.calls_total, 6, "the rolled-up stats reads are excluded");
+    assert_eq!(info.calls_by_tool.len(), 1);
+    assert_eq!(info.calls_by_tool[0].tool, "impact");
+    let day_calls: u64 = info.activity_by_day.iter().map(|d| d.calls).sum();
+    assert_eq!(day_calls, 6, "and the daily series applies the same rule");
+}
+
+/// The regression the story names: re-running a historical window reports the
+/// navigation the raw store actually holds.
+///
+/// The Sprint 60 record read **4** navigation calls from a day whose store held
+/// **82**, because 78 of them were stamped `web` — the surface the read-model
+/// discarded wholesale. Nothing about those rows changed; the *rule* did, which
+/// is only possible because the classification is derived from `tool` at read
+/// time rather than stored per row.
+#[test]
+fn a_historical_window_reports_the_navigation_the_store_holds() {
+    let mut nav = Vec::new();
+    let seed = |surface: &'static str, tool: &str, n: usize| -> Vec<EventRecord> {
+        (0..n)
+            .map(|_| EventRecord {
+                at: NOW - 3_600,
+                surface,
+                tool: tool.to_string(),
+                duration_ms: 8,
+                ok: true,
+                origin: "main".to_string(),
+            })
+            .collect()
+    };
+    // 4 CLI/MCP navigation calls — all the old filter could see.
+    nav.extend(seed("mcp", "search", 4));
+    // 78 more on the web surface: the SPA and the chat agent driving the graph.
+    nav.extend(seed("web", "search", 27));
+    nav.extend(seed("web", "explore", 10));
+    nav.extend(seed("web", "impact", 7));
+    nav.extend(seed("web", "context", 8));
+    nav.extend(seed("web", "callers", 7));
+    nav.extend(seed("web", "node", 5));
+    nav.extend(seed("web", "evolution", 11));
+    nav.extend(seed("web", "dsm", 3));
+    // Plus the self-referential reads that day, which must stay excluded.
+    nav.extend(seed("web", "stats", 120));
+    nav.extend(seed("cli", "stats", 5));
+
+    let mut conn = db::open_in_memory();
+    db::write_batch(&mut conn, &nav).unwrap();
+
+    let info = stats_from(&conn, 7, NOW).expect("stats compute");
+    assert_eq!(
+        info.calls_total, 82,
+        "82 real calls, not the 4 the surface filter left"
+    );
+    let searches: u64 = info
+        .calls_by_tool
+        .iter()
+        .filter(|u| u.tool == "search")
+        .map(|u| u.calls)
+        .sum();
+    assert_eq!(searches, 31, "both surfaces' search calls are one figure");
+}
+
+/// A tool name in the store that today's registry does not know — written by an
+/// older build, since retired — is **counted**, not dropped. History is reported
+/// as it was recorded rather than silently rewritten by the current registry
+/// ([NFR-CC-04]).
+#[test]
+fn an_unregistered_historical_tool_is_still_counted() {
+    let mut conn = db::open_in_memory();
+    db::write_batch(
+        &mut conn,
+        &[record("a_retired_tool", 5, true, NOW - 60), record("search", 5, true, NOW - 60)],
+    )
+    .unwrap();
+
+    let info = stats_from(&conn, 7, NOW).unwrap();
+    assert_eq!(info.calls_total, 2);
+    assert!(
+        info.calls_by_tool.iter().any(|u| u.tool == "a_retired_tool"),
+        "an unknown tool is kept: {:?}",
+        info.calls_by_tool
+    );
+}
+
+// ── The generalised per-event surface override (FR-OB-03, FR-OB-09) ────────
+
+/// [`in_surface`] attributes every event emitted inside it to the scoped
+/// surface, leaving the process stamp untouched outside — the adapter-boundary
+/// seam the chat agent enters once per tool call.
+#[test]
+fn the_surface_scope_attributes_only_what_it_wraps() {
+    let (sink, rx) = TelemetrySink::with_capacity(8);
+    let subscriber = tracing_subscriber::registry()
+        .with(TelemetryLayer::new(Surface::Web, "main".to_string(), sink));
+
+    tracing::subscriber::with_default(subscriber, || {
+        traced(Tool::Search, || Ok::<_, anyhow::Error>(())).unwrap();
+        in_surface(Surface::Watcher, || {
+            traced(Tool::Sync, || Ok::<_, anyhow::Error>(())).unwrap();
+        });
+        traced(Tool::Node, || Ok::<_, anyhow::Error>(())).unwrap();
+    });
+
+    let records: Vec<EventRecord> = rx.try_iter().collect();
+    let seen: Vec<(&str, &str)> = records
+        .iter()
+        .map(|r| (r.tool.as_str(), r.surface))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![("search", "web"), ("sync", "watcher"), ("node", "web")],
+        "the scope covers exactly its own call, and the process stamp resumes"
+    );
+    assert!(
+        records.iter().all(|r| r.origin == "main"),
+        "origin is orthogonal to the surface override (FR-OB-08)"
+    );
+}
+
+/// The scope is restored even when the scoped call unwinds — a panicking tool
+/// call must not leave the thread mis-attributing every later event on it.
+#[test]
+fn the_surface_scope_is_restored_after_a_panic() {
+    let (sink, rx) = TelemetrySink::with_capacity(4);
+    let subscriber = tracing_subscriber::registry()
+        .with(TelemetryLayer::new(Surface::Mcp, "main".to_string(), sink));
+
+    tracing::subscriber::with_default(subscriber, || {
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            in_surface(Surface::Watcher, || panic!("a tool call blew up"));
+        }));
+        assert!(unwound.is_err(), "the panic propagated");
+        traced(Tool::Search, || Ok::<_, anyhow::Error>(())).unwrap();
+    });
+
+    let records: Vec<EventRecord> = rx.try_iter().collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].surface, "mcp",
+        "the process stamp is back after the unwind"
+    );
+}
+
+/// An event that names its own surface is the most specific statement
+/// available, so it wins over an ambient scope. This is what keeps the
+/// watcher's own attribution correct if it is ever driven from inside another
+/// adapter's scope.
+#[test]
+fn an_event_field_override_wins_over_the_ambient_scope() {
+    let (sink, rx) = TelemetrySink::with_capacity(4);
+    let subscriber = tracing_subscriber::registry()
+        .with(TelemetryLayer::new(Surface::Web, "main".to_string(), sink));
+
+    tracing::subscriber::with_default(subscriber, || {
+        in_surface(Surface::Web, || {
+            tracing::info!(
+                target: TELEMETRY_TARGET,
+                tool = Tool::WatchSync.as_str(),
+                surface = Surface::Watcher.as_str(),
+                duration_ms = 4u64,
+                ok = true,
+                "watcher sync inside another scope"
+            );
+        });
+    });
+
+    let records: Vec<EventRecord> = rx.try_iter().collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].surface, "watcher");
+}
+
+/// [FR-OB-10]: a chat-agent tool call is stored under `surface = "chat"`,
+/// separable from both `web` (the process it runs inside) and `mcp` — and it
+/// counts as an engine query, not as a self-referential read.
+///
+/// The surface is gated with the agent substrate it describes, so in a build
+/// without `agents` the variant does not exist and neither does this test.
+#[cfg(feature = "agents")]
+#[test]
+fn chat_agent_calls_are_separable_from_web_and_mcp() {
+    assert_eq!(Surface::Chat.as_str(), "chat", "the FR-OB-10 wire value");
+
+    let (sink, rx) = TelemetrySink::with_capacity(8);
+    let subscriber = tracing_subscriber::registry()
+        // The chat agent runs *inside* `serve --ui`, whose process surface is web.
+        .with(TelemetryLayer::new(Surface::Web, "main".to_string(), sink));
+    tracing::subscriber::with_default(subscriber, || {
+        in_surface(Surface::Chat, || {
+            traced(Tool::Impact, || Ok::<_, anyhow::Error>(())).unwrap();
+        });
+        traced(Tool::Impact, || Ok::<_, anyhow::Error>(())).unwrap();
+    });
+
+    let records: Vec<EventRecord> = rx.try_iter().collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].surface, "chat", "the agent's own call");
+    assert_eq!(records[1].surface, "web", "a human browsing the dashboard");
+
+    // And it survives into the read-model as its own surface, counted.
+    let mut conn = db::open_in_memory();
+    let rows: Vec<EventRecord> = records
+        .into_iter()
+        .map(|r| EventRecord { at: NOW - 60, ..r })
+        .collect();
+    db::write_batch(&mut conn, &rows).unwrap();
+    let info = stats_from(&conn, 7, NOW).unwrap();
+    let surfaces: Vec<&str> = info
+        .calls_by_tool
+        .iter()
+        .map(|u| u.surface.as_str())
+        .collect();
+    assert!(surfaces.contains(&"chat"), "got {surfaces:?}");
+    assert!(surfaces.contains(&"web"), "got {surfaces:?}");
+    assert_eq!(info.calls_total, 2, "agent-issued navigation is real usage");
 }
 
 /// Events outside the window are excluded from counts, percentiles, **and the

@@ -17,14 +17,35 @@
 //! that says whether Logos earns its place ([NFR-OO-03]) — and is honestly
 //! labeled as such ([NFR-CC-04]; the constants are SRS OQ-01).
 //!
-//! **Web-dashboard activity is excluded from every figure.** Each request the
-//! `serve --ui` surface answers emits a `surface="web"` telemetry event, so
-//! *viewing* the stats would otherwise inflate them — self-referential noise
-//! that says nothing about the tool's real value (structural navigation over
-//! CLI/MCP). Every query below filters `surface <> 'web'`, so totals, the daily
-//! series, the dev-vs-`main` split, latency, and the estimate all reflect genuine tool
-//! use only. The `'web'` SQL literal is pinned to [`super::Surface::Web`] by a
-//! guard test so an enum rename cannot silently defeat the filter.
+//! **Self-referential requests are excluded from every figure, on every
+//! surface** ([FR-OB-09]). A request whose subject is Logos's own state — the
+//! telemetry read-model itself, the shell's graph-state readout — says nothing
+//! about the tool's value, and counting it means the measurement observes
+//! itself. Every query below carries the [`tool::engine_query_predicate`]
+//! fragment, so totals, the daily series, the dev-vs-`main` split, latency and
+//! the estimate all reflect genuine tool use only.
+//!
+//! This replaces a blanket `surface <> 'web'` filter. That filter was written to
+//! stop *viewing* the Statistics tab inflating the Statistics tab, which is
+//! right in intent — but `surface` is stamped once per process
+//! ([FR-OB-03]), so it could not tell a dashboard render from a graph query
+//! issued by the same `serve --ui` process. It therefore discarded all SPA
+//! navigation and every in-process chat-agent tool call as collateral, and the
+//! remainder was reported as adoption ([CR-091]).
+//!
+//! **The exclusion is derived, not stored.** The predicate is built in Rust from
+//! [`super::Tool`]'s exhaustive classification, so a new tool cannot escape it
+//! and a per-row class column is unnecessary. That is also what makes the
+//! correction retroactive: rows written *before* this classification existed are
+//! filtered by the same rule as rows written after, which is the only way
+//! re-running a historical window can report the navigation the raw store
+//! actually holds. A stored per-event class could not have done that — and
+//! `daily_rollup` is keyed `(day, surface, tool)`, so a class that is not a
+//! function of `tool` could not survive the rollup either.
+//!
+//! [CR-091]: ../../../docs/requests/CR-091-telemetry-surface-classification-and-usage-attribution.md
+//! [FR-OB-03]: ../../../docs/specs/requirements/FR-OB-03.md
+//! [FR-OB-09]: ../../../docs/specs/requirements/FR-OB-09.md
 //!
 //! [FR-OB-04]: ../../../docs/specs/requirements/FR-OB-04.md
 //! [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
@@ -38,6 +59,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
+use super::tool;
 use crate::models::quality::{DailyActivity, OriginUsage, StatsInfo, ToolUsage};
 
 /// Default stats window in days ([FR-OB-04]: "default window 7 days").
@@ -79,15 +101,20 @@ pub(crate) fn stats(root: &Path, window_days: Option<u32>) -> Result<StatsInfo> 
 /// the testable seam.
 pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> Result<StatsInfo> {
     let cutoff = now_unix - i64::from(window_days) * 86_400;
+    // The self-referential exclusion ([FR-OB-09]), derived once from the
+    // exhaustive tool classification and interpolated into every query below —
+    // raw events and rolled-up days alike, so the two sources can never apply
+    // different rules to the same tool.
+    let engine_query = tool::engine_query_predicate();
 
     // Usage counts: raw events in the window, plus rollup days the window
     // reaches back into (keyed map so the two sources merge per tool).
     let mut usage: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT surface, tool, count(*), sum(ok)
-             FROM events WHERE at >= ?1 AND surface <> 'web' GROUP BY surface, tool",
-        )
+             FROM events WHERE at >= ?1 AND {engine_query} GROUP BY surface, tool",
+        ))
         .context("preparing the usage query")?;
     let rows = stmt
         .query_map([cutoff], |r| {
@@ -106,11 +133,11 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
         entry.1 += ok_calls.max(0) as u64;
     }
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT surface, tool, sum(calls), sum(ok_calls)
-             FROM daily_rollup WHERE day >= date(?1, 'unixepoch') AND surface <> 'web'
+             FROM daily_rollup WHERE day >= date(?1, 'unixepoch') AND {engine_query}
              GROUP BY surface, tool",
-        )
+        ))
         .context("preparing the rollup usage query")?;
     let rows = stmt
         .query_map([cutoff], |r| {
@@ -131,10 +158,10 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
 
     // Latency percentiles over the window's raw durations (nearest-rank).
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT duration_ms FROM events
-             WHERE at >= ?1 AND surface <> 'web' ORDER BY duration_ms",
-        )
+             WHERE at >= ?1 AND {engine_query} ORDER BY duration_ms",
+        ))
         .context("preparing the latency query")?;
     let durations: Vec<u64> = stmt
         .query_map([cutoff], |r| r.get::<_, i64>(0))
@@ -149,10 +176,10 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
     // `'YYYY-MM-DD'` string, whose lexical order is chronological → oldest first.
     let mut by_day: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT date(at, 'unixepoch'), count(*), sum(ok)
-             FROM events WHERE at >= ?1 AND surface <> 'web' GROUP BY 1",
-        )
+             FROM events WHERE at >= ?1 AND {engine_query} GROUP BY 1",
+        ))
         .context("preparing the daily-activity query")?;
     let rows = stmt
         .query_map([cutoff], |r| {
@@ -166,11 +193,11 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
         entry.1 += ok_calls.max(0) as u64;
     }
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT day, sum(calls), sum(ok_calls)
-             FROM daily_rollup WHERE day >= date(?1, 'unixepoch') AND surface <> 'web'
+             FROM daily_rollup WHERE day >= date(?1, 'unixepoch') AND {engine_query}
              GROUP BY day",
-        )
+        ))
         .context("preparing the rollup daily-activity query")?;
     let rows = stmt
         .query_map([cutoff], |r| {
@@ -200,11 +227,11 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
     // Legacy NULL rows and the primary checkout both fold into `"main"` via COALESCE.
     let mut by_origin: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT CASE WHEN COALESCE(origin, 'main') = 'main' THEN 'main' ELSE 'dev' END,
                     count(*), sum(ok)
-             FROM events WHERE at >= ?1 AND surface <> 'web' GROUP BY 1",
-        )
+             FROM events WHERE at >= ?1 AND {engine_query} GROUP BY 1",
+        ))
         .context("preparing the origin-breakdown query")?;
     let rows = stmt
         .query_map([cutoff], |r| {
