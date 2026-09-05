@@ -154,6 +154,23 @@ $client->request('GET', '/users', ['json' => $body]);
     );
 }
 
+/// A double-quoted verb literal (`"GET"`, tree-sitter-php's `encapsed_string`
+/// grammar even with no interpolation) captures identically to a
+/// single-quoted one (`'GET'`, `string`) — the two PHP quoting styles must
+/// not disagree on whether a static verb is recognised.
+#[test]
+fn a_double_quoted_verb_literal_captures_identically_to_single_quoted() {
+    assert_eq!(
+        client_calls(
+            r#"
+$client = new Client();
+$client->request("GET", '/users');
+"#
+        ),
+        ["GET /users"]
+    );
+}
+
 /// A lower-cased verb argument normalizes to the same key as the upper-cased
 /// spelling — `is_http_method` is case-insensitive, and the normalizer upper-
 /// cases the stored verb.

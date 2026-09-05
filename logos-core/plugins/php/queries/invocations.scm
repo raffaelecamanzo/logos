@@ -116,12 +116,23 @@
 ; verb is read from the literal's CONTENT child (bare `GET`), never the quoted
 ; node, so `is_http_method` sees an unquoted verb; the path capture takes the
 ; WHOLE literal, which `static_string_literal` itself unquotes.
+;
+; The verb literal is matched as EITHER of PHP's two quoting grammars —
+; `string` (single-quoted, `'GET'`) or `encapsed_string` (double-quoted,
+; `"GET"`) — because tree-sitter-php parses a double-quoted literal as
+; `encapsed_string` even with no interpolation at all; matching only `string`
+; silently drops every double-quoted verb. The `encapsed_string` alternative
+; anchors its `string_content` child as the node's ONLY child (`.` before and
+; after), so an interpolated verb (`"{$method}"`) still fails to match — the
+; anchor is there for the exact reason `static_string_literal` requires every
+; child to be static, not merely one of them.
 (member_call_expression
   object: [(variable_name) (member_access_expression)]
   name: (name) @_fn
   arguments: (arguments
     .
-    (argument (string (string_content) @invoke.http.method))
+    (argument [(string (string_content) @invoke.http.method)
+               (encapsed_string . (string_content) @invoke.http.method .)])
     .
     (argument (_) @invoke.http.arg))
   (#any-of? @_fn "request" "requestAsync"))
