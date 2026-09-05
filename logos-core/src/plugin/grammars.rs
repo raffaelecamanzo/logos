@@ -671,6 +671,11 @@ fn php_entry() -> GrammarEntry {
                 label: "php/queries/frameworks.scm",
                 source: include_str!("../../plugins/php/queries/frameworks.scm"),
             },
+            EmbeddedQuery {
+                relative_path: "queries/invocations.scm",
+                label: "php/queries/invocations.scm",
+                source: include_str!("../../plugins/php/queries/invocations.scm"),
+            },
         ],
     }
 }

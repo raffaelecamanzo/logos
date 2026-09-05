@@ -16,7 +16,7 @@ module_separator = "\\"
 # symbols still extract (see plugin::grammars::php_entry).
 abi_version = 15
 
-capabilities = ["symbols", "references", "frameworks"]
+capabilities = ["symbols", "references", "frameworks", "invocations"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # `elseif` is PHP's own keyword; `?` covers the ternary and `?:`; `&&`/`||`
@@ -46,10 +46,36 @@ test_convention = "php-unit"
 # never fabricates a route.
 framework_detectors = ["Illuminate"]
 
+# Canonical reference prefix gating outbound **HTTP client-call** capture
+# (S-348, CR-108, FR-WS-08) — the consumer-side twin of `framework_detectors`.
+# FR-WS-08's normative PHP row is Guzzle. `use GuzzleHttp\Client;` canonicalises
+# (backslash → `::`) to `GuzzleHttp::Client`, matched at the `::` segment
+# boundary (`resolve::matches_detector`), so this row admits every
+# `GuzzleHttp\...` namespace member (`Client`, `ClientInterface`,
+# `Exception\RequestException`, …) without admitting an unrelated `Guzzle`-
+# prefixed name.
+#
+# A file that only constructs Guzzle via a fully-qualified `new
+# \GuzzleHttp\Client()` with no `use` clause carries no `@ref.import` at all —
+# `references.scm` deliberately does not capture `new` construction (see its
+# header) — so that file's ledger never opens this gate. A stated ceiling
+# inherited from the references arm, not invented here.
+http_client_detectors = ["GuzzleHttp"]
+
 [queries]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"
 frameworks = "queries/frameworks.scm"
+# Outbound Guzzle HTTP client-call arm (S-348, CR-108, FR-WS-08): the
+# verb-as-method-name form (`$client->get('/p')`) and the verb-as-first-argument
+# form (`$client->request('GET', '/p')`, consuming the constructor-argument
+# anchor shape Go/S-345 settled). Anchors only — the HTTP-verb and
+# static-literal decisions stay in the generic dispatch and
+# `resolve::http_client_call`. Its structural discriminators (an exactly-one-
+# argument call on an instance receiver) keep a same-shaped route
+# REGISTRATION — Slim's `$app->get('/x', $handler)` — from being read as an
+# outbound call; see the query header.
+invocations = "queries/invocations.scm"
 # Captured `@fw.route.method` text (the `Route::` facade verb) → HTTP method
 # (S-060). `Route::match`/`Route::any` declare no single verb → ANY. A captured
 # verb with no entry here is dropped — the table doubles as the
