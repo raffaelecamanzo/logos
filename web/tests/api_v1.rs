@@ -56,14 +56,17 @@ fn commit(cwd: &Path, rel: &str, contents: &str, msg: &str) {
     sh_git(cwd, &["commit", "-q", "-m", msg]);
 }
 
-/// An indexed + scanned + mined fixture — the durable state the read-only `/api/v1`
-/// endpoints reflect without adding to. `scan` persists the metric snapshot even on
-/// an un-parsed graph and `hotspots` mines the temporal snapshot, so the composite
-/// endpoints (`/api/v1/health`, `/files`, …) succeed under a bare `-p web` run.
-fn scanned_engine() -> (TempDir, Arc<Engine>) {
+/// The shared body behind [`scanned_engine`] and [`scanned_engine_with_rules`]:
+/// an indexed + scanned + mined fixture, optionally with `.logos/rules.toml`
+/// written before the engine starts.
+fn build_scanned_engine(rules_toml: Option<&str>) -> (TempDir, Arc<Engine>) {
     let tmp = TempDir::new().expect("temp root");
     let repo = tmp.path();
     sh_git(repo, &["init", "-q", "-b", "main"]);
+    if let Some(rules_toml) = rules_toml {
+        std::fs::create_dir_all(repo.join(".logos")).expect("mkdir .logos");
+        std::fs::write(repo.join(".logos/rules.toml"), rules_toml).expect("write rules.toml");
+    }
     commit(
         repo,
         "src/lib.rs",
@@ -75,6 +78,14 @@ fn scanned_engine() -> (TempDir, Arc<Engine>) {
     engine.scan(false).expect("scan persists a metric snapshot");
     engine.hotspots(None, false, false).expect("hotspots mines a temporal snapshot");
     (tmp, engine)
+}
+
+/// An indexed + scanned + mined fixture — the durable state the read-only `/api/v1`
+/// endpoints reflect without adding to. `scan` persists the metric snapshot even on
+/// an un-parsed graph and `hotspots` mines the temporal snapshot, so the composite
+/// endpoints (`/api/v1/health`, `/files`, …) succeed under a bare `-p web` run.
+fn scanned_engine() -> (TempDir, Arc<Engine>) {
+    build_scanned_engine(None)
 }
 
 fn get(path: &str) -> Request<Body> {
@@ -217,35 +228,26 @@ async fn composite_bundles_serialize_their_read_model_fields() {
 /// Like [`scanned_engine`] but writes `.logos/rules.toml` before starting the
 /// engine, so `check_rules` loads it as a present contract.
 fn scanned_engine_with_rules(rules_toml: &str) -> (TempDir, Arc<Engine>) {
-    let tmp = TempDir::new().expect("temp root");
-    let repo = tmp.path();
-    sh_git(repo, &["init", "-q", "-b", "main"]);
-    std::fs::create_dir_all(repo.join(".logos")).expect("mkdir .logos");
-    std::fs::write(repo.join(".logos/rules.toml"), rules_toml).expect("write rules.toml");
-    commit(
-        repo,
-        "src/lib.rs",
-        "pub fn f(x: i64) -> i64 { if x > 0 { x } else { -x } }\n",
-        "fix: add f",
-    );
-    let engine = Arc::new(Engine::start(repo).expect("engine starts"));
-    engine.index();
-    engine.scan(false).expect("scan persists a metric snapshot");
-    engine.hotspots(None, false, false).expect("hotspots mines a temporal snapshot");
-    (tmp, engine)
+    build_scanned_engine(Some(rules_toml))
 }
 
 /// `/api/v1/overview` and `/api/v1/gaps` both serialize `RulesReport` verbatim
 /// (S-352/S-354): the three states must round-trip through JSON distinctly — a
 /// clean loaded contract (`passed:true`), a violated one (`passed:false`), and
 /// no contract at all (`rules_present:false`, `passed:null` — never `true`,
-/// which would read as a false pass, CR-112).
+/// which would read as a false pass, CR-112). Both endpoints are asserted for
+/// every state, not just `/gaps`: `overview`'s `OverviewModel.rules` is an
+/// independent `e.check_rules(...)` call ([`web/src/api_v1.rs`]'s `overview`
+/// handler), so a divergence between the two is exactly the kind of bug this
+/// story exists to catch.
 #[tokio::test]
 async fn overview_and_gaps_serialize_all_three_rules_states() {
+    const PATHS: [&str; 2] = ["/api/v1/overview", "/api/v1/gaps"];
+
     // State 1: no contract loaded (the `scanned_engine` fixture writes none).
     let (_tmp, engine) = scanned_engine();
     let router = web::router(engine);
-    for path in ["/api/v1/overview", "/api/v1/gaps"] {
+    for path in PATHS {
         let resp = router.clone().oneshot(get(path)).await.unwrap();
         let (status, body, _h) = body_string(resp).await;
         assert_eq!(status, StatusCode::OK, "{path} answers 200");
@@ -259,20 +261,24 @@ async fn overview_and_gaps_serialize_all_three_rules_states() {
     // State 2: a loaded, clean contract.
     let (_tmp, engine) = scanned_engine_with_rules("[constraints]\nmax_cycles = 0\n");
     let router = web::router(engine);
-    let resp = router.oneshot(get("/api/v1/gaps")).await.unwrap();
-    let (status, body, _h) = body_string(resp).await;
-    assert_eq!(status, StatusCode::OK, "/api/v1/gaps answers 200");
-    assert!(body.contains("\"rules_present\":true"), "a loaded rules.toml: {body}");
-    assert!(body.contains("\"passed\":true"), "no cycles in the fixture: {body}");
+    for path in PATHS {
+        let resp = router.clone().oneshot(get(path)).await.unwrap();
+        let (status, body, _h) = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK, "{path} answers 200");
+        assert!(body.contains("\"rules_present\":true"), "{path} a loaded rules.toml: {body}");
+        assert!(body.contains("\"passed\":true"), "{path} no cycles in the fixture: {body}");
+    }
 
     // State 3: a loaded contract with a violation (`max_cc = 0` fires on `f`'s branch).
     let (_tmp, engine) = scanned_engine_with_rules("[constraints]\nmax_cc = 0\n");
     let router = web::router(engine);
-    let resp = router.oneshot(get("/api/v1/gaps")).await.unwrap();
-    let (status, body, _h) = body_string(resp).await;
-    assert_eq!(status, StatusCode::OK, "/api/v1/gaps answers 200");
-    assert!(body.contains("\"rules_present\":true"), "a loaded rules.toml: {body}");
-    assert!(body.contains("\"passed\":false"), "the CC budget fires: {body}");
+    for path in PATHS {
+        let resp = router.clone().oneshot(get(path)).await.unwrap();
+        let (status, body, _h) = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK, "{path} answers 200");
+        assert!(body.contains("\"rules_present\":true"), "{path} a loaded rules.toml: {body}");
+        assert!(body.contains("\"passed\":false"), "{path} the CC budget fires: {body}");
+    }
 }
 
 /// CR-079: the `/api/v1/quadrant` route is unrouted — a GET resolves to `404`,
