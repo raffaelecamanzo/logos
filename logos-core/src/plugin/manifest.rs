@@ -613,6 +613,32 @@ impl PluginManifest {
         if self.http_client_detectors.iter().any(|d| d.trim().is_empty()) {
             return bail("`http_client_detectors` entries must not be empty".to_string());
         }
+        // A detector is compared against canonical reference targets verbatim,
+        // so a stray surrounding space matches nothing — the arm would degrade
+        // to silent no-capture, the exact failure mode CR-108 was filed for.
+        // Fail loudly instead of trimming silently.
+        if self.http_client_detectors.iter().any(|d| d != d.trim()) {
+            return bail(
+                "`http_client_detectors` entries must not carry surrounding whitespace"
+                    .to_string(),
+            );
+        }
+        // The third leg of the FR-WS-08 capability invariant. A descriptor can
+        // declare `invocations`, ship a query that compiles, satisfy the
+        // `frameworks` => `invocations` guard — and still capture nothing for
+        // ever, because `capture_http_client_call_arm` returns early on an empty
+        // detector set. That is honest absence at the capability layer becoming
+        // *invisible* absence at the product layer, which is precisely the
+        // defect CR-108 exists to correct; refuse the descriptor instead.
+        if self.capabilities.iter().any(|c| c == "invocations")
+            && self.http_client_detectors.is_empty()
+        {
+            return bail(
+                "capability 'invocations' requires at least one `http_client_detectors` \
+                 entry, or the arm can never capture (FR-WS-08, CR-108)"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 }
@@ -648,6 +674,7 @@ mod tests {
         // The S-015 framework/export fields default to empty/All when omitted,
         // so pre-existing descriptors keep parsing unchanged (NFR-MA-01).
         assert!(m.framework_detectors.is_empty());
+        assert!(m.http_client_detectors.is_empty());
         assert!(m.framework_methods.is_empty());
         assert_eq!(m.export_convention, ExportConvention::All);
         // A descriptor that declares no test idiom defaults to None — the
@@ -1184,6 +1211,58 @@ mod tests {
         "#;
         let err = PluginManifest::parse("x/plugin.toml", toml).unwrap_err();
         assert!(err.to_string().contains("framework_detectors"));
+    }
+
+    /// The consumer-side twin of [`empty_framework_detector_is_rejected`]: the
+    /// same trap, one layer down (S-341, [CR-108]). An empty detector would
+    /// prefix-match every reference and make every file an outbound-call
+    /// candidate.
+    #[test]
+    fn empty_http_client_detector_is_rejected() {
+        let toml = r#"
+            name = "x"
+            extensions = ["x"]
+            module_separator = "."
+            abi_version = 15
+            capabilities = []
+            http_client_detectors = [""]
+        "#;
+        let err = PluginManifest::parse("x/plugin.toml", toml).unwrap_err();
+        assert!(err.to_string().contains("http_client_detectors"));
+    }
+
+    /// A detector is matched against canonical targets verbatim, so a stray
+    /// space would silently disable the arm rather than fail — refuse it.
+    #[test]
+    fn untrimmed_http_client_detector_is_rejected() {
+        let toml = r#"
+            name = "x"
+            extensions = ["x"]
+            module_separator = "."
+            abi_version = 15
+            capabilities = []
+            http_client_detectors = ["reqwest "]
+        "#;
+        let err = PluginManifest::parse("x/plugin.toml", toml).unwrap_err();
+        assert!(err.to_string().contains("whitespace"), "got: {err}");
+    }
+
+    /// Declaring `invocations` with no detector set is a permanently no-op arm:
+    /// the capability reads present while the product captures nothing. Refused,
+    /// so honest absence cannot masquerade as presence ([FR-WS-08], [CR-108]).
+    #[test]
+    fn declaring_invocations_without_a_client_detector_is_rejected() {
+        let toml = r#"
+            name = "x"
+            extensions = ["x"]
+            module_separator = "."
+            abi_version = 15
+            capabilities = ["invocations"]
+            [queries]
+            invocations = "queries/invocations.scm"
+        "#;
+        let err = PluginManifest::parse("x/plugin.toml", toml).unwrap_err();
+        assert!(err.to_string().contains("http_client_detectors"), "got: {err}");
     }
 
     #[test]
