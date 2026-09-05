@@ -408,8 +408,15 @@
 ;     `exchange`, …) and OpenFeign `@FeignClient` interfaces — identical to
 ;     Java's ceilings and for the identical reason: the arm's
 ;     `@invoke.http.method` slot needs a node whose TEXT is literally an HTTP
-;     verb, and these encode it in a method name or an annotation name. Lifting
-;     them needs a descriptor-level method-alias table (CR-108 CRA-05). Pinned by
+;     verb, and these encode it in a method name or an annotation name. This
+;     bullet used to defer the fix to "a descriptor-level method-alias table
+;     (CR-108 CRA-05)"; S-346 landed that table later in the same sprint
+;     (`[invocation_methods]`, read by `extract::normalize_invocation_method`),
+;     so the mechanism exists and is pure per-plugin descriptor data. What
+;     remains is the same trade the java query header states in full: declaring
+;     any row opts this language into the table's FILTER half, so every bare
+;     verb captured today needs an identity row. OpenFeign is unaffected either
+;     way — its verb is an annotation name with no call to anchor. Pinned by
 ;     `rest_template_verb_suffixed_methods_are_a_stated_ceiling` and
 ;     `openfeign_interfaces_are_a_stated_ceiling`.
 ;

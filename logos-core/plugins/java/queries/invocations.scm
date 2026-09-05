@@ -157,11 +157,30 @@
 ;
 ; The first two share one root cause: the arm's `@invoke.http.method` slot needs
 ; a node whose *text* is literally an HTTP verb, and these encode it in a method
-; name (`getForObject`) or an annotation name (`@GetMapping`). Lifting them needs
-; a descriptor-level method-alias table (a `[framework_methods]`-style
-; `getForObject → GET` map read by `collect_invocation_sites`) — a
-; capture-vocabulary widening, deliberately deferred rather than invented here
-; (CR-108 CRA-05). Parse-tree evidence in the S-341 implementation notes.
+; name (`getForObject`) or an annotation name (`@GetMapping`). Parse-tree
+; evidence in the S-341 implementation notes.
+;
+; This paragraph used to defer the fix as "a descriptor-level method-alias table
+; the arm does not have (CR-108 CRA-05)". S-346 then BUILT exactly that table —
+; `[invocation_methods]` in `plugin.toml`, read through
+; `extract::normalize_invocation_method` from `collect_invocation_sites` — later
+; in the same sprint. The mechanism now exists and is pure per-plugin descriptor
+; data, so lifting `getForObject`/`postForEntity`/… costs this language no
+; logos-core change:
+;
+;   * `getForObject` IS the captured method-name text, so a row resolves it;
+;   * `@GetMapping` is not — the verb is an annotation name on a
+;     `method_declaration`, with no `method_invocation` to anchor. OpenFeign
+;     stays a ceiling for the anchor, not for the vocabulary.
+;
+; What holds the RestTemplate half is therefore a trade, not a missing
+; mechanism, and it is stated here so a later author decides it rather than
+; rediscovers it: declaring any row opts this language into the table's FILTER
+; half — a captured text with no row is dropped — so every bare verb this query
+; captures today (`get`, `GET`, `post`, `delete`, …) would need an identity row,
+; and each new spelling becomes a descriptor edit rather than a free
+; pass-through. `exchange` is unreachable either way: its verb is in a SECOND
+; argument no capture binds.
 ;
 ; One ceiling is an OVER-capture, not an under-capture: the ledger gate is
 ; file-grained, so a route-shaped collection call inside a genuine client file

@@ -372,12 +372,21 @@ fn receiver_less_and_class_qualified_verb_calls_are_never_captured() {
             r#"void t() { rest("/api").get("/{id}").to("direct:x"); }"#,
         ),
     ] {
-        assert!(
-            client_calls(&format!(
-                "public class Calls {{ private RestClient restClient; {body} }}"
-            ))
-            .is_empty(),
-            "{label} must emit no outbound call"
+        // `restClient.get().uri("/probe")` is the positive control: it proves
+        // the file WAS scanned, so each shape's absence is pattern 4's receiver
+        // rule refusing it and not a closed ledger gate. Without it a later
+        // tightening of `http_client_detectors` would leave this test green
+        // while proving nothing — the class the Go and C# arms closed in this
+        // same sprint (`go_invocations.rs`, `c_sharp_invocations.rs`).
+        let calls = client_calls(&format!(
+            "public class Calls {{ private RestClient restClient; {body} \
+             String probe() {{ return restClient.get().uri(\"/probe\").retrieve().body(String.class); }} }}"
+        ));
+        assert_eq!(
+            calls,
+            ["GET /probe"],
+            "{label} must emit no outbound call, and the file was genuinely \
+             scanned: {calls:?}"
         );
     }
 }
@@ -429,8 +438,11 @@ public class Calls {
         )
         .is_empty(),
         "`getForObject` is not an HTTP verb and `exchange` carries its verb in a \
-         second argument — both need a descriptor-level method-alias table the \
-         arm does not have (CR-108 CRA-05), so they stay honestly uncaptured"
+         second argument. `getForObject` could now be lifted by an \
+         `[invocation_methods]` row (S-346 landed that table later in this same \
+         sprint) at the cost of opting Java into its filter half; `exchange` \
+         could not, its verb binding to no capture. Both stay honestly \
+         uncaptured — see the query header for the trade"
     );
 }
 

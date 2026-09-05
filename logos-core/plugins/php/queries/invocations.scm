@@ -78,10 +78,20 @@
 ; refuses it, because "getAsync" is not one of the bare verbs it recognises
 ; (extract::DECLARED_METHOD_PREFIX's own rustdoc: a verb that is merely
 ; non-canonical TEXT "wants a text normalizer, not a per-pattern constant").
-; Building that normalizer is C#'s stated scope (S-346's `[framework_methods]`-
-; style `getasync → GET` table, HttpMethod.Get's own C# ceiling) — inventing it
-; here, ahead of and duplicating that story, is deliberately out of scope
-; (NFR-MA-01). Pinned as a negative test, not silently dropped.
+; When this was written that normalizer was C#'s unlanded scope, and building it
+; here would have duplicated S-346. It has since LANDED, in the same sprint:
+; `[invocation_methods]` in `plugin.toml`, read by
+; `extract::normalize_invocation_method`, per-plugin descriptor data costing no
+; logos-core change. `getAsync` IS the captured method-name text, so a row would
+; resolve it and this ceiling is liftable by descriptor data alone.
+;
+; It stays a ceiling on a TRADE rather than on a missing mechanism, recorded so a
+; later author decides it instead of rediscovering it: the table also FILTERS — a
+; captured text with no row is dropped — so declaring `getAsync` obliges an
+; identity row for every bare verb this pattern captures today (`get`, `post`,
+; `put`, `delete`, `head`, `patch`, `options`), turning a free pass-through into
+; a descriptor that must be kept complete. Pinned as a negative test, not
+; silently dropped.
 ;
 ; `requestAsync('GET', '/p')` has NO such problem and IS captured: its verb
 ; comes from the first ARGUMENT (already bare `GET`), never from the method
@@ -139,8 +149,10 @@
 ;
 ;   * The six Async-suffixed verb-as-method-name forms (`getAsync`,
 ;     `postAsync`, `putAsync`, `deleteAsync`, `patchAsync`, `headAsync`,
-;     `optionsAsync`) — the method-name-embedded verb needs a text normalizer,
-;     C#/S-346's stated scope, not reinvented here.
+;     `optionsAsync`) — the method-name-embedded verb needs a text normalizer.
+;     S-346's `[invocation_methods]` table now provides one and would lift this
+;     by descriptor data alone; the header above states the filter-half trade
+;     that keeps the rows undeclared.
 ;   * Guzzle's optional `array $options` second argument on a verb-as-method-
 ;     name call (`$client->get('/p', ['query' => [...]])`) — the exactly-one-
 ;     argument arity gate that keeps a Slim/Laravel registration out also

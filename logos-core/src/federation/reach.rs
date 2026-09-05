@@ -189,6 +189,34 @@ pub struct CoverageRider {
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound_ratio: Option<f64>,
+    /// The denominator [`bound_ratio`](Self::bound_ratio) was computed over
+    /// (`bound + ambiguous + unbound`), carried verbatim from
+    /// [`CrossServiceCoverage::bound_ratio_measured`](super::coverage::CrossServiceCoverage::bound_ratio_measured)
+    /// ([CR-111], [FR-WS-05]).
+    ///
+    /// [CR-111] made the ratio's scale a duty rather than a courtesy: "excluding
+    /// a bucket from a ratio is right, and it creates a duty to publish the
+    /// bucket beside the ratio". Its acceptance criterion enumerates three
+    /// renderings — `workspace status` human output, `--json`, and the web
+    /// coverage view — and this rider is a **fourth**, publishing the same figure
+    /// on the [FR-WS-12] reachability surface. It already carried
+    /// `no_provider_in_workspace` beside the ratio, but not the denominator, so a
+    /// reader still had to re-implement the sum to learn the scale — and a
+    /// qualification present on one surface and absent on another is the very
+    /// defect shape [CR-111] cites [CR-105] for. Added in the sprint-63 review.
+    ///
+    /// `CrossServiceCoverage`'s composed `bound_ratio_summary` line is
+    /// deliberately **not** carried here. The rider is a `Copy` value attached to
+    /// every individual claim, so an identical sentence would be repeated once
+    /// per claim; the summary is a *rendering*, and the two surfaces that render
+    /// (the CLI and the web view) read it from the coverage summary itself. What
+    /// the rider owes is the figures, and it now carries all of them.
+    ///
+    /// [CR-105]: ../../../docs/requests/CR-105-report-a-failed-member-open-once-per-answer.md
+    /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    /// [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
+    pub bound_ratio_measured: u64,
     /// Members whose **reachability** surface was read successfully.
     ///
     /// Deliberately *not* [`CrossServiceCoverage::members_read`](super::coverage::CrossServiceCoverage::members_read),
@@ -218,6 +246,7 @@ impl CoverageRider {
             unbound: coverage.unbound,
             no_provider_in_workspace: coverage.no_provider_in_workspace,
             bound_ratio: coverage.bound_ratio,
+            bound_ratio_measured: coverage.bound_ratio_measured,
             members_read: members_read as u64,
             members_total: members_total as u64,
         }

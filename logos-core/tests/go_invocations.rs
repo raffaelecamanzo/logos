@@ -574,17 +574,35 @@ fn go_client_calls_bind_go_routes_in_another_member() {
 ///
 /// so the only texts a capture can offer are `http.MethodGet` and `MethodGet` —
 /// neither of which is an HTTP verb to `extract::is_http_method`, whose vocabulary
-/// is the bare verbs. Turning `MethodGet` into `GET` needs a *normalizer table*,
-/// i.e. a `logos-core` change, and this story states that against the
-/// [NFR-MA-01] budget rather than absorbing it: measured on `pec-services`'
-/// `hermodr-mirror`, 23 of its 24 `http.NewRequest` sites carry a **runtime
-/// variable** as the URL, so every one of them is refused as `base-url-runtime`
-/// on the path regardless of whether the verb resolves. The ceiling therefore
-/// costs nothing measurable today, and the same shape recurs as C#'s
-/// `HttpMethod.Get` in [S-346], which already budgets a normalizer table.
+/// is the bare verbs.
 ///
-/// If that table ever lands, this test fails loudly — which is the point: the
-/// ceiling is lifted deliberately, not drifted past.
+/// **The table this test was written against has since landed, and this test did
+/// not notice.** S-346 shipped `[invocation_methods]` for C#'s `HttpMethod.Get`
+/// — the same shape — as per-plugin descriptor data read by
+/// `extract::normalize_invocation_method`, so the original "needs a logos-core
+/// change" framing is spent, and the original promise below ("if that table ever
+/// lands, this test fails loudly") was not kept: the table is per-plugin and
+/// `plugins/go/plugin.toml` declares no rows, so Go's behaviour is byte-identical
+/// and this stayed green. Recorded rather than quietly corrected, because a
+/// ceiling that outlives its stated reason is the failure mode [ADR-54] exists to
+/// prevent.
+///
+/// What actually holds the ceiling now is narrower and structural: the
+/// constructor pattern binds `@invoke.http.method` to an
+/// `interpreted_string_literal_content`, while `http.MethodGet` is a
+/// `selector_expression` — no text reaches the table for a row to normalize — so
+/// lifting it is a table PLUS a query pattern, a Go-side decision. Declaring any
+/// row would also opt Go into the table's filter half, costing `http.Get`/`c.Head`
+/// identity rows the pass-through gives them free.
+///
+/// Cost of leaving it, measured on `pec-services`' `hermodr-mirror`: 23 of its 24
+/// `http.NewRequest` sites carry a **runtime variable** as the URL, so every one
+/// is refused as `base-url-runtime` on the path regardless of whether the verb
+/// resolves. The ceiling costs nothing measurable today.
+///
+/// If a Go `[invocation_methods]` row plus a matching pattern ever land, this
+/// test fails loudly — which is the point: the ceiling is lifted deliberately,
+/// not drifted past.
 ///
 /// [ADR-54]: ../../docs/specs/architecture/decisions/ADR-54.md
 /// [NFR-MA-01]: ../../docs/specs/requirements/NFR-MA-01.md

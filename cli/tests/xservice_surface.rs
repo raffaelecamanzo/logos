@@ -1028,6 +1028,16 @@ fn workspace_reachability_is_labeled_advisory_and_riders_every_claim() {
     assert_eq!(rider["ambiguous"], 0);
     assert_eq!(rider["unbound"], 0);
     assert_eq!(rider["bound_ratio"], 1.0);
+    // …and never bare (CR-111): this rider is the near-degenerate shape in
+    // miniature — a perfect-looking 1.0 computed over ONE reference while
+    // another was excluded — so the denominator rides beside it, as it does on
+    // `workspace status`. Found by the sprint-63 review: CR-111's acceptance
+    // criterion enumerates three renderings and this is a fourth.
+    assert_eq!(
+        rider["bound_ratio_measured"], 1,
+        "the reachability rider publishes the denominator its ratio was computed \
+         over, not just the ratio"
+    );
     assert_eq!(rider["members_read"], 2);
     assert_eq!(rider["members_total"], 2);
     assert_eq!(view["skipped_members"].as_array().unwrap().len(), 0);

@@ -39,9 +39,29 @@
 ;
 ; A verb held in a NAMED CONSTANT (`http.NewRequest(http.MethodGet, …)`) is a
 ; stated ceiling, not a capture: the only texts available are `http.MethodGet`
-; and `MethodGet`, and `is_http_method` speaks bare verbs. Resolving it needs a
-; normalizer table — a logos-core change, stated against NFR-MA-01 rather than
-; absorbed. C#'s `HttpMethod.Get` is the same shape (S-346).
+; and `MethodGet`, and `is_http_method` speaks bare verbs.
+;
+; When this was written the normalizer it would need did not exist, and this
+; paragraph deferred it as "a logos-core change, stated against NFR-MA-01". That
+; is no longer true: S-346 landed `[invocation_methods]` — per-plugin descriptor
+; data, read by `extract::normalize_invocation_method`, costing this language no
+; core change at all — for C#'s `HttpMethod.Get`, which is the same shape. The
+; ceiling stands anyway, for a DIFFERENT and narrower reason, and it is recorded
+; here rather than left to a reader to rediscover:
+;
+;   * a table alone cannot reach it. The constructor pattern below binds
+;     `@invoke.http.method` to an `interpreted_string_literal_content`, and
+;     `http.MethodGet` is a `selector_expression` — no text is captured for a
+;     row to normalize. Lifting it is a table PLUS a query pattern, a Go-side
+;     decision (the c-sharp query header says the same, from the other end).
+;   * and declaring any row opts this language into the table's FILTER half: a
+;     captured text with no row is dropped, so `http.Get`/`c.Head` would each
+;     need an identity row the pass-through gives them for free today.
+;
+; Measured cost of leaving it: on `pec-services`' `hermodr-mirror`, 23 of 24
+; `http.NewRequest` sites carry a runtime variable as the URL and are refused on
+; the path regardless of whether the verb resolves (see
+; `go_invocations.rs::a_named_constant_verb_is_a_stated_ceiling_not_a_capture`).
 ;
 ; ── Why a registration is not a call ────────────────────────────────────────
 ;

@@ -59,6 +59,26 @@ import java.net.http.HttpRequest
 import java.net.URI
 "#;
 
+/// A genuine, captured client call appended to every never-fabricate fixture as
+/// its **positive control** — it renders `"GET /probe"`, so a fixture that
+/// asserts exactly that has proved the ledger gate was open and the query live.
+///
+/// Without one, a `is_empty()` assertion over an in-client-file fixture is
+/// satisfied just as well by a closed gate as by the discriminator under test,
+/// so a later tightening of `http_client_detectors` would leave these tests
+/// green while proving nothing. Go and C# closed that class in this same sprint
+/// (`go_invocations.rs`, `c_sharp_invocations.rs`); Kotlin — the arm where a
+/// detached predicate already proved that "a rule with no test cannot notice
+/// that it stopped applying" — is held to the same standard here.
+///
+/// Its shape is the fluent pattern 1 anchor, so it is independent of pattern 4's
+/// receiver, arity and position rules: no fixture's own discriminator can
+/// suppress the control.
+const PROBE: &str = r#"
+fun probe(restClient: RestClient): String =
+    restClient.get().uri("/probe").retrieve().body(String::class.java)
+"#;
+
 /// Index `body` as a single Kotlin file and return every `http-client-call`
 /// reference target the arm wrote to the ledger, sorted.
 fn client_calls(body: &str) -> Vec<String> {
@@ -331,33 +351,39 @@ fun RestClient.byId(id: String): String {
 /// callee of a lambda application.
 #[test]
 fn a_trailing_lambda_call_is_refused() {
-    assert!(
-        client_calls(
-            r#"
-class Calls(private val webClient: WebClient) {
-    fun user(): Any? {
-        return webClient.get().uri { b -> b.path("/users").build() }.retrieve()
-    }
-}
+    let no_arguments = client_calls(&format!(
+        r#"
+class Calls(private val webClient: WebClient) {{
+    fun user(): Any? {{
+        return webClient.get().uri {{ b -> b.path("/users").build() }}.retrieve()
+    }}
+}}
+{PROBE}
 "#
-        )
-        .is_empty(),
+    ));
+    assert_eq!(
+        no_arguments,
+        ["GET /probe"],
         "`uri {{ … }}` has no value_arguments — the path is built at runtime and \
-         is refused whole, never partially"
+         is refused whole, never partially; the probe proves the file was \
+         genuinely scanned: {no_arguments:?}"
     );
-    assert!(
-        client_calls(
-            r#"
-class Calls(private val restClient: RestClient) {
-    fun probe(client: RestTemplate) {
-        client.get("/users/{id}") { it }
-    }
-}
+    let lambda_applied = client_calls(&format!(
+        r#"
+class Calls(private val restClient: RestClient) {{
+    fun lambdaApplied(client: RestTemplate) {{
+        client.get("/users/{{id}}") {{ it }}
+    }}
+}}
+{PROBE}
 "#
-        )
-        .is_empty(),
+    ));
+    assert_eq!(
+        lambda_applied,
+        ["GET /probe"],
         "a lambda-applied `receiver.verb(\"/p\") {{ … }}` is the shape of a route \
-         REGISTRATION, and is excluded by pattern 4's position rule"
+         REGISTRATION, and is excluded by pattern 4's position rule; the probe \
+         proves the file was genuinely scanned: {lambda_applied:?}"
     );
 }
 
@@ -559,12 +585,12 @@ fn route_registrations_are_never_captured_as_outbound_calls() {
             r#"fun t(mockMvc: MockMvc) { mockMvc.get("/api/users") { accept = JSON } }"#,
         ),
     ] {
-        assert!(
-            client_calls(&format!(
-                "class Calls(private val restClient: RestClient)\n{body}"
-            ))
-            .is_empty(),
-            "{label} must emit no outbound call"
+        let calls = client_calls(&format!("class Calls(private val restClient: RestClient)\n{body}\n{PROBE}"));
+        assert_eq!(
+            calls,
+            ["GET /probe"],
+            "{label} must emit no outbound call, and the file was genuinely \
+             scanned: {calls:?}"
         );
     }
 }
@@ -605,12 +631,12 @@ fn a_class_qualified_receiver_is_never_captured() {
             r#"fun f() { val p = Paths.get("/etc/hosts") }"#,
         ),
     ] {
-        assert!(
-            client_calls(&format!(
-                "class Calls(private val restTemplate: RestTemplate)\n{body}"
-            ))
-            .is_empty(),
-            "{label}: a receiver must be a value, never a type"
+        let calls = client_calls(&format!("class Calls(private val restTemplate: RestTemplate)\n{body}\n{PROBE}"));
+        assert_eq!(
+            calls,
+            ["GET /probe"],
+            "{label}: a receiver must be a value, never a type — and the file \
+             was genuinely scanned: {calls:?}"
         );
     }
 }
@@ -640,13 +666,15 @@ fn an_interpolated_path_on_the_receiver_method_idiom_emits_no_reference() {
             r#"fun drop(id: String) { return restTemplate.delete("/carts/$id") }"#,
         ),
     ] {
-        assert!(
-            client_calls(&format!(
-                "class Calls(private val restTemplate: RestTemplate) {{\n    {body}\n}}"
-            ))
-            .is_empty(),
+        let calls = client_calls(&format!(
+            "class Calls(private val restTemplate: RestTemplate) {{\n    {body}\n}}\n{PROBE}"
+        ));
+        assert_eq!(
+            calls,
+            ["GET /probe"],
             "{label}: a Kotlin string template is composed at runtime and must \
-             never be bound as a static template"
+             never be bound as a static template — and the file was genuinely \
+             scanned: {calls:?}"
         );
     }
 }
@@ -722,8 +750,13 @@ class Calls {
 /// the *method name* (`getForObject`), and `exchange` puts it in a **second**
 /// argument (`HttpMethod.GET`). The arm's `@invoke.http.method` slot needs a
 /// node whose text is literally an HTTP verb, so both are dropped by the generic
-/// dispatch's `is_http_method` check — identical to Java's ceiling, and lifting
-/// either needs the same descriptor-level method-alias table (CR-108 CRA-05).
+/// dispatch's `is_http_method` check — identical to Java's ceiling.
+///
+/// The method-alias table this used to defer to (CR-108 CRA-05) landed later in
+/// the same sprint as S-346's `[invocation_methods]`, so `getForObject` is now
+/// liftable by descriptor data alone; `exchange` still is not, its verb binding
+/// to no capture. The query header states the filter-half trade that keeps the
+/// row undeclared.
 #[test]
 fn rest_template_verb_suffixed_methods_are_a_stated_ceiling() {
     assert!(

@@ -436,8 +436,11 @@ end
 /// class-constructor idiom — carries its verb in the CONSTANT name (`Get`),
 /// not in the called method: the actual method text is `new`, which
 /// `is_http_method` correctly rejects (it is not an HTTP verb). Lifting this
-/// needs a per-verb constant-name table reading the *receiver's* last segment
-/// (CR-108 CRA-05 territory), deliberately deferred.
+/// needs a per-verb constant-name table reading the *receiver's* last segment.
+/// S-346's `[invocation_methods]` table
+/// (same sprint) does not reach it: that table normalizes a captured text, and
+/// the only text captured here is `new`. A table plus a pattern, deliberately
+/// deferred — the same position Go's `http.MethodGet` ceiling is in.
 #[test]
 fn the_generic_request_class_constructor_idiom_is_a_stated_ceiling() {
     let facts = extract_ruby(

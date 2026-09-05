@@ -1671,7 +1671,12 @@ export async function raw() { return axios.get("/files/{*rest}"); }"#,
     feature = "lang-typescript",
     feature = "lang-go",
     feature = "lang-kotlin",
-    feature = "lang-c-sharp"
+    feature = "lang-c-sharp",
+    feature = "lang-rust",
+    feature = "lang-java",
+    feature = "lang-python",
+    feature = "lang-ruby",
+    feature = "lang-php"
 ))]
 fn invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::InvocationSite> {
     let reg = registry();
@@ -2423,4 +2428,396 @@ fn a_table_value_that_is_not_an_http_verb_captures_nothing() {
         "a mistyped verb is dropped by is_http_method, never invented; got {} sites",
         typo.len()
     );
+}
+
+// ── The FR-WS-08 case-2 obligation, closed over EVERY landed arm ────────────
+//
+// Cases 2 and 3 of the shared negative-case fixture contract require more than
+// "emits no reference": they require the query to hand the site OVER, so the
+// refusal carries a coverage reason (`base-url-runtime` / `path-not-composed`)
+// rather than being a silent non-match. A refs-level `is_empty()` cannot tell
+// those two apart, and every arm's query header claims the stronger version.
+//
+// Four arms adopted a slot-level pin for it under task review — typescript
+// (S-343), go (S-INT), kotlin (S-342) and c-sharp (S-346), each with its own
+// richly-documented test above. Four did not: java, python, ruby and php still
+// claim the reason in their headers with nothing asserting it. The obligation
+// was carried in an ENUMERATED `#[cfg(any(…))]` list, and a list like that
+// cannot notice the arm that never joined it.
+//
+// So the roster below is closed against the plugin set instead: every plugin
+// declaring `invocations` must appear here, and the assertion fails naming the
+// language if a tenth arm lands without a row. The per-language tests above stay
+// as they are — this is the guard that no arm is missing one, not a replacement
+// for what they document.
+
+/// One landed arm's runtime-composed-path fixture: the language's own spelling
+/// of "a client call whose path is not a static literal".
+#[cfg(all(
+    feature = "lang-rust",
+    feature = "lang-java",
+    feature = "lang-kotlin",
+    feature = "lang-go",
+    feature = "lang-python",
+    feature = "lang-typescript",
+    feature = "lang-c-sharp",
+    feature = "lang-ruby",
+    feature = "lang-php"
+))]
+struct DynamicPathCase {
+    /// The plugin name, matched against the registry's own roster.
+    plugin: &'static str,
+    /// The extension routing the fixture to that plugin's grammar.
+    ext: &'static str,
+    /// The verb the query must still hand over — only the PATH is dynamic.
+    verb: &'static str,
+    source: &'static str,
+}
+
+#[cfg(all(
+    feature = "lang-rust",
+    feature = "lang-java",
+    feature = "lang-kotlin",
+    feature = "lang-go",
+    feature = "lang-python",
+    feature = "lang-typescript",
+    feature = "lang-c-sharp",
+    feature = "lang-ruby",
+    feature = "lang-php"
+))]
+const DYNAMIC_PATH_CASES: &[DynamicPathCase] = &[
+    DynamicPathCase {
+        plugin: "rust",
+        ext: "rs",
+        verb: "get",
+        source: "fn call(client: &Client, url: &str) { let _ = client.get(url); }\n",
+    },
+    DynamicPathCase {
+        plugin: "java",
+        ext: "java",
+        verb: "get",
+        source: "public class Calls {\n    private RestClient restClient;\n\
+                 \x20   String a(String path) { return restClient.get().uri(path).retrieve().body(String.class); }\n}\n",
+    },
+    DynamicPathCase {
+        plugin: "kotlin",
+        ext: "kt",
+        verb: "get",
+        source: "class Calls(private val restClient: RestClient) {\n\
+                 \x20   fun a(path: String): String = restClient.get().uri(path).retrieve().body(String::class.java)\n}\n",
+    },
+    DynamicPathCase {
+        plugin: "go",
+        ext: "go",
+        verb: "Get",
+        source: "package client\n\nfunc Call(url string) { http.Get(url) }\n",
+    },
+    DynamicPathCase {
+        plugin: "python",
+        ext: "py",
+        verb: "get",
+        source: "def call(session, url):\n    return session.get(url)\n",
+    },
+    DynamicPathCase {
+        plugin: "typescript",
+        ext: "ts",
+        verb: "get",
+        source: "export function call(url: string) { return axios.get(url); }\n",
+    },
+    DynamicPathCase {
+        plugin: "tsx",
+        ext: "tsx",
+        verb: "get",
+        source: "export function call(url: string) { return axios.get(url); }\n",
+    },
+    DynamicPathCase {
+        plugin: "c-sharp",
+        ext: "cs",
+        verb: "GET",
+        source: "public class C\n{\n    HttpClient client;\n    string baseUrl;\n\
+                 \x20   public void M() { client.GetAsync(baseUrl); }\n}\n",
+    },
+    DynamicPathCase {
+        plugin: "ruby",
+        ext: "rb",
+        verb: "get",
+        source: "def call(conn, path)\n  conn.get(path)\nend\n",
+    },
+    DynamicPathCase {
+        plugin: "php",
+        ext: "php",
+        verb: "get",
+        source: "<?php\n$client = new Client();\n$client->get($url);\n",
+    },
+];
+
+/// **Every landed `invocations` arm hands a runtime-composed path OVER to the
+/// interpreter** — FR-WS-08 shared negative case 2, pinned for all of them at
+/// once ([NFR-RA-05]).
+///
+/// The roster is closed against the plugin set, not written out: a plugin
+/// declaring `invocations` with no row here fails, so a tenth language cannot
+/// land an arm and skip the obligation the way java, python, ruby and php did
+/// when it lived in an enumerated `#[cfg(any(…))]` list. (Found by the sprint-63
+/// review: four arms claimed `base-url-runtime` in their query headers with
+/// nothing asserting the site ever reached the interpreter to be refused.)
+///
+/// What each row proves, in the language's own spelling:
+/// - exactly one site — the query matched, so the refusal below is the
+///   interpreter's and not a silent non-match;
+/// - the VERB still reaches the interpreter (normalized through
+///   `[invocation_methods]` where the language declares one) — only the path is
+///   dynamic;
+/// - the dynamic-path marker is set and no static path is guessed, which is what
+///   makes the reason `base-url-runtime` rather than nothing at all.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+#[cfg(all(
+    feature = "lang-rust",
+    feature = "lang-java",
+    feature = "lang-kotlin",
+    feature = "lang-go",
+    feature = "lang-python",
+    feature = "lang-typescript",
+    feature = "lang-c-sharp",
+    feature = "lang-ruby",
+    feature = "lang-php"
+))]
+fn every_landed_invocations_arm_hands_a_dynamic_path_to_the_interpreter() {
+    use crate::resolve::http_client_call::{
+        classify_client_call, ClientCallRefusal, DYNAMIC_PATH_SLOT, METHOD_SLOT, PATH_SLOT,
+    };
+
+    // The roster, closed against the plugin set: no arm may be absent from it.
+    let reg = registry();
+    let mut declaring: Vec<&str> = reg
+        .iter()
+        .filter(|p| p.capabilities().iter().any(|c| c == "invocations"))
+        .map(|p| p.name())
+        .collect();
+    declaring.sort_unstable();
+    let mut covered: Vec<&str> = DYNAMIC_PATH_CASES.iter().map(|c| c.plugin).collect();
+    covered.sort_unstable();
+    assert_eq!(
+        covered, declaring,
+        "every plugin declaring `invocations` needs a DYNAMIC_PATH_CASES row — \
+         FR-WS-08 case 2 requires the query to hand the site OVER so the refusal \
+         carries a coverage reason, and a refs-level `is_empty()` in the arm's \
+         own suite cannot show that"
+    );
+
+    for case in DYNAMIC_PATH_CASES {
+        let sites = invocation_sites(case.ext, case.source);
+        assert_eq!(
+            sites.len(),
+            1,
+            "{}: exactly one invocation site must reach the interpreter",
+            case.plugin
+        );
+        let slots = &sites[0].slots;
+        assert_eq!(
+            slots.get(METHOD_SLOT).map(String::as_str),
+            Some(case.verb),
+            "{}: the verb still reaches the interpreter — only the path is \
+             dynamic: {slots:?}",
+            case.plugin
+        );
+        assert!(
+            slots.contains_key(DYNAMIC_PATH_SLOT),
+            "{}: a runtime-composed path must carry the dynamic-path marker — \
+             that marker is what makes the refusal `base-url-runtime` rather \
+             than a silent non-match: {slots:?}",
+            case.plugin
+        );
+        assert!(
+            !slots.contains_key(PATH_SLOT),
+            "{}: no static path is guessed from a composed one: {slots:?}",
+            case.plugin
+        );
+        assert_eq!(
+            classify_client_call(slots),
+            Err(ClientCallRefusal::BaseUrlRuntime),
+            "{}: and the interpreter's own reason is base-url-runtime",
+            case.plugin
+        );
+    }
+}
+
+/// One landed arm's **static, non-normalizing** path fixture — FR-WS-08 shared
+/// negative case 3's counterpart to [`DynamicPathCase`].
+#[cfg(all(
+    feature = "lang-rust",
+    feature = "lang-java",
+    feature = "lang-kotlin",
+    feature = "lang-go",
+    feature = "lang-python",
+    feature = "lang-typescript",
+    feature = "lang-c-sharp",
+    feature = "lang-ruby",
+    feature = "lang-php"
+))]
+struct StaticPathCase {
+    plugin: &'static str,
+    ext: &'static str,
+    verb: &'static str,
+    source: &'static str,
+}
+
+#[cfg(all(
+    feature = "lang-rust",
+    feature = "lang-java",
+    feature = "lang-kotlin",
+    feature = "lang-go",
+    feature = "lang-python",
+    feature = "lang-typescript",
+    feature = "lang-c-sharp",
+    feature = "lang-ruby",
+    feature = "lang-php"
+))]
+const STATIC_PATH_CASES: &[StaticPathCase] = &[
+    StaticPathCase {
+        plugin: "rust",
+        ext: "rs",
+        verb: "get",
+        source: "fn call(client: &Client) { let _ = client.get(\"/files/**\"); }\n",
+    },
+    StaticPathCase {
+        plugin: "java",
+        ext: "java",
+        verb: "get",
+        source: "public class Calls {\n    private RestClient restClient;\n\
+                 \x20   String a() { return restClient.get().uri(\"/files/**\").retrieve().body(String.class); }\n}\n",
+    },
+    StaticPathCase {
+        plugin: "kotlin",
+        ext: "kt",
+        verb: "get",
+        source: "class Calls(private val restClient: RestClient) {\n\
+                 \x20   fun a(): String = restClient.get().uri(\"/files/**\").retrieve().body(String::class.java)\n}\n",
+    },
+    StaticPathCase {
+        plugin: "go",
+        ext: "go",
+        verb: "Get",
+        source: "package client\n\nfunc Call() { http.Get(\"/files/**\") }\n",
+    },
+    StaticPathCase {
+        plugin: "python",
+        ext: "py",
+        verb: "get",
+        source: "def call(session):\n    return session.get(\"/files/**\")\n",
+    },
+    StaticPathCase {
+        plugin: "typescript",
+        ext: "ts",
+        verb: "get",
+        source: "export function call() { return axios.get(\"/files/**\"); }\n",
+    },
+    StaticPathCase {
+        plugin: "tsx",
+        ext: "tsx",
+        verb: "get",
+        source: "export function call() { return axios.get(\"/files/**\"); }\n",
+    },
+    StaticPathCase {
+        plugin: "c-sharp",
+        ext: "cs",
+        verb: "GET",
+        source: "public class C\n{\n    HttpClient client;\n\
+                 \x20   public void M() { client.GetAsync(\"/files/**\"); }\n}\n",
+    },
+    StaticPathCase {
+        plugin: "ruby",
+        ext: "rb",
+        verb: "get",
+        source: "def call(conn)\n  conn.get(\"/files/**\")\nend\n",
+    },
+    StaticPathCase {
+        plugin: "php",
+        ext: "php",
+        verb: "get",
+        source: "<?php\n$client = new Client();\n$client->get('/files/**');\n",
+    },
+];
+
+/// **Every landed `invocations` arm hands a non-normalizing STATIC path over as a
+/// static path** — FR-WS-08 shared negative case 3, the twin of
+/// [`every_landed_invocations_arm_hands_a_dynamic_path_to_the_interpreter`]
+/// ([NFR-RA-05]).
+///
+/// Case 3's whole point is that the refusal reason is *different* from case 2's:
+/// the query hands over a **static** `path` slot and the refusal comes from
+/// classifying it (`path-not-composed`), not from failing to match. A refs-level
+/// `is_empty()` shows neither, which is why it is asserted here — and closed
+/// against the same plugin-set roster, so no arm can land without it.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+#[cfg(all(
+    feature = "lang-rust",
+    feature = "lang-java",
+    feature = "lang-kotlin",
+    feature = "lang-go",
+    feature = "lang-python",
+    feature = "lang-typescript",
+    feature = "lang-c-sharp",
+    feature = "lang-ruby",
+    feature = "lang-php"
+))]
+fn every_landed_invocations_arm_hands_a_non_normalizing_path_to_the_interpreter() {
+    use crate::resolve::http_client_call::{
+        classify_client_call, ClientCallRefusal, DYNAMIC_PATH_SLOT, METHOD_SLOT, PATH_SLOT,
+    };
+
+    let reg = registry();
+    let mut declaring: Vec<&str> = reg
+        .iter()
+        .filter(|p| p.capabilities().iter().any(|c| c == "invocations"))
+        .map(|p| p.name())
+        .collect();
+    declaring.sort_unstable();
+    let mut covered: Vec<&str> = STATIC_PATH_CASES.iter().map(|c| c.plugin).collect();
+    covered.sort_unstable();
+    assert_eq!(
+        covered, declaring,
+        "every plugin declaring `invocations` needs a STATIC_PATH_CASES row — \
+         FR-WS-08 case 3's distinguishing claim is the REASON, and a refs-level \
+         `is_empty()` in the arm's own suite cannot show which one fired"
+    );
+
+    for case in STATIC_PATH_CASES {
+        let sites = invocation_sites(case.ext, case.source);
+        assert_eq!(
+            sites.len(),
+            1,
+            "{}: one site must reach the interpreter",
+            case.plugin
+        );
+        let slots = &sites[0].slots;
+        assert_eq!(
+            slots.get(METHOD_SLOT).map(String::as_str),
+            Some(case.verb),
+            "{}: the verb reaches the interpreter: {slots:?}",
+            case.plugin
+        );
+        assert_eq!(
+            slots.get(PATH_SLOT).map(String::as_str),
+            Some("/files/**"),
+            "{}: the static literal is handed over verbatim, not pre-judged: {slots:?}",
+            case.plugin
+        );
+        assert!(
+            !slots.contains_key(DYNAMIC_PATH_SLOT),
+            "{}: a static literal never carries the dynamic marker: {slots:?}",
+            case.plugin
+        );
+        assert_eq!(
+            classify_client_call(slots),
+            Err(ClientCallRefusal::PathNotComposed),
+            "{}: and the interpreter's own reason is path-not-composed, which is \
+             what makes case 3 distinct from case 2",
+            case.plugin
+        );
+    }
 }

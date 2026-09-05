@@ -753,6 +753,40 @@ fn an_empty_workspace_yields_an_honest_empty_view() {
     );
 }
 
+/// **The rider's bound-ratio is never bare either** ([CR-111], [FR-WS-05]).
+///
+/// [CR-111]'s acceptance criterion enumerates three renderings and this rider is
+/// a fourth, so nothing in that story's fixtures reaches here. Without this test
+/// the denominator could be dropped from `CoverageRider` with `workspace status`
+/// and the web view both still green — the closed-list failure the sprint-63
+/// review found it by.
+///
+/// Asserted on the wire, not just the struct, because the rider is a JSON payload
+/// every reachability consumer reads.
+///
+/// [CR-111]: ../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+/// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
+#[test]
+fn the_coverage_rider_publishes_the_bound_ratios_denominator_and_excluded_count() {
+    reset();
+    let view = app_wide_reachability(&registry(&[]), &[]);
+
+    let wire = serde_json::to_value(&view).unwrap();
+    let rider = &wire["coverage"];
+    for key in ["bound_ratio_measured", "no_provider_in_workspace"] {
+        assert!(
+            rider.get(key).is_some(),
+            "the rider must publish `{key}` beside its bound-ratio — a ratio \
+             whose scale a reader has to re-derive is the bare figure CR-111 \
+             forbids: {rider}"
+        );
+    }
+    assert_eq!(
+        view.coverage.bound_ratio_measured, 0,
+        "and it is the coverage summary's own denominator, carried verbatim"
+    );
+}
+
 /// The verdict's JSON wire spelling is part of the contract every surface reads.
 /// Asserted directly, because the promotion bucket is empty on the real path
 /// today, so no E2E would catch a rename regression on it.

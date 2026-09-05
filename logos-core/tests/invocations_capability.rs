@@ -81,39 +81,73 @@ fn invocations_is_reported_present_for_rust_and_absent_for_c_cpp_scala() {
     }
 }
 
-/// Each language story's own AC — "both plugins carry the capability" — pinned
-/// by a test that is **green today** (S-341: java; S-343: typescript + tsx;
-/// S-345: go).
+/// **Every language that ships an `invocations.scm` declares the capability,
+/// and its declared query actually loads** — the per-language attribution the
+/// sprint-wide invariant below cannot give, since that one stays red until the
+/// last arm lands.
 ///
-/// The invariant below is the sprint-wide guard and stays red by design until
-/// the last of S-341..S-348 lands, so it cannot serve as any single story's
-/// evidence. This row grows by one entry per story instead, which also makes a
-/// later regression attributable to a language rather than to "the invariant".
+/// # Why the roster is DERIVED and not written out
+///
+/// This assertion used to iterate a hand-written list of language names, one
+/// appended per story. That shape failed exactly as a closed list does: the
+/// five-way parallel merge of Iteration 3 dropped `python` and `php` from it —
+/// neither branch touched that line, so git merged clean, every test stayed
+/// green, and two landed arms silently left the roster. It had to be repaired by
+/// hand afterwards.
+///
+/// A list that must be appended to cannot notice what it does not name. So the
+/// surface is enumerated instead: the roster is the set of plugin directories
+/// that actually ship a `queries/invocations.scm`, read off the source tree, and
+/// every one of them is required to be classified — declared in `plugin.toml`
+/// AND loadable at runtime. Adding a language's query file is then enough to put
+/// it under this guard, and no merge can drop an entry, because there is no
+/// entry to drop.
+///
+/// The reverse direction is checked too, so the correspondence is a set
+/// equality rather than a one-way containment: a plugin declaring `invocations`
+/// with no query file on disk fails here as well (the silent no-capture failure
+/// mode S-340 closed, seen from the test side).
+///
+/// Rust belongs in the derived set even though
+/// [`invocations_is_reported_present_for_rust_and_absent_for_c_cpp_scala`] already
+/// reports its capability: that one reads the `languages()` descriptor summary
+/// and never calls `plugin.query("invocations")`, so the stronger assertion —
+/// the declared query actually LOADS — was never applied to the language that
+/// has shipped the arm longest.
 #[test]
-fn each_landed_language_reports_the_invocations_capability() {
+fn every_language_shipping_an_invocations_query_declares_and_loads_it() {
+    let plugins_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins");
+
+    // The surface: plugin directories carrying a `queries/invocations.scm`.
+    let mut shipped: Vec<String> = std::fs::read_dir(&plugins_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", plugins_dir.display()))
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|dir| dir.join("queries/invocations.scm").is_file())
+        .map(|dir| {
+            dir.file_name()
+                .expect("plugin dir name")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    shipped.sort();
+    assert!(
+        shipped.len() >= 10,
+        "expected every CR-108 arm plus rust to ship a query file, saw {shipped:?}"
+    );
+
     let tmp = tempfile::tempdir().unwrap();
     let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
 
-    // Rust (pre-CR-108), then S-341 (java), S-343 (typescript, tsx), S-345 (go),
-    // S-342 (kotlin), S-344 (python), S-346 (c-sharp), S-347 (ruby), S-348 (php).
-    // All nine CR-108 languages have landed; this list is now complete.
-    //
-    // Rust belongs in this row even though the test above already reports its
-    // capability: that one reads the `languages()` descriptor summary and never
-    // calls `plugin.query("invocations")`, so the stronger assertion — the
-    // declared query actually LOADS — was not applied to the language that has
-    // shipped the arm longest.
-    for name in [
-        "rust", "java", "typescript", "tsx", "go", "kotlin", "c-sharp", "python", "ruby",
-        "php",
-    ] {
+    for name in &shipped {
         let plugin = reg
             .iter()
-            .find(|p| p.name() == name)
+            .find(|p| p.name() == name.as_str())
             .unwrap_or_else(|| panic!("{name} is compiled in by default"));
         assert!(
             has_capability(plugin, "invocations"),
-            "{name} ships an invocations.scm and must declare the capability: {:?}",
+            "{name} ships queries/invocations.scm and must declare the \
+             capability in its plugin.toml: {:?}",
             plugin.capabilities()
         );
         assert!(
@@ -122,6 +156,21 @@ fn each_landed_language_reports_the_invocations_capability() {
              but unloadable query is the silent no-capture failure S-340 closed"
         );
     }
+
+    // …and nothing declares the capability without shipping the file.
+    let mut declaring: Vec<&str> = reg
+        .iter()
+        .filter(|p| has_capability(*p, "invocations"))
+        .map(|p| p.name())
+        .collect();
+    declaring.sort_unstable();
+    assert_eq!(
+        declaring, shipped,
+        "the set of plugins DECLARING `invocations` and the set SHIPPING a \
+         queries/invocations.scm must be the same set — a declaration with no \
+         file is the silent no-capture failure, a file with no declaration is a \
+         landed arm the extractor never runs"
+    );
 }
 
 // ── FR-WS-08 AC5 / CR-108: every plugin declaring `frameworks` also declares
