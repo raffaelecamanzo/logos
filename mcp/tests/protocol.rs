@@ -65,6 +65,14 @@ type Client = RunningService<RoleClient, ()>;
 /// temp dir guard (dropped last so `.logos/` outlives the engine).
 async fn connect() -> (Client, tokio::task::JoinHandle<()>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
+    connect_over(dir).await
+}
+
+/// Like [`connect`] but over a caller-prepared directory — lets a test seed
+/// `.logos/rules.toml` (or other fixture files) before the engine starts.
+async fn connect_over(
+    dir: tempfile::TempDir,
+) -> (Client, tokio::task::JoinHandle<()>, tempfile::TempDir) {
     let engine = Engine::start(dir.path()).expect("engine start");
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let server = tokio::spawn(async move {
@@ -358,6 +366,61 @@ async fn dsm_rejects_an_unknown_granularity() {
     );
     assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
     assert!(err.message.contains("bogus"), "error names the bad token");
+}
+
+// ── S-354 / FR-GV-22: `check_rules` renders all three RulesReport states ──
+
+/// The MCP `check_rules` tool serializes `RulesReport` as-is (S-352), so its
+/// three states must be distinguishable in the JSON a client reads: a clean
+/// loaded contract (`passed: true`), a violated one (`passed: false`), and no
+/// contract at all (`rules_present: false`, `passed` serialized as JSON
+/// `null` — never `true`, which would read as a false pass, CR-112).
+#[tokio::test]
+async fn check_rules_renders_all_three_states() {
+    // State 1: no contract loaded — `rules_present: false`, `passed: null`.
+    let (client, _server, _dir) = connect().await;
+    let absent = call(&client, "check_rules", json!({})).await.expect("check_rules");
+    assert_eq!(absent["rules_present"], false, "no rules.toml was authored: {absent}");
+    assert_eq!(
+        absent["passed"],
+        Value::Null,
+        "an empty evaluated set carries no verdict, never `true`: {absent}"
+    );
+
+    // State 2: a loaded, clean contract — `rules_present: true`, `passed: true`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".logos")).expect("mkdir .logos");
+    std::fs::write(
+        dir.path().join(".logos/rules.toml"),
+        "[constraints]\nmax_cycles = 0\n",
+    )
+    .expect("write rules.toml");
+    let (client, _server, _dir) = connect_over(dir).await;
+    let clean = call(&client, "check_rules", json!({})).await.expect("check_rules");
+    assert_eq!(clean["rules_present"], true, "a loaded rules.toml: {clean}");
+    assert_eq!(clean["passed"], true, "no cycles in an empty graph: {clean}");
+
+    // State 3: a loaded contract with a violation — `rules_present: true`, `passed: false`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".logos")).expect("mkdir .logos");
+    std::fs::write(
+        dir.path().join(".logos/rules.toml"),
+        "[[layers]]\nname = \"a\"\npaths = [\"src/a_*.rs\"]\norder = 1\n\n\
+         [[layers]]\nname = \"b\"\npaths = [\"src/b_*.rs\"]\norder = 2\n\n\
+         [[boundaries]]\nfrom = \"a\"\nto = \"b\"\nreason = \"a must not reach b\"\n",
+    )
+    .expect("write rules.toml");
+    std::fs::create_dir_all(dir.path().join("src")).expect("mkdir src");
+    std::fs::write(
+        dir.path().join("src/a_x.rs"),
+        "use crate::b_y::g;\npub fn f() { g(); }\n",
+    )
+    .expect("write src/a_x.rs");
+    std::fs::write(dir.path().join("src/b_y.rs"), "pub fn g() {}\n").expect("write src/b_y.rs");
+    let (client, _server, _dir) = connect_over(dir).await;
+    let violated = call(&client, "check_rules", json!({})).await.expect("check_rules");
+    assert_eq!(violated["rules_present"], true, "a loaded rules.toml: {violated}");
+    assert_eq!(violated["passed"], false, "the boundary crossing fires: {violated}");
 }
 
 // ── FR-MC-06 / NFR-RA-12 / UAT-MC-04: faults are structured, never fatal ──

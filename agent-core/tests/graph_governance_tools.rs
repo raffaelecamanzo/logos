@@ -30,6 +30,48 @@ fn fixture_engine() -> (Arc<Engine>, tempfile::TempDir) {
     (Arc::new(engine), dir)
 }
 
+/// The `fixture_engine` call chain (no cycles) plus a loaded, harmless
+/// `rules.toml` — a present contract with nothing to flag.
+fn clean_fixture_engine_with_rules() -> (Arc<Engine>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".logos")).expect("mkdir .logos");
+    std::fs::write(dir.path().join(".logos/rules.toml"), "[constraints]\nmax_cycles = 0\n")
+        .expect("write rules.toml");
+    std::fs::create_dir_all(dir.path().join("src")).expect("mkdir src");
+    std::fs::write(
+        dir.path().join("src/lib.rs"),
+        "pub fn alpha() { beta(); }\n\
+         pub fn beta() { gamma(); }\n\
+         pub fn gamma() {}\n",
+    )
+    .expect("write fixture");
+    let engine = Engine::start(dir.path()).expect("engine start");
+    (Arc::new(engine), dir)
+}
+
+/// A layered fixture with a declared boundary the call chain crosses — writing
+/// `rules.toml` first so the engine loads it as a present contract.
+fn layered_fixture_engine() -> (Arc<Engine>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".logos")).expect("mkdir .logos");
+    std::fs::write(
+        dir.path().join(".logos/rules.toml"),
+        "[[layers]]\nname = \"a\"\npaths = [\"src/a_*.rs\"]\norder = 1\n\n\
+         [[layers]]\nname = \"b\"\npaths = [\"src/b_*.rs\"]\norder = 2\n\n\
+         [[boundaries]]\nfrom = \"a\"\nto = \"b\"\nreason = \"a must not reach b\"\n",
+    )
+    .expect("write rules.toml");
+    std::fs::create_dir_all(dir.path().join("src")).expect("mkdir src");
+    std::fs::write(
+        dir.path().join("src/a_x.rs"),
+        "use crate::b_y::g;\npub fn f() { g(); }\n",
+    )
+    .expect("write src/a_x.rs");
+    std::fs::write(dir.path().join("src/b_y.rs"), "pub fn g() {}\n").expect("write src/b_y.rs");
+    let engine = Engine::start(dir.path()).expect("engine start");
+    (Arc::new(engine), dir)
+}
+
 /// Drive one tool by name with JSON args through a `ToolSet`, returning the
 /// parsed JSON read-model.
 async fn call(toolset: &rig_core::tool::ToolSet, tool: &str, args: Value) -> Value {
@@ -202,6 +244,39 @@ async fn check_rules_and_health_run_through_the_governance_set() {
 
     let health = call(&tools, "health", serde_json::json!({})).await;
     assert!(health.is_object(), "health returns a report object");
+}
+
+/// The `check_rules` agent tool serializes `RulesReport` as-is (S-352/S-354):
+/// its three states must be distinguishable in the JSON an agent reads — a
+/// clean loaded contract (`passed: true`), a violated one (`passed: false`),
+/// and no contract at all (`rules_present: false`, `passed: null` — never
+/// `true`, which would read as a false pass, CR-112).
+#[tokio::test]
+async fn check_rules_renders_all_three_states() {
+    // State 1: no contract loaded — `rules_present: false`, `passed: null`.
+    let (engine, _dir) = fixture_engine();
+    let tools = governance_toolset(engine);
+    let absent = call(&tools, "check_rules", serde_json::json!({})).await;
+    assert_eq!(absent["rules_present"], false, "no rules.toml was authored: {absent}");
+    assert_eq!(
+        absent["passed"],
+        serde_json::Value::Null,
+        "an empty evaluated set carries no verdict, never `true`: {absent}"
+    );
+
+    // State 2: a loaded, clean contract — `rules_present: true`, `passed: true`.
+    let (engine, _dir) = clean_fixture_engine_with_rules();
+    let tools = governance_toolset(engine);
+    let clean = call(&tools, "check_rules", serde_json::json!({})).await;
+    assert_eq!(clean["rules_present"], true, "a loaded rules.toml: {clean}");
+    assert_eq!(clean["passed"], true, "no cycles in the alpha/beta/gamma chain: {clean}");
+
+    // State 3: a loaded contract with a violation — `rules_present: true`, `passed: false`.
+    let (engine, _dir) = layered_fixture_engine();
+    let tools = governance_toolset(engine);
+    let violated = call(&tools, "check_rules", serde_json::json!({})).await;
+    assert_eq!(violated["rules_present"], true, "a loaded rules.toml: {violated}");
+    assert_eq!(violated["passed"], false, "the boundary crossing fires: {violated}");
 }
 
 #[tokio::test]
