@@ -37,8 +37,9 @@
 //!
 //! 1. add one `Variant => "wire_name"` line to the `registered_tools!`
 //!    invocation below, in the block for its area;
-//! 2. add the variant to one of [`Tool::event_class`]'s two arms — the compiler
-//!    refuses to build until you do;
+//! 2. classify it **twice** — one of [`Tool::event_class`]'s two arms and one of
+//!    [`Tool::tool_class`]'s five; the compiler refuses to build until you do
+//!    both;
 //! 3. call `traced(Tool::Variant, …)` from the chokepoint.
 //!
 //! Nothing else needs touching: the read-model derives its SQL predicate from
@@ -57,8 +58,28 @@
 //! CLI `logos stats` invocation is no less self-referential than a dashboard
 //! render ([FR-OB-09]).
 //!
+//! # Two classifications, two questions
+//!
+//! [`Tool::event_class`] answers *"does this event count as usage at all?"* — a
+//! binary exclusion ([FR-OB-09]). [`Tool::tool_class`] answers a different
+//! question, *"what kind of work was it?"*, and is the five-way
+//! navigation / quality-gate / session-gate / engine-internal / read-model
+//! breakdown the stats read-model reports ([FR-OB-11]).
+//!
+//! They are **independent axes** and deliberately do not agree member-for-member:
+//! `languages` is a [`ToolClass::ReadModel`] call (it reports Logos's own
+//! grammar registry) yet an [`EventClass::EngineQuery`] event (it is a command
+//! the user typed, and it reads back nothing this measurement produced — see
+//! `event_class`'s last arm). The one direction that *is* an invariant runs the
+//! other way: everything excluded as self-referential is a read-model call, and
+//! `the_two_classifications_agree_where_they_must` pins it.
+//!
+//! Both matches are exhaustive with no wildcard arm, so a new variant fails the
+//! build twice over until it is classified on both axes.
+//!
 //! [CR-091]: ../../../docs/requests/CR-091-telemetry-surface-classification-and-usage-attribution.md
 //! [FR-OB-09]: ../../../docs/specs/requirements/FR-OB-09.md
+//! [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
 
 /// Whether an event counts as tool use, or is Logos measuring itself
 /// ([FR-OB-09]).
@@ -72,6 +93,61 @@ pub(crate) enum EventClass {
     /// figures on every surface.
     ReadModelRequest,
 }
+
+/// What kind of work a call was ([FR-OB-11]) — the five-way breakdown the stats
+/// read-model reports, orthogonal to [`EventClass`]'s binary exclusion.
+///
+/// The distinction existed before this enum, but only as the hardcoded weight
+/// table behind the reads-saved estimate (`stats::reads_saved_per_call`), so
+/// every sprint dogfood table re-derived it by hand in prose — wasted effort and
+/// a place for the classification to drift between reports. Promoting it to a
+/// read-model field makes the table `stats` output ([NFR-CC-04]).
+///
+/// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ToolClass {
+    /// Answers a structural question about the indexed code — the calls that
+    /// substitute for an agent reading files, which is the whole token-saving
+    /// thesis (AS-02). This is the class the reads-saved weights are non-zero on.
+    Navigation,
+    /// Produces or reports a quality/governance verdict **about the code**:
+    /// rules, cycles, hotspots, coverage, health, history.
+    QualityGate,
+    /// The session lifecycle bracket (`session_start` / `session_end`).
+    SessionGate,
+    /// Work on one of Logos's own artifacts — building the graph, the wiki, the
+    /// config store — rather than a question anybody asked about the code.
+    EngineInternal,
+    /// Reports Logos's **own** state (index freshness, telemetry, capabilities,
+    /// wiki/config state) rather than the code's.
+    ReadModel,
+}
+
+impl ToolClass {
+    /// The wire label carried on the read-model.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            ToolClass::Navigation => "navigation",
+            ToolClass::QualityGate => "quality-gate",
+            ToolClass::SessionGate => "session-gate",
+            ToolClass::EngineInternal => "engine-internal",
+            ToolClass::ReadModel => "read-model",
+        }
+    }
+}
+
+/// The class label reported for a tool name **read back from the store**.
+///
+/// A name today's registry does not know was written by an older build and since
+/// retired. It is counted rather than dropped ([`engine_query_predicate`] keeps
+/// it), so it needs a label — and the only honest one is that the class is
+/// unknown, not a guess ([NFR-CC-04]). It is deliberately outside [`ToolClass`]:
+/// the five classes are exhaustive over the *registry*, and inventing a sixth
+/// variant for "not in the registry" would let a live tool fall into it.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+pub(crate) const UNREGISTERED_CLASS: &str = "unregistered";
 
 /// Declare the registered tool set: one `Variant => "wire_name"` line per tool.
 ///
@@ -322,6 +398,146 @@ impl Tool {
             | Tool::Languages => EventClass::EngineQuery,
         }
     }
+}
+
+impl Tool {
+    /// This tool's [`ToolClass`] ([FR-OB-11]).
+    ///
+    /// # This match must stay exhaustive
+    ///
+    /// **Never add a `_ =>` arm**, for exactly the reason spelled out on
+    /// [`Tool::event_class`]: [FR-OB-11] requires that "an unclassified tool
+    /// fails the build rather than defaulting silently", and a wildcard turns
+    /// that into a silent default while still compiling.
+    /// `unclassified_tool_fails_the_build` scans this function's source too.
+    ///
+    /// The arms follow the `registered_tools!` blocks where the block *is* the
+    /// class; the arms that cross a block boundary say why.
+    ///
+    /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+    pub(crate) const fn tool_class(self) -> ToolClass {
+        match self {
+            // ── Navigation: traverses the graph to answer a question about the
+            // code, replacing ad-hoc file reads (AS-02) ─────────────────────
+            Tool::Search
+            | Tool::Context
+            | Tool::Explore
+            | Tool::Node
+            | Tool::Callers
+            | Tool::Callees
+            | Tool::Impact
+            | Tool::Implements
+            | Tool::ReferencingDocs
+            | Tool::Affected
+            | Tool::GraphElements
+            // The two *reads* over the wiki. They sit in the wiki block because
+            // that is where the store lives, but their subject is the codebase
+            // and they substitute for opening source — the navigation criterion.
+            // The rest of the wiki block writes or rebuilds the store, and is
+            // engine-internal below.
+            | Tool::WikiRead
+            | Tool::WikiSearch => ToolClass::Navigation,
+
+            // ── Quality gate: a verdict about the repository ────────────────
+            Tool::Scan
+            | Tool::Rescan
+            | Tool::Gate
+            | Tool::CheckRules
+            | Tool::Evolution
+            | Tool::Dsm
+            | Tool::DocGaps
+            | Tool::Health
+            | Tool::Doctor
+            | Tool::Verify
+            | Tool::Hotspots
+            | Tool::LatestMetrics
+            | Tool::LatestScan
+            | Tool::LatestGate
+            | Tool::LatestTemporalReport
+            | Tool::LatestHotspots
+            | Tool::QualityReadout
+            | Tool::LanguageComposition
+            // `coverage_status` reports the coverage verdict *over the code*;
+            // its three ingest/refresh siblings mutate the graph from an
+            // artifact and are engine-internal.
+            | Tool::CoverageStatus => ToolClass::QualityGate,
+
+            // ── Session gate ────────────────────────────────────────────────
+            Tool::SessionStart | Tool::SessionEnd => ToolClass::SessionGate,
+
+            // ── Engine-internal: work on Logos's own artifacts ──────────────
+            //
+            // The indexing / sync pipeline that builds the graph.
+            Tool::Init
+            | Tool::Index
+            | Tool::Sync
+            | Tool::EnsureIndexed
+            | Tool::Discover
+            | Tool::Load
+            | Tool::Extract
+            | Tool::Resolve
+            | Tool::Annotate
+            | Tool::Persist
+            | Tool::WatchSync
+            | Tool::WatchCoverageIngest
+            | Tool::WorktreeSeed
+            | Tool::NavProloguePurge
+            // Coverage ingestion: folds an external artifact into the graph.
+            | Tool::CoverageIngest
+            | Tool::CoverageIngestAuto
+            | Tool::CoverageRefresh
+            // The wiki store's writes, generation and maintenance.
+            | Tool::WikiWrite
+            | Tool::WikiDelete
+            | Tool::WikiPrunedLog
+            | Tool::WikiGenerate
+            | Tool::WikiNative
+            | Tool::WikiDocCategoryPresent
+            | Tool::WikiSrsMode
+            | Tool::WikiGuidePages
+            | Tool::WikiReconcile
+            | Tool::WikiMaterialize
+            | Tool::WikiSkillEmit
+            | Tool::WikiQualityReportHookEmit
+            // Mutations of the project's own policy store.
+            | Tool::ConfigWrite
+            | Tool::ConfigWriteSecret
+            | Tool::ConfigApply => ToolClass::EngineInternal,
+
+            // ── Read-model: reports Logos's own state ───────────────────────
+            //
+            // `stats` and `status` are also the two `EventClass::
+            // ReadModelRequest` tools, so they never reach the cross-tab at all
+            // (FR-OB-09 excludes them). The other three are counted events —
+            // the two axes are independent, see the module docs.
+            Tool::Stats
+            | Tool::Status
+            // Which grammar plugins compiled in — a capability readout.
+            | Tool::Languages
+            // The wiki store's own freshness/anchor state, and the rendered
+            // configuration; neither asks anything about the code.
+            | Tool::WikiStatus
+            | Tool::ConfigRead => ToolClass::ReadModel,
+        }
+    }
+
+    /// The registered tool with this wire name, or `None` for a name today's
+    /// registry does not know (see [`UNREGISTERED_CLASS`]).
+    ///
+    /// Linear over [`Tool::ALL`]: the registry is a few dozen entries and this
+    /// runs once per distinct tool name in a stats window, never on the emission
+    /// path ([NFR-OO-02]).
+    ///
+    /// [NFR-OO-02]: ../../../docs/specs/requirements/NFR-OO-02.md
+    pub(crate) fn from_wire(name: &str) -> Option<Tool> {
+        Tool::ALL.iter().copied().find(|t| t.as_str() == name)
+    }
+}
+
+/// The [`ToolClass`] label for a wire name read back from the store, or
+/// [`UNREGISTERED_CLASS`] when the registry does not know it.
+pub(crate) fn class_of_wire(name: &str) -> &'static str {
+    Tool::from_wire(name).map_or(UNREGISTERED_CLASS, |t| t.tool_class().as_str())
 }
 
 /// The wire names of every self-referential tool, in registration order.

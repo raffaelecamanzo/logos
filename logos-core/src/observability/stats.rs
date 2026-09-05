@@ -13,6 +13,23 @@
 //! raw-events-only, since `daily_rollup` carries no `origin` column — an honest
 //! omission over a fabricated attribution ([NFR-CC-04]).
 //!
+//! # The attribution projections ([FR-OB-11])
+//!
+//! `calls_by_tool` groups by surface and tool with no origin; `calls_by_origin`
+//! collapses origin to two buckets with no tool. Neither can answer *"which
+//! navigation came from dev panes?"* — a caveat recorded verbatim in three
+//! consecutive sprint records. Both columns already sit on the same `events` row,
+//! so `calls_by_tool_origin` is one more `GROUP BY` over the rows already there,
+//! not a capture change; `calls_by_class` rolls it up to the five-way
+//! [`tool::ToolClass`] so a sprint dogfood table needs no manual classification.
+//!
+//! Both inherit `calls_by_origin`'s coverage: **raw events only** (no `origin` on
+//! a rollup row) and legacy `NULL` origins folded into `"main"`. Those limits are
+//! stated *in the payload* — `attribution_coverage` — rather than in
+//! documentation, because an unlabelled figure is what [NFR-CC-04] forbids. The
+//! per-tool `class` label rides the existing raw-plus-rollup `calls_by_tool`
+//! counts instead, so **every** tool the read-model reports carries a class.
+//!
 //! The headline **tokens-saved figure is an estimate** — the dogfood metric
 //! that says whether Logos earns its place ([NFR-OO-03]) — and is honestly
 //! labeled as such ([NFR-CC-04]; the constants are SRS OQ-01).
@@ -49,6 +66,7 @@
 //!
 //! [FR-OB-04]: ../../../docs/specs/requirements/FR-OB-04.md
 //! [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
+//! [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
 //! [NFR-OO-03]: ../../../docs/specs/requirements/NFR-OO-03.md
 //! [NFR-OO-04]: ../../../docs/specs/requirements/NFR-OO-04.md
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
@@ -60,10 +78,28 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 use super::tool;
-use crate::models::quality::{DailyActivity, OriginUsage, StatsInfo, ToolUsage};
+use crate::models::quality::{
+    AttributionCoverage, ClassUsage, DailyActivity, OriginUsage, StatsInfo, ToolOriginUsage,
+    ToolUsage,
+};
 
 /// Default stats window in days ([FR-OB-04]: "default window 7 days").
 pub(crate) const DEFAULT_WINDOW_DAYS: u32 = 7;
+
+/// The dev-vs-`main` bucket, as a SQL expression over a row's `origin`
+/// ([FR-OB-08]).
+///
+/// Defined once and interpolated into both projections that use it — the origin
+/// split and the [FR-OB-11] cross-tab — for the same reason
+/// [`tool::engine_query_predicate`] is: two copies of a bucketing rule can be
+/// changed one at a time, and `calls_by_origin` and `calls_by_class` are
+/// documented as covering the same rows under the same rule. A literal, never
+/// user input, so interpolation carries no injection surface.
+///
+/// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
+/// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+const ORIGIN_BUCKET: &str =
+    "CASE WHEN COALESCE(origin, 'main') = 'main' THEN 'main' ELSE 'dev' END";
 
 /// Aggregate usage/perf stats for the project rooted at `root`.
 ///
@@ -89,6 +125,10 @@ pub(crate) fn stats(root: &Path, window_days: Option<u32>) -> Result<StatsInfo> 
     if !db_path.is_file() {
         return Ok(StatsInfo {
             window_days,
+            // Empty figures still carry their coverage labels: a consumer
+            // rendering the (absent) cross-tab reads the same limits it would on
+            // a populated store, rather than a silently zeroed struct.
+            attribution_coverage: attribution_coverage(window_days),
             warnings: vec!["no telemetry recorded yet (telemetry.db not found)".to_string()],
             ..StatsInfo::default()
         });
@@ -228,8 +268,7 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
     let mut by_origin: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT CASE WHEN COALESCE(origin, 'main') = 'main' THEN 'main' ELSE 'dev' END,
-                    count(*), sum(ok)
+            "SELECT {ORIGIN_BUCKET}, count(*), sum(ok)
              FROM events WHERE at >= ?1 AND {engine_query} GROUP BY 1",
         ))
         .context("preparing the origin-breakdown query")?;
@@ -253,9 +292,77 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
         })
         .collect();
 
+    // Tool × origin cross-tab ([FR-OB-11]): the projection neither existing
+    // breakdown can produce — `calls_by_tool` groups by surface and tool with no
+    // origin, `calls_by_origin` by origin with no tool. Both columns already sit
+    // on the same `events` row ([FR-OB-08]), so this is one more aggregation over
+    // the rows already there, not a capture change.
+    //
+    // Raw events only and legacy NULLs folded into `main` — the *same*
+    // `ORIGIN_BUCKET` expression as the origin split above, so the two can never
+    // disagree; `attribution_coverage` below states both limits in the payload
+    // ([NFR-CC-04]). Keyed `(tool, origin)` so the order is tool-then-origin with
+    // `"dev"` before `"main"` ([NFR-RA-06]).
+    let mut by_tool_origin: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT tool, {ORIGIN_BUCKET}, count(*), sum(ok)
+             FROM events WHERE at >= ?1 AND {engine_query} GROUP BY 1, 2",
+        ))
+        .context("preparing the tool-by-origin cross-tab query")?;
+    let rows = stmt
+        .query_map([cutoff], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })
+        .context("querying the tool-by-origin cross-tab")?;
+    for row in rows {
+        let (tool, origin, calls, ok_calls) = row.context("reading a cross-tab row")?;
+        let entry = by_tool_origin.entry((tool, origin)).or_default();
+        entry.0 += calls.max(0) as u64;
+        entry.1 += ok_calls.max(0) as u64;
+    }
+
+    let calls_by_tool_origin: Vec<ToolOriginUsage> = by_tool_origin
+        .into_iter()
+        .map(|((tool, origin), (calls, ok_calls))| ToolOriginUsage {
+            class: tool::class_of_wire(&tool).to_string(),
+            tool,
+            origin,
+            calls,
+            ok_calls,
+        })
+        .collect();
+
+    // The class × origin rollup — the dogfood table. Folded in Rust from the
+    // cross-tab rather than queried again, so the two cannot disagree and it
+    // inherits exactly the cross-tab's coverage.
+    let mut by_class_origin: BTreeMap<(&str, &str), (u64, u64)> = BTreeMap::new();
+    for cell in &calls_by_tool_origin {
+        let entry = by_class_origin
+            .entry((cell.class.as_str(), cell.origin.as_str()))
+            .or_default();
+        entry.0 += cell.calls;
+        entry.1 += cell.ok_calls;
+    }
+    let calls_by_class: Vec<ClassUsage> = by_class_origin
+        .into_iter()
+        .map(|((class, origin), (calls, ok_calls))| ClassUsage {
+            class: class.to_string(),
+            origin: origin.to_string(),
+            calls,
+            ok_calls,
+        })
+        .collect();
+
     let calls_by_tool: Vec<ToolUsage> = usage
         .into_iter()
         .map(|((surface, tool), (calls, ok_calls))| ToolUsage {
+            class: tool::class_of_wire(&tool).to_string(),
             surface,
             tool,
             calls,
@@ -279,8 +386,68 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
         artifact_bindings: std::collections::BTreeMap::new(),
         activity_by_day,
         calls_by_origin,
+        calls_by_tool_origin,
+        calls_by_class,
+        attribution_coverage: attribution_coverage(window_days),
         warnings: Vec::new(),
     })
+}
+
+/// What the two attribution projections cover, stated in the payload
+/// ([FR-OB-11], [NFR-CC-04]).
+///
+/// The limits are structural, not data-dependent — they follow from
+/// `daily_rollup`'s schema and the [FR-OB-08] migration — so this is a pure
+/// function of the requested window rather than something measured per query.
+///
+/// `covered_window_days` is therefore a **guaranteed floor, not a measurement**.
+/// Pruning is flush-triggered ([`super::db::rollup_and_prune`] runs from the
+/// writer, not from a clock), so a long-lived process can still hold raw events
+/// older than the retention horizon and the projections then cover more than
+/// this claims. Under-stating is the safe direction ([NFR-CC-04]) and measuring
+/// instead would be worse: `MIN(at)` on a three-day-old store would report
+/// "covers 3 of 7 days", conflating how much history exists with how much of the
+/// window these projections are able to see.
+///
+/// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
+/// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+pub(crate) fn attribution_coverage(window_days: u32) -> AttributionCoverage {
+    let covered_window_days = window_days.min(super::db::RETENTION_DAYS);
+    let truncated_by_retention = covered_window_days < window_days;
+    let mut notes = vec![
+        "`calls_by_tool_origin` and `calls_by_class` are computed from raw events only: \
+         `daily_rollup` is keyed (day, surface, tool) and carries no origin column, so a \
+         rolled-up day is absent from both rather than mis-attributed. `calls_by_origin` \
+         shares this limit; the totals, `calls_by_tool` and `activity_by_day` do not."
+            .to_string(),
+        format!(
+            "Raw events are retained for about {} days, so these projections are guaranteed \
+             to cover only the most recent {} days of any window.",
+            super::db::RETENTION_DAYS,
+            super::db::RETENTION_DAYS,
+        ),
+        "Events written before the origin stamp existed have origin IS NULL and fold into \
+         \"main\", which inflates the historical \"main\" bucket."
+            .to_string(),
+    ];
+    if truncated_by_retention {
+        notes.push(format!(
+            "The requested window reaches past raw retention: `calls_total`, `calls_by_tool` \
+             and `activity_by_day` cover all {window_days} days, while the raw-events-only \
+             projections are guaranteed only the most recent {covered_window_days}. They may \
+             cover more — pruning is flush-triggered, not time-driven — so treat \
+             `covered_window_days` as a floor.",
+        ));
+    }
+    AttributionCoverage {
+        raw_events_only: true,
+        requested_window_days: window_days,
+        covered_window_days,
+        truncated_by_retention,
+        legacy_null_origin_folds_into_main: true,
+        notes,
+    }
 }
 
 /// Nearest-rank percentile over an ascending-sorted slice (`0` when empty).
@@ -319,7 +486,19 @@ const TOKENS_PER_AVOIDED_READ: u64 = 1_500;
 
 /// Estimated file reads replaced by one call of `tool` (0 for non-navigation
 /// tools — indexing and bookkeeping save nothing by themselves).
-fn reads_saved_per_call(tool: &str) -> u64 {
+///
+/// This weight table is where the tool distinction used to live *only*, which is
+/// what [FR-OB-11] promotes onto the read-model as [`tool::ToolClass`]. The two
+/// stay deliberately separate: the class says what kind of work a call was, the
+/// weights say how much reading one of them replaces, and those are different
+/// numbers (an `implements` call is navigation but carries no ratified weight).
+/// The one binding between them is directional and asserted by
+/// `every_weighted_tool_is_classified_navigation`: a non-zero weight implies
+/// [`tool::ToolClass::Navigation`]. The weights themselves are ratified constants
+/// (SRS OQ-01) and are unchanged by that promotion.
+///
+/// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+pub(super) fn reads_saved_per_call(tool: &str) -> u64 {
     match tool {
         "context" => 5, // bundle: replaces a whole exploration
         "explore" => 4, // grouped neighbourhood read

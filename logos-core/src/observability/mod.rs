@@ -478,4 +478,4 @@ pub(crate) fn traced_infallible_timed<T>(tool: Tool, f: impl FnOnce() -> T) -> (
 }
 
 /// Aggregated usage/perf stats from `telemetry.db` — see [`crate::Engine::stats`].
-pub(crate) use stats::stats;
+pub(crate) use stats::{attribution_coverage, stats, DEFAULT_WINDOW_DAYS as DEFAULT_STATS_WINDOW_DAYS};
