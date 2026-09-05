@@ -44,46 +44,6 @@ use std::collections::BTreeMap;
 
 use super::route_template::route_key;
 
-/// Does a file's canonical reference `target` name the HTTP-client package
-/// `detector`?
-///
-/// The consumer-side twin of the framework provider capture's ledger-gated
-/// candidacy ([FR-FW-04]): the outbound-call `.scm` anchor is a broad
-/// `<receiver>.<method>(<arg>)` shape, so a collection/registry `.get("/x")` is
-/// syntactically indistinguishable from `client.get("/x")`. Rather than
-/// fabricate an outbound call from an incidental `/`-shaped string key, the arm
-/// captures **only** in a file that actually references one of the client
-/// packages its own descriptor declares (`http_client_detectors`) — a file that
-/// uses an undetected client wrapper simply stays honestly unbound (under-capture
-/// is safe; over-capture would fabricate a cross-service edge).
-///
-/// The detector set is **descriptor data**, never a branch on the language id:
-/// a new language's arm adds an `http_client_detectors` row to its own
-/// `plugin.toml` and changes no code ([NFR-MA-01]), which is also what
-/// `resolve::framework::tests::jvm_parity` requires of everything under
-/// `src/resolve/`.
-///
-/// The rule itself is the one the framework pass applies to
-/// `framework_detectors` (`resolve::framework::matches_detector`): a hit is the
-/// detector itself or the detector followed by a `::` segment boundary, so
-/// `org::springframework::web::client` matches
-/// `org::springframework::web::client::RestClient` but never
-/// `org::springframework::web::clientutils::X`. Whole-segment equality on the
-/// *first* path segment — the rule this replaces — was a Rust-crate assumption:
-/// `reqwest::Client`'s head is the crate, but a Java import's head is `org` or
-/// `java`. Every Rust detector is a single segment, so the prefix rule accepts
-/// and rejects exactly what the head rule did for Rust ([NFR-RA-06]).
-///
-/// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
-/// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
-/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-pub(crate) fn matches_client_detector(target: &str, detector: &str) -> bool {
-    target
-        .strip_prefix(detector)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
-}
-
 /// The capture slot naming the request's HTTP method (`get`, `POST`, …). Filled
 /// by every per-language client-call capture.
 pub(crate) const METHOD_SLOT: &str = "method";

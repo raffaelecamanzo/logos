@@ -106,6 +106,7 @@ use crate::plugin::{LanguagePlugin, LanguageRegistry};
 use crate::runtime::Runtime;
 
 use super::binder;
+use super::matches_detector;
 use super::promote::{self, Promoted, PromotedEdge};
 
 /// Method-router / method-attribute names recognised as HTTP registrations
@@ -487,16 +488,6 @@ fn detector_prefixes(registry: &LanguageRegistry) -> Vec<String> {
     prefixes.sort();
     prefixes.dedup();
     prefixes
-}
-
-/// `true` when a ledger `target` (canonical `::`-joined) falls under a
-/// descriptor detector prefix: the target *is* the detector, or extends it by
-/// whole segments (`axum::routing::get` under `axum`; never `axumish` under
-/// `axum`).
-fn matches_detector(target: &str, detector: &str) -> bool {
-    target
-        .strip_prefix(detector)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
 }
 
 // ── Scanning (pure tree-sitter, per file) ────────────────────────────────────

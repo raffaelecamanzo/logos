@@ -79,6 +79,26 @@ use crate::graph_store::{EdgeRow, GraphStore, NodeRow, UnresolvedRefRow};
 use crate::models::pipeline::{RelationCoverage, ResolutionStats};
 use crate::runtime::Runtime;
 
+/// `true` when a ledger `target` (canonical `::`-joined) falls under a
+/// descriptor detector prefix: the target *is* the detector, or extends it by
+/// whole segments (`axum::routing::get` under `axum`; never `axumish` under
+/// `axum`).
+///
+/// One rule, two ledger-gated candidacy checks — the framework pass's
+/// provider-side `framework_detectors` ([FR-FW-04]) and the HTTP client-call
+/// arm's consumer-side `http_client_detectors` ([FR-WS-08]). They are the same
+/// question asked of the same canonical target form, so they share one body: a
+/// future tightening (a trailing `::`, case folding) then lands once instead of
+/// drifting between two copies.
+///
+/// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
+/// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+pub(crate) fn matches_detector(target: &str, detector: &str) -> bool {
+    target
+        .strip_prefix(detector)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+}
+
 /// The consistent graph state one resolution run binds against.
 struct Snapshot {
     nodes: Vec<NodeRow>,
