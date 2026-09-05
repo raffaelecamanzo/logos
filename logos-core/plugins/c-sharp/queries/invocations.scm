@@ -87,6 +87,19 @@
 ; `selector_expression`. Lifting Go's ceiling is a Go-side decision — a table plus
 ; a query pattern — not a side effect of this story.
 ;
+; A hole-free interpolated string (`$"/users"`) is NOT captured: C# emits an
+; `interpolation_start` child even with no substitutions, so `static_string_literal`
+; reads it as dynamic. The TypeScript arm captures the analogous hole-free
+; template literal, so this is a deliberate cross-arm divergence in the SAFE
+; direction (under-capture, NFR-RA-05) rather than an oversight. Same for the
+; UTF-8 literal suffix `"/users"u8`.
+;
+; Droppability caveat (FR-PL-04): C# is the one language whose `.scm` is not
+; self-sufficient. The verb vocabulary lives in `[invocation_methods]` in
+; `plugin.toml`, which is NOT overridable, so an on-disk override that binds
+; `@invoke.http.method` to a spelling absent from that table captures nothing and
+; the user has no remedy. Override the SHAPES, not the vocabulary.
+;
 ; Deliberately NOT captured: `client.Send(request)` / a `SendAsync(req)` whose
 ; `HttpRequestMessage` was built elsewhere — the constructor pattern below
 ; captures the CONSTRUCTOR wherever it sits, so the split spelling is covered by
@@ -104,21 +117,37 @@
 ; invocation, so anchoring on `invocation_expression` reaches both spellings.
 ; A runtime-composed path (`$"{base}/users"`, a bare variable) still yields a
 ; SITE, so the arm classifies it base-url-runtime rather than never seeing it.
+; (That classification is not yet observable in any output — nothing consumes
+; `UnboundReason` outside tests — so this is forward parity with the Rust arm,
+; not a live coverage guarantee.)
+; The `name:` alternation carries the two spellings of a member name in one
+; pattern, so the argument slot is defined once: a bare `(identifier)`, and the
+; `(generic_name (identifier))` the `System.Net.Http.Json` extensions produce
+; (`client.GetFromJsonAsync<User>("/users")`). A name is one or the other, never
+; both, so a call still yields exactly one match.
 (invocation_expression
   function: (member_access_expression
-    name: (identifier) @invoke.http.method)
+    name: [
+      (identifier) @invoke.http.method
+      (generic_name (identifier) @invoke.http.method)
+    ])
   arguments: (argument_list
     .
     (argument (_) @invoke.http.arg)))
 
-; ── The same, with an explicit type argument ────────────────────────────────
-; `client.GetFromJsonAsync<User>("/users")` — the `System.Net.Http.Json`
-; extensions are generic, so the member name is a `generic_name` wrapping the
-; identifier rather than a bare identifier. Same two slots.
+; ── The same, through a null-conditional receiver ───────────────────────────
+; `client?.GetAsync("/users")` is an `invocation_expression` whose callee is a
+; `conditional_access_expression` holding a `member_binding_expression` — a
+; different node kind from `member_access_expression`, and one level deeper, so
+; it needs its own pattern rather than an alternation inside the one above.
+; Same two slots.
 (invocation_expression
-  function: (member_access_expression
-    name: (generic_name
-      (identifier) @invoke.http.method))
+  function: (conditional_access_expression
+    (member_binding_expression
+      name: [
+        (identifier) @invoke.http.method
+        (generic_name (identifier) @invoke.http.method)
+      ]))
   arguments: (argument_list
     .
     (argument (_) @invoke.http.arg)))
