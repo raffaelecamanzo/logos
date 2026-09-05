@@ -220,52 +220,85 @@ mod tests {
         );
     }
 
+    /// Every all-verbs registration a shipped descriptor declares, named
+    /// positively — the closed list this guard must classify.
+    ///
+    /// A guard that only rejects *known-wrong* spellings cannot notice an entry
+    /// that drifts to some third spelling, or one that is deleted outright. So
+    /// the expectation is stated forwards: these tokens exist and map to
+    /// [`WILDCARD_METHOD`]. Express `all`/`use` are in the list because they
+    /// carry the rule beyond the JVM — an `app.all("/x", h)` mount is a wildcard
+    /// provider under exactly the same rule a bare `@RequestMapping` is
+    /// ([CR-109] §4.4).
+    const WILDCARD_ENTRIES: &[(&str, &[&str])] = &[
+        ("java/", &["RequestMapping"]),
+        ("kotlin/", &["RequestMapping"]),
+        ("typescript/", &["all", "use"]),
+        ("tsx/", &["all", "use"]),
+        ("python/", &["path", "re_path", "websocket"]),
+        ("go/", &["Any", "Handle", "HandleFunc"]),
+        ("c-sharp/", &["Route"]),
+        ("php/", &["any", "match"]),
+    ];
+
     /// The extraction side names the wildcard, this side interprets it
     /// ([FR-FW-05], [FR-CG-09]) — so every shipped descriptor's all-verbs entry
-    /// must be this module's token verbatim. A descriptor that drifted to `*` or
-    /// `any` would emit routes no consumer could ever reach, silently.
+    /// must be this module's token verbatim. A descriptor that drifted to `*`,
+    /// `any`, `ALL`, or that dropped the entry, would emit routes no consumer
+    /// could ever reach — silently, because nothing else in the tree compares the
+    /// two spellings.
     ///
-    /// Express `all`/`use` are asserted by name because they carry the rule
-    /// beyond the JVM: an `app.all("/x", h)` mount is a wildcard provider under
-    /// exactly the same rule a bare `@RequestMapping` is ([CR-109] §4.4).
+    /// Two halves, because either alone is porous: [`WILDCARD_ENTRIES`] asserts
+    /// **forwards** that each named token is present and spells `ANY`, and the
+    /// sweep asserts **backwards** that no *other* entry means all-verbs while
+    /// spelling it differently. A language whose feature is off is skipped, and
+    /// the closing assertion proves at least one prefix was actually reached, so
+    /// the whole test can never pass vacuously.
     #[test]
     fn every_shipped_descriptor_names_the_wildcard_with_the_shared_token() {
         use crate::plugin::{grammars, PluginManifest};
 
-        let mut express_mounts_seen = 0;
+        let mut prefixes_seen = 0;
         for entry in grammars::compiled() {
             let manifest = PluginManifest::parse(entry.manifest_label, entry.manifest_toml)
                 .expect("a shipped descriptor parses");
+
+            // Forwards: every declared all-verbs token is present and spells `ANY`.
+            for (prefix, tokens) in WILDCARD_ENTRIES {
+                if !entry.manifest_label.starts_with(prefix) {
+                    continue;
+                }
+                prefixes_seen += 1;
+                for token in *tokens {
+                    assert_eq!(
+                        manifest.framework_methods.get(*token).map(String::as_str),
+                        Some(WILDCARD_METHOD),
+                        "{}: `{token}` must map to the wildcard `{WILDCARD_METHOD}` \
+                         (drop it here only when the descriptor deliberately stops \
+                         registering all verbs)",
+                        entry.manifest_label
+                    );
+                }
+            }
+
+            // Backwards: no other entry may mean all-verbs under another spelling.
             for (token, method) in &manifest.framework_methods {
-                let means_all_verbs = method == "*" || method.eq_ignore_ascii_case("any");
+                let means_all_verbs = method == "*"
+                    || method.eq_ignore_ascii_case("any")
+                    || method.eq_ignore_ascii_case("all")
+                    || method.eq_ignore_ascii_case("wildcard");
                 assert!(
                     !means_all_verbs || method == WILDCARD_METHOD,
                     "{}: `{token} = \"{method}\"` must spell the wildcard `{WILDCARD_METHOD}`",
                     entry.manifest_label
                 );
             }
-            if entry.manifest_label.starts_with("typescript/")
-                || entry.manifest_label.starts_with("tsx/")
-            {
-                for mount in ["all", "use"] {
-                    assert_eq!(
-                        manifest.framework_methods.get(mount).map(String::as_str),
-                        Some(WILDCARD_METHOD),
-                        "{}: Express `app.{mount}` must map to the wildcard",
-                        entry.manifest_label
-                    );
-                    express_mounts_seen += 1;
-                }
-            }
         }
-        // Both TypeScript rows ride one cargo feature, so a build carrying it
-        // must have checked all four mounts — never silently zero.
-        #[cfg(feature = "lang-typescript")]
-        assert_eq!(
-            express_mounts_seen, 4,
-            "the typescript and tsx descriptors must each declare `all` and `use`"
+        assert!(
+            prefixes_seen > 0,
+            "no shipped descriptor matched a WILDCARD_ENTRIES prefix — the guard \
+             checked nothing (a renamed manifest label, or every language feature off)"
         );
-        let _ = express_mounts_seen;
     }
 
     /// A bucket holding no compatible provider yields nothing — the same answer
