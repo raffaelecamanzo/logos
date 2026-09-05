@@ -91,20 +91,14 @@
 ; Droppable on disk at `.logos/plugins/php/queries/invocations.scm` (FR-PL-04,
 ; FR-PL-05).
 
-; ── Verb-as-method-name, bare `$var` receiver ───────────────────────────────
-; `$client->get('/p')`, `$client->head('/p')`, `$client->delete('/p')`, …
+; ── Verb-as-method-name, bare `$var` or property-access receiver ────────────
+; `$client->get('/p')`, `$client->head('/p')`, `$client->delete('/p')`, …, and
+; `$this->httpClient->get('/p')` — the ordinary DI-injected-client shape. One
+; pattern: the RECEIVER SHAPE discriminator above is a single rule ("a bare
+; variable or a property access on one"), so the two node kinds share every
+; other field and arity anchor.
 (member_call_expression
-  object: (variable_name)
-  name: (name) @invoke.http.method
-  arguments: (arguments
-    .
-    (argument (_) @invoke.http.arg)
-    .))
-
-; ── Verb-as-method-name, property-access receiver ───────────────────────────
-; `$this->httpClient->get('/p')` — the ordinary DI-injected-client shape.
-(member_call_expression
-  object: (member_access_expression)
+  object: [(variable_name) (member_access_expression)]
   name: (name) @invoke.http.method
   arguments: (arguments
     .
