@@ -1667,7 +1667,11 @@ export async function raw() { return axios.get("/files/{*rest}"); }"#,
 /// [`classify_client_call`](crate::resolve::http_client_call::classify_client_call)
 /// are crate-private, and widening them to `pub` for a test would be a worse
 /// trade than the module gate documented on `extract::tests`.
-#[cfg(any(feature = "lang-typescript", feature = "lang-go"))]
+#[cfg(any(
+    feature = "lang-typescript",
+    feature = "lang-go",
+    feature = "lang-c-sharp"
+))]
 fn invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::InvocationSite> {
     let reg = registry();
     let plugin = reg
@@ -1697,9 +1701,12 @@ fn invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::Invo
         &[],
         &[],
         Some(&module),
-        // The pass-through default: these fixtures assert the dispatch itself,
-        // not a descriptor's `[invocation_methods]` normalization (S-346).
-        &std::collections::BTreeMap::new(),
+        // The plugin's OWN table, not an empty one (S-346). For a language that
+        // declares no rows this is the pass-through these fixtures always had;
+        // for C# it is the difference between reaching the interpreter and
+        // producing zero sites, so an empty map here would make the C# twins
+        // below vacuous in the opposite direction.
+        &plugin.semantics().invocation_methods,
     )
 }
 
@@ -2144,4 +2151,157 @@ func ListUsers() {{ http.Get("{literal}") }}
             "the interpreter's own refusal reason for {literal}"
         );
     }
+}
+
+// ── S-346 / FR-WS-08 / CR-108: C# slot-level refusal reasons ────────────────
+//
+// The rest of the C# arm's suite lives in `tests/c_sharp_invocations.rs`. These
+// stay here for the same reason the Go pair above does — `collect_invocation_sites`
+// and `classify_client_call` are crate-private (see [`invocation_sites`]) — and
+// they are the third arm to adopt the obligation sprint-63's review ruled on:
+// FR-WS-08's negative cases 2 and 3 require "emits no reference AND surfaces the
+// reason", which a refs-level `is_empty()` cannot distinguish from "the query
+// never matched".
+
+/// FR-WS-08 shared negative case 2 for **C#**, pinned at slot level, across both
+/// of the language's anchor shapes.
+///
+/// `tests/c_sharp_invocations.rs::a_runtime_composed_path_is_not_captured` proves
+/// only that an interpolated path emits nothing — equally true if the query never
+/// matched. The C# query header claims the site IS handed over ("still yields a
+/// SITE, so the arm classifies it base-url-runtime"); without this test that claim
+/// is unpinned, and narrowing `(argument (_) @invoke.http.arg)` to a literal
+/// alternation would delete C#'s coverage reasons with every other test green.
+#[test]
+#[cfg(feature = "lang-c-sharp")]
+fn a_runtime_composed_c_sharp_path_reaches_the_interpreter_as_a_dynamic_path() {
+    use crate::resolve::http_client_call::{DYNAMIC_PATH_SLOT, METHOD_SLOT, PATH_SLOT};
+
+    // Verb-as-method-name, and verb-as-constructor-argument (the named constant
+    // this story's normalizer table resolves).
+    for (call, verb) in [
+        (r#"client.GetAsync($"{baseUrl}/users");"#, "GET"),
+        (r#"client.GetAsync(baseUrl);"#, "GET"),
+        (
+            r#"client.SendAsync(new HttpRequestMessage(HttpMethod.Delete, $"{baseUrl}/users"));"#,
+            "DELETE",
+        ),
+    ] {
+        let source = format!(
+            "using System.Net.Http;\n\npublic class C\n{{\n    HttpClient client;\n\
+             \x20   string baseUrl;\n    public void M() {{ {call} }}\n}}\n"
+        );
+        let sites = invocation_sites("cs", &source);
+        assert_eq!(sites.len(), 1, "exactly one invocation site for {call:?}");
+        let slots = &sites[0].slots;
+        assert_eq!(
+            slots.get(METHOD_SLOT).map(String::as_str),
+            Some(verb),
+            "the verb still reaches the interpreter, normalized through \
+             [invocation_methods] — only the path is dynamic: {slots:?}"
+        );
+        assert!(
+            slots.contains_key(DYNAMIC_PATH_SLOT),
+            "a runtime-composed path must carry the dynamic-path marker (that \
+             marker is what makes the refusal `base-url-runtime` rather than a \
+             silent non-match) for {call:?}: {slots:?}"
+        );
+        assert!(
+            !slots.contains_key(PATH_SLOT),
+            "no static path is guessed from a composed one: {slots:?}"
+        );
+        assert!(
+            crate::resolve::http_client_call::render_client_call_target(slots).is_none(),
+            "and the interpreter therefore renders no target"
+        );
+    }
+}
+
+/// FR-WS-08 shared negative case 3 for **C#**, pinned at slot level — and the
+/// relative-literal case beside it, which refuses for a *different* reason.
+/// Case 3's whole point is the distinct reason, so it is asserted where the
+/// reason exists.
+#[test]
+#[cfg(feature = "lang-c-sharp")]
+fn a_non_normalizing_c_sharp_path_reaches_the_interpreter_as_a_static_path() {
+    use crate::resolve::http_client_call::{
+        classify_client_call, ClientCallRefusal, DYNAMIC_PATH_SLOT, PATH_SLOT,
+    };
+
+    for (literal, refusal) in [
+        ("/v{version}/users", ClientCallRefusal::PathNotComposed),
+        ("users/{id}", ClientCallRefusal::BaseUrlRuntime),
+    ] {
+        let source = format!(
+            "using System.Net.Http;\n\npublic class C\n{{\n    HttpClient client;\n\
+             \x20   public void M() {{ client.GetAsync(\"{literal}\"); }}\n}}\n"
+        );
+        let sites = invocation_sites("cs", &source);
+        assert_eq!(sites.len(), 1, "one site reaches the interpreter for {literal}");
+        let slots = &sites[0].slots;
+        assert_eq!(
+            slots.get(PATH_SLOT).map(String::as_str),
+            Some(literal),
+            "the static literal is handed over verbatim, not pre-judged: {slots:?}"
+        );
+        assert!(
+            !slots.contains_key(DYNAMIC_PATH_SLOT),
+            "a static literal never carries the dynamic marker: {slots:?}"
+        );
+        assert_eq!(
+            classify_client_call(slots),
+            Err(refusal),
+            "the interpreter's own refusal reason for {literal}"
+        );
+    }
+}
+
+/// The `[invocation_methods]` **value** half, which no descriptor can exercise:
+/// a mistyped verb (`"GTE"`) captures nothing rather than inventing a method.
+/// Both `plugin.toml` and `PluginManifest::invocation_methods` state this;
+/// nothing else asserts it, because a real descriptor's values are all valid.
+#[test]
+#[cfg(feature = "lang-c-sharp")]
+fn a_table_value_that_is_not_an_http_verb_captures_nothing() {
+    use std::collections::BTreeMap;
+
+    let reg = registry();
+    let plugin = reg.for_extension("cs").expect("c-sharp grammar");
+    let query = plugin.query("invocations").expect("ships an invocations query");
+    let source = "using System.Net.Http;\n\npublic class C\n{\n    HttpClient client;\n\
+                  \x20   public void M() { client.GetAsync(\"/users\"); }\n}\n";
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let facts = extract(&FileInput::new("src/client.cs", source), plugin, &ctx);
+    let module = facts
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Module)
+        .expect("the file module node")
+        .symbol
+        .clone();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(plugin.language()).expect("set language");
+    let tree = parser.parse(source, None).expect("parses");
+
+    let sites = |table: BTreeMap<String, String>| {
+        collect_invocation_sites(
+            query,
+            tree.root_node(),
+            source.as_bytes(),
+            &[],
+            &[],
+            Some(&module),
+            &table,
+        )
+    };
+
+    let good = sites(BTreeMap::from([("GetAsync".into(), "GET".into())]));
+    assert_eq!(good.len(), 1, "a well-formed row yields the site");
+
+    let typo = sites(BTreeMap::from([("GetAsync".into(), "GTE".into())]));
+    assert!(
+        typo.is_empty(),
+        "a mistyped verb is dropped by is_http_method, never invented; got {} sites",
+        typo.len()
+    );
 }
