@@ -2643,3 +2643,181 @@ fn every_landed_invocations_arm_hands_a_dynamic_path_to_the_interpreter() {
         );
     }
 }
+
+/// One landed arm's **static, non-normalizing** path fixture — FR-WS-08 shared
+/// negative case 3's counterpart to [`DynamicPathCase`].
+#[cfg(all(
+    feature = "lang-rust",
+    feature = "lang-java",
+    feature = "lang-kotlin",
+    feature = "lang-go",
+    feature = "lang-python",
+    feature = "lang-typescript",
+    feature = "lang-c-sharp",
+    feature = "lang-ruby",
+    feature = "lang-php"
+))]
+struct StaticPathCase {
+    plugin: &'static str,
+    ext: &'static str,
+    verb: &'static str,
+    source: &'static str,
+}
+
+#[cfg(all(
+    feature = "lang-rust",
+    feature = "lang-java",
+    feature = "lang-kotlin",
+    feature = "lang-go",
+    feature = "lang-python",
+    feature = "lang-typescript",
+    feature = "lang-c-sharp",
+    feature = "lang-ruby",
+    feature = "lang-php"
+))]
+const STATIC_PATH_CASES: &[StaticPathCase] = &[
+    StaticPathCase {
+        plugin: "rust",
+        ext: "rs",
+        verb: "get",
+        source: "fn call(client: &Client) { let _ = client.get(\"/files/**\"); }\n",
+    },
+    StaticPathCase {
+        plugin: "java",
+        ext: "java",
+        verb: "get",
+        source: "public class Calls {\n    private RestClient restClient;\n\
+                 \x20   String a() { return restClient.get().uri(\"/files/**\").retrieve().body(String.class); }\n}\n",
+    },
+    StaticPathCase {
+        plugin: "kotlin",
+        ext: "kt",
+        verb: "get",
+        source: "class Calls(private val restClient: RestClient) {\n\
+                 \x20   fun a(): String = restClient.get().uri(\"/files/**\").retrieve().body(String::class.java)\n}\n",
+    },
+    StaticPathCase {
+        plugin: "go",
+        ext: "go",
+        verb: "Get",
+        source: "package client\n\nfunc Call() { http.Get(\"/files/**\") }\n",
+    },
+    StaticPathCase {
+        plugin: "python",
+        ext: "py",
+        verb: "get",
+        source: "def call(session):\n    return session.get(\"/files/**\")\n",
+    },
+    StaticPathCase {
+        plugin: "typescript",
+        ext: "ts",
+        verb: "get",
+        source: "export function call() { return axios.get(\"/files/**\"); }\n",
+    },
+    StaticPathCase {
+        plugin: "tsx",
+        ext: "tsx",
+        verb: "get",
+        source: "export function call() { return axios.get(\"/files/**\"); }\n",
+    },
+    StaticPathCase {
+        plugin: "c-sharp",
+        ext: "cs",
+        verb: "GET",
+        source: "public class C\n{\n    HttpClient client;\n\
+                 \x20   public void M() { client.GetAsync(\"/files/**\"); }\n}\n",
+    },
+    StaticPathCase {
+        plugin: "ruby",
+        ext: "rb",
+        verb: "get",
+        source: "def call(conn)\n  conn.get(\"/files/**\")\nend\n",
+    },
+    StaticPathCase {
+        plugin: "php",
+        ext: "php",
+        verb: "get",
+        source: "<?php\n$client = new Client();\n$client->get('/files/**');\n",
+    },
+];
+
+/// **Every landed `invocations` arm hands a non-normalizing STATIC path over as a
+/// static path** — FR-WS-08 shared negative case 3, the twin of
+/// [`every_landed_invocations_arm_hands_a_dynamic_path_to_the_interpreter`]
+/// ([NFR-RA-05]).
+///
+/// Case 3's whole point is that the refusal reason is *different* from case 2's:
+/// the query hands over a **static** `path` slot and the refusal comes from
+/// classifying it (`path-not-composed`), not from failing to match. A refs-level
+/// `is_empty()` shows neither, which is why it is asserted here — and closed
+/// against the same plugin-set roster, so no arm can land without it.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+#[cfg(all(
+    feature = "lang-rust",
+    feature = "lang-java",
+    feature = "lang-kotlin",
+    feature = "lang-go",
+    feature = "lang-python",
+    feature = "lang-typescript",
+    feature = "lang-c-sharp",
+    feature = "lang-ruby",
+    feature = "lang-php"
+))]
+fn every_landed_invocations_arm_hands_a_non_normalizing_path_to_the_interpreter() {
+    use crate::resolve::http_client_call::{
+        classify_client_call, ClientCallRefusal, DYNAMIC_PATH_SLOT, METHOD_SLOT, PATH_SLOT,
+    };
+
+    let reg = registry();
+    let mut declaring: Vec<&str> = reg
+        .iter()
+        .filter(|p| p.capabilities().iter().any(|c| c == "invocations"))
+        .map(|p| p.name())
+        .collect();
+    declaring.sort_unstable();
+    let mut covered: Vec<&str> = STATIC_PATH_CASES.iter().map(|c| c.plugin).collect();
+    covered.sort_unstable();
+    assert_eq!(
+        covered, declaring,
+        "every plugin declaring `invocations` needs a STATIC_PATH_CASES row — \
+         FR-WS-08 case 3's distinguishing claim is the REASON, and a refs-level \
+         `is_empty()` in the arm's own suite cannot show which one fired"
+    );
+
+    for case in STATIC_PATH_CASES {
+        let sites = invocation_sites(case.ext, case.source);
+        assert_eq!(
+            sites.len(),
+            1,
+            "{}: one site must reach the interpreter",
+            case.plugin
+        );
+        let slots = &sites[0].slots;
+        assert_eq!(
+            slots.get(METHOD_SLOT).map(String::as_str),
+            Some(case.verb),
+            "{}: the verb reaches the interpreter: {slots:?}",
+            case.plugin
+        );
+        assert_eq!(
+            slots.get(PATH_SLOT).map(String::as_str),
+            Some("/files/**"),
+            "{}: the static literal is handed over verbatim, not pre-judged: {slots:?}",
+            case.plugin
+        );
+        assert!(
+            !slots.contains_key(DYNAMIC_PATH_SLOT),
+            "{}: a static literal never carries the dynamic marker: {slots:?}",
+            case.plugin
+        );
+        assert_eq!(
+            classify_client_call(slots),
+            Err(ClientCallRefusal::PathNotComposed),
+            "{}: and the interpreter's own reason is path-not-composed, which is \
+             what makes case 3 distinct from case 2",
+            case.plugin
+        );
+    }
+}
