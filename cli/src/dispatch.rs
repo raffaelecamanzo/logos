@@ -11,10 +11,11 @@
 //! Cyclomatic complexity here is driven by the `?` operator, not the number of
 //! match arms (arms are free). The heavy `?`/exit-code boilerplate therefore
 //! lives once in the [`Output::query`]/[`Output::try_query`]/
-//! [`Output::report_gate`] chokepoints (the CLI twin of the MCP adapter's
-//! `run`/`run_result` delegators), so the arms below are mostly zero-`?`
-//! one-liners. Only the `wiki` command group — the heaviest remaining cluster —
-//! is peeled into its own function to keep `dispatch` comfortably under the gate.
+//! [`Output::report_gate`]/[`Output::report_check`] chokepoints (the CLI twin
+//! of the MCP adapter's `run`/`run_result` delegators), so the arms below are
+//! mostly zero-`?` one-liners. Only the `wiki` command group — the heaviest
+//! remaining cluster — is peeled into its own function to keep `dispatch`
+//! comfortably under the gate.
 
 use std::path::Path;
 
@@ -24,8 +25,9 @@ use logos_core::{config::load_config_from_root, Engine};
 use crate::{engine, init_options, read_wiki_body, Commands, CoverageCommands, Output, WikiCommands};
 
 /// Route one parsed command to exactly one `Engine` call. Simple reads go
-/// through the [`Output`] chokepoints; the four governance verdicts project an
-/// exit code via [`Output::report_gate`]; `wiki` (its own subcommand cluster)
+/// through the [`Output`] chokepoints; `gate`/`doctor`/`verify` project a
+/// verdict via [`Output::report_gate`], `check` via its own tri-state
+/// [`Output::report_check`] (FR-GV-22); `wiki` (its own subcommand cluster)
 /// delegates to [`wiki`]; `serve` owns stdout and delegates to the surface crate.
 pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i32> {
     match command {
@@ -117,11 +119,14 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             }
         }
         // check/gate/doctor/verify project a verdict to exit 1 on failure
-        // (FR-GV-03); the verdict field differs (`.passed` vs `.ok`), supplied here.
-        Commands::Check { rules, no_reconcile } => out.report_gate(
+        // (FR-GV-03); the verdict field differs (`.passed` vs `.ok`), supplied
+        // here. `check` alone gets its own chokepoint (`report_check`): its
+        // verdict is a tri-state `Option<bool>`, not a plain bool, because a
+        // report over no rules contract carries no verdict at all (FR-GV-22).
+        Commands::Check { rules, no_reconcile, allow_no_rules } => out.report_check(
             root,
             |e| e.check_rules(rules.as_deref(), !no_reconcile),
-            |r| r.passed,
+            allow_no_rules,
         ),
         Commands::Gate {
             threshold,

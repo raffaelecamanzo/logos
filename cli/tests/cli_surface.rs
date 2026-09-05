@@ -372,6 +372,88 @@ to   = \"core\"
     );
 }
 
+/// FR-GV-22 / FR-CL-03: no rules contract loaded exits 4 — distinct from the
+/// clean-pass exit 0 — and the report neither claims `passed: true` nor omits
+/// the honest `rules_present: false` signal.
+#[test]
+fn check_exits_four_with_no_rules_contract() {
+    let tmp = fixture();
+    logos(tmp.path(), &["index", "--quiet"]);
+    let out = logos(tmp.path(), &["check", "--json"]);
+    assert_eq!(
+        exit_code(&out),
+        4,
+        "no rules contract loaded exits 4 (FR-GV-22): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(json["rules_present"], false);
+    assert!(
+        json["passed"].is_null(),
+        "no verdict is reported over an empty evaluated set: {json}"
+    );
+}
+
+/// FR-GV-22: `--allow-no-rules` restores exit 0 for callers that have
+/// deliberately authored no contract yet.
+#[test]
+fn check_allow_no_rules_restores_exit_zero() {
+    let tmp = fixture();
+    logos(tmp.path(), &["index", "--quiet"]);
+    let out = logos(tmp.path(), &["check", "--json", "--allow-no-rules"]);
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "the opt-out flag collapses the absent-contract state to 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(json["rules_present"], false);
+    assert!(json["passed"].is_null(), "the opt-out changes the exit code, not the report: {json}");
+}
+
+/// FR-GV-22: the human-readable surface names the absent-contract condition
+/// explicitly, rather than rendering it as a zero violation count.
+#[test]
+fn check_human_readable_surface_names_the_absent_contract_condition() {
+    let tmp = fixture();
+    logos(tmp.path(), &["index", "--quiet"]);
+    let out = logos(tmp.path(), &["check"]);
+    assert_eq!(exit_code(&out), 4);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no rules contract found — nothing was evaluated"),
+        "the condition is named explicitly: {stdout}"
+    );
+    assert!(
+        !stdout.contains("checked_rules"),
+        "not rendered as a violation count: {stdout}"
+    );
+}
+
+/// FR-GV-22 AC: exit 4 never fires when a contract is present, whatever the
+/// violation count — a clean, loaded contract still exits 0.
+#[test]
+fn check_exits_zero_with_a_clean_loaded_contract() {
+    let tmp = fixture();
+    write(
+        tmp.path(),
+        ".logos/rules.toml",
+        "[[forbidden_imports]]\nfrom = \"src/nope_*.rs\"\nto = \"src/also_nope_*.rs\"\n",
+    );
+    logos(tmp.path(), &["index", "--quiet"]);
+    let out = logos(tmp.path(), &["check", "--json"]);
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "a loaded, clean contract exits 0, never 4: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(json["rules_present"], true);
+    assert_eq!(json["passed"], true);
+}
+
 /// FR-GV-05 / UAT-CL-02: a regression after `gate --save` exits 1 through
 /// the real binary.
 #[test]
@@ -439,6 +521,9 @@ fn non_stub_subcommands_emit_valid_json_with_json_flag() {
     // The sprint test plan: "Pass --json on every subcommand and assert JSON
     // output." Since S-020 the quality commands are wired too: on a clean
     // fixture (no rules.toml, no baseline) every one of them succeeds.
+    // `check` is exercised separately below: on this same contract-less
+    // fixture it exits 4, not 0 (FR-GV-22), so it does not belong in this
+    // uniform-exit-0 sweep.
     let tmp = fixture();
     for args in [
         &["index", "--json"] as &[&str],
@@ -446,7 +531,6 @@ fn non_stub_subcommands_emit_valid_json_with_json_flag() {
         &["affected", "src/core.rs", "--json"],
         &["languages", "--json"],
         &["scan", "--json"],
-        &["check", "--json"],
         &["gate", "--json"],
         &["doctor", "--json"],
         &["verify", "--json"],

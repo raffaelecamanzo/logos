@@ -5,8 +5,9 @@
 //!   1. Parse CLI arguments with clap v4 derive (FR-CL-01, FR-CL-05).
 //!   2. Construct an [`Engine`] and call **exactly one** method per subcommand.
 //!   3. Serialise the read-model to stdout (`--json` machine mode, FR-CL-02).
-//!   4. Map outcomes to exit codes 0/1/2/3 — success / violation / usage /
-//!      internal (ADR-14, FR-CL-03, FR-EH-01).
+//!   4. Map outcomes to exit codes 0/1/2/3/4 — success / violation / usage /
+//!      internal / no rules contract loaded (ADR-14, FR-CL-03, FR-EH-01,
+//!      FR-GV-22).
 
 use std::path::{Path, PathBuf};
 use std::process;
@@ -227,7 +228,8 @@ pub(crate) enum Commands {
         #[arg(long, alias = "assume-fresh")]
         no_reconcile: bool,
     },
-    /// Architecture-rules compliance check; error violations exit 1.
+    /// Architecture-rules compliance check; error violations exit 1, no
+    /// rules contract loaded exits 4 (FR-GV-22).
     Check {
         /// Alternate rules file (defaults to .logos/rules.toml).
         #[arg(long, value_name = "FILE")]
@@ -235,6 +237,10 @@ pub(crate) enum Commands {
         /// Skip the pre-evaluation reconcile (FR-RC-04).
         #[arg(long, alias = "assume-fresh")]
         no_reconcile: bool,
+        /// Restore exit 0 when no rules.toml contract was loaded (FR-GV-22),
+        /// for callers that have deliberately authored no contract yet.
+        #[arg(long)]
+        allow_no_rules: bool,
     },
     /// Non-blocking quality readout for the report tier (FR-IN-07, CR-095):
     /// the freshly computed signal, the blessed baseline and their delta, plus
@@ -703,6 +709,26 @@ impl Output {
         let report = f(&engine(root, false)?)?;
         self.print(&report)?;
         Ok(violation_code(passed(&report)))
+    }
+
+    /// `check` alone (FR-GV-22): the exit code is [`RulesReport::exit_code`]'s
+    /// three-state projection; the human surface names the absent-contract
+    /// state instead of rendering it as a zero violation count, since
+    /// "nothing was evaluated" is not the same claim as a clean evaluation
+    /// (NFR-CC-04).
+    pub(crate) fn report_check(
+        &self,
+        root: &Path,
+        f: impl FnOnce(&Engine) -> Result<logos_core::models::RulesReport>,
+        allow_absent: bool,
+    ) -> Result<i32> {
+        let report = f(&engine(root, false)?)?;
+        if !self.json && !self.quiet && report.passed.is_none() {
+            println!("no rules contract found — nothing was evaluated");
+        } else {
+            self.print(&report)?;
+        }
+        Ok(report.exit_code(allow_absent))
     }
 }
 
