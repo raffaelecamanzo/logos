@@ -2270,6 +2270,8 @@ class Calls(private val restClient: RestClient) {{
             "the interpreter's own refusal reason for {literal}"
         );
     }
+}
+
 // ── S-346 / FR-WS-08 / CR-108: C# slot-level refusal reasons ────────────────
 //
 // The rest of the C# arm's suite lives in `tests/c_sharp_invocations.rs`. These
