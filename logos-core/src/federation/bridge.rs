@@ -1840,8 +1840,10 @@ mod tests {
     /// relation resolves it through the intra-repo artifact binder, unchanged).
     #[test]
     fn an_intra_repo_invocation_is_owned_by_the_local_graph_not_the_bridge() {
-        // Exactly-one: a sole same-member provider is intra-repo.
-        let http = pkey(BridgeNamespace::Http, "GET /users/{}");
+        // Exactly-one: a sole same-member provider is intra-repo. Built through
+        // `PortableKey::http` rather than the facet-less `pkey`, so this exercises
+        // the bucket+facet shape production actually keys HTTP with.
+        let http = PortableKey::http("GET".to_string(), "/users/{}".to_string());
         let edges = indexed(
             &[(http.clone(), ep("api", "local route_local"))],
             vec![(http, ep("api", "local op_local"))],
