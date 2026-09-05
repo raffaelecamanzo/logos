@@ -700,12 +700,29 @@ fn spawn_sync_worker(
                             matched_files = summary.matched_files,
                             "watcher auto-ingested a coverage artifact",
                         ),
-                        Err(e) => tracing::warn!(
-                            target: "logos::watch",
-                            surface = "watcher",
-                            artifact = %artifact.display(),
-                            "auto coverage ingest failed (degraded to a warning; sync unaffected): {e:#}",
-                        ),
+                        Err(e) => {
+                            // The human log keeps the cause; telemetry keeps the
+                            // outcome. Both are needed: without the telemetry
+                            // event a failed ingest is invisible to `stats`, so
+                            // the tool would report `ok_calls == calls` forever —
+                            // a fabricated 100% success rate ([NFR-CC-04]). The
+                            // success arm above records, so this one must too.
+                            tracing::warn!(
+                                target: "logos::watch",
+                                surface = crate::observability::Surface::Watcher.as_str(),
+                                artifact = %artifact.display(),
+                                "auto coverage ingest failed (degraded to a warning; sync unaffected): {e:#}",
+                            );
+                            tracing::info!(
+                                target: crate::observability::TELEMETRY_TARGET,
+                                tool = crate::observability::Tool::WatchCoverageIngest.as_str(),
+                                surface = crate::observability::Surface::Watcher.as_str(),
+                                duration_ms = ingest_ms,
+                                ok = false,
+                                artifact = %artifact.display(),
+                                "watcher coverage ingest failed",
+                            );
+                        }
                     }
                 }
 

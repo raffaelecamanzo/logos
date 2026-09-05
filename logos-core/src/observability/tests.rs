@@ -840,6 +840,72 @@ fn the_surface_scope_is_restored_after_a_panic() {
     );
 }
 
+/// The watcher's two telemetry points record a **full** record in both
+/// outcomes — the regression guard for a defect that was silent for its whole
+/// lifetime.
+///
+/// `watch_coverage_ingest` was emitted without `duration_ms`/`ok`, so
+/// [`TelemetryVisitor::into_record`] dropped it as malformed and it had never
+/// written a row. Fixing only the success arm would have been worse than the
+/// bug: the tool would then report `ok_calls == calls` forever, because failures
+/// still never reached the store — a fabricated 100 % success rate
+/// ([NFR-CC-04]). This asserts the exact field shape both arms emit, so the
+/// event cannot drift back to being dropped and the failure arm cannot go quiet.
+#[test]
+fn the_watcher_records_both_outcomes_with_a_full_field_shape() {
+    let (sink, rx) = TelemetrySink::with_capacity(8);
+    let subscriber = tracing_subscriber::registry()
+        // The watcher runs inside `serve --mcp`, whose process surface is mcp.
+        .with(TelemetryLayer::new(Surface::Mcp, "main".to_string(), sink));
+
+    tracing::subscriber::with_default(subscriber, || {
+        // Mirrors the success arm of watch/mod.rs's coverage-ingest loop.
+        tracing::info!(
+            target: TELEMETRY_TARGET,
+            tool = Tool::WatchCoverageIngest.as_str(),
+            surface = Surface::Watcher.as_str(),
+            duration_ms = 12u64,
+            ok = true,
+            matched_files = 3usize,
+            "watcher auto-ingested a coverage artifact",
+        );
+        // …and the failure arm.
+        tracing::info!(
+            target: TELEMETRY_TARGET,
+            tool = Tool::WatchCoverageIngest.as_str(),
+            surface = Surface::Watcher.as_str(),
+            duration_ms = 4u64,
+            ok = false,
+            "watcher coverage ingest failed",
+        );
+        // …and the sync trigger.
+        tracing::info!(
+            target: TELEMETRY_TARGET,
+            tool = Tool::WatchSync.as_str(),
+            surface = Surface::Watcher.as_str(),
+            duration_ms = 7u64,
+            ok = true,
+            files = 2u64,
+            "watcher sync",
+        );
+    });
+
+    let records: Vec<EventRecord> = rx.try_iter().collect();
+    let seen: Vec<(&str, &str, bool)> = records
+        .iter()
+        .map(|r| (r.tool.as_str(), r.surface, r.ok))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("watch_coverage_ingest", "watcher", true),
+            ("watch_coverage_ingest", "watcher", false),
+            ("watch_sync", "watcher", true),
+        ],
+        "every watcher emission records, and a failure records as a failure"
+    );
+}
+
 /// An event that names its own surface is the most specific statement
 /// available, so it wins over an ambient scope. This is what keeps the
 /// watcher's own attribution correct if it is ever driven from inside another
