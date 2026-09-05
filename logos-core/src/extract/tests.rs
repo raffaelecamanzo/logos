@@ -1603,6 +1603,31 @@ export function load() { return readConfig("/etc/app/config"); }"#
         .is_empty(),
         "only `fetch` carries the verb-less free-function anchor"
     );
+
+    // The MEMBER-EXPRESSION half of the same guard, which the ledger gate
+    // provably cannot backstop: `fetch` is itself one of this descriptor's
+    // `http_client_detectors` rows and `references.scm` emits a name-only
+    // `@ref.method` for `repo.fetch(…)`, so such a file self-satisfies the gate.
+    // Only the anchored `^((window|globalThis|self)\.)?fetch$` regex stands, and
+    // relaxing it to the `(^|\.)` form the axios patterns use — the natural
+    // "make the two consistent" edit — would turn every repository/queue refresh
+    // into a fabricated cross-service call (NFR-RA-05, the CR-110 class the
+    // query header names in so many words).
+    for source in [
+        r#"import axios from "axios";
+export function refresh(repo: Repo) { return repo.fetch("/users"); }"#,
+        r#"import axios from "axios";
+export function drain(queue: Queue) { return queue.fetch("/jobs"); }"#,
+        r#"import axios from "axios";
+class Api { load() { return this.fetch("/users"); } }"#,
+    ] {
+        assert!(
+            ts_client_call_targets(source).is_empty(),
+            "a bare `x.fetch(…)` on an arbitrary receiver is a refresh far more \
+             often than an HTTP call — only the explicit global spellings are \
+             admitted: {source}"
+        );
+    }
 }
 
 /// FR-WS-08 shared negative-case contract, case 3 (path-not-composed) and the
@@ -1678,48 +1703,59 @@ fn ts_invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::I
 /// is exactly what makes `classify_client_call` return
 /// `ClientCallRefusal::BaseUrlRuntime` (fixture-pinned in `http_client_call.rs`,
 /// never re-derived here).
+///
+/// Both idioms run under **both** grammars, like every other fixture in this
+/// section: the two plugins compile the same query text against different
+/// `Language`s ([ADR-09]), so proving axios under `ts` alone and fetch under
+/// `tsx` alone would leave a per-grammar regression invisible at exactly the
+/// level where the coverage reason lives.
+///
+/// [ADR-09]: ../../../docs/specs/architecture/decisions/ADR-09.md
 #[test]
 #[cfg(feature = "lang-typescript")]
 fn a_template_literal_reaches_the_interpreter_as_a_dynamic_path() {
     use crate::resolve::http_client_call::{DYNAMIC_PATH_SLOT, METHOD_SLOT, PATH_SLOT};
 
-    for (ext, source, verb) in [
+    for (source, verb) in [
         (
-            "ts",
             r#"import axios from "axios";
 const base = "https://api.example.com";
 export async function listUsers() { return axios.get(`${base}/users`); }"#,
             "get",
         ),
         (
-            "tsx",
             r#"const base = "https://api.example.com";
 export async function listUsers() { return fetch(`${base}/users`, {method: "POST"}); }"#,
             "POST",
         ),
     ] {
-        let sites = ts_invocation_sites(ext, source);
-        assert_eq!(sites.len(), 1, "exactly one invocation site in {ext}");
-        let slots = &sites[0].slots;
-        assert_eq!(
-            slots.get(METHOD_SLOT).map(String::as_str),
-            Some(verb),
-            "the verb still reaches the interpreter — only the path is dynamic"
-        );
-        assert!(
-            slots.contains_key(DYNAMIC_PATH_SLOT),
-            "an interpolated template literal must carry the dynamic-path marker \
-             (that marker is what makes the refusal `base-url-runtime` rather \
-             than a silent non-match): {slots:?}"
-        );
-        assert!(
-            !slots.contains_key(PATH_SLOT),
-            "no static path is guessed from a runtime-composed literal: {slots:?}"
-        );
-        assert!(
-            crate::resolve::http_client_call::render_client_call_target(slots).is_none(),
-            "and the interpreter therefore renders no target"
-        );
+        for ext in TS_EXTENSIONS {
+            let sites = ts_invocation_sites(ext, source);
+            assert_eq!(sites.len(), 1, "exactly one invocation site in {ext}");
+            let slots = &sites[0].slots;
+            assert_eq!(
+                slots.get(METHOD_SLOT).map(String::as_str),
+                Some(verb),
+                "the verb still reaches the interpreter — only the path is \
+                 dynamic ({ext})"
+            );
+            assert!(
+                slots.contains_key(DYNAMIC_PATH_SLOT),
+                "an interpolated template literal must carry the dynamic-path \
+                 marker (that marker is what makes the refusal \
+                 `base-url-runtime` rather than a silent non-match) in {ext}: \
+                 {slots:?}"
+            );
+            assert!(
+                !slots.contains_key(PATH_SLOT),
+                "no static path is guessed from a runtime-composed literal in \
+                 {ext}: {slots:?}"
+            );
+            assert!(
+                crate::resolve::http_client_call::render_client_call_target(slots).is_none(),
+                "and the interpreter therefore renders no target ({ext})"
+            );
+        }
     }
 }
 

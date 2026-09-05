@@ -1704,5 +1704,16 @@ fn scope_chain(decls: &[Decl<'_>], i: usize) -> Vec<String> {
     chain
 }
 
+/// Unit tests for the extraction walk.
+///
+/// Gated on `lang-rust` because most fixtures here are Rust sources. Note the
+/// consequence for the per-language arms: the S-343 TypeScript client-call
+/// tests live in this module (they need the crate-private
+/// [`collect_invocation_sites`] for their slot-level assertions), so they
+/// inherit this gate — a `--no-default-features --features lang-typescript`
+/// build compiles and passes without running them. The suite that gates this
+/// project runs `--all-features`, where they always run. The sibling arms whose
+/// tests need only the public surface live in `tests/` instead and carry their
+/// own feature gate (`tests/go_invocations.rs`, `tests/java_http_client_call.rs`).
 #[cfg(all(test, feature = "lang-rust"))]
 mod tests;
