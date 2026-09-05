@@ -1157,11 +1157,16 @@ fn chat_agent_calls_are_separable_from_web_and_mcp() {
     assert_eq!(info.calls_total, 3, "agent-issued navigation is real usage");
 }
 
-/// Events outside the window are excluded from counts, percentiles, **and the
-/// S-233 additive fields** — the daily series and origin split carry their own
-/// `WHERE at >= ?1` / `day >= date(cutoff)` predicates, so this locks each
+/// Events outside the window are excluded from counts, percentiles, **and every
+/// additive projection** — the S-233 daily series and origin split, and the
+/// [FR-OB-11] cross-tab and class breakdown. Each carries its own
+/// `WHERE at >= ?1` / `day >= date(cutoff)` predicate, so this locks each
 /// against a dropped window filter (a distinct out-of-window origin and an
 /// out-of-window rollup day would both leak otherwise).
+///
+/// **This roster must grow with the surface it protects.** It is the only test
+/// that exercises the window boundary, so a projection added later and not
+/// asserted here can lose its `at >= ?1` and pass the entire suite.
 #[test]
 fn stats_respects_the_window() {
     let mut conn = db::open_in_memory();
@@ -1207,6 +1212,25 @@ fn stats_respects_the_window() {
     );
     assert_eq!(info.calls_by_origin[0].origin, "main");
     assert_eq!(info.calls_by_origin[0].calls, 1);
+    // The FR-OB-11 projections honor it too. The out-of-window event carries a
+    // *distinct* origin, so a dropped predicate on the cross-tab would surface a
+    // whole extra `("search", "dev")` cell and a `("navigation", "dev")` class row.
+    let cross_tab: Vec<(&str, &str, u64)> = info
+        .calls_by_tool_origin
+        .iter()
+        .map(|c| (c.tool.as_str(), c.origin.as_str(), c.calls))
+        .collect();
+    assert_eq!(
+        cross_tab,
+        vec![("search", "main", 1)],
+        "the out-of-window dev origin is excluded from the cross-tab"
+    );
+    let by_class: Vec<(&str, &str, u64)> = info
+        .calls_by_class
+        .iter()
+        .map(|c| (c.class.as_str(), c.origin.as_str(), c.calls))
+        .collect();
+    assert_eq!(by_class, vec![("navigation", "main", 1)]);
 }
 
 /// An empty store yields a zeroed read-model, not an error — including the
