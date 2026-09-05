@@ -608,11 +608,21 @@ pub(super) struct BucketKey {
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct ProviderCandidate {
-    /// The database-portable endpoint this provider binds to.
+    /// The database-portable endpoint this provider binds to. Declared **first**
+    /// so the derived [`Ord`] sorts a bucket by endpoint — the determinism
+    /// [`sort_buckets`] relies on ([NFR-RA-06]). Reordering these two fields
+    /// silently changes that order.
     pub(super) endpoint: BridgeEndpoint,
     /// The provider's method facet, mirroring [`PortableKey::method`].
     pub(super) method: Option<String>,
 }
+
+/// Providers indexed for matching: each [`BucketKey`] to the candidates filed
+/// under it. Built only by [`index_provider`], read only by
+/// [`bucket_candidates`], and ordered only by [`sort_buckets`] — so the bridge,
+/// the broker arm and the coverage read-model cannot build differently-shaped
+/// indexes ([ADR-52]).
+pub(super) type ProviderIndex = HashMap<BucketKey, Vec<ProviderCandidate>>;
 
 impl PortableKey {
     /// An HTTP key from the shared positional [`route_key`] parts: the
@@ -934,7 +944,7 @@ fn compute_edges<E>(registry: &EngineRegistry<E>) -> Vec<BridgeEdge>
 where
     E: MemberEngine + MemberContracts,
 {
-    let mut providers: HashMap<BucketKey, Vec<ProviderCandidate>> = HashMap::new();
+    let mut providers: ProviderIndex = ProviderIndex::new();
     let mut consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake)> = Vec::new();
 
     for (member, surface) in read_members(registry, "contract surface", |e| e.contract_surface()) {
@@ -1031,7 +1041,7 @@ where
 /// [CR-109]: ../../../docs/requests/CR-109-wildcard-method-route-matching.md
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 pub(super) fn index_provider(
-    providers: &mut HashMap<BucketKey, Vec<ProviderCandidate>>,
+    providers: &mut ProviderIndex,
     key: PortableKey,
     endpoint: BridgeEndpoint,
 ) {
@@ -1040,6 +1050,21 @@ pub(super) fn index_provider(
         .entry(bucket)
         .or_default()
         .push(ProviderCandidate { endpoint, method });
+}
+
+/// Put every bucket in a deterministic order, regardless of the member fan-out
+/// order it was filled in ([NFR-RA-06]).
+///
+/// [`ProviderCandidate`] declares `endpoint` before `method`, so the derived
+/// [`Ord`] sorts by `(member, symbol)` — the same order a bucket had when it held
+/// bare endpoints. Shared with the coverage read-model so both tiers reduce
+/// identically ordered buckets.
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+pub(super) fn sort_buckets(providers: &mut ProviderIndex) {
+    for candidates in providers.values_mut() {
+        candidates.sort();
+    }
 }
 
 /// The providers a consumer holding `key` may bind: its bucket, narrowed by the
@@ -1062,7 +1087,7 @@ pub(super) fn index_provider(
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 pub(super) fn bucket_candidates<'a>(
-    providers: &'a HashMap<BucketKey, Vec<ProviderCandidate>>,
+    providers: &'a ProviderIndex,
     key: &PortableKey,
 ) -> Vec<&'a BridgeEndpoint> {
     let Some(bucket) = providers.get(&key.bucket) else {
@@ -1100,13 +1125,10 @@ pub(super) fn bucket_candidates<'a>(
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
 pub(super) fn match_indexed(
-    mut providers: HashMap<BucketKey, Vec<ProviderCandidate>>,
+    mut providers: ProviderIndex,
     consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake)>,
 ) -> Vec<BridgeEdge> {
-    // Deterministic candidate order regardless of member fan-out order.
-    for endpoints in providers.values_mut() {
-        endpoints.sort();
-    }
+    sort_buckets(&mut providers);
 
     let mut edges = Vec::new();
     // The intake rides with each consumer so the emitted edge records *how* the
@@ -1717,7 +1739,7 @@ mod tests {
         providers: &[(PortableKey, BridgeEndpoint)],
         consumers: Vec<(PortableKey, BridgeEndpoint)>,
     ) -> Vec<BridgeEdge> {
-        let mut index: HashMap<BucketKey, Vec<ProviderCandidate>> = HashMap::new();
+        let mut index: ProviderIndex = ProviderIndex::new();
         for (key, endpoint) in providers {
             index_provider(&mut index, key.clone(), endpoint.clone());
         }

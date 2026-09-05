@@ -43,13 +43,13 @@
 // then it was proven only by this module's tests, mirroring how S-251 shipped
 // `capture_invocation_refs` ahead of its arm callers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::model::{ArtifactRelation, BridgeNamespace};
 
 use super::bridge::{
-    index_provider, match_indexed, BridgeEdge, BridgeEndpoint, BridgeIntake, BucketKey,
-    PortableKey, ProviderCandidate, Role,
+    index_provider, match_indexed, BridgeEdge, BridgeEndpoint, BridgeIntake, PortableKey,
+    ProviderIndex, Role,
 };
 
 /// One captured broker reference promoted to a bridge candidate: which side it
@@ -103,7 +103,7 @@ pub(super) fn classify(relation: ArtifactRelation, topic_key: &str) -> Option<(P
 pub(super) fn broker_edges(
     candidates: impl IntoIterator<Item = BrokerCandidate>,
 ) -> Vec<BridgeEdge> {
-    let mut providers: HashMap<BucketKey, Vec<ProviderCandidate>> = HashMap::new();
+    let mut providers: ProviderIndex = ProviderIndex::new();
     // A publish/subscribe is a captured call site ([FR-WS-10]): every broker edge
     // is invocation intake, so it seeds an app-wide reachability root ([CR-083]).
     let mut consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake)> = Vec::new();

@@ -27,7 +27,6 @@
 //! [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 //! [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 
-use std::collections::HashMap;
 
 use serde::Serialize;
 
@@ -37,7 +36,7 @@ use crate::resolve::http_client_call::ClientCallRefusal;
 
 use super::bridge::{
     bucket_candidates, classify, consumer_portable_key, index_provider, read_members,
-    BridgeEndpoint, BucketKey, MemberContracts, PortableKey, ProviderCandidate,
+    sort_buckets, BridgeEndpoint, MemberContracts, PortableKey, ProviderIndex,
     Role,
 };
 use super::registry::{EngineRegistry, MemberEngine};
@@ -299,7 +298,7 @@ pub fn cross_service_coverage<E>(registry: &EngineRegistry<E>) -> CrossServiceCo
 where
     E: MemberEngine + MemberContracts,
 {
-    let mut providers: HashMap<BucketKey, Vec<ProviderCandidate>> = HashMap::new();
+    let mut providers: ProviderIndex = ProviderIndex::new();
     let mut consumer_refs: Vec<(String, String, crate::model::LogosSymbol)> = Vec::new();
     // Arm-tagged invocation consumers (HTTP client calls, S-252, and later arms):
     // `(member, consumer)` pairs read from each member's ledger, classified below
@@ -373,9 +372,7 @@ where
         }
     }
 
-    for endpoints in providers.values_mut() {
-        endpoints.sort();
-    }
+    sort_buckets(&mut providers);
 
     let mut tally = Tally::default();
 
@@ -538,7 +535,7 @@ fn summarize_bound_ratio(bound: u64, denom: u64, excluded: u64, ratio: Option<f6
 fn tier(
     key: &PortableKey,
     member: &str,
-    providers: &HashMap<BucketKey, Vec<ProviderCandidate>>,
+    providers: &ProviderIndex,
 ) -> Option<CoverageState> {
     // The bridge's own bucket reduction ([CR-109]): a wildcard provider serves
     // every verb, an exact-method provider outranks it. Running the *same*
@@ -586,6 +583,7 @@ mod tests {
     use super::*;
 
     use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
