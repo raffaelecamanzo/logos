@@ -15,13 +15,15 @@
 //! `invocations` capability, it runs the **real** compiled grammar, the **real**
 //! per-language `invocations.scm`, and the **real** `extract::extract` pass (for
 //! the ledger gate and for what the arm emits today), then decomposes each
-//! captured path argument into operands and classifies each operand into
-//! [CR-113] §8's taxonomy: `literal`, `same-unit constant`, `injected`,
-//! `configuration lookup`, `method return`, `other`.
+//! captured path argument into operands and classifies each operand into the
+//! taxonomy [S-355]'s acceptance criterion names: `literal`, `same-unit
+//! constant`, `injected`, `configuration lookup`, `method return`, `other`.
 //!
-//! A site is **newly admissible under folding** when every operand is a literal
-//! or a same-unit constant, the folded template is an absolute path, and the arm
-//! does not already admit it.
+//! A site is **newly admissible** under [FR-WS-18] AC1's reading when its
+//! leading operand folds, the template it folds to is an absolute path (a
+//! trailing non-foldable operand being the `{}` placeholder a route template
+//! already expresses), and the arm does not already admit it. The stricter
+//! reading — *every* operand folds — is measured and reported alongside.
 //!
 //! # The measurement is biased *in favour* of CRA-01, deliberately
 //!
@@ -34,8 +36,18 @@
 //! - a same-unit name initialised from a string literal counts as a constant
 //!   whether or not it is declared `final` / `const` (the strict, const-only
 //!   count is reported alongside as [`Measurement::strict_const_admits`]);
-//! - resolution recurses through a same-unit binding's initialiser rather than
-//!   stopping at the first indirection.
+//! - resolution recurses through a same-unit binding's initialiser to
+//!   [`FOLD_DEPTH`] rather than stopping at the first indirection, and
+//!   [`classify`] and [`folded_text`] reach exactly the same distance;
+//! - a qualified access reduces to its last segment and is resolved against
+//!   this unit's bindings even when its qualifier names another unit;
+//! - the headline count uses AC1's placeholder reading, not the strict one.
+//!
+//! The one place the bias is inverted is deliberate and reported: a name the
+//! unit binds to **two different** literals folds to neither, because the
+//! source does not prove which the call site sees. Such sites are listed under
+//! "foldable by classification but not reducible to one proven template" rather
+//! than silently dropped.
 //!
 //! # Recorded finding (2026-09-05, `~/source/pec-services`, 90 members)
 //!
@@ -44,25 +56,32 @@
 //!
 //! ```text
 //! language     files  gated  sites  emitted  literal  same-u  config  inject  return  other
-//! go             262     75     98        0       51       0       7       0       0     40
-//! java          2447     26     98        0        0       1      85       0       0     12
+//! go             262     75     98        0       51       6       7       0       0     34
+//! java          2447     26     98        0        0       1      81       0       0     16
 //! php            161      0      0        0        0       0       0       0       0      0
 //! python          55      1      2        0        0       0       0       0       0      2
 //! tsx              5      0      0        0        0       0       0       0       0      0
 //! typescript     656     12      1        1        1       0       0       0       0      0
 //! ```
 //!
-//! **Constant folding would newly admit ZERO sites, in every language.** The
-//! Java corpus CRA-01 is about resolves 85 of 98 sites to a *configuration
-//! lookup* (`someApiProperties.getUriX()` on a cross-unit
+//! **Constant folding would newly admit ZERO sites, in every language**, under
+//! both readings. The Java corpus CRA-01 is about resolves 81 of 98 sites to a
+//! *configuration lookup* (`someApiProperties.getUriX()` on a cross-unit
 //! `@ConfigurationProperties` bean whose value lives in `application.yml`, not
-//! in source), 10 more to a `uriBuilder -> …path(<the same getter>)` lambda,
-//! 3 to incidental list accesses, and exactly **1** to a same-unit constant —
-//! `JSESSIONID_COOKIE_NAME`, a cookie name, not a path.
+//! in source), 16 to `other` (9 `uriBuilder -> …path(<that same getter>)`
+//! lambdas, 4 `.uri(uri, …)` method parameters, 3 incidental list accesses),
+//! and exactly **1** to a same-unit constant — `JSESSIONID_COOKIE_NAME`, a
+//! cookie name, not a path.
+//!
+//! Go's 6 same-unit constants are likewise not paths: they are HTTP **header
+//! names** (`Origin`, `AccessControlRequestMethod`, `HeaderXForwardedHost`)
+//! read through `header.Get(…)` inside a `net/http` file — the documented
+//! [ADR-54] file-grained gate ceiling, not outbound calls.
 //!
 //! Ignoring the ledger gate entirely raises the ceiling to **3** sites
-//! workspace-wide (0.5 % of 606), all `WebTestClient` in-process test calls in
-//! two test files — not outbound cross-service coupling at all.
+//! workspace-wide, all `WebTestClient` in-process test calls in two test files
+//! — a service calling its own routes, not cross-service coupling. That figure
+//! is computed and printed by the run, not asserted in prose.
 //!
 //! See `docs/planning/sprints/sprint-impl-64.md` for the full reasoning and the
 //! consequence for [CR-113].
@@ -77,7 +96,19 @@
 //!   cargo test -p logos-core --test operand_resolvability -- --nocapture
 //! ```
 //!
-//! The classifier's own rules are pinned by fixture tests that always run.
+//! The classifier's own rules are pinned by fixture tests that always run, one
+//! per language the corpus contains, so no reported column rests on an
+//! unexercised code path. A `LOGOS_REF_WORKSPACE` that is set but does not
+//! resolve to a directory **panics** rather than skipping — a green run that
+//! measured nothing is the one outcome this file must never produce.
+//!
+//! # This harness is deliberately language-specific
+//!
+//! [`CONST_MARKERS`], [`BINDING_KINDS`], [`looks_like_configuration`]'s needle
+//! list and the per-grammar node-kind tests are exactly the kind of table
+//! `resolve::framework::tests::jvm_parity::no_language_specific_composition_code_exists`
+//! forbids under `logos-core/src/resolve/`. They are legitimate *here*, in a
+//! measurement over a fixed corpus, and must not be lifted into the resolver.
 //!
 //! [S-341]: ../../docs/planning/journal.md
 //! [CR-113]: ../../docs/requests/CR-113-constant-folded-base-url-composition.md
@@ -95,7 +126,8 @@ use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 // ── The taxonomy ────────────────────────────────────────────────────────────
 
-/// [CR-113] §8's operand taxonomy, ordered **most resolvable first** so
+/// The operand taxonomy [S-355]'s first acceptance criterion names (and
+/// [CR-113] §3.2/§3.3 describe in prose), ordered **most resolvable first** so
 /// `min()` over a set of candidate classifications picks the reading most
 /// favourable to CRA-01.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -149,15 +181,40 @@ impl OperandKind {
 
 // ── Static-literal reading (mirrors `extract::static_string_literal`) ────────
 
+/// Named child kinds that carry a literal's **content** rather than its
+/// delimiters. `operands` pushes these as literal fragments of an interpolated
+/// string, so `static_literal` must read them verbatim: they have no quotes to
+/// unwrap, and running the delimiter-stripping fallback over them corrupts the
+/// text (`` `${BASE}rest/v1` `` would lose its leading `r`).
+const LITERAL_FRAGMENT_KINDS: [&str; 7] = [
+    "string_content",
+    "string_fragment",
+    "escape_sequence",
+    "interpreted_string_literal_content",
+    "raw_string_literal_content",
+    "string_literal_content",
+    "raw_string_content",
+];
+
+/// Named child kinds that are a literal's delimiters and carry no content.
+const LITERAL_DELIMITER_KINDS: [&str; 4] =
+    ["string_start", "string_end", "raw_string_start", "raw_string_end"];
+
 /// The literal text of a fully static string node, or `None` when the node is
 /// not a string or carries an interpolation.
 ///
-/// A deliberate mirror of the private `extract::static_string_literal`: the
-/// harness must be able to *say why* a site is refused, which the production
-/// function does not report. The corpus test cross-checks the mirror against
-/// what the real pass actually emitted, so a drift shows up as a failure rather
-/// than as a quietly wrong number.
+/// A mirror of `extract::static_string_literal`, which is a private `fn` in
+/// `logos-core` and therefore unreachable from an integration test. The mirror
+/// is **pinned, not trusted**: the fixtures below assert it against the exact
+/// shapes production handles (including the trailing trim and empty-rejection
+/// that this function previously omitted), and the corpus test cross-checks it
+/// against what the real pass actually emitted.
 fn static_literal(node: Node<'_>, src: &[u8]) -> Option<String> {
+    // A bare content fragment: verbatim, no delimiters to strip, no trim (its
+    // whitespace is real content of the surrounding template).
+    if LITERAL_FRAGMENT_KINDS.contains(&node.kind()) {
+        return node.utf8_text(src).ok().map(str::to_string);
+    }
     if !node.kind().contains("string") {
         return None;
     }
@@ -166,16 +223,14 @@ fn static_literal(node: Node<'_>, src: &[u8]) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         saw_child = true;
-        match child.kind() {
-            "string_content"
-            | "string_fragment"
-            | "escape_sequence"
-            | "interpreted_string_literal_content"
-            | "raw_string_literal_content"
-            | "string_literal_content"
-            | "raw_string_content" => content.push_str(child.utf8_text(src).ok()?),
-            "string_start" | "string_end" | "raw_string_start" | "raw_string_end" => {}
-            _ => return None,
+        let kind = child.kind();
+        if LITERAL_FRAGMENT_KINDS.contains(&kind) {
+            content.push_str(child.utf8_text(src).ok()?);
+        } else if LITERAL_DELIMITER_KINDS.contains(&kind) {
+            // Carries no content — skip without disqualifying the literal.
+        } else {
+            // An interpolation / template substitution / expansion → dynamic.
+            return None;
         }
     }
     if !saw_child {
@@ -192,19 +247,80 @@ fn static_literal(node: Node<'_>, src: &[u8]) -> Option<String> {
         };
         content.push_str(unwrapped);
     }
-    Some(content)
+    // The production tail: an empty or whitespace-only literal is refused, not
+    // returned as an empty path (`extract::static_string_literal`).
+    let content = content.trim().to_string();
+    (!content.is_empty()).then_some(content)
+}
+
+/// Reduce an operand node to the unit-level **name** it references, or `None`
+/// when it is not a name.
+///
+/// The single spelling of this reduction — `classify`, `folded_text` and
+/// `strictly_const` all consult it, so they cannot drift apart the way the
+/// first draft's three separate copies did.
+///
+/// Qualified accesses (`this.BASE`, `self.BASE`, `$this->base`, `self::BASE`,
+/// `c.basePath`, `Routes.BASE`) reduce to their **last** segment and are then
+/// resolved against the unit's own bindings. That is deliberately generous:
+/// a qualifier naming another compilation unit resolves only if this file
+/// happens to bind the same name, and every such site is printed in the census
+/// so the generosity is auditable rather than hidden.
+fn operand_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let text = node.utf8_text(src).ok()?.trim();
+    let kind = node.kind();
+    let bare = |s: &str| -> Option<String> {
+        let s = s.trim().trim_start_matches('$').trim();
+        (!s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_')).then(|| s.to_string())
+    };
+    match kind {
+        "identifier" | "type_identifier" | "variable_name" | "simple_identifier" | "name"
+        | "field_identifier" | "property_identifier" => bare(text),
+        // Python `attribute`, Go `selector_expression`, Java `field_access`,
+        // TS `member_expression`, PHP `member_access_expression` /
+        // `class_constant_access_expression` / `scoped_property_access_expression`.
+        _ if kind == "attribute"
+            || kind.contains("field")
+            || kind.contains("member")
+            || kind.contains("selector")
+            || kind.contains("scoped")
+            || kind.contains("class_constant") =>
+        {
+            let (_, tail) = split_qualified(text)?;
+            bare(tail)
+        }
+        _ => None,
+    }
+}
+
+/// Split a qualified access on its **last** separator — `.`, `->` or `::`.
+fn split_qualified(text: &str) -> Option<(&str, &str)> {
+    let (at, len) = ["::", "->", "."]
+        .iter()
+        .filter_map(|sep| text.rfind(sep).map(|i| (i, sep.len())))
+        .max_by_key(|(i, _)| *i)?;
+    Some((&text[..at], &text[at + len..]))
 }
 
 // ── Same-unit bindings ──────────────────────────────────────────────────────
 
-/// One same-file binding of a name: its initialiser (when the unit shows one)
-/// and the text of the declaration that introduced it (for annotation reading).
+/// One same-file binding of a name: its initialiser (when the unit shows one),
+/// the kind of node that bound it, and the head of the declaration that
+/// introduced it (for annotation reading).
 #[derive(Clone)]
 struct Binding<'t> {
     value: Option<Node<'t>>,
+    /// The binding node's own kind (`variable_declarator`, `formal_parameter`,
+    /// `const_spec`, …) — what decides parameter-vs-field, never the text.
+    bind_kind: String,
+    /// The kind of the declaration statement the binding sits in.
     decl_kind: String,
-    decl_text: String,
-    /// Whether the declaration carries a const/final marker before its `=`.
+    /// The declaration's **head** — everything before the first `=`. Scoped
+    /// deliberately: reading the whole declaration would, for a parameter, pull
+    /// in the entire enclosing method body and let an incidental `config` in
+    /// unrelated code classify the parameter as a configuration lookup.
+    decl_head: String,
+    /// Whether the declaration head carries a const/final marker.
     is_const: bool,
 }
 
@@ -214,9 +330,60 @@ struct Unit<'t> {
     bindings: BTreeMap<String, Vec<Binding<'t>>>,
 }
 
-/// Declaration keywords that mark a binding immutable across the supported
+/// Declaration keywords that mark a binding **immutable** across the supported
 /// grammars (`val` covers Kotlin, `readonly` C#).
-const CONST_MARKERS: [&str; 5] = ["final", "const", "readonly", "val", "static"];
+///
+/// `static` is deliberately **absent**: a Java `private static String` is
+/// reassignable, so admitting it would make the "strict const-only" counter —
+/// the independent lower bound the falsification leans on — not actually
+/// const-only.
+const CONST_MARKERS: [&str; 4] = ["final", "const", "readonly", "val"];
+
+/// How many same-unit binding hops resolution follows. Shared by [`classify`]
+/// and [`folded_text`] so classification and folding can never disagree about
+/// what is reachable. Also the cycle guard: `a = b; b = a` terminates here.
+const FOLD_DEPTH: usize = 4;
+
+/// Node kinds that genuinely **bind a name to a value** in the supported
+/// grammars.
+///
+/// An allowlist, not a "has a `name` field" rule. Every call, class, method and
+/// Python keyword argument also carries a `name` field: under the field rule a
+/// `helper(path="/injected")` keyword argument registered a binding for `path`,
+/// which then folded an unrelated *parameter* of the same name to a stranger's
+/// literal. An allowlist cannot do that.
+const BINDING_KINDS: [&str; 15] = [
+    // Java / C# / TypeScript / JavaScript
+    "variable_declarator",
+    // Java / C# parameters (value-less bindings, so a parameter resolves to
+    // `Other` rather than to whatever else in the file shares its name)
+    "formal_parameter",
+    "spread_parameter",
+    "catch_formal_parameter",
+    "parameter",
+    // Go
+    "const_spec",
+    "var_spec",
+    "short_var_declaration",
+    // Python
+    "assignment",
+    // Java / C# / TypeScript / PHP reassignment — a second binding of a name
+    // already declared, which is what makes a mutable field unfoldable.
+    "assignment_expression",
+    // PHP
+    "property_element",
+    "const_element",
+    "simple_parameter",
+    "property_promotion_parameter",
+    // Kotlin
+    "property_declaration",
+];
+
+/// Binding node kinds that are a **parameter** — never a same-unit constant,
+/// whatever the enclosing declaration's text happens to mention.
+fn is_parameter_kind(kind: &str) -> bool {
+    kind.contains("parameter")
+}
 
 impl<'t> Unit<'t> {
     fn build(root: Node<'t>, src: &[u8]) -> Self {
@@ -226,58 +393,132 @@ impl<'t> Unit<'t> {
             let mut cursor = node.walk();
             stack.extend(node.named_children(&mut cursor));
 
-            // `name`/`value` (Java, C#, TS declarators; Go `const_spec`) and
-            // `left`/`right` (Python assignment, Go short declaration).
-            let named = node
-                .child_by_field_name("name")
-                .map(|n| (n, node.child_by_field_name("value")))
-                .or_else(|| {
-                    // `left`/`right` is a *binding* only for an assignment or a
-                    // Go short declaration — a `binary_expression` carries the
-                    // same field names and must never be read as one.
-                    let k = node.kind();
-                    if !(k.contains("assignment") || k == "short_var_declaration") {
-                        return None;
-                    }
-                    let left = node.child_by_field_name("left")?;
-                    Some((left, node.child_by_field_name("right")))
-                });
-            let Some((name_node, value)) = named else {
-                continue;
-            };
-            let Ok(name) = name_node.utf8_text(src) else {
-                continue;
-            };
-            let name = name.trim_start_matches('$'); // PHP variables
-            if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            if !BINDING_KINDS.contains(&node.kind()) {
                 continue;
             }
+
+            let (name_nodes, value_nodes) = binding_parts(node);
+            if name_nodes.is_empty() {
+                continue;
+            }
+
             let decl = declaration_of(node);
-            let decl_text = decl
+            let decl_head = decl
                 .utf8_text(src)
                 .unwrap_or_default()
                 .chars()
                 .take(400)
-                .collect::<String>();
-            let head = decl_text.split('=').next().unwrap_or_default().to_string();
+                .collect::<String>()
+                .split('=')
+                .next()
+                .unwrap_or_default()
+                .to_string();
             let is_const = CONST_MARKERS.iter().any(|m| {
-                head.split(|c: char| !c.is_alphanumeric() && c != '_')
+                decl_head
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
                     .any(|tok| tok == *m)
             });
-            bindings.entry(name.to_string()).or_default().push(Binding {
-                value,
-                decl_kind: decl.kind().to_string(),
-                decl_text,
-                is_const,
-            });
+
+            for (i, name_node) in name_nodes.iter().enumerate() {
+                let Some(name) = operand_name(*name_node, src) else {
+                    continue;
+                };
+                // Pair positionally when the arities agree; otherwise the source
+                // does not prove which value is which, so bind no value.
+                let value = (value_nodes.len() == name_nodes.len())
+                    .then(|| value_nodes.get(i).copied())
+                    .flatten();
+                bindings.entry(name).or_default().push(Binding {
+                    value,
+                    bind_kind: node.kind().to_string(),
+                    decl_kind: decl.kind().to_string(),
+                    decl_head: decl_head.clone(),
+                    is_const,
+                });
+            }
         }
         Self { bindings }
     }
 }
 
-/// The declaration statement owning a binding node — the node whose text
+/// The names a binding node binds, and the values it binds them to.
+///
+/// Three grammar shapes have to be reconciled, and getting any of them wrong
+/// silently classifies a real same-unit constant as unresolvable:
+///
+/// - **fields** (`name`/`value`, `left`/`right`, PHP's `default_value`) — the
+///   common case;
+/// - **Go's `expression_list`** — `const B = "/x"` binds the value through a
+///   list node, which is not a string node, so folding must descend into it;
+/// - **positional children** — PHP's `const_element` field-names neither part,
+///   and Go's `const A, B = …` field-names only the *first* identifier.
+fn binding_parts<'t>(node: Node<'t>) -> (Vec<Node<'t>>, Vec<Node<'t>>) {
+    // `children_by_field_name` yields the anonymous separator tokens too
+    // (Go's `const A, B` reports `["A", ",", "B"]`), so keep only named nodes —
+    // otherwise the name/value arities never match and the binding is dropped.
+    let mut cursor = node.walk();
+    let mut names: Vec<Node<'t>> = node
+        .children_by_field_name("name", &mut cursor)
+        .filter(Node::is_named)
+        .collect();
+    drop(cursor);
+    if names.is_empty() {
+        if let Some(left) = node.child_by_field_name("left") {
+            names = expression_list_items(left);
+        }
+    }
+
+    let values = node
+        .child_by_field_name("value")
+        .or_else(|| node.child_by_field_name("default_value"))
+        .or_else(|| node.child_by_field_name("right"))
+        .map(expression_list_items);
+
+    let mut kids_cursor = node.walk();
+    let kids: Vec<Node<'t>> = node.named_children(&mut kids_cursor).collect();
+
+    match values {
+        Some(values) => {
+            // Recover the names a grammar left positional (Go's `const A, B`).
+            if names.len() < values.len() {
+                let leading: Vec<Node<'t>> = kids
+                    .iter()
+                    .copied()
+                    .take_while(|n| matches!(n.kind(), "identifier" | "field_identifier"))
+                    .collect();
+                if leading.len() == values.len() {
+                    names = leading;
+                }
+            }
+            (names, values)
+        }
+        // No field-named value at all: a fully positional binding
+        // (PHP `const_element` → `name`, `string`).
+        None if names.is_empty() && kids.len() >= 2 => {
+            (vec![kids[0]], vec![kids[kids.len() - 1]])
+        }
+        None => (names, Vec::new()),
+    }
+}
+
+/// The items of a Go `expression_list`, or the node itself when it is not one.
+fn expression_list_items(node: Node<'_>) -> Vec<Node<'_>> {
+    if node.kind() == "expression_list" {
+        let mut cursor = node.walk();
+        return node.named_children(&mut cursor).collect();
+    }
+    vec![node]
+}
+
+/// The declaration statement owning a binding node — the node whose head
 /// carries the modifiers and annotations (`@Value`, `final`, `const`).
+///
+/// A parameter is its own declaration: climbing from one reaches the enclosing
+/// `method_declaration`, whose text is the whole method.
 fn declaration_of(node: Node<'_>) -> Node<'_> {
+    if is_parameter_kind(node.kind()) {
+        return node;
+    }
     let mut current = node;
     for _ in 0..4 {
         let Some(parent) = current.parent() else { break };
@@ -400,27 +641,16 @@ fn classify(node: Node<'_>, src: &[u8], unit: &Unit<'_>, depth: usize) -> Operan
         return OperandKind::Other;
     }
 
-    // A name, or a field access reducible to one.
-    let name = match kind {
-        "identifier" | "type_identifier" | "variable_name" | "simple_identifier" => {
-            text.trim_start_matches('$').to_string()
-        }
-        _ if kind.contains("field") || kind.contains("member") || kind.contains("selector") => {
-            if looks_like_configuration(text) {
-                return OperandKind::ConfigurationLookup;
-            }
-            // `this.FOO` / `self.FOO` reduces to the unit-level name `FOO`;
-            // `Other.FOO` does not (it is another compilation unit).
-            let (head, tail) = text.rsplit_once('.').unwrap_or(("", text));
-            let head = head.trim();
-            if head.is_empty() || head == "this" || head == "self" {
-                tail.trim().to_string()
-            } else {
-                return OperandKind::Other;
-            }
-        }
-        _ => return OperandKind::Other,
+    // A name, or a qualified access reducible to one. A qualified access whose
+    // own spelling names a configuration source is one without needing to
+    // resolve it (`cch.configuration.STS.Endpoint`, `process.env.API_HOST`).
+    let Some(name) = operand_name(node, src) else {
+        return OperandKind::Other;
     };
+    let is_qualified = split_qualified(text).is_some();
+    if is_qualified && looks_like_configuration(text) {
+        return OperandKind::ConfigurationLookup;
+    }
 
     if depth == 0 {
         return OperandKind::Other;
@@ -443,15 +673,17 @@ fn classify_binding(binding: &Binding<'_>, src: &[u8], unit: &Unit<'_>, depth: u
         }
         return classify(value, src, unit, depth);
     }
-    // Declared but never initialised in the unit.
-    if binding.decl_text.contains("@Value")
-        || binding.decl_text.contains("@ConfigurationProperties")
-        || looks_like_configuration(&binding.decl_text)
+    // Declared but never initialised in the unit. A parameter is decided by its
+    // own node kind FIRST: it is never a configuration lookup, whatever the
+    // declaration around it happens to spell.
+    if is_parameter_kind(&binding.bind_kind) || is_parameter_kind(&binding.decl_kind) {
+        return OperandKind::Other;
+    }
+    if binding.decl_head.contains("@Value")
+        || binding.decl_head.contains("@ConfigurationProperties")
+        || looks_like_configuration(&binding.decl_head)
     {
         return OperandKind::ConfigurationLookup;
-    }
-    if binding.decl_kind.contains("parameter") {
-        return OperandKind::Other;
     }
     if binding.decl_kind.contains("field") || binding.decl_kind.contains("property") {
         return OperandKind::Injected;
@@ -471,6 +703,11 @@ fn is_http_method(name: &str) -> bool {
 /// The path-argument nodes of every site the arm's dispatch would consider —
 /// the same capture names and the same HTTP-verb gate `collect_invocation_sites`
 /// applies, so the harness counts the arm's corpus, not a grep's.
+///
+/// **One stated divergence:** production additionally drops a site whose anchor
+/// has no attributable enclosing symbol; this does not. The omission can only
+/// *add* sites, so it biases in favour of CRA-01 like every other judgement
+/// call here (see the module docs).
 fn collect_sites<'t>(
     query: &Query,
     root: Node<'t>,
@@ -543,8 +780,16 @@ struct Site {
     line: u32,
     text: String,
     kinds: Vec<OperandKind>,
-    /// The template folding would produce, when every operand folds.
+    /// The template folding would produce when **every** operand folds — the
+    /// strict reading of [CR-113] §3.2.
     folded: Option<String>,
+    /// The template folding would produce under [FR-WS-18] AC1's reading, where
+    /// a trailing non-foldable operand is the `{}` placeholder a route template
+    /// already expresses. The leading operand must still fold: "what changes is
+    /// only whether the *prefix* may come from a folded constant" ([CR-113]
+    /// §3.2), and AC3 keeps a configuration / injected / method-return base
+    /// refused.
+    placeholder_folded: Option<String>,
     gate_admitted: bool,
 }
 
@@ -559,15 +804,88 @@ impl Site {
         self.kinds == [OperandKind::Literal]
     }
 
-    /// Newly admissible: folds to an absolute path template the arm does not
-    /// already see. An absolute *URL* (`http://host/p`) stays refused for the
-    /// independent reason that its route prefix is external ([FR-WS-08] AC2),
-    /// so it is not counted.
+    /// Newly admissible under the **strict** reading: every operand folds, to
+    /// an absolute path template the arm does not already see. An absolute
+    /// *URL* (`http://host/p`) stays refused for the independent reason that
+    /// its route prefix is external ([FR-WS-08] AC2), so it is not counted.
     fn newly_admissible(&self) -> bool {
         self.foldable()
             && !self.already_static_literal()
             && self.folded.as_deref().is_some_and(|t| t.starts_with('/'))
     }
+
+    /// Newly admissible under [FR-WS-18] AC1's reading — the **headline**
+    /// count, because it is the more generous of the two and AC1 names
+    /// `CONST + "/literal/" + param` as admissible outright.
+    fn newly_admissible_with_placeholders(&self) -> bool {
+        !self.already_static_literal()
+            && self
+                .placeholder_folded
+                .as_deref()
+                .is_some_and(|t| t.starts_with('/'))
+    }
+
+    /// Foldable by classification, yet folding produced no single proven
+    /// template. Never silently dropped — reported so a human can audit it.
+    fn foldable_but_unfolded(&self) -> bool {
+        self.foldable() && self.folded.is_none()
+    }
+}
+
+/// Classify one captured path argument: its operand kinds, the strict folded
+/// template, the [FR-WS-18] AC1 placeholder template, and whether every
+/// non-literal operand resolves through a const-marked binding.
+///
+/// The **single** path from a captured argument to a verdict — the corpus walk
+/// and every fixture go through it, so a fixture cannot pass over logic the
+/// measurement does not use.
+fn classify_site(
+    arg: Node<'_>,
+    src: &[u8],
+    unit: &Unit<'_>,
+) -> (Vec<OperandKind>, Option<String>, Option<String>, bool) {
+    let mut nodes = Vec::new();
+    operands(arg, src, &mut nodes);
+    let kinds: Vec<OperandKind> = nodes
+        .iter()
+        .map(|n| classify(*n, src, unit, FOLD_DEPTH))
+        .collect();
+    let folded = kinds
+        .iter()
+        .all(|k| k.is_foldable())
+        .then(|| {
+            nodes
+                .iter()
+                .map(|n| folded_text(*n, src, unit, FOLD_DEPTH))
+                .collect::<Option<Vec<_>>>()
+                .map(|parts| parts.concat().trim().to_string())
+                .filter(|t| !t.is_empty())
+        })
+        .flatten();
+    let placeholder = placeholder_template(&nodes, src, unit, FOLD_DEPTH);
+    let strictly = strictly_const(&nodes, src, unit);
+    (kinds, folded, placeholder, strictly)
+}
+
+/// The template a composition folds to under [FR-WS-18] AC1: the leading
+/// operand must fold, and each later operand either folds or becomes the `{}`
+/// placeholder a route template already expresses.
+fn placeholder_template(
+    nodes: &[Node<'_>],
+    src: &[u8],
+    unit: &Unit<'_>,
+    depth: usize,
+) -> Option<String> {
+    let (first, rest) = nodes.split_first()?;
+    let mut out = folded_text(*first, src, unit, depth)?;
+    for node in rest {
+        match folded_text(*node, src, unit, depth) {
+            Some(text) => out.push_str(&text),
+            None => out.push_str("{}"),
+        }
+    }
+    let out = out.trim().to_string();
+    (!out.is_empty()).then_some(out)
 }
 
 // ── The measurement ─────────────────────────────────────────────────────────
@@ -632,23 +950,7 @@ fn scan_file(
         src,
         &plugin.semantics().invocation_methods,
     ) {
-        let mut nodes = Vec::new();
-        operands(arg, src, &mut nodes);
-        let kinds: Vec<OperandKind> = nodes
-            .iter()
-            .map(|n| classify(*n, src, &unit, 4))
-            .collect();
-        let folded = kinds
-            .iter()
-            .all(|k| k.is_foldable())
-            .then(|| {
-                nodes
-                    .iter()
-                    .map(|n| folded_text(*n, src, &unit))
-                    .collect::<Option<Vec<_>>>()
-                    .map(|parts| parts.concat())
-            })
-            .flatten();
+        let (kinds, folded, placeholder_folded, strictly) = classify_site(arg, src, &unit);
         let site = Site {
             file: rel.to_string(),
             line,
@@ -660,9 +962,10 @@ fn scan_file(
                 .join(" "),
             kinds,
             folded,
+            placeholder_folded,
             gate_admitted: gate,
         };
-        if gate && site.newly_admissible() && strictly_const(&nodes, src, &unit) {
+        if gate && site.newly_admissible_with_placeholders() && strictly {
             *strict += 1;
         }
         stats.sites.push(site);
@@ -670,52 +973,80 @@ fn scan_file(
 }
 
 /// The text an operand folds to, or `None` when it does not fold.
-fn folded_text(node: Node<'_>, src: &[u8], unit: &Unit<'_>) -> Option<String> {
+///
+/// Recurses through same-unit bindings to the **same depth** [`classify`] uses,
+/// and via the same [`operand_name`] reduction. The first draft resolved
+/// exactly one hop with its own ad-hoc name handling, so a chained constant
+/// (`ALIAS = BASE; BASE = "/api"`) classified as foldable yet folded to
+/// nothing, and was silently dropped from the admissible count.
+///
+/// When a name is bound to **two different** literals in the same unit, this
+/// returns `None`: the source does not prove which one the call site sees, and
+/// picking whichever the traversal reached first would fold to an arbitrary
+/// template. Such a site is `foldable()` but unfolded, and is reported
+/// explicitly rather than quietly dropped (see [`Measurement::unfoldable`]).
+fn folded_text(node: Node<'_>, src: &[u8], unit: &Unit<'_>, depth: usize) -> Option<String> {
     if let Some(text) = static_literal(node, src) {
         return Some(text);
     }
-    let name = node
-        .utf8_text(src)
-        .ok()?
-        .trim()
-        .trim_start_matches("this.")
-        .trim_start_matches("self.")
-        .trim_start_matches('$')
-        .to_string();
-    unit.bindings
-        .get(&name)?
+    if depth == 0 {
+        return None;
+    }
+    let name = operand_name(node, src)?;
+    let bindings = unit.bindings.get(&name)?;
+    let candidates: std::collections::BTreeSet<String> = bindings
         .iter()
-        .find_map(|b| b.value.and_then(|v| static_literal(v, src)))
+        .filter_map(|b| b.value)
+        .filter_map(|v| folded_text(v, src, unit, depth - 1))
+        .collect();
+    match candidates.len() {
+        1 => candidates.into_iter().next(),
+        _ => None,
+    }
 }
 
-/// Whether every non-literal operand's binding carries a const/final marker —
-/// the strict reading of [CR-113] §3.2 ("a reference to a **constant**").
+/// Whether every non-literal operand resolves to a binding that carries a
+/// const/final marker — the strict reading of [CR-113] §3.2 ("a reference to a
+/// **constant**"), reported alongside the generous count as an independent
+/// lower bound.
 fn strictly_const(nodes: &[Node<'_>], src: &[u8], unit: &Unit<'_>) -> bool {
     nodes.iter().all(|n| {
         if static_literal(*n, src).is_some() {
             return true;
         }
-        let Ok(text) = n.utf8_text(src) else {
+        let Some(name) = operand_name(*n, src) else {
             return false;
         };
-        let name = text
-            .trim()
-            .trim_start_matches("this.")
-            .trim_start_matches("self.")
-            .trim_start_matches('$');
         unit.bindings
-            .get(name)
+            .get(&name)
             .is_some_and(|bs| bs.iter().any(|b| b.is_const && b.value.is_some()))
     })
 }
 
+/// The configured corpus, or `None` when none is configured.
+///
+/// A variable that is **set but does not resolve to a directory** panics rather
+/// than skipping: the two cases are indistinguishable to a reader of a green
+/// test run, and a typo'd or un-checked-out corpus path would otherwise report
+/// success while measuring nothing.
 fn corpus_root() -> Option<PathBuf> {
     let raw = std::env::var("LOGOS_REF_WORKSPACE").ok()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
     let expanded = match raw.strip_prefix("~/") {
-        Some(rest) => PathBuf::from(std::env::var("HOME").ok()?).join(rest),
-        None => PathBuf::from(raw),
+        Some(rest) => PathBuf::from(&home).join(rest),
+        None if raw == "~" => PathBuf::from(&home),
+        None => PathBuf::from(&raw),
     };
-    expanded.is_dir().then_some(expanded)
+    assert!(
+        expanded.is_dir(),
+        "LOGOS_REF_WORKSPACE={raw} does not resolve to a directory (expanded: {}) — \
+         refusing to report a green run that measured nothing",
+        expanded.display(),
+    );
+    Some(expanded)
 }
 
 fn measure(root: &Path) -> Measurement {
@@ -723,9 +1054,16 @@ fn measure(root: &Path) -> Measurement {
     let ctx = SymbolContext::default();
     let mut m = Measurement::default();
 
+    // `parents(false)` matches production's `admission_walk_builder`
+    // (containment: never read ignore files above the root). `git_global` and
+    // `.ignore` are switched OFF so the corpus is the same on every machine —
+    // a developer's `~/.gitignore_global` must not quietly change a published
+    // measurement.
     let walker = ignore::WalkBuilder::new(root)
         .hidden(true)
         .git_ignore(true)
+        .git_global(false)
+        .ignore(false)
         .parents(false)
         .build();
     for entry in walker.flatten() {
@@ -759,7 +1097,8 @@ fn measure(root: &Path) -> Measurement {
     m
 }
 
-fn report(m: &Measurement) {
+/// Print the measurement and return the headline newly-admitted count.
+fn report(m: &Measurement) -> usize {
     println!("\n=== S-355: operand resolvability across the composed client-call corpus ===\n");
     println!(
         "The corpus is the set of sites the arm actually considers: a query match \n\
@@ -805,42 +1144,77 @@ fn report(m: &Measurement) {
             counts.get(&OperandKind::MethodReturn).copied().unwrap_or(0),
             counts.get(&OperandKind::Other).copied().unwrap_or(0),
         );
-        total_new += stats
-            .sites
-            .iter()
-            .filter(|s| s.gate_admitted && s.newly_admissible())
-            .count();
     }
 
     println!("\n--- what constant folding would NEWLY admit, per language ---");
+    println!(
+        "Headline reading is [FR-WS-18] AC1's: the prefix must fold, a trailing\n\
+         non-foldable operand becomes the `{{}}` placeholder a route template already\n\
+         expresses. The strict reading (every operand folds) is reported beside it.\n"
+    );
+    let mut total_ceiling = 0usize;
     for (lang, stats) in &m.per_language {
         let new: Vec<&Site> = stats
             .sites
             .iter()
-            .filter(|s| s.gate_admitted && s.newly_admissible())
+            .filter(|s| s.gate_admitted && s.newly_admissible_with_placeholders())
             .collect();
+        let strict_new = stats
+            .sites
+            .iter()
+            .filter(|s| s.gate_admitted && s.newly_admissible())
+            .count();
         let gated_sites = stats.sites.iter().filter(|s| s.gate_admitted).count();
+        // The ceiling a widened ledger gate would expose — the figure the
+        // recorded finding quotes, computed here so a re-run reproduces it.
+        let ceiling: Vec<&Site> = stats
+            .sites
+            .iter()
+            .filter(|s| !s.gate_admitted && s.newly_admissible_with_placeholders())
+            .collect();
+        total_new += new.len();
+        total_ceiling += ceiling.len();
         println!(
-            "{lang:<12} newly admitted: {:>3}   (of {gated_sites} gate-admitted sites; \
-             {} more behind the ledger gate)",
+            "{lang:<12} newly admitted: {:>3}  (strict reading: {strict_new})  \
+             of {gated_sites} gate-admitted sites; {} behind the ledger gate, of which \
+             {} would fold",
             new.len(),
             stats.sites.len() - gated_sites,
+            ceiling.len(),
         );
-        for site in new {
+        for site in new.iter().chain(ceiling.iter()) {
             println!(
-                "               + {}:{}  {}  ->  {}",
+                "               {} {}:{}  {}  ->  {}",
+                if site.gate_admitted { "+" } else { "(behind gate)" },
                 site.file,
                 site.line,
                 site.text,
-                site.folded.as_deref().unwrap_or("<unfolded>"),
+                site.placeholder_folded.as_deref().unwrap_or("<unfolded>"),
             );
         }
     }
     println!(
-        "\nTOTAL newly admitted (generous reading): {total_new}\
-         \nTOTAL newly admitted (strict const-only reading): {}",
+        "\nTOTAL newly admitted, gate-admitted corpus (FR-WS-18 AC1 reading): {total_new}\
+         \nTOTAL newly admitted (strict const-only reading): {}\
+         \nTOTAL behind the ledger gate that would fold (ceiling): {total_ceiling}",
         m.strict_const_admits
     );
+
+    // Never silently dropped: a site classified foldable that folding could not
+    // reduce to one proven template is named, so it can be audited by hand.
+    let unfolded: Vec<(&String, &Site)> = m
+        .per_language
+        .iter()
+        .flat_map(|(lang, s)| s.sites.iter().map(move |site| (lang, site)))
+        .filter(|(_, site)| site.foldable_but_unfolded())
+        .collect();
+    println!(
+        "\n--- foldable by classification but not reducible to one proven template: {} ---",
+        unfolded.len()
+    );
+    for (lang, site) in unfolded {
+        println!("{lang}  {}:{}  {}", site.file, site.line, site.text);
+    }
 
     println!("\n--- site census over the gate-admitted corpus (every site, auditable) ---");
     for (lang, stats) in &m.per_language {
@@ -849,6 +1223,7 @@ fn report(m: &Measurement) {
             println!("{lang}  {}:{}  [{}]  {}", site.file, site.line, kinds.join(" + "), site.text);
         }
     }
+    total_new
 }
 
 /// The measurement itself. Skips — loudly — when no corpus is configured, so
@@ -863,12 +1238,13 @@ fn measure_operand_resolvability_over_the_reference_workspace() {
         return;
     };
     let m = measure(&root);
-    report(&m);
+    let total_new = report(&m);
 
     // Cross-check the harness against the real pass: every reference the arm
     // actually emitted must correspond to a site the harness classified as a
     // single static literal. A drift in the mirrored literal reading fails here
     // instead of silently skewing the numbers.
+    let mut engaged = false;
     for (lang, stats) in &m.per_language {
         let static_literal_sites = stats
             .sites
@@ -883,132 +1259,645 @@ fn measure_operand_resolvability_over_the_reference_workspace() {
             stats.emitted_today,
             static_literal_sites,
         );
+        engaged |= stats.emitted_today > 0;
     }
+    // `0 <= 0` holds for any implementation, so a corpus where nothing was
+    // emitted anywhere has not cross-checked the mirror at all. Say so rather
+    // than banking a vacuous pass — the always-run `static_literal` fixtures are
+    // what pin the mirror; this is the corpus-level confirmation.
+    assert!(
+        engaged,
+        "the mirror cross-check never engaged: no language emitted a single \
+         `http-client-call` reference over {}, so `0 <= 0` is all that was \
+         asserted. Point LOGOS_REF_WORKSPACE at a corpus that binds at least \
+         one client call, or treat this run as unverified.",
+        root.display(),
+    );
     assert!(
         !m.per_language.is_empty(),
         "the corpus at {} yielded no file in any language shipping `invocations`",
         root.display(),
     );
+
+    // The recorded finding itself. Printing a table is not a test: without this
+    // a classifier regression that flipped the verdict would still pass, and the
+    // verdict is what blocks CR-113.
+    assert_eq!(
+        total_new, 0,
+        "S-355's recorded finding is that constant folding newly admits ZERO \
+         client-call sites across the reference workspace; this run found \
+         {total_new}. Re-open CR-113 §8.1 and re-decide the CR before changing \
+         this assertion — do not relax it to make the suite green.",
+    );
 }
 
-// ── Classifier fixtures (always run) ────────────────────────────────────────
+
+// ── Classifier fixtures ─────────────────────────────────────────────────────
+//
+// These pin the classifier's rules on every `cargo test` run, corpus or no
+// corpus. They matter more than usual: the measurement above skips without a
+// corpus, so without these the file would pin nothing in CI — and the numbers
+// it produces are what block [CR-113].
+//
+// Every fixture goes through `classify_site`, the same entry point the corpus
+// walk uses, so a fixture cannot pass over logic the measurement does not run.
+
+/// One analysed call site, produced from a whole compilation unit.
+struct Analysed {
+    kinds: Vec<OperandKind>,
+    folded: Option<String>,
+    placeholder: Option<String>,
+    strictly_const: bool,
+    site: Site,
+}
+
+/// Parse `source` as `filename`, run that language's **real** `invocations`
+/// query, and classify the single call site it must contain.
+fn analyse(filename: &str, source: &str) -> Analysed {
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    let plugin = registry
+        .for_path(filename)
+        .unwrap_or_else(|| panic!("no plugin for {filename}"));
+    let query = plugin
+        .query("invocations")
+        .unwrap_or_else(|| panic!("{filename}: plugin ships no `invocations` query"));
+    let mut parser = Parser::new();
+    parser.set_language(plugin.language()).expect("language");
+    let tree = parser.parse(source, None).expect("parse");
+    let src = source.as_bytes();
+    let unit = Unit::build(tree.root_node(), src);
+    let sites = collect_sites(
+        query,
+        tree.root_node(),
+        src,
+        &plugin.semantics().invocation_methods,
+    );
+    assert_eq!(
+        sites.len(),
+        1,
+        "fixture must yield exactly one client-call site, got {} in:\n{source}",
+        sites.len(),
+    );
+    let (line, arg) = sites[0];
+    let (kinds, folded, placeholder, strictly) = classify_site(arg, src, &unit);
+    Analysed {
+        site: Site {
+            file: filename.to_string(),
+            line,
+            text: arg.utf8_text(src).unwrap_or_default().to_string(),
+            kinds: kinds.clone(),
+            folded: folded.clone(),
+            placeholder_folded: placeholder.clone(),
+            gate_admitted: true,
+        },
+        kinds,
+        folded,
+        placeholder,
+        strictly_const: strictly,
+    }
+}
+
+// ── Taxonomy invariants (no grammar needed) ─────────────────────────────────
+
+/// Only literals and same-unit constants fold. The boundary [CR-113] §3.2
+/// draws, stated as a list rather than as the implementation's own expression.
+#[test]
+fn foldability_is_exactly_literal_and_same_unit_constant() {
+    let foldable: Vec<OperandKind> = OperandKind::ALL
+        .iter()
+        .copied()
+        .filter(|k| k.is_foldable())
+        .collect();
+    assert_eq!(
+        foldable,
+        vec![OperandKind::Literal, OperandKind::SameUnitConstant],
+    );
+}
+
+/// The taxonomy is ordered most-resolvable-first, which is what makes `min()`
+/// over candidate bindings the reading most favourable to CRA-01.
+#[test]
+fn the_taxonomy_is_ordered_most_resolvable_first() {
+    let mut sorted = OperandKind::ALL;
+    sorted.sort();
+    assert_eq!(sorted, OperandKind::ALL);
+    assert!(OperandKind::Literal < OperandKind::Other);
+}
+
+// ── Java ────────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "lang-java")]
-mod fixtures {
-    use super::*;
-
-    /// Classify a Java expression written as the argument of a `.uri(…)` call,
-    /// with `prelude` supplying the compilation unit's declarations.
-    fn kinds_of(prelude: &str, expr: &str) -> Vec<OperandKind> {
-        let source = format!(
+fn java(prelude: &str, expr: &str) -> Analysed {
+    analyse(
+        "Calls.java",
+        &format!(
             "package com.example;\n\
              import org.springframework.web.reactive.function.client.WebClient;\n\
-             public class Calls {{\n{prelude}\n  void call() {{ client.get().uri({expr}); }}\n}}\n"
-        );
-        let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry");
-        let plugin = registry.for_path("Calls.java").expect("java plugin");
-        let query = plugin.query("invocations").expect("invocations query");
-        let mut parser = Parser::new();
-        parser.set_language(plugin.language()).expect("language");
+             public class Calls {{\n{prelude}\n  \
+             void call(String id) {{ client.get().uri({expr}); }}\n}}\n"
+        ),
+    )
+}
+
+/// A single static literal — what the arm already admits; folding adds nothing.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_static_literal_is_already_admitted_not_newly() {
+    let a = java("", r#""/users/{id}""#);
+    assert_eq!(a.kinds, vec![OperandKind::Literal]);
+    assert!(a.site.already_static_literal());
+    assert!(!a.site.newly_admissible());
+    assert!(!a.site.newly_admissible_with_placeholders());
+}
+
+/// [CR-113]'s motivating shape, and the **positive control** for the whole
+/// measurement: if this did not come out admissible, a zero corpus result would
+/// prove nothing about the corpus.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_same_unit_constant_prefix_is_newly_admissible() {
+    let a = java(r#"  private static final String BASE = "/api/v1";"#, r#"BASE + "/soggetti""#);
+    assert_eq!(
+        a.kinds,
+        vec![OperandKind::SameUnitConstant, OperandKind::Literal],
+    );
+    assert_eq!(a.folded.as_deref(), Some("/api/v1/soggetti"));
+    assert!(a.site.newly_admissible());
+    assert!(a.site.newly_admissible_with_placeholders());
+    assert!(a.strictly_const);
+}
+
+/// [FR-WS-18] AC1's exact shape — `CONST + "/literal/" + param`. The statement
+/// says a parameter interpolation "is not an obstacle: it is the `{id}`
+/// placeholder a route template already expresses", so it must be admissible
+/// under the headline reading even though `id` itself never folds.
+#[cfg(feature = "lang-java")]
+#[test]
+fn the_fr_ws_18_ac1_parameter_shape_is_newly_admissible() {
+    let a = java(
+        r#"  private static final String BASE = "/api/v1";"#,
+        r#"BASE + "/soggetti/" + id"#,
+    );
+    assert_eq!(
+        a.kinds,
+        vec![
+            OperandKind::SameUnitConstant,
+            OperandKind::Literal,
+            OperandKind::Other,
+        ],
+    );
+    // The strict reading refuses it (not every operand folds) …
+    assert!(!a.site.newly_admissible());
+    // … while AC1's reading admits it, with the parameter as a placeholder.
+    assert_eq!(a.placeholder.as_deref(), Some("/api/v1/soggetti/{}"));
+    assert!(a.site.newly_admissible_with_placeholders());
+}
+
+/// A bare same-unit constant reference — the degenerate one-operand
+/// composition, and the only foldable shape the reference workspace actually
+/// contributes.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_bare_same_unit_constant_folds_to_its_literal() {
+    let a = java(r#"  private static final String PATH = "/v1/alerts";"#, "PATH");
+    assert_eq!(a.kinds, vec![OperandKind::SameUnitConstant]);
+    assert_eq!(a.folded.as_deref(), Some("/v1/alerts"));
+    assert!(a.site.newly_admissible());
+}
+
+/// Folding follows a chain of same-unit bindings. `classify` and `folded_text`
+/// must agree about how far they reach: the first draft classified this
+/// foldable and then folded it to nothing, silently dropping the site.
+#[cfg(feature = "lang-java")]
+#[test]
+fn folding_and_classification_reach_the_same_distance() {
+    let a = java(
+        "  private static final String ROOT = \"/api\";\n  \
+         private static final String BASE = ROOT;",
+        r#"BASE + "/x""#,
+    );
+    assert_eq!(
+        a.kinds,
+        vec![OperandKind::SameUnitConstant, OperandKind::Literal],
+    );
+    assert_eq!(a.folded.as_deref(), Some("/api/x"));
+    assert!(
+        !a.site.foldable_but_unfolded(),
+        "a foldable site must fold, or be reported as unfoldable",
+    );
+}
+
+/// An absolute *URL* folds, but stays refused: its route prefix is external
+/// ([FR-WS-08] AC2 / `classify_client_call`'s leading-`/` rule, which [CR-113]
+/// §3.2 does not propose changing).
+#[cfg(feature = "lang-java")]
+#[test]
+fn an_absolute_url_folds_but_is_not_newly_admissible() {
+    let a = java(
+        r#"  private static final String BASE = "http://pec-anagrafica/api/v1";"#,
+        r#"BASE + "/soggetti""#,
+    );
+    assert!(a.site.foldable());
+    assert_eq!(a.folded.as_deref(), Some("http://pec-anagrafica/api/v1/soggetti"));
+    assert!(!a.site.newly_admissible());
+    assert!(!a.site.newly_admissible_with_placeholders());
+}
+
+/// A relative folded template is likewise refused — the route prefix is
+/// composed elsewhere.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_relative_folded_template_is_not_newly_admissible() {
+    let a = java(r#"  private static final String BASE = "v1";"#, r#"BASE + "/users""#);
+    assert!(a.site.foldable());
+    assert!(!a.site.newly_admissible_with_placeholders());
+}
+
+/// A `@Value`-injected base is a configuration lookup — refused, and the
+/// boundary [CR-113] §3.3 exists to preserve.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_value_injected_base_is_a_configuration_lookup() {
+    let a = java(
+        "  @Value(\"${service.base}\")\n  private String base;",
+        r#"base + "/users""#,
+    );
+    assert_eq!(
+        a.kinds,
+        vec![OperandKind::ConfigurationLookup, OperandKind::Literal],
+    );
+    assert!(!a.site.newly_admissible_with_placeholders());
+}
+
+/// A configuration-properties bean's getter — the reference workspace's
+/// dominant shape, 81 of its 98 gate-admitted Java sites.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_properties_bean_getter_is_a_configuration_lookup() {
+    let a = java(
+        "  private final MailboxApiProperties mailboxApiProperties;",
+        "mailboxApiProperties.getUriGetMailbox()",
+    );
+    assert_eq!(a.kinds, vec![OperandKind::ConfigurationLookup]);
+}
+
+/// A plain helper-method call is a method return, not a foldable operand.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_helper_method_call_is_a_method_return() {
+    assert_eq!(
+        java("", "buildCreateMailboxUrl()").kinds,
+        vec![OperandKind::MethodReturn],
+    );
+}
+
+/// An injected collaborator field, never initialised in the unit.
+#[cfg(feature = "lang-java")]
+#[test]
+fn an_uninitialised_field_is_injected() {
+    assert_eq!(
+        java("  private String basePath;", "basePath").kinds,
+        vec![OperandKind::Injected],
+    );
+}
+
+/// [FR-WS-18] AC4: folding never recurses into a value the source does not
+/// prove. A constant initialised from a **plain** call — one no name rule can
+/// rescue — must not fold; this fails if recursion refusal is removed.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_constant_initialised_from_a_call_does_not_fold() {
+    let a = java(
+        "  private static final String BASE = buildBase();",
+        r#"BASE + "/users""#,
+    );
+    assert_eq!(a.kinds, vec![OperandKind::MethodReturn, OperandKind::Literal]);
+    assert!(a.folded.is_none());
+    assert!(!a.site.newly_admissible_with_placeholders());
+}
+
+/// A constant initialised from an environment read is a configuration lookup.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_getenv_initialised_constant_is_a_configuration_lookup() {
+    let a = java(
+        "  private static final String BASE = System.getenv(\"BASE\");",
+        r#"BASE + "/users""#,
+    );
+    assert_eq!(
+        a.kinds,
+        vec![OperandKind::ConfigurationLookup, OperandKind::Literal],
+    );
+}
+
+/// A method **parameter** is `Other`, whatever the enclosing method's body
+/// happens to mention. Pins the corpus correction that moved four `.uri(uri, …)`
+/// sites out of the `configuration lookup` column: reading the whole enclosing
+/// declaration let an incidental `properties` local reclassify a parameter.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_parameter_is_other_even_in_a_method_mentioning_properties() {
+    let a = analyse(
+        "Calls.java",
+        "package com.example;\n\
+         import org.springframework.web.reactive.function.client.WebClient;\n\
+         public class Calls {\n  \
+         void call(String uri) {\n    \
+         String properties = \"config settings\";\n    \
+         client.get().uri(uri);\n  }\n}\n",
+    );
+    assert_eq!(a.kinds, vec![OperandKind::Other]);
+}
+
+/// A `uriBuilder -> …` lambda is `Other` — 9 of the corpus's Java sites.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_uri_builder_lambda_is_other() {
+    let a = java("", "builder -> builder.path(\"/x\").build()");
+    assert_eq!(a.kinds, vec![OperandKind::Other]);
+}
+
+/// A name the unit does not bind is `Other` — never guessed.
+#[cfg(feature = "lang-java")]
+#[test]
+fn an_unbound_name_is_other() {
+    assert_eq!(java("", "unknownVar").kinds, vec![OperandKind::Other]);
+}
+
+/// The strict reading requires an actual const marker. `static` alone does not
+/// make a Java field immutable, so it must not satisfy the strict counter.
+#[cfg(feature = "lang-java")]
+#[test]
+fn the_strict_reading_requires_a_const_marker() {
+    assert!(java(r#"  private static final String B = "/api";"#, "B").strictly_const);
+    assert!(!java(r#"  private static String B = "/api";"#, "B").strictly_const);
+    assert!(!java(r#"  private String b = "/api";"#, "b").strictly_const);
+}
+
+/// A name bound to two different literals folds to neither: the source does not
+/// prove which one the call site sees.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_name_bound_to_two_literals_does_not_fold() {
+    let a = analyse(
+        "Calls.java",
+        "package com.example;\n\
+         import org.springframework.web.reactive.function.client.WebClient;\n\
+         public class Calls {\n  \
+         private static String b = \"/api/v1\";\n  \
+         void mutate() { b = \"/other\"; }\n  \
+         void call() { client.get().uri(b); }\n}\n",
+    );
+    assert!(a.folded.is_none(), "folded to {:?}", a.folded);
+    assert!(!a.site.newly_admissible_with_placeholders());
+    assert!(
+        a.site.foldable_but_unfolded(),
+        "such a site must be reported, not silently dropped",
+    );
+}
+
+// ── The mirrored literal reading ────────────────────────────────────────────
+
+/// `static_literal` must reproduce `extract::static_string_literal`'s tail:
+/// an empty or whitespace-only literal is **refused**, and a padded one is
+/// trimmed. The first draft returned `Some("")` and untrimmed text, which both
+/// inflated the `literal` column and could suppress an admissible site.
+#[cfg(feature = "lang-java")]
+#[test]
+fn the_mirrored_literal_reading_trims_and_rejects_empty() {
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry");
+    let plugin = registry.for_path("Calls.java").expect("java plugin");
+    let mut parser = Parser::new();
+    parser.set_language(plugin.language()).expect("language");
+
+    let cases: [(&str, Option<&str>); 4] = [
+        (r#""""#, None),
+        (r#""   ""#, None),
+        (r#""  /users  ""#, Some("/users")),
+        (r#""/users/{id}""#, Some("/users/{id}")),
+    ];
+    for (literal, expected) in cases {
+        let source = format!("class C {{ String s = {literal}; }}");
         let tree = parser.parse(&source, None).expect("parse");
         let src = source.as_bytes();
-        let unit = Unit::build(tree.root_node(), src);
-        let sites = collect_sites(
-            query,
-            tree.root_node(),
-            src,
-            &plugin.semantics().invocation_methods,
-        );
-        assert_eq!(sites.len(), 1, "fixture must yield exactly one site: {expr}");
-        let mut nodes = Vec::new();
-        operands(sites[0].1, src, &mut nodes);
-        nodes.iter().map(|n| classify(*n, src, &unit, 4)).collect()
-    }
-
-    /// A single static literal — what the arm already admits; folding adds
-    /// nothing.
-    #[test]
-    fn a_static_literal_is_a_literal_operand() {
-        assert_eq!(kinds_of("", r#""/users/{id}""#), vec![OperandKind::Literal]);
-    }
-
-    /// [CR-113]'s motivating shape: a same-unit literal-initialised constant
-    /// concatenated with a literal path and a parameter.
-    #[test]
-    fn a_same_unit_constant_prefix_folds() {
-        let prelude = r#"  private static final String BASE = "/api/v1";"#;
-        assert_eq!(
-            kinds_of(prelude, r#"BASE + "/soggetti""#),
-            vec![OperandKind::SameUnitConstant, OperandKind::Literal],
-        );
-    }
-
-    /// A bare same-unit constant reference — the degenerate one-operand
-    /// composition, and the only shape the reference workspace actually
-    /// contributes.
-    #[test]
-    fn a_bare_same_unit_constant_is_resolvable() {
-        let prelude = r#"  private static final String PATH = "/v1/alerts";"#;
-        assert_eq!(kinds_of(prelude, "PATH"), vec![OperandKind::SameUnitConstant]);
-    }
-
-    /// A `@Value`-injected base is a configuration lookup — refused, and the
-    /// boundary [CR-113] §3.3 exists to preserve.
-    #[test]
-    fn a_value_injected_base_is_a_configuration_lookup() {
-        let prelude = "  @Value(\"${service.base}\")\n  private String base;";
-        assert_eq!(
-            kinds_of(prelude, r#"base + "/users""#),
-            vec![OperandKind::ConfigurationLookup, OperandKind::Literal],
-        );
-    }
-
-    /// A configuration-properties bean's getter — the reference workspace's
-    /// dominant shape.
-    #[test]
-    fn a_properties_bean_getter_is_a_configuration_lookup() {
-        let prelude = "  private final MailboxApiProperties mailboxApiProperties;";
-        assert_eq!(
-            kinds_of(prelude, "mailboxApiProperties.getUriGetMailbox()"),
-            vec![OperandKind::ConfigurationLookup],
-        );
-    }
-
-    /// A plain helper-method call is a method return, not a foldable operand.
-    #[test]
-    fn a_helper_method_call_is_a_method_return() {
-        assert_eq!(
-            kinds_of("", "buildCreateMailboxUrl()"),
-            vec![OperandKind::MethodReturn],
-        );
-    }
-
-    /// An injected collaborator field, never initialised in the unit.
-    #[test]
-    fn an_uninitialised_field_is_injected() {
-        let prelude = "  private String basePath;";
-        assert_eq!(kinds_of(prelude, "basePath"), vec![OperandKind::Injected]);
-    }
-
-    /// Folding never recurses into a value the source does not prove
-    /// ([FR-WS-18] AC4): a constant initialised from another call stays refused.
-    #[test]
-    fn a_constant_initialised_from_a_call_does_not_fold() {
-        let prelude = "  private static final String BASE = System.getenv(\"BASE\");";
-        let kinds = kinds_of(prelude, r#"BASE + "/users""#);
-        assert_eq!(kinds[0], OperandKind::ConfigurationLookup);
-        assert!(!kinds[0].is_foldable());
-    }
-
-    /// Only literals and same-unit constants fold.
-    #[test]
-    fn foldability_is_exactly_literal_and_same_unit_constant() {
-        for kind in OperandKind::ALL {
-            assert_eq!(
-                kind.is_foldable(),
-                matches!(kind, OperandKind::Literal | OperandKind::SameUnitConstant),
-                "{kind:?}",
-            );
+        // The declarator's value is the string node.
+        let mut found = None;
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.kind().contains("string") && node.kind() != "string_fragment" {
+                found = Some(node);
+                break;
+            }
+            let mut c = node.walk();
+            stack.extend(node.named_children(&mut c));
         }
+        let node = found.expect("a string literal node");
+        assert_eq!(
+            static_literal(node, src).as_deref(),
+            expected,
+            "literal {literal}",
+        );
     }
+}
+
+// ── Go — the arm whose constants the first draft could not resolve ──────────
+
+/// Go binds a `const`/`var` through an `expression_list`, not directly. The
+/// first draft read `child_by_field_name("value")`, got the list, failed the
+/// string test and classified **every** Go same-unit constant as `Other` —
+/// invalidating the Go column of a published table.
+#[cfg(feature = "lang-go")]
+#[test]
+fn a_go_const_resolves_as_a_same_unit_constant() {
+    let a = analyse(
+        "client.go",
+        "package main\n\nimport \"net/http\"\n\n\
+         const BasePath = \"/api/v1\"\n\n\
+         func call() { http.Get(BasePath + \"/users\") }\n",
+    );
+    assert_eq!(
+        a.kinds,
+        vec![OperandKind::SameUnitConstant, OperandKind::Literal],
+    );
+    assert_eq!(a.folded.as_deref(), Some("/api/v1/users"));
+}
+
+/// The same for a `var`, and for a `:=` short declaration.
+#[cfg(feature = "lang-go")]
+#[test]
+fn a_go_var_and_short_declaration_resolve() {
+    let a = analyse(
+        "client.go",
+        "package main\n\nimport \"net/http\"\n\n\
+         var VarBase = \"/api/v2\"\n\n\
+         func call() { http.Get(VarBase + \"/things\") }\n",
+    );
+    assert_eq!(
+        a.kinds,
+        vec![OperandKind::SameUnitConstant, OperandKind::Literal],
+    );
+
+    let b = analyse(
+        "client.go",
+        "package main\n\nimport \"net/http\"\n\n\
+         func call() {\n\tbase := \"/api/v3\"\n\thttp.Get(base + \"/things\")\n}\n",
+    );
+    assert_eq!(
+        b.kinds,
+        vec![OperandKind::SameUnitConstant, OperandKind::Literal],
+    );
+}
+
+/// A multi-name `const A, B = "x", "y"` pairs positionally rather than binding
+/// every name to the first value.
+#[cfg(feature = "lang-go")]
+#[test]
+fn a_go_multi_name_const_pairs_positionally() {
+    let a = analyse(
+        "client.go",
+        "package main\n\nimport \"net/http\"\n\n\
+         const A, B = \"/first\", \"/second\"\n\n\
+         func call() { http.Get(B) }\n",
+    );
+    assert_eq!(a.kinds, vec![OperandKind::SameUnitConstant]);
+    assert_eq!(a.folded.as_deref(), Some("/second"));
+}
+
+// ── Python ──────────────────────────────────────────────────────────────────
+
+/// Python spells a qualified access `attribute`, which matched none of the
+/// first draft's kind tests, so `self.BASE` classified as `Other`.
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_self_attribute_resolves() {
+    let a = analyse(
+        "client.py",
+        "import requests\n\n\
+         class C:\n    BASE = \"/api/v1\"\n\n    \
+         def call(self):\n        requests.get(self.BASE + \"/users\")\n",
+    );
+    assert_eq!(
+        a.kinds,
+        vec![OperandKind::SameUnitConstant, OperandKind::Literal],
+    );
+}
+
+/// An f-string decomposes into its fragments and substitutions.
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_f_string_decomposes() {
+    let a = analyse(
+        "client.py",
+        "import requests\n\n\
+         BASE = \"/api/v1\"\n\n\
+         def call():\n    requests.get(f\"{BASE}/users\")\n",
+    );
+    assert_eq!(
+        a.kinds,
+        vec![OperandKind::SameUnitConstant, OperandKind::Literal],
+    );
+    assert_eq!(a.folded.as_deref(), Some("/api/v1/users"));
+}
+
+/// A keyword argument is **not** a binding. Under a "any node with a `name`
+/// field" rule, `helper(path="/injected")` registered a binding for `path` and
+/// folded an unrelated parameter of the same name to it — a fabricated
+/// admission, the one direction a measurement must never err in.
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_keyword_argument_does_not_bind_a_name() {
+    let a = analyse(
+        "client.py",
+        "import requests\n\n\
+         def call(path):\n    helper(path=\"/injected/literal\")\n    \
+         requests.get(path + \"/tail\")\n",
+    );
+    assert_eq!(a.kinds, vec![OperandKind::Other, OperandKind::Literal]);
+    assert!(!a.site.newly_admissible_with_placeholders());
+}
+
+// ── TypeScript ──────────────────────────────────────────────────────────────
+
+/// A template string with a substitution decomposes; one without is a single
+/// literal the arm already admits.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_typescript_template_string_decomposes() {
+    let a = analyse(
+        "client.ts",
+        "import axios from 'axios';\n\
+         const BASE = '/api/v1';\n\
+         export async function call() { await axios.get(`${BASE}/users`); }\n",
+    );
+    assert_eq!(
+        a.kinds,
+        vec![OperandKind::SameUnitConstant, OperandKind::Literal],
+    );
+    assert_eq!(a.folded.as_deref(), Some("/api/v1/users"));
+
+    let b = analyse(
+        "client.ts",
+        "import axios from 'axios';\n\
+         export async function call() { await axios.get(`/api`); }\n",
+    );
+    assert_eq!(b.kinds, vec![OperandKind::Literal]);
+    assert!(
+        b.site.already_static_literal(),
+        "a no-substitution template literal is admitted TODAY, so folding adds nothing",
+    );
+}
+
+/// `process.env` is a configuration lookup wherever it appears.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_typescript_process_env_base_is_a_configuration_lookup() {
+    let a = analyse(
+        "client.ts",
+        "import axios from 'axios';\n\
+         export async function call() { await axios.get(`${process.env.API_HOST}/contracts`); }\n",
+    );
+    assert_eq!(
+        a.kinds,
+        vec![OperandKind::ConfigurationLookup, OperandKind::Literal],
+    );
+    assert!(!a.site.newly_admissible_with_placeholders());
+}
+
+// ── PHP ─────────────────────────────────────────────────────────────────────
+
+/// PHP concatenates with `.`, spells a class constant `self::BASE`, and gives a
+/// property's initialiser the field name `default_value` — three shapes the
+/// first draft classified as `Other`, leaving its PHP row vacuous rather than
+/// confirming.
+#[cfg(feature = "lang-php")]
+#[test]
+fn a_php_class_constant_concatenation_resolves() {
+    let a = analyse(
+        "Client.php",
+        "<?php\nuse GuzzleHttp\\Client;\n\
+         class C {\n  const BASE = '/api/v1';\n  \
+         function call($client) { $client->get(self::BASE . '/users'); }\n}\n",
+    );
+    assert_eq!(
+        a.kinds,
+        vec![OperandKind::SameUnitConstant, OperandKind::Literal],
+    );
+    assert_eq!(a.folded.as_deref(), Some("/api/v1/users"));
+}
+
+/// A property initialiser (`default_value`) is a same-unit constant, not an
+/// injected field.
+#[cfg(feature = "lang-php")]
+#[test]
+fn a_php_property_initialiser_is_not_injected() {
+    let a = analyse(
+        "Client.php",
+        "<?php\nuse GuzzleHttp\\Client;\n\
+         class C {\n  private $base = '/legacy';\n  \
+         function call($client) { $client->get($this->base . '/users'); }\n}\n",
+    );
+    assert_eq!(
+        a.kinds,
+        vec![OperandKind::SameUnitConstant, OperandKind::Literal],
+    );
 }
