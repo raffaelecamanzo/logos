@@ -15,7 +15,7 @@ module_separator = "::"
 # the compiled grammar (FR-PL-03, NFR-PC-03).
 abi_version = 14
 
-capabilities = ["symbols", "references", "frameworks"]
+capabilities = ["symbols", "references", "frameworks", "invocations"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # Anonymous-token kinds in the Ruby grammar: branching keywords, loop keywords,
@@ -48,10 +48,30 @@ test_convention = "ruby-test"
 # (FR-FW-04 ledger-gated candidacy).
 framework_detectors = ["Rails", "ActionController", "ActiveRecord", "ApplicationController", "ApplicationRecord", "ActionMailer", "ActiveJob"]
 
+# Canonical reference prefixes whose presence in a file's ledger makes the file
+# an outbound **HTTP client-call** candidate (S-347, CR-108, FR-WS-08) — the
+# consumer-side twin of `framework_detectors`. FR-WS-08's normative Ruby row is
+# Net::HTTP and Faraday, and both rows are the ledger form of a `require`
+# import, not the constant's own spelling: `require "net/http"` and
+# `require "faraday"` canonicalise through the same generic `import_segments`/
+# `split_path_text` path every other language's imports do (S-345's `net/http`
+# → `net::http` verbatim), giving `net::http` and `faraday` — lowercase,
+# because the require STRING is lowercase even though the constant used at the
+# call site (`Net::HTTP`, `Faraday`) is not. Matched at a segment boundary
+# (`resolve::matches_detector`), so `net::http` also admits a
+# `net::http::persistent`-style extension without admitting the sibling
+# `net::ftp` / `net::smtp` stdlib siblings.
+http_client_detectors = ["net::http", "faraday"]
+
 [queries]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"
 frameworks = "queries/frameworks.scm"
+# Outbound Net::HTTP / Faraday client-call arm (S-347, CR-108, FR-WS-08): the
+# receiver-method idiom (parenthesised and parenthesis-free alike), the
+# `Net::HTTP.get(URI(...))` constructor-wrapped path, and a symbol-keyed hash
+# call. See the query header for the registration-vs-client discriminator.
+invocations = "queries/invocations.scm"
 # Captured `@fw.route.method` text → HTTP method (the declarative framework
 # contract, S-015). Rails routing-DSL verbs map to their HTTP verb; the RESTful
 # macros (`resources`/`resource`) and `root` carry no single path and are

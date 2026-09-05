@@ -626,6 +626,14 @@ fn ruby_entry() -> GrammarEntry {
                 label: "ruby/queries/frameworks.scm",
                 source: include_str!("../../plugins/ruby/queries/frameworks.scm"),
             },
+            // The outbound Net::HTTP / Faraday client-call arm (S-347,
+            // [FR-WS-08], [CR-108]): the consumer side of the route key
+            // `frameworks` promotes on the provider side.
+            EmbeddedQuery {
+                relative_path: "queries/invocations.scm",
+                label: "ruby/queries/invocations.scm",
+                source: include_str!("../../plugins/ruby/queries/invocations.scm"),
+            },
         ],
     }
 }
