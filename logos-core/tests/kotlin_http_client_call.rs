@@ -760,6 +760,40 @@ class Calls(private val restTemplate: RestTemplate) {
     );
 }
 
+/// **Ceiling.** A receiver-method call outside pattern 4's four positions.
+///
+/// The position rule is what excludes a trailing-lambda route registration, and
+/// it costs recall in exchange: a call nested as an argument, extended by a
+/// further `.also { … }`, or — the common one — written inside a **lambda body**
+/// is not captured, because a lambda body is not a `block` node in this grammar.
+/// Under-capture is the safe direction ([NFR-RA-05]), but it is a real gap and a
+/// reader deserves to see its shape rather than infer it.
+#[test]
+fn a_receiver_method_call_outside_pattern_4s_positions_is_a_stated_ceiling() {
+    for (label, body) in [
+        (
+            "inside a lambda body",
+            r#"fun dropAll(ids: List<String>) { ids.forEach { restTemplate.delete("/carts/{id}") } }"#,
+        ),
+        (
+            "nested as an argument",
+            r#"fun drop(id: String) { log(restTemplate.delete("/carts/{id}")) }"#,
+        ),
+        (
+            "extended by a further chained call",
+            r#"fun drop(id: String) { restTemplate.delete("/carts/{id}").also { audit(it) } }"#,
+        ),
+    ] {
+        assert!(
+            client_calls(&format!(
+                "class Calls(private val restTemplate: RestTemplate) {{\n    {body}\n}}"
+            ))
+            .is_empty(),
+            "{label} is outside pattern 4's stated positions and is not captured"
+        );
+    }
+}
+
 /// **Not a ceiling — a Kotlin/Java divergence, in the good direction.** A Kotlin
 /// *raw string* (`"""…"""`) path literal **is** captured, where Java's text
 /// block is not.

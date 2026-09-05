@@ -267,6 +267,13 @@
 ;      (c) the call must occupy a value/statement POSITION rather than be the
 ;          callee of a trailing-lambda application.
 ;
+;    The trailing `.` closing each branch's `call_expression` is belt-and-braces,
+;    not the discriminator: by fact 4 a trailing lambda re-roots the tree, so
+;    `value_arguments` is already the call's last child and the anchor cannot
+;    fail today. It is kept as defence against a grammar bump. The POSITION is
+;    what does the work — do not read the anchor as the guard and delete the
+;    branches.
+;
 ;    (c) is why this appears as four near-identical branches: the position is the
 ;    parent, and a query can only state a parent positively.
 ;
@@ -358,10 +365,16 @@
 
 ; ── Stated coverage ceilings (ADR-54: recorded, never worked around) ────────
 ;
-; NOT captured. Each is asserted as ZERO in
-; logos-core/tests/kotlin_http_client_call.rs §5 — the tests are the
-; enforcement, this list is only the index, so a ceiling cannot quietly become a
-; lie:
+; NOT captured. Each bullet names the test that enforces it, in
+; logos-core/tests/kotlin_http_client_call.rs — the tests are the enforcement,
+; this list is only the index. Two bullets are marked UNPINNED and are prose
+; only; everything else is asserted.
+;
+; The per-bullet naming replaced a blanket "each is asserted as ZERO in §5"
+; claim, which was false in three places at once and is what let pattern 4's
+; detached guards go unnoticed: a reader checking the `$` ceiling trusted a
+; suite that never made the assertion. A ceiling index that overstates itself is
+; worse than no index (ADR-54).
 ;
 ;   * An IMPLICIT extension-function receiver — `fun RestClient.byId(id: String)
 ;     = get().uri("/users/{id}")…`, where `get()` parses as
@@ -369,48 +382,80 @@
 ;     Refused by the receiver rule, which is the same rule that refuses Ktor's
 ;     and WebFlux's receiver-less route DSLs; the two are indistinguishable, and
 ;     refusing both is the NFR-RA-05 direction. Spelling `this.` captures.
+;     Pinned by `an_extension_function_receiver_is_captured_when_spelled_and…`.
 ;
 ;   * A TRAILING-LAMBDA call — `restClient.get().uri { it.path("/users").build() }`
 ;     and any `receiver.verb("/p") { … }`. The first has no `value_arguments` at
 ;     all; the second is excluded by pattern 4's position rule, because that is
 ;     what a Javalin/MockMvc-DSL route registration looks like. Both refuse.
+;     Pinned by `a_trailing_lambda_call_is_refused`.
 ;
 ;   * A MULTI-ARGUMENT receiver-method call — `restTemplate.put("/carts/{id}",
 ;     body)`, `restTemplate.delete(url = "/p", x = y)`. Java captures the first;
 ;     Kotlin does not, because Kotlin has route-registration APIs of exactly that
 ;     shape (`app.get("/users", handler)`) and Java does not. A deliberate,
-;     tested divergence in the safe direction.
+;     tested divergence in the safe direction. Pinned by
+;     `a_multi_argument_receiver_call_is_a_stated_ceiling`.
 ;
 ;   * A receiver-method call in any OTHER position than pattern 4's four —
-;     nested as an argument, or extended by a further `.also { … }`. Under-capture
-;     is the price of the position rule.
+;     nested as an argument, extended by a further `.also { … }`, or (the common
+;     one) written inside a LAMBDA BODY, which is not a `block` node in this
+;     grammar: `ids.forEach { restTemplate.delete("/carts/{id}") }` captures
+;     nothing. Under-capture is the price of the position rule. Pinned by
+;     `a_receiver_method_call_outside_pattern_4s_positions_is_a_stated_ceiling`.
 ;
 ;   * `RestTemplate`'s verb-suffixed methods (`getForObject`, `postForEntity`,
 ;     `exchange`, …) and OpenFeign `@FeignClient` interfaces — identical to
 ;     Java's ceilings and for the identical reason: the arm's
 ;     `@invoke.http.method` slot needs a node whose TEXT is literally an HTTP
 ;     verb, and these encode it in a method name or an annotation name. Lifting
-;     them needs a descriptor-level method-alias table (CR-108 CRA-05).
+;     them needs a descriptor-level method-alias table (CR-108 CRA-05). Pinned by
+;     `rest_template_verb_suffixed_methods_are_a_stated_ceiling` and
+;     `openfeign_interfaces_are_a_stated_ceiling`.
 ;
-;   * A runtime-composed path on the PLAIN RECEIVER-METHOD idiom
+;   * A `$`-interpolated path on the PLAIN RECEIVER-METHOD idiom
 ;     (`restTemplate.delete("/carts/$id")`) is refused, but silently: pattern 4
 ;     carries the `$` guard without the companion pattern 1b gives the fluent
 ;     form, so the site is never seen and no base-url-runtime reason is reported
 ;     for it. A NON-interpolated dynamic path there (`restTemplate.delete(url)`)
-;     still reports normally. Narrow, and in the safe direction.
+;     still reports normally. Narrow, and in the safe direction. Pinned by
+;     `an_interpolated_path_on_the_receiver_method_idiom_emits_no_reference`.
 ;
 ;   * A separated JDK builder chain (`…uri(URI.create("/p")).header("a","b").GET()`)
 ;     and `HttpRequest.newBuilder(URI.create("/p"))`, which has no verb link —
 ;     both refuse whole rather than emitting a verb-less or path-less half.
+;     Pinned by `a_separated_jdk_builder_chain_is_a_stated_ceiling`.
 ;
-;   * OkHttp, Ktor's client and Retrofit — outside FR-WS-08's normative Kotlin
-;     row.
+;   * UNPINNED (prose only) — OkHttp, Ktor's client and Retrofit. They are
+;     outside FR-WS-08's normative Kotlin row, so no pattern targets them and
+;     there is nothing a zero-assertion would defend: it would pin the absence of
+;     code that was never written, not a decision this file makes.
 ;
-; One ceiling is an OVER-capture, not an under-capture: the ledger gate is
-; file-grained, so a route-shaped collection call inside a genuine client file
-; (`perms.get("/admin/users")`) still captures. Inherited from the Rust arm and
-; from Java, likewise pinned by a test; no query can separate it from
-; `client.get(…)` without receiver typing.
+; Two ceilings are OVER-captures rather than under-captures. Neither is
+; separable from a real client call without receiver typing, so both are pinned
+; as the behaviour they are, not wished away:
+;
+;   * The ledger gate is file-grained, so a route-shaped collection call inside a
+;     genuine client file (`perms.get("/admin/users")`) still captures.
+;     Inherited from the Rust arm and from Java. Pinned by
+;     `a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling`.
+;
+;   * A route registration whose handler arrives on a LATER link, or not at all
+;     in the same expression — `val route = router.get("/x")` then
+;     `route.handler { … }` (Vert.x, http4k), or a bare `mockMvc.get("/x")` with
+;     no lambda. The position rule catches the trailing-lambda spelling and the
+;     arity rule catches the extra-argument spelling; this third spelling is
+;     structurally identical to `restTemplate.delete("/x")`. The DIRECT chain
+;     (`router.post("/x").handler { … }`) IS refused — there the call is the
+;     receiver of a further navigation, not one of pattern 4's positions. Pinned
+;     by `a_chained_handler_route_registration_is_a_stated_over_capture_ceiling`.
+;
+; One DIVERGENCE from Java runs the other way and is recorded here so it is a
+; decision rather than an accident: a Kotlin raw string (`"""/p"""`) path literal
+; IS captured, because kotlin-ng exposes its body as `string_content` — a child
+; kind `static_string_literal` accepts — whereas Java's text block exposes a
+; `multiline_string_fragment`, which it does not. Pinned by
+; `a_raw_string_path_literal_is_captured`.
 ;
 ; Like every capability query this file is droppable-on-disk: a copy at
 ; `.logos/plugins/kotlin/queries/invocations.scm` shadows it without a rebuild
