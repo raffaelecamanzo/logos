@@ -95,14 +95,18 @@ fn each_landed_language_reports_the_invocations_capability() {
     let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
 
     // Rust (pre-CR-108), then S-341 (java), S-343 (typescript, tsx), S-345 (go),
-    // S-342 (kotlin), S-346 (c-sharp), S-347 (ruby). Subsequent stories append here.
+    // S-342 (kotlin), S-344 (python), S-346 (c-sharp), S-347 (ruby), S-348 (php).
+    // All nine CR-108 languages have landed; this list is now complete.
     //
     // Rust belongs in this row even though the test above already reports its
     // capability: that one reads the `languages()` descriptor summary and never
     // calls `plugin.query("invocations")`, so the stronger assertion — the
     // declared query actually LOADS — was not applied to the language that has
     // shipped the arm longest.
-    for name in ["rust", "java", "typescript", "tsx", "go", "kotlin", "c-sharp", "ruby"] {
+    for name in [
+        "rust", "java", "typescript", "tsx", "go", "kotlin", "c-sharp", "python", "ruby",
+        "php",
+    ] {
         let plugin = reg
             .iter()
             .find(|p| p.name() == name)
