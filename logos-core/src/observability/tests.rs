@@ -600,6 +600,110 @@ fn the_self_referential_exclusion_reaches_rollup_rows() {
     assert_eq!(day_calls, 6, "and the daily series applies the same rule");
 }
 
+/// The exclusion holds across **every** query the read-model runs, not just the
+/// usage counts — latency, the raw daily series, and the origin split each carry
+/// their own copy of the predicate.
+///
+/// This is a regression guard with teeth: `stats_from` interpolates
+/// `{engine_query}` at **six** independent sites, and dropping it from any one
+/// is a plausible edit. Mutation-testing the suite showed the latency query, the
+/// raw daily-activity query and the origin breakdown could each lose the
+/// predicate with every other test still green — the three the retired
+/// `web_surface_activity_is_excluded_from_all_stats` used to cover. The seeded
+/// self-referential rows are therefore given a *distinguishing* duration and a
+/// *distinguishing* origin, so a leak in any query is visible in that query's
+/// own output rather than only in the totals.
+#[test]
+fn the_exclusion_applies_to_every_stats_query() {
+    let mut conn = db::open_in_memory();
+    // Real use: three cli `search` calls, origin "main", durations 10/20/30.
+    db::write_batch(
+        &mut conn,
+        &[
+            record("search", 10, true, NOW - 60),
+            record("search", 20, true, NOW - 60),
+            record("search", 30, true, NOW - 60),
+        ],
+    )
+    .unwrap();
+    // Self-referential noise on the same day: a huge duration (would dominate
+    // every percentile), a distinct origin (would add a whole `dev` bucket) and
+    // four extra calls (would inflate that day's series entry).
+    let noise: Vec<EventRecord> = (0..4)
+        .map(|_| EventRecord {
+            at: NOW - 60,
+            surface: "web",
+            tool: "stats".to_string(),
+            duration_ms: 5_000,
+            ok: true,
+            origin: "some-worktree-branch".to_string(),
+        })
+        .collect();
+    db::write_batch(&mut conn, &noise).unwrap();
+    // And on a rolled-up day inside the window, beside a real rollup row.
+    for (tool, calls) in [("status", 99), ("node", 2)] {
+        conn.execute(
+            "INSERT INTO daily_rollup (day, surface, tool, calls, ok_calls,
+                                       total_duration_ms, max_duration_ms)
+             VALUES (date(?1, 'unixepoch'), 'web', ?2, ?3, ?3, 100, 50)",
+            rusqlite::params![NOW - 86_400, tool, calls],
+        )
+        .unwrap();
+    }
+
+    let info = stats_from(&conn, 7, NOW).expect("stats compute");
+
+    // Query 1 + 2 — usage counts, raw and rolled up.
+    assert_eq!(info.calls_total, 5, "3 cli search + 2 rollup node");
+    assert!(
+        info.calls_by_tool
+            .iter()
+            .all(|u| u.tool != "stats" && u.tool != "status"),
+        "no self-referential tool in the breakdown: {:?}",
+        info.calls_by_tool
+    );
+
+    // Query 3 — latency. The 5000 ms reads must not reach the percentiles.
+    assert!(
+        info.latency_p99_ms <= 30,
+        "self-referential latency leaked into the percentiles: p99 = {}",
+        info.latency_p99_ms
+    );
+
+    // Query 4 + 5 — the daily series, raw and rolled up.
+    let day_of = |secs: i64| -> String {
+        conn.query_row("SELECT date(?1, 'unixepoch')", [secs], |r| r.get(0))
+            .unwrap()
+    };
+    let today = day_of(NOW - 60);
+    let raw_day = info
+        .activity_by_day
+        .iter()
+        .find(|d| d.day == today)
+        .expect("the raw day is in the series");
+    assert_eq!(
+        raw_day.calls, 3,
+        "the raw daily series counted the self-referential reads"
+    );
+    let rolled = info
+        .activity_by_day
+        .iter()
+        .find(|d| d.day == day_of(NOW - 86_400))
+        .expect("the rolled-up day is in the series");
+    assert_eq!(rolled.calls, 2, "the rolled-up day counted `status`");
+
+    // Query 6 — the origin split. The noise carried its own branch origin, so a
+    // leak would show up as a whole extra `dev` bucket.
+    assert_eq!(
+        info.calls_by_origin.len(),
+        1,
+        "a self-referential origin leaked into the split: {:?}",
+        info.calls_by_origin
+    );
+    assert_eq!(info.calls_by_origin[0].origin, "main");
+    assert_eq!(info.calls_by_origin[0].calls, 3);
+}
+
 /// The regression the story names: re-running a historical window reports the
 /// navigation the raw store actually holds.
 ///
