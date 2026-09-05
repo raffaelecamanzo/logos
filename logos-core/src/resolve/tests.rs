@@ -1118,6 +1118,62 @@ fn an_operation_is_unbound_until_its_route_is_indexed() {
     );
 }
 
+// ── CR-109 / S-349: wildcard-method matching with exact-method precedence ────
+//
+// The intra-repo half of the shared fixture matrix. The cross-member bridge and
+// the federation coverage read-model drive the *same* rows from
+// `resolve::route_method::matrix`, so an input that binds at one site and not at
+// another fails at one of the three ([FR-CG-09] AC3, [ADR-52]).
+
+/// Every matrix case, driven through the `ApiOperation` → `Route` binder.
+#[test]
+fn the_wildcard_method_matrix_holds_at_the_intra_repo_binder() {
+    for case in super::route_method::matrix::MATRIX {
+        let routes: Vec<NodeRow> = case
+            .providers
+            .iter()
+            .enumerate()
+            .map(|(i, name)| route_node(50 + i as i64, name))
+            .collect();
+        let outcome = bind_route(&routes, &route_ref(case.consumer));
+        match case.expect.bound() {
+            Some(i) => {
+                let want = NodeId(50 + i as i64);
+                assert!(
+                    matches!(outcome, Outcome::Bound { target, .. } if target == want),
+                    "{}: `{}` must bind provider {i} (`{}`), got {outcome:?}",
+                    case.name,
+                    case.consumer,
+                    case.providers[i]
+                );
+            }
+            None => assert_eq!(
+                outcome,
+                Outcome::Unbound,
+                "{}: `{}` must not bind against {:?}",
+                case.name,
+                case.consumer,
+                case.providers
+            ),
+        }
+    }
+}
+
+/// A wildcard route is a candidate for *every* verb, not merely the one the
+/// matrix happens to name — the property the `ANY` token asserts, checked over
+/// the whole method vocabulary an OpenAPI document can carry.
+#[test]
+fn a_wildcard_route_binds_every_verb_an_operation_can_declare() {
+    let routes = [route_node(50, "ANY /v1/things/{id}")];
+    for verb in ["GET", "PUT", "POST", "DELETE", "PATCH", "HEAD", "OPTIONS"] {
+        let r = route_ref(&format!("{verb} /v1/things/{{thingId}}"));
+        assert!(
+            matches!(bind_route(&routes, &r), Outcome::Bound { target, .. } if target == NodeId(50)),
+            "a bare @RequestMapping route serves {verb} (FR-CG-09, CR-109)"
+        );
+    }
+}
+
 #[test]
 fn relation_coverage_groups_ledger_rows_by_relation_class() {
     // The per-relation-class coverage surface (FR-CG-11, FR-RS-04): bound vs

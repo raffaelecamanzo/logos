@@ -53,6 +53,13 @@ pub mod framework;
 /// templates under one parameter-position-only comparison. See its module docs.
 pub(crate) mod grpc_key;
 pub(crate) mod route_template;
+/// The shared wildcard-method matching rule (S-349, CR-109, FR-CG-09): decides
+/// whether a provider registered under one HTTP method serves a consumer that
+/// declares another (`ANY` is the wildcard), and which of the providers sharing
+/// a normalized template a consumer may bind. The one rule all three
+/// candidate-selection sites reduce their template bucket through. See its
+/// module docs.
+pub(crate) mod route_method;
 /// The HTTP client-call arm normalizer (S-252, CR-061, FR-WS-08): reduces a
 /// captured outbound call to its `"METHOD /template"` bind target or the reason
 /// it is honestly unbindable (base-url-runtime / path-not-composed). The one

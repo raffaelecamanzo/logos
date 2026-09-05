@@ -56,6 +56,7 @@ use crate::model::{
     ArtifactRelation, BridgeNamespace, BridgeRole, EdgeKind, LogosSymbol, MatchDiscipline, NodeId,
     NodeKind,
 };
+use crate::resolve::route_method::preferred_candidates;
 use crate::resolve::route_template::route_key;
 
 /// Which side of a portable-key match a node sits on — the bridge's local alias
@@ -533,17 +534,21 @@ fn rpc_methods(body: &str) -> impl Iterator<Item = &str> {
 }
 
 /// The portable identity a candidate is matched on across members: a
-/// [`BridgeNamespace`] plus the arm's normalized **key string** ([FR-WS-07],
-/// [ADR-54]).
+/// [`BucketKey`] (a [`BridgeNamespace`] plus the arm's normalized **bucket
+/// string**) and the within-bucket method facet ([FR-WS-07], [ADR-54]).
 ///
-/// Namespace-generic by construction — the match loop keys on this struct and
+/// Namespace-generic by construction — the match loop indexes on the bucket and
 /// applies the namespace's [`match_discipline`](BridgeNamespace::match_discipline),
-/// never any per-arm code. The HTTP key folds the shared positional
-/// [`route_key`] `(METHOD, template)` into `"METHOD /template"`; the gRPC and
-/// broker arms ([FR-WS-09], [FR-WS-10]) build their own key strings
-/// (`package.Service/Method`, a topic name) under their own namespace. Any two
-/// candidates with the same `(namespace, key)` meet — regardless of which arm
-/// produced them.
+/// never any per-arm code. The HTTP key splits the shared positional
+/// [`route_key`] `(METHOD, template)` across the two: the template is the
+/// bucket, the method is the facet ([CR-109]). The gRPC and broker arms
+/// ([FR-WS-09], [FR-WS-10]) build their own bucket strings
+/// (`package.Service/Method`, a topic name) under their own namespace with no
+/// facet at all. Two candidates in one bucket meet iff the shared
+/// [`route_method`](crate::resolve::route_method) rule says the provider's facet
+/// serves the consumer's — regardless of which arm produced them.
+///
+/// [CR-109]: ../../../docs/requests/CR-109-wildcard-method-route-matching.md
 ///
 /// [route_key]: crate::resolve::route_template::route_key
 /// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
@@ -559,23 +564,74 @@ fn rpc_methods(body: &str) -> impl Iterator<Item = &str> {
 /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct PortableKey {
+    /// The bucket two candidates must share before they are compared at all.
+    pub(super) bucket: BucketKey,
+    /// The within-bucket **method facet**: `Some("GET")`, `Some("ANY")`, … for the
+    /// HTTP namespace; `None` for the gRPC and broker namespaces, whose keys carry
+    /// no method dimension. Compatibility and wildcard precedence over this facet
+    /// are the shared [`route_method`](crate::resolve::route_method) rule's job,
+    /// never this struct's ([CR-109]).
+    ///
+    /// [CR-109]: ../../../docs/requests/CR-109-wildcard-method-route-matching.md
+    pub(super) method: Option<String>,
+}
+
+/// The **bucket identity** a provider index files candidates under: the
+/// namespace plus the arm-normalized bucket string ([CR-109], [ADR-52]).
+///
+/// For the HTTP namespace that string is the positionally-normalized template
+/// **alone**, with the method held apart in [`PortableKey::method`]. That split
+/// is the whole point: a `HashMap` keyed on the whole `(method, template)` tuple
+/// cannot express a wildcard method, so a wildcard and an exact-method provider
+/// of one endpoint have to land in the *same* bucket for the precedence rule to
+/// see them together. For the gRPC and broker namespaces, whose keys have no
+/// method dimension, the bucket string is the whole key and the facet is `None` —
+/// so their matching is untouched.
+///
+/// [CR-109]: ../../../docs/requests/CR-109-wildcard-method-route-matching.md
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct BucketKey {
     /// The invocation namespace this key lives in — decides the match discipline.
     pub(super) namespace: BridgeNamespace,
-    /// The arm-normalized, database-portable key string two candidates meet on.
+    /// The arm-normalized, database-portable bucket string two candidates meet on.
     pub(super) key: String,
+}
+
+/// One provider filed in a bucket: its endpoint plus the method facet deciding
+/// which consumers of that bucket it serves and how specific it is ([CR-109]).
+///
+/// `endpoint` is declared first so a bucket sorts by endpoint, exactly as it did
+/// when a bucket was a bare `Vec<BridgeEndpoint>` ([NFR-RA-06]).
+///
+/// [CR-109]: ../../../docs/requests/CR-109-wildcard-method-route-matching.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct ProviderCandidate {
+    /// The database-portable endpoint this provider binds to.
+    pub(super) endpoint: BridgeEndpoint,
+    /// The provider's method facet, mirroring [`PortableKey::method`].
+    pub(super) method: Option<String>,
 }
 
 impl PortableKey {
     /// An HTTP key from the shared positional [`route_key`] parts: the
-    /// upper-cased method and positionally-normalized template folded into one
-    /// `"METHOD /template"` string under the [`Http`](BridgeNamespace::Http)
-    /// namespace.
+    /// positionally-normalized template becomes the bucket under the
+    /// [`Http`](BridgeNamespace::Http) namespace and the upper-cased method
+    /// becomes the facet. Derivation is unchanged — an endpoint still reduces to
+    /// `(METHOD, normalized template)`; only where the two halves live differs
+    /// ([ADR-52] as amended by [CR-109]).
     ///
     /// [route_key]: crate::resolve::route_template::route_key
+    /// [CR-109]: ../../../docs/requests/CR-109-wildcard-method-route-matching.md
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
     pub(super) fn http(method: String, template: String) -> PortableKey {
         PortableKey {
-            namespace: BridgeNamespace::Http,
-            key: format!("{method} {template}"),
+            bucket: BucketKey {
+                namespace: BridgeNamespace::Http,
+                key: template,
+            },
+            method: Some(method),
         }
     }
 
@@ -583,20 +639,45 @@ impl PortableKey {
     /// optionally guarded by a `#`-appended message-schema FQN) under the fan-out
     /// [`BrokerTopic`](BridgeNamespace::BrokerTopic) namespace (S-254,
     /// [FR-WS-10]). The [`super::broker`] classifier builds these; two sides meet
-    /// iff their whole topic key (topic + optional guard) is byte-equal.
+    /// iff their whole topic key (topic + optional guard) is byte-equal — the
+    /// namespace carries no method facet, so it is `None`.
     ///
     /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
     pub(super) fn broker(key: String) -> PortableKey {
         PortableKey {
-            namespace: BridgeNamespace::BrokerTopic,
-            key,
+            bucket: BucketKey {
+                namespace: BridgeNamespace::BrokerTopic,
+                key,
+            },
+            method: None,
         }
+    }
+
+    /// A gRPC key from an already fully-qualified `package.Service/Method` string
+    /// under the [`Grpc`](BridgeNamespace::Grpc) namespace (S-253, [FR-WS-09]).
+    /// The namespace carries no method facet — the verb is part of the key — so it
+    /// is `None`.
+    ///
+    /// [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
+    pub(super) fn grpc(key: String) -> PortableKey {
+        PortableKey {
+            bucket: BucketKey {
+                namespace: BridgeNamespace::Grpc,
+                key,
+            },
+            method: None,
+        }
+    }
+
+    /// The invocation namespace this key lives in.
+    pub(super) fn namespace(&self) -> BridgeNamespace {
+        self.bucket.namespace
     }
 
     /// The relation class a binding on this key is filed under — the namespace's
     /// stable relation label ([`BridgeNamespace::relation`]).
     pub(super) fn relation(&self) -> &'static str {
-        self.namespace.relation()
+        self.bucket.namespace.relation()
     }
 }
 
@@ -621,13 +702,7 @@ pub(super) fn classify(kind: NodeKind, name: &str) -> Option<(PortableKey, Role)
             // fully-qualified string is the gRPC provider key directly. A bare
             // (method-less) service has no `/` and carries no portable key.
             if name.contains('/') {
-                Some((
-                    PortableKey {
-                        namespace: BridgeNamespace::Grpc,
-                        key: name.to_string(),
-                    },
-                    Role::Provider,
-                ))
+                Some((PortableKey::grpc(name.to_string()), Role::Provider))
             } else {
                 None
             }
@@ -675,10 +750,7 @@ pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) ->
         // `package.Service/Method` key the `grpc_key` normalizer wrote (S-253,
         // [FR-WS-09]); it is the exact string the expanded `ProtoService` provider
         // classifies to, so the two meet on an identical `Grpc` key.
-        BridgeNamespace::Grpc => Some(PortableKey {
-            namespace: BridgeNamespace::Grpc,
-            key: target.to_string(),
-        }),
+        BridgeNamespace::Grpc => Some(PortableKey::grpc(target.to_string())),
         // A broker publish's target is the arm-normalized topic key (a topic name,
         // optionally `#`-guarded by a message-schema FQN) the broker normalizer
         // wrote (S-254, [FR-WS-10]) — the same string [`super::broker::classify`]
@@ -862,7 +934,7 @@ fn compute_edges<E>(registry: &EngineRegistry<E>) -> Vec<BridgeEdge>
 where
     E: MemberEngine + MemberContracts,
 {
-    let mut providers: HashMap<PortableKey, Vec<BridgeEndpoint>> = HashMap::new();
+    let mut providers: HashMap<BucketKey, Vec<ProviderCandidate>> = HashMap::new();
     let mut consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake)> = Vec::new();
 
     for (member, surface) in read_members(registry, "contract surface", |e| e.contract_surface()) {
@@ -875,7 +947,7 @@ where
                 symbol: node.symbol,
             };
             match role {
-                Role::Provider => providers.entry(key).or_default().push(endpoint),
+                Role::Provider => index_provider(&mut providers, key, endpoint),
                 // A contract-surface consumer is a *declared* endpoint (an OpenAPI
                 // operation) — it describes a contract, it does not call one, so its
                 // edge is contract-surface intake and never seeds a reachability
@@ -948,6 +1020,60 @@ where
     edges
 }
 
+/// File one provider under its bucket, keeping its method facet beside the
+/// endpoint ([CR-109]).
+///
+/// The one place a [`PortableKey`] is split into an index entry. The bridge, the
+/// broker arm and the coverage read-model all index through it, so the three can
+/// never build differently-shaped provider indexes and then disagree about what
+/// a bucket contains ([ADR-52]).
+///
+/// [CR-109]: ../../../docs/requests/CR-109-wildcard-method-route-matching.md
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+pub(super) fn index_provider(
+    providers: &mut HashMap<BucketKey, Vec<ProviderCandidate>>,
+    key: PortableKey,
+    endpoint: BridgeEndpoint,
+) {
+    let PortableKey { bucket, method } = key;
+    providers
+        .entry(bucket)
+        .or_default()
+        .push(ProviderCandidate { endpoint, method });
+}
+
+/// The providers a consumer holding `key` may bind: its bucket, narrowed by the
+/// shared [`route_method`](crate::resolve::route_method) rule — a wildcard
+/// provider serves every verb, and an exact-method provider of the same template
+/// is the sole candidate beside a wildcard one ([CR-109], [FR-CG-09]).
+///
+/// An **empty** result covers both "no such bucket" and "a bucket holding
+/// nothing that serves this method": the same answer, deliberately, because that
+/// is exactly what a `(method, template)`-keyed index used to report for a method
+/// mismatch. Ranking never picks a winner — equally-specific providers all come
+/// back, for the caller's own exactly-one gate to refuse ([NFR-RA-05]).
+///
+/// The intra-repo binder narrows its own bucket through the same rule, which is
+/// what keeps "why did this bind" and "why didn't this bind" from drifting
+/// ([ADR-52]).
+///
+/// [CR-109]: ../../../docs/requests/CR-109-wildcard-method-route-matching.md
+/// [FR-CG-09]: ../../../docs/specs/requirements/FR-CG-09.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+pub(super) fn bucket_candidates<'a>(
+    providers: &'a HashMap<BucketKey, Vec<ProviderCandidate>>,
+    key: &PortableKey,
+) -> Vec<&'a BridgeEndpoint> {
+    let Some(bucket) = providers.get(&key.bucket) else {
+        return Vec::new();
+    };
+    preferred_candidates(
+        bucket.iter().map(|c| (c.method.as_deref(), &c.endpoint)),
+        key.method.as_deref(),
+    )
+}
+
 /// The **namespace-generic** cross-service match core ([FR-WS-04], [ADR-54]).
 ///
 /// Given providers indexed on their [`PortableKey`] and the consumer keys, emit
@@ -974,7 +1100,7 @@ where
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
 pub(super) fn match_indexed(
-    mut providers: HashMap<PortableKey, Vec<BridgeEndpoint>>,
+    mut providers: HashMap<BucketKey, Vec<ProviderCandidate>>,
     consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake)>,
 ) -> Vec<BridgeEdge> {
     // Deterministic candidate order regardless of member fan-out order.
@@ -988,10 +1114,11 @@ pub(super) fn match_indexed(
     // surface ([CR-083]). The match discipline is unchanged; only the edge's
     // provenance is carried through.
     for (key, consumer, intake) in consumers {
-        let Some(candidates) = providers.get(&key) else {
-            continue; // no provider anywhere in the workspace — no edge
-        };
-        match key.namespace.match_discipline() {
+        // No bucket, or a bucket holding nothing that serves this consumer's
+        // method, both mean the same thing: no provider of this endpoint anywhere
+        // in the workspace, so no edge.
+        let candidates = bucket_candidates(&providers, &key);
+        match key.namespace().match_discipline() {
             MatchDiscipline::ExactlyOne => {
                 // Exactly-one across members ([NFR-RA-05]): two or more providers
                 // of the same key are ambiguous and never fabricate an edge.
@@ -1007,7 +1134,7 @@ pub(super) fn match_indexed(
                 edges.push(BridgeEdge {
                     relation: key.relation().to_string(),
                     from: consumer,
-                    to: only.clone(),
+                    to: (*only).clone(),
                     intake,
                 });
             }
@@ -1023,7 +1150,7 @@ pub(super) fn match_indexed(
                     edges.push(BridgeEdge {
                         relation: key.relation().to_string(),
                         from: consumer.clone(),
-                        to: provider.clone(),
+                        to: (*provider).clone(),
                         intake,
                     });
                 }
@@ -1575,19 +1702,24 @@ mod tests {
             symbol: LogosSymbol::parse(symbol).unwrap(),
         }
     }
+    /// A facet-less portable key in `namespace` — the shape the gRPC and broker
+    /// namespaces carry (their keys have no method dimension).
     fn pkey(namespace: BridgeNamespace, key: &str) -> PortableKey {
         PortableKey {
-            namespace,
-            key: key.to_string(),
+            bucket: BucketKey {
+                namespace,
+                key: key.to_string(),
+            },
+            method: None,
         }
     }
     fn indexed(
         providers: &[(PortableKey, BridgeEndpoint)],
         consumers: Vec<(PortableKey, BridgeEndpoint)>,
     ) -> Vec<BridgeEdge> {
-        let mut index: HashMap<PortableKey, Vec<BridgeEndpoint>> = HashMap::new();
+        let mut index: HashMap<BucketKey, Vec<ProviderCandidate>> = HashMap::new();
         for (key, endpoint) in providers {
-            index.entry(key.clone()).or_default().push(endpoint.clone());
+            index_provider(&mut index, key.clone(), endpoint.clone());
         }
         // These match-core tests model invocation-arm consumers (gRPC/broker call
         // sites); the intake does not change the match discipline they exercise.
@@ -1806,6 +1938,82 @@ mod tests {
         assert!(consumer_portable_key(ArtifactRelation::HttpClientCall, "GET /files/{*rest}").is_none());
     }
 
+    // ── CR-109 / S-349: wildcard-method matching with exact-method precedence ──
+    //
+    // The cross-member half of the shared fixture matrix. The intra-repo binder
+    // (`resolve::tests`) and the coverage read-model (`coverage::tests`) drive the
+    // *same* rows, so an input that binds at one site and not another fails at one
+    // of the three ([FR-CG-09] AC3, [ADR-52]).
+
+    /// Lay a matrix case out across members: the consumer operation in `spec`,
+    /// each provider alone in its own `p{i}` — so every binding the bridge could
+    /// emit is genuinely cross-member. Returns the member names in registry order.
+    fn spread_matrix_case(case: &crate::resolve::route_method::matrix::Case) -> Vec<String> {
+        reset();
+        set_member("spec", 0, vec![op(case.consumer, "local operation")]);
+        let mut members = vec!["spec".to_string()];
+        for (i, name) in case.providers.iter().enumerate() {
+            let member = format!("p{i}");
+            set_member(&member, 0, vec![route(name, &format!("local route_{i}"))]);
+            members.push(member);
+        }
+        members
+    }
+
+    /// Every matrix case, driven through the cross-member bridge.
+    #[test]
+    fn the_wildcard_method_matrix_holds_at_the_cross_member_bridge() {
+        for case in crate::resolve::route_method::matrix::MATRIX {
+            let members = spread_matrix_case(case);
+            let names: Vec<&str> = members.iter().map(String::as_str).collect();
+            let edges = ContractBridge::new().edges(&registry(&names));
+
+            match case.expect.bound() {
+                Some(i) => {
+                    assert_eq!(
+                        edges.len(),
+                        1,
+                        "{}: `{}` must bind exactly one provider, got {edges:?}",
+                        case.name,
+                        case.consumer
+                    );
+                    assert_eq!(
+                        edges[0].to.member,
+                        format!("p{i}"),
+                        "{}: `{}` must bind provider {i} (`{}`)",
+                        case.name,
+                        case.consumer,
+                        case.providers[i]
+                    );
+                }
+                None => assert!(
+                    edges.is_empty(),
+                    "{}: `{}` must emit no edge against {:?}, got {edges:?}",
+                    case.name,
+                    case.consumer,
+                    case.providers
+                ),
+            }
+        }
+    }
+
+    /// A client-call consumer reaches a wildcard provider through the very same
+    /// bucket an OpenAPI operation does — the HTTP arm inherits the rule without
+    /// registering anything of its own ([FR-WS-08]).
+    #[test]
+    fn a_client_call_binds_a_wildcard_route_in_another_member() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers("web", vec![http_call("DELETE /v1/users/{id}", "local delete_call")]);
+        set_member("api", 0, vec![route("ANY /v1/users/{userId}", "local route_any")]);
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "api"]));
+
+        assert_eq!(edges.len(), 1, "the client call binds the wildcard route: {edges:?}");
+        assert_eq!(edges[0].to.member, "api");
+        assert_eq!(edges[0].to.symbol.as_str(), "local route_any");
+    }
+
     /// Acceptance (1): a static client call in one member binds the sole matching
     /// `Route` in **another** member — the edge starts at the call site and points
     /// at the route, filed under the `route` relation.
@@ -1931,8 +2139,8 @@ mod tests {
         let (key, role) =
             classify(NodeKind::ProtoService, "example.v1.UserService/GetUser").unwrap();
         assert_eq!(role, Role::Provider);
-        assert_eq!(key.namespace, BridgeNamespace::Grpc);
-        assert_eq!(key.key, "example.v1.UserService/GetUser");
+        assert_eq!(key.namespace(), BridgeNamespace::Grpc);
+        assert_eq!(key.bucket.key, "example.v1.UserService/GetUser");
         assert_eq!(key.relation(), "grpc-call");
         // A bare service (no rpc method) is not a provider key.
         assert!(classify(NodeKind::ProtoService, "example.v1.UserService").is_none());

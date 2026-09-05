@@ -50,6 +50,7 @@ use crate::extract::doc::heading_slug;
 use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
 use crate::model::{ArtifactRelation, EdgeKind, NodeId, NodeKind, RefForm};
 
+use super::route_method::preferred_candidates;
 use super::route_template::route_key;
 
 /// A module's identity: `(crate name, module path segments)`.
@@ -227,16 +228,24 @@ pub(crate) struct Index {
     /// file path → every node defined in that file, sorted by `NodeId` — the
     /// universe a doc link/path reference resolves against (S-035).
     by_file_path: HashMap<String, Vec<NodeId>>,
-    /// `(METHOD, normalized-template)` → the [`NodeKind::Route`] nodes matching
-    /// it, sorted by `NodeId` — the universe an OpenAPI `ApiOperation`→route
-    /// reference resolves against (S-069, [FR-CG-09]). A route whose template
-    /// does not normalize cleanly (catch-all, regex) is **absent** from this map
-    /// and so is never a candidate — honestly unresolved, never approximately
-    /// matched ([NFR-RA-05]).
+    /// Normalized template → the `(METHOD, node)` pairs of every
+    /// [`NodeKind::Route`] carrying it, sorted by `NodeId` — the universe an
+    /// OpenAPI `ApiOperation`→route reference resolves against (S-069,
+    /// [FR-CG-09]). A route whose template does not normalize cleanly
+    /// (catch-all, regex) is **absent** from this map and so is never a
+    /// candidate — honestly unresolved, never approximately matched
+    /// ([NFR-RA-05]).
     ///
+    /// Keyed on the **template alone**, not on `(method, template)`: a wildcard
+    /// (`ANY`) provider serves every verb, and tuple equality cannot express
+    /// that, so the method is resolved *inside* the bucket by the shared
+    /// [`route_method`](super::route_method) rule ([CR-109], [ADR-52]).
+    ///
+    /// [CR-109]: ../../../docs/requests/CR-109-wildcard-method-route-matching.md
     /// [FR-CG-09]: ../../../docs/specs/requirements/FR-CG-09.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    routes_by_key: HashMap<(String, String), Vec<NodeId>>,
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    routes_by_template: HashMap<String, Vec<(String, NodeId)>>,
     /// file id → scope facts from its import rows.
     file_scopes: HashMap<i64, FileScope>,
     /// Normalised crate names present in the graph.
@@ -277,7 +286,7 @@ impl Index {
         let by_symbol = build_by_symbol(nodes);
         let by_name = build_by_name(nodes);
         let by_file_path = build_by_file_path(nodes);
-        let routes_by_key = build_routes_by_key(nodes);
+        let routes_by_template = build_routes_by_template(nodes);
         let file_scopes = build_file_scopes(refs);
         let impls_by_trait_method =
             build_impls_by_trait_method(refs, &by_symbol, &by_name, &info);
@@ -291,7 +300,7 @@ impl Index {
             module_key,
             by_name,
             by_file_path,
-            routes_by_key,
+            routes_by_template,
             file_scopes,
             crates,
             impls_by_trait_method,
@@ -582,24 +591,35 @@ fn build_by_file_path(nodes: &[NodeRow]) -> HashMap<String, Vec<NodeId>> {
     by_file_path
 }
 
-/// `(METHOD, normalized-template)` → route nodes, for the OpenAPI
-/// operation→route match (S-069). A route name is `"METHOD /path"`; its key is
-/// the upper-cased method plus the positionally-normalized template (parameter
-/// names/syntax erased). A route whose template does not normalize cleanly is
-/// skipped, so it can never become a candidate ([FR-CG-09], [NFR-RA-05]).
-/// `nodes` is id-ordered, so each list is already sorted by id.
-fn build_routes_by_key(nodes: &[NodeRow]) -> HashMap<(String, String), Vec<NodeId>> {
-    let mut routes_by_key: HashMap<(String, String), Vec<NodeId>> = HashMap::new();
+/// Normalized template → its `(METHOD, route node)` candidates, for the OpenAPI
+/// operation→route match (S-069). A route name is `"METHOD /path"`; the bucket
+/// key is the positionally-normalized template (parameter names/syntax erased)
+/// and the upper-cased method rides with the node. A route whose template does
+/// not normalize cleanly is skipped, so it can never become a candidate
+/// ([FR-CG-09], [NFR-RA-05]). `nodes` is id-ordered, so each bucket is already
+/// sorted by id.
+///
+/// Bucketing on the template alone is what lets a wildcard (`ANY`) provider be
+/// compared against a concrete consumer method at all: the compatibility and
+/// precedence rule then runs over the bucket in
+/// [`resolve_route`](Ctx::resolve_route) ([CR-109], [FR-CG-09]).
+///
+/// [CR-109]: ../../../docs/requests/CR-109-wildcard-method-route-matching.md
+fn build_routes_by_template(nodes: &[NodeRow]) -> HashMap<String, Vec<(String, NodeId)>> {
+    let mut routes_by_template: HashMap<String, Vec<(String, NodeId)>> = HashMap::new();
     for n in nodes {
         if n.kind != NodeKind::Route {
             continue;
         }
-        let Some(key) = route_key(&n.name) else {
+        let Some((method, template)) = route_key(&n.name) else {
             continue;
         };
-        routes_by_key.entry(key).or_default().push(n.id);
+        routes_by_template
+            .entry(template)
+            .or_default()
+            .push((method, n.id));
     }
-    routes_by_key
+    routes_by_template
 }
 
 /// Per-file scope facts (aliases + globs) from the ledger's `Imports` rows,
@@ -1480,27 +1500,43 @@ impl Ctx<'_> {
     /// [`NodeKind::Route`] node's `name` carries). Both sides are reduced to the
     /// shared `(METHOD, positionally-normalized template)`
     /// [`route_key`](super::route_template::route_key): parameter names and
-    /// syntax are erased, but the HTTP method and the static skeleton must match
-    /// exactly. The candidate set is the routes filed under that key in
-    /// [`Index`], reduced by the shared [`exactly_one`] gate — so two routes
-    /// sharing a normalized template + method leave the operation unresolved, a
-    /// method mismatch never binds, and an operation whose key does not normalize
-    /// (or matches no route) stays in the ledger for the next sync ([NFR-RA-05]).
-    /// A catch-all/regex route is absent from the index entirely, so it is never
+    /// syntax are erased, but the static skeleton must match exactly. The
+    /// candidate set is that template's bucket in [`Index`], narrowed by the
+    /// shared [`route_method`](super::route_method) rule — an `ANY` provider
+    /// serves every verb, an exact-method provider of the same template is the
+    /// sole candidate beside a wildcard one ([CR-109]) — and then reduced by the
+    /// shared [`exactly_one`] gate. So two equally-specific routes sharing a
+    /// normalized template leave the operation unresolved, a method mismatch
+    /// never binds, and an operation whose key does not normalize (or matches no
+    /// route) stays in the ledger for the next sync ([NFR-RA-05]). A
+    /// catch-all/regex route is absent from the index entirely, so it is never
     /// approximately matched.
     ///
+    /// The cross-member bridge ([`crate::federation::bridge`]) narrows its own
+    /// provider bucket through the very same rule, so the two sites cannot drift
+    /// on which input binds ([ADR-52]).
+    ///
+    /// [CR-109]: ../../../docs/requests/CR-109-wildcard-method-route-matching.md
     /// [FR-CG-09]: ../../../docs/specs/requirements/FR-CG-09.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
     fn resolve_route(&self, target: &str) -> Res {
-        let Some(key) = route_key(target) else {
+        let Some((method, template)) = route_key(target) else {
             // The operation's own template does not normalize (or the target is
             // malformed): never approximately matched.
             return Res::NotFound;
         };
-        match self.ix.routes_by_key.get(&key) {
-            Some(candidates) => exactly_one(candidates),
-            None => Res::NotFound,
-        }
+        let Some(bucket) = self.ix.routes_by_template.get(&template) else {
+            return Res::NotFound;
+        };
+        let candidates: Vec<NodeId> = preferred_candidates(
+            bucket.iter().map(|(m, id)| (Some(m.as_str()), id)),
+            Some(&method),
+        )
+        .into_iter()
+        .copied()
+        .collect();
+        exactly_one(&candidates)
     }
 
     /// CR-068 Part B bare-path method exclusion, expressed as a **tie-break**

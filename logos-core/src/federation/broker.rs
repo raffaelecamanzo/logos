@@ -47,7 +47,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::model::{ArtifactRelation, BridgeNamespace};
 
-use super::bridge::{match_indexed, BridgeEdge, BridgeEndpoint, BridgeIntake, PortableKey, Role};
+use super::bridge::{
+    index_provider, match_indexed, BridgeEdge, BridgeEndpoint, BridgeIntake, BucketKey,
+    PortableKey, ProviderCandidate, Role,
+};
 
 /// One captured broker reference promoted to a bridge candidate: which side it
 /// is (its [`ArtifactRelation`] arm), the already-normalized topic key it was
@@ -100,7 +103,7 @@ pub(super) fn classify(relation: ArtifactRelation, topic_key: &str) -> Option<(P
 pub(super) fn broker_edges(
     candidates: impl IntoIterator<Item = BrokerCandidate>,
 ) -> Vec<BridgeEdge> {
-    let mut providers: HashMap<PortableKey, Vec<BridgeEndpoint>> = HashMap::new();
+    let mut providers: HashMap<BucketKey, Vec<ProviderCandidate>> = HashMap::new();
     // A publish/subscribe is a captured call site ([FR-WS-10]): every broker edge
     // is invocation intake, so it seeds an app-wide reachability root ([CR-083]).
     let mut consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake)> = Vec::new();
@@ -123,7 +126,7 @@ pub(super) fn broker_edges(
             continue; // a repeat of this exact endpoint on this topic — drop it
         }
         match role {
-            Role::Provider => providers.entry(key).or_default().push(cand.endpoint),
+            Role::Provider => index_provider(&mut providers, key, cand.endpoint),
             Role::Consumer => consumers.push((key, cand.endpoint, BridgeIntake::Invocation)),
         }
     }

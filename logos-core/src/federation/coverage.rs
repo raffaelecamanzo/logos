@@ -36,7 +36,8 @@ use crate::resolve::framework::RouteRefusal;
 use crate::resolve::http_client_call::ClientCallRefusal;
 
 use super::bridge::{
-    classify, consumer_portable_key, read_members, BridgeEndpoint, MemberContracts, PortableKey,
+    bucket_candidates, classify, consumer_portable_key, index_provider, read_members,
+    BridgeEndpoint, BucketKey, MemberContracts, PortableKey, ProviderCandidate,
     Role,
 };
 use super::registry::{EngineRegistry, MemberEngine};
@@ -298,7 +299,7 @@ pub fn cross_service_coverage<E>(registry: &EngineRegistry<E>) -> CrossServiceCo
 where
     E: MemberEngine + MemberContracts,
 {
-    let mut providers: HashMap<PortableKey, Vec<BridgeEndpoint>> = HashMap::new();
+    let mut providers: HashMap<BucketKey, Vec<ProviderCandidate>> = HashMap::new();
     let mut consumer_refs: Vec<(String, String, crate::model::LogosSymbol)> = Vec::new();
     // Arm-tagged invocation consumers (HTTP client calls, S-252, and later arms):
     // `(member, consumer)` pairs read from each member's ledger, classified below
@@ -318,10 +319,14 @@ where
                 consumer_refs.push((member.clone(), node.name.clone(), node.symbol.clone()));
             }
             if let Some((key, Role::Provider)) = classify(node.kind, &node.name) {
-                providers.entry(key).or_default().push(BridgeEndpoint {
-                    member: member.clone(),
-                    symbol: node.symbol.clone(),
-                });
+                index_provider(
+                    &mut providers,
+                    key,
+                    BridgeEndpoint {
+                        member: member.clone(),
+                        symbol: node.symbol.clone(),
+                    },
+                );
             }
         }
     }
@@ -354,10 +359,14 @@ where
                     else {
                         continue; // an unkeyable arm contributes no provider
                     };
-                    providers.entry(key).or_default().push(BridgeEndpoint {
-                        member: member.clone(),
-                        symbol: reference.symbol,
-                    });
+                    index_provider(
+                        &mut providers,
+                        key,
+                        BridgeEndpoint {
+                            member: member.clone(),
+                            symbol: reference.symbol,
+                        },
+                    );
                 }
                 None => {} // not an invocation arm — not this tier's business
             }
@@ -529,22 +538,34 @@ fn summarize_bound_ratio(bound: u64, denom: u64, excluded: u64, ratio: Option<f6
 fn tier(
     key: &PortableKey,
     member: &str,
-    providers: &HashMap<PortableKey, Vec<BridgeEndpoint>>,
+    providers: &HashMap<BucketKey, Vec<ProviderCandidate>>,
 ) -> Option<CoverageState> {
-    let Some(candidates) = providers.get(key) else {
+    // The bridge's own bucket reduction ([CR-109]): a wildcard provider serves
+    // every verb, an exact-method provider outranks it. Running the *same*
+    // helper is what stops the coverage board from reporting a reference the
+    // service map has drawn an edge for — or the reverse ([ADR-52]).
+    let candidates = bucket_candidates(providers, key);
+    if candidates.is_empty() {
+        // Nothing in the workspace provides this endpoint — discipline-independent.
+        // An absent bucket and a bucket whose methods do not serve this consumer
+        // are the same answer, deliberately: it is the reading a
+        // `(method, template)`-keyed index gave for a method mismatch before
+        // wildcards existed.
         return Some(CoverageState::Unbound {
             reason: UnboundReason::NoProviderInWorkspace,
         });
-    };
+    }
 
-    match key.namespace.match_discipline() {
+    match key.namespace().match_discipline() {
         MatchDiscipline::ExactlyOne => match candidates.as_slice() {
             // A sole same-member provider is intra-repo — not a cross-boundary
             // reference (unchanged from the pre-S-256 tier).
             [only] if only.member == member => None,
             [_only] => Some(CoverageState::Bound),
-            // Two or more providers of one key: the sole-provider rule fails, so the
-            // bridge fabricates no edge and this is honestly ambiguous.
+            // Two or more surviving candidates for one key: the sole-provider rule
+            // fails, so the bridge fabricates no edge and this is honestly
+            // ambiguous. The wildcard rule narrows the bucket before this point but
+            // never breaks a tie among equally-specific providers ([NFR-RA-05]).
             _ => Some(CoverageState::Unbound {
                 reason: UnboundReason::Ambiguous,
             }),
@@ -1358,6 +1379,84 @@ mod tests {
             UnboundReason::from(RouteRefusal::PathNotComposed),
             UnboundReason::from(ClientCallRefusal::PathNotComposed),
         );
+    }
+
+    // ── CR-109 / S-349: wildcard-method matching with exact-method precedence ──
+    //
+    // The read-model half of the shared fixture matrix. The intra-repo binder and
+    // the bridge can only observe *whether* a reference bound; this site observes
+    // *why* it did not, which is what pins the ambiguous-vs-no-provider
+    // distinction the acceptance criteria require to be reported rather than
+    // absorbed ([FR-WS-05], [NFR-CC-04]).
+
+    /// The coverage state every matrix outcome must be reported as.
+    fn expected_state(expect: crate::resolve::route_method::matrix::Expect) -> CoverageState {
+        use crate::resolve::route_method::matrix::Expect;
+        match expect {
+            Expect::Binds(_) => CoverageState::Bound,
+            Expect::Ambiguous => CoverageState::Unbound {
+                reason: UnboundReason::Ambiguous,
+            },
+            Expect::NoProvider => CoverageState::Unbound {
+                reason: UnboundReason::NoProviderInWorkspace,
+            },
+            Expect::NotComposed => CoverageState::Unbound {
+                reason: UnboundReason::PathNotComposed,
+            },
+        }
+    }
+
+    /// Every matrix case, driven through the coverage read-model: the consumer
+    /// operation alone in `spec`, each provider alone in its own `p{i}`.
+    #[test]
+    fn the_wildcard_method_matrix_holds_at_the_coverage_read_model() {
+        for case in crate::resolve::route_method::matrix::MATRIX {
+            reset();
+            set_member("spec", vec![op(case.consumer, "local operation")]);
+            let mut members = vec!["spec".to_string()];
+            for (i, name) in case.providers.iter().enumerate() {
+                let member = format!("p{i}");
+                set_member(&member, vec![route(name, &format!("local route_{i}"))]);
+                members.push(member);
+            }
+            let names: Vec<&str> = members.iter().map(String::as_str).collect();
+
+            let cov = cross_service_coverage(&registry(&names));
+
+            assert_eq!(
+                cov.references.len(),
+                1,
+                "{}: the operation is the one classified reference",
+                case.name
+            );
+            assert_eq!(
+                cov.references[0].state,
+                expected_state(case.expect),
+                "{}: `{}` against {:?} must be reported this way",
+                case.name,
+                case.consumer,
+                case.providers
+            );
+        }
+    }
+
+    /// The ambiguity a wildcard introduces is **reported**, not absorbed: a
+    /// template genuinely owned by two members counts in the `ambiguous` bucket
+    /// and never in `unbound`, so a rising ambiguity is legible as the correct
+    /// refusal it is rather than as a silent loss ([FR-WS-05], [NFR-RA-05]).
+    #[test]
+    fn a_wildcard_ambiguity_is_counted_as_ambiguous_not_absorbed() {
+        reset();
+        set_member("spec", vec![op("GET /v1/users/{id}/mailboxes/{mid}", "local op")]);
+        set_member("a", vec![route("ANY /v1/users/{uid}/mailboxes/{m}", "local route_a")]);
+        set_member("b", vec![route("ANY /v1/users/{u}/mailboxes/{box}", "local route_b")]);
+
+        let cov = cross_service_coverage(&registry(&["spec", "a", "b"]));
+
+        assert_eq!(cov.ambiguous, 1, "the two-owner template is ambiguous");
+        assert_eq!(cov.bound, 0, "no provider is guessed (NFR-RA-05)");
+        assert_eq!(cov.unbound, 0, "ambiguity is its own bucket, never folded into unbound");
+        assert_eq!(cov.references[0].bucket, "ambiguous");
     }
 
     /// Operation consumers and client-call consumers coexist: an `ApiOperation`
