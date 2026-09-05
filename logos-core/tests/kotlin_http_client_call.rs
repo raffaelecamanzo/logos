@@ -363,12 +363,24 @@ class Calls(private val restClient: RestClient) {
 
 /// **String template — REFUSED as `base-url-runtime` (S-342 AC4).** Kotlin's
 /// interpolation is `"$base/users"` / `"${base}/users"`, not Java's `${…}`
-/// *property placeholder*, and the two are different enough to need their own
-/// test: the braced form parses as `(string_literal (interpolation …)
-/// (string_content))`, which `static_string_literal` refuses outright, while the
-/// bare `$base` form parses as **two `string_content` children** and reads back
-/// as the static text `$base/users` — which is *relative*, so it is refused on
-/// the other branch. Both emit no reference; both are `base-url-runtime`.
+/// *property placeholder*, and it needs its own test because the grammar treats
+/// the two spellings differently — and one of them dangerously.
+///
+/// All three fixtures are refused by the same mechanism: pattern 1's
+/// `(#not-match? @invoke.http.arg "[$]")` guard rejects the literal, and pattern
+/// 1b re-captures the argument node so the site still reaches the interpreter
+/// carrying the dynamic-path marker. That the reason really is
+/// `base-url-runtime` — rather than the site silently never existing — is
+/// asserted at slot level by
+/// `extract::tests::a_kotlin_string_template_reaches_the_interpreter_as_a_dynamic_path`,
+/// which is where the refusal reason is observable.
+///
+/// `trailingSegment` is the fixture the guard exists for. `bare` and `braced`
+/// would be refused even without it (the first reads back *relative*, the second
+/// carries an `interpolation` node `static_string_literal` rejects), but
+/// `"/users/$id/roles"` reads back **absolute** — kotlin-ng merely splits the
+/// fragment at the `$` into plain `string_content` children — so before the
+/// guard it bound the runtime-composed template `/users/$id/roles`.
 #[test]
 fn a_string_template_path_emits_no_reference() {
     assert!(
