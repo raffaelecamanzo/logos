@@ -136,6 +136,24 @@ $client->request('GET', '/users');
     );
 }
 
+/// A trailing `array $options` third argument does not break the
+/// constructor-argument anchor — the pattern anchors only the first two
+/// (adjacent, leading) arguments, never the whole list, mirroring Go's
+/// [S-345](../../docs/planning/journal.md#s-345-go-http-client-call-capture)
+/// constructor-argument pattern.
+#[test]
+fn a_trailing_options_array_argument_does_not_break_the_request_anchor() {
+    assert_eq!(
+        client_calls(
+            r#"
+$client = new Client();
+$client->request('GET', '/users', ['json' => $body]);
+"#
+        ),
+        ["GET /users"]
+    );
+}
+
 /// A lower-cased verb argument normalizes to the same key as the upper-cased
 /// spelling — `is_http_method` is case-insensitive, and the normalizer upper-
 /// cases the stored verb.

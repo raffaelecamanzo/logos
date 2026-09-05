@@ -123,8 +123,7 @@
     .
     (argument (string (string_content) @invoke.http.method))
     .
-    (argument (_) @invoke.http.arg)
-    .)
+    (argument (_) @invoke.http.arg))
   (#any-of? @_fn "request" "requestAsync"))
 
 ; ── Stated coverage ceilings (ADR-54: recorded, never worked around) ────────
