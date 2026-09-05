@@ -1784,6 +1784,25 @@ fn the_cross_tab_splits_each_tool_by_dev_and_main_origin() {
     assert_eq!(info.calls_by_origin[1].calls, 2);
     assert_eq!(info.calls_total, 6);
 
+    // The cross-tab and the origin split bucket identically — both interpolate
+    // `stats::ORIGIN_BUCKET`, and this makes the agreement observable rather
+    // than merely structural. Both are raw-events-only over the same rows, so
+    // the cross-tab summed by origin must reproduce the split exactly; a bucket
+    // rule changed in one place and not the other would show up here.
+    for split in &info.calls_by_origin {
+        let summed: u64 = info
+            .calls_by_tool_origin
+            .iter()
+            .filter(|c| c.origin == split.origin)
+            .map(|c| c.calls)
+            .sum();
+        assert_eq!(
+            summed, split.calls,
+            "the cross-tab and calls_by_origin disagree on the {:?} bucket",
+            split.origin
+        );
+    }
+
     // …and every tool in the existing breakdown now carries a class too, so the
     // label covers the full raw-plus-rollup coverage, not only the cross-tab.
     let classed: Vec<(&str, &str)> = info

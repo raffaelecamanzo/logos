@@ -86,6 +86,21 @@ use crate::models::quality::{
 /// Default stats window in days ([FR-OB-04]: "default window 7 days").
 pub(crate) const DEFAULT_WINDOW_DAYS: u32 = 7;
 
+/// The dev-vs-`main` bucket, as a SQL expression over a row's `origin`
+/// ([FR-OB-08]).
+///
+/// Defined once and interpolated into both projections that use it — the origin
+/// split and the [FR-OB-11] cross-tab — for the same reason
+/// [`tool::engine_query_predicate`] is: two copies of a bucketing rule can be
+/// changed one at a time, and `calls_by_origin` and `calls_by_class` are
+/// documented as covering the same rows under the same rule. A literal, never
+/// user input, so interpolation carries no injection surface.
+///
+/// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
+/// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+const ORIGIN_BUCKET: &str =
+    "CASE WHEN COALESCE(origin, 'main') = 'main' THEN 'main' ELSE 'dev' END";
+
 /// Aggregate usage/perf stats for the project rooted at `root`.
 ///
 /// The store resolves through [`super::telemetry_logos_dir`], so a linked
@@ -253,8 +268,7 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
     let mut by_origin: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT CASE WHEN COALESCE(origin, 'main') = 'main' THEN 'main' ELSE 'dev' END,
-                    count(*), sum(ok)
+            "SELECT {ORIGIN_BUCKET}, count(*), sum(ok)
              FROM events WHERE at >= ?1 AND {engine_query} GROUP BY 1",
         ))
         .context("preparing the origin-breakdown query")?;
@@ -284,16 +298,15 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
     // on the same `events` row ([FR-OB-08]), so this is one more aggregation over
     // the rows already there, not a capture change.
     //
-    // Raw events only and legacy NULLs folded into `main`, exactly as the origin
-    // split above; `attribution_coverage` below states both limits in the payload
+    // Raw events only and legacy NULLs folded into `main` — the *same*
+    // `ORIGIN_BUCKET` expression as the origin split above, so the two can never
+    // disagree; `attribution_coverage` below states both limits in the payload
     // ([NFR-CC-04]). Keyed `(tool, origin)` so the order is tool-then-origin with
     // `"dev"` before `"main"` ([NFR-RA-06]).
     let mut by_tool_origin: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT tool,
-                    CASE WHEN COALESCE(origin, 'main') = 'main' THEN 'main' ELSE 'dev' END,
-                    count(*), sum(ok)
+            "SELECT tool, {ORIGIN_BUCKET}, count(*), sum(ok)
              FROM events WHERE at >= ?1 AND {engine_query} GROUP BY 1, 2",
         ))
         .context("preparing the tool-by-origin cross-tab query")?;
