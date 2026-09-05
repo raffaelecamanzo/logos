@@ -298,14 +298,16 @@ reason = \"the domain must not reach upward into presentation\"
 
 /// [FR-WT-06] AC1: seeding a DB-less worktree from a primary checkout that
 /// has `.logos/rules.toml` yields a worktree where `check_rules` reports the
-/// SAME `checked_rules` count as the primary at the same commit. The
-/// contract never traveled through git (it is gitignored), so parity here
-/// can only come from the seed's own copy — and the copy is byte-identical,
-/// never rewritten ([FR-IN-06]).
+/// SAME `checked_rules` count as the primary at the same commit. Neither
+/// policy file traveled through git (both are gitignored), so parity here
+/// can only come from the seed's own copy — and both copies are
+/// byte-identical, never rewritten ([FR-IN-06]).
 #[test]
 fn worktree_seed_carries_the_governance_contract_with_checked_rules_parity() {
     let (tmp, main) = gitignored_repo_fixture();
     write(&main, ".logos/rules.toml", LAYERED_RULES);
+    let config_body = "max_file_size = 4096\n";
+    write(&main, ".logos/config.toml", config_body);
 
     let primary_checked_rules = {
         let engine = Engine::start(&main).expect("primary engine starts");
@@ -322,14 +324,23 @@ fn worktree_seed_carries_the_governance_contract_with_checked_rules_parity() {
         !wt.join(".logos/rules.toml").exists(),
         "rules.toml is gitignored — it must not have traveled through git"
     );
+    assert!(
+        !wt.join(".logos/config.toml").exists(),
+        "config.toml is gitignored — it must not have traveled through git"
+    );
 
     // First use in the DB-less worktree: the seed copies the graph AND the
-    // governance contract (FR-WT-06).
+    // governance contract (FR-WT-06) — both policy files, not only rules.toml.
     let engine = Engine::start(&wt).expect("worktree engine starts");
     assert_eq!(
         fs::read_to_string(wt.join(".logos/rules.toml")).unwrap(),
         fs::read_to_string(main.join(".logos/rules.toml")).unwrap(),
         "the seeded rules.toml is byte-identical to the primary's — never rewritten (FR-IN-06)"
+    );
+    assert_eq!(
+        fs::read_to_string(wt.join(".logos/config.toml")).unwrap(),
+        config_body,
+        "the seeded config.toml is byte-identical to the primary's — never rewritten (FR-IN-06)"
     );
 
     let wt_report = engine
@@ -340,6 +351,34 @@ fn worktree_seed_carries_the_governance_contract_with_checked_rules_parity() {
         wt_report.checked_rules, primary_checked_rules,
         "the worktree evaluates the SAME rule count as the primary at the same commit"
     );
+}
+
+/// [FR-WT-06]: contract seeding is independent of whether the primary
+/// checkout has ever run `Engine::start` itself. A primary that authored
+/// `rules.toml` but has no `.logos/logos.db` yet (so `seed_source` — which
+/// requires a primary DB — resolves to `None`) still seeds its contract into
+/// a fresh worktree, because the bootstrap resolves the primary root for
+/// contract-seeding independently of the graph-store seed.
+#[test]
+fn worktree_seed_carries_the_contract_even_when_the_primary_has_no_db() {
+    let (tmp, main) = gitignored_repo_fixture();
+    write(&main, ".logos/rules.toml", LAYERED_RULES);
+    assert!(
+        !main.join(".logos/logos.db").exists(),
+        "the primary never ran Engine::start"
+    );
+
+    let wt = add_worktree(&tmp, &main);
+    let engine = Engine::start(&wt).expect("worktree engine starts without a primary DB");
+    assert_eq!(
+        fs::read_to_string(wt.join(".logos/rules.toml")).unwrap(),
+        LAYERED_RULES,
+        "the contract is seeded even though the primary itself was never indexed"
+    );
+    let report = engine
+        .check_rules(None, true)
+        .expect("worktree check_rules runs");
+    assert!(report.rules_present, "the seeded worktree has a contract");
 }
 
 /// [FR-WT-06] AC2: a primary checkout with no contract seeds a worktree with
