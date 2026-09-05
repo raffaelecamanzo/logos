@@ -483,9 +483,11 @@ fn send_with_a_prebuilt_request_object_is_a_stated_ceiling() {
 $client = new Client();
 $request = new Request('GET', '/users');
 $client->send($request);
+$client->sendAsync($request);
 "#
         )
         .is_empty(),
-        "the verb/path live on the Request object, not this call site"
+        "the verb/path live on the Request object, not this call site — for \
+         both send() and sendAsync()"
     );
 }
