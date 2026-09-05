@@ -97,6 +97,20 @@ where
 /// [`logos_core::observability::in_surface`] scopes per thread, and the blocking
 /// pool is where the engine — and so the telemetry event — actually runs.
 ///
+/// # This hardcodes *which* agent, and that is a real assumption
+///
+/// [`ToolDomain`] partitions the **subagent roster** (S-174), so today this
+/// module is the chat agent's tool layer and nothing else reaches it —
+/// `wiki-agent` consumes `agent-core`'s provider substrate, not its tools, and
+/// carries no `ToolSet` at all. That is the only reason a fixed
+/// [`Surface::Chat`] is correct here rather than a surface threaded from the
+/// caller.
+///
+/// A second consumer would silently inherit the wrong attribution, which is the
+/// exact conflation [FR-OB-10] exists to prevent — reporting one agent's work as
+/// another's. So if a tool-bearing agent is ever added, do not reuse this: give
+/// the bridges a surface parameter and let each caller name itself.
+///
 /// Without it the agent's queries carry the process surface, `web`, and are
 /// indistinguishable from a human browsing the dashboard. *"Logos's own agent
 /// navigated the graph N times"* and *"a developer did"* are different claims,
