@@ -558,6 +558,17 @@ logos xservice callers <SYMBOL> [--limit <N>] [--repo <MEMBER>] [--json]
 logos xservice impact <SYMBOL> [--depth <N>] [--repo <MEMBER>] [--json]
 ```
 
+**Method wildcards.** A provider declared without an explicit verb — Spring's
+`@RequestMapping` with no `method =`, Express's `app.all(...)`/`router.use(...)` —
+registers the method token `ANY` and matches **every** verb. When both a wildcard
+and an exact-method provider exist for the same template, the **exact-method
+provider wins**; a consumer only becomes ambiguous when two providers are equally
+specific. Two members owning the same template both via `ANY` leaves the consumer
+`ambiguous` with **no edge** — Logos refuses rather than picking one. Expect the
+`ambiguous` count to be non-trivial on a real workspace: that is the refusal
+working, not a defect.
+
+
 - **`route-providers`** — the workspace service map: every cross-service binding
   where one member's declared route provides for a reference in another
   (`BridgeEdge`s matched exactly-one on a portable `route_key`; two providers ⇒
@@ -613,6 +624,40 @@ and never feeds any member's quality gate ([ADR-53](../specs/architecture/decisi
 `coverage.bound_ratio` is **absent** (`null` under `--json`) when nothing was
 measured — when `bound + ambiguous + unbound` is zero. It is never reported as a
 perfect score: `0 / 0` is *no measurement*, not full coverage.
+
+##### The ratio never appears without its denominator
+
+A bound-ratio alone can be read as far more than it is. `no-provider-in-workspace`
+references are excluded from the denominator by design (they are the *correct*
+exclusion — nothing in this workspace claims to serve them), but a healthy-looking
+ratio computed over a handful of references, while hundreds sit excluded, misleads.
+So every rendering carries the **denominator and the excluded count** beside it:
+
+```bash
+logos workspace status            # human
+#   0.355 (81 of 228 measured; 647 excluded as no-provider-in-workspace)
+```
+
+```jsonc
+// logos workspace status --json
+"coverage": {
+  "bound": 81,
+  "ambiguous": 146,
+  "unbound": 1,
+  "bound_ratio": 0.355,
+  "bound_ratio_measured": 228,          // the denominator, explicit
+  "no_provider_in_workspace": 647,      // the excluded bucket
+  "bound_ratio_summary": "0.355 (81 of 228 measured; 647 excluded as no-provider-in-workspace)"
+}
+```
+
+`bound_ratio_measured` and `no_provider_in_workspace` are explicit fields, so a
+machine consumer never re-implements the denominator rule. The same three figures
+ride the [`workspace reachability`](#workspace-reachability) coverage rider, and
+the web dashboard renders the score bar **muted** rather than as a confident fill
+when the excluded bucket dominates the denominator. When `bound_ratio` is absent
+on a zero denominator, the excluded count is **still** reported — "0 measured,
+N excluded" is the informative statement.
 
 #### Two per-member axes: `warm_state` and `open_state`
 

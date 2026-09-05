@@ -849,6 +849,8 @@ extraction, framework detection) are embedded in the binary but can be
 .logos/plugins/<language>/queries/symbols.scm
 .logos/plugins/<language>/queries/references.scm
 .logos/plugins/<language>/queries/frameworks.scm
+.logos/plugins/<language>/queries/invocations.scm
+.logos/plugins/<language>/queries/brokers.scm
 ```
 
 A file present at one of these paths replaces the embedded query for that
@@ -857,3 +859,45 @@ This is the escape hatch for teaching Logos project-specific conventions
 without rebuilding. The embedded queries under `logos-core/plugins/` serve as
 reference starting points — each header documents the captures and the known
 v1 limitations.
+
+### Outbound HTTP client calls (`invocations`)
+
+`invocations.scm` is the **consumer** side of cross-service coupling: it captures
+outbound HTTP client call sites so they can bind another workspace member's route
+(the provider side, `frameworks.scm`). Ten plugins ship it — Rust, Java, Kotlin,
+TypeScript, TSX, Go, Python, C#, Ruby and PHP. C, C++ and Scala ship no
+`frameworks` capability and therefore no client side either; `logos languages`
+reports `invocations` **absent** for them rather than empty-but-present, so
+"this language has no client capture" is distinguishable from "it captured
+nothing".
+
+Two descriptor fields in `plugin.toml` drive the arm:
+
+```toml
+capabilities = ["symbols", "references", "frameworks", "invocations"]
+
+# The ledger gate: a file is scanned for client calls only if it references
+# one of these. Without it, a broad `<receiver>.<method>("/x")` anchor would
+# turn any incidental "/"-shaped collection key into a fabricated edge.
+http_client_detectors = ["org::springframework::web::client", "java::net::http"]
+
+# Optional: normalizes a non-canonical verb spelling to an HTTP method.
+[invocation_methods]
+getasync = "GET"
+postasync = "POST"
+```
+
+Declaring the capability **requires** at least one `http_client_detectors` entry —
+a descriptor declaring `invocations` with an empty detector list, or with a query
+file that will not load, fails validation at startup rather than degrading to
+silent no-capture.
+
+**What is deliberately not captured.** A path composed at runtime — `${api.base}/users`,
+a template literal, an f-string, a bare variable — emits **no** reference and is
+reported as `base-url-runtime`; a static path that will not normalize is reported
+as `path-not-composed`. Logos never guesses the composed value, so on a codebase
+whose call sites all build their URLs from configuration you should expect few or
+no captures, and that is the honest answer rather than a defect. Route
+*registrations* (`app.get("/x", handler)`, `Route::get(...)`, a FastAPI decorator)
+are excluded structurally in every language — capturing one would bind another
+member's real route and invent a cross-service edge.
