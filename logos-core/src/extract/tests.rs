@@ -74,10 +74,19 @@ impl LanguagePlugin for NoSymbolsPlugin {
     }
 }
 
-/// Extract one in-memory source string at `path`, with a fixed coordinate.
+/// Extract one in-memory Rust source string at `path`, with a fixed coordinate.
 fn extract_src(path: &str, source: &str) -> Facts {
+    extract_lang("rs", path, source)
+}
+
+/// Extract one in-memory source string with the plugin owning `ext` — the
+/// multi-language twin of [`extract_src`], for the arms whose behaviour is
+/// carried by a per-language `.scm` rather than by the Rust grammar.
+fn extract_lang(ext: &str, path: &str, source: &str) -> Facts {
     let reg = registry();
-    let plugin = reg.for_extension("rs").expect("rust grammar");
+    let plugin = reg
+        .for_extension(ext)
+        .unwrap_or_else(|| panic!("{ext} grammar"));
     let ctx = SymbolContext::cargo("logos-core", "0.1.0");
     extract(&FileInput::new(path, source), plugin, &ctx)
 }
@@ -1311,4 +1320,823 @@ fn authorize(perms: HashMap<String, i32>) { let _ = perms.get("/admin/users"); }
         "a non-client file never emits an outbound-call ref: {:?}",
         http_client_call_targets(&facts)
     );
+}
+
+// ── S-343 / FR-WS-08 / CR-108: TypeScript + TSX HTTP client-call capture ─────
+//
+// Every assertion below runs against **both** TypeScript grammars. `.ts`/`.js`
+// and `.tsx`/`.jsx` are one language split across two tree-sitter `Language`s
+// (ADR-09) shipping two copies of the same query, so a rule proved in only one
+// leaves half the surface unproven.
+#[cfg(feature = "lang-typescript")]
+const TS_EXTENSIONS: [&str; 2] = ["ts", "tsx"];
+
+/// Extract a TypeScript fixture under both grammars and assert they agree,
+/// returning the (shared) captured client-call targets. A failure names which
+/// grammar produced which capture — the two are not interchangeable when one
+/// of them regresses.
+#[cfg(feature = "lang-typescript")]
+fn ts_client_call_targets(source: &str) -> Vec<String> {
+    let ts = http_client_call_targets(&extract_lang("ts", "src/client.ts", source));
+    let tsx = http_client_call_targets(&extract_lang("tsx", "src/client.tsx", source));
+    assert_eq!(
+        ts, tsx,
+        "the typescript and tsx queries must capture identically (they are one \
+         language, ADR-09) — ts={ts:?} tsx={tsx:?}, source:\n{source}"
+    );
+    ts
+}
+
+/// FR-WS-08 AC (axios, receiver-verb form): `axios.get("/users")` yields exactly
+/// one `"GET /users"` reference on the `Path`/`ArtifactBinding` shape the route
+/// binder consumes — the same ledger row the Rust arm files, proving the
+/// per-language query is the whole of the language-specific surface.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn an_axios_receiver_call_is_captured_as_a_method_template_ref() {
+    const AXIOS_GET_USERS: &str = r#"import axios from "axios";
+export async function listUsers() { return axios.get("/users"); }"#;
+
+    assert_eq!(
+        ts_client_call_targets(AXIOS_GET_USERS),
+        vec!["GET /users".to_string()]
+    );
+
+    // The shape stays a `Path`-form artifact binding, not a plain code ref —
+    // asserted under BOTH grammars, since `ts_client_call_targets` compares only
+    // the rendered target and would not notice a form/kind divergence.
+    for ext in TS_EXTENSIONS {
+        let facts = extract_lang(ext, &format!("src/client.{ext}"), AXIOS_GET_USERS);
+        let r = facts
+            .refs
+            .iter()
+            .find(|r| r.relation == Some(crate::model::ArtifactRelation::HttpClientCall))
+            .unwrap_or_else(|| panic!("the client-call ref is present in {ext}"));
+        assert_eq!(r.form, crate::model::RefForm::Path, "{ext}");
+        assert_eq!(r.kind, EdgeKind::ArtifactBinding, "{ext}");
+    }
+
+    // A non-`get` verb and a member-qualified, conventionally-named instance
+    // both resolve — the receiver rule is a name rule, not an identity rule.
+    assert_eq!(
+        ts_client_call_targets(
+            r#"import axios from "axios";
+class Api { async create(body: unknown) { return this.axiosClient.post("/users", body); } }"#
+        ),
+        vec!["POST /users".to_string()]
+    );
+}
+
+/// FR-WS-08 AC (axios, object-argument form): `axios({url, method})` yields one
+/// reference, in **either** key order — an object literal has no canonical key
+/// order, and tree-sitter matches siblings in source order, so both spellings
+/// are pinned rather than assumed.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn an_axios_object_argument_call_is_captured_in_either_key_order() {
+    assert_eq!(
+        ts_client_call_targets(
+            r#"import axios from "axios";
+export async function listUsers() { return axios({url: "/users", method: "get"}); }"#
+        ),
+        vec!["GET /users".to_string()],
+        "url-then-method order"
+    );
+    assert_eq!(
+        ts_client_call_targets(
+            r#"import axios from "axios";
+export async function listUsers() { return axios({method: "get", url: "/users"}); }"#
+        ),
+        vec!["GET /users".to_string()],
+        "method-then-url order"
+    );
+    // The `axios.request({…})` spelling of the same shape.
+    assert_eq!(
+        ts_client_call_targets(
+            r#"import axios from "axios";
+export async function put(body: unknown) { return axios.request({url: "/users", method: "put", data: body}); }"#
+        ),
+        vec!["PUT /users".to_string()],
+        "the axios.request spelling captures once, not twice"
+    );
+
+    // A member-qualified callee resolves in the object-argument form exactly as
+    // it does in the receiver-verb form. Anchoring the callee only at `^` made
+    // one file disagree with itself: `this.axiosClient.post("/u")` captured while
+    // `this.axios({…})` silently did not (review-fix).
+    for source in [
+        r#"import axios from "axios";
+class Api { list() { return this.axios({url: "/users", method: "get"}); } }"#,
+        r#"import axios from "axios";
+class Api { list() { return this.axiosClient.request({method: "get", url: "/users"}); } }"#,
+    ] {
+        assert_eq!(
+            ts_client_call_targets(source),
+            vec!["GET /users".to_string()],
+            "a member-qualified axios object-argument call is captured: {source}"
+        );
+    }
+}
+
+/// FR-WS-08 AC (the free-function anchor, S-343's own question): `fetch` takes
+/// no receiver at all, and the generic dispatch carries it — a bare
+/// `fetch("/users")` resolves to `GET`, the WHATWG Fetch default declared by the
+/// `@invoke.http.method.get` capture name. The method-bearing form is the next
+/// test's subject, not this one's.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_fetch_free_function_call_is_captured_with_its_verb() {
+    assert_eq!(
+        ts_client_call_targets(
+            r#"export async function listUsers() { return fetch("/users"); }"#
+        ),
+        vec!["GET /users".to_string()],
+        "a verb-less fetch is a GET by the Fetch standard"
+    );
+
+    // `window.fetch` / `globalThis.fetch` / `self.fetch` are the same global
+    // spelled explicitly — captured rather than left as an unstated ceiling.
+    for receiver in ["window", "globalThis", "self"] {
+        assert_eq!(
+            ts_client_call_targets(&format!(
+                "export async function listUsers() {{ return {receiver}.fetch(\"/users\"); }}"
+            )),
+            vec!["GET /users".to_string()],
+            "{receiver}.fetch is the same global"
+        );
+    }
+}
+
+/// NFR-RA-05 (the AC's sharpest edge): a method-bearing `fetch` resolves to its
+/// stated verb and emits **no** silent `GET` alongside it. The two fetch
+/// patterns are disjoint by construction (the verb-less one anchors on a call
+/// with exactly one argument), and the dispatch ranks a source-read verb above
+/// a name-declared one — this asserts the outcome of both, since a single
+/// spurious `GET /users` here would fabricate a second cross-service edge.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_method_bearing_fetch_resolves_to_its_verb_and_never_also_to_get() {
+    let targets = ts_client_call_targets(
+        r#"export async function createUser(body: unknown) {
+    return fetch("/users", {method: "POST", body: JSON.stringify(body)});
+}"#,
+    );
+    assert_eq!(
+        targets,
+        vec!["POST /users".to_string()],
+        "exactly one reference, and it is the POST — never a defaulted GET"
+    );
+}
+
+/// FR-WS-08 shared negative-case contract, case 2 (base-url-runtime): a
+/// template literal composes its path at runtime, so it emits no reference —
+/// the interpolation makes the literal dynamic and the arm refuses it rather
+/// than guessing a target. Asserted on both the axios and the fetch anchor, so
+/// neither idiom can regress into approximate matching independently.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_template_literal_path_emits_no_reference() {
+    for source in [
+        r#"import axios from "axios";
+const base = "https://api.example.com";
+export async function listUsers() { return axios.get(`${base}/users`); }"#,
+        r#"const base = "https://api.example.com";
+export async function listUsers() { return fetch(`${base}/users`); }"#,
+        // A bare variable is the same refusal for a different reason.
+        r#"import axios from "axios";
+export async function listUsers(url: string) { return axios.get(url); }"#,
+    ] {
+        assert!(
+            ts_client_call_targets(source).is_empty(),
+            "a runtime-composed path is base-url-runtime, never approximated: {source}"
+        );
+    }
+
+    // A template literal with no substitution is static text and still binds —
+    // the refusal is about interpolation, not about the backtick.
+    assert_eq!(
+        ts_client_call_targets(
+            r#"export async function listUsers() { return fetch(`/users`); }"#
+        ),
+        vec!["GET /users".to_string()],
+    );
+}
+
+/// FR-WS-08 shared negative-case contract, case 1 (a same-shaped non-HTTP
+/// receiver call) — and the CR-110 false-positive class this arm must not
+/// reintroduce on the consumer side.
+///
+/// S-350 retracted the unscoped `<receiver>.get("string")` anchor on the
+/// **provider** side after an Angular `formGroup.get("year")` and a
+/// `cache.get("/cache/key")` each promoted a route. Both consumer-side defences
+/// are asserted here: the query refuses an unrecognised receiver even inside a
+/// genuine axios file (first case), and the arm's ledger gate refuses a file
+/// that references no client (second case, with a positive control isolating
+/// the gate as the only difference).
+///
+/// The two are independent for `axios`, which is a real import specifier. They
+/// are **not** for `fetch`: it is a global, so the reference that opens the gate
+/// is the call itself and only the query's exact-name guard stands — see the
+/// non-independent-gate rule on [`capture_http_client_call_arm`], which is where
+/// that rule is stated once. That is why every pattern in this language's query
+/// is scoped to a named client rather than relying on the gate.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_non_client_receiver_call_is_never_captured() {
+    // In a real axios file — the ledger gate is open, so only the query's
+    // receiver scoping stands between `cache.get` and a fabricated edge.
+    assert_eq!(
+        ts_client_call_targets(
+            r#"import axios from "axios";
+export async function listUsers() {
+    const cached = cache.get("/cache/key");
+    const year = formGroup.get("year");
+    return cached ?? year ?? axios.get("/users");
+}"#
+        ),
+        vec!["GET /users".to_string()],
+        "only the axios call is captured — `cache.get` and `formGroup.get` are \
+         the exact CR-110 shapes, and must not reappear on the consumer side"
+    );
+
+    // The ledger gate, isolated. The receiver here is one the QUERY accepts
+    // (`axiosCache` begins with `axios`), so the only thing that can produce the
+    // empty result is `capture_http_client_call_arm`'s `is_http_client_file`
+    // check. The previous fixture used `perms.get(…)`, which no pattern matches
+    // — it would have passed with the gate deleted (review-fix).
+    const GATED: &str = r#"export function lookup() { return axiosCache.get("/users"); }"#;
+    assert!(
+        ts_client_call_targets(GATED).is_empty(),
+        "no reference to axios or fetch anywhere ⇒ the file is never scanned"
+    );
+    // Positive control: the identical source, with the import that opens the
+    // gate, does capture — so the emptiness above is attributable to the gate
+    // and to nothing else.
+    assert_eq!(
+        ts_client_call_targets(&format!("import axios from \"axios\";\n{GATED}")),
+        vec!["GET /users".to_string()],
+        "the same source with the client import captures — the gate is the only \
+         difference between these two cases"
+    );
+
+    // The CR-110 shape the boundary rule exists for: a receiver that merely
+    // CONTAINS `axios` is not an axios instance. A substring test admitted
+    // `notaxiosCache.get("/cache/key")` and fabricated a cross-service call from
+    // a cache lookup (review-fix).
+    assert!(
+        ts_client_call_targets(
+            r#"import axios from "axios";
+export function lookup() { return notaxiosCache.get("/cache/key"); }"#
+        )
+        .is_empty(),
+        "the receiver name rule is a boundary rule, never a substring test"
+    );
+
+    // A plain-identifier call that is not `fetch` is refused by the anchored
+    // `#match?` name guard — otherwise the verb-less pattern would make every
+    // one-argument free function in a client file a GET.
+    assert!(
+        ts_client_call_targets(
+            r#"import axios from "axios";
+export function load() { return readConfig("/etc/app/config"); }"#
+        )
+        .is_empty(),
+        "only `fetch` carries the verb-less free-function anchor"
+    );
+
+    // The MEMBER-EXPRESSION half of the same guard, which the ledger gate
+    // provably cannot backstop: `fetch` is itself one of this descriptor's
+    // `http_client_detectors` rows and `references.scm` emits a name-only
+    // `@ref.method` for `repo.fetch(…)`, so such a file self-satisfies the gate.
+    // Only the anchored `^((window|globalThis|self)\.)?fetch$` regex stands, and
+    // relaxing it to the `(^|\.)` form the axios patterns use — the natural
+    // "make the two consistent" edit — would turn every repository/queue refresh
+    // into a fabricated cross-service call (NFR-RA-05, the CR-110 class the
+    // query header names in so many words).
+    for source in [
+        r#"import axios from "axios";
+export function refresh(repo: Repo) { return repo.fetch("/users"); }"#,
+        r#"import axios from "axios";
+export function drain(queue: Queue) { return queue.fetch("/jobs"); }"#,
+        r#"import axios from "axios";
+class Api { load() { return this.fetch("/users"); } }"#,
+    ] {
+        assert!(
+            ts_client_call_targets(source).is_empty(),
+            "a bare `x.fetch(…)` on an arbitrary receiver is a refresh far more \
+             often than an HTTP call — only the explicit global spellings are \
+             admitted: {source}"
+        );
+    }
+}
+
+/// FR-WS-08 shared negative-case contract, case 3 (path-not-composed) and the
+/// relative-path refusal, reached through the TypeScript anchors: a static
+/// absolute literal that does not positionally normalize, and a literal with no
+/// absolute route prefix, each emit nothing. The classification itself is the
+/// shared interpreter's and is fixture-pinned there; this proves the TypeScript
+/// query feeds it the slots it expects.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_non_composable_typescript_path_literal_is_not_captured() {
+    for source in [
+        r#"import axios from "axios";
+export async function raw() { return axios.get("/files/{*rest}"); }"#,
+        r#"export async function raw() { return fetch("users/{id}"); }"#,
+    ] {
+        assert!(
+            ts_client_call_targets(source).is_empty(),
+            "a non-normalizing or relative literal is refused: {source}"
+        );
+    }
+}
+
+/// Drive `collect_invocation_sites` directly for a fixture in the language owning
+/// `ext`, returning the raw slots that language's query hands the shared
+/// interpreter.
+///
+/// The refs-level helpers can only see what survived classification, so they
+/// cannot distinguish "the query never matched" from "the interpreter refused
+/// it" — and only the second surfaces a coverage reason. Every negative case
+/// whose contract names a specific reason is pinned through this.
+///
+/// This is why a language arm's slot-level tests live in this module rather than
+/// beside the rest of its suite in `tests/`: both
+/// [`collect_invocation_sites`] and
+/// [`classify_client_call`](crate::resolve::http_client_call::classify_client_call)
+/// are crate-private, and widening them to `pub` for a test would be a worse
+/// trade than the module gate documented on `extract::tests`.
+#[cfg(any(feature = "lang-typescript", feature = "lang-go"))]
+fn invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::InvocationSite> {
+    let reg = registry();
+    let plugin = reg
+        .for_extension(ext)
+        .unwrap_or_else(|| panic!("{ext} grammar"));
+    let query = plugin
+        .query("invocations")
+        .unwrap_or_else(|| panic!("the {ext} plugin ships an invocations query"));
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let facts = extract(&FileInput::new(format!("src/client.{ext}"), source), plugin, &ctx);
+    // Borrow a real file-module symbol so the site has an attributable scope.
+    let module = facts
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Module)
+        .expect("the file module node")
+        .symbol
+        .clone();
+
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(plugin.language()).expect("set language");
+    let tree = parser.parse(source, None).expect("parses");
+    collect_invocation_sites(
+        query,
+        tree.root_node(),
+        source.as_bytes(),
+        &[],
+        &[],
+        Some(&module),
+    )
+}
+
+/// [`invocation_sites`] for a TypeScript fixture (S-343's original spelling).
+#[cfg(feature = "lang-typescript")]
+fn ts_invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::InvocationSite> {
+    invocation_sites(ext, source)
+}
+
+/// FR-WS-08 shared negative-case contract, case 2 — pinned at the level the
+/// contract asks a language story to pin it: **the slots**, not the
+/// classification.
+///
+/// "Emits no reference" is satisfied by two very different outcomes — the query
+/// never matched at all, or the query matched and the interpreter refused it —
+/// and only the second one reports `base-url-runtime`. This asserts the second:
+/// the TypeScript anchors do hand an interpolated template literal to the
+/// interpreter, carrying the `path_dynamic` marker rather than a `path`, which
+/// is exactly what makes `classify_client_call` return
+/// `ClientCallRefusal::BaseUrlRuntime` (fixture-pinned in `http_client_call.rs`,
+/// never re-derived here).
+///
+/// Both idioms run under **both** grammars, like every other fixture in this
+/// section: the two plugins compile the same query text against different
+/// `Language`s ([ADR-09]), so proving axios under `ts` alone and fetch under
+/// `tsx` alone would leave a per-grammar regression invisible at exactly the
+/// level where the coverage reason lives.
+///
+/// [ADR-09]: ../../../docs/specs/architecture/decisions/ADR-09.md
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_template_literal_reaches_the_interpreter_as_a_dynamic_path() {
+    use crate::resolve::http_client_call::{DYNAMIC_PATH_SLOT, METHOD_SLOT, PATH_SLOT};
+
+    for (source, verb) in [
+        (
+            r#"import axios from "axios";
+const base = "https://api.example.com";
+export async function listUsers() { return axios.get(`${base}/users`); }"#,
+            "get",
+        ),
+        (
+            r#"const base = "https://api.example.com";
+export async function listUsers() { return fetch(`${base}/users`, {method: "POST"}); }"#,
+            "POST",
+        ),
+    ] {
+        for ext in TS_EXTENSIONS {
+            let sites = ts_invocation_sites(ext, source);
+            assert_eq!(sites.len(), 1, "exactly one invocation site in {ext}");
+            let slots = &sites[0].slots;
+            assert_eq!(
+                slots.get(METHOD_SLOT).map(String::as_str),
+                Some(verb),
+                "the verb still reaches the interpreter — only the path is \
+                 dynamic ({ext})"
+            );
+            assert!(
+                slots.contains_key(DYNAMIC_PATH_SLOT),
+                "an interpolated template literal must carry the dynamic-path \
+                 marker (that marker is what makes the refusal \
+                 `base-url-runtime` rather than a silent non-match) in {ext}: \
+                 {slots:?}"
+            );
+            assert!(
+                !slots.contains_key(PATH_SLOT),
+                "no static path is guessed from a runtime-composed literal in \
+                 {ext}: {slots:?}"
+            );
+            assert!(
+                crate::resolve::http_client_call::render_client_call_target(slots).is_none(),
+                "and the interpreter therefore renders no target ({ext})"
+            );
+        }
+    }
+}
+
+/// FR-WS-08 shared negative-case contract, case 3 (`path-not-composed`) — pinned
+/// at slot level for the same reason case 2 is.
+///
+/// The refs-level test above proves only that these emit nothing, and the two
+/// fixtures there actually exercise **different** refusals: a catch-all segment
+/// is `PathNotComposed`, a relative literal is `BaseUrlRuntime`. Since case 3's
+/// whole point is the distinct coverage reason, it has to be asserted where the
+/// reason exists — the query must hand over a static `path`, not the dynamic
+/// marker, so the refusal comes from classifying a composed path rather than
+/// from the query failing to match at all.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_non_normalizing_absolute_path_reaches_the_interpreter_as_a_static_path() {
+    use crate::resolve::http_client_call::{
+        classify_client_call, ClientCallRefusal, DYNAMIC_PATH_SLOT, PATH_SLOT,
+    };
+
+    for (source, literal, refusal) in [
+        (
+            r#"import axios from "axios";
+export async function raw() { return axios.get("/files/{*rest}"); }"#,
+            "/files/{*rest}",
+            ClientCallRefusal::PathNotComposed,
+        ),
+        (
+            r#"export async function raw() { return fetch("users/{id}"); }"#,
+            "users/{id}",
+            ClientCallRefusal::BaseUrlRuntime,
+        ),
+    ] {
+        for ext in TS_EXTENSIONS {
+            let sites = ts_invocation_sites(ext, source);
+            assert_eq!(sites.len(), 1, "one site reaches the interpreter in {ext}");
+            let slots = &sites[0].slots;
+            assert_eq!(
+                slots.get(PATH_SLOT).map(String::as_str),
+                Some(literal),
+                "the static literal is handed over verbatim, not pre-judged: {slots:?}"
+            );
+            assert!(
+                !slots.contains_key(DYNAMIC_PATH_SLOT),
+                "a static literal never carries the dynamic marker: {slots:?}"
+            );
+            assert_eq!(
+                classify_client_call(slots),
+                Err(refusal),
+                "the interpreter's own refusal reason for {literal} in {ext}"
+            );
+        }
+    }
+}
+
+/// The `fetch("/users", {headers: …})` ceiling the query records — asserted
+/// **empty on purpose**, so widening a pattern re-litigates the intent instead
+/// of silently changing it.
+///
+/// The risk here is not the under-capture. It is that a method-less init object
+/// could fall through to the verb-less pattern and emit a phantom `GET`, or that
+/// a `method` key nested inside another object could be mistaken for the init's
+/// own — which is the plausible regression, since the init pattern matches a
+/// `pair` among the object's direct children.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_method_less_fetch_init_object_is_the_stated_ceiling() {
+    for source in [
+        r#"export async function f() { return fetch("/users", {headers: {}}); }"#,
+        // The nested-`method` trap: `{method: "POST"}` here belongs to `headers`,
+        // not to the init object, and must not be read as the request's verb.
+        r#"export async function f() { return fetch("/users", {headers: {method: "POST"}}); }"#,
+    ] {
+        assert!(
+            ts_client_call_targets(source).is_empty(),
+            "a method-less init object is the stated ceiling — it must emit \
+             nothing, never a phantom GET: {source}"
+        );
+    }
+
+    // ...and when the init object DOES carry its own `method`, an unrelated
+    // nested one never displaces it.
+    assert_eq!(
+        ts_client_call_targets(
+            r#"export async function f() {
+    return fetch("/users", {headers: {method: "POST"}, method: "PUT"});
+}"#
+        ),
+        vec!["PUT /users".to_string()],
+        "the init object's own method wins over a nested lookalike"
+    );
+}
+
+/// The three guarantees `DECLARED_METHOD_PREFIX` states in its rustdoc, pinned
+/// directly rather than through whatever the shipped `.scm` files happen to
+/// contain — no shipped query exercises the failure or precedence branches, so
+/// they are otherwise dead to the suite.
+///
+/// These are core-level claims against [NFR-RA-05]: a name-declared verb must
+/// pass the same `is_http_method` gate as a source-read one (so a typo captures
+/// nothing rather than inventing a method); a verb spelled in the source must
+/// always outrank one declared by a capture name (so a query binding both can
+/// never downgrade a real `POST` to a shape's default); and when a query binds
+/// two conflicting declared verbs to one match, the **first declaration wins**
+/// — chosen so the resolved verb never depends on node position, which a
+/// droppable on-disk query ([FR-PL-04]) makes a reachable case.
+///
+/// Runs against the `ts` grammar alone on purpose, unlike every other test in
+/// this section: its subject is the core dispatch driven by ad-hoc queries, not
+/// plugin data, so the TSX `Language` would re-prove the same core code.
+///
+/// [FR-PL-04]: ../../../docs/specs/requirements/FR-PL-04.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_name_declared_verb_is_gated_and_outranked_by_a_source_read_one() {
+    use crate::resolve::http_client_call::METHOD_SLOT;
+
+    let reg = registry();
+    let plugin = reg.for_extension("ts").expect("typescript grammar");
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let source = r#"export async function f() { return frob("/users", {method: "POST"}); }"#;
+    let facts = extract(&FileInput::new("src/c.ts", source), plugin, &ctx);
+    let module = facts
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Module)
+        .expect("the file module node")
+        .symbol
+        .clone();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(plugin.language()).expect("set language");
+    let tree = parser.parse(source, None).expect("parses");
+
+    let sites = |query_src: &str| -> Vec<crate::extract::config::InvocationSite> {
+        let query = Query::new(plugin.language(), query_src).expect("query compiles");
+        collect_invocation_sites(
+            &query,
+            tree.root_node(),
+            source.as_bytes(),
+            &[],
+            &[],
+            Some(&module),
+        )
+    };
+
+    // A capture name whose suffix is not an HTTP verb captures nothing — the
+    // name-declared path is gated exactly like a source-read one.
+    assert!(
+        sites(
+            r#"(call_expression
+                 function: (identifier) @invoke.http.method.frobnicate
+                 arguments: (arguments . (_) @invoke.http.arg))"#
+        )
+        .is_empty(),
+        "`frobnicate` is not an HTTP verb, so no site is emitted"
+    );
+
+    // Sanity: the same shape with a real verb in the capture name does emit,
+    // so the assertion above fails for the verb and not for the query shape.
+    assert_eq!(
+        sites(
+            r#"(call_expression
+                 function: (identifier) @invoke.http.method.head
+                 arguments: (arguments . (_) @invoke.http.arg))"#
+        )
+        .len(),
+        1,
+        "a real verb in the capture name does emit a site"
+    );
+
+    // A verb spelled in the source outranks one declared by the capture name.
+    let ranked = sites(
+        r#"(call_expression
+             function: (identifier) @invoke.http.method.get
+             arguments: (arguments
+               . (_) @invoke.http.arg
+               . (object (pair value: (string (string_fragment) @invoke.http.method)))))"#,
+    );
+    assert_eq!(ranked.len(), 1, "one site");
+    assert_eq!(
+        ranked[0].slots.get(METHOD_SLOT).map(String::as_str),
+        Some("POST"),
+        "the source-read POST outranks the name-declared GET — a query binding \
+         both must never downgrade a spelled-out verb"
+    );
+
+    // Two conflicting DECLARED verbs on one match: the first capture declaration
+    // wins, so the resolved verb never depends on which node tree-sitter reports
+    // first. Both captures are real HTTP verbs, so `is_http_method` cannot be
+    // what decides it.
+    let first_wins = sites(
+        r#"(call_expression
+             function: (identifier) @invoke.http.method.head
+             arguments: (arguments
+               . (_) @invoke.http.arg
+               . (object) @invoke.http.method.put))"#,
+    );
+    assert_eq!(first_wins.len(), 1, "one site");
+    assert_eq!(
+        first_wins[0].slots.get(METHOD_SLOT).map(String::as_str),
+        Some("head"),
+        "the FIRST name-declared verb wins — resolving by capture order would \
+         make the verb depend on node position (FR-PL-04 droppable queries)"
+    );
+}
+
+/// A verb-less shape reports the **call's** line, not its path argument's
+/// ([FR-WS-08], [NFR-RA-05]).
+///
+/// The name-declared branch has no `@invoke.http.method` node to attribute to,
+/// so `collect_invocation_sites` anchors on the node the declaring capture bound
+/// — for the shipped `fetch` pattern, the callee. Anchoring on the path argument
+/// instead put a wrapped call's reference one line below the call, disagreeing
+/// with every method-bearing shape and with the other four language arms, and
+/// sending anyone navigating from the reference to the wrong line.
+///
+/// Also pins the site's owning symbol, which the same anchor decides: the two
+/// travel together, so a regression in one is a regression in both.
+///
+/// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_verb_less_call_is_attributed_to_the_call_not_to_its_argument() {
+    // The call opens on line 2; its sole argument is on line 3.
+    const WRAPPED: &str = r#"export async function listUsers() {
+    return fetch(
+        "/users"
+    );
+}"#;
+
+    // Driven through the real `extract` path, not `ts_invocation_sites`: that
+    // helper passes empty `decls`/`symbols`, so every site there falls back to
+    // the file module and the enclosing-symbol half would be unfalsifiable.
+    for ext in TS_EXTENSIONS {
+        let facts = extract_lang(ext, &format!("src/client.{ext}"), WRAPPED);
+        let refs: Vec<_> = facts
+            .refs
+            .iter()
+            .filter(|r| r.relation == Some(crate::model::ArtifactRelation::HttpClientCall))
+            .collect();
+        assert_eq!(refs.len(), 1, "one client-call reference in {ext}");
+        assert_eq!(refs[0].target, "GET /users", "{ext}");
+        assert_eq!(
+            refs[0].line, 2,
+            "the reference reports the `fetch` line, not the wrapped \
+             argument's line 3 ({ext})"
+        );
+        assert!(
+            refs[0].source.to_string().contains("listUsers"),
+            "the reference is attributed to its enclosing declaration, not the \
+             file module ({ext}): {:?}",
+            refs[0].source
+        );
+    }
+}
+
+
+// ── S-345 / FR-WS-08 / CR-108: Go slot-level refusal reasons ────────────────
+//
+// The rest of the Go arm's suite lives in `tests/go_invocations.rs`. These two
+// stay here because they need the crate-private `collect_invocation_sites` and
+// `classify_client_call` — see [`invocation_sites`]. They are the Go twins of
+// `a_template_literal_reaches_the_interpreter_as_a_dynamic_path` and
+// `a_non_normalizing_absolute_path_reaches_the_interpreter_as_a_static_path`.
+
+/// FR-WS-08 shared negative case 2 for **Go**, pinned at slot level.
+///
+/// `tests/go_invocations.rs::a_runtime_composed_path_is_not_captured` proves
+/// only that a runtime-composed path emits nothing — which is equally true if
+/// the query never matched it. The contract's actual obligation is that the
+/// query DOES hand the site over, carrying the dynamic-path marker, so the
+/// refusal is `base-url-runtime` rather than a silent non-match. The Go query
+/// header states exactly this ("A composed path still yields a SITE, so the arm
+/// classifies it base-url-runtime instead of never seeing it"); without this
+/// test that claim is unpinned, and narrowing the query's `(_) @invoke.http.arg`
+/// to a string-literal alternation — a plausible "tighten the anchor" edit —
+/// would delete Go's coverage reasons with every existing test still green.
+#[test]
+#[cfg(feature = "lang-go")]
+fn a_runtime_composed_go_path_reaches_the_interpreter_as_a_dynamic_path() {
+    use crate::resolve::http_client_call::{DYNAMIC_PATH_SLOT, METHOD_SLOT, PATH_SLOT};
+
+    // Both Go anchor shapes: verb-as-method-name and verb-as-constructor-arg.
+    for (body, verb) in [
+        ("http.Get(url)", "Get"),
+        (r#"req, _ := http.NewRequest("GET", url, nil); c.Do(req)"#, "GET"),
+    ] {
+        let source = format!(
+            r#"package client
+
+import "net/http"
+
+func Fetch(c *http.Client, url string) {{
+	{body}
+}}
+"#
+        );
+        let sites = invocation_sites("go", &source);
+        assert_eq!(sites.len(), 1, "exactly one invocation site for {body:?}");
+        let slots = &sites[0].slots;
+        assert_eq!(
+            slots.get(METHOD_SLOT).map(String::as_str),
+            Some(verb),
+            "the verb still reaches the interpreter — only the path is dynamic"
+        );
+        assert!(
+            slots.contains_key(DYNAMIC_PATH_SLOT),
+            "a runtime-composed path must carry the dynamic-path marker (that \
+             marker is what makes the refusal `base-url-runtime` rather than a \
+             silent non-match) for {body:?}: {slots:?}"
+        );
+        assert!(
+            !slots.contains_key(PATH_SLOT),
+            "no static path is guessed from a composed one: {slots:?}"
+        );
+        assert!(
+            crate::resolve::http_client_call::render_client_call_target(slots).is_none(),
+            "and the interpreter therefore renders no target"
+        );
+    }
+}
+
+/// FR-WS-08 shared negative case 3 for **Go**, pinned at slot level — and the
+/// relative-literal case beside it, which refuses for a *different* reason.
+///
+/// The refs-level Go tests prove only that both emit nothing, so they cannot
+/// show that the two carry distinct coverage reasons. Case 3's whole point is
+/// the distinct reason, so it is asserted where the reason exists: the query
+/// hands over a **static** `path` slot, and the refusal comes from classifying
+/// it, not from failing to match.
+#[test]
+#[cfg(feature = "lang-go")]
+fn a_non_normalizing_go_path_reaches_the_interpreter_as_a_static_path() {
+    use crate::resolve::http_client_call::{
+        classify_client_call, ClientCallRefusal, DYNAMIC_PATH_SLOT, PATH_SLOT,
+    };
+
+    for (literal, refusal) in [
+        ("/v{version}/users", ClientCallRefusal::PathNotComposed),
+        ("users/{id}", ClientCallRefusal::BaseUrlRuntime),
+    ] {
+        let source = format!(
+            r#"package client
+
+import "net/http"
+
+func ListUsers() {{ http.Get("{literal}") }}
+"#
+        );
+        let sites = invocation_sites("go", &source);
+        assert_eq!(sites.len(), 1, "one site reaches the interpreter for {literal}");
+        let slots = &sites[0].slots;
+        assert_eq!(
+            slots.get(PATH_SLOT).map(String::as_str),
+            Some(literal),
+            "the static literal is handed over verbatim, not pre-judged: {slots:?}"
+        );
+        assert!(
+            !slots.contains_key(DYNAMIC_PATH_SLOT),
+            "a static literal never carries the dynamic marker: {slots:?}"
+        );
+        assert_eq!(
+            classify_client_call(slots),
+            Err(refusal),
+            "the interpreter's own refusal reason for {literal}"
+        );
+    }
 }

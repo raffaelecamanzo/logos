@@ -15,7 +15,7 @@ module_separator = "."
 # against the compiled grammar (FR-PL-03, NFR-PC-03).
 abi_version = 14
 
-capabilities = ["symbols", "references", "frameworks"]
+capabilities = ["symbols", "references", "frameworks", "invocations"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "&&", "||", "?"]
@@ -38,10 +38,41 @@ test_convention = "js-callback"
 # (`react` rides along: a Next.js component file may import only react).
 framework_detectors = ["express", "next", "react"]
 
+# Canonical reference prefixes whose presence in a file's ledger makes the file
+# an outbound **HTTP client-call** candidate (S-343, CR-108, FR-WS-08) — the
+# consumer-side twin of `framework_detectors`. FR-WS-08's normative TypeScript
+# row is `axios` and the `fetch` global.
+#
+# NON-INDEPENDENT GATE — `fetch` is one. The general rule, and what a language
+# owes when it declares such a row, is stated once on
+# `extract::capture_http_client_call_arm`; read it before copying this row's
+# shape. What is TS-specific, and belongs here:
+#
+#   * `fetch` is a *global*, imported from nothing, so the ledger evidence that
+#     opens the gate is the `@ref.call` on the `fetch` identifier itself. For
+#     that half the gate is tautological — a file declaring its own local
+#     `fetch` self-satisfies it — and only `queries/invocations.scm`'s
+#     exact-name guard, the leading-`/` requirement and `route_key` stand
+#     behind it.
+#   * `axios` is a genuine import specifier and gates normally.
+#
+# The compensating scope that rule obliges IS delivered here: every pattern in
+# `queries/invocations.scm` is anchored to a NAMED client, and this language
+# ships no broad `<receiver>.<method>(<arg>)` anchor.
+#
+# Both TS grammars share the row: `.ts`/`.js` and `.tsx`/`.jsx` are one language
+# split across two tree-sitter `Language`s (ADR-09).
+http_client_detectors = ["axios", "fetch"]
+
 [queries]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"
 frameworks = "queries/frameworks.scm"
+# Outbound HTTP client-call arm (S-343, CR-108, FR-WS-08): `axios` (receiver-verb
+# and object-argument forms) and the `fetch` global, including its verb-less
+# spelling. Anchors only — the HTTP-verb and static-literal decisions stay in the
+# generic dispatch and `resolve::http_client_call`.
+invocations = "queries/invocations.scm"
 # Captured `@fw.route.method` text → HTTP method (S-015). Express router
 # verbs map to themselves; `all` and `use` (mounting) carry every verb.
 [framework_methods]

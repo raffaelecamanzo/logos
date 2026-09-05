@@ -81,6 +81,45 @@ fn invocations_is_reported_present_for_rust_and_absent_for_c_cpp_scala() {
     }
 }
 
+/// Each language story's own AC — "both plugins carry the capability" — pinned
+/// by a test that is **green today** (S-341: java; S-343: typescript + tsx;
+/// S-345: go).
+///
+/// The invariant below is the sprint-wide guard and stays red by design until
+/// the last of S-341..S-348 lands, so it cannot serve as any single story's
+/// evidence. This row grows by one entry per story instead, which also makes a
+/// later regression attributable to a language rather than to "the invariant".
+#[test]
+fn each_landed_language_reports_the_invocations_capability() {
+    let tmp = tempfile::tempdir().unwrap();
+    let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+
+    // Rust (pre-CR-108), then S-341 (java), S-343 (typescript, tsx), S-345 (go).
+    // Subsequent stories append their language here.
+    //
+    // Rust belongs in this row even though the test above already reports its
+    // capability: that one reads the `languages()` descriptor summary and never
+    // calls `plugin.query("invocations")`, so the stronger assertion — the
+    // declared query actually LOADS — was not applied to the language that has
+    // shipped the arm longest.
+    for name in ["rust", "java", "typescript", "tsx", "go"] {
+        let plugin = reg
+            .iter()
+            .find(|p| p.name() == name)
+            .unwrap_or_else(|| panic!("{name} is compiled in by default"));
+        assert!(
+            has_capability(plugin, "invocations"),
+            "{name} ships an invocations.scm and must declare the capability: {:?}",
+            plugin.capabilities()
+        );
+        assert!(
+            plugin.query("invocations").is_some(),
+            "{name}'s declared invocations query must actually load — a declared \
+             but unloadable query is the silent no-capture failure S-340 closed"
+        );
+    }
+}
+
 // ── FR-WS-08 AC5 / CR-108: every plugin declaring `frameworks` also declares
 // `invocations` — a language shipping a provider side (a route) with no
 // consumer side (a client-call capture) is a conformance failure, not an

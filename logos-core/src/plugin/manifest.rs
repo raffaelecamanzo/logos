@@ -248,6 +248,13 @@ pub struct PluginManifest {
     /// interpreter must be driven by descriptor data, never by a branch on which
     /// language it is looking at (`resolve::framework::tests::jvm_parity`).
     ///
+    /// A **bare-identifier** row (TypeScript's `fetch`, S-343) matches a plain
+    /// call as well as an import, which makes the gate non-independent for that
+    /// entry and obliges the language's `invocations.scm` to carry the scope
+    /// instead — the rule is stated once on `extract::capture_http_client_call_arm`
+    /// (private to that module, so named rather than linked); read it before
+    /// adding one.
+    ///
     /// [CR-108]: ../../../docs/requests/CR-108-per-language-http-client-call-capture.md
     /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
     #[serde(default)]

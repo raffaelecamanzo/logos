@@ -322,6 +322,13 @@ fn typescript_entry() -> GrammarEntry {
                 label: "typescript/queries/frameworks.scm",
                 source: include_str!("../../plugins/typescript/queries/frameworks.scm"),
             },
+            // The outbound HTTP client-call arm (S-343, [FR-WS-08]): the
+            // consumer side that makes this language's routes bindable.
+            EmbeddedQuery {
+                relative_path: "queries/invocations.scm",
+                label: "typescript/queries/invocations.scm",
+                source: include_str!("../../plugins/typescript/queries/invocations.scm"),
+            },
         ],
     }
 }
@@ -351,6 +358,13 @@ fn tsx_entry() -> GrammarEntry {
                 label: "tsx/queries/frameworks.scm",
                 source: include_str!("../../plugins/tsx/queries/frameworks.scm"),
             },
+            // The outbound HTTP client-call arm (S-343, [FR-WS-08]): the
+            // consumer side that makes this language's routes bindable.
+            EmbeddedQuery {
+                relative_path: "queries/invocations.scm",
+                label: "tsx/queries/invocations.scm",
+                source: include_str!("../../plugins/tsx/queries/invocations.scm"),
+            },
         ],
     }
 }
@@ -377,6 +391,14 @@ fn go_entry() -> GrammarEntry {
                 relative_path: "queries/frameworks.scm",
                 label: "go/queries/frameworks.scm",
                 source: include_str!("../../plugins/go/queries/frameworks.scm"),
+            },
+            // The outbound `net/http` client-call arm (S-345, [FR-WS-08],
+            // [CR-108]): the consumer side of the route key `frameworks`
+            // promotes on the provider side.
+            EmbeddedQuery {
+                relative_path: "queries/invocations.scm",
+                label: "go/queries/invocations.scm",
+                source: include_str!("../../plugins/go/queries/invocations.scm"),
             },
         ],
     }
