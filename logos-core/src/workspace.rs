@@ -257,21 +257,27 @@ pub fn seed_source(root: &Path) -> Option<SeedSource> {
 }
 
 /// One governance policy file's seed outcome ([FR-WT-06]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContractFileOutcome {
     /// Copied verbatim from the primary checkout.
     Copied,
     /// The primary checkout has no such file — nothing to copy, and nothing
     /// fabricated ([FR-WT-06] AC2).
     Absent,
+    /// The worktree already has its own file at this path — left untouched.
+    /// Covers a policy file that traveled through git ([FR-WT-02]) as well as
+    /// one a prior partial seed already placed; either way it is never
+    /// clobbered with the primary's copy.
+    AlreadyPresent,
     /// The primary checkout has the file, but the copy itself failed (a
-    /// permissions error, a full disk, …). Non-fatal — the caller logs and
-    /// the seeded graph stays usable ([FR-WT-06] AC3, [ADR-11]).
-    Failed,
+    /// permissions error, a full disk, …), carrying the OS error for
+    /// diagnosis. Non-fatal — the caller logs and the seeded graph stays
+    /// usable ([FR-WT-06] AC3, [ADR-11]).
+    Failed(String),
 }
 
 /// The outcome of seeding both governance policy files ([FR-WT-06]).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ContractSeedResult {
     pub rules: ContractFileOutcome,
     pub config: ContractFileOutcome,
@@ -289,12 +295,20 @@ pub struct ContractSeedResult {
 /// A primary checkout missing one or both files seeds a worktree missing the
 /// same ones: the copy never fabricates a contract that was never authored.
 ///
+/// **Never overwrites.** A worktree that already has its own copy of a policy
+/// file — because it traveled through git ([FR-WT-02]: "checked-in policy...
+/// is honoured" per branch) or a prior partial seed already placed it — keeps
+/// that copy untouched. The seed only fills a gap `.logos/` being gitignored
+/// would otherwise leave; it must never clobber a branch-local override that
+/// already arrived correctly.
+///
 /// Call this only where `worktree_root` is a genuinely DB-less linked
-/// worktree seeding for the first time — it always overwrites, matching the
-/// once-per-bootstrap contract of the graph-store seed it travels alongside.
+/// worktree seeding for the first time, matching the once-per-bootstrap
+/// contract of the graph-store seed it travels alongside.
 ///
 /// [ADR-15]: ../../docs/specs/architecture/decisions/ADR-15.md
 /// [FR-WT-06]: ../../docs/specs/requirements/FR-WT-06.md
+/// [FR-WT-02]: ../../docs/specs/requirements/FR-WT-02.md
 /// [FR-IN-06]: ../../docs/specs/requirements/FR-IN-06.md
 pub fn seed_contract(primary_root: &Path, worktree_root: &Path) -> ContractSeedResult {
     ContractSeedResult {
@@ -304,17 +318,21 @@ pub fn seed_contract(primary_root: &Path, worktree_root: &Path) -> ContractSeedR
 }
 
 /// Copy one `.logos/<name>` policy file from the primary checkout into the
-/// worktree, byte for byte. See [`seed_contract`] for the fail-soft /
-/// never-fabricate contract.
+/// worktree, byte for byte, unless the worktree already has its own. See
+/// [`seed_contract`] for the fail-soft / never-fabricate / never-overwrite
+/// contract.
 fn copy_contract_file(primary_root: &Path, worktree_root: &Path, name: &str) -> ContractFileOutcome {
     let src = primary_root.join(".logos").join(name);
     if !src.is_file() {
         return ContractFileOutcome::Absent;
     }
     let dst = worktree_root.join(".logos").join(name);
+    if dst.exists() {
+        return ContractFileOutcome::AlreadyPresent;
+    }
     match std::fs::copy(&src, &dst) {
         Ok(_) => ContractFileOutcome::Copied,
-        Err(_) => ContractFileOutcome::Failed,
+        Err(err) => ContractFileOutcome::Failed(err.to_string()),
     }
 }
 
@@ -708,25 +726,53 @@ mod tests {
         assert!(!wt.join(".logos/config.toml").exists());
     }
 
-    /// A copy failure is reported as `Failed`, not propagated as an error —
-    /// the fail-soft discipline the graph-store seed already follows
-    /// ([ADR-11]). The destination path is occupied by a directory, which
-    /// blocks the copy regardless of platform or user (portable, unlike a
-    /// permission-bit simulation that root bypasses).
+    /// A copy failure is reported as `Failed` (carrying the OS error), not
+    /// propagated as an error — the fail-soft discipline the graph-store seed
+    /// already follows ([ADR-11]). `.logos` in the worktree is a plain FILE
+    /// rather than a directory, so the destination path itself does not
+    /// exist yet (never hits the `AlreadyPresent` short-circuit) but writing
+    /// into it fails — portable, no permission bits a root user could bypass.
     #[test]
     fn seed_contract_reports_a_failed_copy_without_panicking() {
         let (tmp, main) = repo_fixture();
         fs::create_dir_all(main.join(".logos")).unwrap();
         fs::write(main.join(".logos/rules.toml"), "[constraints]\n").unwrap();
         let wt = add_worktree(&tmp, &main);
-        // Occupy the destination with a directory so the copy fails.
-        fs::create_dir_all(wt.join(".logos/rules.toml")).unwrap();
+        fs::write(wt.join(".logos"), b"not a directory").unwrap();
 
         let result = seed_contract(&main, &wt);
-        assert_eq!(result.rules, ContractFileOutcome::Failed);
         assert!(
-            wt.join(".logos/rules.toml").is_dir(),
+            matches!(result.rules, ContractFileOutcome::Failed(_)),
+            "expected Failed, got {:?}",
+            result.rules
+        );
+        assert!(
+            wt.join(".logos").is_file(),
             "a failed copy leaves the destination untouched"
+        );
+    }
+
+    /// The worktree already has its own copy of a policy file — left over
+    /// from a previous seed, or placed by hand — so the seed leaves it alone
+    /// rather than clobbering it with the primary's ([FR-WT-02]: a
+    /// checked-in / branch-local policy file must be honoured, not
+    /// overwritten).
+    #[test]
+    fn seed_contract_never_overwrites_an_existing_destination_file() {
+        let (tmp, main) = repo_fixture();
+        fs::create_dir_all(main.join(".logos")).unwrap();
+        fs::write(main.join(".logos/rules.toml"), "[constraints]\nmax_cc = 9\n").unwrap();
+        let wt = add_worktree(&tmp, &main);
+        fs::create_dir_all(wt.join(".logos")).unwrap();
+        let branch_local = "[constraints]\nmax_cc = 20\n";
+        fs::write(wt.join(".logos/rules.toml"), branch_local).unwrap();
+
+        let result = seed_contract(&main, &wt);
+        assert_eq!(result.rules, ContractFileOutcome::AlreadyPresent);
+        assert_eq!(
+            fs::read_to_string(wt.join(".logos/rules.toml")).unwrap(),
+            branch_local,
+            "the worktree's own file must survive the seed untouched"
         );
     }
 

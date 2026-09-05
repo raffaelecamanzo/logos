@@ -281,7 +281,9 @@ impl Engine {
             // architecture contract and every governance evaluation inside
             // the worktree would be vacuous. Each file is copied verbatim
             // (never parsed or rewritten), so no copied value can become an
-            // absolute path into the primary checkout (FR-IN-06).
+            // absolute path into the primary checkout (FR-IN-06). A file the
+            // worktree already has of its own — travelled through git
+            // (FR-WT-02) or left by a prior partial seed — is left alone.
             if let Some(primary) = crate::workspace::primary_root(&root) {
                 let contract = crate::workspace::seed_contract(&primary, &root);
                 for (name, outcome) in [
@@ -296,14 +298,16 @@ impl Engine {
                                 "seeded the governance contract file from the primary checkout (FR-WT-06)"
                             );
                         }
-                        crate::workspace::ContractFileOutcome::Absent => {}
-                        crate::workspace::ContractFileOutcome::Failed => {
+                        crate::workspace::ContractFileOutcome::Absent
+                        | crate::workspace::ContractFileOutcome::AlreadyPresent => {}
+                        crate::workspace::ContractFileOutcome::Failed(error) => {
                             // Fail-soft, matching the graph-store seed above
                             // (ADR-11): the worktree stays usable, just
                             // without this policy file.
                             tracing::warn!(
                                 file = name,
                                 primary = %primary.display(),
+                                error = %error,
                                 "seeding {name} from the primary checkout failed; the \
                                  worktree's governance contract may be incomplete"
                             );
