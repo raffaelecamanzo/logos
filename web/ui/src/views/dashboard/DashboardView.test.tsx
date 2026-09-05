@@ -186,12 +186,37 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
 
   it("Rule findings widget — muted onboarding state when no rules.toml is authored", async () => {
     const m = clone();
-    m.rules = { passed: true, checked_rules: 0, rules_present: false, violations: [], freshness: "fresh", warnings: [] };
+    // `passed: null` (S-352, FR-GV-22): no contract loaded and nothing else fired —
+    // a verdict over an empty evaluated set is not a verdict.
+    m.rules = { passed: null, checked_rules: 0, rules_present: false, violations: [], freshness: "fresh", warnings: [] };
     stub(m);
     render(<DashboardView />);
     expect(await screen.findByText(/No architecture rules yet/i)).toBeInTheDocument();
     expect(screen.getByText("logos check")).toBeInTheDocument();
     // Never a fabricated PASS/FAIL verdict when no rules exist yet.
     expect(screen.queryByText("FAIL")).not.toBeInTheDocument();
+  });
+
+  it("Rule findings widget — a violation wins over the onboarding prompt even with no rules.toml (S-354)", async () => {
+    // The always-on structural/admission fold-ins (FR-GV-18/FR-GV-20) fire
+    // independent of a loaded contract, so `rules_present: false` can still carry
+    // a real violation (`passed: Some(false)`, never `None`). The widget must
+    // show the finding, not swallow it behind the no-rules onboarding prompt.
+    const m = clone();
+    m.rules = {
+      passed: false,
+      checked_rules: 0,
+      rules_present: false,
+      violations: [
+        { rule: "graph-structural-integrity", rule_type: "constraint", severity: "error", file: "", node_id: null, message: "orphan shingle" },
+      ],
+      freshness: "fresh",
+      warnings: [],
+    };
+    stub(m);
+    render(<DashboardView />);
+    expect(await screen.findByText("FAIL")).toBeInTheDocument();
+    expect(screen.getByText(/1 rule finding\(s\) across 0 checked rule\(s\)/i)).toBeInTheDocument();
+    expect(screen.queryByText(/No architecture rules yet/i)).not.toBeInTheDocument();
   });
 });

@@ -63,11 +63,37 @@ describe("GapsView → Rule findings over mocked /api/v1 (S-189, FR-UI-06; CR-07
   });
 
   it("shows the no-rules onboarding empty state, not an always-empty table", async () => {
-    stub(model({ rules: { passed: true, checked_rules: 0, rules_present: false, violations: [], freshness: "fresh", warnings: [] } }));
+    // `passed: null` (S-352, FR-GV-22): no contract loaded and nothing else fired —
+    // a verdict over an empty evaluated set is not a verdict.
+    stub(model({ rules: { passed: null, checked_rules: 0, rules_present: false, violations: [], freshness: "fresh", warnings: [] } }));
     render(<GapsView />);
     expect(await screen.findByText(/architecture rules are not configured/i)).toBeInTheDocument();
     expect(screen.getByText(/\[\[forbidden_imports\]\]/)).toBeInTheDocument();
     expect(screen.queryByText("No rule findings.")).not.toBeInTheDocument();
+  });
+
+  it("renders the findings table over the onboarding prompt when a violation fires despite no rules.toml (S-354)", async () => {
+    // The always-on structural/admission fold-ins (FR-GV-18/FR-GV-20) fire
+    // independent of a loaded contract, so `rules_present: false` can still carry
+    // a real violation (`passed: Some(false)`, never `None`). Findings must win.
+    stub(
+      model({
+        rules: {
+          passed: false,
+          checked_rules: 0,
+          rules_present: false,
+          violations: [
+            { rule: "graph-admission-drift", rule_type: "constraint", severity: "error", file: "", node_id: null, message: "unadmitted file" },
+          ],
+          freshness: "fresh",
+          warnings: [],
+        },
+      }),
+    );
+    render(<GapsView />);
+    const table = await screen.findByRole("table", { name: "Rule findings" });
+    expect(within(table).getByText("graph-admission-drift")).toBeInTheDocument();
+    expect(screen.queryByText(/architecture rules are not configured/i)).not.toBeInTheDocument();
   });
 
   it("renders rule violations with severity badges (error → red, warning → orange)", async () => {

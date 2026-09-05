@@ -137,19 +137,16 @@ function CodeCoverageCard({ coverage }: { coverage: CoverageStatus }) {
  *  (CR-079), in the former test-coverage slot. Three honest states (NFR-CC-04):
  *  a muted onboarding prompt when no `.logos/rules.toml` is authored yet
  *  (`rules_present === false`); a red FAIL naming the violation count when there
- *  are findings; a green PASS otherwise. Never a fabricated figure. */
+ *  are findings; a green PASS otherwise. Never a fabricated figure.
+ *
+ *  Findings are checked FIRST, before `rules_present` (S-354): the always-on
+ *  structural/admission fold-ins fire independent of a loaded contract, so a
+ *  contract-less project can still carry real violations — those must win over
+ *  the onboarding prompt, never be hidden behind it. */
 function RuleFindingsCard({ rules }: { rules: RulesReport }) {
   const violations = rules.violations.length;
   let body;
-  if (!rules.rules_present) {
-    // Onboarding: no rules authored yet — prompt to write them, never an empty PASS.
-    body = (
-      <EmptyState
-        message="No architecture rules yet — author them in .logos/rules.toml, then run"
-        command="logos check"
-      />
-    );
-  } else if (violations > 0) {
+  if (violations > 0) {
     body = (
       <>
         <div className={styles.heroFigure}>
@@ -160,6 +157,14 @@ function RuleFindingsCard({ rules }: { rules: RulesReport }) {
           {violations} rule finding(s) across {rules.checked_rules} checked rule(s)
         </p>
       </>
+    );
+  } else if (!rules.rules_present) {
+    // Onboarding: no rules authored yet — prompt to write them, never an empty PASS.
+    body = (
+      <EmptyState
+        message="No architecture rules yet — author them in .logos/rules.toml, then run"
+        command="logos check"
+      />
     );
   } else {
     body = (

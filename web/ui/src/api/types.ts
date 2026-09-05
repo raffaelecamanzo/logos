@@ -660,7 +660,9 @@ export interface Violation {
 
 /** The architecture-rules report (mirrors `RulesReport`). */
 export interface RulesReport {
-  passed: boolean;
+  /** `null` when no `.logos/rules.toml` contract was loaded and nothing else fired
+   *  (S-352, FR-GV-22) — a verdict over an empty evaluated set is not a verdict. */
+  passed: boolean | null;
   checked_rules: number;
   /** Whether a `.logos/rules.toml` exists — gates the onboarding empty state. */
   rules_present: boolean;
