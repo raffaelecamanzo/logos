@@ -750,8 +750,13 @@ class Calls {
 /// the *method name* (`getForObject`), and `exchange` puts it in a **second**
 /// argument (`HttpMethod.GET`). The arm's `@invoke.http.method` slot needs a
 /// node whose text is literally an HTTP verb, so both are dropped by the generic
-/// dispatch's `is_http_method` check — identical to Java's ceiling, and lifting
-/// either needs the same descriptor-level method-alias table (CR-108 CRA-05).
+/// dispatch's `is_http_method` check — identical to Java's ceiling.
+///
+/// The method-alias table this used to defer to (CR-108 CRA-05) landed later in
+/// the same sprint as S-346's `[invocation_methods]`, so `getForObject` is now
+/// liftable by descriptor data alone; `exchange` still is not, its verb binding
+/// to no capture. The query header states the filter-half trade that keeps the
+/// row undeclared.
 #[test]
 fn rest_template_verb_suffixed_methods_are_a_stated_ceiling() {
     assert!(

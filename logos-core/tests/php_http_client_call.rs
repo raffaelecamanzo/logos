@@ -208,11 +208,12 @@ $client->requestAsync('POST', '/users');
 /// [FR-WS-08]'s "capture … or explicitly refused with their reason recorded"
 /// acceptance criterion. The reason: the verb is embedded in the
 /// `Async`-suffixed METHOD NAME, and `is_http_method` recognises only the bare
-/// verbs — capturing this needs a text normalizer, C#/[S-346]'s stated scope
-/// (a `[framework_methods]`-style `getasync → GET` table), not invented here
-/// ahead of that story (NFR-MA-01). The single-argument pattern still
-/// structurally MATCHES this call (proving the file was scanned); the verb
-/// check is what refuses it.
+/// verbs — capturing this needs a text normalizer. [S-346] landed one later in
+/// the same sprint (`[invocation_methods]`, per-plugin descriptor data), so the
+/// ceiling now rests on the trade the query header states — the table's filter
+/// half obliges an identity row for every bare verb — not on a missing
+/// mechanism. The single-argument pattern still structurally MATCHES this call
+/// (proving the file was scanned); the verb check is what refuses it.
 ///
 /// [S-346]: ../../docs/planning/journal.md#s-346-c-http-client-call-capture
 #[test]

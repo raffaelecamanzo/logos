@@ -438,8 +438,11 @@ public class Calls {
         )
         .is_empty(),
         "`getForObject` is not an HTTP verb and `exchange` carries its verb in a \
-         second argument — both need a descriptor-level method-alias table the \
-         arm does not have (CR-108 CRA-05), so they stay honestly uncaptured"
+         second argument. `getForObject` could now be lifted by an \
+         `[invocation_methods]` row (S-346 landed that table later in this same \
+         sprint) at the cost of opting Java into its filter half; `exchange` \
+         could not, its verb binding to no capture. Both stay honestly \
+         uncaptured — see the query header for the trade"
     );
 }
 

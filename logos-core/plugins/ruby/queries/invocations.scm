@@ -151,6 +151,9 @@
 ;   * `Net::HTTP.start(host) { |http| http.get("/users") }` — the `Net::HTTPGenericRequest`
 ;     helper form (`Net::HTTP::Get.new("/users")`) is a class-constructor call,
 ;     not a `.get(...)` method call; its verb rides the CONSTANT name
-;     (`Get`/`Post`/…), which pattern 1's `method: (identifier)` cannot bind
-;     without a per-verb constant-name table (CR-108 CRA-05 territory, deferred
-;     like Go's `http.MethodGet` ceiling).
+;     (`Get`/`Post`/…), which pattern 1's `method: (identifier)` cannot bind.
+;     S-346's `[invocation_methods]` table (landed later in the same sprint) does
+;     NOT lift this on its own: the table normalizes a CAPTURED text, and no
+;     pattern here captures the constant — the called method's text is `new`.
+;     Lifting it is a table PLUS a pattern reaching the receiver's last segment,
+;     a Ruby-side decision, exactly as it is for Go's `http.MethodGet`.
