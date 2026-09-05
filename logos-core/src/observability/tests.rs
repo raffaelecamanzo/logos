@@ -12,7 +12,9 @@ use tracing_subscriber::layer::SubscriberExt;
 
 use super::layer::{spawn_writer, TelemetryLayer, TelemetrySink};
 use super::stats::{reads_saved_per_call, stats_from};
-use super::tool::{self_referential_tools, EventClass, Tool, ToolClass, UNREGISTERED_CLASS};
+use super::tool::{
+    class_of_wire, self_referential_tools, EventClass, Tool, ToolClass, UNREGISTERED_CLASS,
+};
 use super::{
     db, in_surface, telemetry_logos_dir, telemetry_origin, traced, EventRecord, Surface,
     TELEMETRY_TARGET,
@@ -616,6 +618,18 @@ fn every_registered_tool_carries_one_of_the_five_classes() {
         assert!(
             VOCABULARY.contains(&label),
             "{} is classified {label:?}, outside the FR-OB-11 vocabulary {VOCABULARY:?}",
+            tool.as_str()
+        );
+        // The read-model does not call `tool_class()` — it calls `class_of_wire`
+        // on a name read back out of the store, which round-trips through
+        // `Tool::from_wire`. Assert the wire path agrees for *every* registered
+        // tool, not just the handful the fixtures happen to emit: a name that
+        // failed to resolve would be labelled `unregistered` while the tool is
+        // very much registered.
+        assert_eq!(
+            class_of_wire(tool.as_str()),
+            label,
+            "the wire path disagrees with the enum path for {}",
             tool.as_str()
         );
         if !seen.contains(&label) {
@@ -1997,13 +2011,18 @@ fn a_retired_tool_name_is_counted_and_labelled_unregistered() {
     assert_eq!(retired.class, UNREGISTERED_CLASS);
     assert_eq!(retired.origin, "main");
     // …and it rolls up under its own label rather than inflating a real class.
-    let unregistered: Vec<&str> = info
+    // Asserted as the exact table, so the retired call cannot be silently added
+    // to `navigation` — and so its ordering (last, after `session-gate`) is
+    // pinned rather than merely its presence.
+    let table: Vec<(&str, &str, u64, u64)> = info
         .calls_by_class
         .iter()
-        .map(|c| c.class.as_str())
-        .filter(|c| *c == UNREGISTERED_CLASS)
+        .map(|c| (c.class.as_str(), c.origin.as_str(), c.calls, c.ok_calls))
         .collect();
-    assert_eq!(unregistered, vec![UNREGISTERED_CLASS]);
+    assert_eq!(
+        table,
+        vec![("navigation", "main", 1, 1), (UNREGISTERED_CLASS, "main", 1, 1)]
+    );
     assert!(
         info.calls_by_tool
             .iter()
