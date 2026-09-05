@@ -1138,8 +1138,8 @@ fn is_http_method(name: &str) -> bool {
 /// content children (e.g. a raw-string form) falls back to trimming its quote and
 /// prefix characters.
 ///
-/// The content-child kind names below are the extension point when a grammar
-/// names them differently (S-345). Go 0.25 calls them
+/// The content-child kind names below are where a grammar that names them
+/// differently gets added (S-345). Go 0.25 calls them
 /// `interpreted_string_literal_content` / `raw_string_literal_content`; **C#
 /// 0.23 calls them `string_literal_content` / `raw_string_content`**, so
 /// [S-346] must add that pair here rather than rediscovering this. A grammar
@@ -1149,6 +1149,18 @@ fn is_http_method(name: &str) -> bool {
 /// already-unquoted content child takes the no-children fallback below, whose
 /// quote/`#` trimming would corrupt a path ending in one of those characters.
 ///
+/// **Accepted [NFR-MA-01] debt, not the intended end state.** This union is a
+/// flat, language-agnostic list — never a `match language {…}` — so it does not
+/// reintroduce the per-language branch S-341 deleted. But it does mean each
+/// remaining CR-108 language costs a `logos-core` edit, which the descriptor
+/// contract exists to avoid: `nesting_block_kinds` already carries exactly this
+/// data class declaratively, and `http_client_detectors` is the second such
+/// field. Lifting these names into a descriptor field beside them is the right
+/// end state; it is deliberately NOT done here, because it is an
+/// every-plugin change that belongs to a CR rather than to an integration
+/// session porting two arms. S-346 should either pay it or restate it.
+///
+/// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
 /// [S-346]: ../../../docs/planning/journal.md#s-346-c-http-client-call-capture
 fn static_string_literal(node: Node<'_>, source: &[u8]) -> Option<String> {
     if !node.kind().contains("string") {
