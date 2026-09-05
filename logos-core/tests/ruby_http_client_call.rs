@@ -454,3 +454,28 @@ end
         client_call_targets(&facts)
     );
 }
+
+/// **Ceiling.** A block-form Faraday request whose path is built *inside* the
+/// block (`req.url "/users"`) rather than passed as a call argument has no
+/// `arguments:` field at all to anchor on: `conn.get { |req| … }` matches the
+/// grammar's block-only `call` variant (`receiver` + `block`, no `argument_list`
+/// — confirmed against the vendored `tree-sitter-ruby` grammar), so pattern 1
+/// never matches this call in the first place. Not attempted, not worked
+/// around.
+#[test]
+fn a_block_form_request_with_no_path_argument_is_a_stated_ceiling() {
+    let facts = extract_ruby(
+        r#"require "faraday"
+
+def list_users(conn)
+  conn.get { |req| req.url "/users" }
+end
+"#,
+    );
+    assert!(
+        client_call_targets(&facts).is_empty(),
+        "the path is built inside the block, not passed as an argument — there \
+         is no `arguments:` field to anchor on: {:?}",
+        client_call_targets(&facts)
+    );
+}
