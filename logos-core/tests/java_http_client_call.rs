@@ -372,12 +372,21 @@ fn receiver_less_and_class_qualified_verb_calls_are_never_captured() {
             r#"void t() { rest("/api").get("/{id}").to("direct:x"); }"#,
         ),
     ] {
-        assert!(
-            client_calls(&format!(
-                "public class Calls {{ private RestClient restClient; {body} }}"
-            ))
-            .is_empty(),
-            "{label} must emit no outbound call"
+        // `restClient.get().uri("/probe")` is the positive control: it proves
+        // the file WAS scanned, so each shape's absence is pattern 4's receiver
+        // rule refusing it and not a closed ledger gate. Without it a later
+        // tightening of `http_client_detectors` would leave this test green
+        // while proving nothing — the class the Go and C# arms closed in this
+        // same sprint (`go_invocations.rs`, `c_sharp_invocations.rs`).
+        let calls = client_calls(&format!(
+            "public class Calls {{ private RestClient restClient; {body} \
+             String probe() {{ return restClient.get().uri(\"/probe\").retrieve().body(String.class); }} }}"
+        ));
+        assert_eq!(
+            calls,
+            ["GET /probe"],
+            "{label} must emit no outbound call, and the file was genuinely \
+             scanned: {calls:?}"
         );
     }
 }
