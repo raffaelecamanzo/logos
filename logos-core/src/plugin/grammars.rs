@@ -295,6 +295,14 @@ fn python_entry() -> GrammarEntry {
                 label: "python/queries/frameworks.scm",
                 source: include_str!("../../plugins/python/queries/frameworks.scm"),
             },
+            // The outbound HTTP client-call arm (S-344, [FR-WS-08], [CR-108]):
+            // `requests`/`httpx` free functions and the session/client
+            // receiver form.
+            EmbeddedQuery {
+                relative_path: "queries/invocations.scm",
+                label: "python/queries/invocations.scm",
+                source: include_str!("../../plugins/python/queries/invocations.scm"),
+            },
         ],
     }
 }

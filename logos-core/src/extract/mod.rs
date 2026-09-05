@@ -1180,6 +1180,14 @@ fn static_string_literal(node: Node<'_>, source: &[u8]) -> Option<String> {
             | "raw_string_literal_content" => {
                 content.push_str(child.utf8_text(source).ok()?);
             }
+            // Python 0.21+'s PEP-701 grammar rewrite names the surrounding
+            // quote/prefix tokens as their own NAMED children (`string_start`
+            // `f"`/`r"`/`"""`, `string_end` `"`/`"""`) rather than leaving them
+            // anonymous like every other supported grammar's `string` node
+            // (S-344). They carry no literal content, so skip them without
+            // disqualifying the literal — an f-string's `interpolation` child
+            // is what disqualifies it, via the catch-all arm below.
+            "string_start" | "string_end" => {}
             // An interpolation / template substitution / expansion → dynamic.
             _ => return None,
         }
