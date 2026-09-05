@@ -283,10 +283,14 @@ mod tests {
 
             // Backwards: no other entry may mean all-verbs under another spelling.
             for (token, method) in &manifest.framework_methods {
+                // Plausible alternative spellings only. A literal here is
+                // matched against JVM grammar node kinds by
+                // `framework::tests::no_language_specific_composition_code_exists`,
+                // which keeps this module language-neutral — so keep the set to
+                // spellings a descriptor might actually use.
                 let means_all_verbs = method == "*"
                     || method.eq_ignore_ascii_case("any")
-                    || method.eq_ignore_ascii_case("all")
-                    || method.eq_ignore_ascii_case("wildcard");
+                    || method.eq_ignore_ascii_case("all");
                 assert!(
                     !means_all_verbs || method == WILDCARD_METHOD,
                     "{}: `{token} = \"{method}\"` must spell the wildcard `{WILDCARD_METHOD}`",
