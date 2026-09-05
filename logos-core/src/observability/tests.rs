@@ -816,6 +816,47 @@ fn the_surface_scope_attributes_only_what_it_wraps() {
     );
 }
 
+/// Nesting restores the **outer** scope, not the process stamp.
+///
+/// [`in_surface`]'s contract says so explicitly, and the difference is only
+/// visible when a scope is entered from inside another one: a guard that reset
+/// to `None` instead of the saved value would pass every other scope test here,
+/// because they all start unscoped.
+#[test]
+fn a_nested_surface_scope_restores_the_outer_one() {
+    let (sink, rx) = TelemetrySink::with_capacity(8);
+    let subscriber = tracing_subscriber::registry()
+        .with(TelemetryLayer::new(Surface::Mcp, "main".to_string(), sink));
+
+    tracing::subscriber::with_default(subscriber, || {
+        in_surface(Surface::Web, || {
+            traced(Tool::Search, || Ok::<_, anyhow::Error>(())).unwrap();
+            in_surface(Surface::Watcher, || {
+                traced(Tool::Sync, || Ok::<_, anyhow::Error>(())).unwrap();
+            });
+            // Back in the OUTER scope — web, not the mcp process stamp.
+            traced(Tool::Node, || Ok::<_, anyhow::Error>(())).unwrap();
+        });
+        // Outside every scope — the process stamp.
+        traced(Tool::Impact, || Ok::<_, anyhow::Error>(())).unwrap();
+    });
+
+    let seen: Vec<(String, &str)> = rx
+        .try_iter()
+        .map(|r| (r.tool, r.surface))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("search".to_string(), "web"),
+            ("sync".to_string(), "watcher"),
+            ("node".to_string(), "web"),
+            ("impact".to_string(), "mcp"),
+        ],
+        "the inner scope pops back to the outer one, then to the process stamp"
+    );
+}
+
 /// The scope is restored even when the scoped call unwinds — a panicking tool
 /// call must not leave the thread mis-attributing every later event on it.
 #[test]
@@ -963,10 +1004,22 @@ fn chat_agent_calls_are_separable_from_web_and_mcp() {
 
     // And it survives into the read-model as its own surface, counted.
     let mut conn = db::open_in_memory();
-    let rows: Vec<EventRecord> = records
+    let mut rows: Vec<EventRecord> = records
         .into_iter()
         .map(|r| EventRecord { at: NOW - 60, ..r })
         .collect();
+    // FR-OB-10 AC1 names BOTH: separable from `web` *and* from `mcp`. The two
+    // are separate claims — `web` is the process the agent runs inside, `mcp`
+    // is the other agent-facing surface it would otherwise be summed with — so
+    // an `mcp` row joins the fixture rather than being assumed.
+    rows.push(EventRecord {
+        at: NOW - 60,
+        surface: "mcp",
+        tool: "impact".to_string(),
+        duration_ms: 3,
+        ok: true,
+        origin: "main".to_string(),
+    });
     db::write_batch(&mut conn, &rows).unwrap();
     let info = stats_from(&conn, 7, NOW).unwrap();
     let surfaces: Vec<&str> = info
@@ -974,9 +1027,19 @@ fn chat_agent_calls_are_separable_from_web_and_mcp() {
         .iter()
         .map(|u| u.surface.as_str())
         .collect();
-    assert!(surfaces.contains(&"chat"), "got {surfaces:?}");
-    assert!(surfaces.contains(&"web"), "got {surfaces:?}");
-    assert_eq!(info.calls_total, 2, "agent-issued navigation is real usage");
+    for expected in ["chat", "web", "mcp"] {
+        assert!(
+            surfaces.contains(&expected),
+            "`{expected}` is its own group, not folded into another: {surfaces:?}"
+        );
+    }
+    assert_eq!(
+        info.calls_by_tool.len(),
+        3,
+        "one `impact` row per surface — chat is never summed with web or mcp: {:?}",
+        info.calls_by_tool
+    );
+    assert_eq!(info.calls_total, 3, "agent-issued navigation is real usage");
 }
 
 /// Events outside the window are excluded from counts, percentiles, **and the
