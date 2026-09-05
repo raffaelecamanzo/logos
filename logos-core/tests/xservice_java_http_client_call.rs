@@ -96,6 +96,7 @@ fn index_member(root: &Path) {
     let engine = Engine::start(root).expect("engine starts");
     engine.index();
     let _ = engine.sync(&[] as &[PathBuf]);
+    // `engine` drops here, releasing the store lock.
 }
 
 fn member(name: &str, root: &Path) -> Member {
@@ -183,4 +184,51 @@ fn a_runtime_composed_java_client_call_never_binds() {
         edges.is_empty(),
         "a base-url-runtime call never binds — no approximate edge: {edges:?}"
     );
+}
+
+/// [FR-WS-08]: *"Two matching routes across the workspace ⇒ ambiguous, no
+/// edge."* Two members providing the same positional key make the Java client
+/// call ambiguous — never fabricated ([NFR-RA-05]). The Rust twin
+/// (`xservice_http_client_call.rs`) pins this for `reqwest`; without it here the
+/// Java arm's references would only ever be proven down the *bind* path, and
+/// [S-349](../../docs/planning/journal.md) re-keys the provider index on the
+/// normalized template in this same sprint.
+#[test]
+fn two_matching_spring_routes_make_the_java_client_call_ambiguous() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    let web = root.join("web");
+    let api = root.join("api");
+    let admin = root.join("admin");
+    write(&web, "src/UserGateway.java", JAVA_CLIENT);
+    write(&api, "src/UserController.java", SPRING_CONTROLLER);
+    // `admin` registers the same positional route; the param name drifts again,
+    // so only the shared `route_key` can see that the two collide.
+    write(
+        &admin,
+        "src/UserController.java",
+        &SPRING_CONTROLLER.replace("{userId}", "{uid}"),
+    );
+    index_member(&web);
+    index_member(&api);
+    index_member(&admin);
+
+    let registry = EngineRegistry::<Engine>::new(
+        federation(
+            root,
+            vec![member("web", &web), member("api", &api), member("admin", &admin)],
+        ),
+        RegistryMode::Lazy,
+    );
+
+    let edges = ContractBridge::new().edges(&registry);
+    assert!(
+        edges.is_empty(),
+        "two providers of one client-call key are ambiguous — no edge: {edges:?}"
+    );
+
+    let coverage = cross_service_coverage(&registry);
+    assert_eq!(coverage.ambiguous, 1, "the ambiguous call is bucketed as such");
+    assert_eq!(coverage.bound, 0);
 }
