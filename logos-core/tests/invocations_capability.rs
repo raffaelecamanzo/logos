@@ -155,3 +155,66 @@ fn every_plugin_declaring_frameworks_also_declares_invocations() {
          this test required; it turns green on its own once the last lands."
     );
 }
+
+// ── The structural guard S-342 wishes had existed ──────────────────────────
+
+/// **Every pattern in every `invocations` query must capture something.**
+///
+/// A capture-less pattern is not a harmless no-op — it is the signature of a
+/// **detached predicate**. Tree-sitter opens a new pattern for each top-level
+/// s-expression, and a `(#match? …)` written at column 0 after a completed
+/// pattern (rather than inside its parentheses) becomes its own step-less,
+/// capture-less pattern. The predicate then constrains nothing, and the pattern
+/// it was meant to guard runs wide open.
+///
+/// S-342 shipped exactly that. Kotlin's pattern 4 — the broad
+/// `<receiver>.<method>(<arg>)` anchor — carried its lower-case-receiver rule
+/// and its string-template guard outside the alternation, so both were inert:
+/// the arm captured `RequestPredicates.GET("/users")` (a Spring WebFlux **route
+/// declaration**, which would have bound another workspace member's real
+/// `GET /users` and fabricated a cross-service edge), `Paths.get("/etc/hosts")`
+/// (a filesystem path) and `restTemplate.delete("/carts/$id")` (a
+/// runtime-composed template bound as though static) — the [NFR-RA-05]
+/// never-fabricate breach the whole arm exists to avoid. Every per-language test
+/// stayed green, because a rule with no test cannot notice that it stopped
+/// applying.
+///
+/// This guard is language-agnostic and needs no per-language knowledge, so it
+/// covers the four CR-108 arms still landing as well as the four already merged.
+/// It is deliberately weaker than "assert the intended pattern count": a count
+/// has to be maintained per language and per edit, whereas "no pattern captures
+/// nothing" is true of every correct query by construction and cannot drift.
+///
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+fn no_invocations_query_contains_a_capture_less_pattern() {
+    let tmp = tempfile::tempdir().unwrap();
+    let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+
+    let mut checked = 0usize;
+    for plugin in reg.iter() {
+        let Some(query) = plugin.query("invocations") else {
+            continue;
+        };
+        checked += 1;
+        for index in 0..query.pattern_count() {
+            let captures_something = query
+                .capture_quantifiers(index)
+                .iter()
+                .any(|q| *q != tree_sitter::CaptureQuantifier::Zero);
+            assert!(
+                captures_something,
+                "{}'s invocations.scm pattern #{index} (source byte {}) captures \
+                 nothing. That is almost always a predicate written at column 0 \
+                 after a closing `)` or `]` instead of inside it — in which case \
+                 the pattern it was meant to guard is running unguarded.",
+                plugin.name(),
+                query.start_byte_for_pattern(index)
+            );
+        }
+    }
+    assert!(
+        checked >= 5,
+        "expected the landed invocations arms to be compiled in, saw {checked}"
+    );
+}
