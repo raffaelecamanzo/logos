@@ -1537,10 +1537,9 @@ export async function listUsers(url: string) { return axios.get(url); }"#,
 /// The two are independent for `axios`, which is a real import specifier. They
 /// are **not** for `fetch`: it is a global, so the reference that opens the gate
 /// is the call itself and only the query's exact-name guard stands — see the
-/// non-independent-gate rule on [`capture_http_client_call_arm`] and the row's
-/// own note in `plugins/typescript/plugin.toml`. That is why every pattern in
-/// this language's query is scoped to a named client rather than relying on the
-/// gate.
+/// non-independent-gate rule on [`capture_http_client_call_arm`], which is where
+/// that rule is stated once. That is why every pattern in this language's query
+/// is scoped to a named client rather than relying on the gate.
 #[test]
 #[cfg(feature = "lang-typescript")]
 fn a_non_client_receiver_call_is_never_captured() {
@@ -1593,9 +1592,9 @@ export function lookup() { return notaxiosCache.get("/cache/key"); }"#
         "the receiver name rule is a boundary rule, never a substring test"
     );
 
-    // A plain-identifier call that is not `fetch` is refused by the `#eq?`
-    // guard — otherwise the verb-less pattern would make every one-argument
-    // free function in a client file a GET.
+    // A plain-identifier call that is not `fetch` is refused by the anchored
+    // `#match?` name guard — otherwise the verb-less pattern would make every
+    // one-argument free function in a client file a GET.
     assert!(
         ts_client_call_targets(
             r#"import axios from "axios";

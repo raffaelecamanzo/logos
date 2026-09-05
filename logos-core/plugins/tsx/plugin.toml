@@ -40,13 +40,11 @@ framework_detectors = ["express", "next", "react"]
 # one language split across two tree-sitter `Language`s (ADR-09), so a row landed
 # in one and not the other leaves half the TypeScript surface ungated.
 #
-# NON-INDEPENDENT GATE: `fetch` is a bare identifier and a *global*, imported
-# from nothing, so the ledger evidence that opens the gate is the reference on
-# the `fetch` call itself — tautological for that half. The compensating scope is
-# owed by the query: every pattern in `queries/invocations.scm` is anchored to a
-# NAMED client, and this language must NOT ship the broad
-# `<receiver>.<method>(<arg>)` anchor Rust relies on this gate to bound. See the
-# `typescript` descriptor for the full argument, kept there once.
+# NON-INDEPENDENT GATE: `fetch` is one. The general rule is stated once on
+# `extract::capture_http_client_call_arm`; the TS-specific half (why `fetch` is
+# tautological and `axios` is not) is on the `typescript` descriptor's row. The
+# compensating scope that rule obliges is delivered by
+# `queries/invocations.scm`, whose patterns are all anchored to a named client.
 http_client_detectors = ["axios", "fetch"]
 
 [queries]

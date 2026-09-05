@@ -676,13 +676,16 @@ fn extract_one(
 /// what never-fabricate forbids ([NFR-RA-05]).
 ///
 /// The gate is **independent evidence only when every detector row is a name the
-/// call shape itself cannot supply.** A detector is matched against the head of a
-/// canonical reference *target*, not against an import specifier specifically, so
-/// a **bare-identifier** row also matches a plain-call and — in a name-only
-/// reference dialect such as TypeScript's — a member-call name. A row like
-/// `fetch` (S-343: a global, imported from nothing) therefore makes the gate
-/// **non-independent**: the very call the query is about is the ledger evidence
-/// that opens it, and a file declaring its own local `fetch` self-satisfies it.
+/// call shape itself cannot supply.** A detector is matched against a canonical
+/// reference *target* (at a `::` segment boundary, per
+/// [`crate::resolve::matches_detector`]), not against an import specifier
+/// specifically — and for a **single-segment** row the boundary rule and a plain
+/// name equality coincide. So a **bare-identifier** row also matches a plain-call
+/// and — in a name-only reference dialect such as TypeScript's — a member-call
+/// name. A row like `fetch` (S-343: a global, imported from nothing) therefore
+/// makes the gate **non-independent**: the very call the query is about is the
+/// ledger evidence that opens it, and a file declaring its own local `fetch`
+/// self-satisfies it.
 ///
 /// A language adding such a row owes the compensating scope in its own
 /// `invocations.scm`: **every pattern anchored to a named client**, and it must
@@ -690,8 +693,11 @@ fn extract_one(
 /// gate to bound — with a tautological gate behind it, that anchor reopens the
 /// CR-110 fabrication class (`formGroup.get("year")`, `cache.get("/cache/key")`)
 /// with nothing standing behind it but the leading-`/` requirement and
-/// `route_key` ([NFR-RA-05]). The row's own descriptor states which of its
-/// entries are in this position (see `plugins/typescript/plugin.toml`).
+/// `route_key` ([NFR-RA-05]).
+///
+/// **This paragraph is the single statement of that rule** — a descriptor row
+/// records only which of *its own* entries sit in this position, and points
+/// here rather than restating the argument (see `plugins/typescript/plugin.toml`).
 ///
 /// The gate is **file-grained**, so it is a cross-file guarantee only: the same
 /// incidental call *inside* a genuine client file still captures. That residual

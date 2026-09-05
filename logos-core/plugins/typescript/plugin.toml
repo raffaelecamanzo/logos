@@ -43,23 +43,22 @@ framework_detectors = ["express", "next", "react"]
 # consumer-side twin of `framework_detectors`. FR-WS-08's normative TypeScript
 # row is `axios` and the `fetch` global.
 #
-# NON-INDEPENDENT GATE — read before copying this row's shape. A detector is
-# matched against the HEAD of a canonical reference target, not against an
-# import specifier specifically, so a BARE IDENTIFIER here also matches a
-# plain-call and (in a name-only reference dialect such as TypeScript's) a
-# member-call name. `fetch` is a *global*, imported from nothing, so the ledger
-# evidence that opens the gate is the `@ref.call` on the `fetch` identifier
-# itself: for that half the gate is tautological — a file declaring its own
-# local `fetch` self-satisfies it — and only `invocations.scm`'s exact-name
-# guard, the leading-`/` requirement and `route_key` stand behind it. `axios` is
-# a genuine import specifier and gates normally.
+# NON-INDEPENDENT GATE — `fetch` is one. The general rule, and what a language
+# owes when it declares such a row, is stated once on
+# `extract::capture_http_client_call_arm`; read it before copying this row's
+# shape. What is TS-specific, and belongs here:
 #
-# The compensating scope is owed by the query, and is load-bearing: every
-# pattern in `queries/invocations.scm` is anchored to a NAMED client, and this
-# language must NOT ship the broad `<receiver>.<method>(<arg>)` anchor Rust
-# relies on this gate to bound — that is the exact CR-110 fabrication class
-# (`formGroup.get("year")`, `cache.get("/cache/key")`) with nothing behind it
-# (NFR-RA-05).
+#   * `fetch` is a *global*, imported from nothing, so the ledger evidence that
+#     opens the gate is the `@ref.call` on the `fetch` identifier itself. For
+#     that half the gate is tautological — a file declaring its own local
+#     `fetch` self-satisfies it — and only `queries/invocations.scm`'s
+#     exact-name guard, the leading-`/` requirement and `route_key` stand
+#     behind it.
+#   * `axios` is a genuine import specifier and gates normally.
+#
+# The compensating scope that rule obliges IS delivered here: every pattern in
+# `queries/invocations.scm` is anchored to a NAMED client, and this language
+# ships no broad `<receiver>.<method>(<arg>)` anchor.
 #
 # Both TS grammars share the row: `.ts`/`.js` and `.tsx`/`.jsx` are one language
 # split across two tree-sitter `Language`s (ADR-09).
