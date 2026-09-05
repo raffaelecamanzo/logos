@@ -39,6 +39,7 @@ impl NoSymbolsPlugin {
                 nesting_block_kinds: Vec::new(),
                 abi_version: 15,
                 framework_detectors: Vec::new(),
+                http_client_detectors: Vec::new(),
                 framework_methods: std::collections::BTreeMap::new(),
                 export_convention: crate::plugin::ExportConvention::All,
                 test_convention: crate::plugin::TestConvention::None,

@@ -666,11 +666,25 @@ fn extract_one(
 ///
 /// Ledger-gated candidacy (the consumer-side mirror of the framework pass's
 /// FR-FW-04): the `.scm` anchor is a broad `<receiver>.<method>(<arg>)` shape,
-/// so it is captured ONLY in a file that references a known HTTP-client crate.
+/// so it is captured ONLY in a file whose reference ledger names one of the
+/// client packages that language's own descriptor declares
+/// (`http_client_detectors`, matched by [`crate::resolve::matches_detector`] —
+/// the same prefix rule the provider side applies to `framework_detectors`).
 /// Without this gate an incidental collection/registry call whose key looks
 /// like a route (`perms.get("/admin/users")`, a route-table `.get("/health")`)
 /// would be captured, normalize, and fabricate a cross-service edge — exactly
 /// what never-fabricate forbids ([NFR-RA-05]).
+///
+/// The gate is **file-grained**, so it is a cross-file guarantee only: the same
+/// incidental call *inside* a genuine client file still captures. That residual
+/// is the documented ADR-54 accuracy ceiling (see `HTTP_METHODS`), pinned by
+/// `a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling` in
+/// `tests/java_http_client_call.rs`. Under-capture is safe; over-capture is not,
+/// so a language whose client wrapper is undetected simply stays unbound.
+///
+/// A descriptor declaring `invocations` with an empty detector set is refused at
+/// parse time ([`crate::plugin::PluginManifest::validate`]) — otherwise the
+/// capability would read present while this function returned early for ever.
 ///
 /// See [FR-WS-08]'s "Shared negative-case fixture contract" section (S-340)
 /// for the three negative cases every per-language `invocations.scm` story
@@ -681,8 +695,8 @@ fn extract_one(
 /// `invoke.http.method` / `invoke.http.arg` capture names correctly
 /// ([`collect_invocation_sites`]) — never re-implement the classification.
 /// Case 1 (a same-shaped non-HTTP receiver call) is per-language, gated by
-/// this function's ledger check above via
-/// [`http_client_crates`](crate::resolve::http_client_call::http_client_crates).
+/// this function's ledger check above against the descriptor's
+/// `http_client_detectors` rows.
 ///
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
@@ -699,11 +713,12 @@ fn capture_http_client_call_arm(
     let Some(inv_query) = plugin.query("invocations") else {
         return;
     };
-    let detectors = crate::resolve::http_client_call::http_client_crates(plugin.name());
+    let detectors = &plugin.semantics().http_client_detectors;
     let is_http_client_file = !detectors.is_empty()
         && facts.refs.iter().any(|r| {
-            let head = r.target.split("::").next().unwrap_or_default();
-            detectors.contains(&head)
+            detectors
+                .iter()
+                .any(|d| crate::resolve::matches_detector(&r.target, d))
         });
     if !is_http_client_file {
         return;

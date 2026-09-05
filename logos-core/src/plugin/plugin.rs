@@ -42,6 +42,13 @@ pub struct Semantics {
     ///
     /// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
     pub framework_detectors: Vec<String>,
+    /// Canonical reference-path prefixes that gate **HTTP client-call**
+    /// candidacy (S-341, [FR-WS-08]; see
+    /// [`PluginManifest::http_client_detectors`]) — the consumer-side twin of
+    /// [`Self::framework_detectors`].
+    ///
+    /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+    pub http_client_detectors: Vec<String>,
     /// Captured `@fw.route.method` text → HTTP method for the declarative
     /// framework contract (S-015; see [`PluginManifest::framework_methods`]).
     pub framework_methods: std::collections::BTreeMap<String, String>,
@@ -210,6 +217,7 @@ impl CompiledPlugin {
             nesting_block_kinds: manifest.nesting_block_kinds,
             abi_version: manifest.abi_version,
             framework_detectors: manifest.framework_detectors,
+            http_client_detectors: manifest.http_client_detectors,
             framework_methods: manifest.framework_methods,
             export_convention: manifest.export_convention,
             test_convention: manifest.test_convention,
