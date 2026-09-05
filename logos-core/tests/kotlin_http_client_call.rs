@@ -230,6 +230,55 @@ class Calls(private val restClient: RestClient) {
     );
 }
 
+/// **Every position and receiver form pattern 4 spells out, pinned positively.**
+///
+/// Pattern 4 is written as four near-identical branches because the discriminator
+/// against a trailing-lambda route registration IS the parent node, and a
+/// tree-sitter query can only state a parent positively. That makes each branch
+/// load-bearing by the query's own account — so each one needs a fixture that
+/// would stop capturing if the branch were deleted. The same goes for the
+/// `this.`-qualified receiver alternative repeated inside all four: the only
+/// other `this.` fixture in this file goes through pattern 1, whose receiver slot
+/// is an unconstrained `(_)`, so it would not notice.
+#[test]
+fn each_receiver_method_position_and_receiver_form_is_captured() {
+    for (label, body, expected) in [
+        (
+            "block statement",
+            r#"fun drop(id: String) { restTemplate.delete("/carts/{id}") }"#,
+            "DELETE /carts/{id}",
+        ),
+        (
+            "expression body",
+            r#"fun drop(id: String) = restTemplate.delete("/sessions/{id}")"#,
+            "DELETE /sessions/{id}",
+        ),
+        (
+            "return position",
+            r#"fun drop(id: String) { return restTemplate.delete("/baskets/{id}") }"#,
+            "DELETE /baskets/{id}",
+        ),
+        (
+            "property initialiser",
+            r#"fun drop(id: String) { val ignored = restTemplate.delete("/orders/{id}") }"#,
+            "DELETE /orders/{id}",
+        ),
+        (
+            "`this.`-qualified receiver",
+            r#"fun drop(id: String) { this.restTemplate.delete("/quotes/{id}") }"#,
+            "DELETE /quotes/{id}",
+        ),
+    ] {
+        assert_eq!(
+            client_calls(&format!(
+                "class Calls(private val restTemplate: RestTemplate) {{\n    {body}\n}}"
+            )),
+            [expected],
+            "{label} is one of pattern 4's stated positions and must capture"
+        );
+    }
+}
+
 /// **Extension-function receiver — CAPTURED when the receiver is spelled,
 /// REFUSED when it is implicit**, and the two halves of that split are recorded
 /// here together because the refusal is not an oversight: an implicit-receiver
@@ -482,7 +531,7 @@ fn route_registrations_are_never_captured_as_outbound_calls() {
             r#"fun routes() { routing { get("/users") { call.respond(x) } } }"#,
         ),
         (
-            "RouterFunctions, class-qualified",
+            "RouterFunctions (refused by verb-name and arity, NOT the receiver rule)",
             r#"fun routes() = RouterFunctions.route(GET("/users"), handler)"#,
         ),
         (
@@ -506,6 +555,134 @@ fn route_registrations_are_never_captured_as_outbound_calls() {
             "{label} must emit no outbound call"
         );
     }
+}
+
+/// **The lower-case-receiver rule, pinned in its own right.**
+///
+/// `route_registrations_are_never_captured_as_outbound_calls` above does *not*
+/// exercise it: every fixture there is refused by a different rule
+/// (`RouterFunctions.route(…)` because `route` is not an HTTP verb and it takes
+/// two arguments; the DSL forms because they have no receiver). So the
+/// `(#match? @_recv "^[a-z_]")` guard — the one that keeps a **type**-qualified
+/// call from being read as an outbound call — had no test at all, and could be
+/// deleted with the whole suite still green.
+///
+/// It is not a hypothetical. `RequestPredicates.GET("/users")` is a Spring
+/// WebFlux **route declaration**: an upper-case receiver, an HTTP-verb member
+/// name and a sole absolute string literal, in a plain statement position. It is
+/// the exact shape pattern 4 matches, and capturing it would record a provider
+/// as calling its own endpoint — binding another workspace member's real
+/// `GET /users` and fabricating a cross-service edge ([NFR-RA-05]).
+///
+/// This test exists because that is precisely what happened: the guard was
+/// written but not attached (its predicate sat outside the alternation, so
+/// tree-sitter parsed it as a separate pattern), and nothing here noticed.
+#[test]
+fn a_class_qualified_receiver_is_never_captured() {
+    for (label, body) in [
+        (
+            "RequestPredicates.GET as a statement",
+            r#"fun routes() { RequestPredicates.GET("/users") }"#,
+        ),
+        (
+            "RequestPredicates.GET as a property initialiser",
+            r#"fun routes() { val p = RequestPredicates.GET("/users") }"#,
+        ),
+        (
+            "a non-HTTP class-qualified call that merely looks like one",
+            r#"fun f() { val p = Paths.get("/etc/hosts") }"#,
+        ),
+    ] {
+        assert!(
+            client_calls(&format!(
+                "class Calls(private val restTemplate: RestTemplate)\n{body}"
+            ))
+            .is_empty(),
+            "{label}: a receiver must be a value, never a type"
+        );
+    }
+}
+
+/// **The `$`-guard on the plain receiver-method idiom, pinned in its own right.**
+///
+/// `a_string_template_path_emits_no_reference` exercises only the *fluent*
+/// `.uri(…)` form, whose guard lives on pattern 1. Pattern 4 carries its own
+/// copy, and it too was unattached and untested: with it gone,
+/// `static_string_literal` concatenates kotlin-ng's split `string_content`
+/// children back into `/carts/$id`, `classify_client_call` sees an absolute
+/// literal, and the arm emits `DELETE /carts/$id` — a runtime-composed path
+/// bound as though it were static ([NFR-RA-05]).
+#[test]
+fn an_interpolated_path_on_the_receiver_method_idiom_emits_no_reference() {
+    for (label, body) in [
+        (
+            "block statement",
+            r#"fun drop(id: String) { restTemplate.delete("/carts/$id") }"#,
+        ),
+        (
+            "expression body",
+            r#"fun drop(id: String) = restTemplate.delete("/carts/$id")"#,
+        ),
+        (
+            "return position",
+            r#"fun drop(id: String) { return restTemplate.delete("/carts/$id") }"#,
+        ),
+    ] {
+        assert!(
+            client_calls(&format!(
+                "class Calls(private val restTemplate: RestTemplate) {{\n    {body}\n}}"
+            ))
+            .is_empty(),
+            "{label}: a Kotlin string template is composed at runtime and must \
+             never be bound as a static template"
+        );
+    }
+}
+
+/// **Stated over-capture ceiling — a route registration whose handler is
+/// CHAINED rather than passed.**
+///
+/// Pattern 4's position rule excludes a trailing-lambda registration
+/// (`app.get("/x") { … }`), but not one that takes its handler on a *later*
+/// link (`val route = router.get("/x"); route.handler { … }` — Vert.x, http4k)
+/// nor a bare MockMvc DSL call with no lambda. Structurally these are
+/// indistinguishable from `restTemplate.delete("/x")`: lower-case receiver, HTTP
+/// verb, sole absolute literal, statement or property position. No query can
+/// separate them without receiver typing.
+///
+/// This is the same class as
+/// [`a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling`]
+/// and is pinned the same way — asserting the *current* (over-capturing)
+/// behaviour, so that narrowing it later is a deliberate change rather than an
+/// accident, and so the ceilings list cannot claim more than it delivers.
+///
+/// Note the direct-chain spelling (`router.post("/orders").handler { … }`) is
+/// correctly refused: there the call is the receiver of a further navigation,
+/// which is not one of pattern 4's positions.
+#[test]
+fn a_chained_handler_route_registration_is_a_stated_over_capture_ceiling() {
+    assert_eq!(
+        client_calls(
+            r#"
+class Calls(private val restTemplate: RestTemplate) {
+    fun register(router: Router) {
+        val route = router.get("/vertx-users")
+        route.handler { ctx -> ctx.end() }
+    }
+    fun probe(mockMvc: MockMvc) {
+        mockMvc.get("/mockmvc-orders")
+    }
+    fun direct(router: Router) {
+        router.post("/chained").handler { ctx -> ctx.end() }
+    }
+}
+"#
+        ),
+        ["GET /mockmvc-orders", "GET /vertx-users"],
+        "the chained-handler and bare-DSL registrations are over-captured (the \
+         documented ceiling); the DIRECT chain is correctly refused, so no \
+         `POST /chained` appears"
+    );
 }
 
 /// `URI.create(…)` is anchored on its **receiver type**, so an unrelated
