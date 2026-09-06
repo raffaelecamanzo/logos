@@ -17,6 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 
@@ -102,6 +103,72 @@ pub struct Engine {
     ///
     /// [web-surface]: ../../../docs/specs/architecture/components/web-surface.md
     native_wiki: std::sync::Mutex<Option<(u64, crate::wiki::NativeWiki)>>,
+}
+
+/// Per-phase cold-start attribution, produced by
+/// [`Engine::start_with_phase_report`] ([CR-116], [NFR-PE-05], [S-368]).
+///
+/// [`Engine::start`] itself is untouched — this struct and the function that
+/// produces it exist purely to answer CR-116 §3.2: whether the phases
+/// [NFR-PE-05] enumerates alone exceed the 500 ms budget, or whether the
+/// excess sits in the phases it does not enumerate (store open, schema
+/// migration, pool startup).
+///
+/// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+/// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+/// [S-368]: ../../../docs/planning/journal.md#s-368-attribute-the-cold-start-cost-across-its-phases
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ColdStartPhases {
+    /// Parsing every grammar's embedded `plugin.toml`.
+    pub plugin_toml_parse: Duration,
+    /// Everything else `LanguageRegistry::load` does besides parsing and
+    /// query compilation: ABI assertion, override-dir resolution, and
+    /// plugin/extension/filename bookkeeping.
+    pub registry_construction: Duration,
+    /// Resolving and compiling every capability's query.
+    pub query_compilation: Duration,
+    /// Opening the writer store's file and applying the pragma contract.
+    pub store_open: Duration,
+    /// Running the writer store's schema migrations.
+    pub schema_migration: Duration,
+    /// Opening the read-only pool plus building (or attaching) the worker pool.
+    pub pool_startup: Duration,
+    /// Everything on the cold path that is not one of the six phases above:
+    /// worktree-root resolution, `.logos/` directory creation, worktree-seed
+    /// detection/copy, governance-contract seeding, and the post-construction
+    /// seed-diff reconcile. Exists so [`sum`](Self::sum) reconciles with the
+    /// externally measured wall time rather than merely approximating it
+    /// (CR-116 AC1).
+    pub other: Duration,
+}
+
+impl ColdStartPhases {
+    /// Sum of every phase, including [`other`](Self::other) — reconciles with
+    /// the externally measured [`Engine::start_with_phase_report`] wall time
+    /// to within the noise of the handful of `Instant::now()` calls
+    /// themselves (CR-116 AC1).
+    pub fn sum(&self) -> Duration {
+        self.plugin_toml_parse
+            + self.registry_construction
+            + self.query_compilation
+            + self.store_open
+            + self.schema_migration
+            + self.pool_startup
+            + self.other
+    }
+
+    /// The total for **only** the phases [NFR-PE-05] currently enumerates:
+    /// embedded `plugin.toml` parse, `LanguageRegistry` construction, query
+    /// compilation. Store open, schema migration and pool startup are
+    /// deliberately excluded — this is the number that decides
+    /// [CR-116] §3.2's branch (a) (a genuine breach) versus branch (b) (the
+    /// guard measures more than the requirement bounds).
+    ///
+    /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+    /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+    pub fn nfr_pe05_enumerated_total(&self) -> Duration {
+        self.plugin_toml_parse + self.registry_construction + self.query_compilation
+    }
 }
 
 impl Engine {
@@ -359,6 +426,138 @@ impl Engine {
         }
 
         Ok(engine)
+    }
+
+    /// [`Engine::start`], instrumented with per-phase cold-start attribution
+    /// ([CR-116], [NFR-PE-05], [S-368]).
+    ///
+    /// Mirrors [`start_with_configs`](Self::start_with_configs) step for step,
+    /// timing each phase with a plain `Instant` delta rather than routing
+    /// through it. `Engine::start` is byte-for-byte untouched, so this
+    /// diagnostic path's own overhead never lands on the measured production
+    /// cold start — the delta between this function's wall time and
+    /// `Engine::start`'s over the same root is the instrumentation's own cost
+    /// (CR-116 R2).
+    ///
+    /// [`ColdStartPhases::other`] absorbs everything that is not one of the
+    /// six named phases — root resolution, directory creation, worktree-seed
+    /// detection/copy, and the post-construction seed-diff reconcile — so
+    /// [`ColdStartPhases::sum`] reconciles with the externally measured wall
+    /// time to within the noise of the handful of `Instant::now()` calls
+    /// themselves, not merely "within a stated margin" by approximation.
+    ///
+    /// # Errors
+    /// Same as [`Engine::start`].
+    ///
+    /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+    /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+    /// [S-368]: ../../../docs/planning/journal.md#s-368-attribute-the-cold-start-cost-across-its-phases
+    pub fn start_with_phase_report(root: impl AsRef<Path>) -> Result<(Self, ColdStartPhases)> {
+        let mut phases = ColdStartPhases::default();
+
+        let t_other = Instant::now();
+        let root = crate::workspace::resolve_root(root.as_ref());
+        let logos_dir = root.join(".logos");
+        std::fs::create_dir_all(&logos_dir)
+            .with_context(|| format!("creating the .logos directory at {}", logos_dir.display()))?;
+        let db_path = logos_dir.join("logos.db");
+
+        let seed = if db_path.exists() {
+            None
+        } else {
+            let seed = crate::workspace::seed_source(&root).and_then(
+                |seed| match crate::graph_store::seed_copy(&seed.db_path, &db_path) {
+                    Ok(()) => {
+                        tracing::info!(
+                            primary = %seed.primary_root.display(),
+                            head = %seed.head,
+                            "seeded the worktree store from the primary checkout (ADR-15)"
+                        );
+                        Some(seed)
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "seed-from-main copy failed; falling back to a fresh store \
+                             and a full index: {err:#}"
+                        );
+                        None
+                    }
+                },
+            );
+
+            if let Some(primary) = crate::workspace::primary_root(&root) {
+                let contract = crate::workspace::seed_contract(&primary, &root);
+                for (name, outcome) in [
+                    ("rules.toml", contract.rules),
+                    ("config.toml", contract.config),
+                ] {
+                    match outcome {
+                        crate::workspace::ContractFileOutcome::Copied => {
+                            tracing::info!(
+                                file = name,
+                                primary = %primary.display(),
+                                "seeded the governance contract file from the primary checkout (FR-WT-06)"
+                            );
+                        }
+                        crate::workspace::ContractFileOutcome::Absent
+                        | crate::workspace::ContractFileOutcome::AlreadyPresent => {}
+                        crate::workspace::ContractFileOutcome::Failed(error) => {
+                            tracing::warn!(
+                                file = name,
+                                primary = %primary.display(),
+                                error = %error,
+                                "seeding {name} from the primary checkout failed; the \
+                                 worktree's governance contract may be incomplete"
+                            );
+                        }
+                    }
+                }
+            }
+
+            seed
+        };
+        phases.other += t_other.elapsed();
+
+        let (runtime, runtime_timings) =
+            Runtime::open_with_config_timed(&db_path, RuntimeConfig::default()).with_context(
+                || format!("starting the execution runtime for root {}", root.display()),
+            )?;
+        phases.store_open = runtime_timings.store_connect;
+        phases.schema_migration = runtime_timings.schema_migration;
+        phases.pool_startup = runtime_timings.pool_startup;
+
+        let registry = match crate::plugin::LanguageRegistry::load_with_timings(&root) {
+            Ok((registry, reg_timings)) => {
+                phases.plugin_toml_parse = reg_timings.manifest_parse;
+                phases.query_compilation = reg_timings.query_compile;
+                phases.registry_construction = reg_timings.construction;
+                Some(registry)
+            }
+            Err(err) => {
+                tracing::warn!("could not load plugin registry at startup: {err}");
+                None
+            }
+        };
+
+        let t_seed = Instant::now();
+        let engine = Self {
+            root,
+            runtime: Some(runtime),
+            registry,
+            hydration: HydrationCache::new(HydrationConfig::default()),
+            sync_stamp: AtomicU64::new(SyncStamp::INITIAL.0),
+            nav_prologue_done: AtomicBool::new(false),
+            last_full_index_at: AtomicU64::new(0),
+            governance: crate::governance::GovernanceState::default(),
+            native_wiki: std::sync::Mutex::new(None),
+        };
+
+        if let Some(seed) = seed {
+            engine.reconcile_seed_diff(&seed);
+        }
+        phases.other += t_seed.elapsed();
+
+        Ok((engine, phases))
     }
 
     /// The live execution runtime, if this engine was created with

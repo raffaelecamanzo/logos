@@ -23,6 +23,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use tree_sitter::Language;
 
@@ -243,6 +244,118 @@ impl LanguageRegistry {
     pub fn is_empty(&self) -> bool {
         self.plugins.is_empty()
     }
+
+    /// [`load`](Self::load), timed per phase ([CR-116], [NFR-PE-05]).
+    ///
+    /// Mirrors [`load_from`](Self::load_from)'s loop step for step, splitting
+    /// its wall-clock into three buckets: `plugin.toml` parse, query
+    /// compilation, and everything else the loop does (ABI assertion, override
+    /// resolution, extension/filename bookkeeping — the [NFR-PE-05]-enumerated
+    /// "`LanguageRegistry` construction"). `load`/`load_from` are untouched, so
+    /// this diagnostic path's own cost never lands on the production
+    /// cold-start path — used only by
+    /// [`Engine::start_with_phase_report`](crate::Engine::start_with_phase_report).
+    ///
+    /// # Errors
+    /// As [`load`](Self::load).
+    ///
+    /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+    /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+    pub(crate) fn load_with_timings(
+        project_root: impl AsRef<Path>,
+    ) -> Result<(Self, RegistryLoadTimings), PluginError> {
+        let entries = grammars::compiled();
+        let abi_range = AbiRange::runtime();
+        let project_root = Some(project_root.as_ref());
+
+        let mut plugins: Vec<CompiledPlugin> = Vec::new();
+        let mut by_extension: HashMap<String, usize> = HashMap::new();
+        let mut filename_claims: Vec<(String, usize)> = Vec::new();
+        let mut skipped: Vec<SkippedGrammar> = Vec::new();
+        let mut timings = RegistryLoadTimings::default();
+
+        for entry in &entries {
+            let t = Instant::now();
+            let manifest = PluginManifest::parse(entry.manifest_label, entry.manifest_toml)?;
+            timings.manifest_parse += t.elapsed();
+
+            let t = Instant::now();
+            let language: Language = entry.language.into();
+            let compiled_abi = language.abi_version();
+            if let Err(reason) = assert_abi(manifest.abi_version, compiled_abi, &abi_range) {
+                let skip = SkippedGrammar {
+                    name: manifest.name.clone(),
+                    reason,
+                };
+                tracing::warn!("{skip}");
+                skipped.push(skip);
+                timings.construction += t.elapsed();
+                continue; // skip only this grammar — the run is not aborted
+            }
+            let override_dir = project_root.map(|root| override_dir_for(root, &manifest.name));
+            timings.construction += t.elapsed();
+
+            let t = Instant::now();
+            let (queries, overridden) =
+                compile_capabilities(entry, &manifest, &language, override_dir.as_deref())?;
+            timings.query_compile += t.elapsed();
+
+            let t = Instant::now();
+            let plugin = CompiledPlugin::new(manifest, language, queries, overridden);
+
+            let idx = plugins.len();
+            for ext in plugin.extensions() {
+                if let Some(prev) = by_extension.insert(normalize_ext(ext), idx) {
+                    tracing::warn!(
+                        "extension '{ext}' claimed by '{}' shadows '{}'",
+                        plugin.name(),
+                        plugins[prev].name()
+                    );
+                }
+            }
+            for fname in plugin.filenames() {
+                if let Some((_, prev)) = filename_claims.iter().find(|(c, _)| c == fname) {
+                    tracing::warn!(
+                        "filename '{fname}' claimed by '{}' also claimed by '{}'",
+                        plugin.name(),
+                        plugins[*prev].name()
+                    );
+                }
+                filename_claims.push((fname.clone(), idx));
+            }
+            plugins.push(plugin);
+            timings.construction += t.elapsed();
+        }
+
+        Ok((
+            Self {
+                plugins,
+                by_extension,
+                filename_claims,
+                skipped,
+            },
+            timings,
+        ))
+    }
+}
+
+/// Per-phase timings for [`LanguageRegistry::load_with_timings`] ([CR-116],
+/// [NFR-PE-05]).
+///
+/// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+/// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct RegistryLoadTimings {
+    /// Parsing every grammar's embedded `plugin.toml`.
+    pub manifest_parse: Duration,
+    /// Resolving and compiling every capability's query.
+    pub query_compile: Duration,
+    /// Everything else the load loop does: ABI assertion, override-dir
+    /// resolution, plugin/extension/filename bookkeeping — the
+    /// [NFR-PE-05]-enumerated "`LanguageRegistry` construction".
+    ///
+    /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+    pub construction: Duration,
 }
 
 /// Resolve and compile every capability's query for one grammar.
@@ -734,5 +847,36 @@ mod tests {
         assert!(reg.is_empty());
         assert_eq!(reg.skipped().len(), grammars::compiled().len());
         assert!(!warnings.is_empty());
+    }
+
+    /// [`load_with_timings`](LanguageRegistry::load_with_timings) is a
+    /// near-duplicate of [`load`](LanguageRegistry::load)'s loop, kept
+    /// separate so the [CR-116] measurement path never touches production
+    /// cold start. A regression guard against the two drifting apart: same
+    /// project root, same compiled-in grammar table, so both must load the
+    /// same grammars and skip the same ones.
+    ///
+    /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+    #[test]
+    fn load_with_timings_matches_load() {
+        let root = tempfile::TempDir::new().expect("temp root");
+        let plain = LanguageRegistry::load(root.path()).expect("load succeeds");
+        let (timed, timings) =
+            LanguageRegistry::load_with_timings(root.path()).expect("load_with_timings succeeds");
+
+        assert_eq!(
+            plain.len(),
+            timed.len(),
+            "load_with_timings loads the same number of grammars as load"
+        );
+        assert_eq!(
+            plain.skipped().len(),
+            timed.skipped().len(),
+            "load_with_timings skips the same grammars as load"
+        );
+        assert!(
+            timings.manifest_parse + timings.query_compile + timings.construction > Duration::ZERO,
+            "a non-empty grammar table records some phase time: {timings:?}"
+        );
     }
 }

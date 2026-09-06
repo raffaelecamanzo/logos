@@ -162,7 +162,7 @@ pub mod wiki;
 /// primary checkout's DB to seed from via `--git-common-dir` (FR-WT-03).
 pub mod workspace;
 
-pub use engine::Engine;
+pub use engine::{ColdStartPhases, Engine};
 pub use error::{CoreError, Severity};
 pub use hydrate::{Granularity, GraphView, HydrationConfig, HydrationStats, Scope, SyncStamp};
 pub use runtime::{live_worker_threads, Runtime, RuntimeConfig, SharedWorkerPool, WeakWorkerPool};
