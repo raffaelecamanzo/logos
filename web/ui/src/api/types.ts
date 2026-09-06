@@ -1024,15 +1024,62 @@ export type UnboundReason =
  *  bucket, never folded into `unbound`. */
 export type CoverageBucket = "bound" | "ambiguous" | "unbound";
 
+/** What the providers listed on a coverage row ARE to that row (CR-118). Read
+ *  this, never `bucket`, to decide whether a listed provider is actually reached:
+ *  the two sets are the same shape and mean opposite things.
+ *
+ *  - `bound-to` — every listed provider IS bound; the fan-out arms' shape, where
+ *    one publish reaches every cross-member subscriber (FR-WS-10).
+ *  - `tied-between` — the listed providers tied at the exactly-one test; NONE is
+ *    bound, no edge exists, and the row stays `unbound` (NFR-RA-05). */
+export type ProviderDisposition = "bound-to" | "tied-between";
+
+/** The providers named on one coverage row — bounded, never silently trimmed
+ *  (CR-118, NFR-CC-04). */
+export interface ProviderCandidates {
+  disposition: ProviderDisposition;
+  /** The providers, capped server-side; `total` says how many there were. */
+  providers: BridgeEndpoint[];
+  /** How many providers there were BEFORE truncation. */
+  total: number;
+  /** How many `total` omits from `providers` — `0` when nothing was truncated,
+   *  and present even then, so absence of truncation is stated rather than
+   *  inferred from a length (NFR-CC-04). */
+  omitted: number;
+  /** The set never presented bare: its size, how much is listed, and what it
+   *  means — e.g. `"4 tied providers, all listed; none bound"`. */
+  summary: string;
+}
+
 /** One cross-boundary reference's coverage classification (FR-WS-05). `state` +
  *  `reason` are the flattened `CoverageState`; `bucket` is the display bucket
- *  derived from them server-side, so the two can never disagree. */
+ *  derived from them server-side, so the two can never disagree.
+ *
+ *  `to` / `intake` / `candidates` are the CR-118 provider-identity riders. All
+ *  three are OPTIONAL and every one of them is genuinely absent on real rows —
+ *  an older store predates them entirely, and even a current store omits them on
+ *  a row with no provider to name. A view must render a row without them
+ *  (CR-118 §4.5); it must never `!`-assert its way past one. */
 export interface ReferenceCoverage {
   relation: string;
   from: BridgeEndpoint;
   bucket: CoverageBucket;
   state: "bound" | "unbound";
   reason?: UnboundReason;
+  /** The provider this reference bound to, under an exactly-one discipline
+   *  (`route`, `grpc-call`) — the same pair `xservice route-providers` reports.
+   *  Absent on every non-bound row, and on a fan-out bound row, which binds a
+   *  SET and reports it in `candidates` instead (CR-118). */
+  to?: BridgeEndpoint;
+  /** How this row's binding entered the overlay (CR-083). Present only on a
+   *  bound row: an intake describes an edge, and a row that bound nothing has
+   *  none. */
+  intake?: BridgeIntake;
+  /** The providers this reference tied between (ambiguous) or fanned out to (a
+   *  bound broker row). On an ambiguous row this is what turns a bare
+   *  `ambiguous` count into a diagnosis — four aggregator members on one
+   *  template is the architecture, not a matcher defect (FR-CG-09 Notes). */
+  candidates?: ProviderCandidates;
 }
 
 /** The advisory 3-state cross-service coverage summary (FR-WS-05, ADR-53) — never

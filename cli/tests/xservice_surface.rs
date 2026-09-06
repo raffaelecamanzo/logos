@@ -249,6 +249,75 @@ fn workspace_status_reports_the_excluded_count_when_the_bound_ratio_is_absent() 
     );
 }
 
+// ── S-372 / CR-118: a coverage row names the other end ────────────────────────
+
+/// **[CR-118] §2.1's headline gap, closed end-to-end.** A bound coverage row in
+/// `workspace status --json` carries the provider it bound to, and it is the
+/// *identical* `(member, symbol, intake)` triple `xservice route-providers`
+/// reports for the same reference — asserted by running both real commands over
+/// one workspace and comparing them, which is the whole claim: the answer already
+/// existed on a sibling surface, and the surface that frames the question now
+/// holds it too.
+///
+/// The unbound sibling row is asserted in the same pass: `to` is absent there, so
+/// a reader can tell "bound to nothing" from "bound to something unnamed".
+///
+/// [CR-118]: ../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+#[test]
+fn a_bound_coverage_row_names_the_same_provider_route_providers_does() {
+    let tmp = workspace();
+
+    let status = logos_json(tmp.path(), &["workspace", "status"]);
+    let references = status["coverage"]["references"]
+        .as_array()
+        .expect("coverage carries its classified references");
+    let bound: Vec<&Value> = references.iter().filter(|r| r["bucket"] == "bound").collect();
+    assert_eq!(bound.len(), 1, "the GET operation is the one bound reference: {references:?}");
+
+    let edges = logos_json(tmp.path(), &["xservice", "route-providers"]);
+    let providers = edges["providers"].as_array().expect("providers array");
+    assert_eq!(providers.len(), 1);
+
+    assert_eq!(
+        bound[0]["to"], providers[0]["to"],
+        "the coverage row and the route-providers edge name the SAME provider — \
+         the `to` key that was absent on all 875 rows of the reference workspace"
+    );
+    assert_eq!(bound[0]["from"], providers[0]["from"]);
+    assert_eq!(
+        bound[0]["intake"], providers[0]["intake"],
+        "and the same intake discriminator (CR-083), so the two surfaces agree on \
+         how the binding was captured as well as on what it bound"
+    );
+    assert_eq!(bound[0]["to"]["member"], "web");
+
+    // The DELETE operation has no provider anywhere: absent `to`, not an empty
+    // one — a reader distinguishes "bound to nothing" from "bound, unnamed".
+    let orphan: Vec<&Value> = references
+        .iter()
+        .filter(|r| r["reason"] == "no-provider-in-workspace")
+        .collect();
+    assert_eq!(orphan.len(), 1);
+    for field in ["to", "intake", "candidates"] {
+        assert!(
+            orphan[0].get(field).is_none(),
+            "`{field}` is absent on a row with no provider to name: {}",
+            orphan[0]
+        );
+    }
+
+    // The human rendering is the same read-model pretty-printed (FR-CL-02), so the
+    // provider reaches the human surface too — asserted on the whole coverage
+    // object so neither surface can gain the field without the other.
+    let human = logos(tmp.path(), &["workspace", "status"]);
+    let human: Value = serde_json::from_str(&String::from_utf8(human.stdout).unwrap())
+        .expect("the human rendering is the same read-model, pretty-printed");
+    assert_eq!(
+        human["coverage"], status["coverage"],
+        "human and --json carry the identical coverage payload, provider included"
+    );
+}
+
 // ── S-323: per-member warm state and roll-up (FR-WS-15, BR-44, NFR-CC-04) ──
 
 /// A workspace of `members`, each a committed git repo (so `discover` keeps it),
