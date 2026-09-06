@@ -65,7 +65,8 @@ use logos_core::federation::{query as fed_query, Backing, ContractBridge, Engine
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
 use logos_core::models::navigation::{
-    GraphElements, ImpactResult, LanguageComposition, NodeInfo, SearchResult, StatusInfo,
+    GraphElements, ImpactIntersectionResult, ImpactResult, LanguageComposition, NodeInfo,
+    SearchResult, StatusInfo,
 };
 use logos_core::models::quality::{
     DsmReport, EvolutionReport, GateResult, LanguagesInfo, RulesReport, ScanResult, StatsInfo,
@@ -381,6 +382,40 @@ pub(crate) async fn impact(
         return ok(ImpactResult::default());
     };
     let result: ImpactResult = bridge(engine, "api_v1_impact", move |e| e.impact(&seed, None)).await;
+    ok(result)
+}
+
+/// `GET /api/v1/impact-intersection?item=<id>=<sym>[,<sym>]&item=…[&depth=<n>]`
+/// — which planned work items collide, and on what ([FR-NV-11], CR-114).
+///
+/// The JSON twin of the `impact-intersection` CLI command and the MCP tool of
+/// the same name: all three hand their raw `item` strings to the **one**
+/// [`Engine::impact_intersection`] accessor, which owns the
+/// `<id>=<symbol>,…` parse — so the three surfaces cannot drift in what they
+/// accept ([ADR-01], [NFR-MA-02]). `item` repeats, which is why this handler
+/// reads the query as ordered pairs rather than the map the other endpoints use.
+///
+/// A pure reader ([ADR-28]). Infallible at the surface: no `item` at all, a
+/// malformed spec, or a symbol the graph does not know all resolve to an honest
+/// read-model carrying its warnings and coverage limits — never a `404` or a
+/// `400` ([NFR-CC-04]).
+pub(crate) async fn impact_intersection(
+    MemberEngine(engine): MemberEngine,
+    Query(pairs): Query<Vec<(String, String)>>,
+) -> Response {
+    let items: Vec<String> = pairs
+        .iter()
+        .filter(|(key, _)| key == "item")
+        .map(|(_, value)| value.clone())
+        .collect();
+    let depth = pairs
+        .iter()
+        .find(|(key, _)| key == "depth")
+        .and_then(|(_, value)| value.parse::<usize>().ok());
+    let result: ImpactIntersectionResult = bridge(engine, "api_v1_impact_intersection", move |e| {
+        e.impact_intersection(&items, depth)
+    })
+    .await;
     ok(result)
 }
 

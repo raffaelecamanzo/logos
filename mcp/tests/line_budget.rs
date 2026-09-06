@@ -109,14 +109,29 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// promotions-only projection — the member filter, the honest-empty `dead: None`
 /// suppression, and the `all → !promotions_only` inversion — all live in
 /// `logos_core::federation::reach`; the surface only parses and delegates.
+/// S-358/CR-114 raises 920→940 for the `impact_intersection` tool ([FR-NV-11]).
+/// Measured against the Sprint 63 base of 913, the change costs +21, landing the
+/// adapter at 934; 940 is that measurement plus the usual small headroom.
+///
+/// Delegation-only, and there is nothing to trim: the tool is an attribute, a
+/// signature, and ONE `Engine::impact_intersection` call, plus a typed
+/// `ImpactIntersectionParams` (`items`/`depth`). This guard counts EVERY
+/// non-blank line including doc comments, so roughly half the delta is the
+/// tool `description` and the two param doc lines — the wire contract an MCP
+/// host reads, which is precisely what must not move into the core.
+///
+/// Note what deliberately did NOT land here: the `<id>=<symbol>[,<symbol>...]`
+/// parse. It lives in `logos_core::models::navigation::WorkItem::from_specs`,
+/// shared verbatim with the CLI command and the `/api/v1` route, so no surface
+/// owns a spelling of its own (ADR-01). CR-084 §6 — recorded, not laundered.
 #[test]
 fn mcp_surface_line_budget() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 920,
-        "mcp adapter exceeds the 920 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 940,
+        "mcp adapter exceeds the 940 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

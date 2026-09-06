@@ -84,6 +84,15 @@ const REPRESENTATIVE: &[&[&str]] = &[
     &["callers", "alpha", "--limit", "5"],
     &["callees", "alpha", "--limit", "5"],
     &["impact", "alpha", "--depth", "2"],
+    &[
+        "impact-intersection",
+        "--item",
+        "S-1=top",
+        "--item",
+        "S-2=base",
+        "--depth",
+        "2",
+    ],
     &["affected", "src/core.rs", "--tests-only"],
     &["scan", "src"],
     &["check"],
@@ -970,8 +979,8 @@ fn serve_mcp_speaks_jsonrpc_on_stdout_and_exits_cleanly_on_disconnect() {
             .as_array()
             .expect("tools array")
             .len(),
-        27,
-        "all 27 tools register through the shipped binary (FR-MC-01)"
+        28,
+        "all 28 tools register through the shipped binary (FR-MC-01)"
     );
 
     // Host disconnect → the process winds down by itself with exit 0.
@@ -989,6 +998,87 @@ fn serve_mcp_speaks_jsonrpc_on_stdout_and_exits_cleanly_on_disconnect() {
         std::thread::sleep(Duration::from_millis(50));
     };
     assert!(status.success(), "clean exit on disconnect, got {status}");
+}
+
+// ── FR-NV-11 / CR-114: impact-set intersection across planned work items ────
+
+/// The scheduling query, end-to-end through the shipped binary in `--json`
+/// mode (the acceptance criterion "ships with a CLI command carrying `--json`").
+///
+/// The fixture chain is `top` -> `mid` -> `base`, so an item intending to change
+/// `top` and one intending to change `base` are NOT independent: `base` is in
+/// both impact sets. That is the collision a planner otherwise infers from
+/// architecture prose.
+#[test]
+fn impact_intersection_reports_the_collision_through_the_binary() {
+    let tmp = fixture();
+    logos(tmp.path(), &["index"]);
+
+    let out = logos(
+        tmp.path(),
+        &[
+            "impact-intersection",
+            "--item",
+            "S-1=top",
+            "--item",
+            "S-2=base",
+            "--json",
+        ],
+    );
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let payload: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json emits one machine-readable object");
+
+    // The pair is reported as intersecting, and the shared symbols are named.
+    let intersecting = payload["intersecting"].as_array().expect("intersecting");
+    assert_eq!(intersecting.len(), 1, "{payload}");
+    assert_eq!(intersecting[0]["left"], "S-1");
+    assert_eq!(intersecting[0]["right"], "S-2");
+    let shared: Vec<&str> = intersecting[0]["shared"]
+        .as_array()
+        .expect("shared symbols")
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert!(shared.contains(&"base"), "{shared:?}");
+    assert!(
+        payload["safe_parallel"].as_array().unwrap().is_empty(),
+        "a colliding pair is never also reported safely parallel: {payload}"
+    );
+
+    // NFR-CC-04: the verdict ships with the limits of the graph it was computed
+    // over, so a `safe_parallel` answer is never read as ground truth.
+    let statement = payload["coverage"]["statement"]
+        .as_str()
+        .expect("the coverage statement rides the payload");
+    assert!(statement.contains("indexed code graph"), "{statement}");
+    assert_eq!(payload["depth"], 3, "the default depth is reported");
+
+    // A malformed spec is warned about, not silently dropped, and never an error.
+    let out = logos(
+        tmp.path(),
+        &[
+            "impact-intersection",
+            "--item",
+            "S-1=top",
+            "--item",
+            "no-equals-sign",
+            "--json",
+        ],
+    );
+    assert_eq!(exit_code(&out), 0, "a malformed item is not a usage fault");
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let warnings = payload["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or_default().contains("no-equals-sign")),
+        "{warnings:?}"
+    );
+
+    // `--item` is required: an intersection over nothing is a usage fault (2).
+    let out = logos(tmp.path(), &["impact-intersection"]);
+    assert_eq!(exit_code(&out), 2, "clap requires at least one --item");
 }
 
 // ── FR-CL-02: --quiet suppresses human output, never the JSON ──────────────

@@ -190,6 +190,10 @@ registered_tools! {
     Callers => "callers",
     Callees => "callees",
     Impact => "impact",
+    /// Impact-set intersection across a set of planned work items ([FR-NV-11],
+    /// CR-114) — the scheduling question, asked of the graph instead of the
+    /// architecture prose.
+    ImpactIntersection => "impact_intersection",
     Implements => "implements",
     ReferencingDocs => "referencing_docs",
     Affected => "affected",
@@ -322,6 +326,7 @@ impl Tool {
             | Tool::Callers
             | Tool::Callees
             | Tool::Impact
+            | Tool::ImpactIntersection
             | Tool::Implements
             | Tool::ReferencingDocs
             | Tool::Affected
@@ -426,6 +431,7 @@ impl Tool {
             | Tool::Callers
             | Tool::Callees
             | Tool::Impact
+            | Tool::ImpactIntersection
             | Tool::Implements
             | Tool::ReferencingDocs
             | Tool::Affected

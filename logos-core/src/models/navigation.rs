@@ -244,6 +244,194 @@ pub struct ImpactEntry {
     pub distance: u32,
 }
 
+// ── Impact-set intersection across planned work items ([FR-NV-11]) ──────────
+//
+// The scheduling question, made deterministic: given several work items each
+// naming the symbols it intends to change, which pairs' transitive impact sets
+// overlap — and on which symbols. Overlapping items cannot safely run in
+// parallel; disjoint ones can. Everything below is derived from the SAME
+// depth-bounded traversal `impact` runs ([FR-NV-06]), so the two answers can
+// never disagree.
+//
+// [FR-NV-11]: ../../../docs/specs/requirements/FR-NV-11.md
+// [FR-NV-06]: ../../../docs/specs/requirements/FR-NV-06.md
+
+/// One unit of planned work, naming the symbols it intends to change
+/// ([FR-NV-11]) — the *input* to [`ImpactIntersectionResult`].
+///
+/// This is the one type in this module that is parsed rather than serialised:
+/// every surface (CLI `--item`, the MCP tool, the `/api/v1` route) accepts the
+/// same `<id>=<symbol>[,<symbol>…]` spelling, and [`WorkItem::from_specs`] is
+/// the single parser all three share so the surfaces cannot drift (ADR-01 —
+/// the adapters parse nothing of their own).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct WorkItem {
+    /// The item's identifier as the caller spelled it (a story id, a branch
+    /// name, a free-text label — Logos never interprets it).
+    pub id: String,
+    /// The symbols this item intends to change, as given.
+    pub symbols: Vec<String>,
+}
+
+impl WorkItem {
+    /// Parse one `<id>=<symbol>[,<symbol>…]` spec.
+    ///
+    /// Splits on the FIRST `=` only, so a symbol containing `=` survives; the
+    /// symbol list is comma-separated, and blank entries are dropped. `None`
+    /// when the spec carries no `=`, or an empty id — the caller reports that
+    /// as a warning rather than guessing what was meant ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub fn parse_spec(spec: &str) -> Option<WorkItem> {
+        let (id, rest) = spec.split_once('=')?;
+        let id = id.trim();
+        if id.is_empty() {
+            return None;
+        }
+        Some(WorkItem {
+            id: id.to_string(),
+            symbols: rest
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+        })
+    }
+
+    /// Parse a whole `--item` list into work items, merging repeated ids.
+    ///
+    /// Repeating an id accumulates its symbols (`--item A=f --item A=g` is
+    /// `A` naming both), which is also the escape hatch for a symbol that
+    /// genuinely contains a comma. Order follows first appearance, so the
+    /// reported pair order is the caller's own. Returns the items alongside one
+    /// warning per unparseable spec — a malformed spec is never silently
+    /// dropped ([NFR-CC-04]).
+    pub fn from_specs<S: AsRef<str>>(specs: &[S]) -> (Vec<WorkItem>, Vec<String>) {
+        let (mut items, mut warnings): (Vec<WorkItem>, Vec<String>) = (Vec::new(), Vec::new());
+        for spec in specs {
+            let spec = spec.as_ref();
+            let Some(parsed) = WorkItem::parse_spec(spec) else {
+                warnings.push(format!(
+                    "ignored work item {spec:?}: expected <id>=<symbol>[,<symbol>...]"
+                ));
+                continue;
+            };
+            match items.iter_mut().find(|existing| existing.id == parsed.id) {
+                Some(existing) => existing.symbols.extend(parsed.symbols),
+                None => items.push(parsed),
+            }
+        }
+        (items, warnings)
+    }
+}
+
+/// Impact-set intersection across a set of planned work items ([FR-NV-11]).
+#[derive(Debug, Default, Serialize)]
+pub struct ImpactIntersectionResult {
+    /// Depth bound applied to every item's impact set (default 3) — the same
+    /// bound `impact` applies ([FR-NV-06]).
+    pub depth: u32,
+    /// One row per work item, in the order supplied: what it declared, what
+    /// resolved, and how large its impact set turned out to be.
+    pub items: Vec<WorkItemImpact>,
+    /// Every unordered pair whose impact sets intersect, naming the shared
+    /// symbols. **These items cannot safely proceed in parallel.** Ordered by
+    /// the items' input positions (left, then right).
+    pub intersecting: Vec<ItemIntersection>,
+    /// Every unordered pair whose impact sets are disjoint — safely parallel.
+    /// Same ordering.
+    pub safe_parallel: Vec<ItemPair>,
+    /// What this answer can and cannot see ([NFR-CC-04]).
+    pub coverage: IntersectionCoverage,
+    /// Degradation channel (ADR-14) — also where a malformed `--item` spec and
+    /// a single-item call are reported.
+    pub warnings: Vec<String>,
+}
+
+/// One work item's declared symbols and the size of the impact set they span.
+#[derive(Debug, Default, Serialize)]
+pub struct WorkItemImpact {
+    /// The item id as given.
+    pub item: String,
+    /// The symbols it declared, as given.
+    pub declared: Vec<String>,
+    /// The nodes those symbols resolved to (deterministic, symbol asc).
+    pub resolved: Vec<SymbolRef>,
+    /// Declared symbols the graph does not know. They contribute no
+    /// intersection, so their absence is a coverage limit and not evidence of
+    /// independence ([NFR-CC-04]).
+    pub unresolved: Vec<String>,
+    /// Size of the transitive impact set: the resolved seeds plus everything
+    /// upstream and downstream of them within `depth`.
+    pub impact_set_size: u32,
+}
+
+/// Two work items whose impact sets intersect, and the symbols they share.
+#[derive(Debug, Default, Serialize)]
+pub struct ItemIntersection {
+    /// The earlier-supplied item.
+    pub left: String,
+    /// The later-supplied item.
+    pub right: String,
+    /// How many symbols the two impact sets share, in full — never the length
+    /// of the truncated `shared` list ([NFR-CC-04]).
+    pub shared_total: u32,
+    /// The shared symbols: those either item declared directly first, then by
+    /// symbol ascending; truncated to a bounded payload.
+    pub shared: Vec<SharedSymbol>,
+    /// How many shared symbols `shared` omitted — `0` when the list is whole.
+    pub shared_elided: u32,
+}
+
+/// One symbol two work items' impact sets have in common.
+#[derive(Debug, Serialize)]
+pub struct SharedSymbol {
+    /// The shared symbol.
+    #[serde(flatten)]
+    pub symbol: SymbolRef,
+    /// Which of the two items named this symbol *directly*, in input order.
+    /// Empty when both merely reach it — a weaker signal than a declared
+    /// collision, and distinguished so a consumer can rank them.
+    pub declared_by: Vec<String>,
+}
+
+/// An unordered pair of work items, named by id.
+#[derive(Debug, Default, Serialize)]
+pub struct ItemPair {
+    /// The earlier-supplied item.
+    pub left: String,
+    /// The later-supplied item.
+    pub right: String,
+}
+
+/// The coverage limits of one intersection answer ([NFR-CC-04]).
+///
+/// The result is only as complete as the graph it was computed over, and this
+/// is where that is said out loud rather than left for the reader to infer.
+#[derive(Debug, Default, Serialize)]
+pub struct IntersectionCoverage {
+    /// The standing statement of what the answer can and cannot see.
+    pub statement: String,
+    /// Declared symbols no node matched, with the item that declared them.
+    /// A non-empty list means "disjoint" is weaker than it looks.
+    pub unresolved: Vec<UnresolvedDeclaration>,
+    /// Work items that ended with no resolved seed at all: they are disjoint
+    /// from everything by construction, which says nothing about the code.
+    pub items_without_resolved_symbols: Vec<String>,
+}
+
+/// One declared symbol the graph does not know ([NFR-CC-04]).
+#[derive(Debug, Serialize)]
+pub struct UnresolvedDeclaration {
+    /// The item that declared it.
+    pub item: String,
+    /// The symbol text as given.
+    pub symbol: String,
+    /// "Did you mean" names for it ([FR-NV-09]) — empty when nothing is close.
+    pub suggestions: Vec<String>,
+}
+
 /// Current index and sync health of the code graph (FR-NV-07).
 #[derive(Debug, Default, Serialize)]
 pub struct StatusInfo {

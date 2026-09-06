@@ -51,9 +51,11 @@ use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::navigation::{
     AffectedFile, AffectedResult, CalleesResult, CallersResult, ContextBundle, ContextNode,
     EdgeDirection, EdgeSummary, ExploreResult, ExploreSymbol, FileGroup, GraphElementEdge,
-    GraphElementNode, GraphElements, GraphGranularity, GraphLayer, ImpactEntry, ImpactResult,
-    ImplementorsResult,
-    NodeDetail, NodeInfo, ReferencingDocsResult, SearchResult, StatusInfo, SymbolRef, TraceLink,
+    GraphElementNode, GraphElements, GraphGranularity, GraphLayer, ImpactEntry,
+    ImpactIntersectionResult, ImpactResult, ImplementorsResult, IntersectionCoverage,
+    ItemIntersection, ItemPair, NodeDetail, NodeInfo, ReferencingDocsResult, SearchResult,
+    SharedSymbol, StatusInfo, SymbolRef, TraceLink, UnresolvedDeclaration, WorkItem,
+    WorkItemImpact,
 };
 
 #[cfg(test)]
@@ -656,6 +658,263 @@ pub(crate) fn impact(engine: &Engine, symbol: &str, depth: Option<usize>) -> Res
         suggestions: Vec::new(),
         warnings: Vec::new(),
     })
+}
+
+/// Bounded per-pair shared-symbol list. A pair of items whose impact sets
+/// overlap on hundreds of symbols has already answered the scheduling question;
+/// the rest of the list is weight, so it is elided **and counted**
+/// ([NFR-CC-04]) rather than shipped.
+const MAX_SHARED_LISTED: usize = 50;
+
+/// The standing coverage-limits statement carried by every intersection answer
+/// ([FR-NV-11] AC 3, [NFR-CC-04]). Fixed prose, not a computed claim: what
+/// varies between answers is the depth and the unresolved list beside it.
+const INTERSECTION_COVERAGE: &str = "impact sets are computed over the indexed code graph within \
+the stated depth bound. A surface the index does not cover — an unindexed language, an excluded \
+path, a call resolved only at runtime — cannot contribute an intersection, so a `safe_parallel` \
+verdict is bounded by what is indexed and is not proof of independence.";
+
+/// `impact_intersection` — which planned work items collide, and on what
+/// ([FR-NV-11], CR-114).
+///
+/// Given work items each naming the symbols it intends to change, compute every
+/// item's transitive impact set (its resolved seeds plus everything upstream and
+/// downstream within `depth`, on the same `ExcludeContains` dependency view
+/// [`impact`] uses) and report every pair whose sets intersect, naming the shared
+/// symbols. Pairs with disjoint sets are reported as safely parallel.
+///
+/// This is a scheduling decision that is otherwise taken by reading architecture
+/// prose. Sprint 63 scheduled three stories in parallel while all three touched
+/// `http_client_crates`; the first deleted it and the other two could not merge.
+/// The graph held that answer and nothing asked it.
+///
+/// Each spec is `<id>=<symbol>[,<symbol>…]`; repeating an id accumulates its
+/// symbols. Deterministic throughout: pair order follows the caller's item order, shared
+/// symbols sort declared-first then by canonical symbol ([NFR-RA-06]). Costs one
+/// pooled read for the whole resolution, one (cached) hydration, and one row
+/// fetch for the symbols actually reported — never one `impact` call per symbol.
+///
+/// [FR-NV-11]: ../../../docs/specs/requirements/FR-NV-11.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+pub(crate) fn impact_intersection(
+    engine: &Engine,
+    specs: &[String],
+    depth: Option<usize>,
+) -> Result<ImpactIntersectionResult> {
+    let runtime = engine.nav_runtime()?;
+    let depth = depth.unwrap_or(DEFAULT_IMPACT_DEPTH);
+    // The `<id>=<symbol>,...` spelling is parsed HERE, once, for every surface:
+    // the CLI, the MCP tool and the `/api/v1` route each hand over the strings
+    // they were given and parse nothing of their own ([ADR-01], [NFR-MA-02]).
+    let (items, mut warnings) = WorkItem::from_specs(specs);
+    let items = items.as_slice();
+    if items.len() < 2 {
+        warnings.push(format!(
+            "an intersection needs at least two work items; {} supplied",
+            items.len()
+        ));
+    }
+
+    // ONE pooled read resolves every declared symbol of every item, so the
+    // round-trip cost is independent of how many items are being scheduled.
+    let declared: Vec<(usize, String)> = items
+        .iter()
+        .enumerate()
+        .flat_map(|(i, item)| item.symbols.iter().map(move |s| (i, s.clone())))
+        .collect();
+    let resolved = runtime.submit_read(move |store| {
+        let mut out: Vec<(usize, String, Option<NodeRow>, Vec<String>)> =
+            Vec::with_capacity(declared.len());
+        for (index, text) in declared {
+            match resolve_symbol(store, &text)? {
+                Some(row) => out.push((index, text, Some(row), Vec::new())),
+                None => {
+                    let suggestions = store.suggest(&text, SUGGEST_LIMIT)?;
+                    out.push((index, text, None, suggestions));
+                }
+            }
+        }
+        Ok(out)
+    })?;
+
+    let view = engine.hydrate(Granularity::ExcludeContains)?;
+    let mut rows: Vec<WorkItemImpact> = items
+        .iter()
+        .map(|item| WorkItemImpact {
+            item: item.id.clone(),
+            declared: item.symbols.clone(),
+            ..WorkItemImpact::default()
+        })
+        .collect();
+    let mut coverage = IntersectionCoverage {
+        statement: INTERSECTION_COVERAGE.to_string(),
+        ..IntersectionCoverage::default()
+    };
+    // `seeds` are what an item named directly; `reach` is its whole impact set
+    // (seeds included). The distinction survives to the payload: a declared
+    // collision is a stronger signal than a merely reachable one.
+    let mut seeds: Vec<BTreeSet<NodeIndex>> = vec![BTreeSet::new(); items.len()];
+    let mut reach: Vec<BTreeSet<NodeIndex>> = vec![BTreeSet::new(); items.len()];
+
+    for (index, text, row, suggestions) in resolved {
+        let Some(row) = row else {
+            rows[index].unresolved.push(text.clone());
+            coverage.unresolved.push(UnresolvedDeclaration {
+                item: items[index].id.clone(),
+                symbol: text,
+                suggestions,
+            });
+            continue;
+        };
+        rows[index].resolved.push(symbol_ref(&row));
+        match view.index_of(row.symbol.as_str()) {
+            Some(start) => {
+                seeds[index].insert(start);
+                reach[index].insert(start);
+                bfs_into(&view, start, Direction::Incoming, depth, &mut reach[index]);
+                bfs_into(&view, start, Direction::Outgoing, depth, &mut reach[index]);
+            }
+            // Indexed, but absent from this view's snapshot — it landed after
+            // hydration. Say so; an empty impact set for a symbol that exists
+            // must not read as "this symbol reaches nothing" ([NFR-CC-04]).
+            None => warnings.push(format!(
+                "{} is indexed but absent from the hydrated dependency view; \
+                 it contributes no impact set to this answer",
+                row.symbol.as_str()
+            )),
+        }
+    }
+
+    for (index, item) in rows.iter_mut().enumerate() {
+        item.resolved.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        item.impact_set_size = reach[index].len() as u32;
+        if item.resolved.is_empty() {
+            coverage
+                .items_without_resolved_symbols
+                .push(item.item.clone());
+        }
+    }
+
+    let (intersecting, safe_parallel) = pair_up(engine, items, &seeds, &reach, &view)?;
+    Ok(ImpactIntersectionResult {
+        depth: depth as u32,
+        items: rows,
+        intersecting,
+        safe_parallel,
+        coverage,
+        warnings,
+    })
+}
+
+/// Every unordered item pair, split into intersecting and disjoint
+/// ([FR-NV-11]). Split out of [`impact_intersection`] so each function stays a
+/// single concern: that one resolves and traverses, this one compares.
+///
+/// Row materialisation happens **once**, over the union of the symbols actually
+/// reported — after the per-pair sort and truncation, so an overlap of hundreds
+/// of symbols costs the store fifty rows, not hundreds.
+fn pair_up(
+    engine: &Engine,
+    items: &[WorkItem],
+    seeds: &[BTreeSet<NodeIndex>],
+    reach: &[BTreeSet<NodeIndex>],
+    view: &GraphView,
+) -> Result<(Vec<ItemIntersection>, Vec<ItemPair>)> {
+    let graph = view.graph();
+    let mut intersecting: Vec<(usize, usize, u32, Vec<NodeIndex>)> = Vec::new();
+    let mut safe_parallel = Vec::new();
+    for left in 0..items.len() {
+        for right in (left + 1)..items.len() {
+            let mut shared: Vec<NodeIndex> =
+                reach[left].intersection(&reach[right]).copied().collect();
+            if shared.is_empty() {
+                safe_parallel.push(ItemPair {
+                    left: items[left].id.clone(),
+                    right: items[right].id.clone(),
+                });
+                continue;
+            }
+            let total = shared.len() as u32;
+            // Declared collisions first, then canonical symbol — so the
+            // truncation below can never drop a directly-declared collision in
+            // favour of a merely-reachable one.
+            shared.sort_by(|a, b| {
+                let declared = |idx: &NodeIndex| seeds[left].contains(idx) || seeds[right].contains(idx);
+                declared(b)
+                    .cmp(&declared(a))
+                    .then_with(|| graph[*a].key.cmp(&graph[*b].key))
+            });
+            shared.truncate(MAX_SHARED_LISTED);
+            intersecting.push((left, right, total, shared));
+        }
+    }
+
+    let ids: Vec<NodeId> = intersecting
+        .iter()
+        .flat_map(|(_, _, _, shared)| shared.iter())
+        .filter_map(|idx| graph[*idx].node_id)
+        .collect();
+    let fetched = fetch_rows(engine, &ids)?;
+
+    let intersecting = intersecting
+        .into_iter()
+        .map(|(left, right, total, shared)| {
+            let listed: Vec<SharedSymbol> = shared
+                .iter()
+                .filter_map(|idx| {
+                    let row = fetched.get(&graph[*idx].node_id?)?;
+                    let declared_by = [left, right]
+                        .into_iter()
+                        .filter(|side| seeds[*side].contains(idx))
+                        .map(|side| items[side].id.clone())
+                        .collect();
+                    Some(SharedSymbol {
+                        symbol: symbol_ref(row),
+                        declared_by,
+                    })
+                })
+                .collect();
+            ItemIntersection {
+                left: items[left].id.clone(),
+                right: items[right].id.clone(),
+                shared_total: total,
+                shared_elided: total - listed.len() as u32,
+                shared: listed,
+            }
+        })
+        .collect();
+    Ok((intersecting, safe_parallel))
+}
+
+/// Depth-bounded BFS from `start` in `direction`, accumulating reached vertices
+/// into `out`. The set-building half of [`impact_entries`] without its row
+/// materialisation: an intersection needs the *sets*, and materialising every
+/// item's whole impact set to compare them would fetch thousands of rows to
+/// report a handful.
+fn bfs_into(
+    view: &GraphView,
+    start: NodeIndex,
+    direction: Direction,
+    max_depth: usize,
+    out: &mut BTreeSet<NodeIndex>,
+) {
+    let graph = view.graph();
+    let mut distance: HashMap<NodeIndex, usize> = HashMap::from([(start, 0)]);
+    let mut queue: VecDeque<NodeIndex> = VecDeque::from([start]);
+    while let Some(current) = queue.pop_front() {
+        let d = distance[&current];
+        if d >= max_depth {
+            continue;
+        }
+        for neighbour in graph.neighbors_directed(current, direction) {
+            if let std::collections::hash_map::Entry::Vacant(slot) = distance.entry(neighbour) {
+                slot.insert(d + 1);
+                out.insert(neighbour);
+                queue.push_back(neighbour);
+            }
+        }
+    }
 }
 
 /// `implements` — which code implements a documentation/requirement node

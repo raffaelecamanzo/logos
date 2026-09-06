@@ -251,17 +251,33 @@ fn adapter_lines() -> usize {
 /// duplication waiting to be deleted — the adapter only picks the flag and
 /// the rendering. Recorded, not laundered (CR-084 §6).
 ///
-/// **The budget is now exactly full at 841.** The next adapter change needs a
-/// real reduction first — and, per the S-321 note above, the next author should
-/// expect to find a duplication of core logic to delete, not surface to
-/// relocate. Relocating surface into the core has been tried twice here and was
-/// wrong both times.
+/// **The budget was exactly full at 841.**
+///
+/// **S-358/CR-114 841→855** for the `impact-intersection` command ([FR-NV-11]):
+/// measured 841→851 (+10), 4 lines of headroom. The whole delta is `main.rs`'s
+/// `ImpactIntersection` variant declaration (+7: the `#[command(name = ...)]`
+/// rename, the repeatable `--item` `#[arg]` and the `--depth` `#[arg]`) plus a
+/// 3-line dispatch arm delegating to ONE `Engine::impact_intersection` call.
+///
+/// The S-321 note above told the next author to expect a duplication of core
+/// logic to delete. There is none: every remaining function in `cli/src` is a
+/// clap declaration, one of the four `Output` chokepoints, or surface I/O (the
+/// TTY prompt, `--body-file`, the detached supervisor argv). That was checked
+/// before raising, not asserted after.
+///
+/// What the raise bought back instead is the reduction this guard actually
+/// wants. The `<id>=<symbol>[,<symbol>...]` work-item spelling is parsed in
+/// `logos_core::models::navigation::WorkItem::from_specs` — NOT here — so the
+/// adapter hands the raw `Vec<String>` straight through, and the CLI, the MCP
+/// tool and the `/api/v1` route cannot drift in what they accept. A clap
+/// `value_parser` would have cost more adapter lines *and* put the parse in
+/// three surfaces. Recorded, not laundered (CR-084 §6).
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 841,
-        "cli adapter exceeds the 841 production-LOC budget (NFR-MA-02): \
+        lines <= 855,
+        "cli adapter exceeds the 855 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

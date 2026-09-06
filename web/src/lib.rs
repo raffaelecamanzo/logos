@@ -731,6 +731,7 @@ fn build_router(state: WebState) -> Router {
         // Read-only Decisions-panel impact read-model (FR-NV-10, FR-DG-02): the
         // JSON the SPA\'s Decisions panel (S-186) builds client-side from.
         .route("/api/v1/impact", get(api_v1::impact))
+        .route("/api/v1/impact-intersection", get(api_v1::impact_intersection))
         .route("/api/v1/node", get(api_v1::node))
         .route("/api/v1/search", get(api_v1::search))
         .route("/api/v1/wiki", get(api_v1::wiki_index))

@@ -126,6 +126,7 @@ const V1_ENDPOINTS: &[&str] = &[
     "/api/v1/graph",
     "/api/v1/query?q=f",
     "/api/v1/impact?seed=f",
+    "/api/v1/impact-intersection?item=S-1=f&item=S-2=g",
     "/api/v1/node?symbol=f",
     "/api/v1/search?q=f",
     "/api/v1/wiki",
@@ -351,6 +352,55 @@ async fn impact_endpoint_serializes_the_read_model_and_defaults_empty() {
     assert_eq!(status, StatusCode::OK, "seedless impact is an honest 200");
     assert_json_self_only_csp(&headers, "/api/v1/impact");
     assert!(body.contains("\"resolved\":null"), "seedless impact resolves to nothing: {body}");
+}
+
+/// `GET /api/v1/impact-intersection?item=<id>=<sym>&…` serializes the
+/// [FR-NV-11] read-model (S-358, CR-114): the per-item rows, the intersecting
+/// pairs with their shared symbols, the safely-parallel pairs, and the coverage
+/// limits. `item` REPEATS, which is the one thing this route does differently
+/// from its neighbours — it reads the query as ordered pairs, not a map, so a
+/// second `item` cannot silently overwrite the first.
+///
+/// Infallible at the surface ([NFR-CC-04]): no `item` at all is an honest `200`
+/// empty read-model carrying its warning, never a `400`.
+#[tokio::test]
+async fn impact_intersection_endpoint_serializes_the_read_model_and_keeps_every_item() {
+    let (_tmp, engine) = scanned_engine();
+    let router = web::router(engine);
+
+    let path = "/api/v1/impact-intersection?item=S-1=f&item=S-2=f";
+    let resp = router.clone().oneshot(get(path)).await.unwrap();
+    let (status, body, headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_json_self_only_csp(&headers, path);
+    for key in ["\"items\"", "\"intersecting\"", "\"safe_parallel\"", "\"coverage\"", "\"depth\""] {
+        assert!(body.contains(key), "the body carries {key}: {body}");
+    }
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        payload["items"].as_array().map(Vec::len),
+        Some(2),
+        "a repeated `item` param is kept, not overwritten: {body}"
+    );
+    assert!(
+        !payload["coverage"]["statement"].as_str().unwrap_or_default().is_empty(),
+        "the coverage limits ride the payload (NFR-CC-04): {body}"
+    );
+
+    // No items at all → the honest empty default, not a 4xx.
+    let resp = router.oneshot(get("/api/v1/impact-intersection")).await.unwrap();
+    let (status, body, _headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "an itemless call is an honest 200");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert!(payload["items"].as_array().unwrap().is_empty(), "{body}");
+    assert!(
+        payload["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap_or_default().contains("at least two")),
+        "the empty answer says why it is empty: {body}"
+    );
 }
 
 /// `GET /api/v1/statistics` serializes the enriched telemetry read-model (S-234,
