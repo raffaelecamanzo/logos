@@ -1761,6 +1761,53 @@ mod surface_parity {
         }
     }
 
+    /// The user guide's subcommand COUNT matches the shipped clap surface
+    /// ([FR-IN-09] AC 4).
+    ///
+    /// This story had to correct `docs/howto/README.md` from "27-subcommand" to
+    /// 38 — proof that a hand-counted cardinality drifts silently. The spans walk
+    /// checks that every *named* command exists; it says nothing about how many
+    /// there are, so the number needs its own guard. `docs/howto/commands.md`
+    /// carries the same figure in its opening line and is checked with it.
+    ///
+    /// [FR-IN-09]: ../../docs/specs/requirements/FR-IN-09.md
+    #[test]
+    fn the_user_guide_subcommand_count_matches_the_shipped_surface() {
+        // Top-level, public, clap's generated `help` excluded — the set a reader
+        // of `logos --help` counts. `command_paths` returns leaves, so a group
+        // (`wiki write`) would be counted once per leaf; go to clap directly.
+        let shipped = Cli::command()
+            .get_subcommands()
+            .filter(|sub| !sub.is_hide_set() && sub.get_name() != "help")
+            .count();
+
+        // (file, the phrase whose preceding integer is the claim)
+        for (relative, phrase) in [
+            ("docs/howto/README.md", "-subcommand reference"),
+            ("docs/howto/commands.md", " top-level commands"),
+        ] {
+            let path = repo_root().join(relative);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let at = text.find(phrase).unwrap_or_else(|| {
+                panic!("{relative} no longer states a subcommand count near {phrase:?} — \
+                        update or drop this guard")
+            });
+            let claimed: usize = text[..at]
+                .rsplit(|c: char| !c.is_ascii_digit())
+                .next()
+                .filter(|digits| !digits.is_empty())
+                .unwrap_or_else(|| panic!("{relative} states no number before {phrase:?}"))
+                .parse()
+                .expect("digits parse");
+            assert_eq!(
+                claimed, shipped,
+                "{relative} claims {claimed} top-level commands but the shipped \
+                 clap definition has {shipped} (FR-IN-09 AC 4)"
+            );
+        }
+    }
+
     /// The MCP instructions' negative claim — that `affected` has no tool on the
     /// MCP surface — is true of the shipped router ([FR-IN-09] AC 4).
     ///
