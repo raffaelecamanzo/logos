@@ -932,12 +932,10 @@ fn tier(
                 .filter(|p| p.member != member)
                 .map(|p| (*p).clone())
                 .collect();
-            (!bound.is_empty()).then(|| {
-                (
-                    CoverageState::Bound,
-                    ProviderEvidence::Several(ProviderDisposition::BoundTo, bound),
-                )
-            })
+            (!bound.is_empty()).then_some((
+                CoverageState::Bound,
+                ProviderEvidence::Several(ProviderDisposition::BoundTo, bound),
+            ))
         }
     }
 }
