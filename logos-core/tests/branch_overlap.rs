@@ -315,6 +315,10 @@ fn dropped_work_repo() -> TempDir {
                 "src/lib.rs",
                 lib_rs(&[]).replace("    2\n", "    22\n"),
             ),
+            // A symbol in a file the merge result never touches at all — the
+            // `merge_changed_the_file: false` case, so one answer carries both
+            // kinds of loss and the ordering rule between them is observable.
+            ("src/arms.rs", "pub fn rust_capture() -> u32 {\n    9\n}\n".to_string()),
             ("src/wanted_only.rs", arm_rs("wanted")),
         ],
     );
@@ -340,22 +344,35 @@ fn work_a_ref_did_and_the_merge_did_not_is_reported_lost() {
     let result = engine.branch_overlap(&refs(&["wanted", "landed"]), None, Some("partial"));
     let merge = result.merge.as_ref().expect("a merge result was stated");
 
-    let lost: Vec<&str> = merge
+    // Both kinds of loss, and the ordering rule between them: the stronger
+    // signal — the merge took part of that file and not this symbol — leads, so
+    // truncation can never drop it for a whole-file omission.
+    let lost: Vec<(&str, bool)> = merge
         .lost_symbols
         .iter()
-        .map(|row| row.symbol.name.as_str())
+        .map(|row| (row.symbol.name.as_str(), row.merge_changed_the_file))
         .collect();
-    assert_eq!(lost, ["lonely_corner"], "{merge:?}");
-    assert_eq!(merge.lost_symbols[0].modified_by, ["wanted"]);
-    assert!(
-        merge.lost_symbols[0].merge_changed_the_file,
-        "the merge took part of src/lib.rs and not this — the stronger signal"
+    // `src/arms.rs` holds a single function whose span is the whole file, so the
+    // file's module node ties with it and both are reported — the documented
+    // equal-span case, pinned here rather than papered over.
+    assert_eq!(
+        lost,
+        [
+            ("lonely_corner", true),
+            ("arms", false),
+            ("rust_capture", false)
+        ],
+        "{merge:?}"
     );
-    assert_eq!(merge.lost_symbols_total, 1);
+    assert!(merge
+        .lost_symbols
+        .iter()
+        .all(|row| row.modified_by == ["wanted"]));
+    assert_eq!(merge.lost_symbols_total, 3);
     assert_eq!(merge.lost_symbols_elided, 0);
 
     // `landed`'s own change is in the merge, so it is not reported lost.
-    assert!(!lost.contains(&"unrelated_helper"));
+    assert!(!lost.iter().any(|(name, _)| *name == "unrelated_helper"));
 
     // The coarse twin catches the whole file the merge never took — the only
     // report that can speak for content the index holds no symbol for.
@@ -364,8 +381,13 @@ fn work_a_ref_did_and_the_merge_did_not_is_reported_lost() {
         .iter()
         .map(|row| row.path.as_str())
         .collect();
-    assert_eq!(lost_files, ["src/wanted_only.rs"]);
-    assert_eq!(merge.lost_files[0].modified_by, ["wanted"]);
+    assert_eq!(lost_files, ["src/arms.rs", "src/wanted_only.rs"]);
+    assert!(merge
+        .lost_files
+        .iter()
+        .all(|row| row.modified_by == ["wanted"]));
+    assert_eq!(merge.lost_files_total, 2);
+    assert_eq!(merge.lost_files_elided, 0);
 }
 
 /// The negative: refs that touch nothing in common report no contention at all,
@@ -381,7 +403,11 @@ fn refs_with_no_shared_symbol_report_no_contention_and_no_merge_block() {
     assert_eq!(result.contended_total, 0);
     assert!(result.merge.is_none(), "no merge was stated");
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
-    assert_eq!(result.refs[0].symbols_modified, 1);
+    // The pipeline demonstrably ran: `wanted` touched real symbols. Without a
+    // positive companion, "no contention" would also be what a broken query
+    // returns.
+    assert!(result.refs[0].symbols_modified >= 1, "{:?}", result.refs);
+    assert_eq!(result.refs[1].symbols_modified, 1);
 }
 
 /// A ref that deletes a file has modified every symbol the file held, so it
@@ -451,15 +477,18 @@ fn the_payload_states_its_limits_including_the_unindexed_symbol_bound() {
             .contains(&"assets/notes.txt".to_string()),
         "a changed file the index holds nothing for is named: {coverage:?}"
     );
-    // Both refs differ from the indexed snapshot (`main`), so the spans used to
-    // attribute their hunks are disclosed as possibly moved.
-    assert!(
-        coverage
-            .files_with_drifted_spans
-            .contains(&"src/lib.rs".to_string()),
+    // Both refs differ from the indexed working tree (`main`), so the spans used
+    // to attribute their hunks are disclosed as possibly moved. Asserted as an
+    // exact set: a `contains` would still hold if the narrowing to the changed
+    // files were dropped and the list grew to everything differing from the
+    // snapshot.
+    assert_eq!(
+        coverage.files_with_drifted_spans,
+        ["assets/notes.txt", "src/lib.rs"],
         "{coverage:?}"
     );
     assert!(coverage.unresolved_refs.is_empty());
+    assert!(coverage.refs_not_diffed.is_empty());
     assert_eq!(
         coverage.unattributed_hunks, 0,
         "every hunk in this fixture lands inside a symbol"
@@ -467,6 +496,190 @@ fn the_payload_states_its_limits_including_the_unindexed_symbol_bound() {
     assert_eq!(
         result.base_origin,
         "the common ancestor (git merge-base) of the supplied refs"
+    );
+}
+
+/// The bounds are real, and their arithmetic is reported.
+///
+/// Every other assertion on `contended_total`/`contended_elided` in this file is
+/// against a two-row answer, where the counters hold trivially. A regression
+/// that computed the total *after* truncating — reporting 100 of 100 with
+/// nothing elided — would pass all of them.
+#[test]
+fn a_contended_set_beyond_the_cap_is_truncated_with_the_elision_counted() {
+    let tmp = base_repo();
+    let root = tmp.path();
+    let wide = |suffix: &str| {
+        (0..120)
+            .map(|n| format!("pub fn f{n:03}() -> u32 {{\n    {n}{suffix}\n}}\n"))
+            .collect::<String>()
+    };
+    write(root, "src/wide.rs", &wide(""));
+    commit(root, "wide");
+    for name in ["left", "right"] {
+        branch(root, name, &[("src/wide.rs", wide("1"))]);
+    }
+    // A third ref touches only the first function, making it the sole 3-way
+    // collision — so the ordering rule is what decides which rows survive.
+    let mut only_first = wide("");
+    only_first = only_first.replacen("    0\n", "    7\n", 1);
+    branch(root, "third", &[("src/wide.rs", only_first)]);
+    let engine = indexed_engine(root);
+
+    let result = engine.branch_overlap(&refs(&["left", "right", "third"]), None, None);
+    // 120, not 121: the file's module node encloses every function, so the
+    // innermost rule keeps the functions and drops it — the nesting case the
+    // unit test pins, observed here at scale.
+    assert_eq!(result.contended_total, 120);
+    assert_eq!(result.contended.len(), 100, "capped at MAX_SYMBOLS_LISTED");
+    assert_eq!(result.contended_elided, 20);
+    assert_eq!(
+        result.contended[0].modified_by,
+        ["left", "right", "third"],
+        "the only three-way collision leads, so truncation cannot drop it: {:?}",
+        result.contended[0].symbol
+    );
+    assert!(
+        result.contended[1..]
+            .iter()
+            .all(|row| row.modified_by == ["left", "right"]),
+        "every other row is two-way"
+    );
+}
+
+/// The three `base_origin` outcomes the happy path does not produce. These are
+/// the words the payload uses to explain its comparison point, and a caller
+/// acting on the wrong one re-runs the same broken command.
+#[test]
+fn every_way_the_base_can_fail_says_which_one_happened() {
+    let tmp = sprint_63_repo();
+    let engine = indexed_engine(tmp.path());
+
+    // (1) A stated base that does not resolve names itself — and must NOT
+    // advise passing `--base`, which the caller already did.
+    let result = engine.branch_overlap(&refs(&["kotlin", "ruby"]), Some("no-such-base"), None);
+    assert_eq!(
+        result.base_origin,
+        "no-such-base was stated as the base but does not resolve"
+    );
+    assert!(result.base.is_none());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("no-such-base") && w.contains("stated as the base")),
+        "{:?}",
+        result.warnings
+    );
+    assert!(
+        !result.warnings.iter().any(|w| w.contains("pass --base")),
+        "the caller passed --base; that advice is a loop: {:?}",
+        result.warnings
+    );
+
+    // (2) Unrelated histories have no comparison point at all.
+    let root = tmp.path();
+    git(root, &["checkout", "-q", "--orphan", "island"]);
+    git(root, &["rm", "-rq", "--cached", "."]);
+    write(root, "src/island.rs", "pub fn island() {}\n");
+    commit(root, "island");
+    git(root, &["checkout", "-q", "merged"]);
+    let result = engine.branch_overlap(&refs(&["kotlin", "island"]), None, None);
+    assert_eq!(result.base_origin, "the supplied refs have no common ancestor");
+    assert!(
+        result.warnings.iter().any(|w| w.contains("no common ancestor")),
+        "{:?}",
+        result.warnings
+    );
+
+    // (3) An empty optional is an ABSENT optional, on every surface — so this
+    // falls back to the merge-base rather than collapsing the whole answer.
+    let result = engine.branch_overlap(&refs(&["kotlin", "ruby"]), Some(""), Some("  "));
+    assert_eq!(
+        result.base_origin,
+        "the common ancestor (git merge-base) of the supplied refs"
+    );
+    assert!(result.base.is_some());
+    assert!(result.merge.is_none(), "a blank --merge states no merge");
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+/// The two questions that cannot be asked from the CLI (clap requires `--ref`)
+/// but reach the engine through the web route and MCP.
+#[test]
+fn no_refs_and_an_unresolvable_merge_are_honest_warnings() {
+    let tmp = sprint_63_repo();
+    let engine = indexed_engine(tmp.path());
+
+    let result = engine.branch_overlap(&[], None, None);
+    assert!(result.refs.is_empty());
+    assert!(result.merge.is_none());
+    assert!(
+        result.warnings.iter().any(|w| w.contains("no refs supplied")),
+        "{:?}",
+        result.warnings
+    );
+
+    // A merge result that is not a commit leaves `merge: null`, which a
+    // consumer could read as "no losses" — so it must never be silent.
+    let result = engine.branch_overlap(&refs(&["kotlin", "ruby"]), None, Some("no-such-merge"));
+    assert!(result.merge.is_none());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("no-such-merge") && w.contains("does not resolve")),
+        "{:?}",
+        result.warnings
+    );
+}
+
+/// The two coverage counters that only ever read as their degenerate value
+/// elsewhere: a hunk past everything the index knows, and a ref that IS the
+/// indexed snapshot and therefore drifts from nothing.
+///
+/// This is also the AC's "a symbol a ref adds that never reached the index is
+/// invisible" clause, demonstrated by a counter rather than asserted as prose.
+#[test]
+fn a_change_the_index_cannot_see_is_counted_not_dropped() {
+    let tmp = base_repo();
+    let root = tmp.path();
+    // `grown` appends a whole new function below everything `main` holds.
+    branch(
+        root,
+        "grown",
+        &[(
+            "src/lib.rs",
+            format!("{}\npub fn brand_new() -> u32 {{\n    3\n}}\n", lib_rs(&[])),
+        )],
+    );
+    branch(root, "quiet", &[("src/arms.rs", arm_rs("quiet"))]);
+    let engine = indexed_engine(root);
+
+    let result = engine.branch_overlap(&refs(&["grown", "quiet"]), None, None);
+    assert!(
+        result.coverage.unattributed_hunks >= 1,
+        "the appended function is past every indexed span: {:?}",
+        result.coverage
+    );
+    assert!(
+        !result
+            .contended
+            .iter()
+            .any(|row| row.symbol.name == "brand_new"),
+        "a symbol outside the indexed set cannot be reported — the AC's own limit"
+    );
+
+    // The indexed working tree IS `main`, and `main` is neither ref, so both
+    // drift. Compare with a ref that is the snapshot: it contributes nothing.
+    let result = engine.branch_overlap(&refs(&["main", "quiet"]), None, None);
+    assert!(
+        !result
+            .coverage
+            .files_with_drifted_spans
+            .contains(&"src/lib.rs".to_string()),
+        "`main` is the snapshot, so nothing it changed can have drifted: {:?}",
+        result.coverage
     );
 }
 

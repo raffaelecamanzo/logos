@@ -843,6 +843,20 @@ mod tests {
         assert_eq!(files["gone.rs"], vec![WHOLE_FILE]);
     }
 
+    /// The [ADR-14] degraded payload is the answer with no data behind it, so it
+    /// is the one that most needs its limits stated. A future simplification to
+    /// `BranchOverlapResult::default()` must fail here.
+    #[test]
+    fn the_degraded_payload_still_states_its_limits() {
+        let result = overlap_degraded("boom".to_string());
+        assert_eq!(result.warnings, ["boom"]);
+        assert_eq!(result.coverage.statement, OVERLAP_COVERAGE);
+        assert!(result.base_origin.contains("degraded"), "{}", result.base_origin);
+        assert!(result.base.is_none());
+        assert!(result.contended.is_empty());
+        assert!(result.merge.is_none());
+    }
+
     /// Git does NOT put a bare path on a `---`/`+++` line. It appends a TAB when
     /// the path holds a space and C-quotes the whole thing when it holds a `"`
     /// or a control character — `core.quotePath=false` suppresses neither. The

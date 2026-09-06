@@ -2012,3 +2012,44 @@ fn branch_overlap_reports_contention_and_loss_through_the_binary() {
     let out = logos(tmp.path(), &["branch-overlap", "--json"]);
     assert_eq!(exit_code(&out), 2, "a missing --ref is a usage fault");
 }
+
+/// `git` absent from `PATH` is a distinct branch from "not a git repository":
+/// the spawn itself fails, taking the `.ok()?` arm rather than the
+/// `status.success()` arm. Both must degrade to an exit-0 payload that says why
+/// it is empty ([ADR-14], [NFR-CC-04]) — a bare "no collisions" here would be
+/// the most dangerous answer this tool can give.
+#[test]
+fn branch_overlap_without_git_on_path_still_exits_zero() {
+    let tmp = overlap_fixture();
+    logos(tmp.path(), &["index"]);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_logos"))
+        .env("PATH", "")
+        .arg("--project")
+        .arg(tmp.path())
+        .args(["branch-overlap", "--ref", "left", "--ref", "right", "--json"])
+        .output()
+        .expect("the logos binary runs");
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json still emits a read-model");
+    assert_eq!(
+        payload["coverage"]["unresolved_refs"],
+        serde_json::json!(["left", "right"]),
+        "{payload}"
+    );
+    assert!(payload["base"].is_null(), "{payload}");
+    assert!(payload["contended"].as_array().unwrap().is_empty(), "{payload}");
+    assert!(
+        !payload["coverage"]["statement"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "an answer with no data behind it still states its limits: {payload}"
+    );
+}

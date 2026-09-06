@@ -556,6 +556,41 @@ async fn branch_overlap_endpoint_serializes_the_read_model_and_keeps_every_ref()
         serde_json::json!(["nope"]),
         "{body}"
     );
+
+    // An EMPTY optional is an absent optional — `base=`/`merge=` are the normal
+    // output of an HTML form, and reading them as stated values collapsed the
+    // whole answer behind advice to pass the very flag that caused it.
+    let resp = router
+        .clone()
+        .oneshot(get(&format!("{path}&base=&merge=")))
+        .await
+        .unwrap();
+    let (status, body, _headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        payload["base_origin"], "the common ancestor (git merge-base) of the supplied refs",
+        "{body}"
+    );
+    assert!(!payload["contended"].as_array().unwrap().is_empty(), "{body}");
+    assert!(payload["merge"].is_null(), "{body}");
+    assert!(payload["warnings"].as_array().unwrap().is_empty(), "{body}");
+
+    // No `ref` at all is the honest empty default the handler doc promises,
+    // not a 4xx — the one shape only this surface and MCP can even ask for.
+    let resp = router.oneshot(get("/api/v1/branch-overlap")).await.unwrap();
+    let (status, body, _headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "a refless call is an honest 200");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert!(payload["refs"].as_array().unwrap().is_empty(), "{body}");
+    assert!(
+        payload["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap_or_default().contains("no refs supplied")),
+        "the empty answer says why it is empty: {body}"
+    );
 }
 
 /// `GET /api/v1/statistics` serializes the enriched telemetry read-model (S-234,
