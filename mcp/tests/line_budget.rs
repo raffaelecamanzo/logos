@@ -24,11 +24,11 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
     total
 }
 
-/// Budget: ≤ 920 non-blank lines of Rust across the whole MCP adapter
+/// Budget: ≤ 962 non-blank lines of Rust across the whole MCP adapter
 /// (NFR-MA-02 thick-core/thin-surface invariant).
 ///
-/// Derivation (combined S-020, S-022, S-048, S-051, S-053 re-base): 28 `#[tool]`
-/// registrations (8 navigation, 11 quality, 1 temporal `hotspots`, 3 coverage per
+/// Derivation (combined S-020, S-022, S-048, S-051, S-053 re-base): 29 `#[tool]`
+/// registrations (9 navigation, 11 quality, 1 temporal `hotspots`, 3 coverage per
 /// CR-007/CR-036, 5 wiki per CR-008/CR-062), each a mechanical attribute, signature,
 /// and ONE Engine call — cost ~15 non-blank lines each ≈420; the typed parameter
 /// structs (6 navigation, 4 quality, 1 temporal, 1 coverage, 3 wiki) ≈135; the
@@ -141,14 +141,25 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// resolution and the similarity notion itself. Both live in
 /// `logos_core::navigate`, shared verbatim with the CLI command and the
 /// `/api/v1` route (ADR-01). CR-084 §6 — recorded, not laundered.
+/// **S-360/CR-114 940→962** for the `branch_overlap` tool ([FR-NV-13]):
+/// measured 934→957 (+23), 5 lines of headroom. Itemised: the
+/// `BranchOverlapParams` schema struct (+11 — two derives, the struct line, and
+/// three fields each carrying the doc line that IS its wire description), the
+/// `#[tool]` registration (+11 — the attribute, the long `description` an MCP
+/// host reads, the signature and ONE `Engine::branch_overlap` call), and one
+/// roster comment line. Nothing computed here: ref resolution, the diff parse
+/// and the span attribution are all `logos_core::navigate::branch`, so the
+/// three surfaces cannot drift in what they accept (ADR-01).
+///
+/// [FR-NV-13]: ../../docs/specs/requirements/FR-NV-13.md
 #[test]
 fn mcp_surface_line_budget() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 960,
-        "mcp adapter exceeds the 960 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 982,
+        "mcp adapter exceeds the 982 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

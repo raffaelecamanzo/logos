@@ -102,6 +102,9 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             out.query(root, |e| e.impact_intersection(&items, depth))
         }
         Commands::Precedent { target, limit } => out.query(root, |e| e.precedent(&target, limit)),
+        Commands::BranchOverlap { refs, base, merge } => out.query(root, |e| {
+            e.branch_overlap(&refs, base.as_deref(), merge.as_deref())
+        }),
         Commands::Implements { doc } => out.query(root, |e| e.implements(&doc)),
         Commands::ReferencingDocs { symbol } => out.query(root, |e| e.referencing_docs(&symbol)),
         Commands::Affected { files, tests_only } => out.query(root, |e| e.affected(&files, tests_only)),

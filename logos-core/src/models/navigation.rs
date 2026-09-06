@@ -1,5 +1,8 @@
-//! Navigation read-models — the eight navigation-service result types
-//! (S-013, [FR-NV-01..09]).
+//! Navigation read-models — the navigation-service result types
+//! (S-013, [FR-NV-01..13]).
+//!
+//! Countless on purpose: the header used to say "the eight", and two
+//! consecutive stories added to this file without noticing.
 //!
 //! Each struct corresponds to one `Engine` navigation method (ADR-01).
 //! All types derive [`serde::Serialize`] so CLI and MCP adapters can
@@ -668,6 +671,177 @@ pub struct UbiquitousAnchor {
     pub facet: PrecedentFacet,
     /// How many nodes share it — above the stated bound named in `notion`.
     pub sharers: u32,
+}
+// ── Branch and merge symbol overlap ([FR-NV-13]) ────────────────────────────
+//
+// The integration question, made deterministic: given the refs about to be
+// merged, which symbols does more than one of them modify — and, once a merge
+// result is stated, which of a ref's symbols did that result not carry.
+//
+// A clean merge is not a complete merge. In Sprint 63 five branches contributed
+// to one capability roster, git merged them without a conflict, and two of the
+// arms never reached the roster: nothing in the working tree, the test suite or
+// the merge output said so. This is the query that says so.
+//
+// [FR-NV-13]: ../../../docs/specs/requirements/FR-NV-13.md
+
+/// Branch and merge symbol overlap across a set of git refs ([FR-NV-13]).
+#[derive(Debug, Default, Serialize)]
+pub struct BranchOverlapResult {
+    /// The commit every ref was diffed against — the octopus merge-base of the
+    /// refs, or the caller's `--base` when one was given. `None` when it could
+    /// not be resolved, in which case nothing below was computed.
+    pub base: Option<String>,
+    /// How `base` was arrived at, in words — so a reader never has to guess
+    /// whether the comparison point was chosen or supplied.
+    pub base_origin: String,
+    /// One row per requested ref, in the order supplied.
+    pub refs: Vec<RefChangeSummary>,
+    /// The symbols **more than one ref modifies**, naming the refs
+    /// ([FR-NV-13] AC 1). Ordered by contention (most refs first), then by
+    /// canonical symbol, and truncated to a bounded payload.
+    pub contended: Vec<ContendedSymbol>,
+    /// How many symbols more than one ref modifies, in full — never the length
+    /// of the truncated `contended` list ([NFR-CC-04]).
+    pub contended_total: u32,
+    /// How many contended symbols `contended` omitted — `0` when whole.
+    pub contended_elided: u32,
+    /// The stated merge result and what it did not carry ([FR-NV-13] AC 2).
+    /// `None` when no merge result was stated: the collision half of this query
+    /// stands on its own, before any merge exists.
+    pub merge: Option<MergeCheck>,
+    /// What this answer can and cannot see ([NFR-CC-04]).
+    pub coverage: OverlapCoverage,
+    /// Degradation channel ([ADR-14]) — also where an unresolvable ref, a
+    /// missing `git`, and a single-ref call are reported.
+    pub warnings: Vec<String>,
+}
+
+/// What one ref changed relative to the base.
+#[derive(Debug, Default, Serialize)]
+pub struct RefChangeSummary {
+    /// The ref as the caller spelled it; Logos never rewrites it.
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    /// The commit it resolved to, or `None` when it did not resolve.
+    pub commit: Option<String>,
+    /// Files this ref changed relative to the base.
+    pub files_changed: u32,
+    /// Indexed symbols this ref's changed line ranges landed in.
+    pub symbols_modified: u32,
+}
+
+/// One symbol that more than one of the refs modifies ([FR-NV-13] AC 1).
+#[derive(Debug, Serialize)]
+pub struct ContendedSymbol {
+    /// The contended symbol.
+    #[serde(flatten)]
+    pub symbol: SymbolRef,
+    /// The refs whose changes land inside this symbol, in the order supplied.
+    pub modified_by: Vec<String>,
+    /// The refs in the same set that do **not** touch it, in the order
+    /// supplied. A shared append point that only some siblings reached is the
+    /// silent-drop shape: it is what Sprint 63's roster looked like from the
+    /// outside. A **smell, not a proof** — see [`OverlapCoverage::statement`].
+    pub absent_from: Vec<String>,
+}
+
+/// A stated merge result, and what it did not carry ([FR-NV-13] AC 2).
+///
+/// Deliberately not `Default`: the payload distinguishes `merge: null` (none was
+/// stated) from a merge block, and an all-empty block reads as a clean bill of
+/// health. There should be no one-line way to write the answer the tests exist
+/// to prevent.
+#[derive(Debug, Serialize)]
+pub struct MergeCheck {
+    /// The merge result as the caller spelled it.
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    /// The commit it resolved to, or `None` when it did not resolve.
+    pub commit: Option<String>,
+    /// Files the merge result changed relative to the same base.
+    pub files_changed: u32,
+    /// Symbols a ref modified that the merge result does not change **at all** —
+    /// the ref's work on them is not in the merge. Bounded like `contended`.
+    ///
+    /// A symbol the merge result *does* change is never listed here, even where
+    /// the merge kept only one contributing ref's version of it. That case is
+    /// not detectable by comparing which symbols changed, and it is precisely
+    /// the shape a clean merge hides — read `contended`/`absent_from` for it.
+    pub lost_symbols: Vec<LostSymbol>,
+    /// How many such symbols there are in full ([NFR-CC-04]).
+    pub lost_symbols_total: u32,
+    /// How many `lost_symbols` omitted — `0` when whole.
+    pub lost_symbols_elided: u32,
+    /// Files a ref changed that the merge result does not change at all. The
+    /// coarser twin of `lost_symbols`, and the only one that can speak for a
+    /// file the index does not cover ([NFR-CC-04]). Bounded like the lists
+    /// above — and counted, because a file the index holds no symbol for has no
+    /// twin in `lost_symbols` to compensate for a silent truncation.
+    pub lost_files: Vec<LostFile>,
+    /// How many such files there are in full.
+    pub lost_files_total: u32,
+    /// How many `lost_files` omitted — `0` when whole.
+    pub lost_files_elided: u32,
+}
+
+/// One symbol a ref modified that the stated merge result does not carry.
+#[derive(Debug, Serialize)]
+pub struct LostSymbol {
+    /// The symbol.
+    #[serde(flatten)]
+    pub symbol: SymbolRef,
+    /// The refs that modified it, in the order supplied.
+    pub modified_by: Vec<String>,
+    /// Whether the merge result changed the symbol's file at all. `true` is the
+    /// stronger signal: the merge took *some* of that file and not this.
+    pub merge_changed_the_file: bool,
+}
+
+/// One file a ref changed that the stated merge result does not change.
+#[derive(Debug, Serialize)]
+pub struct LostFile {
+    /// Project-relative path.
+    pub path: String,
+    /// The refs that changed it, in the order supplied.
+    pub modified_by: Vec<String>,
+}
+
+/// The coverage limits of one branch-overlap answer ([NFR-CC-04]).
+///
+/// This query joins two sources with different horizons — git, which sees every
+/// byte of every ref, and the code graph, which sees one indexed snapshot. Every
+/// way that join can under-report is named here rather than left to the reader.
+#[derive(Debug, Default, Serialize)]
+pub struct OverlapCoverage {
+    /// The standing statement of what the answer can and cannot see.
+    pub statement: String,
+    /// `HEAD` at query time — a *label* for the snapshot, not its identity.
+    /// Logos indexes the working tree, so the spans used for attribution may
+    /// include uncommitted edits this commit id does not describe.
+    /// `files_with_drifted_spans` is the field that answers the question
+    /// honestly; this one is for saying where in history the answer sits.
+    /// `None` when it could not be resolved.
+    pub indexed_snapshot: Option<String>,
+    /// Changed files whose content at a ref differs from **the working tree the
+    /// spans were read from**, so the spans used to attribute their hunks may
+    /// have moved. Bounded.
+    pub files_with_drifted_spans: Vec<String>,
+    /// Changed files the index holds no span-bearing symbol for — an unindexed
+    /// language, an excluded path, a data file. Their changes are invisible to
+    /// the symbol half of this answer. Bounded.
+    pub files_without_indexed_symbols: Vec<String>,
+    /// Changed line ranges that fell inside no indexed symbol span. Each is a
+    /// change this answer could not attribute.
+    pub unattributed_hunks: u32,
+    /// Refs that did not resolve to a commit; they contribute nothing.
+    pub unresolved_refs: Vec<String>,
+    /// Refs that resolved but whose diff against the base failed — a partial
+    /// clone with unfetched blobs, a killed subprocess. They contribute nothing
+    /// and, unlike a ref that genuinely changed nothing, they are **excluded
+    /// from `absent_from`**: "we did not look" is not "this ref did not touch
+    /// it", and `absent_from` is the field a reader acts on.
+    pub refs_not_diffed: Vec<String>,
 }
 
 /// Current index and sync health of the code graph (FR-NV-07).

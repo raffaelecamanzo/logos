@@ -198,6 +198,10 @@ registered_tools! {
     /// ([FR-NV-12], CR-114): the "show me the sibling that already does this"
     /// question a plan-driven workflow asks once scope is settled.
     Precedent => "precedent",
+    /// Branch and merge symbol overlap across a set of git refs ([FR-NV-13],
+    /// CR-114) — the integration question: which refs contend, and what a clean
+    /// merge did not carry.
+    BranchOverlap => "branch_overlap",
     Implements => "implements",
     ReferencingDocs => "referencing_docs",
     Affected => "affected",
@@ -332,6 +336,7 @@ impl Tool {
             | Tool::Impact
             | Tool::ImpactIntersection
             | Tool::Precedent
+            | Tool::BranchOverlap
             | Tool::Implements
             | Tool::ReferencingDocs
             | Tool::Affected
@@ -438,6 +443,7 @@ impl Tool {
             | Tool::Impact
             | Tool::ImpactIntersection
             | Tool::Precedent
+            | Tool::BranchOverlap
             | Tool::Implements
             | Tool::ReferencingDocs
             | Tool::Affected

@@ -65,8 +65,8 @@ use logos_core::federation::{query as fed_query, Backing, ContractBridge, Engine
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
 use logos_core::models::navigation::{
-    GraphElements, ImpactIntersectionResult, ImpactResult, LanguageComposition, NodeInfo,
-    PrecedentResult, SearchResult, StatusInfo,
+    BranchOverlapResult, GraphElements, ImpactIntersectionResult, ImpactResult,
+    LanguageComposition, NodeInfo, PrecedentResult, SearchResult, StatusInfo,
 };
 use logos_core::models::quality::{
     DsmReport, EvolutionReport, GateResult, LanguagesInfo, RulesReport, ScanResult, StatsInfo,
@@ -449,6 +449,46 @@ pub(crate) async fn precedent(
     let limit = q.get("limit").and_then(|value| value.parse::<usize>().ok());
     let result: PrecedentResult =
         bridge(engine, "api_v1_precedent", move |e| e.precedent(&target, limit)).await;
+    ok(result)
+}
+/// `GET /api/v1/branch-overlap?ref=<r>&ref=<r>[&base=<r>][&merge=<r>]` — which
+/// git refs collide, and what a merge did not carry ([FR-NV-13], CR-114).
+///
+/// The JSON twin of the `branch-overlap` CLI command and the MCP tool of the
+/// same name: all three hand their raw ref strings to the **one**
+/// [`Engine::branch_overlap`] accessor, so the three surfaces cannot drift in
+/// what they accept ([ADR-01], [NFR-MA-02]). `ref` repeats, which is why this
+/// handler reads the query as ordered pairs rather than the map most endpoints
+/// use.
+///
+/// A pure reader ([ADR-28]) — every git call underneath is a local read of the
+/// object database. Infallible at the surface: no `ref` at all, a ref that does
+/// not resolve, or a project that is not a git repository all produce an honest
+/// read-model carrying its warnings and coverage limits, never a `4xx`
+/// ([NFR-CC-04]).
+pub(crate) async fn branch_overlap(
+    MemberEngine(engine): MemberEngine,
+    Query(pairs): Query<Vec<(String, String)>>,
+) -> Response {
+    // `ref` repeats and is read positionally; `base`/`merge` are single. Empty
+    // values are NOT filtered here — `Engine::branch_overlap` owns that rule so
+    // `?base=` and `--base ""` behave identically ([ADR-01]).
+    let refs: Vec<String> = pairs
+        .iter()
+        .filter(|(key, _)| key == "ref")
+        .map(|(_, value)| value.clone())
+        .collect();
+    let pick = |wanted: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| key == wanted)
+            .map(|(_, value)| value.clone())
+    };
+    let (base, merge) = (pick("base"), pick("merge"));
+    let result: BranchOverlapResult = bridge(engine, "api_v1_branch_overlap", move |e| {
+        e.branch_overlap(&refs, base.as_deref(), merge.as_deref())
+    })
+    .await;
     ok(result)
 }
 

@@ -733,6 +733,7 @@ fn build_router(state: WebState) -> Router {
         .route("/api/v1/impact", get(api_v1::impact))
         .route("/api/v1/impact-intersection", get(api_v1::impact_intersection))
         .route("/api/v1/precedent", get(api_v1::precedent))
+        .route("/api/v1/branch-overlap", get(api_v1::branch_overlap))
         .route("/api/v1/node", get(api_v1::node))
         .route("/api/v1/search", get(api_v1::search))
         .route("/api/v1/wiki", get(api_v1::wiki_index))

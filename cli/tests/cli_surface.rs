@@ -94,6 +94,17 @@ const REPRESENTATIVE: &[&[&str]] = &[
         "2",
     ],
     &["precedent", "top", "--limit", "5"],
+    &[
+        "branch-overlap",
+        "--ref",
+        "main",
+        "--ref",
+        "topic",
+        "--base",
+        "main",
+        "--merge",
+        "main",
+    ],
     &["affected", "src/core.rs", "--tests-only"],
     &["scan", "src"],
     &["check"],
@@ -980,8 +991,8 @@ fn serve_mcp_speaks_jsonrpc_on_stdout_and_exits_cleanly_on_disconnect() {
             .as_array()
             .expect("tools array")
             .len(),
-        29,
-        "all 29 tools register through the shipped binary (FR-MC-01)"
+        30,
+        "all 30 tools register through the shipped binary (FR-MC-01)"
     );
 
     // Host disconnect → the process winds down by itself with exit 0.
@@ -1937,5 +1948,228 @@ fn wiki_hook_emit_sweeps_the_retired_session_end_hook() {
         summary["retired_removed"].as_array().map(Vec::len),
         Some(0),
         "the sweep does not keep claiming a removal it already made: {summary}"
+    );
+}
+
+// ── FR-NV-13 / CR-114: branch and merge symbol overlap ──────────────────────
+
+/// A git fixture with two branches that both edit `mid`, plus a merge result
+/// that carries only one of them.
+///
+/// `mid.rs` is deliberately multi-line so the innermost-symbol rule has real
+/// nesting to resolve: the hunks land inside `mid`, not merely inside the file.
+fn overlap_fixture() -> TempDir {
+    let tmp = fixture();
+    let root = tmp.path();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "-c",
+                "user.email=dev@logos",
+                "-c",
+                "user.name=Logos Dev",
+                "-c",
+                "commit.gpgsign=false",
+                // See the note in logos-core/tests/branch_overlap.rs: a global
+                // `core.hooksPath` would let a foreign pre-commit hook veto
+                // these commits.
+                "-c",
+                "core.hooksPath=",
+            ])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let mid = |body: &str| format!("use crate::core::base;\npub fn mid() {{\n    {body}\n}}\n");
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    git(&["branch", "-M", "main"]);
+    for (branch, body) in [("left", "base();\n    // left"), ("right", "base();\n    // right")] {
+        git(&["checkout", "-q", "-b", branch, "main"]);
+        write(root, "src/mid.rs", &mid(body));
+        if branch == "right" {
+            // Work only `right` did: a symbol edit and a whole file, neither of
+            // which the merge result below takes.
+            write(root, "src/core.rs", "pub fn base() {\n    // right\n}\n");
+            write(root, "src/right_only.rs", "pub fn right_only() {}\n");
+        }
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", branch]);
+        git(&["checkout", "-q", "main"]);
+    }
+    // The merge result took `left`'s edit and a new file of its own, and never
+    // took `right`'s — the silent-drop shape, made explicit.
+    git(&["checkout", "-q", "-b", "merged", "left"]);
+    write(root, "src/extra.rs", "pub fn extra() {}\n");
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "merge"]);
+    tmp
+}
+
+/// `branch-overlap` through the shipped binary in `--json` mode ([FR-NV-13],
+/// S-360, CR-114).
+///
+/// The MCP parity test compares read-models, not argv, so this is the only
+/// place a dropped or mis-plumbed CLI flag (`--ref`, `--base`, `--merge`) would
+/// be caught.
+#[test]
+fn branch_overlap_reports_contention_and_loss_through_the_binary() {
+    let tmp = overlap_fixture();
+    logos(tmp.path(), &["index"]);
+
+    let out = logos(
+        tmp.path(),
+        &["branch-overlap", "--ref", "left", "--ref", "right", "--json"],
+    );
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let payload: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json emits a parseable read-model");
+    let contended = payload["contended"].as_array().expect("contended");
+    assert!(
+        contended.iter().any(|row| row["name"] == "mid"),
+        "both refs edit `mid`: {payload}"
+    );
+    let mid = contended.iter().find(|row| row["name"] == "mid").unwrap();
+    assert_eq!(mid["modified_by"], serde_json::json!(["left", "right"]));
+    assert!(
+        !payload["coverage"]["statement"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "the coverage limits ride the payload (NFR-CC-04): {payload}"
+    );
+
+    // `--merge` reaches the engine. What is reported lost is `right`'s edit to
+    // `base` and its whole file `src/right_only.rs` — work the merge result
+    // does not carry at all. Its edit to `mid` is NOT reported lost, because
+    // the merge changed that symbol too (taking `left`'s version): the merge
+    // check compares which symbols changed, not their content, and the payload
+    // states that limit. `contended` above is what carries that shape.
+    let out = logos(
+        tmp.path(),
+        &[
+            "branch-overlap",
+            "--ref",
+            "left",
+            "--ref",
+            "right",
+            "--merge",
+            "merged",
+            "--json",
+        ],
+    );
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(payload["merge"]["ref"], "merged", "{payload}");
+    assert!(
+        payload["merge"]["lost_symbols"]
+            .as_array()
+            .expect("lost_symbols")
+            .iter()
+            .any(|row| row["name"] == "base" && row["modified_by"] == serde_json::json!(["right"])),
+        "`right`'s edit to `base` never reached the merge: {payload}"
+    );
+    assert!(
+        payload["merge"]["lost_files"]
+            .as_array()
+            .expect("lost_files")
+            .iter()
+            .any(|row| row["path"] == "src/right_only.rs"),
+        "the whole file the merge never took: {payload}"
+    );
+    // …and that same file is a stated limit of the symbol half: `right` added
+    // it, the indexed merge result never had it, so no symbol of its own can be
+    // reported for it ([NFR-CC-04], the AC's own words).
+    assert!(
+        payload["coverage"]["files_without_indexed_symbols"]
+            .as_array()
+            .expect("files_without_indexed_symbols")
+            .iter()
+            .any(|path| path == "src/right_only.rs"),
+        "{payload}"
+    );
+
+    // `--base` reaches the engine and changes the comparison point.
+    let out = logos(
+        tmp.path(),
+        &[
+            "branch-overlap",
+            "--ref",
+            "left",
+            "--ref",
+            "right",
+            "--base",
+            "main",
+            "--json",
+        ],
+    );
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(payload["base_origin"], "stated by the caller as main", "{payload}");
+
+    // An unresolvable ref is a coverage limit on an exit-0 payload, never an error.
+    let out = logos(
+        tmp.path(),
+        &["branch-overlap", "--ref", "left", "--ref", "nope", "--json"],
+    );
+    assert_eq!(exit_code(&out), 0, "an unknown ref is not a failure");
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(
+        payload["coverage"]["unresolved_refs"],
+        serde_json::json!(["nope"]),
+        "{payload}"
+    );
+
+    // `--ref` is required: that is a clap parse contract, not a graph answer.
+    let out = logos(tmp.path(), &["branch-overlap", "--json"]);
+    assert_eq!(exit_code(&out), 2, "a missing --ref is a usage fault");
+}
+
+/// `git` absent from `PATH` is a distinct branch from "not a git repository":
+/// the spawn itself fails, taking the `.ok()?` arm rather than the
+/// `status.success()` arm. Both must degrade to an exit-0 payload that says why
+/// it is empty ([ADR-14], [NFR-CC-04]) — a bare "no collisions" here would be
+/// the most dangerous answer this tool can give.
+#[test]
+fn branch_overlap_without_git_on_path_still_exits_zero() {
+    let tmp = overlap_fixture();
+    logos(tmp.path(), &["index"]);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_logos"))
+        .env("PATH", "")
+        .arg("--project")
+        .arg(tmp.path())
+        .args(["branch-overlap", "--ref", "left", "--ref", "right", "--json"])
+        .output()
+        .expect("the logos binary runs");
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json still emits a read-model");
+    assert_eq!(
+        payload["coverage"]["unresolved_refs"],
+        serde_json::json!(["left", "right"]),
+        "{payload}"
+    );
+    assert!(payload["base"].is_null(), "{payload}");
+    assert!(payload["contended"].as_array().unwrap().is_empty(), "{payload}");
+    assert!(
+        !payload["coverage"]["statement"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "an answer with no data behind it still states its limits: {payload}"
     );
 }

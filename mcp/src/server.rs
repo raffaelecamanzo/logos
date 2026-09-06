@@ -1,6 +1,6 @@
 //! The rmcp `ServerHandler` — the `logos:*` tools, each a thin delegator
 //! (S-017, FR-MC-01, FR-MC-02, NFR-MA-02). The single-root backing exposes the
-//! 29-tool `single_tool_router` roster; the federated workspace backing composes
+//! 30-tool `single_tool_router` roster; the federated workspace backing composes
 //! the `xservice_*`/`workspace_*` cross-service tools on top, leaving every
 //! single-root tool byte-identical (FR-WS-05, S-248).
 //!
@@ -33,7 +33,7 @@ const INSTRUCTIONS: &str = include_str!("instructions.md");
 /// delegates to one [`Engine`] method (or, for `xservice_*`, one [`query`]
 /// read-model over the member registry); no business logic lives here (FR-MC-02).
 ///
-/// [`new`](Self::new) is the single-root server (one [`Engine`], the 29-tool
+/// [`new`](Self::new) is the single-root server (one [`Engine`], the 30-tool
 /// `single_tool_router`); [`federated`](Self::federated) composes the
 /// `xservice_*` tools on top and runs the shared tools against the default
 /// member. The single-root roster carries no `repo` dimension, so its
@@ -340,6 +340,18 @@ pub struct PrecedentParams {
     pub limit: Option<usize>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct BranchOverlapParams {
+    /// The git refs about to be merged (or just merged) — branches, tags or
+    /// commits; anything `git rev-parse` accepts.
+    pub refs: Vec<String>,
+    /// Comparison point (default: the merge-base of the supplied refs).
+    pub base: Option<String>,
+    /// A stated merge result to check the refs' work against.
+    pub merge: Option<String>,
+}
+
 // ── Quality tool parameter schemas (S-020, FR-GV / FR-RC wire contracts) ────
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -423,7 +435,7 @@ pub struct WikiSearchParams {
     pub list: Option<bool>,
 }
 
-// ── The 29 single-root tools (FR-MC-01) ─────────────────────────────────────
+// ── The 30 single-root tools (FR-MC-01) ─────────────────────────────────────
 //
 // Named `single_tool_router` (not the default `tool_router`) so the federated
 // backing can compose it with `xservice_tool_router`; under `Backing::Single`
@@ -533,6 +545,19 @@ impl LogosMcp {
     ) -> Result<CallToolResult, ErrorData> {
         self.run("precedent", move |e| e.precedent(&p.target, p.limit))
             .await
+    }
+
+    #[tool(
+        description = "Which git refs collide, and what a merge did not carry (FR-NV-13). Give the refs about to be merged; returns the symbols more than one of them modifies (naming the refs, and naming the refs that do NOT touch a shared symbol — the silent-drop shape), plus, with `merge`, the symbols and files a ref changed that the stated merge result does not. Ask BEFORE integrating parallel branches, and again after: a clean merge is not a complete merge."
+    )]
+    async fn branch_overlap(
+        &self,
+        Parameters(p): Parameters<BranchOverlapParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run("branch_overlap", move |e| {
+            e.branch_overlap(&p.refs, p.base.as_deref(), p.merge.as_deref())
+        })
+        .await
     }
 
     #[tool(

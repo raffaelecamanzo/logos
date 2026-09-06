@@ -129,6 +129,7 @@ async fn loading_every_view_repeatedly_writes_no_snapshot() {
         "/api/v1/search?q=f", "/api/v1/node?symbol=f", "/api/v1/impact?seed=f",
         "/api/v1/impact-intersection?item=S-1=f&item=S-2=f",
         "/api/v1/precedent?target=f",
+        "/api/v1/branch-overlap?ref=main&ref=main",
     ] {
         for _ in 0..2 {
             let resp = router

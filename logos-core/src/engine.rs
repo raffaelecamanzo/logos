@@ -28,8 +28,9 @@ use crate::model::{EdgeKind, NodeKind};
 use crate::models::{
     navigation::{
         AffectedResult, CalleesResult, CallersResult, ContextBundle, ExploreResult, GraphElements,
-        GraphGranularity, GraphLayer, ImpactIntersectionResult, ImpactResult, ImplementorsResult,
-        LanguageComposition, NodeInfo, PrecedentResult, ReferencingDocsResult, SearchResult,
+        BranchOverlapResult, GraphGranularity, GraphLayer, ImpactIntersectionResult, ImpactResult,
+        ImplementorsResult, LanguageComposition, NodeInfo, PrecedentResult, ReferencingDocsResult,
+        SearchResult,
         StatusInfo,
     },
     pipeline::{IndexResult, InitResult, SyncResult},
@@ -715,6 +716,37 @@ impl Engine {
         .unwrap_or_else(|err| {
             tracing::warn!("precedent failed: {err:#}");
             crate::navigate::precedent_degraded(target, format!("precedent failed: {err}"))
+        })
+    }
+    /// Which git refs collide, and what a merge did not carry ([FR-NV-13],
+    /// CR-114).
+    ///
+    /// Given a set of refs, reports the symbols more than one of them modifies,
+    /// naming the refs. When `merge` names a stated merge result, also reports
+    /// the symbols and files a ref changed that the result does not carry — a
+    /// clean merge is not a complete merge. The payload carries its own coverage
+    /// limits ([NFR-CC-04]): hunks are attributed to the spans of the indexed
+    /// snapshot, so a symbol outside the indexed set cannot be reported.
+    ///
+    /// Refs are passed to git verbatim and are never interpreted here, so every
+    /// surface accepts whatever `git rev-parse` accepts ([ADR-01]). An
+    /// unresolvable ref becomes a warning on the payload, never an error.
+    ///
+    /// [FR-NV-13]: ../../../docs/specs/requirements/FR-NV-13.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
+    pub fn branch_overlap(
+        &self,
+        refs: &[String],
+        base: Option<&str>,
+        merge: Option<&str>,
+    ) -> BranchOverlapResult {
+        crate::observability::traced(Tool::BranchOverlap, || {
+            crate::navigate::branch::branch_overlap(self, refs, base, merge)
+        })
+        .unwrap_or_else(|err| {
+            tracing::warn!("branch_overlap failed: {err:#}");
+            crate::navigate::branch::overlap_degraded(format!("branch_overlap failed: {err}"))
         })
     }
 
