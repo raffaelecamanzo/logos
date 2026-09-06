@@ -494,15 +494,7 @@ fn place_hook(src: &Path, dst: &Path, mode: LinkMode, refresh_copies: bool) -> R
     match std::fs::symlink_metadata(dst) {
         Ok(meta) => {
             let is_link = meta.file_type().is_symlink();
-            // A DANGLING symlink cannot be read, but one under our own hooks
-            // directory is ours by construction — it is what an uninstall that
-            // purged the source first leaves behind — so it is replaceable,
-            // not foreign.
-            let managed = match std::fs::read_to_string(dst) {
-                Ok(body) => body.contains(MANAGED_MARKER),
-                Err(_) => is_link,
-            };
-            if !managed {
+            if !is_managed_hook_entry(dst, is_link) {
                 return Ok(Placement::Foreign);
             }
             if is_link && mode == LinkMode::Symlink && links_to(dst, src) {
@@ -594,6 +586,30 @@ fn symlink_file(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// Does `path` hold one of our hook scripts (following a symlink)?
 fn is_managed_script(path: &Path) -> bool {
     std::fs::read_to_string(path).is_ok_and(|body| body.contains(MANAGED_MARKER))
+}
+
+/// Is the existing entry at `path` (whose symlink-ness the caller has already
+/// stat'd as `is_link`) one of **ours** — safe to replace or remove?
+///
+/// The single decision behind both the seed's "may I overwrite this?" and the
+/// uninstall's "may I delete this?", so the two can never drift into
+/// disagreeing about which files logos owns.
+///
+/// A **dangling** symlink counts as ours: only this seeding leaves one under
+/// `.logos/hooks/`, and it is exactly what an uninstall that purged the source
+/// scripts first leaves behind. The narrowness matters — the read is allowed
+/// to fail *only* with `NotFound`. Every other error (a symlink to a
+/// directory, one whose target is unreadable, a script that is not valid
+/// UTF-8) says nothing about ownership, and treating those as ours would
+/// silently delete a third party's hook: `.logos/hooks/` is a directory the
+/// user may legitimately keep their own scripts in, and the non-clobbering
+/// posture ([FR-IN-01]) has to hold for the ones we cannot read too.
+fn is_managed_hook_entry(path: &Path, is_link: bool) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(body) => body.contains(MANAGED_MARKER),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => is_link,
+        Err(_) => false,
+    }
 }
 
 /// The body of [`COPY_FALLBACK_MARKER`] — human-readable, and machine-readable
@@ -736,14 +752,7 @@ fn purge_hooks_dir(dir: &Path, scope: PurgeScope) -> (Vec<String>, Vec<String>) 
             continue;
         };
         let is_link = meta.file_type().is_symlink();
-        // As in `place_hook`: an unreadable symlink under our own directory is
-        // a dangling link of ours — precisely what must not survive an
-        // uninstall — not a foreign script to preserve.
-        let managed = match std::fs::read_to_string(&path) {
-            Ok(body) => body.contains(MANAGED_MARKER),
-            Err(_) => is_link,
-        };
-        if !managed {
+        if !is_managed_hook_entry(&path, is_link) {
             warnings.push(format!(
                 "{HOOKS_RELDIR}/{name} is not logos-managed — left untouched"
             ));

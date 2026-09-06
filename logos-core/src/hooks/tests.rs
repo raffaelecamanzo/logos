@@ -463,3 +463,37 @@ fn concurrent_seeds_never_truncate_the_source_scripts() {
         );
     }
 }
+
+#[test]
+fn an_unreadable_foreign_hook_is_neither_replaced_nor_removed() {
+    // `.logos/hooks/` is a directory the user may keep their own scripts in,
+    // so the non-clobbering posture must hold for the ones we cannot READ too.
+    // Only a `NotFound` read may be taken as "a dangling link of ours"; a
+    // symlink to a directory, or a script that is not valid UTF-8, says
+    // nothing about ownership — and treating either as ours would silently
+    // delete somebody else's hook.
+    let (primary, worktree) = installed_repo_and_worktree();
+    let dir = worktree.path().join(HOOKS_RELDIR);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // A symlink pointing at a directory: readable as a link, unreadable as text.
+    let to_a_dir = dir.join("post-commit");
+    std::os::unix::fs::symlink(worktree.path(), &to_a_dir).unwrap();
+    // A hook that is simply not valid UTF-8.
+    let not_utf8 = dir.join("post-merge");
+    std::fs::write(&not_utf8, [0x23, 0x21, 0xff, 0xfe, 0x0a]).unwrap();
+
+    let seeded = seed_worktree(primary.path(), worktree.path());
+
+    assert_eq!(seeded.warnings.len(), 2, "both must be reported, not swallowed: {seeded:?}");
+    assert!(std::fs::symlink_metadata(&to_a_dir).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read(&not_utf8).unwrap(), [0x23, 0x21, 0xff, 0xfe, 0x0a]);
+
+    // …and an uninstall must not delete them either.
+    let (removed, warnings) = purge_hooks_dir(&dir, PurgeScope::SeededOnly);
+    assert!(!removed.contains(&"post-commit".to_string()), "{removed:?}");
+    assert!(!removed.contains(&"post-merge".to_string()), "{removed:?}");
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(std::fs::symlink_metadata(&to_a_dir).is_ok(), "foreign symlink survived");
+    assert!(not_utf8.is_file(), "foreign non-UTF-8 hook survived");
+}
