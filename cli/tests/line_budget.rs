@@ -305,12 +305,32 @@ fn adapter_lines() -> usize {
 /// given and interprets nothing. CR-084 §6 — recorded, not laundered.
 ///
 /// [FR-NV-13]: ../../docs/specs/requirements/FR-NV-13.md
+///
+/// **S-361/CR-114 878→890** for the session-gate CLI twins ([FR-CL-06]):
+/// measured 869→880 (+11), 10 lines of headroom. Itemised: `main.rs` +8 — the
+/// `Health` variant with its `--no-reconcile` flag (+4) and the `SessionStart`
+/// / `SessionEnd` variants, each a `#[command(name = "session-start", …)]`
+/// rename plus a fieldless variant (+2 each) — and `dispatch.rs` +3, one arm
+/// per command, each ONE `Engine::health` / `Engine::session_start` /
+/// `Engine::session_end` call through the existing `try_query` / `report_gate`
+/// chokepoints. Nothing computed in the adapter: the baseline upsert and the
+/// epsilon comparison are `logos_core::governance`, exactly as they already
+/// were for the MCP twins these commands now pair with.
+///
+/// The duplication hunt this file asks of each author was run again and is
+/// still negative. The one recorded candidate — folding the `stats`/`languages`
+/// `Engine::open(root)` + `print` pair into an `Output::open_query`
+/// chokepoint — was re-examined: the helper costs more lines than the two arms
+/// it would shorten, so it stays rejected for the same reason S-319 and S-358
+/// left it. CR-084 §6 — recorded, not laundered.
+///
+/// [FR-CL-06]: ../../docs/specs/requirements/FR-CL-06.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 878,
-        "cli adapter exceeds the 878 production-LOC budget (NFR-MA-02): \
+        lines <= 890,
+        "cli adapter exceeds the 890 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

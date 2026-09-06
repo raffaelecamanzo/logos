@@ -109,6 +109,10 @@ const REPRESENTATIVE: &[&[&str]] = &[
     &["scan", "src"],
     &["check"],
     &["gate", "--threshold", "7000"],
+    &["health"],
+    &["health", "--no-reconcile"],
+    &["session-start"],
+    &["session-end"],
     &["doctor"],
     &["verify"],
     &["evolution"],
@@ -994,6 +998,13 @@ fn serve_mcp_speaks_jsonrpc_on_stdout_and_exits_cleanly_on_disconnect() {
         30,
         "all 30 tools register through the shipped binary (FR-MC-01)"
     );
+    // The roster this count tracks is declared as a LIST in two places, and a
+    // tool added to only one surface is named for you by the guards there
+    // rather than reduced to an off-by-one here: `mcp/tests/support/roster.rs`
+    // (the MCP names) and `cli/src/main.rs::surface_parity` (their CLI twins,
+    // FR-CL-06). Neither is reachable from this crate's integration tests — the
+    // first is another crate's test module, the second is inside the binary —
+    // so this number stays hand-written. Update it there first.
 
     // Host disconnect → the process winds down by itself with exit 0.
     drop(stdin);

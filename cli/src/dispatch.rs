@@ -146,10 +146,21 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             }
             out.report_gate(root, |e| e.gate(threshold, save, !no_reconcile), |r| r.passed)
         }
+        // ARCHITECTURE health: a report, not a verdict. It carries the
+        // FR-GV-18/FR-GV-20 dimensions doctor gates on, but an FTS desync is
+        // exactly what it exists to surface — so it prints at exit 0 rather
+        // than gating like doctor/verify below.
+        Commands::Health { no_reconcile } => out.try_query(root, |e| e.health(!no_reconcile)),
         // CR-052 / FR-GV-18/19/20: structural-integrity guards — a corrupted or
         // drifted graph is a failure a human or CI must see, not a silent read.
         Commands::Doctor => out.report_gate(root, |e| e.doctor(), |r| r.ok),
         Commands::Verify => out.report_gate(root, |e| e.verify(), |r| r.ok),
+        // The session gate (FR-GV-04/05) without an MCP host (FR-CL-06):
+        // `session-start` records the baseline and always exits 0;
+        // `session-end` projects the regression verdict onto exit 1 the way
+        // `gate` does, so a CLI-directed agent can detect a failing gate.
+        Commands::SessionStart => out.try_query(root, |e| e.session_start()),
+        Commands::SessionEnd => out.report_gate(root, |e| e.session_end(), |r| r.passed),
         Commands::Evolution { limit } => out.try_query(root, |e| e.evolution(limit)),
         Commands::Dsm {
             granularity,

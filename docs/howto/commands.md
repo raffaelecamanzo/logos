@@ -1,6 +1,6 @@
 # Command Reference
 
-All subcommands of the `logos` binary (29 top-level commands, including the
+All subcommands of the `logos` binary (38 top-level commands, including the
 Sprint-55 `xservice` and `workspace` federation groups). Every command accepts
 the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 [usage.md](usage.md#global-flags-and-exit-codes) for those and for the
@@ -35,7 +35,13 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`workspace check`](#workspace-check) | ✅ | Evaluate workspace governance rules over cross-service bindings — advisory: a violation never moves the exit code (an unopenable member exits 1) |
 | [`scan`](#scan) | ✅ | Full architecture-quality scan |
 | [`check`](#check) | ✅ | Architecture-rules compliance check |
-| [`gate`](#gate) | ✅ | CI quality gate on the signal |
+| [`gate`](#gate---save---threshold-n---label-l) | ✅ | CI quality gate on the signal |
+| [`health`](#health) | ✅ | Architecture health — DB integrity, schema, FTS, structural + admission drift |
+| [`session-start`](#session-start--session-end) | ✅ | Record the quality baseline before edits (the CLI half of the session gate) |
+| [`session-end`](#session-start--session-end) | ✅ | Re-score against the baseline; exit 1 on regression |
+| [`doctor`](#doctor) | ✅ | Fast structural-integrity + admission tripwire; exit 1 on drift |
+| [`verify`](#verify) | ✅ | Deep reindex-diff consistency check; exit 1 on drift |
+| [`coverage refresh`](#coverage-refresh) | ✅ | Run the configured `refresh_cmd` and ingest what it produced |
 | [`quality-report`](#quality-report---hook-json) | ✅ | Non-blocking quality readout — writes nothing, always exits 0 (CLI-only) |
 | [`evolution`](#evolution) | ✅ | Signal evolution over snapshots |
 | [`dsm`](#dsm) | ✅ | Dependency-structure-matrix clusters |
@@ -1097,6 +1103,46 @@ Two consequences worth knowing:
 `--hook-json` renders the same read-model as the agent-host session-start payload
 (`systemMessage` + `hookSpecificOutput.additionalContext`). It exists for the
 installed hook script to exec; you would not normally run it by hand.
+
+### `health`
+
+```bash
+logos health [--no-reconcile]
+logos health --json
+```
+
+**ARCHITECTURE** health — the counterpart to [`status`](#status), which reports
+**INDEX** freshness. Checks database presence and size, the schema version, FTS
+coherence, structural integrity ([FR-GV-18](../specs/requirements/FR-GV-18.md)),
+the [FR-GV-20](../specs/requirements/FR-GV-20.md) admission tripwire, and the
+graph node/edge counts. An FTS desync is *reported* in the read-model rather than
+raised as an error — diagnosing it is what `health` is for — so the command
+exits 0 on a report it could produce. Payload-identical with the `health` MCP
+tool.
+
+### `session-start` / `session-end`
+
+```bash
+logos session-start            # record the quality baseline BEFORE edits
+# ... make your changes ...
+logos session-end              # re-score and compare; exit 1 on regression
+```
+
+The session gate ([FR-GV-04](../specs/requirements/FR-GV-04.md),
+[FR-GV-05](../specs/requirements/FR-GV-05.md)) without an MCP host, so an agent
+directed at the CLI can run the same mandatory bracket the MCP
+`server-instructions` describe. `session-start` computes a fresh snapshot,
+upserts it as the project baseline and reports the `session_id` (the snapshot
+row id), the recorded signal and the freshness line; it always exits 0.
+`session-end` re-scores and compares against that baseline, exiting **1** on an
+aggregate regression beyond epsilon — the same verdict projection
+[`gate`](#gate---save---threshold-n---label-l) makes, and what lets a shell
+script or CI step notice a failing gate.
+
+The baseline lives in the store, not in process memory, so the two commands work
+across separate invocations. Both are payload-identical with their
+`session_start` / `session_end` MCP twins; only the exit-code projection is
+CLI-side.
 
 ### `doctor`
 

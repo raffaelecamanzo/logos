@@ -18,56 +18,13 @@ use rmcp::{
 };
 use serde_json::{json, Value};
 
-/// The 11 navigation tools wired to `Engine` methods (FR-NV-01..07;
-/// `impact_intersection` added by S-358/CR-114, FR-NV-11; `precedent` by
-/// S-359/CR-114, FR-NV-12; `branch_overlap` by S-360/CR-114, FR-NV-13).
-const NAV_TOOLS: [&str; 11] = [
-    "search",
-    "context",
-    "explore",
-    "node",
-    "callers",
-    "callees",
-    "impact",
-    "impact_intersection",
-    "precedent",
-    "branch_overlap",
-    "status",
-];
+/// The shipped tool roster, shared with every other guard in this crate — a
+/// list, so two sessions each adding a tool merge into two entries instead of
+/// two copies of the same wrong count (S-361; see the module's own docs).
+#[path = "support/roster.rs"]
+mod roster;
 
-/// The 10 quality tools wired to the governance engine (S-020, FR-MC-01;
-/// `doctor` added by S-204/CR-052, `verify` by S-205/CR-052, FR-GV-18/FR-GV-19;
-/// the static test-gap tool removed by S-289/CR-079).
-const QUALITY_TOOLS: [&str; 10] = [
-    "scan",
-    "health",
-    "doctor",
-    "verify",
-    "session_start",
-    "session_end",
-    "rescan",
-    "check_rules",
-    "evolution",
-    "dsm",
-];
-
-/// The 1 temporal tool wired to the history engine (S-048, CR-006, FR-GH-06).
-const TEMPORAL_TOOLS: [&str; 1] = ["hotspots"];
-
-/// The 3 coverage tools wired to the evidence store (S-051, CR-007, FR-CV-06/07;
-/// `coverage_refresh` added by S-140/CR-036, FR-CV-10).
-const COVERAGE_TOOLS: [&str; 3] = ["coverage_ingest", "coverage_status", "coverage_refresh"];
-
-/// The 5 wiki twins wired to the wiki store (S-053, CR-008, FR-WK-09;
-/// `wiki_materialize` added by S-263/CR-062, FR-WK-20). `wiki delete`/`wiki
-/// skill` are CLI-only — destructive/install ops off the agent surface.
-const WIKI_TOOLS: [&str; 5] = [
-    "wiki_write",
-    "wiki_read",
-    "wiki_search",
-    "wiki_status",
-    "wiki_materialize",
-];
+use roster::{COVERAGE_TOOLS, NAV_TOOLS, QUALITY_TOOLS, TEMPORAL_TOOLS, WIKI_TOOLS};
 
 type Client = RunningService<RoleClient, ()>;
 
@@ -132,7 +89,7 @@ fn mcp_error(result: Result<Value, ServiceError>, tool: &str) -> rmcp::model::Er
 // ── FR-MC-01 / FR-MC-05 / UAT-MC-01: registration and namespacing ─────────
 
 #[tokio::test]
-async fn all_twenty_nine_tools_register_with_bare_names() {
+async fn exactly_the_declared_tool_roster_registers_with_bare_names() {
     let (client, _server, _dir) = connect().await;
 
     let tools = client.list_all_tools().await.expect("tools/list");
@@ -148,9 +105,18 @@ async fn all_twenty_nine_tools_register_with_bare_names() {
         .copied()
         .collect();
     expected.sort_unstable();
+    // The tally is derived, never written down: a hand-counted one is exactly
+    // what went stale when two Sprint 64 sessions each appended a tool and each
+    // wrote the same count (S-361, FR-CL-06).
     assert_eq!(
-        names, expected,
-        "exactly the 10 navigation + 10 quality + 1 temporal + 3 coverage + 5 wiki tools must register (FR-MC-01)"
+        names,
+        expected,
+        "exactly the {} navigation + {} quality + {} temporal + {} coverage + {} wiki tools must register (FR-MC-01)",
+        NAV_TOOLS.len(),
+        QUALITY_TOOLS.len(),
+        TEMPORAL_TOOLS.len(),
+        COVERAGE_TOOLS.len(),
+        WIKI_TOOLS.len(),
     );
 
     // Namespacing is the HOST's job, derived from the server identity: names
