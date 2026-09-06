@@ -350,12 +350,17 @@ claude mcp add logos -- /path/to/logos --project /path/to/project serve --mcp
 
 The host then sees **30 `logos:*` tools**, all live:
 
-| Navigation (10) | Quality & Governance (10) | Evidence tiers (4) | Source wiki (5) |
+| Navigation (11) | Quality & Governance (10) | Evidence tiers (4) | Source wiki (5) |
 |---|---|---|---|
 | `search`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `precedent`, `branch_overlap`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh` | `wiki_read`, `wiki_search`, `wiki_status`, `wiki_write`, `wiki_materialize` |
 
 Each MCP tool is a thin twin of the CLI command of the same name and returns a
-byte-identical payload. The four evidence-tier tools are **non-gated** — like
+byte-identical payload — `check_rules` is spelled `logos check`, and `rescan` is
+the one deliberate MCP-only tool (it replays the last scan's parameters *within a
+server process*, which a one-shot CLI invocation has no equivalent of; use
+`logos scan`). The session gate is reachable from either surface:
+`logos session-start` / `logos session-end`, with a failing `session-end`
+exiting 1. The four evidence-tier tools are **non-gated** — like
 their CLI counterparts they never move the `session_end` gate signal — and the
 source-wiki tools read/write the gate-immune `wiki.db` store, never the graph.
 

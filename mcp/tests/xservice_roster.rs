@@ -3,7 +3,7 @@
 //!
 //! The load-bearing guarantee: introducing the federated backing and the
 //! `xservice_*` cross-service tools must leave the single-root tool roster
-//! **byte-for-byte unchanged** — same 30 tools, same schemas, no `repo`
+//! **byte-for-byte unchanged** — same tools, same schemas, no `repo`
 //! dimension. Federation only ever *adds* tools, and only when a workspace is
 //! present. This drives the roster directly through [`LogosMcp::list_tools`]
 //! (engine-free: the router is built from the static tool attrs, independent of
@@ -14,6 +14,12 @@ use std::collections::BTreeMap;
 use logos_core::federation::{EngineRegistry, Federation, RegistryMode};
 use logos_core::Engine;
 use mcp::LogosMcp;
+
+/// The shipped tool roster, shared with `protocol.rs` and `stdout_safety.rs` —
+/// every count below derives from it, so a roster change is one edit and cannot
+/// leave a guard behind (S-361; see the module's own docs).
+#[path = "support/roster.rs"]
+mod roster;
 
 /// The single-root server over a throwaway (unindexed) engine — `list_tools`
 /// reads the static router, so no index is needed.
@@ -47,8 +53,9 @@ fn names(tools: &[rmcp::model::Tool]) -> Vec<String> {
     tools.iter().map(|t| t.name.to_string()).collect()
 }
 
-/// The single-root roster is exactly today's 30 tools, and none of them carries
-/// a `repo` parameter — the single-root wire contract is unchanged (FR-WS-05).
+/// The single-root roster is exactly the set declared in `tests/support/roster.rs`,
+/// and none of them carries a `repo` parameter — the single-root wire contract is
+/// unchanged (FR-WS-05).
 ///
 /// S-358/CR-114 raised the roster 27→28 for `impact_intersection` ([FR-NV-11]),
 /// S-359/CR-114 28→29 for `precedent` ([FR-NV-12]), and S-360/CR-114 29→30 for
@@ -60,12 +67,13 @@ fn names(tools: &[rmcp::model::Tool]) -> Vec<String> {
 /// [FR-NV-11]: ../../docs/specs/requirements/FR-NV-11.md
 /// [FR-NV-12]: ../../docs/specs/requirements/FR-NV-12.md
 #[test]
-fn single_root_roster_is_the_unchanged_29_with_no_repo_dimension() {
+fn single_root_roster_is_the_declared_set_with_no_repo_dimension() {
     let single = single_tools();
     assert_eq!(
         single.len(),
-        30,
-        "single-root backing registers exactly the 30 tools (FR-MC-01): {:?}",
+        roster::SINGLE_ROOT,
+        "single-root backing registers exactly the {} declared tools (FR-MC-01): {:?}",
+        roster::SINGLE_ROOT,
         names(&single)
     );
 
@@ -84,7 +92,7 @@ fn single_root_roster_is_the_unchanged_29_with_no_repo_dimension() {
     }
 }
 
-/// The 30 single-root tools appear **byte-identical** under the federated
+/// The single-root tools appear **byte-identical** under the federated
 /// backing, which adds exactly the 7 cross-service tools on top (FR-WS-05, plus
 /// S-257's `workspace_reachability` union view, FR-WS-12, and S-258's
 /// `workspace_check` governance tool, FR-WS-13).
@@ -109,8 +117,10 @@ fn federated_backing_adds_xservice_without_touching_the_single_roster() {
 
     assert_eq!(
         federated.len(),
-        30 + 7,
-        "federated backing is the 30 single tools + the 7 cross-service tools: {:?}",
+        roster::FEDERATED,
+        "federated backing is the {} single tools + the {} cross-service tools: {:?}",
+        roster::SINGLE_ROOT,
+        roster::XSERVICE_TOOLS.len(),
         names(&federated)
     );
 
@@ -122,15 +132,7 @@ fn federated_backing_adds_xservice_without_touching_the_single_roster() {
     // `list_all` sorts by name, so the added set is alphabetical.
     assert_eq!(
         added,
-        vec![
-            "workspace_check",
-            "workspace_reachability",
-            "workspace_status",
-            "xservice_callers",
-            "xservice_impact",
-            "xservice_route_providers",
-            "xservice_search",
-        ],
+        roster::XSERVICE_TOOLS,
         "federation adds exactly the FR-WS-05 query tools + the \
          FR-WS-12 app-wide reachability union view + the FR-WS-13 governance tool",
     );

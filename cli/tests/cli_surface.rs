@@ -109,6 +109,16 @@ const REPRESENTATIVE: &[&[&str]] = &[
     &["scan", "src"],
     &["check"],
     &["gate", "--threshold", "7000"],
+    &["health"],
+    &["health", "--no-reconcile"],
+    &["session-start"],
+    &["session-end"],
+    // The underscore spellings are the point of the `alias` attributes: an
+    // agent that knows the MCP tool name `session_start` must reach the twin.
+    // A dropped alias becomes an unknown subcommand — exit 2 — which the sweep
+    // below is exactly the assertion for (S-361, FR-CL-06).
+    &["session_start"],
+    &["session_end"],
     &["doctor"],
     &["verify"],
     &["evolution"],
@@ -553,8 +563,11 @@ fn non_stub_subcommands_emit_valid_json_with_json_flag() {
         &["languages", "--json"],
         &["scan", "--json"],
         &["gate", "--json"],
+        &["health", "--json"],
         &["doctor", "--json"],
         &["verify", "--json"],
+        &["session-start", "--json"],
+        &["session-end", "--json"],
         &["evolution", "--json"],
         &["dsm", "--json"],
         &["hotspots", "--json"],
@@ -986,13 +999,24 @@ fn serve_mcp_speaks_jsonrpc_on_stdout_and_exits_cleanly_on_disconnect() {
         "logos",
         "the host derives logos:<tool> from this identity (FR-MC-01)"
     );
+    // Derived from the real router, never written down (S-361): a hand-written
+    // count is what two Sprint 64 sessions each got wrong on the same line, and
+    // git merged the identical edits without a conflict. `list_tools` reads the
+    // static tool attrs, so the throwaway engine needs no index — this asserts
+    // that the SHIPPED BINARY's stdio server registers the same roster the
+    // in-process router declares, which is the half a spawned process can hide.
+    let registered = mcp::LogosMcp::new(logos_core::Engine::open(
+        TempDir::new().expect("tempdir").path(),
+    ))
+    .list_tools()
+    .len();
     assert_eq!(
         tools.unwrap()["result"]["tools"]
             .as_array()
             .expect("tools array")
             .len(),
-        30,
-        "all 30 tools register through the shipped binary (FR-MC-01)"
+        registered,
+        "all {registered} registered tools reach the host through the shipped binary (FR-MC-01)"
     );
 
     // Host disconnect → the process winds down by itself with exit 0.
@@ -2171,5 +2195,135 @@ fn branch_overlap_without_git_on_path_still_exits_zero() {
             .unwrap_or_default()
             .is_empty(),
         "an answer with no data behind it still states its limits: {payload}"
+    );
+}
+
+// ── S-361 / FR-CL-06: the session-gate CLI twins, through the real binary ────
+//
+// `cli/src/main.rs::surface_parity` proves the three commands EXIST on both
+// surfaces and are declared with a reason where they do not. That is a
+// registration contract; it says nothing about what they do. These tests cover
+// the half a roster cannot: the exit-code projection and the read-model each
+// one actually emits, through the shipped executable.
+
+/// FR-GV-04 / FR-GV-05 through the binary: `session-start` records a baseline
+/// one process later `session-end` compares against, and a regression exits 1.
+///
+/// This is the assertion behind the sentence [FR-IN-02]'s managed `CLAUDE.md`
+/// block now ships into every initialised project — *"a failing gate exits 1"*.
+/// Modelled on [`gate_exits_one_on_regression`], because the pair IS the gate:
+/// `Engine::session_end` is `governance::gate(.., None, false, true)`.
+///
+/// [FR-IN-02]: ../../docs/specs/requirements/FR-IN-02.md
+#[test]
+fn the_session_gate_pair_carries_a_baseline_across_processes_and_exits_one_on_regression() {
+    let tmp = fixture();
+    logos(tmp.path(), &["index", "--quiet"]);
+
+    let started = logos(tmp.path(), &["session-start", "--json"]);
+    assert_eq!(
+        exit_code(&started),
+        0,
+        "session-start always exits 0 — it records, it does not gate: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let start: serde_json::Value =
+        serde_json::from_slice(&started.stdout).expect("session-start emits valid JSON");
+    assert!(
+        start["session_id"].as_str().is_some_and(|id| !id.is_empty()),
+        "the baseline snapshot id is the session handle: {start}"
+    );
+    let baseline = start["signal"].as_u64().expect("a recorded baseline signal");
+
+    // An unchanged tree passes, and — the load-bearing half — `session-end` in a
+    // SEPARATE process compares against the signal the earlier process recorded.
+    // That only works because the baseline is a store row, not process state.
+    let held = logos(tmp.path(), &["session-end", "--json"]);
+    assert_eq!(
+        exit_code(&held),
+        0,
+        "an unchanged session holds its gate: {}",
+        String::from_utf8_lossy(&held.stderr)
+    );
+    let end: serde_json::Value =
+        serde_json::from_slice(&held.stdout).expect("session-end emits valid JSON");
+    assert_eq!(end["passed"], true);
+    assert_eq!(
+        end["baseline_signal"].as_u64(),
+        Some(baseline),
+        "session-end compares against the baseline session-start wrote: {end}"
+    );
+
+    // Degrade the graph exactly as `gate_exits_one_on_regression` does.
+    write(
+        tmp.path(),
+        "src/core.rs",
+        "\
+pub fn base() {}
+fn tangle_a() {
+    tangle_b();
+}
+fn tangle_b() {
+    tangle_a();
+}
+",
+    );
+    let regressed = logos(tmp.path(), &["session-end", "--json"]);
+    assert_eq!(
+        exit_code(&regressed),
+        1,
+        "a regression past the session baseline exits 1 (FR-GV-05): {}",
+        String::from_utf8_lossy(&regressed.stderr)
+    );
+    let failed: serde_json::Value =
+        serde_json::from_slice(&regressed.stdout).expect("valid JSON on the failing path too");
+    assert_eq!(failed["passed"], false);
+}
+
+/// `health` emits the ARCHITECTURE read-model — not `status`'s, and not
+/// `doctor`'s — and honours `--no-reconcile` (FR-RC-04).
+///
+/// `schema_version` is the field `mcp/tests/protocol.rs` picked as unique to
+/// this read-model precisely so a dispatch swap fails loudly; the CLI needs the
+/// same guard, because `health` is the command whose own doc comment has to
+/// spend three lines distinguishing it from `status`.
+#[test]
+fn health_reports_the_architecture_read_model_through_the_binary() {
+    let tmp = fixture();
+    logos(tmp.path(), &["index", "--quiet"]);
+
+    let out = logos(tmp.path(), &["health", "--json"]);
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "a healthy graph exits 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("health emits valid JSON");
+    assert!(
+        json.get("schema_version").is_some(),
+        "the ARCHITECTURE read-model, not another command's: {json}"
+    );
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["fts_ok"], true);
+    assert_eq!(json["structural_ok"], true);
+    assert!(
+        json["nodes"].as_u64().is_some_and(|n| n > 0),
+        "an indexed project reports its graph counts: {json}"
+    );
+
+    // `--no-reconcile` reaches the engine as `health(false)`. Asserting the
+    // freshness line is what kills the inverted-boolean class: a flipped `!`
+    // would silently reconcile and this string would not appear.
+    let fast = logos(tmp.path(), &["health", "--no-reconcile", "--json"]);
+    assert_eq!(exit_code(&fast), 0);
+    let fast_json: serde_json::Value =
+        serde_json::from_slice(&fast.stdout).expect("valid JSON");
+    assert!(
+        fast_json["freshness"]
+            .as_str()
+            .is_some_and(|f| f.starts_with("assumed-fresh (--no-reconcile)")),
+        "--no-reconcile skips the pre-evaluation reconcile (FR-RC-04): {fast_json}"
     );
 }

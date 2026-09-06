@@ -16,6 +16,11 @@ use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+/// The shipped tool roster, shared with `protocol.rs` and `xservice_roster.rs`
+/// — the count below derives from it (S-361; see the module's own docs).
+#[path = "support/roster.rs"]
+mod roster;
+
 /// Spawn `logos-mcp <root>` at TRACE log level with piped stdio.
 fn spawn_server(root: &std::path::Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_logos-mcp"))
@@ -202,8 +207,9 @@ fn stdout_carries_only_jsonrpc_even_at_trace_level() {
     );
     assert_eq!(
         tool_count(&responses[&json!(2)]),
-        30,
-        "all 30 logos tools register (FR-MC-01)"
+        roster::SINGLE_ROOT,
+        "all {} declared logos tools register (FR-MC-01)",
+        roster::SINGLE_ROOT
     );
     assert_ne!(
         responses[&json!(3)]["result"]["isError"],
@@ -220,7 +226,7 @@ fn stdout_carries_only_jsonrpc_even_at_trace_level() {
     // …and the server survived it to answer the next request (FR-MC-06).
     assert_eq!(
         tool_count(&responses[&json!(4)]),
-        30,
+        roster::SINGLE_ROOT,
         "server alive after malformed input"
     );
 

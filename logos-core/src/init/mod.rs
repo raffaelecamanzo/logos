@@ -311,6 +311,8 @@ structure, and reach for them by the *shape* of the question:
 Wrap editing sessions in the quality gate: `logos:session_start` before edits,
 `logos:session_end` after — on a failing gate, stop and fix the regression before
 piling on more changes. Run `logos:check_rules` before declaring any task done.
+Without an MCP host the same gate is `logos session-start` / `logos session-end`
+(a failing gate exits 1) and `logos check`.
 
 The full quality loop has four moves — **freshen** (index/sync so the graph matches
 the code), **enforce** (`logos check` blocks regressions; the `pre-push` gate runs
@@ -318,7 +320,10 @@ it), **report** (`logos scan` surfaces the 0–10000 signal; the session-start h
 prints it), and **bless** (`logos gate --save` records a new baseline, at release only). The
 copy-pasteable CI recipe is `docs/howto/ci-integration.md`.
 
-Every tool has a CLI twin (`logos context`, `logos search`, …) with `--json` output.
+Every tool has a CLI twin (`logos context`, `logos search`, …) with `--json` output,
+with one deliberate exception: `rescan` is MCP-only, because it replays the
+parameters of the last scan **in the same server process** and a one-shot CLI
+invocation has no earlier scan to replay — run `logos scan` instead.
 
 This block is managed by `logos init -i`: edits inside the markers are regenerated on
 re-run; content outside the markers is never touched.

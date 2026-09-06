@@ -8,7 +8,7 @@
 //! are byte-identical for the same `wiki.db` + tree over a real indexed git
 //! fixture, that every read carries the four mandatory provenance fields
 //! ([FR-WK-04]), and that the host lists exactly the five `logos:*` wiki tools
-//! as part of the 29-tool surface.
+//! as part of the shipped tool surface (`tests/support/roster.rs`).
 
 use std::path::Path;
 use std::process::Command;
