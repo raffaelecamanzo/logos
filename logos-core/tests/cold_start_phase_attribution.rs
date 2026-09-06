@@ -159,6 +159,7 @@ fn cold_start_phase_attribution_child_sample() {
     let engine = Engine::start(root.path()).expect("engine starts");
     let uninstrumented = t.elapsed();
     assert!(engine.runtime().is_some(), "engine is ready to serve");
+    let uninstrumented_registry_len = engine.registry().map(|r| r.len());
     drop(engine);
     drop(root);
 
@@ -170,6 +171,15 @@ fn cold_start_phase_attribution_child_sample() {
     assert!(
         engine.runtime().is_some(),
         "instrumented engine is ready to serve"
+    );
+    // `start_with_phase_report` mirrors `Engine::start`'s call sequence by
+    // hand so it can be timed without touching the production path — this is
+    // the cheapest behavioral check that the mirror stayed faithful: both
+    // arms must load the identical plugin substrate.
+    assert_eq!(
+        engine.registry().map(|r| r.len()),
+        uninstrumented_registry_len,
+        "Engine::start_with_phase_report loads the same registry as Engine::start"
     );
 
     // AC1: the per-phase breakdown reconciles with the externally measured
