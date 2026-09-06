@@ -1161,6 +1161,25 @@ pub trait GraphStore {
     /// [NFR-PE-03]: ../../../docs/specs/requirements/NFR-PE-03.md
     fn callable_nodes_in_files(&self, paths: &[String]) -> Result<Vec<NodeRow>>;
 
+    /// Every **span-bearing** node defined in the given project-relative file
+    /// `paths`, ordered by path then start line then id.
+    ///
+    /// The line-range counterpart to
+    /// [`callable_nodes_in_files`](GraphStore::callable_nodes_in_files): where
+    /// that one narrows to `Function`/`Method` for the dispatch pass, this
+    /// returns *every* kind that recorded a `start_line`, because mapping a git
+    /// hunk back to the symbol that encloses it ([FR-NV-13],
+    /// [`crate::navigate::branch`]) must be able to land on a struct, a const or
+    /// a module as readily as on a function. Nodes with no recorded start line
+    /// are excluded: a hunk cannot be attributed to a span that does not exist.
+    ///
+    /// Change-proportional like its sibling — only the changed files' nodes are
+    /// materialised, never the whole-graph [`all_nodes`](GraphStore::all_nodes)
+    /// scan. An empty `paths` yields an empty result.
+    ///
+    /// [FR-NV-13]: ../../../docs/specs/requirements/FR-NV-13.md
+    fn span_nodes_in_files(&self, paths: &[String]) -> Result<Vec<NodeRow>>;
+
     /// The subset of `node_ids` that carry a **dispatch live-root marker** — a
     /// `RoutesTo` self-edge (`source == target`, [`crate::resolve::dispatch`]).
     ///
@@ -2034,6 +2053,31 @@ impl GraphStore for SqliteGraphStore {
             .query_map(rusqlite::params_from_iter(paths.iter()), map_raw_row)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting callable nodes in files")?;
+        raws.into_iter().map(raw_to_node).collect()
+    }
+
+    fn span_nodes_in_files(&self, paths: &[String]) -> Result<Vec<NodeRow>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Dynamic `IN (?,?,…)` over the (small) changed-file set; `prepare` not
+        // `prepare_cached` because the placeholder count varies. No kind filter:
+        // a git hunk can land on any declaration that recorded a span, and
+        // `start_line IS NOT NULL` is exactly the "has a span" predicate.
+        let placeholders = vec!["?"; paths.len()].join(",");
+        let sql = format!(
+            "SELECT n.id, s.symbol, n.kind, n.name, f.path, n.start_line, n.end_line \
+             FROM nodes n \
+             JOIN symbols s ON s.id = n.symbol_id \
+             JOIN files f ON f.id = n.file_id \
+             WHERE f.path IN ({placeholders}) AND n.start_line IS NOT NULL \
+             ORDER BY f.path, n.start_line, n.id"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let raws = stmt
+            .query_map(rusqlite::params_from_iter(paths.iter()), map_raw_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting span-bearing nodes in files")?;
         raws.into_iter().map(raw_to_node).collect()
     }
 

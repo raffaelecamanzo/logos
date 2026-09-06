@@ -348,11 +348,11 @@ For manual wiring:
 claude mcp add logos -- /path/to/logos --project /path/to/project serve --mcp
 ```
 
-The host then sees **28 `logos:*` tools**, all live:
+The host then sees **29 `logos:*` tools**, all live:
 
-| Navigation (9) | Quality & Governance (10) | Evidence tiers (4) | Source wiki (5) |
+| Navigation (10) | Quality & Governance (10) | Evidence tiers (4) | Source wiki (5) |
 |---|---|---|---|
-| `search`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh` | `wiki_read`, `wiki_search`, `wiki_status`, `wiki_write`, `wiki_materialize` |
+| `search`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `branch_overlap`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh` | `wiki_read`, `wiki_search`, `wiki_status`, `wiki_write`, `wiki_materialize` |
 
 Each MCP tool is a thin twin of the CLI command of the same name and returns a
 byte-identical payload. The four evidence-tier tools are **non-gated** — like
@@ -536,7 +536,8 @@ read mutates no store and leaves every metric/cycle/DSM/dead-code scope
 byte-identical. The endpoints are: `/api/v1/overview`, `/api/v1/health`,
 `/api/v1/graph`, `/api/v1/query`, `/api/v1/impact`,
 `/api/v1/impact-intersection` (repeatable `item=<id>=<symbol>[,<symbol>]`,
-optional `depth`), `/api/v1/node`,
+optional `depth`), `/api/v1/branch-overlap` (repeatable `ref=<git-ref>`,
+optional `base` and `merge`), `/api/v1/node`,
 `/api/v1/search`, `/api/v1/architecture`, `/api/v1/gaps`, `/api/v1/files`,
 `/api/v1/coverage`, `/api/v1/wiki`, `/api/v1/wiki/nav`,
 `/api/v1/wiki/search`, `/api/v1/wiki/page/*slug`, `/api/v1/wiki/asset/*path`

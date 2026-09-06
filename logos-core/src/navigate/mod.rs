@@ -61,6 +61,8 @@ use crate::models::navigation::{
 #[cfg(test)]
 mod tests;
 
+pub(crate) mod branch;
+
 /// Default `search` result cap ([FR-NV-01]).
 const DEFAULT_SEARCH_LIMIT: usize = 20;
 /// Default `callers`/`callees` result cap ([FR-NV-05]).

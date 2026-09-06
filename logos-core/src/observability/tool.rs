@@ -194,6 +194,10 @@ registered_tools! {
     /// CR-114) — the scheduling question, asked of the graph instead of the
     /// architecture prose.
     ImpactIntersection => "impact_intersection",
+    /// Branch and merge symbol overlap across a set of git refs ([FR-NV-13],
+    /// CR-114) — the integration question: which refs contend, and what a clean
+    /// merge did not carry.
+    BranchOverlap => "branch_overlap",
     Implements => "implements",
     ReferencingDocs => "referencing_docs",
     Affected => "affected",
@@ -327,6 +331,7 @@ impl Tool {
             | Tool::Callees
             | Tool::Impact
             | Tool::ImpactIntersection
+            | Tool::BranchOverlap
             | Tool::Implements
             | Tool::ReferencingDocs
             | Tool::Affected
@@ -432,6 +437,7 @@ impl Tool {
             | Tool::Callees
             | Tool::Impact
             | Tool::ImpactIntersection
+            | Tool::BranchOverlap
             | Tool::Implements
             | Tool::ReferencingDocs
             | Tool::Affected

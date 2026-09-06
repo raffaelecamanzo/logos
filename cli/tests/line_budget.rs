@@ -275,12 +275,28 @@ fn adapter_lines() -> usize {
 /// tool and the `/api/v1` route cannot drift in what they accept. A clap
 /// `value_parser` would have cost more adapter lines *and* put the parse in
 /// three surfaces. Recorded, not laundered (CR-084 §6).
+///
+/// **S-360/CR-114 855→868** for the `branch-overlap` command ([FR-NV-13]):
+/// measured 851→863 (+12), 5 lines of headroom. The whole delta is `main.rs`'s
+/// `BranchOverlap` variant declaration (+9: the `#[command(name = ...)]` rename
+/// and the repeatable `--ref` plus `--base` and `--merge` `#[arg]`s) and a
+/// 3-line dispatch arm delegating to ONE `Engine::branch_overlap` call.
+///
+/// The duplication hunt this file keeps asking of each author was run again and
+/// is still negative: the `stats`/`languages` `open_query` fold recorded in the
+/// S-319 paragraph above remains the only candidate, and S-358 re-examined it
+/// and left it. What the raise buys instead is that ref resolution, the git
+/// diff parse and the span attribution all stayed in
+/// `logos_core::navigate::branch` — the CLI hands over the `Vec<String>` it was
+/// given and interprets nothing. CR-084 §6 — recorded, not laundered.
+///
+/// [FR-NV-13]: ../../docs/specs/requirements/FR-NV-13.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 855,
-        "cli adapter exceeds the 855 production-LOC budget (NFR-MA-02): \
+        lines <= 868,
+        "cli adapter exceeds the 868 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

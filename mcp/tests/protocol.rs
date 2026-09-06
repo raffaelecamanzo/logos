@@ -18,9 +18,10 @@ use rmcp::{
 };
 use serde_json::{json, Value};
 
-/// The 9 navigation tools wired to `Engine` methods (FR-NV-01..07;
-/// `impact_intersection` added by S-358/CR-114, FR-NV-11).
-const NAV_TOOLS: [&str; 9] = [
+/// The 10 navigation tools wired to `Engine` methods (FR-NV-01..07;
+/// `impact_intersection` added by S-358/CR-114, FR-NV-11; `branch_overlap` by
+/// S-360/CR-114, FR-NV-13).
+const NAV_TOOLS: [&str; 10] = [
     "search",
     "context",
     "explore",
@@ -29,6 +30,7 @@ const NAV_TOOLS: [&str; 9] = [
     "callees",
     "impact",
     "impact_intersection",
+    "branch_overlap",
     "status",
 ];
 
@@ -203,7 +205,7 @@ async fn server_instructions_contain_all_three_steers() {
     );
 }
 
-// ── FR-MC-02 / UAT-MC-01: the 9 navigation tools delegate and answer ──────
+// ── FR-MC-02 / UAT-MC-01: the 10 navigation tools delegate and answer ─────
 
 #[tokio::test]
 async fn navigation_tools_return_their_read_models() {
@@ -214,7 +216,7 @@ async fn navigation_tools_return_their_read_models() {
     // The expected field is UNIQUE to each tool's read-model (no `query`/
     // shared fields), so a cross-tool dispatch swap — the primary bug class
     // in a pure dispatch layer — fails loudly (FR-MC-02).
-    let calls: [(&'static str, Value, &str); 9] = [
+    let calls: [(&'static str, Value, &str); 10] = [
         ("search", json!({"query": "anything"}), "hits"),
         ("context", json!({"task": "find the entrypoint"}), "hops"),
         ("explore", json!({"query": "anything"}), "total_files"),
@@ -230,6 +232,11 @@ async fn navigation_tools_return_their_read_models() {
             "impact_intersection",
             json!({"items": ["A=does::not::Exist", "B=also::does::not::Exist"]}),
             "safe_parallel",
+        ),
+        (
+            "branch_overlap",
+            json!({"refs": ["HEAD", "does-not-exist"]}),
+            "contended",
         ),
         ("status", Value::Null, "freshness"),
     ];

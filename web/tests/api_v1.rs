@@ -127,6 +127,7 @@ const V1_ENDPOINTS: &[&str] = &[
     "/api/v1/query?q=f",
     "/api/v1/impact?seed=f",
     "/api/v1/impact-intersection?item=S-1=f&item=S-2=g",
+    "/api/v1/branch-overlap?ref=main&ref=main",
     "/api/v1/node?symbol=f",
     "/api/v1/search?q=f",
     "/api/v1/wiki",
@@ -452,6 +453,108 @@ async fn impact_intersection_endpoint_serializes_the_read_model_and_keeps_every_
             .iter()
             .any(|w| w.as_str().unwrap_or_default().contains("at least two")),
         "the empty answer says why it is empty: {body}"
+    );
+}
+
+/// `GET /api/v1/branch-overlap?ref=<r>&ref=<r>[&merge=<r>]` serializes the
+/// [FR-NV-13] read-model (S-360, CR-114): the per-ref rows, the contended
+/// symbols with the refs that modify them and the refs that do not, the merge
+/// block, and the coverage limits. `ref` REPEATS, which is the one thing this
+/// route does differently from its neighbours — it reads the query as ordered
+/// pairs, not a map, so a second `ref` cannot silently overwrite the first.
+///
+/// The route must be shown to COMPUTE, not merely to serialise field names, so
+/// the fixture grows two branches that genuinely edit the same function.
+/// Infallible at the surface ([NFR-CC-04]): a ref that does not resolve is an
+/// honest `200` carrying its warning, never a `400`.
+#[tokio::test]
+async fn branch_overlap_endpoint_serializes_the_read_model_and_keeps_every_ref() {
+    let (tmp, engine) = scanned_engine();
+    let repo = tmp.path();
+    for (branch, body) in [
+        ("topic", "pub fn f(x: i64) -> i64 { if x > 0 { x } else { 0 - x } }\n"),
+        ("other", "pub fn f(x: i64) -> i64 { if x >= 0 { x } else { -x } }\n"),
+    ] {
+        sh_git(repo, &["checkout", "-q", "-b", branch, "main"]);
+        commit(repo, "src/lib.rs", body, "branch edit");
+        sh_git(repo, &["checkout", "-q", "main"]);
+    }
+    let router = web::router(engine);
+
+    let path = "/api/v1/branch-overlap?ref=topic&ref=other";
+    let resp = router.clone().oneshot(get(path)).await.unwrap();
+    let (status, body, headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_json_self_only_csp(&headers, path);
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+
+    // A repeated `ref` param is KEPT — the reason this handler reads ordered
+    // pairs rather than the map its neighbours use.
+    assert_eq!(
+        payload["refs"].as_array().map(Vec::len),
+        Some(2),
+        "a repeated `ref` param is kept, not overwritten: {body}"
+    );
+    assert_eq!(payload["refs"][0]["ref"], "topic", "{body}");
+    let contended = payload["contended"].as_array().expect("contended");
+    // Two rows, and both are true: this fixture's `src/lib.rs` is a SINGLE line,
+    // so the file's module node and the only function in it share one span and
+    // neither encloses the other. The innermost-symbol rule that keeps a module
+    // out of the answer in ordinary multi-line code has nothing to bite on here;
+    // `logos-core/tests/branch_overlap.rs` pins that rule where it applies.
+    assert_eq!(contended.len(), 2, "{body}");
+    let f = contended
+        .iter()
+        .find(|row| row["name"] == "f")
+        .unwrap_or_else(|| panic!("the edited function is contended: {body}"));
+    assert_eq!(
+        f["modified_by"],
+        serde_json::json!(["topic", "other"]),
+        "the refs are named, in the order supplied: {body}"
+    );
+    assert!(
+        f["absent_from"].as_array().unwrap().is_empty(),
+        "both refs touch it: {body}"
+    );
+    assert!(payload["merge"].is_null(), "no merge was stated: {body}");
+    assert!(
+        !payload["coverage"]["statement"].as_str().unwrap_or_default().is_empty(),
+        "the coverage limits ride the payload (NFR-CC-04): {body}"
+    );
+
+    // `?merge=` reaches the engine: against `main` — which carries neither
+    // branch's edit — `f` is reported as work the merge result does not have.
+    let resp = router
+        .clone()
+        .oneshot(get(&format!("{path}&merge=main")))
+        .await
+        .unwrap();
+    let (status, body, _headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(payload["merge"]["ref"], "main", "{body}");
+    assert!(
+        payload["merge"]["lost_symbols"]
+            .as_array()
+            .expect("lost_symbols")
+            .iter()
+            .any(|row| row["name"] == "f"),
+        "{body}"
+    );
+
+    // A ref that does not resolve reaches the wire as a coverage limit.
+    let resp = router
+        .clone()
+        .oneshot(get("/api/v1/branch-overlap?ref=topic&ref=nope"))
+        .await
+        .unwrap();
+    let (status, body, _headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "an unknown ref is not a 4xx");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        payload["coverage"]["unresolved_refs"],
+        serde_json::json!(["nope"]),
+        "{body}"
     );
 }
 

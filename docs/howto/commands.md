@@ -421,6 +421,52 @@ symbols is warned about rather than silently disambiguated.
 Malformed items and unknown symbols are warnings on an exit-0 payload, never
 errors; omitting `--item` entirely is a usage fault (exit 2).
 
+### `branch-overlap`
+
+```bash
+logos branch-overlap --ref <REF> --ref <REF> [--ref <REF>...] \
+                     [--base <REF>] [--merge <REF>]
+```
+
+Which git refs collide, and what a merge did not carry. Given the refs about to
+be merged, reports every symbol more than one of them modifies, naming the refs.
+A clean merge is not a complete merge — ask this before integrating parallel
+branches, and again after.
+
+```bash
+logos branch-overlap --ref sprint-63-I3-S1 --ref sprint-63-I3-S2 \
+                     --ref sprint-63-I3-S3 --merge main --json
+```
+
+`--ref` repeats and is required; each is passed to git verbatim, so a branch,
+tag, or commit all work. `--base` pins the comparison point (default: the
+merge-base of the supplied refs). `--merge` states a merge result to check the
+refs' work against.
+
+Each contended symbol carries two lists. `modified_by` names the refs whose
+changes land inside it. `absent_from` names the refs in the same set that do
+**not** touch it — a shared append point some siblings reached and others did
+not is what a silent drop looks like from the outside, and it is the signal that
+was missing when five Sprint 63 branches contributed to one capability roster
+and two of them never joined it.
+
+With `--merge`, the payload also carries `merge.lost_symbols` (symbols a ref
+modified that the merge result does not change at all) and `merge.lost_files`
+(whole files the merge never took — the only report that can speak for content
+the index holds no symbol for).
+
+The payload states its own coverage limits (`coverage`): changed line ranges are
+attributed to the symbol spans of the *indexed* snapshot, so a symbol outside
+the indexed set cannot be reported. `files_without_indexed_symbols` names
+changed files the graph holds nothing for, `files_with_drifted_spans` names
+files whose content at a ref differs from the snapshot the spans came from,
+`unattributed_hunks` counts the changes that landed in no symbol, and
+`unresolved_refs` names refs that are not commits.
+
+Unresolvable refs, a project that is not a git repository, and fewer than two
+refs are all warnings on an exit-0 payload, never errors; omitting `--ref`
+entirely is a usage fault (exit 2).
+
 ### `affected`
 
 ```bash

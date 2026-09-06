@@ -211,6 +211,23 @@ pub(crate) enum Commands {
         #[arg(long)]
         depth: Option<usize>,
     },
+    /// Which git refs collide, and what a merge did not carry (FR-NV-13):
+    /// given the refs about to be merged, the symbols more than one of them
+    /// modifies; given `--merge`, the symbols and files a ref changed that the
+    /// stated merge result does not. A clean merge is not a complete merge.
+    #[command(name = "branch-overlap", alias = "branch_overlap")]
+    BranchOverlap {
+        /// A git ref, repeatable: a branch, tag or commit — anything
+        /// `git rev-parse` accepts.
+        #[arg(long = "ref", value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// Comparison point (default: the merge-base of the supplied refs).
+        #[arg(long)]
+        base: Option<String>,
+        /// A stated merge result to check the refs' work against.
+        #[arg(long)]
+        merge: Option<String>,
+    },
     /// Files affected by a changed set — whole reverse-transitive closure.
     Affected {
         /// Changed files (project-relative paths).
