@@ -42,16 +42,11 @@ Navigating by structure *while you edit* — `search`, `node`, `callers`,
 > once per agent session — evidence that a navigate-while-you-code framing
 > under-delivered, not evidence that this framing works.
 >
-> The figure to judge it by is read from `logos stats --json`, never hand-derived:
-> its `calls_by_class` cross-tab classifies every call as `navigation`,
-> `quality-gate`, `session-gate`, `engine-internal` or `read-model` and splits each
-> by dev-vs-`main` origin. At the moment this framing shipped, that breakdown put
-> navigation at **3,038 of 115,267 lifetime calls (2.64%)** against 105,809
-> `engine-internal` — roughly one navigation call for every 35 the engine made on
-> its own — and 1.47% over dev-origin calls alone. (Earlier prose quoted 0.81% for
-> the same project; that was hand-derived over a narrower tool list, which is the
-> drift this cross-tab exists to end.) The cross-tab is raw-events-only and states
-> its own coverage limits in the payload.
+> Judge it from `logos stats --json`, never by hand: its `calls_by_class` cross-tab
+> gives every call a tool class, split by dev-vs-`main` origin, and states its own
+> coverage limits in the payload. When this framing shipped, navigation was **2.64%
+> of lifetime calls on this project** (1.47% of dev-origin ones). Re-read the
+> cross-tab for the project in front of you rather than trusting that number.
 
 ## What it indexes
 
@@ -99,7 +94,7 @@ have payload-identical MCP twins (five wiki tools).
 1. [Installation](installation.md) — building the `logos` binary, feature flags, verification
 2. [Configuration](configuration.md) — `.logos/`, `config.toml`, `rules.toml`, logging, query overrides
 3. [Usage](usage.md) — indexing workflow, navigation, agent/MCP setup, the web UI dashboard, worktree-based development, exit codes, scripting
-4. [Commands](commands.md) — the full 38-subcommand reference (incl. the planning-time `impact-intersection`, `precedent`, `branch-overlap`, plus `wiki`, `hotspots`, `coverage`)
+4. [Commands](commands.md) — the full 38-subcommand reference (incl. the planning-time `logos impact-intersection`, `logos precedent`, `logos branch-overlap`, plus `logos hotspots` and the `logos wiki …` / `logos coverage …` families)
 5. [Metrics](metrics.md) — the ten-dimension quality metrics engine and the 0–10000 signal
 6. [Error handling](error-handling.md) — the fail-soft / fail-loud contract, exit codes, and troubleshooting
 7. [CI integration](ci-integration.md) — the freshen / enforce / report / bless loop as a copy-pasteable CI recipe (enforce with `check`, report with `scan --json`, bless with `gate --save` at release only)
