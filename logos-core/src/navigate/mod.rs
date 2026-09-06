@@ -801,13 +801,7 @@ pub(crate) fn impact_intersection(
         // a *scheduling verdict*, and silently picking the wrong `new` would
         // manufacture the false `safe_parallel` this query exists to prevent, so
         // the ambiguity is said out loud ([NFR-CC-04]).
-        if candidates > 1 {
-            warnings.push(format!(
-                "{text:?} matched {candidates} symbols by name; resolved to {} — \
-                 qualify the name to disambiguate",
-                row.symbol.as_str()
-            ));
-        }
+        warnings.extend(ambiguity_warning(&text, candidates, row.symbol.as_str()));
         rows[index].resolved.push(symbol_ref(&row));
         match view.index_of(row.symbol.as_str()) {
             Some(start) => {
@@ -1189,13 +1183,9 @@ pub(crate) fn precedent(
             // match many symbols and the resolver picks one. Here the answer is
             // "copy this precedent", so being shown the precedents of the wrong
             // `new` is a wasted edit ([NFR-CC-04]).
-            if candidates > 1 {
-                result.warnings.push(format!(
-                    "{target:?} matched {candidates} symbols by name; resolved to {} — qualify \
-                     the name to disambiguate",
-                    row.symbol.as_str()
-                ));
-            }
+            result
+                .warnings
+                .extend(ambiguity_warning(target, candidates, row.symbol.as_str()));
             result.target_kind = PrecedentTargetKind::Symbol;
             result.target_symbol = Some(symbol_ref(&row));
             result.target_file = row.file_path.clone();
@@ -1497,13 +1487,12 @@ fn precedent_anchors(
     graph: &DiGraph<Vertex, EdgeData>,
     seeds: &BTreeSet<NodeIndex>,
 ) -> Vec<PrecedentAnchor> {
+    // Collected with duplicates and deduplicated by the sort below: the sort key
+    // IS the anchor's identity, so equal anchors land adjacent and `dedup` is
+    // exact. A `HashSet` beside the `Vec` would be a second copy of that same
+    // fact — and, because the closure would need `&mut Vec` threaded through it
+    // to satisfy the borrow checker, a worse-shaped one.
     let mut anchors: Vec<PrecedentAnchor> = Vec::new();
-    let mut seen: HashSet<PrecedentAnchor> = HashSet::new();
-    let mut push = |anchor: PrecedentAnchor, anchors: &mut Vec<PrecedentAnchor>| {
-        if seen.insert(anchor) {
-            anchors.push(anchor);
-        }
-    };
     for &seed in seeds {
         for edge in graph.edges_directed(seed, Direction::Outgoing) {
             // A self-edge relates a node to nobody. Left in, a recursive
@@ -1524,14 +1513,11 @@ fn precedent_anchors(
                 // three stated facets, so it is not a reason.
                 _ => continue,
             };
-            push(
-                PrecedentAnchor {
-                    facet,
-                    node: edge.target(),
-                    kind,
-                },
-                &mut anchors,
-            );
+            anchors.push(PrecedentAnchor {
+                facet,
+                node: edge.target(),
+                kind,
+            });
         }
         for edge in graph.edges_directed(seed, Direction::Incoming) {
             if edge.source() == edge.target() {
@@ -1540,14 +1526,11 @@ fn precedent_anchors(
             let Some(kind) = edge.weight().kind.filter(|k| is_registration_edge(*k)) else {
                 continue;
             };
-            push(
-                PrecedentAnchor {
-                    facet: PrecedentFacet::SharedRegistration,
-                    node: edge.source(),
-                    kind,
-                },
-                &mut anchors,
-            );
+            anchors.push(PrecedentAnchor {
+                facet: PrecedentFacet::SharedRegistration,
+                node: edge.source(),
+                kind,
+            });
         }
     }
     anchors.sort_by(|a, b| {
@@ -1556,6 +1539,7 @@ fn precedent_anchors(
             .then_with(|| graph[a.node].key.cmp(&graph[b.node].key))
             .then_with(|| (a.kind as i32).cmp(&(b.kind as i32)))
     });
+    anchors.dedup();
     anchors
 }
 
@@ -2581,6 +2565,25 @@ fn resolve_counting_candidates(
     let candidates = store.nodes_by_name(text)?;
     let count = candidates.len();
     Ok(candidates.into_iter().next().map(|row| (row, count)))
+}
+
+/// The [NFR-CC-04] disclosure for a bare name that matched more than one symbol,
+/// or `None` when the resolution was unambiguous.
+///
+/// One function because two callers word it identically and must keep doing so:
+/// `impact_intersection` and `precedent` both hand the user a verdict that a
+/// wrong pick silently invalidates — a false `safe_parallel` in one case, the
+/// precedents of the wrong `new` in the other — and a warning that drifted
+/// between them would be two different accounts of the same guess.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn ambiguity_warning(text: &str, candidates: usize, resolved: &str) -> Option<String> {
+    (candidates > 1).then(|| {
+        format!(
+            "{text:?} matched {candidates} symbols by name; resolved to {resolved} — qualify \
+             the name to disambiguate"
+        )
+    })
 }
 
 /// Depth-bounded multi-source BFS: every vertex whose minimal hop distance from
