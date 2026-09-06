@@ -96,6 +96,13 @@ pub(crate) fn branch_overlap(
     merge: Option<&str>,
 ) -> Result<BranchOverlapResult> {
     let root = engine.root().to_path_buf();
+    // An empty optional is an ABSENT optional, everywhere. `?base=` is the
+    // normal output of an HTML form and `--base ""` of a shell variable that
+    // did not expand; treating either as a stated base collapsed the entire
+    // answer to empty behind a warning advising the caller to pass `--base`.
+    // The rule lives here so all four surfaces share it ([ADR-01]).
+    let blank = |value: &&str| !value.trim().is_empty();
+    let (base, merge) = (base.filter(blank), merge.filter(blank));
     let mut warnings = Vec::new();
     if refs.is_empty() {
         warnings.push("no refs supplied; nothing to compare".to_string());
@@ -138,11 +145,19 @@ pub(crate) fn branch_overlap(
         .filter_map(|(i, (name, commit))| Some((i, name.as_str(), commit.as_deref()?)))
         .collect();
     let (base_commit, base_origin) = resolve_base(&root, base, &live, merge_commit.as_deref());
-    if base_commit.is_none() && !live.is_empty() {
-        warnings.push(
+    match (&base_commit, base) {
+        (Some(_), _) => {}
+        // A base the caller stated and git does not know is its own fault, and
+        // advising them to "pass --base" — which they did — sends them round
+        // the same loop. Name the base instead.
+        (None, Some(base)) => warnings.push(format!(
+            "{base} was stated as the base but does not resolve to a commit in this repository"
+        )),
+        (None, None) if !live.is_empty() => warnings.push(
             "no common ancestor for the supplied refs; pass --base to state the comparison point"
                 .to_string(),
-        );
+        ),
+        (None, None) => {}
     }
 
     let mut result = BranchOverlapResult {
@@ -341,6 +356,7 @@ pub(crate) fn branch_overlap(
                 }
             }
         }
+        let lost_files_total = by_file.len() as u32;
         result.merge = Some(MergeCheck {
             git_ref: name.to_string(),
             commit: merge_commit,
@@ -356,6 +372,9 @@ pub(crate) fn branch_overlap(
                     modified_by: by.into_iter().map(|i| ref_names[i].clone()).collect(),
                 })
                 .collect(),
+            lost_files_total,
+            lost_files_elided: lost_files_total
+                .saturating_sub(MAX_PATHS_LISTED.min(lost_files_total as usize) as u32),
         });
     }
     Ok(result)

@@ -517,7 +517,12 @@ pub struct ContendedSymbol {
 }
 
 /// A stated merge result, and what it did not carry ([FR-NV-13] AC 2).
-#[derive(Debug, Default, Serialize)]
+///
+/// Deliberately not `Default`: the payload distinguishes `merge: null` (none was
+/// stated) from a merge block, and an all-empty block reads as a clean bill of
+/// health. There should be no one-line way to write the answer the tests exist
+/// to prevent.
+#[derive(Debug, Serialize)]
 pub struct MergeCheck {
     /// The merge result as the caller spelled it.
     #[serde(rename = "ref")]
@@ -535,8 +540,14 @@ pub struct MergeCheck {
     pub lost_symbols_elided: u32,
     /// Files a ref changed that the merge result does not change at all. The
     /// coarser twin of `lost_symbols`, and the only one that can speak for a
-    /// file the index does not cover ([NFR-CC-04]).
+    /// file the index does not cover ([NFR-CC-04]). Bounded like the lists
+    /// above — and counted, because a file the index holds no symbol for has no
+    /// twin in `lost_symbols` to compensate for a silent truncation.
     pub lost_files: Vec<LostFile>,
+    /// How many such files there are in full.
+    pub lost_files_total: u32,
+    /// How many `lost_files` omitted — `0` when whole.
+    pub lost_files_elided: u32,
 }
 
 /// One symbol a ref modified that the stated merge result does not carry.

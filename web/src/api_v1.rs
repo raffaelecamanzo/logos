@@ -438,6 +438,9 @@ pub(crate) async fn branch_overlap(
     MemberEngine(engine): MemberEngine,
     Query(pairs): Query<Vec<(String, String)>>,
 ) -> Response {
+    // `ref` repeats and is read positionally; `base`/`merge` are single. Empty
+    // values are NOT filtered here — `Engine::branch_overlap` owns that rule so
+    // `?base=` and `--base ""` behave identically ([ADR-01]).
     let refs: Vec<String> = pairs
         .iter()
         .filter(|(key, _)| key == "ref")
