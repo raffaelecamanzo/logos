@@ -1903,9 +1903,82 @@ mod tests {
         );
         set_member("web", vec![route("GET /users/{id}", "local route_web")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let reg = registry(&["api", "web"]);
+        let cov = cross_service_coverage(&reg);
         assert_eq!(cov.ambiguous, 1);
         assert_eq!(cov.bound, 0);
+
+        // **[CR-118] CRA-02: the tie lists its same-member participant too.** The
+        // consumer's own member holds one of the two tied routes, and it is named:
+        // the tie is what refused the binding, so dropping a participant would
+        // misreport *why*. This is the one place the tied set deliberately DIVERGES
+        // from the fan-out set, which excludes same-member subscribers because the
+        // bridge emits no edge for them — an invariant stated emphatically in
+        // `tier`, and therefore asserted here rather than left to the comment.
+        let tied = cov.references[0]
+            .candidates
+            .as_ref()
+            .expect("the tie is named");
+        assert_eq!(tied.total, 2);
+        let members: Vec<&str> = tied.providers.iter().map(|p| p.member.as_str()).collect();
+        assert_eq!(members, ["api", "web"], "including the consumer's own member");
+
+        // **AC: naming candidates creates no edge** ([NFR-RA-05]). Asserted against
+        // the real bridge, mirroring the bound twin's `edges.len() == 1` — this is
+        // the story's one claim that was otherwise carried by argument alone.
+        assert!(
+            super::super::bridge::ContractBridge::new().edges(&reg).is_empty(),
+            "a tie fabricates no edge, so there is no ArtifactBinding to emit"
+        );
+    }
+
+    /// A tie whose candidates are **all in the consumer's own member** — pinned, not
+    /// changed.
+    ///
+    /// Only the *sole* same-member provider is excluded as intra-repo
+    /// (`[only] if only.member == member => None`); a two-or-more tie applies no
+    /// member filter, so this classifies `ambiguous` on the cross-service board with
+    /// no cross-boundary participant at all. That is **pre-existing** tier
+    /// behaviour — the bridge agrees, emitting no edge either way — and [CR-118] is
+    /// only what made it legible, by naming the participants. Changing it would move
+    /// a reference between buckets, which this story's own acceptance criterion
+    /// forbids.
+    ///
+    /// Recorded as a test so the next reader meets it as a known property rather
+    /// than as a [CR-118] regression.
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    #[test]
+    fn an_all_same_member_tie_is_pre_existing_behaviour_and_names_only_intra_repo_candidates() {
+        reset();
+        set_member(
+            "api",
+            vec![
+                op("GET /users/{id}", "local op_get"),
+                route("GET /users/{id}", "local route_one"),
+                route("GET /users/{userId}", "local route_two"),
+            ],
+        );
+
+        let reg = registry(&["api"]);
+        let cov = cross_service_coverage(&reg);
+
+        assert_eq!(cov.ambiguous, 1, "pre-existing: a 2+ tie applies no member filter");
+        let tied = cov.references[0]
+            .candidates
+            .as_ref()
+            .expect("the tie is named");
+        let members: Vec<&str> = tied.providers.iter().map(|p| p.member.as_str()).collect();
+        assert_eq!(
+            members,
+            ["api", "api"],
+            "every named participant is the consumer's own member — the property \
+             CR-118 makes visible, not one it introduces"
+        );
+        assert!(
+            super::super::bridge::ContractBridge::new().edges(&reg).is_empty(),
+            "and the bridge agrees: no edge either way"
+        );
     }
 
     /// A route whose template does not normalize is never a provider
