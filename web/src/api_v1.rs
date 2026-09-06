@@ -66,7 +66,7 @@ use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
 use logos_core::models::navigation::{
     GraphElements, ImpactIntersectionResult, ImpactResult, LanguageComposition, NodeInfo,
-    SearchResult, StatusInfo,
+    PrecedentResult, SearchResult, StatusInfo,
 };
 use logos_core::models::quality::{
     DsmReport, EvolutionReport, GateResult, LanguagesInfo, RulesReport, ScanResult, StatsInfo,
@@ -416,6 +416,34 @@ pub(crate) async fn impact_intersection(
         e.impact_intersection(&items, depth)
     })
     .await;
+    ok(result)
+}
+
+/// `GET /api/v1/precedent?target=<symbol|path>[&limit=<n>]` — nodes
+/// structurally analogous to one symbol or file ([FR-NV-12], CR-114).
+///
+/// The JSON twin of the `precedent` CLI command and the MCP tool of the same
+/// name: all three hand their raw target string to the **one**
+/// [`Engine::precedent`] accessor, which owns the symbol-then-file resolution
+/// rule, so the three surfaces cannot drift in what they accept ([ADR-01],
+/// [NFR-MA-02]).
+///
+/// A pure reader ([ADR-28]). Infallible at the surface: a missing target, an
+/// unknown symbol, or a target with no structure to compare all resolve to an
+/// honest read-model whose `empty_reason` names why — never a `404` or a `400`
+/// ([NFR-CC-04]). A non-numeric `limit` falls back to the default rather than
+/// rejecting the request.
+pub(crate) async fn precedent(
+    MemberEngine(engine): MemberEngine,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(target) = q.get("target").map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_string)
+    else {
+        return ok(PrecedentResult::default());
+    };
+    let limit = q.get("limit").and_then(|value| value.parse::<usize>().ok());
+    let result: PrecedentResult =
+        bridge(engine, "api_v1_precedent", move |e| e.precedent(&target, limit)).await;
     ok(result)
 }
 

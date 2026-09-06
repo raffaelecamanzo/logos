@@ -127,6 +127,7 @@ const V1_ENDPOINTS: &[&str] = &[
     "/api/v1/query?q=f",
     "/api/v1/impact?seed=f",
     "/api/v1/impact-intersection?item=S-1=f&item=S-2=g",
+    "/api/v1/precedent?target=f",
     "/api/v1/node?symbol=f",
     "/api/v1/search?q=f",
     "/api/v1/wiki",
@@ -352,6 +353,144 @@ async fn impact_endpoint_serializes_the_read_model_and_defaults_empty() {
     assert_eq!(status, StatusCode::OK, "seedless impact is an honest 200");
     assert_json_self_only_csp(&headers, "/api/v1/impact");
     assert!(body.contains("\"resolved\":null"), "seedless impact resolves to nothing: {body}");
+}
+
+/// A language-plugin registry fixture: two capability arms behind one trait,
+/// through the same two helpers, plus a registry naming both types.
+///
+/// The `/api/v1` precedent route needs a repository that actually HAS a
+/// precedent — a route test over the single-function default fixture would
+/// assert serde field names against an empty answer and pass while proving
+/// nothing (the defect review caught in the S-358 twin).
+fn precedent_engine() -> (TempDir, Arc<Engine>) {
+    let tmp = TempDir::new().expect("temp root");
+    let repo = tmp.path();
+    sh_git(repo, &["init", "-q", "-b", "main"]);
+    commit(
+        repo,
+        "src/plugin.rs",
+        "pub trait LanguagePlugin {\n    fn extract(&self);\n}\n",
+        "feat: the plugin trait",
+    );
+    commit(
+        repo,
+        "src/shared.rs",
+        "pub fn parse_source() {}\npub fn emit_facts() {}\n",
+        "feat: the shared helpers",
+    );
+    for (file, ty) in [("src/rustarm.rs", "RustArm"), ("src/pyarm.rs", "PyArm")] {
+        commit(
+            repo,
+            file,
+            &format!(
+                "use crate::plugin::LanguagePlugin;\n\
+                 use crate::shared::{{parse_source, emit_facts}};\n\n\
+                 pub struct {ty};\n\n\
+                 impl LanguagePlugin for {ty} {{\n\
+                 \x20   fn extract(&self) {{\n\
+                 \x20       parse_source();\n\
+                 \x20       emit_facts();\n\
+                 \x20   }}\n\
+                 }}\n"
+            ),
+            "feat: a capability arm",
+        );
+    }
+    let engine = Arc::new(Engine::start(repo).expect("engine starts"));
+    engine.index();
+    (tmp, engine)
+}
+
+/// `GET /api/v1/precedent?target=<symbol|path>[&limit=<n>]` serializes the
+/// [FR-NV-12] read-model (S-359, CR-114): the analogous nodes, the reason each
+/// one is analogous, the stated notion and ranking rule, and the coverage limits.
+///
+/// Infallible at the surface ([NFR-CC-04]): a missing target, an unknown symbol
+/// and a malformed `limit` are all honest `200`s carrying their own explanation,
+/// never a `400`.
+#[tokio::test]
+async fn precedent_endpoint_serializes_the_read_model_with_its_reasons() {
+    let (_tmp, engine) = precedent_engine();
+    let router = web::router(engine);
+
+    let path = "/api/v1/precedent?target=logos%20.%20.%20.%20src/%60rustarm.rs%60/extract().";
+    let resp = router.clone().oneshot(get(path)).await.unwrap();
+    let (status, body, headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_json_self_only_csp(&headers, path);
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+
+    // The route must be shown to COMPUTE, not merely to serialise field names:
+    // the sibling arm comes back and says why it is analogous.
+    assert_eq!(payload["target_kind"], "symbol", "{body}");
+    let precedents = payload["precedents"].as_array().expect("precedents");
+    assert_eq!(precedents.len(), 1, "{body}");
+    assert_eq!(precedents[0]["file"], "src/pyarm.rs", "{body}");
+    let facets: Vec<&str> = precedents[0]["reasons"]
+        .as_array()
+        .expect("reasons")
+        .iter()
+        .map(|r| r["facet"].as_str().unwrap())
+        .collect();
+    assert_eq!(facets, vec!["shared_supertype", "shared_callee"], "{body}");
+    assert_eq!(precedents[0]["rank"]["facets"], 2, "{body}");
+    assert!(
+        !payload["notion"].as_str().unwrap_or_default().is_empty()
+            && !payload["ranked_by"].as_str().unwrap_or_default().is_empty(),
+        "the stated notion and ranking rule ride the payload (FR-NV-12 AC 1): {body}"
+    );
+    assert!(
+        !payload["coverage"]["statement"].as_str().unwrap_or_default().is_empty(),
+        "the coverage limits ride the payload (NFR-CC-04): {body}"
+    );
+
+    // A file target — the second half of the resolution rule — reaches the wire.
+    let resp = router
+        .clone()
+        .oneshot(get("/api/v1/precedent?target=src/rustarm.rs"))
+        .await
+        .unwrap();
+    let (status, body, _headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(payload["target_kind"], "file", "{body}");
+    assert!(!payload["precedents"].as_array().unwrap().is_empty(), "{body}");
+
+    // `?limit=` reaches the engine; a malformed limit degrades to the default
+    // rather than failing the request.
+    for (query, expected_len) in [("&limit=1", 1), ("&limit=abc", 1)] {
+        let resp = router
+            .clone()
+            .oneshot(get(&format!("/api/v1/precedent?target=src/rustarm.rs{query}")))
+            .await
+            .unwrap();
+        let (status, body, _headers) = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
+        let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert!(
+            payload["precedents"].as_array().unwrap().len() >= expected_len,
+            "{query}: {body}"
+        );
+    }
+
+    // An unknown target reaches the wire as an empty answer naming its reason.
+    let resp = router
+        .clone()
+        .oneshot(get("/api/v1/precedent?target=no_such_thing"))
+        .await
+        .unwrap();
+    let (status, body, _headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "an unknown target is not a 4xx");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(payload["empty_reason"]["code"], "target_unresolved", "{body}");
+
+    // No target at all → the honest empty default, not a 4xx.
+    let resp = router.oneshot(get("/api/v1/precedent")).await.unwrap();
+    let (status, body, _headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "a targetless call is an honest 200");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert!(payload["precedents"].as_array().unwrap().is_empty(), "{body}");
+    assert_eq!(payload["target_kind"], "unresolved", "{body}");
 }
 
 /// `GET /api/v1/impact-intersection?item=<id>=<sym>&…` serializes the

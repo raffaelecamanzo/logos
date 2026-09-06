@@ -442,6 +442,226 @@ pub struct UnresolvedDeclaration {
     pub suggestions: Vec<String>,
 }
 
+// ── Structural precedent ([FR-NV-12]) ───────────────────────────────────────
+//
+// "Which existing code plays the same structural role as the thing I am about
+// to write." The blast-radius questions ([FR-NV-06], [FR-NV-11]) answer what a
+// change breaks; this one answers what it should look like — the dominant
+// question once a plan has already settled the scope.
+//
+// The whole design risk is in the word *analogous*. A similarity notion that
+// cannot explain itself is a fuzzy score wearing a graph costume, so there is
+// no score here at all: analogy is a fixed set of three NAMED graph facts
+// ([`PrecedentFacet`]), every result says which of them it matched and through
+// which nodes, and the ranking is a lexicographic comparison of counts that are
+// all printed on the payload ([FR-NV-12], [NFR-CC-04]).
+//
+// [FR-NV-12]: ../../../docs/specs/requirements/FR-NV-12.md
+// [FR-NV-11]: ../../../docs/specs/requirements/FR-NV-11.md
+// [FR-NV-06]: ../../../docs/specs/requirements/FR-NV-06.md
+
+/// One named notion of structural similarity ([FR-NV-12]).
+///
+/// These three are the whole vocabulary — the query never invents a fourth
+/// reason and never blends them into a number. They are declared in the order
+/// the ranking breaks ties on, strongest first: sharing a supertype is a
+/// declared contract, being wired up by the same node is a declared
+/// registration, and sharing callees is inferred from behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrecedentFacet {
+    /// The candidate implements or extends a trait/interface/superclass the
+    /// target also implements or extends — a shared declared contract.
+    SharedSupertype,
+    /// Some third node depends on the candidate and on the target the same way:
+    /// a registry, dispatcher, factory or route table that names both. This is
+    /// the facet that finds sibling arms of one capability.
+    SharedRegistration,
+    /// The candidate and the target call the same functions — a matching call
+    /// shape. Counted only from [`MIN_SHARED_CALLEES`] shared callees up.
+    ///
+    /// [`MIN_SHARED_CALLEES`]: crate::models::navigation::MIN_SHARED_CALLEES
+    SharedCallee,
+}
+
+impl PrecedentFacet {
+    /// Every facet, in ranking precedence order. Generated-adjacent: the
+    /// ranking, the per-facet accumulator and the wire vocabulary all iterate
+    /// this, so a fourth facet cannot be half-added.
+    pub const ALL: [PrecedentFacet; 3] = [
+        PrecedentFacet::SharedSupertype,
+        PrecedentFacet::SharedRegistration,
+        PrecedentFacet::SharedCallee,
+    ];
+
+    /// The wire name — identical to the `serde` representation.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            PrecedentFacet::SharedSupertype => "shared_supertype",
+            PrecedentFacet::SharedRegistration => "shared_registration",
+            PrecedentFacet::SharedCallee => "shared_callee",
+        }
+    }
+}
+
+/// How many shared callees the call-shape facet requires before it counts
+/// ([FR-NV-12]).
+///
+/// One shared callee is a coincidence of using the same helper; two or more is
+/// a call shape. The threshold is public, stated on every payload, and the
+/// candidates it drops are **counted** on the coverage block rather than
+/// silently discarded ([NFR-CC-04]) — a hidden filter is exactly the opaque
+/// behaviour this query exists not to have.
+pub const MIN_SHARED_CALLEES: usize = 2;
+
+/// Nodes structurally analogous to one symbol or file ([FR-NV-12]).
+#[derive(Debug, Default, Serialize)]
+pub struct PrecedentResult {
+    /// The target as the caller spelled it.
+    pub query: String,
+    /// How the query text was resolved.
+    pub target_kind: PrecedentTargetKind,
+    /// The resolved target symbol, when the query named one.
+    pub target_symbol: Option<SymbolRef>,
+    /// The resolved project-relative file, when the query named one.
+    pub target_file: Option<String>,
+    /// The similarity notion, stated in full on every answer — the reader never
+    /// has to trust an undocumented ranking ([FR-NV-12]).
+    pub notion: String,
+    /// The ranking rule, likewise stated in full.
+    pub ranked_by: String,
+    /// The analogous nodes, best precedent first.
+    pub precedents: Vec<Precedent>,
+    /// How many analogous nodes were found in total, before the limit.
+    pub total_found: u32,
+    /// How many `total_found` omitted — `0` when the list is whole.
+    pub elided: u32,
+    /// Why the answer is empty, when it is. `None` whenever `precedents` is
+    /// non-empty. An empty result **always** carries one: the query never
+    /// relaxes the notion to manufacture a low-confidence guess ([FR-NV-12]).
+    pub empty_reason: Option<EmptyPrecedent>,
+    /// What this answer can and cannot see ([NFR-CC-04]).
+    pub coverage: PrecedentCoverage,
+    /// "Did you mean" names for an unresolved target ([FR-NV-09]).
+    pub suggestions: Vec<String>,
+    /// Degradation channel ([ADR-14]).
+    pub warnings: Vec<String>,
+}
+
+/// What the query text turned out to name.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrecedentTargetKind {
+    /// The graph knows nothing by that symbol, name, or path.
+    #[default]
+    Unresolved,
+    /// One symbol; its own structure is compared.
+    Symbol,
+    /// A project-relative file; the structure of every symbol it defines is
+    /// compared, and the precedents are the analogous **symbols** — a sibling
+    /// file surfaces as a cluster of its symbols, each naming its file.
+    File,
+}
+
+/// One structurally analogous node, with the reasons it qualifies.
+#[derive(Debug, Serialize)]
+pub struct Precedent {
+    /// The analogous symbol.
+    #[serde(flatten)]
+    pub symbol: SymbolRef,
+    /// The counted graph facts this result was ranked on — the same numbers
+    /// the ranking rule names, so the order is reproducible by hand.
+    pub rank: PrecedentRank,
+    /// Why it is analogous: one entry per matched facet, each naming the nodes
+    /// the analogy runs through ([FR-NV-12] AC 2).
+    pub reasons: Vec<PrecedentReason>,
+}
+
+/// The counted facts behind one precedent's position ([FR-NV-12] AC 1).
+///
+/// Deliberately four separate integers rather than one number: a composite
+/// score would be exactly the opaque ranking the requirement forbids, and these
+/// are compared lexicographically in declaration order.
+#[derive(Debug, Default, Serialize)]
+pub struct PrecedentRank {
+    /// How many of the three facets matched (1–3).
+    pub facets: u32,
+    /// Distinct traits/interfaces/superclasses shared with the target.
+    pub shared_supertypes: u32,
+    /// Distinct nodes that depend on both the candidate and the target the
+    /// same way.
+    pub shared_registrations: u32,
+    /// Distinct functions both call.
+    pub shared_callees: u32,
+}
+
+/// One reason a node is analogous ([FR-NV-12] AC 2).
+#[derive(Debug, Serialize)]
+pub struct PrecedentReason {
+    /// Which notion matched.
+    pub facet: PrecedentFacet,
+    /// The reason in words, naming the nodes it runs through.
+    pub explanation: String,
+    /// The shared nodes themselves — the trait, the registrar, the callees —
+    /// round-trippable into any other navigation tool. Bounded.
+    pub via: Vec<SymbolRef>,
+    /// How many shared nodes there are in full, never the length of `via`.
+    pub via_total: u32,
+    /// How many `via` omitted — `0` when the list is whole.
+    pub via_elided: u32,
+}
+
+/// Why a precedent answer is empty ([FR-NV-12] AC 4).
+///
+/// The requirement is explicit that an empty result states its reason rather
+/// than degrading to a low-confidence guess, so the reason is a **closed
+/// vocabulary** a consumer can branch on, not free prose that will be reworded.
+#[derive(Debug, Clone, Serialize)]
+pub struct EmptyPrecedent {
+    /// One of `target_unresolved`, `graph_empty`, `target_absent_from_view`,
+    /// `no_structural_anchors`, `anchors_are_unshared` — plus `query_failed`
+    /// and `results_unavailable` on the two degraded paths.
+    pub code: String,
+    /// The same reason in words, with the numbers behind it.
+    pub detail: String,
+}
+
+/// The coverage limits of one precedent answer ([NFR-CC-04]).
+#[derive(Debug, Default, Serialize)]
+pub struct PrecedentCoverage {
+    /// The standing statement of what the answer can and cannot see.
+    pub statement: String,
+    /// The symbols whose structure was actually compared: the target itself in
+    /// symbol mode, the file's own symbols in file mode.
+    pub compared: Vec<SymbolRef>,
+    /// How many symbols the file mode's comparison set omitted at its bound.
+    pub compared_elided: u32,
+    /// Shared nodes discarded as ubiquitous — a helper called from everywhere
+    /// is not evidence of analogy, and saying which ones were dropped is how a
+    /// surprising empty answer stays diagnosable.
+    pub ubiquitous_anchors: Vec<UbiquitousAnchor>,
+    /// How many candidate nodes shared at least one anchor before the
+    /// call-shape threshold and the facet filters were applied.
+    pub candidates_considered: u32,
+    /// How many candidates were dropped for matching on a **single** shared
+    /// callee and nothing else — the [`MIN_SHARED_CALLEES`] threshold, made
+    /// visible rather than silent.
+    pub dropped_single_callee_matches: u32,
+}
+
+/// A shared node too widely shared to be evidence ([NFR-CC-04]).
+#[derive(Debug, Serialize)]
+pub struct UbiquitousAnchor {
+    /// The canonical symbol of the over-shared node.
+    pub symbol: String,
+    /// Its human-facing name.
+    pub name: String,
+    /// The facet it would have contributed to.
+    pub facet: PrecedentFacet,
+    /// How many nodes share it — above the stated bound named in `notion`.
+    pub sharers: u32,
+}
+
 /// Current index and sync health of the code graph (FR-NV-07).
 #[derive(Debug, Default, Serialize)]
 pub struct StatusInfo {

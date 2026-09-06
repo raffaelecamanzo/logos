@@ -8,7 +8,7 @@ use std::fs;
 
 use tempfile::TempDir;
 
-use super::{line_u32, read_code};
+use super::{facet_slot, is_registration_edge, line_u32, read_code};
 use crate::graph_store::NodeRow;
 use crate::model::{LogosSymbol, NodeId, NodeKind};
 
@@ -164,4 +164,59 @@ fn phrase_query_wraps_raw_text_so_punctuation_is_inert() {
     // Empty/whitespace is a well-defined no-op, not an FTS syntax error.
     assert_eq!(phrase_query(""), None);
     assert_eq!(phrase_query("   "), None);
+}
+
+/// [`facet_slot`] and [`PrecedentFacet::ALL`] are two hand-written orderings of
+/// the same three facets, and every rank field is read out of the array by slot.
+/// A fourth facet added to one and not the other would silently mis-attribute
+/// every reason rather than fail to compile, so the two are pinned together.
+#[test]
+fn precedent_facet_slots_index_their_position_in_all() {
+    for (position, facet) in crate::models::navigation::PrecedentFacet::ALL
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            facet_slot(*facet),
+            position,
+            "{} occupies slot {} but position {position} in ALL",
+            facet.as_str(),
+            facet_slot(*facet)
+        );
+    }
+}
+
+/// The registration facet must not double-count the supertype facet, and must
+/// not read the derived governance edge as a structural fact ([FR-NV-12]).
+#[test]
+fn registration_edges_exclude_the_supertype_and_derived_kinds() {
+    use crate::model::EdgeKind;
+
+    for kind in [
+        EdgeKind::Calls,
+        EdgeKind::Imports,
+        EdgeKind::References,
+        EdgeKind::Instantiates,
+        EdgeKind::TypeUses,
+        EdgeKind::RoutesTo,
+    ] {
+        assert!(is_registration_edge(kind), "{kind:?} registers its target");
+    }
+    for kind in [
+        // Counted by the supertype facet from the other side — counting it here
+        // too would inflate one graph fact into two.
+        EdgeKind::Implements,
+        EdgeKind::Extends,
+        // A derived governance marker mirroring an edge already counted.
+        EdgeKind::ForbiddenDependency,
+        // Lexical nesting and field access are not registrations: sharing a
+        // parent module is not an analogy.
+        EdgeKind::Contains,
+        EdgeKind::Accesses,
+    ] {
+        assert!(
+            !is_registration_edge(kind),
+            "{kind:?} must not count as a registration"
+        );
+    }
 }

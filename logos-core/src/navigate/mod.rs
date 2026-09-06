@@ -42,6 +42,7 @@ use std::path::{Component, Path};
 
 use anyhow::Result;
 use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 
 use crate::engine::Engine;
@@ -50,12 +51,13 @@ use crate::hydrate::{EdgeData, Granularity, GraphView, Vertex};
 use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::navigation::{
     AffectedFile, AffectedResult, CalleesResult, CallersResult, ContextBundle, ContextNode,
-    EdgeDirection, EdgeSummary, ExploreResult, ExploreSymbol, FileGroup, GraphElementEdge,
-    GraphElementNode, GraphElements, GraphGranularity, GraphLayer, ImpactEntry,
+    EdgeDirection, EdgeSummary, EmptyPrecedent, ExploreResult, ExploreSymbol, FileGroup,
+    GraphElementEdge, GraphElementNode, GraphElements, GraphGranularity, GraphLayer, ImpactEntry,
     ImpactIntersectionResult, ImpactResult, ImplementorsResult, IntersectionCoverage,
-    ItemIntersection, ItemPair, NodeDetail, NodeInfo, ReferencingDocsResult, SearchResult,
-    SharedSymbol, StatusInfo, SymbolRef, TraceLink, UnresolvedDeclaration, WorkItem,
-    WorkItemImpact,
+    ItemIntersection, ItemPair, NodeDetail, NodeInfo, Precedent, PrecedentCoverage, PrecedentFacet,
+    PrecedentRank, PrecedentReason, PrecedentResult, PrecedentTargetKind, ReferencingDocsResult,
+    SearchResult, SharedSymbol, StatusInfo, SymbolRef, TraceLink, UbiquitousAnchor,
+    UnresolvedDeclaration, WorkItem, WorkItemImpact, MIN_SHARED_CALLEES,
 };
 
 #[cfg(test)]
@@ -975,6 +977,631 @@ fn pair_up(
         })
         .collect();
     Ok((intersecting, safe_parallel))
+}
+
+// ── Structural precedent ([FR-NV-12]) ───────────────────────────────────────
+
+/// Default number of precedents returned ([FR-NV-12]).
+const DEFAULT_PRECEDENT_LIMIT: usize = 20;
+/// Ceiling on the caller's `limit`. The payload carries a full explanation per
+/// result, so an unbounded list is a token bill rather than an answer.
+const MAX_PRECEDENT_LIMIT: usize = 100;
+/// A shared node linking more than this many nodes is ubiquitous utility, not
+/// evidence of analogy: everything calls the logger. Anchors above the bound
+/// contribute nothing and are **named** in the coverage block, so a surprising
+/// empty answer stays diagnosable ([NFR-CC-04]).
+const MAX_ANCHOR_FAN: usize = 200;
+/// How many shared nodes one reason lists before eliding the rest (the count
+/// still rides on `via_total`). Bounded because every listed node costs a point
+/// read to materialise ([NFR-PE-01]).
+const MAX_VIA_LISTED: usize = 5;
+/// How many of a file's own symbols the file-mode comparison set holds. Larger
+/// than any file in a sane tree; the overflow is reported, never silent.
+const MAX_FILE_SEEDS: usize = 300;
+/// How many ubiquitous anchors the coverage block names before it stops.
+const MAX_UBIQUITOUS_LISTED: usize = 20;
+
+/// The standing coverage-limits statement carried by every precedent answer
+/// ([FR-NV-12] AC 4, [NFR-CC-04]).
+const PRECEDENT_COVERAGE: &str = "precedents are drawn from the indexed symbol graph, so a sibling \
+written in an unindexed language, kept on an excluded path, or reached only through a call \
+resolved at runtime cannot appear. Lexical containment is never a reason: sharing a parent module \
+is not an analogy. The three facets are the whole notion — code analogous in a way none of them \
+expresses is not found, and an empty answer names its reason rather than relaxing the notion to \
+produce a guess.";
+
+/// The similarity notion, stated in full on every answer ([FR-NV-12] AC 1).
+///
+/// Built with `format!` rather than written as a literal so the thresholds it
+/// quotes are the constants the code actually applies — a stated notion that
+/// drifts from the implementation is worse than none.
+fn precedent_notion() -> String {
+    format!(
+        "structural analogy is three named graph facts, never a score. \
+         shared_supertype: the candidate implements or extends a trait, interface or superclass \
+         the target also does. shared_registration: some third node depends on the candidate and \
+         on the target by the same edge kind — a registry, dispatcher, factory, route table, \
+         importer or signature that names both. shared_callee: the candidate and the target call \
+         the same functions, counted from {MIN_SHARED_CALLEES} shared callees up, because one \
+         shared helper is coincidence rather than call shape. A shared node linking more than \
+         {MAX_ANCHOR_FAN} nodes is treated as ubiquitous utility and contributes nothing; those \
+         are named in coverage.ubiquitous_anchors."
+    )
+}
+
+/// The ranking rule, likewise stated in full ([FR-NV-12] AC 1).
+fn precedent_ranking() -> String {
+    format!(
+        "ranked by counted graph facts compared lexicographically, every one of them printed in \
+         each result's `rank`: number of distinct facets matched, then shared supertypes, then \
+         shared registrations, then shared callees, then canonical symbol ascending. No weighting \
+         and no composite score, so the order is reproducible by hand from the payload. At most \
+         {MAX_VIA_LISTED} shared nodes are listed per reason; `via_total` carries the full count."
+    )
+}
+
+/// Whether an **inbound** edge counts as a *registration* of its target
+/// ([FR-NV-12]).
+///
+/// A registration is some third node depending on this one by name: a registry
+/// or dispatcher that calls it, a factory that instantiates it, a table that
+/// references it, a route that dispatches to it, a module that imports it, a
+/// signature typed by it. Deliberately **not** `Implements`/`Extends` — that is
+/// the supertype facet seen from the other side, and counting it twice would
+/// inflate a rank on one graph fact — and **not** `ForbiddenDependency`, a
+/// derived governance marker mirroring an edge already counted here.
+const fn is_registration_edge(kind: EdgeKind) -> bool {
+    matches!(
+        kind,
+        EdgeKind::Calls
+            | EdgeKind::Imports
+            | EdgeKind::References
+            | EdgeKind::Instantiates
+            | EdgeKind::TypeUses
+            | EdgeKind::RoutesTo
+    )
+}
+
+/// This facet's slot in the per-candidate accumulator, and the position it
+/// occupies in [`PrecedentFacet::ALL`]. `precedent_facet_slots_match_all` pins
+/// the two together.
+const fn facet_slot(facet: PrecedentFacet) -> usize {
+    match facet {
+        PrecedentFacet::SharedSupertype => 0,
+        PrecedentFacet::SharedRegistration => 1,
+        PrecedentFacet::SharedCallee => 2,
+    }
+}
+
+/// One node the target is structurally attached to, and the facet that
+/// attachment would make a candidate analogous under.
+///
+/// The unit of comparison: a candidate is analogous exactly when it is attached
+/// to one of the target's anchors the same way. Carrying the edge `kind` keeps
+/// "both called by the registry" distinct from "both instantiated by it" while
+/// gathering, so an anchor cannot be matched across two unrelated relations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PrecedentAnchor {
+    facet: PrecedentFacet,
+    node: NodeIndex,
+    kind: EdgeKind,
+}
+
+/// What a precedent query's target text turned out to name.
+enum PrecedentTarget {
+    /// One symbol, with how many nodes its name matched ([NFR-CC-04]).
+    Symbol { row: NodeRow, candidates: usize },
+    /// A project-relative file and the symbols it defines, with the count
+    /// before [`MAX_FILE_SEEDS`] truncation.
+    File {
+        path: String,
+        seeds: Vec<NodeRow>,
+        total: usize,
+    },
+    /// Nothing answered, with "did you mean" names ([FR-NV-09]).
+    Unresolved(Vec<String>),
+}
+
+/// `precedent` — nodes structurally analogous to a symbol or file
+/// ([FR-NV-12], CR-114).
+///
+/// The plan-driven counterpart to [`impact`]: once a plan has settled *what* to
+/// change, the question left is *what should it look like* — "show me the
+/// sibling that already does this". Nothing else answers it, so today it is
+/// answered by grepping for a name that seems similar, which finds nothing when
+/// the sibling is named differently and finds noise when it is not.
+///
+/// The answer is deliberately **not** a score. Analogy is three named graph
+/// facts ([`PrecedentFacet`]) read off the full symbol view [`explore`] uses;
+/// each result names which facets it matched and the nodes the analogy runs
+/// through, and the ranking is a lexicographic comparison of counts that are all
+/// printed on the payload. A reader can re-derive the order by hand — which is
+/// the point, and what a similarity score cannot offer.
+///
+/// A file target compares the structure of **every symbol the file defines**;
+/// the precedents are still nodes, so a sibling *file* surfaces as a cluster of
+/// its symbols, each naming its file.
+///
+/// An empty answer always carries an [`EmptyPrecedent`] naming which of the
+/// closed set of reasons applies ([FR-NV-12] AC 4) — that invariant is total,
+/// not best-effort, and `an_empty_list_always_names_its_reason` pins it. The
+/// notion is never relaxed to manufacture a low-confidence guess.
+///
+/// Cost: one pooled read to resolve the target, one (cached) hydration, and one
+/// row fetch over the union of the nodes actually reported — never one query
+/// per candidate ([NFR-PE-01], [ADR-11]).
+///
+/// [FR-NV-12]: ../../../docs/specs/requirements/FR-NV-12.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-PE-01]: ../../../docs/specs/requirements/NFR-PE-01.md
+pub(crate) fn precedent(
+    engine: &Engine,
+    target: &str,
+    limit: Option<usize>,
+) -> Result<PrecedentResult> {
+    let runtime = engine.nav_runtime()?;
+    // Clamped to at least 1, not just at most 100: `limit = 0` would otherwise
+    // ship an empty `precedents` with no `empty_reason`, and an empty answer
+    // that does not say why is exactly what [FR-NV-12] AC 4 forbids.
+    let limit = limit
+        .unwrap_or(DEFAULT_PRECEDENT_LIMIT)
+        .clamp(1, MAX_PRECEDENT_LIMIT);
+    let mut result = precedent_shell(target);
+
+    let query = target.to_string();
+    let resolution = runtime.submit_read(move |store| resolve_precedent_target(store, &query))?;
+    let seed_rows = match resolution {
+        PrecedentTarget::Unresolved(suggestions) => {
+            result.suggestions = suggestions;
+            result.empty_reason = Some(EmptyPrecedent {
+                code: "target_unresolved".to_string(),
+                detail: format!(
+                    "nothing in the indexed graph answers to {target:?} as a canonical symbol, a \
+                     symbol name, or a project-relative file path"
+                ),
+            });
+            return Ok(result);
+        }
+        PrecedentTarget::Symbol { row, candidates } => {
+            // The same disclosure `impact_intersection` makes: a bare name can
+            // match many symbols and the resolver picks one. Here the answer is
+            // "copy this precedent", so being shown the precedents of the wrong
+            // `new` is a wasted edit ([NFR-CC-04]).
+            if candidates > 1 {
+                result.warnings.push(format!(
+                    "{target:?} matched {candidates} symbols by name; resolved to {} — qualify \
+                     the name to disambiguate",
+                    row.symbol.as_str()
+                ));
+            }
+            result.target_kind = PrecedentTargetKind::Symbol;
+            result.target_symbol = Some(symbol_ref(&row));
+            result.target_file = row.file_path.clone();
+            vec![row]
+        }
+        PrecedentTarget::File { path, seeds, total } => {
+            result.target_kind = PrecedentTargetKind::File;
+            result.target_file = Some(path);
+            result.coverage.compared_elided = total.saturating_sub(seeds.len()) as u32;
+            seeds
+        }
+    };
+    result.coverage.compared = seed_rows.iter().map(symbol_ref).collect();
+
+    // The FULL symbol view, not the `ExcludeContains` dependency view the
+    // blast-radius queries run on: that view deliberately drops `Implements`
+    // (and `Accesses`) so the five ratified metrics stay byte-identical
+    // ([ADR-21], [FR-RS-08]) — and `Implements` is precisely the edge the
+    // shared-supertype facet is made of. Nothing lexical leaks in as a result:
+    // `Contains` and `Accesses` are admitted to the view but match no facet
+    // below, because sharing a parent module is not an analogy.
+    let view = engine.hydrate(Granularity::Symbol)?;
+    if view.node_count() == 0 {
+        result.empty_reason = Some(EmptyPrecedent {
+            code: "graph_empty".to_string(),
+            detail: "the symbol graph holds no nodes — nothing is indexed, so there is no \
+                     precedent to find rather than none to have"
+                .to_string(),
+        });
+        return Ok(result);
+    }
+    let graph = view.graph();
+
+    let mut seeds: BTreeSet<NodeIndex> = BTreeSet::new();
+    for row in &seed_rows {
+        match view.index_of(row.symbol.as_str()) {
+            Some(idx) => {
+                seeds.insert(idx);
+            }
+            // Indexed but absent from this view: a documentation or config node,
+            // which every code-subgraph view drops by construction ([ADR-19],
+            // [ADR-25]), or a symbol that landed after hydration.
+            None => result.warnings.push(format!(
+                "{} is indexed but absent from the hydrated symbol view; its structure is not \
+                 compared",
+                row.symbol.as_str()
+            )),
+        }
+    }
+    if seeds.is_empty() {
+        result.empty_reason = Some(EmptyPrecedent {
+            code: "target_absent_from_view".to_string(),
+            detail: "the target is indexed but holds no vertex in the symbol graph — \
+                     documentation and config nodes are excluded from it by construction, so \
+                     their structure cannot be compared"
+                .to_string(),
+        });
+        return Ok(result);
+    }
+
+    let anchors = precedent_anchors(graph, &seeds);
+    if anchors.is_empty() {
+        result.empty_reason = Some(EmptyPrecedent {
+            code: "no_structural_anchors".to_string(),
+            detail: format!(
+                "the {} compared symbol(s) implement nothing, are registered by nothing, and call \
+                 nothing in the indexed symbol graph — there is no structure to compare on",
+                seeds.len()
+            ),
+        });
+        return Ok(result);
+    }
+
+    // Fan out from each anchor to everything attached to it the same way. The
+    // whole comparison runs on the hydrated view: no candidate costs a read,
+    // which is what lets an anchor be examined and then discarded as ubiquitous.
+    let mut hits: BTreeMap<NodeIndex, [BTreeSet<NodeIndex>; 3]> = BTreeMap::new();
+    // Counted separately from the listing, which stops at `MAX_UBIQUITOUS_LISTED`:
+    // the empty-reason detail below must report how many anchors were actually
+    // discarded, not how many fitted in the list.
+    let mut discarded = 0usize;
+    for anchor in &anchors {
+        let sharers = anchor_sharers(graph, *anchor);
+        if sharers.len() > MAX_ANCHOR_FAN {
+            discarded += 1;
+            if result.coverage.ubiquitous_anchors.len() < MAX_UBIQUITOUS_LISTED {
+                result.coverage.ubiquitous_anchors.push(UbiquitousAnchor {
+                    symbol: graph[anchor.node].key.clone(),
+                    name: graph[anchor.node].label.clone(),
+                    facet: anchor.facet,
+                    sharers: sharers.len() as u32,
+                });
+            }
+            continue;
+        }
+        for candidate in sharers {
+            if seeds.contains(&candidate) {
+                continue;
+            }
+            hits.entry(candidate).or_default()[facet_slot(anchor.facet)].insert(anchor.node);
+        }
+    }
+    result.coverage.candidates_considered = hits.len() as u32;
+
+    let mut ranked = rank_precedents(graph, hits, &mut result.coverage);
+    result.total_found = ranked.len() as u32;
+    if ranked.is_empty() {
+        result.empty_reason = Some(EmptyPrecedent {
+            code: "anchors_are_unshared".to_string(),
+            detail: format!(
+                "the target's {} structural anchor(s) are attached to no other node under this \
+                 notion ({} candidate(s) shared an anchor but none cleared a facet, {} anchor(s) \
+                 were discarded as ubiquitous)",
+                anchors.len(),
+                result.coverage.candidates_considered,
+                discarded
+            ),
+        });
+        return Ok(result);
+    }
+    ranked.truncate(limit);
+
+    // ONE row fetch, over the union of the candidates and the shared nodes their
+    // reasons will actually list — after the truncation above, so a widely
+    // shared anchor costs the store nothing beyond the rows it appears in.
+    let mut ids: Vec<NodeId> = Vec::new();
+    for (candidate, _, facets) in &ranked {
+        ids.extend(graph[*candidate].node_id);
+        for set in facets {
+            ids.extend(
+                listed_via(graph, set)
+                    .into_iter()
+                    .filter_map(|idx| graph[idx].node_id),
+            );
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    let fetched = fetch_rows(engine, &ids)?;
+
+    result.precedents = ranked
+        .into_iter()
+        .filter_map(|(candidate, rank, facets)| {
+            let row = fetched.get(&graph[candidate].node_id?)?;
+            let reasons = PrecedentFacet::ALL
+                .iter()
+                .filter_map(|facet| {
+                    let set = &facets[facet_slot(*facet)];
+                    if set.is_empty() {
+                        return None;
+                    }
+                    let total = set.len() as u32;
+                    let via: Vec<SymbolRef> = listed_via(graph, set)
+                        .into_iter()
+                        .filter_map(|idx| Some(symbol_ref(fetched.get(&graph[idx].node_id?)?)))
+                        .collect();
+                    Some(PrecedentReason {
+                        facet: *facet,
+                        explanation: precedent_explanation(*facet, &via, total),
+                        via_elided: total - via.len() as u32,
+                        via_total: total,
+                        via,
+                    })
+                })
+                .collect();
+            Some(Precedent {
+                symbol: symbol_ref(row),
+                rank,
+                reasons,
+            })
+        })
+        .collect();
+    // Recomputed from what was actually built, not from the limit: a candidate
+    // whose row vanished between hydration and fetch is elided, not miscounted.
+    result.elided = result
+        .total_found
+        .saturating_sub(result.precedents.len() as u32);
+    // The [FR-NV-12] AC 4 invariant, made total rather than conditional: an
+    // empty list ALWAYS names its reason. Reachable only when a concurrent sync
+    // deletes every reported node between the hydration snapshot and the row
+    // fetch — rare, and precisely the case where a bare empty answer would be
+    // read as "nothing analogous exists", which would be false.
+    if result.precedents.is_empty() && result.empty_reason.is_none() {
+        result.empty_reason = Some(EmptyPrecedent {
+            code: "results_unavailable".to_string(),
+            detail: format!(
+                "{} analogous node(s) were found, but none could be materialised — the graph \
+                 changed under the query; re-run it",
+                result.total_found
+            ),
+        });
+    }
+    Ok(result)
+}
+
+/// The degraded [`PrecedentResult`] for a failed engine call ([ADR-14]).
+///
+/// Carries the notion, the ranking rule and the coverage statement exactly as a
+/// success does, and states the failure through the same `empty_reason` channel
+/// every other empty answer uses — an answer with no data behind it is the one
+/// that most needs its limits stated.
+pub(crate) fn precedent_degraded(query: &str, warning: String) -> PrecedentResult {
+    let mut result = precedent_shell(query);
+    result.empty_reason = Some(EmptyPrecedent {
+        code: "query_failed".to_string(),
+        detail: warning.clone(),
+    });
+    result.warnings = vec![warning];
+    result
+}
+
+/// A [`PrecedentResult`] carrying everything true of *every* answer: the query,
+/// the stated notion, the stated ranking, and the coverage statement. The single
+/// place those four are set, so the success path and the [ADR-14] degraded path
+/// cannot ship different ones.
+fn precedent_shell(query: &str) -> PrecedentResult {
+    PrecedentResult {
+        query: query.to_string(),
+        notion: precedent_notion(),
+        ranked_by: precedent_ranking(),
+        coverage: PrecedentCoverage {
+            statement: PRECEDENT_COVERAGE.to_string(),
+            ..PrecedentCoverage::default()
+        },
+        ..PrecedentResult::default()
+    }
+}
+
+/// Resolve a precedent target: a symbol first, then a project-relative file.
+///
+/// Symbol-first keeps the resolution rule identical to every other navigation
+/// tool ([FR-NV-04], [FR-NV-05]); the file fallback runs only when nothing
+/// answers to the text as a symbol, and the two vocabularies do not overlap in
+/// practice (a canonical symbol is not a path). `./` prefixes normalise to the
+/// stored project-relative form, as in [`affected`].
+fn resolve_precedent_target(store: &dyn GraphStore, target: &str) -> Result<PrecedentTarget> {
+    if let Some((row, candidates)) = resolve_counting_candidates(store, target)? {
+        return Ok(PrecedentTarget::Symbol { row, candidates });
+    }
+    let path = target.strip_prefix("./").unwrap_or(target);
+    let mut seeds: Vec<NodeRow> = Vec::new();
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    for name in store.node_names_for_path(path)? {
+        for row in store.nodes_by_name(&name)? {
+            // `nodes_by_name` is name-scoped, not file-scoped: a name shared
+            // with another file must not drag that file's node in as a seed.
+            if row.file_path.as_deref() == Some(path) && seen.insert(row.id) {
+                seeds.push(row);
+            }
+        }
+    }
+    if !seeds.is_empty() {
+        seeds.sort_by(|a, b| a.symbol.as_str().cmp(b.symbol.as_str()));
+        let total = seeds.len();
+        seeds.truncate(MAX_FILE_SEEDS);
+        return Ok(PrecedentTarget::File {
+            path: path.to_string(),
+            seeds,
+            total,
+        });
+    }
+    Ok(PrecedentTarget::Unresolved(store.suggest(target, SUGGEST_LIMIT)?))
+}
+
+/// Every node the seed set is structurally attached to, deduplicated and in a
+/// deterministic order ([NFR-RA-06]).
+fn precedent_anchors(
+    graph: &DiGraph<Vertex, EdgeData>,
+    seeds: &BTreeSet<NodeIndex>,
+) -> Vec<PrecedentAnchor> {
+    let mut anchors: Vec<PrecedentAnchor> = Vec::new();
+    let mut seen: HashSet<PrecedentAnchor> = HashSet::new();
+    let mut push = |anchor: PrecedentAnchor, anchors: &mut Vec<PrecedentAnchor>| {
+        if seen.insert(anchor) {
+            anchors.push(anchor);
+        }
+    };
+    for &seed in seeds {
+        for edge in graph.edges_directed(seed, Direction::Outgoing) {
+            let Some(kind) = edge.weight().kind else {
+                continue;
+            };
+            let facet = match kind {
+                EdgeKind::Implements | EdgeKind::Extends => PrecedentFacet::SharedSupertype,
+                EdgeKind::Calls => PrecedentFacet::SharedCallee,
+                // Everything else — the lexical `Contains` and `Accesses` the
+                // full view carries, imports, type uses — is not one of the
+                // three stated facets, so it is not a reason.
+                _ => continue,
+            };
+            push(
+                PrecedentAnchor {
+                    facet,
+                    node: edge.target(),
+                    kind,
+                },
+                &mut anchors,
+            );
+        }
+        for edge in graph.edges_directed(seed, Direction::Incoming) {
+            let Some(kind) = edge.weight().kind.filter(|k| is_registration_edge(*k)) else {
+                continue;
+            };
+            push(
+                PrecedentAnchor {
+                    facet: PrecedentFacet::SharedRegistration,
+                    node: edge.source(),
+                    kind,
+                },
+                &mut anchors,
+            );
+        }
+    }
+    anchors.sort_by(|a, b| {
+        a.facet
+            .cmp(&b.facet)
+            .then_with(|| graph[a.node].key.cmp(&graph[b.node].key))
+            .then_with(|| (a.kind as i32).cmp(&(b.kind as i32)))
+    });
+    anchors
+}
+
+/// Everything attached to `anchor` the same way the target is — the candidate
+/// set that one anchor contributes.
+fn anchor_sharers(
+    graph: &DiGraph<Vertex, EdgeData>,
+    anchor: PrecedentAnchor,
+) -> BTreeSet<NodeIndex> {
+    // Supertype and callee anchors are things the target points AT, so their
+    // sharers arrive on inbound edges; a registration anchor points at the
+    // target, so its sharers are its other outbound endpoints.
+    let direction = match anchor.facet {
+        PrecedentFacet::SharedSupertype | PrecedentFacet::SharedCallee => Direction::Incoming,
+        PrecedentFacet::SharedRegistration => Direction::Outgoing,
+    };
+    graph
+        .edges_directed(anchor.node, direction)
+        .filter(|edge| edge.weight().kind == Some(anchor.kind))
+        .map(|edge| match direction {
+            Direction::Incoming => edge.source(),
+            _ => edge.target(),
+        })
+        .collect()
+}
+
+/// Apply the call-shape threshold, drop candidates left with no facet, and sort
+/// what remains by the stated ranking rule ([FR-NV-12] AC 1).
+///
+/// Split out of [`precedent`] so that function stays "resolve, then fan out":
+/// this one owns the whole of the notion's arithmetic, which is the part a
+/// reader checking the ranking claim needs to read.
+fn rank_precedents(
+    graph: &DiGraph<Vertex, EdgeData>,
+    hits: BTreeMap<NodeIndex, [BTreeSet<NodeIndex>; 3]>,
+    coverage: &mut PrecedentCoverage,
+) -> Vec<(NodeIndex, PrecedentRank, [BTreeSet<NodeIndex>; 3])> {
+    let callee = facet_slot(PrecedentFacet::SharedCallee);
+    let mut ranked = Vec::new();
+    for (candidate, mut facets) in hits {
+        if facets[callee].len() < MIN_SHARED_CALLEES {
+            // A candidate whose ONLY evidence was one shared helper disappears
+            // here. That is the threshold working, but a threshold nobody can
+            // see is indistinguishable from a bug, so the drops are counted
+            // ([NFR-CC-04]).
+            if !facets[callee].is_empty() && facets.iter().filter(|s| !s.is_empty()).count() == 1 {
+                coverage.dropped_single_callee_matches += 1;
+            }
+            facets[callee].clear();
+        }
+        let rank = PrecedentRank {
+            facets: facets.iter().filter(|set| !set.is_empty()).count() as u32,
+            shared_supertypes: facets[facet_slot(PrecedentFacet::SharedSupertype)].len() as u32,
+            shared_registrations: facets[facet_slot(PrecedentFacet::SharedRegistration)].len()
+                as u32,
+            shared_callees: facets[callee].len() as u32,
+        };
+        if rank.facets == 0 {
+            continue;
+        }
+        ranked.push((candidate, rank, facets));
+    }
+    // The stated order, literally: counts descending in facet-precedence order,
+    // then canonical symbol ascending as the total tie-break ([NFR-RA-06]).
+    ranked.sort_by(|(a_idx, a, _), (b_idx, b, _)| {
+        b.facets
+            .cmp(&a.facets)
+            .then_with(|| b.shared_supertypes.cmp(&a.shared_supertypes))
+            .then_with(|| b.shared_registrations.cmp(&a.shared_registrations))
+            .then_with(|| b.shared_callees.cmp(&a.shared_callees))
+            .then_with(|| graph[*a_idx].key.cmp(&graph[*b_idx].key))
+    });
+    ranked
+}
+
+/// The bounded, deterministically ordered slice of one facet's shared nodes that
+/// a reason lists.
+fn listed_via(graph: &DiGraph<Vertex, EdgeData>, set: &BTreeSet<NodeIndex>) -> Vec<NodeIndex> {
+    let mut listed: Vec<NodeIndex> = set.iter().copied().collect();
+    listed.sort_by(|a, b| graph[*a].key.cmp(&graph[*b].key));
+    listed.truncate(MAX_VIA_LISTED);
+    listed
+}
+
+/// One reason in words, naming the shared nodes it runs through
+/// ([FR-NV-12] AC 2).
+fn precedent_explanation(facet: PrecedentFacet, via: &[SymbolRef], total: u32) -> String {
+    let names = via
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = match total as usize - via.len() {
+        0 => String::new(),
+        rest => format!(", +{rest} more"),
+    };
+    let s = if total == 1 { "" } else { "s" };
+    match facet {
+        PrecedentFacet::SharedSupertype => format!(
+            "implements or extends {total} declared supertype{s} the target also does: {names}{more}"
+        ),
+        PrecedentFacet::SharedRegistration => format!(
+            "is wired up the same way by {total} node{s} that also wire{} up the target: {names}{more}",
+            if total == 1 { "s" } else { "" }
+        ),
+        PrecedentFacet::SharedCallee => format!(
+            "calls {total} function{s} the target also calls — a matching call shape: {names}{more}"
+        ),
+    }
 }
 
 /// `implements` — which code implements a documentation/requirement node

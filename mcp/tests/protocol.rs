@@ -18,9 +18,10 @@ use rmcp::{
 };
 use serde_json::{json, Value};
 
-/// The 9 navigation tools wired to `Engine` methods (FR-NV-01..07;
-/// `impact_intersection` added by S-358/CR-114, FR-NV-11).
-const NAV_TOOLS: [&str; 9] = [
+/// The 10 navigation tools wired to `Engine` methods (FR-NV-01..07;
+/// `impact_intersection` added by S-358/CR-114, FR-NV-11; `precedent` by
+/// S-359/CR-114, FR-NV-12).
+const NAV_TOOLS: [&str; 10] = [
     "search",
     "context",
     "explore",
@@ -29,6 +30,7 @@ const NAV_TOOLS: [&str; 9] = [
     "callees",
     "impact",
     "impact_intersection",
+    "precedent",
     "status",
 ];
 
@@ -129,7 +131,7 @@ fn mcp_error(result: Result<Value, ServiceError>, tool: &str) -> rmcp::model::Er
 // ── FR-MC-01 / FR-MC-05 / UAT-MC-01: registration and namespacing ─────────
 
 #[tokio::test]
-async fn all_twenty_eight_tools_register_with_bare_names() {
+async fn all_twenty_nine_tools_register_with_bare_names() {
     let (client, _server, _dir) = connect().await;
 
     let tools = client.list_all_tools().await.expect("tools/list");
@@ -147,7 +149,7 @@ async fn all_twenty_eight_tools_register_with_bare_names() {
     expected.sort_unstable();
     assert_eq!(
         names, expected,
-        "exactly the 9 navigation + 10 quality + 1 temporal + 3 coverage + 5 wiki tools must register (FR-MC-01)"
+        "exactly the 10 navigation + 10 quality + 1 temporal + 3 coverage + 5 wiki tools must register (FR-MC-01)"
     );
 
     // Namespacing is the HOST's job, derived from the server identity: names
@@ -203,7 +205,7 @@ async fn server_instructions_contain_all_three_steers() {
     );
 }
 
-// ── FR-MC-02 / UAT-MC-01: the 9 navigation tools delegate and answer ──────
+// ── FR-MC-02 / UAT-MC-01: the 10 navigation tools delegate and answer ─────
 
 #[tokio::test]
 async fn navigation_tools_return_their_read_models() {
@@ -214,7 +216,7 @@ async fn navigation_tools_return_their_read_models() {
     // The expected field is UNIQUE to each tool's read-model (no `query`/
     // shared fields), so a cross-tool dispatch swap — the primary bug class
     // in a pure dispatch layer — fails loudly (FR-MC-02).
-    let calls: [(&'static str, Value, &str); 9] = [
+    let calls: [(&'static str, Value, &str); 10] = [
         ("search", json!({"query": "anything"}), "hits"),
         ("context", json!({"task": "find the entrypoint"}), "hops"),
         ("explore", json!({"query": "anything"}), "total_files"),
@@ -230,6 +232,11 @@ async fn navigation_tools_return_their_read_models() {
             "impact_intersection",
             json!({"items": ["A=does::not::Exist", "B=also::does::not::Exist"]}),
             "safe_parallel",
+        ),
+        (
+            "precedent",
+            json!({"target": "does::not::Exist"}),
+            "ranked_by",
         ),
         ("status", Value::Null, "freshness"),
     ];

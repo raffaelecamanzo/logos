@@ -421,6 +421,58 @@ symbols is warned about rather than silently disambiguated.
 Malformed items and unknown symbols are warnings on an exit-0 payload, never
 errors; omitting `--item` entirely is a usage fault (exit 2).
 
+### `precedent`
+
+```bash
+logos precedent <SYMBOL|FILE> [--limit <N>]              # default 20, capped at 100
+```
+
+Which existing code plays the same structural role as the thing you are about to
+write — *"show me the sibling that already does this"*. Ask it **before** writing
+new code, when a plan has already settled the scope and what is left is
+precedent.
+
+```bash
+logos precedent JavaHttpClientCapture --json
+logos precedent logos-core/src/lang/java.rs --limit 5
+```
+
+**Analogy is three named graph facts, never a score.** Every result says which
+of them it matched and through which nodes:
+
+| Facet | What it means |
+|---|---|
+| `shared_supertype` | The result implements or extends a trait/interface/superclass the target also does. |
+| `shared_registration` | Some third node depends on the result and on the target the same way — a registry, dispatcher, factory, route table, importer or signature that names both. This is the facet that finds sibling arms of one capability. |
+| `shared_callee` | The result and the target call the same functions — a matching call shape. Counted from **2** shared callees up; one shared helper is coincidence, and the candidates that threshold drops are counted in `coverage.dropped_single_callee_matches`. |
+
+Results are ranked lexicographically by counted facts, all of them printed in
+each result's `rank`: number of distinct facets matched, then shared supertypes,
+then shared registrations, then shared callees, then canonical symbol ascending.
+No weighting and no composite score — the order can be re-derived by hand from
+the payload, which is exactly what a similarity score cannot offer. The rule
+itself rides on every answer, in `notion` and `ranked_by`.
+
+The target is resolved as a **symbol first, then a project-relative file** (a
+`./` prefix normalises). A file target compares every symbol the file defines;
+the results are still nodes, so a sibling *file* shows up as a cluster of its
+symbols, each naming its file.
+
+**An empty answer always states its reason** rather than relaxing the notion into
+a low-confidence guess. `empty_reason.code` is one of a closed set:
+`target_unresolved` (with "did you mean" suggestions), `graph_empty`,
+`target_absent_from_view` (a documentation or config node, which the code graph
+excludes by construction), `no_structural_anchors` (the target implements
+nothing, is registered by nothing and calls nothing), and `anchors_are_unshared`
+(it has structure, but nothing else shares it) — plus `query_failed` and
+`results_unavailable` on the two degraded paths.
+
+`coverage` states the limits: which symbols were compared, how many candidates
+were considered, and — under `ubiquitous_anchors` — which shared nodes were
+discarded for linking more than 200 nodes, since a helper called from everywhere
+is not evidence of analogy. Unknown targets and empty answers are exit-0
+payloads, never errors; omitting the target entirely is a usage fault (exit 2).
+
 ### `affected`
 
 ```bash

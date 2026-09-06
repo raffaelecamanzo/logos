@@ -504,15 +504,16 @@ pub(super) fn reads_saved_per_call(tool: &str) -> u64 {
         "explore" => 4, // grouped neighbourhood read
         "impact" => 3,  // transitive closure vs. manual chasing
         "search" | "node" | "callers" | "callees" => 2, // point query vs. grep + open
-        // `impact_intersection` ([FR-NV-11]) deliberately carries NO weight, and
-        // that is a decision rather than an oversight. These are ratified
-        // constants (SRS OQ-01) calibrated against reads an agent would
-        // otherwise perform; the scheduling question it answers has no
-        // file-reading equivalent to price — the thing it replaces is reading
-        // architecture prose, which this estimate does not model. Inventing a
-        // number would move the shipped tokens-saved figure on a guess
-        // ([NFR-CC-04]); `implements` sits at 0 for the same reason. Ratify a
-        // weight here only alongside the estimate's own re-derivation.
+        // `impact_intersection` ([FR-NV-11]) and `precedent` ([FR-NV-12])
+        // deliberately carry NO weight, and that is a decision rather than an
+        // oversight. These are ratified constants (SRS OQ-01) calibrated
+        // against reads an agent would otherwise perform; the scheduling and
+        // precedent questions they answer have no file-reading equivalent to
+        // price — what they replace is reading architecture prose and guessing
+        // at a sibling's name, neither of which this estimate models.
+        // Inventing a number would move the shipped tokens-saved figure on a
+        // guess ([NFR-CC-04]); `implements` sits at 0 for the same reason.
+        // Ratify a weight here only alongside the estimate's own re-derivation.
         _ => 0,         // index/sync/stats save nothing
     }
 }

@@ -29,7 +29,8 @@ use crate::models::{
     navigation::{
         AffectedResult, CalleesResult, CallersResult, ContextBundle, ExploreResult, GraphElements,
         GraphGranularity, GraphLayer, ImpactIntersectionResult, ImpactResult, ImplementorsResult,
-        LanguageComposition, NodeInfo, ReferencingDocsResult, SearchResult, StatusInfo,
+        LanguageComposition, NodeInfo, PrecedentResult, ReferencingDocsResult, SearchResult,
+        StatusInfo,
     },
     pipeline::{IndexResult, InitResult, SyncResult},
     quality::{
@@ -688,6 +689,32 @@ impl Engine {
                 depth,
                 format!("impact_intersection failed: {err}"),
             )
+        })
+    }
+
+    /// Nodes structurally analogous to `target` — a symbol or a
+    /// project-relative file ([FR-NV-12], CR-114).
+    ///
+    /// The precedent question a plan-driven workflow asks once scope is
+    /// settled: *which existing code plays the same structural role as the
+    /// thing I am about to write*. Analogy is three named graph facts — a
+    /// shared supertype, a shared registration, a matching call shape — and
+    /// every result names which of them it matched and through which nodes.
+    /// There is no score ([FR-NV-12] AC 1/AC 2).
+    ///
+    /// An empty answer always states its reason rather than relaxing the
+    /// notion into a guess ([FR-NV-12] AC 4, [NFR-CC-04]). `limit` defaults to
+    /// 20 and is clamped to 100.
+    ///
+    /// [FR-NV-12]: ../../../docs/specs/requirements/FR-NV-12.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub fn precedent(&self, target: &str, limit: Option<usize>) -> PrecedentResult {
+        crate::observability::traced(Tool::Precedent, || {
+            crate::navigate::precedent(self, target, limit)
+        })
+        .unwrap_or_else(|err| {
+            tracing::warn!("precedent failed: {err:#}");
+            crate::navigate::precedent_degraded(target, format!("precedent failed: {err}"))
         })
     }
 
