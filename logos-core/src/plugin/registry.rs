@@ -874,6 +874,33 @@ mod tests {
             timed.skipped().len(),
             "load_with_timings skips the same grammars as load"
         );
+        // Identity, not just count: two loaders that admit the same NUMBER of
+        // grammars could still disagree on WHICH ones (or on WHICH extensions
+        // each claims) and this test would not have noticed.
+        let names = |r: &LanguageRegistry| -> std::collections::BTreeSet<String> {
+            r.iter().map(|p| p.name().to_string()).collect()
+        };
+        assert_eq!(
+            names(&plain),
+            names(&timed),
+            "load_with_timings loads the identical set of grammars as load, not merely the same count"
+        );
+        let extensions = |r: &LanguageRegistry| -> std::collections::BTreeSet<String> {
+            r.iter().flat_map(|p| p.extensions().iter().cloned()).collect()
+        };
+        assert_eq!(
+            extensions(&plain),
+            extensions(&timed),
+            "load_with_timings claims the identical extension set as load"
+        );
+        let skipped_names = |r: &LanguageRegistry| -> std::collections::BTreeSet<String> {
+            r.skipped().iter().map(|s| s.name.clone()).collect()
+        };
+        assert_eq!(
+            skipped_names(&plain),
+            skipped_names(&timed),
+            "load_with_timings skips the identical set of grammars as load"
+        );
         assert!(
             timings.manifest_parse + timings.query_compile + timings.construction > Duration::ZERO,
             "a non-empty grammar table records some phase time: {timings:?}"
