@@ -348,11 +348,11 @@ For manual wiring:
 claude mcp add logos -- /path/to/logos --project /path/to/project serve --mcp
 ```
 
-The host then sees **27 `logos:*` tools**, all live:
+The host then sees **28 `logos:*` tools**, all live:
 
-| Navigation (8) | Quality & Governance (10) | Evidence tiers (4) | Source wiki (5) |
+| Navigation (9) | Quality & Governance (10) | Evidence tiers (4) | Source wiki (5) |
 |---|---|---|---|
-| `search`, `node`, `callers`, `callees`, `impact`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh` | `wiki_read`, `wiki_search`, `wiki_status`, `wiki_write`, `wiki_materialize` |
+| `search`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh` | `wiki_read`, `wiki_search`, `wiki_status`, `wiki_write`, `wiki_materialize` |
 
 Each MCP tool is a thin twin of the CLI command of the same name and returns a
 byte-identical payload. The four evidence-tier tools are **non-gated** — like

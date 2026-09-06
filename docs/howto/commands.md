@@ -381,6 +381,46 @@ logos impact <SYMBOL> [--depth <N>]                     # default depth 3
 Transitive closure in both directions, labeled: *upstream* (what breaks if
 this changes) and *downstream* (what this depends on).
 
+### `impact-intersection`
+
+```bash
+logos impact-intersection --item <ID>=<SYMBOL>[,<SYMBOL>...] \
+                          --item <ID>=<SYMBOL>[,<SYMBOL>...] [--depth <N>]
+```
+
+Which planned work items collide, and on what. Give each work item the symbols
+it *intends to change*; the command reports every pair whose transitive impact
+sets intersect — naming the shared symbols — and every pair that is safely
+parallel. Ask it **before** scheduling work in parallel, not after.
+
+```bash
+logos impact-intersection --item "S-341=java_http_client_call,http_client_crates" \
+                          --item "S-343=typescript_http_client_call" --json
+```
+
+`--item` repeats and is required; repeating the same id accumulates its symbols
+(`--item A=f --item A=g` is one item naming both), which is also how to pass a
+symbol containing a comma. Only the first `=` splits, so a symbol may contain
+one. `--depth` bounds each impact set exactly as [`impact`](#impact) does
+(default 3); at depth 0 only directly-declared symbols can collide.
+
+An item's impact set is its resolved symbols plus everything upstream and
+downstream of them within the depth bound — the same traversal `impact` runs, so
+the two answers cannot disagree. Each shared symbol names, in `declared_by`,
+which of the two items intended to change it directly; a symbol both items only
+*reach* has an empty `declared_by` and is the weaker signal.
+
+The payload states its own coverage limits (`coverage`): impact is computed over
+the indexed graph, so an unindexed surface cannot contribute an intersection and
+a `safe_parallel` verdict is bounded by what is indexed rather than proof of
+independence. `coverage.unresolved` names every declared symbol the graph does
+not know (with "did you mean" suggestions), `items_without_resolved_symbols`
+names items that are disjoint *by construction*, and a name matching several
+symbols is warned about rather than silently disambiguated.
+
+Malformed items and unknown symbols are warnings on an exit-0 payload, never
+errors; omitting `--item` entirely is a usage fault (exit 2).
+
 ### `affected`
 
 ```bash
