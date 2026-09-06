@@ -570,11 +570,16 @@ pub struct LostFile {
 pub struct OverlapCoverage {
     /// The standing statement of what the answer can and cannot see.
     pub statement: String,
-    /// The commit whose symbol spans were used for attribution — the indexed
-    /// snapshot's proxy. `None` when it could not be resolved.
+    /// `HEAD` at query time — a *label* for the snapshot, not its identity.
+    /// Logos indexes the working tree, so the spans used for attribution may
+    /// include uncommitted edits this commit id does not describe.
+    /// `files_with_drifted_spans` is the field that answers the question
+    /// honestly; this one is for saying where in history the answer sits.
+    /// `None` when it could not be resolved.
     pub indexed_snapshot: Option<String>,
-    /// Changed files whose content at a ref differs from the indexed snapshot,
-    /// so the spans used to attribute their hunks may have moved. Bounded.
+    /// Changed files whose content at a ref differs from **the working tree the
+    /// spans were read from**, so the spans used to attribute their hunks may
+    /// have moved. Bounded.
     pub files_with_drifted_spans: Vec<String>,
     /// Changed files the index holds no span-bearing symbol for — an unindexed
     /// language, an excluded path, a data file. Their changes are invisible to

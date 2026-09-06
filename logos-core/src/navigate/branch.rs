@@ -66,8 +66,9 @@ const OVERLAP_COVERAGE: &str = "changed line ranges are read from git and attrib
 symbol spans of the INDEXED snapshot. A symbol outside the indexed set cannot be reported — an \
 unindexed language, an excluded path, or a symbol a ref adds that never reached the index is \
 invisible to the symbol half of this answer, and only its file can be reported. Spans come from \
-the snapshot, so a symbol that moved between a ref and the snapshot may be attributed to its \
-neighbour; the drifted files are listed. `absent_from` marks refs that do not touch a symbol \
+the INDEXED WORKING TREE, so a symbol that moved between a ref and that snapshot may be attributed \
+to its neighbour; the drifted files are listed, and `indexed_snapshot` names HEAD as a label for \
+where in history the answer sits rather than as the exact state the spans came from. `absent_from` marks refs that do not touch a symbol \
 their siblings share — the silent-drop shape, and a smell rather than a proof; it is drawn only from \
 the refs that were actually diffed, so a ref listed under `unresolved_refs` or `refs_not_diffed` is \
 never reported as absent from anything.";
@@ -253,8 +254,8 @@ pub(crate) fn branch_overlap(
     // whose spans may have moved under the attribution above ([NFR-CC-04]).
     let mut drifted: BTreeSet<String> = BTreeSet::new();
     for (_, _, commit) in &live {
-        if let Some(against_head) = changed_paths(&root, "HEAD", commit) {
-            drifted.extend(against_head.intersection(&paths).cloned());
+        if let Some(against_snapshot) = paths_differing_from_snapshot(&root, commit) {
+            drifted.extend(against_snapshot.intersection(&paths).cloned());
         }
     }
     result.coverage.files_with_drifted_spans =
@@ -453,10 +454,16 @@ fn changed_ranges(root: &Path, base: &str, commit: &str) -> Result<FileRanges> {
     Ok(parse_diff(&String::from_utf8_lossy(&out.stdout)))
 }
 
-/// The files `commit` differs from `other` in — the drift probe, and cheaper
-/// than a content diff. `None` when git could not answer.
-fn changed_paths(root: &Path, other: &str, commit: &str) -> Option<BTreeSet<String>> {
-    let out = git(root, &["diff", "--name-only", "--no-renames", other, commit]).ok()?;
+/// The files whose content at `commit` differs from **the working tree** — the
+/// span-drift probe. `None` when git could not answer.
+///
+/// The working tree, not `HEAD`: Logos indexes what is on disk, so those are
+/// the spans the attribution above used. A single-rev `git diff <commit>`
+/// compares that commit to the working tree, which is exactly the question, and
+/// unlike a commit-to-commit diff it sees uncommitted edits — the case that
+/// would otherwise move a symbol's span with nothing in the payload saying so.
+fn paths_differing_from_snapshot(root: &Path, commit: &str) -> Option<BTreeSet<String>> {
+    let out = git(root, &["diff", "--name-only", "--no-renames", commit]).ok()?;
     out.status.success().then(|| {
         // `--name-only` C-quotes a path containing `"` or a control character
         // exactly as the diff headers do (there is no trailing TAB here), so it
