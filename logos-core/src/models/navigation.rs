@@ -531,8 +531,13 @@ pub struct MergeCheck {
     pub commit: Option<String>,
     /// Files the merge result changed relative to the same base.
     pub files_changed: u32,
-    /// Symbols a ref modified that the merge result does not change at all —
+    /// Symbols a ref modified that the merge result does not change **at all** —
     /// the ref's work on them is not in the merge. Bounded like `contended`.
+    ///
+    /// A symbol the merge result *does* change is never listed here, even where
+    /// the merge kept only one contributing ref's version of it. That case is
+    /// not detectable by comparing which symbols changed, and it is precisely
+    /// the shape a clean merge hides — read `contended`/`absent_from` for it.
     pub lost_symbols: Vec<LostSymbol>,
     /// How many such symbols there are in full ([NFR-CC-04]).
     pub lost_symbols_total: u32,

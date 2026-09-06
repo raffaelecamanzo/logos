@@ -72,7 +72,10 @@ to its neighbour; the drifted files are listed, and `indexed_snapshot` names HEA
 where in history the answer sits rather than as the exact state the spans came from. `absent_from` marks refs that do not touch a symbol \
 their siblings share — the silent-drop shape, and a smell rather than a proof; it is drawn only from \
 the refs that were actually diffed, so a ref listed under `unresolved_refs` or `refs_not_diffed` is \
-never reported as absent from anything.";
+never reported as absent from anything. The merge \
+check compares WHICH symbols changed, not their content: a symbol both a ref and the merge result \
+change is never reported lost, even where the merge kept only one ref's version of it — that shape \
+is what `contended` and its `absent_from` are for, and it is the shape a clean merge hides.";
 
 /// `branch_overlap` — which refs collide, and what a merge did not carry
 /// ([FR-NV-13], CR-114).

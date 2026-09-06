@@ -237,7 +237,19 @@ fn sprint_63_replay_names_the_two_arms_that_never_reached_the_roster() {
     // above distinguishes a complete merge from a clean one.
     let merge = result.merge.as_ref().expect("a merge result was stated");
     assert_eq!(merge.lost_symbols_total, 0, "{:?}", merge.lost_symbols);
+    assert_eq!(merge.lost_files_total, 0, "{:?}", merge.lost_files);
     assert!(merge.lost_files.is_empty(), "{:?}", merge.lost_files);
+    // That silence is a stated limit, not an omission: the merge check compares
+    // WHICH symbols changed, and the payload says so rather than leaving an
+    // empty `lost_symbols` to read as a clean bill of health ([NFR-CC-04]).
+    assert!(
+        result
+            .coverage
+            .statement
+            .contains("compares WHICH symbols changed, not their content"),
+        "{}",
+        result.coverage.statement
+    );
 }
 
 /// Determinism and the truncation guard's ordering rule ([NFR-RA-06]): the
