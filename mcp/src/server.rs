@@ -1,6 +1,6 @@
 //! The rmcp `ServerHandler` — the `logos:*` tools, each a thin delegator
 //! (S-017, FR-MC-01, FR-MC-02, NFR-MA-02). The single-root backing exposes the
-//! 28-tool `single_tool_router` roster; the federated workspace backing composes
+//! 29-tool `single_tool_router` roster; the federated workspace backing composes
 //! the `xservice_*`/`workspace_*` cross-service tools on top, leaving every
 //! single-root tool byte-identical (FR-WS-05, S-248).
 //!
@@ -33,7 +33,7 @@ const INSTRUCTIONS: &str = include_str!("instructions.md");
 /// delegates to one [`Engine`] method (or, for `xservice_*`, one [`query`]
 /// read-model over the member registry); no business logic lives here (FR-MC-02).
 ///
-/// [`new`](Self::new) is the single-root server (one [`Engine`], the 28-tool
+/// [`new`](Self::new) is the single-root server (one [`Engine`], the 29-tool
 /// `single_tool_router`); [`federated`](Self::federated) composes the
 /// `xservice_*` tools on top and runs the shared tools against the default
 /// member. The single-root roster carries no `repo` dimension, so its
@@ -331,6 +331,15 @@ pub struct ImpactIntersectionParams {
     pub depth: Option<usize>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct PrecedentParams {
+    /// Symbol or project-relative file whose structural precedents to find.
+    pub target: String,
+    /// Maximum number of precedents (default 20, capped at 100).
+    pub limit: Option<usize>,
+}
+
 // ── Quality tool parameter schemas (S-020, FR-GV / FR-RC wire contracts) ────
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -414,7 +423,7 @@ pub struct WikiSearchParams {
     pub list: Option<bool>,
 }
 
-// ── The 28 single-root tools (FR-MC-01) ─────────────────────────────────────
+// ── The 29 single-root tools (FR-MC-01) ─────────────────────────────────────
 //
 // Named `single_tool_router` (not the default `tool_router`) so the federated
 // backing can compose it with `xservice_tool_router`; under `Backing::Single`
@@ -513,6 +522,17 @@ impl LogosMcp {
             e.impact_intersection(&p.items, p.depth)
         })
         .await
+    }
+
+    #[tool(
+        description = "Structural precedent (FR-NV-12): nodes analogous to a symbol or a project-relative file — those sharing a trait/interface implementation, a registration edge (the same registry, dispatcher or factory names both), or a call shape. Each result names WHY it is analogous and through which nodes; ranking is counted graph facts, never a score, and an empty answer states its reason. Ask BEFORE writing new code, to find the sibling that already does this."
+    )]
+    async fn precedent(
+        &self,
+        Parameters(p): Parameters<PrecedentParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run("precedent", move |e| e.precedent(&p.target, p.limit))
+            .await
     }
 
     #[tool(

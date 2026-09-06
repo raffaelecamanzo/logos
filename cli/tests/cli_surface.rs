@@ -93,6 +93,7 @@ const REPRESENTATIVE: &[&[&str]] = &[
         "--depth",
         "2",
     ],
+    &["precedent", "top", "--limit", "5"],
     &["affected", "src/core.rs", "--tests-only"],
     &["scan", "src"],
     &["check"],
@@ -979,8 +980,8 @@ fn serve_mcp_speaks_jsonrpc_on_stdout_and_exits_cleanly_on_disconnect() {
             .as_array()
             .expect("tools array")
             .len(),
-        28,
-        "all 28 tools register through the shipped binary (FR-MC-01)"
+        29,
+        "all 29 tools register through the shipped binary (FR-MC-01)"
     );
 
     // Host disconnect → the process winds down by itself with exit 0.
@@ -1131,6 +1132,125 @@ fn impact_intersection_reports_the_collision_through_the_binary() {
     // `--item` is required: an intersection over nothing is a usage fault (2).
     let out = logos(tmp.path(), &["impact-intersection"]);
     assert_eq!(exit_code(&out), 2, "clap requires at least one --item");
+}
+
+/// A language-plugin registry fixture: two capability arms behind one trait,
+/// through the same two helpers, plus a symbol attached to nothing.
+fn precedent_fixture() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/plugin.rs",
+        "pub trait LanguagePlugin {\n    fn extract(&self);\n}\n",
+    );
+    write(
+        tmp.path(),
+        "src/shared.rs",
+        "pub fn parse_source() {}\npub fn emit_facts() {}\n",
+    );
+    for (file, ty) in [("src/rustarm.rs", "RustArm"), ("src/pyarm.rs", "PyArm")] {
+        write(
+            tmp.path(),
+            file,
+            &format!(
+                "use crate::plugin::LanguagePlugin;\n\
+                 use crate::shared::{{parse_source, emit_facts}};\n\n\
+                 pub struct {ty};\n\n\
+                 impl LanguagePlugin for {ty} {{\n\
+                 \x20   fn extract(&self) {{\n\
+                 \x20       parse_source();\n\
+                 \x20       emit_facts();\n\
+                 \x20   }}\n\
+                 }}\n\n\
+                 pub fn {init}_init() {{}}\n",
+                init = file.trim_start_matches("src/").trim_end_matches(".rs")
+            ),
+        );
+    }
+    // A dispatcher that CALLS each arm's init, so the file target finds a
+    // second, lower-ranked precedent (the init sibling, one registration facet)
+    // behind the method sibling (two facets). A module `use` list is
+    // deliberately not a registration — see `is_registration_edge`.
+    write(
+        tmp.path(),
+        "src/registry.rs",
+        "use crate::rustarm::rustarm_init;\n\
+         use crate::pyarm::pyarm_init;\n\n\
+         pub fn register_all() {\n\
+         \x20   rustarm_init();\n\
+         \x20   pyarm_init();\n\
+         }\n",
+    );
+    write(tmp.path(), "src/lonely.rs", "pub fn lonely_helper() {}\n");
+    tmp
+}
+
+/// The structural-precedent query, end-to-end through the shipped binary in
+/// `--json` mode (the acceptance criterion "ships with a CLI command carrying
+/// `--json` … in the same increment").
+///
+/// The parity test compares read-models, not argv, so this is the only place a
+/// dropped positional or a mis-plumbed `--limit` would be caught.
+#[test]
+fn precedent_reports_the_sibling_arms_through_the_binary() {
+    let tmp = precedent_fixture();
+    logos(tmp.path(), &["index"]);
+
+    let out = logos(
+        tmp.path(),
+        &["precedent", "logos . . . src/`rustarm.rs`/extract().", "--json"],
+    );
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let payload: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json emits one machine-readable object");
+
+    // The sibling arm comes back, and it says WHY (FR-NV-12 AC 2/AC 3).
+    let precedents = payload["precedents"].as_array().expect("precedents");
+    assert_eq!(precedents.len(), 1, "{payload}");
+    assert_eq!(precedents[0]["file"], "src/pyarm.rs", "{payload}");
+    let facets: Vec<&str> = precedents[0]["reasons"]
+        .as_array()
+        .expect("reasons")
+        .iter()
+        .map(|r| r["facet"].as_str().unwrap())
+        .collect();
+    assert_eq!(facets, vec!["shared_supertype", "shared_callee"], "{payload}");
+    // The notion and the ranking rule the order rests on ride the payload, and
+    // the rank is counted facts rather than a score (AC 1).
+    assert!(payload["notion"].as_str().unwrap().contains("never a score"));
+    assert!(payload["ranked_by"].as_str().unwrap().contains("lexicographically"));
+    assert_eq!(precedents[0]["rank"]["facets"], 2, "{payload}");
+
+    // `--limit` reaches the engine through the binary, and the remainder is
+    // counted rather than silently dropped.
+    let out = logos(tmp.path(), &["precedent", "src/rustarm.rs", "--limit", "1", "--json"]);
+    assert_eq!(exit_code(&out), 0);
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(payload["target_kind"], "file", "a file target resolves: {payload}");
+    assert_eq!(payload["precedents"].as_array().unwrap().len(), 1);
+    assert!(
+        payload["total_found"].as_u64().unwrap() > 1 && payload["elided"].as_u64().unwrap() >= 1,
+        "--limit reaches the engine and the remainder is counted: {payload}"
+    );
+
+    // An unknown target is an honest empty answer naming its reason at exit 0,
+    // never an error (FR-NV-12 AC 4, ADR-14).
+    let out = logos(tmp.path(), &["precedent", "no_such_thing", "--json"]);
+    assert_eq!(exit_code(&out), 0, "an unknown target is not a fault");
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert!(payload["precedents"].as_array().unwrap().is_empty());
+    assert_eq!(payload["empty_reason"]["code"], "target_unresolved", "{payload}");
+
+    // A resolved symbol with nothing to compare on says exactly that, rather
+    // than reaching for a looser notion.
+    let out = logos(tmp.path(), &["precedent", "lonely_helper", "--json"]);
+    assert_eq!(exit_code(&out), 0);
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(payload["empty_reason"]["code"], "no_structural_anchors", "{payload}");
+
+    // The target is required: a precedent query over nothing is a usage fault.
+    let out = logos(tmp.path(), &["precedent"]);
+    assert_eq!(exit_code(&out), 2, "clap requires the target");
 }
 
 // ── FR-CL-02: --quiet suppresses human output, never the JSON ──────────────

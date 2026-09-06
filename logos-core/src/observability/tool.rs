@@ -194,6 +194,10 @@ registered_tools! {
     /// CR-114) — the scheduling question, asked of the graph instead of the
     /// architecture prose.
     ImpactIntersection => "impact_intersection",
+    /// Structural precedent — the nodes analogous to a symbol or file
+    /// ([FR-NV-12], CR-114): the "show me the sibling that already does this"
+    /// question a plan-driven workflow asks once scope is settled.
+    Precedent => "precedent",
     Implements => "implements",
     ReferencingDocs => "referencing_docs",
     Affected => "affected",
@@ -327,6 +331,7 @@ impl Tool {
             | Tool::Callees
             | Tool::Impact
             | Tool::ImpactIntersection
+            | Tool::Precedent
             | Tool::Implements
             | Tool::ReferencingDocs
             | Tool::Affected
@@ -432,6 +437,7 @@ impl Tool {
             | Tool::Callees
             | Tool::Impact
             | Tool::ImpactIntersection
+            | Tool::Precedent
             | Tool::Implements
             | Tool::ReferencingDocs
             | Tool::Affected

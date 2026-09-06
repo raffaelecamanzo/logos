@@ -211,6 +211,17 @@ pub(crate) enum Commands {
         #[arg(long)]
         depth: Option<usize>,
     },
+    /// Structurally analogous code — the sibling that already does this
+    /// (FR-NV-12): nodes sharing a supertype, a registration, or a call shape
+    /// with the target, each naming why. Ranked by counted graph facts, never
+    /// a score; an empty answer states its reason.
+    Precedent {
+        /// Symbol or project-relative file whose structural precedents to find.
+        target: String,
+        /// Maximum number of precedents (default 20, capped at 100).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Files affected by a changed set — whole reverse-transitive closure.
     Affected {
         /// Changed files (project-relative paths).

@@ -124,14 +124,31 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// parse. It lives in `logos_core::models::navigation::WorkItem::from_specs`,
 /// shared verbatim with the CLI command and the `/api/v1` route, so no surface
 /// owns a spelling of its own (ADR-01). CR-084 §6 — recorded, not laundered.
+///
+/// S-359/CR-114 raises 940→960 for the `precedent` tool ([FR-NV-12]). Measured
+/// against the S-358 base of 934, the change costs +18, landing the adapter at
+/// 952; 960 is that measurement plus the usual small headroom.
+///
+/// Delegation-only again: an attribute, a signature, and ONE `Engine::precedent`
+/// call, plus a typed `PrecedentParams` (`target`/`limit`). As with its
+/// predecessor, roughly half the delta is the tool `description` — and here that
+/// is load-bearing rather than incidental: the description is where an MCP host
+/// learns that the ranking is counted graph facts and not a similarity score,
+/// which is the whole contract of [FR-NV-12] AC 1. It must not move into the
+/// core.
+///
+/// Note what deliberately did NOT land here: the symbol-then-file target
+/// resolution and the similarity notion itself. Both live in
+/// `logos_core::navigate`, shared verbatim with the CLI command and the
+/// `/api/v1` route (ADR-01). CR-084 §6 — recorded, not laundered.
 #[test]
 fn mcp_surface_line_budget() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 940,
-        "mcp adapter exceeds the 940 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 960,
+        "mcp adapter exceeds the 960 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

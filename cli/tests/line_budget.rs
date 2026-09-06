@@ -275,12 +275,27 @@ fn adapter_lines() -> usize {
 /// tool and the `/api/v1` route cannot drift in what they accept. A clap
 /// `value_parser` would have cost more adapter lines *and* put the parse in
 /// three surfaces. Recorded, not laundered (CR-084 §6).
+///
+/// **S-359/CR-114 855→865** for the `precedent` command ([FR-NV-12]): measured
+/// 851→857 (+6), 8 lines of headroom. The whole delta is `main.rs`'s
+/// `Precedent` variant (+5: the four-line doc comment the `--help` renders, the
+/// `target` positional and the `--limit` `#[arg]`) plus a 1-line dispatch arm
+/// delegating to ONE `Engine::precedent` call.
+///
+/// Nothing to trim, and this was checked rather than assumed: the duplication
+/// the S-358 paragraph above re-examined (the `stats`/`languages` `open_query`
+/// fold) is still net-negative, and no new candidate appeared — the command
+/// carries no parsing of its own. The symbol-then-file resolution rule that
+/// decides what a `precedent` target *is* lives in
+/// `logos_core::navigate::resolve_precedent_target`, shared verbatim with the
+/// MCP tool and the `/api/v1` route, so a target string means the same thing on
+/// every surface (ADR-01). Recorded, not laundered (CR-084 §6).
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 855,
-        "cli adapter exceeds the 855 production-LOC budget (NFR-MA-02): \
+        lines <= 865,
+        "cli adapter exceeds the 865 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

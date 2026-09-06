@@ -128,6 +128,7 @@ async fn loading_every_view_repeatedly_writes_no_snapshot() {
         "/api/v1/coverage", "/api/v1/config", "/api/v1/graph",
         "/api/v1/search?q=f", "/api/v1/node?symbol=f", "/api/v1/impact?seed=f",
         "/api/v1/impact-intersection?item=S-1=f&item=S-2=f",
+        "/api/v1/precedent?target=f",
     ] {
         for _ in 0..2 {
             let resp = router
