@@ -1129,6 +1129,26 @@ mod surface_parity {
 
     /// The PUBLIC command surface — what `logos --help` offers. This is the set
     /// the two-way roster contract is written against.
+    ///
+    /// **`hide = true` commands are deliberately exempt**, and the exemption is
+    /// a decision, not an accident of how the walker was written. Settled at the
+    /// Sprint 64 human review, where three review agents split on it: [FR-CL-06]
+    /// governs the parity between *tools* and their CLI twins, and a hidden
+    /// command is neither a tool nor something a user can be told to run —
+    /// today's only one, `internal-warm`, is the [FR-WS-14] bounded-warm
+    /// supervisor, spawned solely by `supervisor_argv` and declared not a public
+    /// contract by [FR-CL-01]. Requiring it to carry a `CLI_ONLY` reason would
+    /// put an internal re-invocation of the binary in a roster whose purpose is
+    /// to describe the user-facing surface.
+    ///
+    /// The dangerous half of the objection is already closed elsewhere: a hidden
+    /// command can no longer mask a stale `McpOnly` claim, because that check
+    /// reads [`all_cli_command_paths`] instead. What is exempted here is only
+    /// the obligation to write down a reason.
+    ///
+    /// [FR-CL-01]: ../../docs/specs/requirements/FR-CL-01.md
+    /// [FR-CL-06]: ../../docs/specs/requirements/FR-CL-06.md
+    /// [FR-WS-14]: ../../docs/specs/requirements/FR-WS-14.md
     fn cli_command_paths() -> BTreeSet<String> {
         command_paths(false)
     }

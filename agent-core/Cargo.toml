@@ -1,6 +1,6 @@
 [package]
 name    = "agent-core"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Logos agent substrate — the ui-gated rig provider/mock seam (CR-046, CR-047, ADR-41, ADR-42)"
 license.workspace = true

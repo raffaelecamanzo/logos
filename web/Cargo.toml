@@ -1,6 +1,6 @@
 [package]
 name    = "web"
-version = "0.3.0"
+version.workspace = true
 edition = "2021"
 description = "Logos web adapter — feature-gated localhost dashboard (CR-012, ADR-27)"
 license.workspace = true

@@ -492,9 +492,16 @@ pub enum PrecedentFacet {
 }
 
 impl PrecedentFacet {
-    /// Every facet, in ranking precedence order. Generated-adjacent: the
-    /// ranking, the per-facet accumulator and the wire vocabulary all iterate
-    /// this, so a fourth facet cannot be half-added.
+    /// Every facet, in ranking precedence order — the same order the derived
+    /// [`Ord`] gives, since both follow the declaration above.
+    ///
+    /// The accumulator and the ranking no longer read this: they key on the
+    /// facet itself and take their order from `Ord`. What is left needs an
+    /// *enumeration* rather than an order — the wire-vocabulary check, and any
+    /// consumer that wants to name the whole notion. A fourth variant fails to
+    /// compile in [`as_str`](Self::as_str), `precedent_explanation` and
+    /// `precedent_direction`, and `precedent_facet_all_lists_every_variant`
+    /// then catches it missing from this list.
     pub const ALL: [PrecedentFacet; 3] = [
         PrecedentFacet::SharedSupertype,
         PrecedentFacet::SharedRegistration,
@@ -625,13 +632,62 @@ pub struct PrecedentReason {
 /// vocabulary** a consumer can branch on, not free prose that will be reworded.
 #[derive(Debug, Clone, Serialize)]
 pub struct EmptyPrecedent {
-    /// One of `target_unresolved`, `graph_empty`, `target_absent_from_view`,
-    /// `no_structural_anchors`, `anchors_are_unshared`, `anchors_are_ubiquitous`
-    /// — plus `query_failed` and `results_unavailable` on the two degraded
-    /// paths.
-    pub code: String,
+    /// Which of the closed vocabulary applies.
+    pub code: EmptyPrecedentCode,
     /// The same reason in words, with the numbers behind it.
     pub detail: String,
+}
+
+/// The closed vocabulary of [`EmptyPrecedent::code`] ([FR-NV-12] AC 4).
+///
+/// A type rather than a `String` for the reason the doc above gives: the
+/// vocabulary is *promised* closed, and only an enum makes that promise
+/// checkable — a consumer matching on it is told by the compiler when a code is
+/// added, and a typo cannot reach the wire. This mirrors
+/// [`DegradedCause`](crate::federation::open_state::DegradedCause), the other
+/// closed reason-code vocabulary in the read model, down to the
+/// serialized-value pinning test; two spellings of one idea is exactly what the
+/// `precedent` query exists to stop.
+///
+/// The wire format is unchanged — `rename_all` reproduces the same snake_case
+/// strings the `String` codes carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmptyPrecedentCode {
+    /// The query text named nothing in the graph.
+    TargetUnresolved,
+    /// The graph itself is empty — nothing has been indexed.
+    GraphEmpty,
+    /// The target resolved, but no node for it survived into the compared view.
+    TargetAbsentFromView,
+    /// The target has none of the three structural attachments to compare on.
+    NoStructuralAnchors,
+    /// The target's anchors exist but nothing else in the graph shares them.
+    /// The opposite claim from [`Self::AnchorsAreUbiquitous`], and a different
+    /// next action, which is why the two are separate codes.
+    AnchorsAreUnshared,
+    /// Every anchor was shared so widely it was discarded as uninformative.
+    AnchorsAreUbiquitous,
+    /// A degraded path: the underlying query failed.
+    QueryFailed,
+    /// A degraded path: results could not be read back.
+    ResultsUnavailable,
+}
+
+impl EmptyPrecedentCode {
+    /// The wire name — identical to the `serde` representation.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            EmptyPrecedentCode::TargetUnresolved => "target_unresolved",
+            EmptyPrecedentCode::GraphEmpty => "graph_empty",
+            EmptyPrecedentCode::TargetAbsentFromView => "target_absent_from_view",
+            EmptyPrecedentCode::NoStructuralAnchors => "no_structural_anchors",
+            EmptyPrecedentCode::AnchorsAreUnshared => "anchors_are_unshared",
+            EmptyPrecedentCode::AnchorsAreUbiquitous => "anchors_are_ubiquitous",
+            EmptyPrecedentCode::QueryFailed => "query_failed",
+            EmptyPrecedentCode::ResultsUnavailable => "results_unavailable",
+        }
+    }
 }
 
 /// The coverage limits of one precedent answer ([NFR-CC-04]).

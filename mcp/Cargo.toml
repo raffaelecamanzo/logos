@@ -1,6 +1,6 @@
 [package]
 name    = "mcp"
-version = "0.3.0"
+version.workspace = true
 edition = "2021"
 description = "Logos MCP adapter — thin rmcp surface (S-017, ADR-01, ADR-13)"
 license.workspace = true

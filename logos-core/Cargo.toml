@@ -1,6 +1,6 @@
 [package]
 name        = "logos-core"
-version     = "0.3.0"
+version.workspace = true
 edition     = "2021"
 description = "Logos engine — thick-core ports-and-adapters (ADR-01)"
 license.workspace = true

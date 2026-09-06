@@ -1,6 +1,6 @@
 [package]
 name    = "wiki-agent"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Logos wiki-agent — ui-gated in-process wiki generation on the shared rig substrate (CR-047, ADR-42)"
 license.workspace = true

@@ -994,10 +994,24 @@ fn serve_mcp_speaks_jsonrpc_on_stdout_and_exits_cleanly_on_disconnect() {
             _ => {}
         }
     }
+    let init = init.unwrap();
     assert_eq!(
-        init.unwrap()["result"]["serverInfo"]["name"],
-        "logos",
+        init["result"]["serverInfo"]["name"], "logos",
         "the host derives logos:<tool> from this identity (FR-MC-01)"
+    );
+    // The other half of that identity, and the half that had rotted: `mcp`
+    // carried its own `0.3.0`, so `env!("CARGO_PKG_VERSION")` in its
+    // `get_info` reported 0.3.0 while the binary answering this very probe was
+    // 1.4.6. Asserting it HERE is the point — this crate's
+    // `CARGO_PKG_VERSION` is the product version, and the response came off a
+    // spawned `logos serve --mcp`, so the two can only agree if the shipped
+    // artifact really advertises what it really is. A per-crate version
+    // reintroduced anywhere in the chain fails this line.
+    assert_eq!(
+        init["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION"),
+        "the stdio server advertises a version that is not the shipped \
+         binary's — hosts surface this string to identify the server"
     );
     // Derived from the real router, never written down (S-361): a hand-written
     // count is what two Sprint 64 sessions each got wrong on the same line, and

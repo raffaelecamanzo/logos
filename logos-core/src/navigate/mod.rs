@@ -51,7 +51,8 @@ use crate::hydrate::{EdgeData, Granularity, GraphView, Vertex};
 use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::navigation::{
     AffectedFile, AffectedResult, CalleesResult, CallersResult, ContextBundle, ContextNode,
-    EdgeDirection, EdgeSummary, EmptyPrecedent, ExploreResult, ExploreSymbol, FileGroup,
+    EdgeDirection, EdgeSummary, EmptyPrecedent, EmptyPrecedentCode, ExploreResult,
+    ExploreSymbol, FileGroup,
     GraphElementEdge, GraphElementNode, GraphElements, GraphGranularity, GraphLayer, ImpactEntry,
     ImpactIntersectionResult, ImpactResult, ImplementorsResult, IntersectionCoverage,
     ItemIntersection, ItemPair, NodeDetail, NodeInfo, Precedent, PrecedentCoverage, PrecedentFacet,
@@ -1086,16 +1087,20 @@ const fn is_registration_edge(kind: EdgeKind) -> bool {
     )
 }
 
-/// This facet's slot in the per-candidate accumulator, and the position it
-/// occupies in [`PrecedentFacet::ALL`]. `precedent_facet_slots_match_all` pins
-/// the two together.
-const fn facet_slot(facet: PrecedentFacet) -> usize {
-    match facet {
-        PrecedentFacet::SharedSupertype => 0,
-        PrecedentFacet::SharedRegistration => 1,
-        PrecedentFacet::SharedCallee => 2,
-    }
-}
+/// What one candidate matched: the anchor nodes it shares with the target,
+/// grouped by the facet that makes them count.
+///
+/// Keyed by the facet rather than indexed by a slot, so the map's own iteration
+/// order **is** the ranking precedence — [`PrecedentFacet`]'s derived [`Ord`]
+/// follows its declaration order, which the type's docs already state is the
+/// order ties break in. That removes the second hand-written ordering a slot
+/// table needed, and with it the possibility of the two disagreeing.
+///
+/// Invariant: a facet is present **iff** it matched at least one anchor. Nothing
+/// inserts an empty set, and the [`MIN_SHARED_CALLEES`] threshold *removes* the
+/// callee entry rather than clearing it — so `len()` is the matched-facet count
+/// and every entry is a real reason.
+type FacetHits = BTreeMap<PrecedentFacet, BTreeSet<NodeIndex>>;
 
 /// One node the target is structurally attached to, and the facet that
 /// attachment would make a candidate analogous under.
@@ -1180,7 +1185,7 @@ pub(crate) fn precedent(
         PrecedentTarget::Unresolved(suggestions) => {
             result.suggestions = suggestions;
             result.empty_reason = Some(EmptyPrecedent {
-                code: "target_unresolved".to_string(),
+                code: EmptyPrecedentCode::TargetUnresolved,
                 detail: format!(
                     "nothing in the indexed graph answers to {target:?} as a canonical symbol, a \
                      symbol name, or a project-relative file path"
@@ -1229,7 +1234,7 @@ pub(crate) fn precedent(
     let view = engine.hydrate(Granularity::Symbol)?;
     if view.node_count() == 0 {
         result.empty_reason = Some(EmptyPrecedent {
-            code: "graph_empty".to_string(),
+            code: EmptyPrecedentCode::GraphEmpty,
             detail: "the symbol graph holds no nodes — nothing is indexed, so there is no \
                      precedent to find rather than none to have"
                 .to_string(),
@@ -1256,7 +1261,7 @@ pub(crate) fn precedent(
     }
     if seeds.is_empty() {
         result.empty_reason = Some(EmptyPrecedent {
-            code: "target_absent_from_view".to_string(),
+            code: EmptyPrecedentCode::TargetAbsentFromView,
             detail: "the target is indexed but holds no vertex in the symbol graph — \
                      documentation and config nodes are excluded from it by construction, so \
                      their structure cannot be compared"
@@ -1268,7 +1273,7 @@ pub(crate) fn precedent(
     let anchors = precedent_anchors(graph, &seeds);
     if anchors.is_empty() {
         result.empty_reason = Some(EmptyPrecedent {
-            code: "no_structural_anchors".to_string(),
+            code: EmptyPrecedentCode::NoStructuralAnchors,
             detail: format!(
                 "the {} compared symbol(s) implement nothing, are registered by nothing, and call \
                  nothing in the indexed symbol graph — there is no structure to compare on",
@@ -1281,7 +1286,7 @@ pub(crate) fn precedent(
     // Fan out from each anchor to everything attached to it the same way. The
     // whole comparison runs on the hydrated view: no candidate costs a read,
     // which is what lets an anchor be examined and then discarded as ubiquitous.
-    let mut hits: BTreeMap<NodeIndex, [BTreeSet<NodeIndex>; 3]> = BTreeMap::new();
+    let mut hits: BTreeMap<NodeIndex, FacetHits> = BTreeMap::new();
     // Counted separately from the listing, which stops at `MAX_UBIQUITOUS_LISTED`:
     // the empty-reason detail below must report how many anchors were actually
     // discarded, not how many fitted in the list.
@@ -1304,7 +1309,11 @@ pub(crate) fn precedent(
             if seeds.contains(&candidate) {
                 continue;
             }
-            hits.entry(candidate).or_default()[facet_slot(anchor.facet)].insert(anchor.node);
+            hits.entry(candidate)
+                .or_default()
+                .entry(anchor.facet)
+                .or_default()
+                .insert(anchor.node);
         }
     }
     result.coverage.candidates_considered = hits.len() as u32;
@@ -1322,7 +1331,7 @@ pub(crate) fn precedent(
         // graph that resembles you too much ([NFR-CC-04]).
         result.empty_reason = Some(if discarded == anchors.len() {
             EmptyPrecedent {
-                code: "anchors_are_ubiquitous".to_string(),
+                code: EmptyPrecedentCode::AnchorsAreUbiquitous,
                 detail: format!(
                     "every one of the target's {} structural anchor(s) links more than \
                      {MAX_ANCHOR_FAN} nodes and was discarded as ubiquitous utility — the \
@@ -1333,7 +1342,7 @@ pub(crate) fn precedent(
             }
         } else {
             EmptyPrecedent {
-                code: "anchors_are_unshared".to_string(),
+                code: EmptyPrecedentCode::AnchorsAreUnshared,
                 detail: format!(
                     "the target's {} structural anchor(s) are attached to no other node under \
                      this notion ({} candidate(s) shared an anchor but none cleared a facet, {} \
@@ -1354,7 +1363,7 @@ pub(crate) fn precedent(
     let mut ids: Vec<NodeId> = Vec::new();
     for (candidate, _, facets) in &ranked {
         ids.extend(graph[*candidate].node_id);
-        for set in facets {
+        for set in facets.values() {
             ids.extend(
                 listed_via(graph, set)
                     .into_iter()
@@ -1370,25 +1379,25 @@ pub(crate) fn precedent(
         .into_iter()
         .filter_map(|(candidate, rank, facets)| {
             let row = fetched.get(&graph[candidate].node_id?)?;
-            let reasons = PrecedentFacet::ALL
+            // Straight over the map: every entry is a matched facet
+            // (`FacetHits`), and `BTreeMap` yields them in `PrecedentFacet`'s
+            // declared order, which is the ranking precedence the payload
+            // claims. No filter and no second ordering to keep in step.
+            let reasons = facets
                 .iter()
-                .filter_map(|facet| {
-                    let set = &facets[facet_slot(*facet)];
-                    if set.is_empty() {
-                        return None;
-                    }
+                .map(|(facet, set)| {
                     let total = set.len() as u32;
                     let via: Vec<SymbolRef> = listed_via(graph, set)
                         .into_iter()
                         .filter_map(|idx| Some(symbol_ref(fetched.get(&graph[idx].node_id?)?)))
                         .collect();
-                    Some(PrecedentReason {
+                    PrecedentReason {
                         facet: *facet,
                         explanation: precedent_explanation(*facet, &via, total),
                         via_elided: total - via.len() as u32,
                         via_total: total,
                         via,
-                    })
+                    }
                 })
                 .collect();
             Some(Precedent {
@@ -1410,7 +1419,7 @@ pub(crate) fn precedent(
     // read as "nothing analogous exists", which would be false.
     if result.precedents.is_empty() && result.empty_reason.is_none() {
         result.empty_reason = Some(EmptyPrecedent {
-            code: "results_unavailable".to_string(),
+            code: EmptyPrecedentCode::ResultsUnavailable,
             detail: format!(
                 "{} analogous node(s) were found, but none could be materialised — the graph \
                  changed under the query; re-run it",
@@ -1430,7 +1439,7 @@ pub(crate) fn precedent(
 pub(crate) fn precedent_degraded(query: &str, warning: String) -> PrecedentResult {
     let mut result = precedent_shell(query);
     result.empty_reason = Some(EmptyPrecedent {
-        code: "query_failed".to_string(),
+        code: EmptyPrecedentCode::QueryFailed,
         detail: warning.clone(),
     });
     result.warnings = vec![warning];
@@ -1593,28 +1602,33 @@ fn anchor_sharers(
 /// reader checking the ranking claim needs to read.
 fn rank_precedents(
     graph: &DiGraph<Vertex, EdgeData>,
-    hits: BTreeMap<NodeIndex, [BTreeSet<NodeIndex>; 3]>,
+    hits: BTreeMap<NodeIndex, FacetHits>,
     coverage: &mut PrecedentCoverage,
-) -> Vec<(NodeIndex, PrecedentRank, [BTreeSet<NodeIndex>; 3])> {
-    let callee = facet_slot(PrecedentFacet::SharedCallee);
+) -> Vec<(NodeIndex, PrecedentRank, FacetHits)> {
     let mut ranked = Vec::new();
     for (candidate, mut facets) in hits {
-        if facets[callee].len() < MIN_SHARED_CALLEES {
+        let callees = facets
+            .get(&PrecedentFacet::SharedCallee)
+            .map_or(0, BTreeSet::len);
+        if callees < MIN_SHARED_CALLEES {
             // A candidate whose ONLY evidence was one shared helper disappears
             // here. That is the threshold working, but a threshold nobody can
             // see is indistinguishable from a bug, so the drops are counted
             // ([NFR-CC-04]).
-            if !facets[callee].is_empty() && facets.iter().filter(|s| !s.is_empty()).count() == 1 {
+            if callees > 0 && facets.len() == 1 {
                 coverage.dropped_single_callee_matches += 1;
             }
-            facets[callee].clear();
+            // Removed, not emptied: `FacetHits` promises that a present facet
+            // is a matched one, and `facets.len()` below is read as the
+            // matched-facet count.
+            facets.remove(&PrecedentFacet::SharedCallee);
         }
+        let count = |facet| facets.get(&facet).map_or(0, BTreeSet::len) as u32;
         let rank = PrecedentRank {
-            facets: facets.iter().filter(|set| !set.is_empty()).count() as u32,
-            shared_supertypes: facets[facet_slot(PrecedentFacet::SharedSupertype)].len() as u32,
-            shared_registrations: facets[facet_slot(PrecedentFacet::SharedRegistration)].len()
-                as u32,
-            shared_callees: facets[callee].len() as u32,
+            facets: facets.len() as u32,
+            shared_supertypes: count(PrecedentFacet::SharedSupertype),
+            shared_registrations: count(PrecedentFacet::SharedRegistration),
+            shared_callees: count(PrecedentFacet::SharedCallee),
         };
         if rank.facets == 0 {
             continue;

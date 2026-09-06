@@ -9,7 +9,7 @@ use std::fs;
 use tempfile::TempDir;
 
 use super::{
-    anchor_sharers, facet_slot, is_registration_edge, line_u32, precedent_anchors,
+    anchor_sharers, is_registration_edge, line_u32, precedent_anchors,
     precedent_degraded, read_code, PrecedentAnchor,
 };
 use crate::graph_store::NodeRow;
@@ -169,24 +169,27 @@ fn phrase_query_wraps_raw_text_so_punctuation_is_inert() {
     assert_eq!(phrase_query("   "), None);
 }
 
-/// [`facet_slot`] and [`PrecedentFacet::ALL`] are two hand-written orderings of
-/// the same three facets, and every rank field is read out of the array by slot.
-/// A fourth facet added to one and not the other would silently mis-attribute
-/// every reason rather than fail to compile, so the two are pinned together.
+/// [`PrecedentFacet::ALL`] is hand-written, and a facet missing from it is
+/// invisible rather than wrong — no reason is emitted for it and no test fails.
+/// The `match` below is the guard: a fourth variant makes it non-exhaustive, so
+/// the build stops here, and the arm it forces you to write is next to the
+/// length assertion that sends you to `ALL` and to `PrecedentRank`'s per-facet
+/// fields, which are the two places arity is still written down by hand.
 #[test]
-fn precedent_facet_slots_index_their_position_in_all() {
-    for (position, facet) in crate::models::navigation::PrecedentFacet::ALL
-        .iter()
-        .enumerate()
-    {
-        assert_eq!(
-            facet_slot(*facet),
-            position,
-            "{} occupies slot {} but position {position} in ALL",
-            facet.as_str(),
-            facet_slot(*facet)
-        );
+fn precedent_facet_all_lists_every_variant() {
+    for facet in crate::models::navigation::PrecedentFacet::ALL {
+        match facet {
+            PrecedentFacet::SharedSupertype
+            | PrecedentFacet::SharedRegistration
+            | PrecedentFacet::SharedCallee => {}
+        }
     }
+    assert_eq!(
+        crate::models::navigation::PrecedentFacet::ALL.len(),
+        3,
+        "a facet was added to the enum: add it to ALL, and give PrecedentRank \
+         the matching per-facet count field"
+    );
 }
 
 /// The registration facet must not double-count the supertype facet, and must
@@ -427,5 +430,46 @@ fn precedent_facet_wire_names_match_their_serde_representation() {
             serde_json::Value::from(facet.as_str()),
             "{facet:?} serialises differently from as_str()"
         );
+    }
+}
+
+/// Every [`EmptyPrecedentCode`]'s **serialized value**, pinned against literals.
+///
+/// The vocabulary was `String` literals until the Sprint 64 human review typed
+/// it; the whole point of that change is that the wire stayed byte-identical,
+/// so the literals here are the ones the strings carried, not the ones the
+/// derive happens to produce. Dropping `rename_all` would emit
+/// `"TargetUnresolved"`, leave every other test green, and break every consumer
+/// branching on the documented code — the same trap
+/// `every_degraded_cause_has_a_stable_kebab_case_wire_value` guards for
+/// [`DegradedCause`](crate::federation::open_state::DegradedCause).
+///
+/// The `match` is the completeness half: a ninth code cannot compile until it
+/// is listed below with its wire spelling.
+#[test]
+fn every_empty_precedent_code_has_a_stable_snake_case_wire_value() {
+    use crate::models::navigation::EmptyPrecedentCode as C;
+    for (code, wire) in [
+        (C::TargetUnresolved, "target_unresolved"),
+        (C::GraphEmpty, "graph_empty"),
+        (C::TargetAbsentFromView, "target_absent_from_view"),
+        (C::NoStructuralAnchors, "no_structural_anchors"),
+        (C::AnchorsAreUnshared, "anchors_are_unshared"),
+        (C::AnchorsAreUbiquitous, "anchors_are_ubiquitous"),
+        (C::QueryFailed, "query_failed"),
+        (C::ResultsUnavailable, "results_unavailable"),
+    ] {
+        match code {
+            C::TargetUnresolved
+            | C::GraphEmpty
+            | C::TargetAbsentFromView
+            | C::NoStructuralAnchors
+            | C::AnchorsAreUnshared
+            | C::AnchorsAreUbiquitous
+            | C::QueryFailed
+            | C::ResultsUnavailable => {}
+        }
+        assert_eq!(serde_json::to_value(code).unwrap(), wire);
+        assert_eq!(code.as_str(), wire, "as_str disagrees with the wire value");
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name    = "chat-agent"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Logos chat-agent — ui-gated conversation persistence + orchestration (CR-045, CR-046, ADR-40, ADR-41)"
 license.workspace = true

@@ -937,6 +937,10 @@ impl ServerHandler for LogosMcp {
         // `logos` is the namespace authority: hosts derive `logos:<tool>`
         // from this identity (FR-MC-01); the instructions ride the
         // initialize response (FR-MC-03).
+        // This macro expands to THIS crate's version, so it is the product
+        // version only while every member inherits `version.workspace` (root
+        // Cargo.toml says why). Give `mcp` its own version again and hosts see
+        // a number nobody can install; `cli/tests/cli_surface.rs` fails on it.
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("logos", env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS)

@@ -42,7 +42,21 @@ members = [
 # the cargo-deny license gate (deny.toml). `repository` feeds the cargo-dist
 # release pipeline (S-023, FR-DS-01): artifact URLs, the Homebrew formula,
 # and the shell-installer download base all derive from it.
+#
+# `version` is the PRODUCT version, and it is shared for a reason. Every member
+# is `publish = false` and ships as one artifact — the single `logos` binary —
+# so a per-crate version is not a release contract, it is just a second number
+# nobody bumps. Two crates had drifted to `0.3.0` while the product shipped
+# 1.4.6, and both of them *print* their own version at a user: the MCP server's
+# `serverInfo` (hosts show it to identify the server) and the materialized
+# `logos-wiki` SKILL.md header. `env!("CARGO_PKG_VERSION")` expands to the
+# version of the crate it is written in, so both told the user 0.3.0. Inheriting
+# one version makes that macro correct wherever it appears and makes a release
+# bump a single edit. Found at the Sprint 64 human review; only the `dist = true`
+# package (cli) feeds cargo-dist, so renumbering the libraries changes no
+# artifact, tag, or download URL.
 [workspace.package]
+version = "1.4.6"
 license = "Apache-2.0"
 repository = "https://github.com/raffaelecamanzo/logos"
 
