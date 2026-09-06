@@ -1,8 +1,8 @@
 //! The rmcp `ServerHandler` — the `logos:*` tools, each a thin delegator
 //! (S-017, FR-MC-01, FR-MC-02, NFR-MA-02). The single-root backing exposes the
-//! 27-tool `single_tool_router` roster (byte-for-byte as today); the federated
-//! workspace backing composes the 5 `xservice_*` cross-service tools on top
-//! (FR-WS-05, S-248).
+//! 28-tool `single_tool_router` roster; the federated workspace backing composes
+//! the `xservice_*`/`workspace_*` cross-service tools on top, leaving every
+//! single-root tool byte-identical (FR-WS-05, S-248).
 //!
 //! Tool names are registered BARE (`search`, not `logos:search`): MCP hosts
 //! namespace tools by *server identity* — this server identifies as `logos`
@@ -33,8 +33,8 @@ const INSTRUCTIONS: &str = include_str!("instructions.md");
 /// delegates to one [`Engine`] method (or, for `xservice_*`, one [`query`]
 /// read-model over the member registry); no business logic lives here (FR-MC-02).
 ///
-/// [`new`](Self::new) is the single-root server (one [`Engine`], the unchanged
-/// 27-tool `single_tool_router`); [`federated`](Self::federated) composes the
+/// [`new`](Self::new) is the single-root server (one [`Engine`], the 28-tool
+/// `single_tool_router`); [`federated`](Self::federated) composes the
 /// `xservice_*` tools on top and runs the shared tools against the default
 /// member. The single-root roster carries no `repo` dimension, so its
 /// `tools/list` is byte-identical whether or not federation exists (FR-WS-05).
@@ -321,6 +321,16 @@ pub struct ImpactParams {
     pub depth: Option<usize>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ImpactIntersectionParams {
+    /// The work items, each `<id>=<symbol>[,<symbol>...]`. Repeating an id
+    /// accumulates its symbols.
+    pub items: Vec<String>,
+    /// Traversal depth bound for every impact set (default 3).
+    pub depth: Option<usize>,
+}
+
 // ── Quality tool parameter schemas (S-020, FR-GV / FR-RC wire contracts) ────
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -404,7 +414,7 @@ pub struct WikiSearchParams {
     pub list: Option<bool>,
 }
 
-// ── The 27 single-root tools (FR-MC-01) ─────────────────────────────────────
+// ── The 28 single-root tools (FR-MC-01) ─────────────────────────────────────
 //
 // Named `single_tool_router` (not the default `tool_router`) so the federated
 // backing can compose it with `xservice_tool_router`; under `Backing::Single`
@@ -490,6 +500,19 @@ impl LogosMcp {
     ) -> Result<CallToolResult, ErrorData> {
         self.run("impact", move |e| e.impact(&p.symbol, p.depth))
             .await
+    }
+
+    #[tool(
+        description = "Which planned work items collide, and on what (FR-NV-11). Give work items as `<id>=<symbol>[,<symbol>...]`; returns the pairs whose transitive impact sets intersect (naming the shared symbols), the pairs that are safely parallel, and the coverage limits of that verdict. Ask BEFORE scheduling work in parallel, not after."
+    )]
+    async fn impact_intersection(
+        &self,
+        Parameters(p): Parameters<ImpactIntersectionParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run("impact_intersection", move |e| {
+            e.impact_intersection(&p.items, p.depth)
+        })
+        .await
     }
 
     #[tool(

@@ -28,8 +28,8 @@ use crate::model::{EdgeKind, NodeKind};
 use crate::models::{
     navigation::{
         AffectedResult, CalleesResult, CallersResult, ContextBundle, ExploreResult, GraphElements,
-        GraphGranularity, GraphLayer, ImpactResult, ImplementorsResult, LanguageComposition, NodeInfo,
-        ReferencingDocsResult, SearchResult, StatusInfo,
+        GraphGranularity, GraphLayer, ImpactIntersectionResult, ImpactResult, ImplementorsResult,
+        LanguageComposition, NodeInfo, ReferencingDocsResult, SearchResult, StatusInfo,
     },
     pipeline::{IndexResult, InitResult, SyncResult},
     quality::{
@@ -658,6 +658,37 @@ impl Engine {
                     ..ImpactResult::default()
                 }
             })
+    }
+
+    /// Which planned work items collide, and on what ([FR-NV-11], CR-114).
+    ///
+    /// Given work items each naming the symbols it intends to change, reports
+    /// every pair whose transitive impact sets intersect (naming the shared
+    /// symbols) and every pair that is safely parallel. The payload carries its
+    /// own coverage limits ([NFR-CC-04]): impact is computed over the indexed
+    /// graph, so an unindexed surface cannot contribute an intersection.
+    ///
+    /// [FR-NV-11]: ../../../docs/specs/requirements/FR-NV-11.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// Each spec is `<id>=<symbol>[,<symbol>…]` — parsed in the core, so every
+    /// surface accepts the identical spelling and none of them parses anything
+    /// of its own ([ADR-01]). A malformed spec becomes a warning on the payload,
+    /// never an error.
+    pub fn impact_intersection(
+        &self,
+        items: &[String],
+        depth: Option<usize>,
+    ) -> ImpactIntersectionResult {
+        crate::observability::traced(Tool::ImpactIntersection, || {
+            crate::navigate::impact_intersection(self, items, depth)
+        })
+        .unwrap_or_else(|err| {
+            tracing::warn!("impact_intersection failed: {err:#}");
+            crate::navigate::intersection_degraded(
+                depth,
+                format!("impact_intersection failed: {err}"),
+            )
+        })
     }
 
     /// Which code implements a documentation/requirement node (FR-NV-10,

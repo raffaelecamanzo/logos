@@ -196,6 +196,21 @@ pub(crate) enum Commands {
         #[arg(long)]
         depth: Option<usize>,
     },
+    /// Which planned work items collide, and on what (FR-NV-11): given work
+    /// items each naming the symbols it intends to change, the pairs whose
+    /// transitive impact sets intersect, the pairs that are safely parallel,
+    /// and the coverage limits of that verdict.
+    #[command(name = "impact-intersection", alias = "impact_intersection")]
+    ImpactIntersection {
+        /// A work item, repeatable: `<id>=<symbol>[,<symbol>...]`. Repeating an
+        /// id accumulates its symbols (also the escape hatch for a symbol that
+        /// contains a comma).
+        #[arg(long = "item", value_name = "SPEC", required = true)]
+        items: Vec<String>,
+        /// Traversal depth bound for every impact set (default 3).
+        #[arg(long)]
+        depth: Option<usize>,
+    },
     /// Files affected by a changed set — whole reverse-transitive closure.
     Affected {
         /// Changed files (project-relative paths).
