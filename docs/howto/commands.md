@@ -898,6 +898,13 @@ match-gated** ([FR-CG-09](../specs/requirements/FR-CG-09.md) Notes). The
 `candidates` list is what lets you see this at a glance: four aggregator members
 on one template is an architecture, not a bug.
 
+One shape that surprises people: a tie whose candidates are **all in the
+consumer's own member**. Only a *sole* same-member provider is excluded as an
+intra-repo fact; a two-or-more tie applies no member filter, so it is reported
+here with every participant named and none of them cross-boundary. That is
+long-standing behaviour of the exactly-one rule — the bridge agrees, emitting no
+edge either way — and `candidates` is simply the first thing to make it visible.
+
 #### Two per-member axes: `warm_state` and `open_state`
 
 Each member row carries **two independent labels**, and conflating them is the

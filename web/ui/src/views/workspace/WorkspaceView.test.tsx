@@ -264,9 +264,23 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
 
     expect(screen.getAllByText("33.3%").length).toBeGreaterThan(0);
+    // The `route` arm carries `to`; the `grpc-call` arm is the one carrying
+    // `candidates`. Assert BOTH — asserting only the first leaves the arm whose
+    // rows gained the tied-candidate set covered by the headline alone.
     const routeRow = screen.getByRole("cell", { name: /HTTP \(OpenAPI ↔ route\)/ }).closest("tr")!;
-    const cells = [...routeRow.querySelectorAll("td")].map((c) => c.textContent);
-    expect(cells.slice(1, 5)).toEqual(["1", "0", "1", "2"]);
+    expect([...routeRow.querySelectorAll("td")].map((c) => c.textContent).slice(1, 5)).toEqual([
+      "1",
+      "0",
+      "1",
+      "2",
+    ]);
+    const grpcRow = screen.getByRole("cell", { name: /gRPC/ }).closest("tr")!;
+    expect([...grpcRow.querySelectorAll("td")].map((c) => c.textContent).slice(1, 5)).toEqual([
+      "0",
+      "1",
+      "0",
+      "0",
+    ]);
   });
 });
 
