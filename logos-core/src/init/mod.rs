@@ -834,10 +834,17 @@ fn install_hooks(root: &Path) -> Result<InitStep> {
     // runs on the unchanged path too: an existing installation predating this
     // behaviour has worktrees that were never seeded.
     let seeded = crate::hooks::seed_all_worktrees(root).len();
-    let worktrees = match seeded {
-        0 => String::new(),
-        1 => "; 1 linked worktree seeded".to_string(),
-        n => format!("; {n} linked worktrees seeded"),
+    let worktrees = match crate::hooks::linked_worktree_install_notice(root) {
+        // Installed from inside a linked worktree: it covers this tree alone,
+        // and saying so is not optional. `init --hooks` is the command users
+        // actually run, so a silent partial installation here is exactly the
+        // "every signal reads as success" failure CR-106 exists to close.
+        Some(notice) => format!("; {notice}"),
+        None => match seeded {
+            0 => String::new(),
+            1 => "; 1 linked worktree seeded".to_string(),
+            n => format!("; {n} linked worktrees seeded"),
+        },
     };
 
     Ok(match (wrote, any_existed) {

@@ -231,15 +231,8 @@ pub fn install(root: &Path) -> Result<HooksResult> {
     // Every working tree that exists *now* becomes reachable before this call
     // returns, so a worktree that predates the installation is covered by
     // construction rather than on some later visit.
-    if crate::workspace::primary_root(root).is_some() {
-        // …except from here, where there is no durable anchor to point them at.
-        result.warnings.push(format!(
-            "installed in a linked worktree, so the hooks fire here but not in the \
-             repository's other working trees — run `logos init --hooks` in the primary \
-             checkout to make them reachable everywhere ({HOOKS_RELDIR} is resolved \
-             per working tree)"
-        ));
-    }
+    // …except from here, where there is no durable anchor to point them at.
+    result.warnings.extend(linked_worktree_install_notice(root));
     for seeded in seed_all_worktrees(root) {
         if !seeded.is_empty() {
             result.worktrees.push(seeded.worktree);
@@ -663,6 +656,30 @@ fn other_working_trees(root: &Path) -> Vec<PathBuf> {
         .into_iter()
         .filter(|path| !crate::workspace::paths_equal(path, root))
         .collect()
+}
+
+/// The warning an installation run from inside a **linked worktree** must
+/// carry: it covers that tree and no other, and there is no durable anchor to
+/// point the others at (see [`seed_all_worktrees`]).
+///
+/// `None` in the primary checkout, outside a repository, and in a submodule —
+/// every case where the installation does cover the repository.
+///
+/// Shared by **both** install paths deliberately. `logos init --hooks` (the
+/// command users actually run, [`crate::init`]) and [`install`] (the library
+/// seam) are separate implementations, and a silent partial installation on
+/// one of them is precisely the "every observable signal reads as success"
+/// shape CR-106 exists to close — so neither may carry the notice alone.
+pub(crate) fn linked_worktree_install_notice(root: &Path) -> Option<String> {
+    crate::workspace::primary_root(root).map(|primary| {
+        format!(
+            "installed in a linked worktree, so the hooks fire here but not in the \
+             repository's other working trees — `{HOOKS_RELDIR}` is resolved per working \
+             tree. Run `logos init --hooks` in the primary checkout ({}) to make them \
+             reachable everywhere.",
+            primary.display()
+        )
+    })
 }
 
 /// Seed every OTHER working tree of `root`'s repository from the managed
