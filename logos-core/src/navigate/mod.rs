@@ -1506,6 +1506,13 @@ fn precedent_anchors(
     };
     for &seed in seeds {
         for edge in graph.edges_directed(seed, Direction::Outgoing) {
+            // A self-edge relates a node to nobody. Left in, a recursive
+            // function became a registration anchor *on itself*, which made
+            // everything it calls "analogous to it because we are both called
+            // by it" — true as arithmetic, vacuous as a reason.
+            if edge.source() == edge.target() {
+                continue;
+            }
             let Some(kind) = edge.weight().kind else {
                 continue;
             };
@@ -1527,6 +1534,9 @@ fn precedent_anchors(
             );
         }
         for edge in graph.edges_directed(seed, Direction::Incoming) {
+            if edge.source() == edge.target() {
+                continue;
+            }
             let Some(kind) = edge.weight().kind.filter(|k| is_registration_edge(*k)) else {
                 continue;
             };

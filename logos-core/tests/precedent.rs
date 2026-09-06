@@ -677,20 +677,158 @@ fn a_documentation_target_reports_that_it_holds_no_vertex() {
 
     let result = engine.precedent("docs/design.md", None);
 
-    // The doc file resolves (it is indexed) but contributes no comparable
-    // structure; either honest empty reason is correct, and both name the limit.
-    let code = result.empty_reason.as_ref().map(|e| e.code.as_str());
-    assert!(
-        matches!(
-            code,
-            Some("target_absent_from_view")
-                | Some("no_structural_anchors")
-                | Some("target_unresolved")
-        ),
-        "unexpected reason {code:?}: {}",
+    // Pinned exactly, not as a disjunction: the three plausible codes make
+    // materially different claims ("its structure cannot be compared" vs
+    // "nothing analogous exists"), and accepting any of them would defeat the
+    // point of a closed vocabulary.
+    assert_eq!(
+        result.empty_reason.as_ref().map(|e| e.code.as_str()),
+        Some("target_absent_from_view"),
+        "{}",
         summarise(&result)
     );
     assert!(result.precedents.is_empty());
+    // The per-seed warning is the only signal that a resolved symbol was
+    // silently left out of the comparison.
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("absent from the hydrated symbol view")),
+        "the dropped seed must be named: {:?}",
+        result.warnings
+    );
+}
+
+/// An indexed project holding no code at all reports `graph_empty` — a
+/// different claim from "nothing analogous", and one that calls for indexing
+/// rather than for a different target.
+#[test]
+fn a_project_with_no_code_reports_graph_empty_not_nothing_analogous() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "docs/one.md", "# One\n\nProse.\n");
+    write(tmp.path(), "docs/two.md", "# Two\n\nMore prose.\n");
+    let engine = indexed_engine(&tmp);
+
+    let result = engine.precedent("docs/one.md", None);
+
+    assert_eq!(
+        result.empty_reason.as_ref().map(|e| e.code.as_str()),
+        Some("graph_empty"),
+        "{}",
+        summarise(&result)
+    );
+    assert!(result
+        .empty_reason
+        .as_ref()
+        .unwrap()
+        .detail
+        .contains("nothing is indexed"));
+}
+
+/// A near-miss target earns "did you mean" names ([FR-NV-09]).
+///
+/// Deleting the one line that populates `suggestions` was invisible to every
+/// other test in this suite, the CLI suite and the web suite.
+#[test]
+fn a_near_miss_target_earns_did_you_mean_suggestions() {
+    let tmp = plugin_fixture();
+    let engine = indexed_engine(&tmp);
+
+    let result = engine.precedent("parse_sour", None);
+
+    assert_eq!(
+        result.empty_reason.as_ref().map(|e| e.code.as_str()),
+        Some("target_unresolved")
+    );
+    assert!(
+        result.suggestions.iter().any(|s| s == "parse_source"),
+        "a near miss must suggest the name it nearly hit: {:?}",
+        result.suggestions
+    );
+}
+
+/// `MAX_VIA_LISTED` truncates a reason's shared-node list, and the count and
+/// the prose both stay honest ([NFR-CC-04]).
+#[test]
+fn a_long_shared_list_is_truncated_counted_and_says_so() {
+    let tmp = TempDir::new().unwrap();
+    let helpers: Vec<String> = (0..8).map(|n| format!("helper_{n}")).collect();
+    write(
+        tmp.path(),
+        "src/util.rs",
+        &helpers
+            .iter()
+            .map(|h| format!("pub fn {h}() {{}}\n"))
+            .collect::<String>(),
+    );
+    for who in ["subject", "twin"] {
+        let calls: String = helpers.iter().map(|h| format!("    {h}();\n")).collect();
+        write(
+            tmp.path(),
+            &format!("src/{who}.rs"),
+            &format!(
+                "use crate::util::{{{}}};\npub fn {who}() {{\n{calls}}}\n",
+                helpers.join(", ")
+            ),
+        );
+    }
+    let engine = indexed_engine(&tmp);
+
+    let result = engine.precedent("logos . . . src/`subject.rs`/subject().", None);
+
+    let twin = by_name(&result, "twin");
+    let reason = &twin.reasons[0];
+    assert_eq!(reason.facet, PrecedentFacet::SharedCallee);
+    assert_eq!(reason.via_total, 8, "the full count, not the listed length");
+    assert_eq!(reason.via.len(), 5, "bounded by MAX_VIA_LISTED");
+    assert_eq!(reason.via_elided, 3);
+    assert!(
+        reason.explanation.ends_with("+3 more"),
+        "the prose must name the elision: {:?}",
+        reason.explanation
+    );
+    // The listed slice is the deterministic head, not an arbitrary five.
+    let listed: Vec<&str> = reason.via.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(
+        listed,
+        vec!["helper_0", "helper_1", "helper_2", "helper_3", "helper_4"],
+        "the listed slice is canonical-symbol ascending"
+    );
+}
+
+/// `MAX_PRECEDENT_LIMIT` caps an over-large request, and the remainder is
+/// counted rather than silently dropped.
+#[test]
+fn an_over_large_limit_is_clamped_and_the_remainder_counted() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/util.rs",
+        "pub fn helper_a() {}\npub fn helper_b() {}\n",
+    );
+    // 150 siblings, all sharing the same two callees — comfortably past the
+    // hard ceiling of 100.
+    let mut body = String::from("use crate::util::{helper_a, helper_b};\n");
+    for n in 0..150 {
+        let _ = write!(
+            body,
+            "pub fn sibling_{n}() {{\n    helper_a();\n    helper_b();\n}}\n"
+        );
+    }
+    write(tmp.path(), "src/siblings.rs", &body);
+    let engine = indexed_engine(&tmp);
+
+    let result = engine.precedent("logos . . . src/`siblings.rs`/sibling_0().", Some(10_000));
+
+    assert_eq!(
+        result.precedents.len(),
+        100,
+        "the hard ceiling applies however large the request: {}",
+        summarise(&result)
+    );
+    assert_eq!(result.total_found, 149, "{}", summarise(&result));
+    assert_eq!(result.elided, 49);
 }
 
 // ── Bounds, ambiguity and the coverage block ─────────────────────────────────
