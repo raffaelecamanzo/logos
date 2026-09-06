@@ -396,6 +396,23 @@ fn precedent_engine() -> (TempDir, Arc<Engine>) {
             "feat: a capability arm",
         );
     }
+    // A registry naming both types, so a file target yields MORE THAN ONE
+    // precedent — without it every `?limit=` assertion below would hold
+    // trivially against a one-element list and would pass even if the handler
+    // never parsed `limit` at all.
+    commit(
+        repo,
+        "src/registry.rs",
+        "use crate::rustarm::RustArm;\n\
+         use crate::pyarm::PyArm;\n\n\
+         pub fn register_all() {\n\
+         \x20   let a = RustArm;\n\
+         \x20   let b = PyArm;\n\
+         \x20   a.extract();\n\
+         \x20   b.extract();\n\
+         }\n",
+        "feat: the registry",
+    );
     let engine = Arc::new(Engine::start(repo).expect("engine starts"));
     engine.index();
     (tmp, engine)
@@ -456,22 +473,47 @@ async fn precedent_endpoint_serializes_the_read_model_with_its_reasons() {
     assert_eq!(payload["target_kind"], "file", "{body}");
     assert!(!payload["precedents"].as_array().unwrap().is_empty(), "{body}");
 
-    // `?limit=` reaches the engine; a malformed limit degrades to the default
-    // rather than failing the request.
-    for (query, expected_len) in [("&limit=1", 1), ("&limit=abc", 1)] {
+    // `?limit=` reaches the engine, and a malformed limit degrades to the
+    // default rather than failing the request. Both halves are asserted against
+    // a target with MORE THAN ONE precedent, so neither can hold trivially: if
+    // the handler dropped `limit`, the capped case would return them all.
+    let unbounded: serde_json::Value = {
         let resp = router
             .clone()
-            .oneshot(get(&format!("/api/v1/precedent?target=src/rustarm.rs{query}")))
+            .oneshot(get("/api/v1/precedent?target=src/rustarm.rs"))
             .await
             .unwrap();
-        let (status, body, _headers) = body_string(resp).await;
-        assert_eq!(status, StatusCode::OK, "{query}: {body}");
-        let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
-        assert!(
-            payload["precedents"].as_array().unwrap().len() >= expected_len,
-            "{query}: {body}"
-        );
-    }
+        let (_status, body, _headers) = body_string(resp).await;
+        serde_json::from_str(&body).expect("json")
+    };
+    let total = unbounded["total_found"].as_u64().expect("total_found");
+    assert!(total > 1, "the fixture must offer a choice to cap: {unbounded}");
+
+    let resp = router
+        .clone()
+        .oneshot(get("/api/v1/precedent?target=src/rustarm.rs&limit=1"))
+        .await
+        .unwrap();
+    let (status, body, _headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(payload["precedents"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(payload["total_found"].as_u64(), Some(total), "{body}");
+    assert_eq!(payload["elided"].as_u64(), Some(total - 1), "{body}");
+
+    let resp = router
+        .clone()
+        .oneshot(get("/api/v1/precedent?target=src/rustarm.rs&limit=abc"))
+        .await
+        .unwrap();
+    let (status, body, _headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "a malformed limit is not a 4xx: {body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        payload["precedents"].as_array().unwrap().len() as u64,
+        total,
+        "a malformed limit falls back to the default, it does not cap: {body}"
+    );
 
     // An unknown target reaches the wire as an empty answer naming its reason.
     let resp = router
@@ -484,13 +526,32 @@ async fn precedent_endpoint_serializes_the_read_model_with_its_reasons() {
     let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(payload["empty_reason"]["code"], "target_unresolved", "{body}");
 
-    // No target at all → the honest empty default, not a 4xx.
+    // No target at all → an honest 200 that still STATES ITSELF. `precedents`
+    // empty and `target_kind == "unresolved"` are both satisfied by a bare
+    // `PrecedentResult::default()`, so asserting only those would certify the
+    // very gap this checks for: the default carries no reason and no notion,
+    // and [FR-NV-12] AC 4 makes an unexplained empty answer the one thing this
+    // read-model may never be.
     let resp = router.oneshot(get("/api/v1/precedent")).await.unwrap();
     let (status, body, _headers) = body_string(resp).await;
     assert_eq!(status, StatusCode::OK, "a targetless call is an honest 200");
     let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert!(payload["precedents"].as_array().unwrap().is_empty(), "{body}");
     assert_eq!(payload["target_kind"], "unresolved", "{body}");
+    assert_eq!(
+        payload["empty_reason"]["code"], "target_unresolved",
+        "an empty answer must name its reason (FR-NV-12 AC 4): {body}"
+    );
+    for stated in ["notion", "ranked_by"] {
+        assert!(
+            !payload[stated].as_str().unwrap_or_default().is_empty(),
+            "the targetless answer must still state its {stated}: {body}"
+        );
+    }
+    assert!(
+        !payload["coverage"]["statement"].as_str().unwrap_or_default().is_empty(),
+        "the targetless answer must still state its coverage limits: {body}"
+    );
 }
 
 /// `GET /api/v1/impact-intersection?item=<id>=<sym>&…` serializes the

@@ -437,10 +437,15 @@ pub(crate) async fn precedent(
     MemberEngine(engine): MemberEngine,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(target) = q.get("target").map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_string)
-    else {
-        return ok(PrecedentResult::default());
-    };
+    // A missing or blank `target` is handed to the engine as `""` rather than
+    // short-circuited to `PrecedentResult::default()`. The default is empty in
+    // the one way this read-model must never be: no `notion`, no `ranked_by`,
+    // no coverage statement and no `empty_reason` — the four things
+    // `precedent_shell` exists to put on EVERY answer. Delegating keeps this
+    // surface's degenerate case identical to the other three ([ADR-01]) and
+    // keeps [FR-NV-12] AC 4 total: the core answers `target_unresolved` for an
+    // empty target, with the whole shell populated.
+    let target = q.get("target").map(|s| s.trim().to_string()).unwrap_or_default();
     let limit = q.get("limit").and_then(|value| value.parse::<usize>().ok());
     let result: PrecedentResult =
         bridge(engine, "api_v1_precedent", move |e| e.precedent(&target, limit)).await;
