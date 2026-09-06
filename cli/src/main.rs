@@ -315,7 +315,8 @@ pub(crate) enum Commands {
     },
     /// ARCHITECTURE health: DB integrity, schema version, FTS coherence,
     /// structural integrity, admission-tripwire drift (FR-GV-18/FR-GV-20) and
-    /// graph counts. For INDEX freshness use `status`.
+    /// graph counts; an unhealthy graph exits 1. For INDEX freshness use
+    /// `status`.
     Health {
         /// Skip the pre-evaluation reconcile (FR-RC-04).
         #[arg(long, alias = "assume-fresh")]

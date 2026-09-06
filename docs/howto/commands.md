@@ -1107,7 +1107,7 @@ installed hook script to exec; you would not normally run it by hand.
 ### `health`
 
 ```bash
-logos health [--no-reconcile]
+logos health [--no-reconcile]     # unhealthy graph exits 1
 logos health --json
 ```
 
@@ -1115,10 +1115,17 @@ logos health --json
 **INDEX** freshness. Checks database presence and size, the schema version, FTS
 coherence, structural integrity ([FR-GV-18](../specs/requirements/FR-GV-18.md)),
 the [FR-GV-20](../specs/requirements/FR-GV-20.md) admission tripwire, and the
-graph node/edge counts. An FTS desync is *reported* in the read-model rather than
-raised as an error — diagnosing it is what `health` is for — so the command
-exits 0 on a report it could produce. Payload-identical with the `health` MCP
-tool.
+graph node/edge counts.
+
+**It projects a verdict.** `ok` is `fts_ok && structural_ok`, and the admission
+tripwire folds into `structural_ok`, so `logos health` exits **1** on an
+unhealthy graph — which is what
+[FR-GV-20](../specs/requirements/FR-GV-20.md) requires of it alongside
+`session-end` and `check`, independent of the metric signal. An FTS desync or
+admission drift is still *reported* in full rather than raised as an error —
+diagnosing it is what `health` is for — but the process exit says so too, so a
+CI step or a shell script notices. Payload-identical with the `health` MCP tool
+(MCP has no exit codes; only the projection is CLI-side).
 
 ### `session-start` / `session-end`
 

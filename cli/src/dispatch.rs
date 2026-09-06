@@ -146,11 +146,18 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             }
             out.report_gate(root, |e| e.gate(threshold, save, !no_reconcile), |r| r.passed)
         }
-        // ARCHITECTURE health: a report, not a verdict. It carries the
-        // FR-GV-18/FR-GV-20 dimensions doctor gates on, but an FTS desync is
-        // exactly what it exists to surface — so it prints at exit 0 rather
-        // than gating like doctor/verify below.
-        Commands::Health { no_reconcile } => out.try_query(root, |e| e.health(!no_reconcile)),
+        // ARCHITECTURE health, and it PROJECTS ITS VERDICT (FR-GV-20 AC 1:
+        // "`session_end`, `check_rules`, and `health` all fail (exit 1)" on
+        // admission drift; UAT-GV-11 steps 4-5 turn on the same pass/fail
+        // distinction). `HealthInfo::ok` is `fts_ok && structural_ok`, and
+        // `structural_ok` is where the admission tripwire folds in — so `ok` is
+        // the field to gate on, and an FTS desync (a Correctness fault under
+        // ADR-14) rides the same exit code rather than printing `"ok": false`
+        // at exit 0. The read-model is still returned in full: diagnosing the
+        // desync is what `health` is FOR, so the fault is reported, not raised.
+        Commands::Health { no_reconcile } => {
+            out.report_gate(root, |e| e.health(!no_reconcile), |r| r.ok)
+        }
         // CR-052 / FR-GV-18/19/20: structural-integrity guards — a corrupted or
         // drifted graph is a failure a human or CI must see, not a silent read.
         Commands::Doctor => out.report_gate(root, |e| e.doctor(), |r| r.ok),
