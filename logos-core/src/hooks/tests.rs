@@ -330,7 +330,13 @@ fn seeding_over_a_checked_in_hook_leaves_it_exactly_as_it_found_it() {
         body,
         "replacing it would dirty every working tree's `git status`"
     );
-    assert_eq!(seeded.linked.len(), 3, "the rest are still seeded: {seeded:?}");
+    // Count reachability, not mechanism: on a filesystem that refuses symlinks
+    // these arrive as marked copies, and that is a correct outcome here.
+    assert_eq!(
+        seeded.linked.len() + seeded.copied.len(),
+        3,
+        "the rest are still seeded: {seeded:?}"
+    );
 }
 
 #[test]
@@ -369,6 +375,7 @@ fn reachability_reports_an_installed_configuration_whose_hooks_are_gone() {
 }
 
 #[test]
+#[cfg(unix)] // the point of the test IS the symlink; a copy fallback cannot make one
 fn reachability_reports_a_dangling_symlink_as_the_nothing_ran_that_it_is() {
     let (primary, worktree) = installed_repo_and_worktree();
     seed_worktree(primary.path(), worktree.path());
@@ -465,6 +472,7 @@ fn concurrent_seeds_never_truncate_the_source_scripts() {
 }
 
 #[test]
+#[cfg(unix)] // the point of the test IS the symlink; a copy fallback cannot make one
 fn an_unreadable_foreign_hook_is_neither_replaced_nor_removed() {
     // `.logos/hooks/` is a directory the user may keep their own scripts in,
     // so the non-clobbering posture must hold for the ones we cannot READ too.
@@ -496,4 +504,57 @@ fn an_unreadable_foreign_hook_is_neither_replaced_nor_removed() {
     assert_eq!(warnings.len(), 2, "{warnings:?}");
     assert!(std::fs::symlink_metadata(&to_a_dir).is_ok(), "foreign symlink survived");
     assert!(not_utf8.is_file(), "foreign non-UTF-8 hook survived");
+}
+
+#[test]
+fn seeding_covers_every_linked_worktree_not_merely_the_first() {
+    // The single-worktree fixtures elsewhere cannot tell "seeds each working
+    // tree" from "seeds one and stops", and a repository under parallel
+    // development is the case CR-106 exists for — it routinely has several.
+    let primary = git_repo();
+    let trees = TempDir::new().expect("worktrees dir");
+    let run = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(primary.path())
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    std::fs::write(primary.path().join("base.rs"), "pub fn base() {}\n").unwrap();
+    run(&["add", "--", "base.rs"]);
+    run(&["commit", "-q", "-m", "base"]);
+
+    let worktrees: Vec<std::path::PathBuf> = ["one", "two", "three"]
+        .iter()
+        .map(|name| {
+            let path = trees.path().join(name);
+            run(&["worktree", "add", "-q", "-b", name, &path.display().to_string()]);
+            path
+        })
+        .collect();
+
+    let result = install(primary.path()).expect("install succeeds");
+
+    assert_eq!(result.worktrees.len(), 3, "every working tree, not just one: {result:?}");
+    for worktree in &worktrees {
+        for name in all_hook_names() {
+            assert!(
+                worktree.join(HOOKS_RELDIR).join(name).is_file(),
+                "{name} unreachable in {}",
+                worktree.display()
+            );
+        }
+    }
+
+    // …and the uninstall reaches every one of them too, leaving no dangling links.
+    let removed = uninstall(primary.path()).expect("uninstall succeeds");
+    assert_eq!(removed.worktrees.len(), 3, "{removed:?}");
+    for worktree in &worktrees {
+        assert!(
+            !worktree.join(HOOKS_RELDIR).exists(),
+            "{} still holds seeded hooks",
+            worktree.display()
+        );
+    }
 }

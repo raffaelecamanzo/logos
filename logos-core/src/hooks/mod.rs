@@ -255,6 +255,13 @@ pub fn uninstall(root: &Path) -> Result<HooksResult> {
         ..HooksResult::default()
     };
 
+    // Read the configuration BEFORE touching the filesystem, mirroring
+    // `install`'s check-then-mutate order. Read afterwards, a git fault here
+    // (`configured_hooks_path` deliberately surfaces exit ≥2 rather than
+    // mistaking it for "unset") would return `Err` with every hook already
+    // deleted and `core.hooksPath` still pointing at them.
+    let ours = configured_hooks_path(root)?.as_deref() == Some(HOOKS_RELDIR);
+
     let (removed, warnings) = purge_hooks_dir(&root.join(HOOKS_RELDIR), PurgeScope::Installation);
     result.installed = removed;
     result.warnings.extend(warnings);
@@ -273,7 +280,7 @@ pub fn uninstall(root: &Path) -> Result<HooksResult> {
         result.warnings.extend(warnings);
     }
 
-    if configured_hooks_path(root)?.as_deref() == Some(HOOKS_RELDIR) {
+    if ours {
         let status = git(root, &["config", "--unset", "core.hooksPath"])?;
         if !status.status.success() {
             bail!("could not unset core.hooksPath");
