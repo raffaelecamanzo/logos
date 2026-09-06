@@ -1872,11 +1872,21 @@ mod tests {
         }
         let before = serde_json::to_string(&value).unwrap().len();
         let growth = (after - before) as f64 / before as f64;
+        // The HUMAN rendering too, because `workspace status` has no formatter of
+        // its own — `Output::print` pretty-prints this same read-model, so the
+        // "stays readable on an 84-member workspace" criterion is a claim about
+        // THIS figure and its line count, not about a layout. Measured rather than
+        // asserted: the bound that keeps it readable is `CANDIDATE_LIMIT`, and a
+        // reviewer is entitled to the number it produces.
+        let pretty = serde_json::to_string_pretty(&cov).unwrap();
+        let pretty_lines = pretty.lines().count();
         println!(
             "CR-118 payload growth at the reference workspace's shape \
              (875 refs: 81 bound / 146 ambiguous / 648 no-provider, ties four-way): \
-             {before} → {after} bytes (+{:.1}%)",
-            growth * 100.0
+             compact {before} → {after} bytes (+{:.1}%); \
+             human (pretty) {} bytes over {pretty_lines} lines",
+            growth * 100.0,
+            pretty.len()
         );
         // Measured at ~+60% on this shape, which projects the ~260 KB reference
         // baseline to roughly 415 KB. Almost all of it is the 146 four-way ties:
