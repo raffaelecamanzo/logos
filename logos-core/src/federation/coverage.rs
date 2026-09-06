@@ -213,11 +213,20 @@ pub struct ProviderCandidates {
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub omitted: u64,
     /// The set, never presented bare: its size, how much of it is listed, and what
-    /// it means — e.g. `"4 tied providers, all listed; none bound"`, or
-    /// `"12 bound providers (fan-out), 8 listed, 4 omitted"`. One composed line
-    /// carried by the human rendering and `--json` alike, so neither can regress
-    /// while the other stays honest — the [CR-111] discipline
-    /// ([`CrossServiceCoverage::bound_ratio_summary`]) applied per row.
+    /// it means — e.g. `"4 tied providers, all listed; none bound"`,
+    /// `"12 bound providers (fan-out), 8 listed, 4 omitted"`, or, at the ordinary
+    /// two-service arity, `"1 bound provider (fan-out), all listed"`.
+    ///
+    /// The prose is the one thing a reader gets from a pretty-printed read-model
+    /// that the sibling fields do not spell out — `disposition` names the meaning
+    /// and `total`/`omitted` the arithmetic, but only this line puts "none bound"
+    /// beside a list of four members, which is the misreading it exists to
+    /// prevent. It is *derived*, so it is also the only field here that can be
+    /// wrong on its own; it is asserted verbatim at every arity it can render.
+    ///
+    /// Kin to [`CrossServiceCoverage::bound_ratio_summary`] ([CR-111]) in shape,
+    /// though not in force: that line carries a denominator the payload otherwise
+    /// hides, whereas this one restates siblings that are present.
     ///
     /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
     pub summary: String,
@@ -231,14 +240,13 @@ impl ProviderCandidates {
     fn new(disposition: ProviderDisposition, mut providers: Vec<BridgeEndpoint>) -> Self {
         let total = providers.len() as u64;
         providers.truncate(CANDIDATE_LIMIT);
-        let listed = providers.len() as u64;
-        let omitted = total - listed;
+        let omitted = total - providers.len() as u64;
         Self {
             disposition,
             providers,
             total,
             omitted,
-            summary: summarize_candidates(disposition, listed, total, omitted),
+            summary: summarize_candidates(disposition, total, omitted),
         }
     }
 }
@@ -251,23 +259,27 @@ impl ProviderCandidates {
 ///
 /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-fn summarize_candidates(
-    disposition: ProviderDisposition,
-    listed: u64,
-    total: u64,
-    omitted: u64,
-) -> String {
+fn summarize_candidates(disposition: ProviderDisposition, total: u64, omitted: u64) -> String {
+    // `listed` is not a third independent fact — it is `total - omitted`, and taking
+    // it as a parameter would create a consistency obligation nothing enforces.
     let extent = if omitted == 0 {
         "all listed".to_string()
     } else {
-        format!("{listed} listed, {omitted} omitted")
+        format!("{} listed, {omitted} omitted", total - omitted)
     };
+    // A fan-out bound to exactly ONE cross-member subscriber is the ordinary
+    // two-service shape, not an edge case, so this line must be grammatical at
+    // arity 1 — the idiom the rest of the codebase uses for the same reason.
+    let plural = if total == 1 { "" } else { "s" };
     match disposition {
         ProviderDisposition::BoundTo => {
-            format!("{total} bound providers (fan-out), {extent}")
+            format!("{total} bound provider{plural} (fan-out), {extent}")
         }
+        // A tie is 2-or-more by construction (the sole-candidate and empty-bucket
+        // cases are intercepted before it), so this arm never renders arity 1 —
+        // it is pluralized alongside its sibling rather than relying on that.
         ProviderDisposition::TiedBetween => {
-            format!("{total} tied providers, {extent}; none bound")
+            format!("{total} tied provider{plural}, {extent}; none bound")
         }
     }
 }
@@ -529,6 +541,10 @@ where
     // `(member, consumer)` pairs read from each member's ledger, classified below
     // through the same provider index as the contract-surface consumers.
     let mut inv_consumers: Vec<(String, super::bridge::InvocationRef)> = Vec::new();
+    // Ledger-provider endpoints already indexed, so one endpoint is filed once —
+    // the collapse `broker_edges` performs before its own fan-out ([NFR-RA-05]).
+    let mut ledger_providers: std::collections::HashSet<(PortableKey, String, String)> =
+        std::collections::HashSet::new();
 
     let surfaces = read_members(registry, "contract surface", |e| e.contract_surface());
     // The members that actually contributed — the numerator of the coverage
@@ -583,6 +599,24 @@ where
                     else {
                         continue; // an unkeyable arm contributes no provider
                     };
+                    // One endpoint per (key, member, symbol) — the SAME collapse
+                    // [`super::broker::broker_edges`] applies before its fan-out, and
+                    // for the same reason: a ledger can hold two rows for one endpoint
+                    // (they differ in `form` or `payload`, both outside the
+                    // `unresolved_refs` unique key), and the fan-out treats each as a
+                    // separate provider. The bridge de-duplicates, so before [CR-118]
+                    // this tier could differ only in a boolean nobody could see. Now
+                    // the set is NAMED and COUNTED, so a duplicate would report "3
+                    // bound providers (fan-out)" beside two bridge edges — a
+                    // fabricated count ([NFR-RA-05]) and exactly the classifier drift
+                    // this module exists to prevent.
+                    if !ledger_providers.insert((
+                        key.clone(),
+                        member.clone(),
+                        reference.symbol.as_str().to_string(),
+                    )) {
+                        continue; // a repeat of this exact endpoint on this key
+                    }
                     index_provider(
                         &mut providers,
                         key,
@@ -1390,19 +1424,97 @@ mod tests {
         assert_eq!(tied.disposition, ProviderDisposition::TiedBetween);
         assert_eq!(tied.total, 3);
         assert_eq!(tied.omitted, 0);
-        let members: Vec<&str> = tied.providers.iter().map(|p| p.member.as_str()).collect();
+        // The (member, symbol) PAIRS, not each half separately: the AC says "each
+        // with member and symbol", and an implementation that carried the consumer's
+        // symbol — or cloned one candidate's symbol across all three — would satisfy
+        // a members-only assertion. Order is the bridge's own deterministic bucket
+        // order ([NFR-RA-06]).
+        let pairs: Vec<(&str, String)> = tied
+            .providers
+            .iter()
+            .map(|p| (p.member.as_str(), p.symbol.to_string()))
+            .collect();
         assert_eq!(
-            members,
-            ["funnel-aggregator-api", "mailbox-aggregator-api", "mailbox-core"],
-            "all three named, in the bridge's own deterministic bucket order (NFR-RA-06)"
+            pairs,
+            [
+                ("funnel-aggregator-api", "local route_funnel_agg".to_string()),
+                ("mailbox-aggregator-api", "local route_mailbox_agg".to_string()),
+                ("mailbox-core", "local route_core".to_string()),
+            ]
         );
-        for p in &tied.providers {
-            assert!(
-                !p.symbol.to_string().is_empty(),
-                "each candidate carries member AND symbol"
+        assert_eq!(tied.summary, "3 tied providers, all listed; none bound");
+
+        // The WIRE shape, pinned here because `web/ui/src/api/types.ts` and the
+        // `docs/howto/commands.md` payload block are hand-written mirrors of it: a
+        // `rename_all` change or a field rename would otherwise ship a broken UI
+        // contract with a fully green suite.
+        let value = serde_json::to_value(row).unwrap();
+        assert_eq!(value["candidates"]["disposition"], "tied-between");
+        assert_eq!(value["candidates"]["total"], 3);
+        assert_eq!(
+            value["candidates"]["omitted"], 0,
+            "present even at zero — absence of truncation is stated, not inferred (NFR-CC-04)"
+        );
+        assert_eq!(
+            value["candidates"]["providers"][0]["member"],
+            "funnel-aggregator-api"
+        );
+        assert_eq!(
+            value["candidates"]["summary"],
+            "3 tied providers, all listed; none bound"
+        );
+        assert!(
+            value.get("to").is_none() && value.get("intake").is_none(),
+            "a tie names no `to` and carries no intake: {value}"
+        );
+    }
+
+    /// The **fan-out** truncation branch — the fourth `summarize_candidates` string,
+    /// and the one the [`ProviderCandidates::summary`] doc uses as its worked
+    /// example. Truncation must disclose its remainder on *both* dispositions, not
+    /// only on a tie ([NFR-CC-04]).
+    ///
+    /// This branch is also where the arity-1 pluralization defect lived unseen: the
+    /// only fan-out test bound two subscribers, so no test ever rendered a fan-out
+    /// summary at any other arity.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn a_truncated_fan_out_set_states_how_many_subscribers_it_omits() {
+        reset();
+        set_consumers("orders", vec![broker_publish("orders.created", "local publish")]);
+        let subs: Vec<String> = (0..12).map(|i| format!("s{i:02}")).collect();
+        for name in &subs {
+            set_consumers(
+                name,
+                vec![broker_subscribe("orders.created", &format!("local sub_{name}"))],
             );
         }
-        assert_eq!(tied.summary, "3 tied providers, all listed; none bound");
+        let mut names: Vec<&str> = subs.iter().map(String::as_str).collect();
+        names.push("orders");
+
+        let cov = cross_service_coverage(&registry(&names));
+
+        let publish = cov
+            .references
+            .iter()
+            .find(|r| r.relation == "broker-topic" && r.bucket == "bound")
+            .expect("the publish binds its cross-member subscribers");
+        let bound = publish.candidates.as_ref().expect("the bound set is named");
+        assert_eq!(bound.disposition, ProviderDisposition::BoundTo);
+        assert_eq!(bound.total, 12, "the total is the set BEFORE truncation");
+        assert_eq!(bound.providers.len(), CANDIDATE_LIMIT);
+        assert_eq!(bound.omitted, 4);
+        assert_eq!(bound.summary, "12 bound providers (fan-out), 8 listed, 4 omitted");
+        assert_eq!(
+            cov.bound, 1,
+            "truncating the NAMED set moves no reference between buckets"
+        );
+        // The `bound-to` wire token, pinned for the same hand-written-mirror reason
+        // as its `tied-between` sibling above.
+        let value = serde_json::to_value(publish).unwrap();
+        assert_eq!(value["candidates"]["disposition"], "bound-to");
+        assert_eq!(value["candidates"]["omitted"], 4);
     }
 
     /// A tie larger than [`CANDIDATE_LIMIT`] is truncated with the remainder
@@ -1485,6 +1597,55 @@ mod tests {
         );
         assert_eq!(bound.total, 2);
         assert_eq!(bound.summary, "2 bound providers (fan-out), all listed");
+    }
+
+    /// **The bridge de-duplicates fan-out endpoints; so does this tier.** A ledger
+    /// holding two rows for one subscribe endpoint must name that subscriber
+    /// **once** — and the coverage row's count must equal the number of edges the
+    /// bridge emits, asserted here against the real bridge rather than assumed.
+    ///
+    /// Before [CR-118] this tier's fan-out arm asked only `.any(|p| …)`, so a
+    /// duplicate changed a boolean nobody could observe. Now the set is named and
+    /// counted, so the same duplicate would publish "2 bound providers (fan-out)"
+    /// beside a single bridge edge — a fabricated count ([NFR-RA-05]) and the
+    /// classifier drift this module's contract forbids.
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn a_repeated_ledger_endpoint_is_named_once_and_counted_once() {
+        reset();
+        set_consumers("orders", vec![broker_publish("orders.created", "local publish")]);
+        // The SAME subscribe endpoint twice — two ledger rows, one subscriber.
+        set_consumers(
+            "billing",
+            vec![
+                broker_subscribe("orders.created", "local bill_sub"),
+                broker_subscribe("orders.created", "local bill_sub"),
+            ],
+        );
+
+        let reg = registry(&["orders", "billing"]);
+        let cov = cross_service_coverage(&reg);
+        let edges = super::super::bridge::ContractBridge::new().edges(&reg);
+
+        let publish = cov
+            .references
+            .iter()
+            .find(|r| r.relation == "broker-topic" && r.bucket == "bound")
+            .expect("the publish binds its cross-member subscriber");
+        let bound = publish.candidates.as_ref().expect("the bound set is named");
+        assert_eq!(
+            bound.total, 1,
+            "one subscriber, named once — not once per ledger row"
+        );
+        assert_eq!(bound.providers.len(), 1);
+        assert_eq!(bound.summary, "1 bound provider (fan-out), all listed");
+        assert_eq!(
+            bound.total as usize,
+            edges.len(),
+            "the named count equals the edges the bridge emits — one classifier, no drift"
+        );
     }
 
     /// The new fields are **optional**, and a row with nothing to name carries
