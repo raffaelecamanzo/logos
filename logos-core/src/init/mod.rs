@@ -310,31 +310,22 @@ const CLAUDE_MD_BLOCK: &str = "\
 ## Logos — structural code intelligence
 
 This project is indexed by Logos. The graph's primary use is **scoping work before
-you decompose it** — deciding what can run in parallel, finding the precedent to
-follow, sizing the blast radius. Navigating while you code is the secondary mode.
+you decompose it**. Navigating while you code is the secondary mode.
 
 ### Primary — before you decompose the work
 
-Ask the graph the questions a plan is made of, *before* choosing what to read:
+Each tool's own description says what it returns; these are the moments to ask.
 
-- **What does this task touch?** — `logos:context` with the task in one sentence
-  returns a ranked, code-carrying bundle; one call replaces several speculative
-  reads. Make it the first move of a task, not a mid-edit lookup.
-- **Can these two work items run in parallel?** — `logos:impact_intersection`,
-  given each item and the symbols it intends to change, names the pairs whose
-  transitive impact sets intersect and the symbols they share. Split colliding
-  items across iterations instead of discovering the collision at merge.
-- **Has this already been done here?** — `logos:precedent` on the symbol or file
-  you are about to write returns the siblings that play the same structural role,
-  each stating *why* it is analogous — counted graph facts, not a similarity
-  score. Follow the sibling rather than inventing a second spelling.
-- **How large is the change really?** — `logos:impact` for one symbol's transitive
-  blast radius; `logos affected <file>…` for the reverse-transitive file closure
-  of a changed set, which is the pre-review \"what else did I reach?\" check.
+- **What does this task touch?** — `logos:context` with the task in one sentence.
+  The first move of a task, not a mid-edit lookup.
+- **Can these two work items run in parallel?** — `logos:impact_intersection`.
+  Split colliding items across iterations instead of colliding at merge.
+- **Has this already been done here?** — `logos:precedent` on what you are about
+  to write. Follow the sibling rather than inventing a second spelling.
+- **How large is the change really?** — `logos:impact` for one symbol;
+  `logos affected <file>…` for a changed set, the pre-review reach check.
 - **Which branches collide, and did the merge carry everything?** —
-  `logos:branch_overlap` over the refs about to be merged reports the symbols more
-  than one of them modifies; given a stated merge result it also reports what a
-  ref changed and the merge does not have. A clean merge is not a complete merge.
+  `logos:branch_overlap`. A clean merge is not a complete merge.
 
 ### Secondary — while you are editing
 
@@ -348,13 +339,9 @@ Ask the graph the questions a plan is made of, *before* choosing what to read:
   on a common bare name (`new`, `map`, `severity`) resolves to one arbitrary match;
   pivot from a unique caller or qualify the path instead.
 
-This ordering is a **hypothesis under measurement, not a settled finding**. It comes
-from one project's telemetry, where navigation was a low single-digit percentage of
-lifetime tool calls and the task-scoping call fired about once per agent session —
-evidence that a navigate-while-you-code framing under-delivered, not evidence that
-this one works. `logos stats --json` breaks calls down by tool class and by
-dev-vs-main origin; read the figure for THIS project there rather than trusting the
-one that motivated this block, and report what you measure.
+This ordering is a **hypothesis under measurement, not a settled finding** — it comes
+from one project's telemetry. `logos stats --json` breaks calls down by tool class
+and origin; read the figure for THIS project there.
 
 Wrap editing sessions in the quality gate: `logos:session_start` before edits,
 `logos:session_end` after — on a failing gate, stop and fix the regression before
