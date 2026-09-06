@@ -413,9 +413,10 @@ type FileRanges = BTreeMap<String, Vec<(u32, u32)>>;
 ///
 /// `--unified=0` so a range is the change itself and not three lines of
 /// courtesy context either side; `--no-renames` so a rename reads as the
-/// delete-and-add it is for attribution purposes; `--no-prefix` so a path is
-/// the whole rest of its header line and no `a/`/`b/` convention has to be
-/// stripped (which would corrupt a real path beginning `b/`).
+/// delete-and-add it is for attribution purposes; `--no-prefix` so no `a/`/`b/`
+/// convention has to be stripped (which would corrupt a real path beginning
+/// `b/`). The header path still needs [`header_path`] — `--no-prefix` does not
+/// make the rest of the line a bare path.
 fn changed_ranges(root: &Path, base: &str, commit: &str) -> Result<FileRanges> {
     let out = git(
         root,
@@ -443,9 +444,13 @@ fn changed_ranges(root: &Path, base: &str, commit: &str) -> Result<FileRanges> {
 fn changed_paths(root: &Path, other: &str, commit: &str) -> Option<BTreeSet<String>> {
     let out = git(root, &["diff", "--name-only", "--no-renames", other, commit]).ok()?;
     out.status.success().then(|| {
+        // `--name-only` C-quotes a path containing `"` or a control character
+        // exactly as the diff headers do (there is no trailing TAB here), so it
+        // has to come back through the same unquoting or the intersection with
+        // the diffed paths silently misses those files.
         String::from_utf8_lossy(&out.stdout)
             .lines()
-            .map(str::to_string)
+            .map(unquote_c_style)
             .collect()
     })
 }
@@ -464,7 +469,7 @@ fn parse_diff(diff: &str) -> FileRanges {
         if line.starts_with("diff --git ") {
             header = FileHeader::start();
         } else if header.in_header && line.starts_with("--- ") {
-            header.old_path = strip_dev_null(&line[4..]);
+            header.old_path = header_path(&line[4..]);
         } else if header.in_header && line.starts_with("+++ ") {
             header.open(&line[4..], &mut files);
         } else if line.starts_with("@@ ") {
@@ -505,9 +510,10 @@ impl FileHeader {
 
     /// Read a `+++` line: register the changed file, and give a deletion the
     /// whole-file range it has no hunks to express.
-    fn open(&mut self, path: &str, files: &mut FileRanges) {
-        self.new_side = path != "/dev/null";
-        self.current = strip_dev_null(path).or_else(|| self.old_path.clone());
+    fn open(&mut self, raw: &str, files: &mut FileRanges) {
+        let path = header_path(raw);
+        self.new_side = path.is_some();
+        self.current = path.or_else(|| self.old_path.clone());
         let Some(current) = self.current.clone() else {
             return;
         };
@@ -531,9 +537,75 @@ impl FileHeader {
     }
 }
 
-/// A diff header path, or `None` for git's `/dev/null` absent-side marker.
-fn strip_dev_null(path: &str) -> Option<String> {
-    (path != "/dev/null").then(|| path.to_string())
+/// The project-relative path a `---`/`+++` header names, or `None` for git's
+/// `/dev/null` absent-side marker.
+///
+/// The rest of the header line is **not** the path. Git appends a literal TAB
+/// whenever the path contains a space, and C-quotes the whole path in double
+/// quotes whenever it contains `"`, a TAB, or another control character —
+/// neither of which `core.quotePath=false` suppresses (that setting governs
+/// only octal-escaping of non-ASCII bytes). Taking the raw remainder would key
+/// the file map on `"src/My Handler.ts\t"`, which matches no indexed path, so a
+/// collision in any file with a space in its name would be silently missed.
+fn header_path(raw: &str) -> Option<String> {
+    let path = raw.strip_suffix('\t').unwrap_or(raw);
+    (path != "/dev/null").then(|| unquote_c_style(path))
+}
+
+/// Undo git's C-style quoting if `path` carries it, else return it unchanged.
+///
+/// Git quotes with a leading and trailing `"` and escapes `\\`, `\"`, the usual
+/// control-character letters, and any other byte as three octal digits. Bytes
+/// are collected and decoded once at the end so a multi-byte character split
+/// across escapes still reassembles.
+fn unquote_c_style(path: &str) -> String {
+    let Some(inner) = path
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .filter(|_| path.len() >= 2)
+    else {
+        return path.to_string();
+    };
+    let mut out: Vec<u8> = Vec::with_capacity(inner.len());
+    let mut bytes = inner.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte != b'\\' {
+            out.push(byte);
+            continue;
+        }
+        match bytes.next() {
+            Some(b'a') => out.push(0x07),
+            Some(b'b') => out.push(0x08),
+            Some(b'f') => out.push(0x0c),
+            Some(b'n') => out.push(b'\n'),
+            Some(b'r') => out.push(b'\r'),
+            Some(b't') => out.push(b'\t'),
+            Some(b'v') => out.push(0x0b),
+            // `\NNN` octal: git always emits exactly three digits.
+            Some(digit @ b'0'..=b'7') => {
+                let mut value = u32::from(digit - b'0');
+                for _ in 0..2 {
+                    match bytes.next() {
+                        Some(next @ b'0'..=b'7') => value = value * 8 + u32::from(next - b'0'),
+                        Some(other) => {
+                            out.push(value as u8);
+                            out.push(other);
+                            value = u32::MAX;
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+                if value != u32::MAX {
+                    out.push(value as u8);
+                }
+            }
+            // `\\`, `\"`, and anything git did not mean as an escape.
+            Some(other) => out.push(other),
+            None => out.push(b'\\'),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The inclusive new-side line range of a `@@ -a,b +c,d @@` hunk header.
@@ -664,6 +736,40 @@ mod tests {
                     @@ -1,4 +0,0 @@\n";
         let files = parse_diff(diff);
         assert_eq!(files["gone.rs"], vec![WHOLE_FILE]);
+    }
+
+    /// Git does NOT put a bare path on a `---`/`+++` line. It appends a TAB when
+    /// the path holds a space and C-quotes the whole thing when it holds a `"`
+    /// or a control character — `core.quotePath=false` suppresses neither. The
+    /// fixture lines here are verbatim `git diff --no-prefix` output.
+    #[test]
+    fn header_paths_are_de_tabbed_and_unquoted() {
+        assert_eq!(header_path("plain.rs"), Some("plain.rs".to_string()));
+        assert_eq!(header_path("my file.rs\t"), Some("my file.rs".to_string()));
+        assert_eq!(
+            header_path("\"say \\\"hi\\\".py\"\t"),
+            Some("say \"hi\".py".to_string())
+        );
+        assert_eq!(header_path("/dev/null"), None);
+        // A tab INSIDE the name is octal- or letter-escaped inside the quotes,
+        // so the trailing-tab strip cannot eat part of a real path.
+        assert_eq!(header_path("\"tab\\there.rs\"\t"), Some("tab\there.rs".to_string()));
+        assert_eq!(header_path("\"oct\\303\\251.rs\""), Some("octé.rs".to_string()));
+    }
+
+    /// The whole parse, over a header carrying a space — the case that used to
+    /// key the file map on a path no index could match.
+    #[test]
+    fn a_path_with_a_space_survives_the_parse() {
+        let diff = "diff --git my file.rs my file.rs\n\
+                    --- my file.rs\t\n\
+                    +++ my file.rs\t\n\
+                    @@ -1 +1 @@\n\
+                    -a\n\
+                    +b\n";
+        let files = parse_diff(diff);
+        assert_eq!(files.keys().collect::<Vec<_>>(), vec!["my file.rs"]);
+        assert_eq!(files["my file.rs"], vec![(1, 1)]);
     }
 
     /// Both hunk-header spellings, and the deletion case where git reports the
