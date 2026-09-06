@@ -9,6 +9,52 @@ runs fully offline, writes nothing outside the project's `.logos/` directory,
 and supports twelve languages out of the box: Rust, Python,
 TypeScript/JavaScript, Go, Java, C, C++, C#, Kotlin, Scala, Ruby, and PHP.
 
+## What it is primarily for: scoping work before you decompose it
+
+The graph's primary value is answering the questions a *plan* is made of, before
+the work is split into tasks and before anyone decides what to read:
+
+- **What does this task touch?** — `logos context "<task in one sentence>"`
+  returns a ranked, code-carrying bundle in one call, instead of a sequence of
+  speculative file reads.
+- **Can these two work items run in parallel?** — `logos impact-intersection
+  --item a=<symbol>,… --item b=<symbol>,…` reports the pairs whose transitive
+  impact sets intersect, and the symbols they share, so colliding items can be
+  placed in different iterations rather than collide at merge.
+- **Has this already been done here?** — `logos precedent <symbol-or-file>`
+  returns the code that plays the same structural role — sharing a supertype, a
+  registration, or a call shape — each result naming why it is analogous. Ranked
+  by counted graph facts, never a similarity score; an empty answer says why.
+- **How large is the change really?** — `logos impact <symbol>` for a symbol's
+  transitive blast radius, `logos affected <file>…` for the reverse-transitive
+  file closure of a changed set.
+- **Which branches collide, and did the merge carry everything?** — `logos
+  branch-overlap --ref a --ref b` reports symbols more than one ref modifies;
+  add `--merge <ref>` and it reports what a branch changed that the merge result
+  does not have.
+
+Navigating by structure *while you edit* — `search`, `node`, `callers`,
+`callees`, `explore` — is the secondary mode, covered in
+[Usage](usage.md) and [Commands](commands.md).
+
+> **This ordering is a hypothesis under measurement, not a settled finding.** It
+> comes from this project's own telemetry, where the task-scoping call fired about
+> once per agent session — evidence that a navigate-while-you-code framing
+> under-delivered, not evidence that this framing works.
+>
+> The figure to judge it by is read from `logos stats --json`, never hand-derived:
+> its `calls_by_class` cross-tab classifies every call as `navigation`,
+> `quality-gate`, `session-gate`, `engine-internal` or `read-model` and splits each
+> by dev-vs-`main` origin. At the moment this framing shipped, that breakdown put
+> navigation at **3,038 of 115,267 lifetime calls (2.64%)** against 105,809
+> `engine-internal` — roughly one navigation call for every 35 the engine made on
+> its own — and 1.47% over dev-origin calls alone. (Earlier prose quoted 0.81% for
+> the same project; that was hand-derived over a narrower tool list, which is the
+> drift this cross-tab exists to end.) The cross-tab is raw-events-only and states
+> its own coverage limits in the payload.
+
+## What it indexes
+
 Markdown documentation is indexed as a first-class layer too — `DocFile`/
 `DocSection` nodes with doc→code traceability (and typed
 `Requirement`/`Adr`/`Story` nodes on swe-skills repos), so you can ask which
@@ -53,7 +99,7 @@ have payload-identical MCP twins (five wiki tools).
 1. [Installation](installation.md) — building the `logos` binary, feature flags, verification
 2. [Configuration](configuration.md) — `.logos/`, `config.toml`, `rules.toml`, logging, query overrides
 3. [Usage](usage.md) — indexing workflow, navigation, agent/MCP setup, the web UI dashboard, worktree-based development, exit codes, scripting
-4. [Commands](commands.md) — the full 27-subcommand reference (incl. `wiki`, `hotspots`, `coverage`)
+4. [Commands](commands.md) — the full 38-subcommand reference (incl. the planning-time `impact-intersection`, `precedent`, `branch-overlap`, plus `wiki`, `hotspots`, `coverage`)
 5. [Metrics](metrics.md) — the ten-dimension quality metrics engine and the 0–10000 signal
 6. [Error handling](error-handling.md) — the fail-soft / fail-loud contract, exit codes, and troubleshooting
 7. [CI integration](ci-integration.md) — the freshen / enforce / report / bless loop as a copy-pasteable CI recipe (enforce with `check`, report with `scan --json`, bless with `gate --save` at release only)
@@ -69,9 +115,13 @@ cd /path/to/your/project
 logos init -i --hooks   # policy files + .mcp.json injection + git hooks
 logos index             # build the code graph
 
-# Navigate
-logos search "handler"
+# Scope the work, before decomposing it
 logos context "add pagination to the users endpoint"
+logos precedent src/api/users.rs
+logos impact-intersection --item pag=list_users --item auth=require_session
+
+# Navigate, while coding
+logos search "handler"
 logos affected src/lib.rs
 
 # Govern

@@ -361,6 +361,41 @@ fn fresh_claude_md_is_created_when_absent() {
     assert!(read(tmp.path(), "CLAUDE.md").contains("<!-- logos:managed:begin -->"));
 }
 
+/// FR-IN-09 AC 3, over an already-initialised project: repositioning the block's
+/// content changes nothing about the upsert contract — a re-run rewrites the
+/// marker span and leaves user content on **both** sides of it byte-identical.
+///
+/// The existing coverage above only has user content *before* the block, which a
+/// naive truncate-and-append would also satisfy. This is the case that fails if
+/// regeneration ever reaches past the end marker.
+#[test]
+fn regenerating_the_managed_block_rewrites_only_the_marker_span() {
+    let tmp = TempDir::new().unwrap();
+    Engine::init_with(tmp.path(), &interactive()).unwrap();
+
+    // Sandwich the managed block between user content on both sides.
+    let generated = read(tmp.path(), "CLAUDE.md");
+    let before = "# House rules\n\nNever commit to main.\n\n";
+    let after = "\n## My own notes\n\nThe `logos:*` tools are wired via .mcp.json.\n";
+    let sandwiched = format!("{before}{generated}{after}");
+    fs::write(tmp.path().join("CLAUDE.md"), &sandwiched).unwrap();
+
+    // Tamper INSIDE the markers, then re-run.
+    let tampered = sandwiched.replace("structural code intelligence", "TAMPERED");
+    assert_ne!(tampered, sandwiched, "the tamper actually changed the body");
+    fs::write(tmp.path().join("CLAUDE.md"), &tampered).unwrap();
+    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
+
+    let refreshed = read(tmp.path(), "CLAUDE.md");
+    assert_eq!(
+        refreshed, sandwiched,
+        "regeneration restores the managed span and touches nothing outside it"
+    );
+    assert!(refreshed.starts_with(before), "user content before survives");
+    assert!(refreshed.ends_with(after), "user content after survives");
+    assert_eq!(step(&result, "CLAUDE.md").action, InitAction::Updated);
+}
+
 // ── FR-IN-03 / FR-SY-05: git hooks via core.hooksPath ─────────────────────
 
 fn hook_opts() -> InitOptions {

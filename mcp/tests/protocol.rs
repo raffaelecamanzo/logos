@@ -172,6 +172,51 @@ async fn server_instructions_contain_all_three_steers() {
     );
 }
 
+/// FR-IN-09 (S-362/CR-114) at the protocol level: what a connecting host is
+/// actually served leads with scoping before decomposition, names the three
+/// planning-time tools, and keeps navigate-while-editing as the secondary mode.
+///
+/// `cli/src/main.rs::surface_parity` checks the same property over the source
+/// file alongside the other two guidance texts; this checks what crosses the
+/// wire, which is the only copy a host ever sees.
+#[tokio::test]
+async fn server_instructions_lead_with_scoping_before_decomposition() {
+    let (client, _server, _dir) = connect().await;
+
+    let info = client.peer_info().expect("server info");
+    let instructions = info
+        .instructions
+        .as_deref()
+        .expect("server-instructions must be served (FR-MC-03)")
+        .to_lowercase();
+
+    let scoping = instructions
+        .find("## primary — before the work is decomposed")
+        .expect("the served instructions open with the scoping section (FR-IN-09)");
+    let navigating = instructions
+        .find("## secondary — while editing")
+        .expect("the served instructions keep navigation as the secondary mode (FR-IN-09)");
+    assert!(
+        scoping < navigating,
+        "scoping must be presented before navigation (FR-IN-09)"
+    );
+
+    // The capabilities the repositioning points at (FR-NV-11/12/13) — guidance
+    // that says "scope first" without naming what to scope with is a slogan.
+    for tool in ["impact_intersection", "precedent", "branch_overlap"] {
+        assert!(
+            instructions.contains(tool),
+            "the served instructions must name the planning-time tool `{tool}` (FR-IN-09)"
+        );
+    }
+
+    // NFR-CC-04: the repositioning is stated as a hypothesis, not a finding.
+    assert!(
+        instructions.contains("hypothesis, not a finding"),
+        "the served instructions must state the repositioning as a hypothesis (NFR-CC-04)"
+    );
+}
+
 // ── FR-MC-02 / UAT-MC-01: the 10 navigation tools delegate and answer ─────
 
 #[tokio::test]
