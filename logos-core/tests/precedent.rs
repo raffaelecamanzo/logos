@@ -70,28 +70,38 @@ fn plugin_fixture() -> TempDir {
                  \x20       parse_source();\n\
                  \x20       emit_facts();\n\
                  \x20   }}\n\
-                 }}\n"
+                 }}\n\n\
+                 pub fn {init}() {{}}\n",
+                init = arm_init(file)
             ),
         );
     }
+    // A dispatcher that CALLS each arm's init. This is what a registration is:
+    // a node that does something with all of them. It is deliberately not a
+    // module `use` list — `is_registration_edge` records why co-import was
+    // tried, measured, and rejected.
     write(
         tmp.path(),
         "src/registry.rs",
-        "use crate::rust_arm::RustArm;\n\
-         use crate::python_arm::PythonArm;\n\
-         use crate::go_arm::GoArm;\n\n\
+        "use crate::rust_arm::rust_arm_init;\n\
+         use crate::python_arm::python_arm_init;\n\
+         use crate::go_arm::go_arm_init;\n\n\
          pub fn register_all() {\n\
-         \x20   let a = RustArm;\n\
-         \x20   let b = PythonArm;\n\
-         \x20   let c = GoArm;\n\
-         \x20   a.extract();\n\
-         \x20   b.extract();\n\
-         \x20   c.extract();\n\
+         \x20   rust_arm_init();\n\
+         \x20   python_arm_init();\n\
+         \x20   go_arm_init();\n\
          }\n",
     );
     // A symbol attached to nothing at all: no supertype, no registrar, no call.
     write(tmp.path(), "src/lonely.rs", "pub fn lonely_helper() {}\n");
     tmp
+}
+
+/// The init-function name for the arm defined in `file` (`src/rust_arm.rs` →
+/// `rust_arm_init`).
+fn arm_init(file: &str) -> String {
+    let stem = file.trim_start_matches("src/").trim_end_matches(".rs");
+    format!("{stem}_init")
 }
 
 /// An indexed engine over `tmp`.
@@ -344,27 +354,79 @@ fn the_answer_is_deterministic_and_ties_break_on_the_canonical_symbol() {
 
 // ── The three facets, each isolated ──────────────────────────────────────────
 
-/// The registration facet on its own: the three plugin **types** implement
-/// nothing and call nothing, and are connected only by the registry module that
-/// names all three.
+/// The registration facet on its own: the three arm-init functions implement
+/// nothing and call nothing, and are connected only by the dispatcher that
+/// calls all three.
 #[test]
 fn a_shared_registration_alone_is_a_reason() {
     let tmp = plugin_fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent("RustArm", None);
+    let result = engine.precedent("rust_arm_init", None);
 
     let names: Vec<&str> = result
         .precedents
         .iter()
         .map(|p| p.symbol.name.as_str())
         .collect();
-    assert_eq!(names, vec!["GoArm", "PythonArm"], "{}", summarise(&result));
-    let sibling = by_name(&result, "GoArm");
+    assert_eq!(
+        names,
+        vec!["go_arm_init", "python_arm_init"],
+        "{}",
+        summarise(&result)
+    );
+    let sibling = by_name(&result, "go_arm_init");
     assert_eq!(sibling.rank.facets, 1);
     assert_eq!(sibling.rank.shared_registrations, 1);
     assert_eq!(sibling.reasons[0].facet, PrecedentFacet::SharedRegistration);
-    assert_eq!(sibling.reasons[0].via[0].name, "registry");
+    assert_eq!(
+        sibling.reasons[0].via[0].name, "register_all",
+        "the registrar is the dispatcher that calls both, not the module that \
+         imports them: {}",
+        summarise(&result)
+    );
+}
+
+/// The regression that removing `EdgeKind::Imports` from the registration facet
+/// exists to prevent: two symbols that share nothing but a `use` list are NOT
+/// analogous.
+///
+/// Measured against this repository's own index, admitting co-import returned 67
+/// "precedents" for one enum — a `usize` constant and a test function among them
+/// — all tied at one facet, so the reported slice was the alphabetical head.
+/// That is the low-confidence guess [FR-NV-12] AC 4 forbids, wearing a named
+/// reason.
+#[test]
+fn co_import_is_not_a_registration() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/alpha.rs",
+        "pub struct Alpha;\npub const ALPHA_LIMIT: usize = 3;\n",
+    );
+    write(tmp.path(), "src/beta.rs", "pub struct Beta;\n");
+    // One consumer whose `use` list names all three, and which does nothing
+    // else with them — the shape that flooded the real index.
+    write(
+        tmp.path(),
+        "src/consumer.rs",
+        "use crate::alpha::{Alpha, ALPHA_LIMIT};\nuse crate::beta::Beta;\n",
+    );
+    let engine = indexed_engine(&tmp);
+
+    let result = engine.precedent("Alpha", None);
+
+    assert!(
+        result.precedents.is_empty(),
+        "appearing in the same `use` list is not structural analogy: {}",
+        summarise(&result)
+    );
+    assert_eq!(
+        result.empty_reason.as_ref().map(|e| e.code.as_str()),
+        Some("no_structural_anchors"),
+        "{}",
+        summarise(&result)
+    );
 }
 
 /// One shared callee is not a call shape ([`MIN_SHARED_CALLEES`]), and the
@@ -492,7 +554,7 @@ fn a_file_target_compares_every_symbol_the_file_defines() {
         .collect();
     assert_eq!(
         compared,
-        vec!["rust_arm", "RustArm", "extract"],
+        vec!["rust_arm", "RustArm", "extract", "rust_arm_init"],
         "every symbol the file defines is compared, in canonical-symbol order"
     );
     // Nothing from the target file may come back as its own precedent.

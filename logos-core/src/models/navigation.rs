@@ -473,9 +473,13 @@ pub enum PrecedentFacet {
     /// The candidate implements or extends a trait/interface/superclass the
     /// target also implements or extends — a shared declared contract.
     SharedSupertype,
-    /// Some third node depends on the candidate and on the target the same way:
-    /// a registry, dispatcher, factory or route table that names both. This is
-    /// the facet that finds sibling arms of one capability.
+    /// Some third node *does something with* both the candidate and the target
+    /// the same way: a registry, dispatcher, factory or route table that calls,
+    /// instantiates, references, routes to, or is typed by both. This is the
+    /// facet that finds sibling arms of one capability.
+    ///
+    /// A module's `use` list is deliberately **not** a registration — see
+    /// `is_registration_edge` for the measurement that settled it.
     SharedRegistration,
     /// The candidate and the target call the same functions — a matching call
     /// shape. Counted only from [`MIN_SHARED_CALLEES`] shared callees up.

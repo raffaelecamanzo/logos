@@ -391,25 +391,26 @@ fn precedent_engine() -> (TempDir, Arc<Engine>) {
                  \x20       parse_source();\n\
                  \x20       emit_facts();\n\
                  \x20   }}\n\
-                 }}\n"
+                 }}\n\n\
+                 pub fn {init}_init() {{}}\n",
+                init = file.trim_start_matches("src/").trim_end_matches(".rs")
             ),
             "feat: a capability arm",
         );
     }
-    // A registry naming both types, so a file target yields MORE THAN ONE
-    // precedent — without it every `?limit=` assertion below would hold
+    // A dispatcher CALLING each arm's init, so a file target yields MORE THAN
+    // ONE precedent — without it every `?limit=` assertion below would hold
     // trivially against a one-element list and would pass even if the handler
-    // never parsed `limit` at all.
+    // never parsed `limit` at all. A module `use` list is deliberately not a
+    // registration (see `is_registration_edge`), so the dispatcher must call.
     commit(
         repo,
         "src/registry.rs",
-        "use crate::rustarm::RustArm;\n\
-         use crate::pyarm::PyArm;\n\n\
+        "use crate::rustarm::rustarm_init;\n\
+         use crate::pyarm::pyarm_init;\n\n\
          pub fn register_all() {\n\
-         \x20   let a = RustArm;\n\
-         \x20   let b = PyArm;\n\
-         \x20   a.extract();\n\
-         \x20   b.extract();\n\
+         \x20   rustarm_init();\n\
+         \x20   pyarm_init();\n\
          }\n",
         "feat: the registry",
     );

@@ -71,10 +71,26 @@ fn fixture() -> tempfile::TempDir {
                  \x20       parse_source();\n\
                  \x20       emit_facts();\n\
                  \x20   }}\n\
-                 }}\n"
+                 }}\n\n\
+                 pub fn {init}_init() {{}}\n",
+                init = ty.to_lowercase()
             ),
         );
     }
+    // A dispatcher CALLING each arm's init, so a FILE target yields more than
+    // one precedent. Without it every payload here holds exactly one result and
+    // an explicit `limit` is a no-op — the parity assertion would pass even if
+    // the MCP tool dropped `p.limit` on the floor.
+    write(
+        tmp.path(),
+        "src/registry.rs",
+        "use crate::rustarm::rustarm_init;\n\
+         use crate::pythonarm::pythonarm_init;\n\n\
+         pub fn register_all() {\n\
+         \x20   rustarm_init();\n\
+         \x20   pythonarm_init();\n\
+         }\n",
+    );
     Engine::start(tmp.path()).expect("engine starts").index();
     tmp
 }
@@ -159,24 +175,33 @@ async fn cli_and_mcp_precedent_payloads_are_identical() {
         "the coverage limits ride the wire payload (NFR-CC-04): {mcp}"
     );
 
-    // (2) An explicit limit travels identically through both surfaces.
-    assert_eq!(
-        cli_payload(root, target, Some(1)),
-        mcp_payload(&client, target, Some(1)).await,
-        "an explicit limit must not diverge between surfaces"
-    );
-
-    // (3) A file target — the second half of the resolution rule, which lives in
+    // (2) A file target — the second half of the resolution rule, which lives in
     // the core precisely so neither adapter can invent a spelling of its own.
     let file = "src/rustarm.rs";
+    let unbounded = mcp_payload(&client, file, None).await;
+    assert_eq!(unbounded["target_kind"], Value::from("file"));
+    let total = unbounded["total_found"].as_u64().expect("total_found");
+    assert!(total > 1, "the fixture must offer a choice to cap: {unbounded}");
     assert_eq!(
         cli_payload(root, file, None),
-        mcp_payload(&client, file, None).await,
+        unbounded,
         "a file target must not diverge between surfaces"
     );
+
+    // (3) An explicit limit travels identically through both surfaces — asserted
+    // against that multi-result target, so a dropped `p.limit` on the MCP side
+    // would now show up as a longer list rather than comparing equal to itself.
+    let capped = mcp_payload(&client, file, Some(1)).await;
     assert_eq!(
-        mcp_payload(&client, file, None).await["target_kind"],
-        Value::from("file")
+        capped["precedents"].as_array().map(Vec::len),
+        Some(1),
+        "the MCP tool must plumb `limit` through to the engine: {capped}"
+    );
+    assert_eq!(capped["elided"].as_u64(), Some(total - 1), "{capped}");
+    assert_eq!(
+        cli_payload(root, file, Some(1)),
+        capped,
+        "an explicit limit must not diverge between surfaces"
     );
 
     // (4) The empty answer, whose stated reason must reach BOTH surfaces

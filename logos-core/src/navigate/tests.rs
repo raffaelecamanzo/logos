@@ -194,7 +194,6 @@ fn registration_edges_exclude_the_supertype_and_derived_kinds() {
 
     for kind in [
         EdgeKind::Calls,
-        EdgeKind::Imports,
         EdgeKind::References,
         EdgeKind::Instantiates,
         EdgeKind::TypeUses,
@@ -213,6 +212,16 @@ fn registration_edges_exclude_the_supertype_and_derived_kinds() {
         // parent module is not an analogy.
         EdgeKind::Contains,
         EdgeKind::Accesses,
+        // The regression this constant exists to hold. `Imports` runs from a
+        // MODULE node to everything its file `use`s, so admitting it made every
+        // pair of co-imported symbols "analogous" — 67 of them for one enum in
+        // this repository's own index, all tied at one facet. A `use` list is
+        // not a registry.
+        EdgeKind::Imports,
+        // A broker coupling, not a declaration site; out of scope for the three
+        // facets [FR-NV-12] names.
+        EdgeKind::Publishes,
+        EdgeKind::Subscribes,
     ] {
         assert!(
             !is_registration_edge(kind),

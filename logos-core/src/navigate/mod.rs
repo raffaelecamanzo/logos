@@ -1020,8 +1020,8 @@ fn precedent_notion() -> String {
         "structural analogy is three named graph facts, never a score. \
          shared_supertype: the candidate implements or extends a trait, interface or superclass \
          the target also does. shared_registration: some third node depends on the candidate and \
-         on the target by the same edge kind — a registry, dispatcher, factory, route table, \
-         importer or signature that names both. shared_callee: the candidate and the target call \
+         on the target by the same edge kind — a registry, dispatcher, factory, route table or \
+         signature that names both (a module's `use` list is not a registration). shared_callee: the candidate and the target call \
          the same functions, counted from {MIN_SHARED_CALLEES} shared callees up, because one \
          shared helper is coincidence rather than call shape. A shared node linking more than \
          {MAX_ANCHOR_FAN} nodes is treated as ubiquitous utility and contributes nothing; those \
@@ -1043,18 +1043,40 @@ fn precedent_ranking() -> String {
 /// Whether an **inbound** edge counts as a *registration* of its target
 /// ([FR-NV-12]).
 ///
-/// A registration is some third node depending on this one by name: a registry
-/// or dispatcher that calls it, a factory that instantiates it, a table that
-/// references it, a route that dispatches to it, a module that imports it, a
-/// signature typed by it. Deliberately **not** `Implements`/`Extends` — that is
-/// the supertype facet seen from the other side, and counting it twice would
-/// inflate a rank on one graph fact — and **not** `ForbiddenDependency`, a
-/// derived governance marker mirroring an edge already counted here.
+/// A registration is some third node **doing something with** this one: a
+/// registry or dispatcher that calls it, a factory that instantiates it, a
+/// table that references it, a route that dispatches to it, a signature typed
+/// by it.
+///
+/// # What is deliberately excluded, and why
+///
+/// - `Implements`/`Extends` — the supertype facet seen from the other side.
+///   Counting it here too would inflate a rank on one graph fact.
+/// - `ForbiddenDependency` — a derived governance marker mirroring an edge
+///   already counted here.
+/// - `Contains`/`Accesses` — the full symbol view carries both, but lexical
+///   nesting and field access are not registrations.
+/// - **`Imports`** — this one was admitted at first and had to be removed.
+///   The extractor emits `Imports` from a **module** node to every symbol its
+///   file `use`s, so admitting it made every pair of symbols co-imported by one
+///   file "structurally analogous". Measured against this repository's own
+///   index, `precedent ChatProvider` returned **67** such candidates — a `usize`
+///   constant and a test function among them — every one reasoned as "wired up
+///   by … config, wiki", where those are ordinary modules and not registries.
+///   All 67 tied at one facet, so the reported slice was just the alphabetical
+///   head: exactly the low-confidence guess [FR-NV-12] AC 4 forbids, wearing a
+///   named reason. A `use` list is bookkeeping the language obliges you to
+///   write, and co-residence in one is the same thing the coverage statement
+///   already rules out — sharing a parent module — one indirection away.
+/// - `Publishes`/`Subscribes` — two producers on one topic is a plausible
+///   fourth reading of "registration", but a broker edge is a runtime coupling
+///   rather than a declaration site, and [FR-NV-12] names three facets. Left
+///   out of THIS increment deliberately, not overlooked; admitting it is a
+///   facet extension for a follow-up story, not a silent widening here.
 const fn is_registration_edge(kind: EdgeKind) -> bool {
     matches!(
         kind,
         EdgeKind::Calls
-            | EdgeKind::Imports
             | EdgeKind::References
             | EdgeKind::Instantiates
             | EdgeKind::TypeUses

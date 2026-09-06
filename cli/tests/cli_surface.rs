@@ -1161,22 +1161,24 @@ fn precedent_fixture() -> TempDir {
                  \x20       parse_source();\n\
                  \x20       emit_facts();\n\
                  \x20   }}\n\
-                 }}\n"
+                 }}\n\n\
+                 pub fn {init}_init() {{}}\n",
+                init = file.trim_start_matches("src/").trim_end_matches(".rs")
             ),
         );
     }
-    // A registry that names both types, so the file target finds a second,
-    // lower-ranked precedent (the type sibling) behind the method sibling.
+    // A dispatcher that CALLS each arm's init, so the file target finds a
+    // second, lower-ranked precedent (the init sibling, one registration facet)
+    // behind the method sibling (two facets). A module `use` list is
+    // deliberately not a registration — see `is_registration_edge`.
     write(
         tmp.path(),
         "src/registry.rs",
-        "use crate::rustarm::RustArm;\n\
-         use crate::pyarm::PyArm;\n\n\
+        "use crate::rustarm::rustarm_init;\n\
+         use crate::pyarm::pyarm_init;\n\n\
          pub fn register_all() {\n\
-         \x20   let a = RustArm;\n\
-         \x20   let b = PyArm;\n\
-         \x20   a.extract();\n\
-         \x20   b.extract();\n\
+         \x20   rustarm_init();\n\
+         \x20   pyarm_init();\n\
          }\n",
     );
     write(tmp.path(), "src/lonely.rs", "pub fn lonely_helper() {}\n");
