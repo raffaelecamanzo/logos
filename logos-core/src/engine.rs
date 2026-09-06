@@ -322,6 +322,32 @@ impl Engine {
             seed
         };
 
+        // Hook reachability (CR-106, [FR-IN-03], [FR-IN-06]): deliberately
+        // OUTSIDE the DB-less gate above. `core.hooksPath` is the relative
+        // `.logos/hooks`, which git resolves against *this* working tree, so a
+        // linked worktree needs its own hooks directory or no logos git hook
+        // fires in it at all — including the blocking `pre-push` gate. Gating
+        // this on "first use" would cover only worktrees created after the
+        // installation; running it every start covers a worktree that predates
+        // it too, on its next logos command. It costs one `stat` outside a
+        // linked worktree (the `.git`-is-a-file discriminator) and seeds
+        // nothing when hooks are not installed — opt-in stays opt-in.
+        //
+        // [FR-IN-03]: ../../../docs/specs/requirements/FR-IN-03.md
+        // [FR-IN-06]: ../../../docs/specs/requirements/FR-IN-06.md
+        if let Some(seeded) = crate::hooks::seed_from_primary(&root) {
+            for warning in &seeded.warnings {
+                tracing::warn!("seeding this worktree's git hooks: {warning}");
+            }
+            if !seeded.is_empty() {
+                tracing::info!(
+                    linked = seeded.linked.len(),
+                    copied = seeded.copied.len(),
+                    "made the installed git hooks reachable from this worktree (CR-106)"
+                );
+            }
+        }
+
         let runtime = Runtime::open_with_config(&db_path, runtime).with_context(|| {
             format!("starting the execution runtime for root {}", root.display())
         })?;

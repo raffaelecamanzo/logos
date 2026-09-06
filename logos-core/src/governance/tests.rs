@@ -2584,6 +2584,29 @@ fn doc_symlink_warning_is_diagnostic_only_and_never_flips_ok() {
     assert!(report.faults.is_empty(), "the warning is not a fault");
 }
 
+// ── CR-106 / FR-IN-03: hook reachability is a `doctor` surface ───────────────
+
+#[test]
+fn doctor_report_builder_leaves_the_hook_warnings_empty() {
+    // Same discipline as the two twins below: the builder is shared with
+    // `verify` (as its embedded `structural`), and hook reachability is a
+    // property of the working tree the command ran in, not of the graph
+    // `verify` re-derives — so the builder leaves it empty and never folds it
+    // into `faults`. The end-to-end proof that `doctor` DOES populate it, and
+    // that populating it does not move the exit code, is
+    // `doctor_reports_unreachable_hooks_without_moving_its_verdict` in
+    // `logos-core/tests/worktree_hooks.rs`, where the real `doctor()` runs in a
+    // real linked worktree.
+    let structural = StructuralReport {
+        node_count: 2,
+        distinct_symbol_ids: 2,
+        ..StructuralReport::default()
+    };
+    let report = doctor_report(structural, AdmissionCensus::default());
+    assert!(report.hook_warnings.is_empty(), "builder does not populate the warning");
+    assert!(report.ok, "clean census is ok");
+}
+
 // ── CR-098 / S-320 / FR-IX-13: the zero-admission diagnostic is diagnostic ────
 
 #[test]

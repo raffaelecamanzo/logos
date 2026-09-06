@@ -224,3 +224,199 @@ fn managed_set_is_the_three_freshness_hooks_plus_the_gate() {
     let scripted: Vec<&str> = managed_scripts().into_iter().map(|(n, _)| n).collect();
     assert_eq!(scripted, names, "both accessors list the same roster");
 }
+
+// ── Every-working-tree reachability (CR-106) ────────────────────────────────
+//
+// The end-to-end proof — real `git worktree add`, real commits and pushes,
+// hooks asserted by the side effect of their own bodies — lives in
+// `tests/worktree_hooks.rs`. What is left here is the mechanism the e2e suite
+// cannot reach: the copy fallback (a filesystem that refuses symlinks is not
+// something CI can be asked to provide) and the `doctor` findings.
+
+/// A primary checkout with hooks installed, plus an empty directory standing
+/// in for a linked worktree — enough for the seeding mechanism, which never
+/// asks git what a worktree is.
+fn installed_repo_and_worktree() -> (TempDir, TempDir) {
+    let primary = git_repo();
+    install(primary.path()).expect("install succeeds");
+    (primary, TempDir::new().expect("worktree dir"))
+}
+
+#[test]
+fn the_copy_fallback_writes_real_scripts_and_a_staleness_marker() {
+    let (primary, worktree) = installed_repo_and_worktree();
+
+    let seeded = seed_worktree_with(primary.path(), worktree.path(), LinkMode::Copy);
+
+    assert_eq!(seeded.copied.len(), 4, "{seeded:?}");
+    assert!(seeded.linked.is_empty(), "{seeded:?}");
+    let copy = worktree.path().join(HOOKS_RELDIR).join("post-commit");
+    assert!(
+        !std::fs::symlink_metadata(&copy).unwrap().file_type().is_symlink(),
+        "the fallback must produce a real file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&copy).unwrap(),
+        std::fs::read_to_string(primary.path().join(HOOKS_RELDIR).join("post-commit")).unwrap(),
+    );
+
+    // Never silent: the marker is what lets `doctor` say these are copies.
+    let note = std::fs::read_to_string(worktree.path().join(HOOKS_RELDIR).join(COPY_FALLBACK_MARKER))
+        .expect("the staleness marker exists");
+    assert!(note.contains(&primary.path().display().to_string()), "{note}");
+}
+
+#[test]
+fn a_copy_fallback_seed_is_reported_by_doctor_and_flagged_when_it_goes_stale() {
+    let (primary, worktree) = installed_repo_and_worktree();
+    seed_worktree_with(primary.path(), worktree.path(), LinkMode::Copy);
+    // `reachability_findings` reads `core.hooksPath`, which is repo-global; the
+    // stand-in worktree is a bare directory, so point it at the primary's
+    // configuration by asking about the primary's own tree.
+    let findings = copy_fallback_findings(&worktree.path().join(HOOKS_RELDIR));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].contains("are COPIES"), "{findings:?}");
+    assert!(!findings[0].contains("STALE"), "{findings:?}");
+
+    // A re-install that updates the primary's scripts is exactly what copies
+    // cannot follow — and exactly what the marker exists to make visible.
+    std::fs::write(
+        primary.path().join(HOOKS_RELDIR).join("post-commit"),
+        format!("#!/bin/sh\n{MANAGED_MARKER}: post-commit\n# a newer body\nexit 0\n"),
+    )
+    .expect("rewrite the primary script");
+
+    let findings = copy_fallback_findings(&worktree.path().join(HOOKS_RELDIR));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].contains("STALE"), "{findings:?}");
+    assert!(findings[0].contains("post-commit"), "{findings:?}");
+}
+
+#[test]
+fn a_second_copy_fallback_seed_refreshes_its_own_copies() {
+    let (primary, worktree) = installed_repo_and_worktree();
+    seed_worktree_with(primary.path(), worktree.path(), LinkMode::Copy);
+    let newer = format!("#!/bin/sh\n{MANAGED_MARKER}: post-commit\n# a newer body\nexit 0\n");
+    std::fs::write(primary.path().join(HOOKS_RELDIR).join("post-commit"), &newer).unwrap();
+
+    let seeded = seed_worktree_with(primary.path(), worktree.path(), LinkMode::Copy);
+
+    assert_eq!(seeded.copied.len(), 4, "{seeded:?}");
+    assert_eq!(
+        std::fs::read_to_string(worktree.path().join(HOOKS_RELDIR).join("post-commit")).unwrap(),
+        newer,
+        "a marked copy is ours to refresh"
+    );
+    assert!(copy_fallback_findings(&worktree.path().join(HOOKS_RELDIR))
+        .first()
+        .is_some_and(|f| !f.contains("STALE")));
+}
+
+#[test]
+fn seeding_over_a_checked_in_hook_leaves_it_exactly_as_it_found_it() {
+    let (primary, worktree) = installed_repo_and_worktree();
+    // The `.logos/hooks` directory is deliberately not gitignored, so a team
+    // may commit its hooks; a worktree checkout then already has them.
+    let checked_in = worktree.path().join(HOOKS_RELDIR).join("post-commit");
+    std::fs::create_dir_all(checked_in.parent().unwrap()).unwrap();
+    let body = format!("#!/bin/sh\n{MANAGED_MARKER}: post-commit\n# shared through git\nexit 0\n");
+    std::fs::write(&checked_in, &body).unwrap();
+
+    let seeded = seed_worktree(primary.path(), worktree.path());
+
+    assert_eq!(seeded.present, vec!["post-commit".to_string()], "{seeded:?}");
+    assert_eq!(
+        std::fs::read_to_string(&checked_in).unwrap(),
+        body,
+        "replacing it would dirty every working tree's `git status`"
+    );
+    assert_eq!(seeded.linked.len(), 3, "the rest are still seeded: {seeded:?}");
+}
+
+#[test]
+fn seeding_a_repo_without_hooks_creates_nothing() {
+    let primary = git_repo(); // no `install`
+    let worktree = TempDir::new().expect("worktree dir");
+
+    let seeded = seed_worktree(primary.path(), worktree.path());
+
+    assert!(seeded.is_empty() && seeded.warnings.is_empty(), "{seeded:?}");
+    assert!(
+        !worktree.path().join(".logos").exists(),
+        "opt-in stays opt-in: an unhooked project must not grow a hooks directory"
+    );
+}
+
+#[test]
+fn reachability_reports_an_installed_configuration_whose_hooks_are_gone() {
+    let repo = git_repo();
+    install(repo.path()).expect("install succeeds");
+    assert!(
+        reachability_findings(repo.path()).is_empty(),
+        "a reachable installation is not a finding"
+    );
+
+    // Exactly the shape a linked worktree had: `core.hooksPath` set and
+    // resolving to a directory that does not exist.
+    std::fs::remove_dir_all(repo.path().join(HOOKS_RELDIR)).unwrap();
+
+    let findings = reachability_findings(repo.path());
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].contains("do NOT fire in this working tree"), "{findings:?}");
+    for name in all_hook_names() {
+        assert!(findings[0].contains(name), "{findings:?}");
+    }
+}
+
+#[test]
+fn reachability_reports_a_dangling_symlink_as_the_nothing_ran_that_it_is() {
+    let (primary, worktree) = installed_repo_and_worktree();
+    seed_worktree(primary.path(), worktree.path());
+    // Uninstalling the source first is precisely what leaves dangling links.
+    std::fs::remove_file(primary.path().join(HOOKS_RELDIR).join("post-commit")).unwrap();
+
+    let dir = worktree.path().join(HOOKS_RELDIR);
+    assert!(
+        std::fs::symlink_metadata(dir.join("post-commit")).is_ok(),
+        "the link is still there — which is exactly why presence proves nothing"
+    );
+    assert!(!dir.join("post-commit").is_file(), "…and it resolves to nothing");
+}
+
+#[test]
+fn reachability_is_silent_when_hooks_are_absent_by_choice_or_foreign() {
+    let repo = git_repo();
+    assert!(
+        reachability_findings(repo.path()).is_empty(),
+        "an unhooked project must not be degraded by a finding it cannot act on"
+    );
+
+    git_config(repo.path(), "core.hooksPath", ".husky").expect("set a foreign hooks path");
+    assert!(
+        reachability_findings(repo.path()).is_empty(),
+        "another hook manager's configuration is not ours to report on"
+    );
+}
+
+#[test]
+fn uninstall_clears_the_seeded_worktree_hooks_and_leaves_a_checked_in_one() {
+    let (primary, worktree) = installed_repo_and_worktree();
+    let dir = worktree.path().join(HOOKS_RELDIR);
+    seed_worktree(primary.path(), worktree.path());
+    // One hook the repository shares through git, not one this seed placed.
+    std::fs::remove_file(dir.join("post-merge")).unwrap();
+    std::fs::write(
+        dir.join("post-merge"),
+        format!("#!/bin/sh\n{MANAGED_MARKER}: post-merge\nexit 0\n"),
+    )
+    .unwrap();
+
+    let (removed, warnings) = purge_hooks_dir(&dir, PurgeScope::SeededOnly);
+
+    assert_eq!(removed.len(), 3, "{removed:?} {warnings:?}");
+    assert!(
+        dir.join("post-merge").is_file(),
+        "a checked-in hook belongs to the repository, not to this seed"
+    );
+    assert!(!dir.join(COPY_FALLBACK_MARKER).exists());
+}

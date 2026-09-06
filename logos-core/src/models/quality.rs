@@ -632,6 +632,28 @@ pub struct DoctorReport {
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     #[serde(default)]
     pub zero_admission_warning: Option<String>,
+    /// Git-hook reachability findings for the working tree `doctor` ran in
+    /// (CR-106, [FR-IN-03]): an installed `core.hooksPath` whose hooks are
+    /// missing from *this* tree and therefore fire nothing, or hooks seeded as
+    /// copies rather than symlinks (and whether those copies have gone stale).
+    ///
+    /// Empty when hooks are absent by choice or belong to another hook
+    /// manager — opt-in stays opt-in and an unhooked project is not degraded
+    /// by a finding it cannot act on.
+    ///
+    /// **Detection is not tradeable here.** No logos git hook ever fired in a
+    /// linked worktree, and the defect survived because "installed" was never
+    /// checked against "fires": `init` reported success, `git config` returned
+    /// a value, and the scripts were on disk. This field is what asks the
+    /// question those three signals cannot answer.
+    ///
+    /// Purely diagnostic, like the two fields above: it does **not** affect
+    /// [`ok`](Self::ok) or the exit status, which still moves on structural
+    /// drift alone.
+    ///
+    /// [FR-IN-03]: ../../../docs/specs/requirements/FR-IN-03.md
+    #[serde(default)]
+    pub hook_warnings: Vec<String>,
     pub message: String,
 }
 

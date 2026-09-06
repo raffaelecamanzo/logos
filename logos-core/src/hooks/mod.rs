@@ -34,6 +34,16 @@
 //! is changed. Re-running over our own installation is idempotent: scripts
 //! are refreshed in place.
 //!
+//! # Reachable from every working tree (CR-106, [FR-WT-01])
+//!
+//! `core.hooksPath` is relative, and git resolves it against the top level of
+//! the working tree the command runs in — so a linked worktree looks for its
+//! *own* `.logos/hooks`, which [ADR-15]'s seed-from-main never created. The
+//! path stays relative ([FR-IN-06] AC1); reachability comes from seeding each
+//! working tree with symlinks to the one real copy of each script. See the
+//! "Every-working-tree reachability" section below for the mechanism, the
+//! copy fallback, and the accepted timing gap.
+//!
 //! # Consumed by S-023
 //!
 //! `logos init -i` surfaces this as its optional "install git hooks" step —
@@ -44,10 +54,12 @@
 //! [FR-SY-06]: ../../../docs/specs/requirements/FR-SY-06.md
 //! [FR-IN-01]: ../../../docs/specs/requirements/FR-IN-01.md
 //! [FR-IN-03]: ../../../docs/specs/requirements/FR-IN-03.md
+//! [FR-WT-01]: ../../../docs/specs/requirements/FR-WT-01.md
 //! [ADR-11]: ../../../docs/specs/architecture/decisions/ADR-11.md
+//! [ADR-15]: ../../../docs/specs/architecture/decisions/ADR-15.md
 //! [git integration]: ../../../docs/specs/architecture/integrations/git.md
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -153,6 +165,12 @@ pub struct HooksResult {
     pub hooks_dir: String,
     /// Hook scripts written (or refreshed) by this call.
     pub installed: Vec<String>,
+    /// The **other** working trees this call made the hooks reachable from
+    /// (CR-106) — seeded on [`install`], cleaned on [`uninstall`]. Empty in a
+    /// single-checkout repository, which is why the hooks appearing to work
+    /// there proved nothing about the linked worktrees where they did not.
+    #[serde(default)]
+    pub worktrees: Vec<String>,
     /// Why anything was skipped — e.g. a foreign `core.hooksPath`.
     pub warnings: Vec<String>,
 }
@@ -205,7 +223,29 @@ pub fn install(root: &Path) -> Result<HooksResult> {
         result.installed.push(name.to_string());
     }
 
+    // Deliberately the RELATIVE path (FR-IN-06 AC1) — reachability from the
+    // other working trees comes from seeding below, never from absolutising
+    // this value (CR-106).
     git_config(root, "core.hooksPath", HOOKS_RELDIR)?;
+
+    // Every working tree that exists *now* becomes reachable before this call
+    // returns, so a worktree that predates the installation is covered by
+    // construction rather than on some later visit.
+    if crate::workspace::primary_root(root).is_some() {
+        // …except from here, where there is no durable anchor to point them at.
+        result.warnings.push(format!(
+            "installed in a linked worktree, so the hooks fire here but not in the \
+             repository's other working trees — run `logos init --hooks` in the primary \
+             checkout to make them reachable everywhere ({HOOKS_RELDIR} is resolved \
+             per working tree)"
+        ));
+    }
+    for seeded in seed_all_worktrees(root) {
+        if !seeded.is_empty() {
+            result.worktrees.push(seeded.worktree);
+        }
+        result.warnings.extend(seeded.warnings);
+    }
     Ok(result)
 }
 
@@ -222,20 +262,22 @@ pub fn uninstall(root: &Path) -> Result<HooksResult> {
         ..HooksResult::default()
     };
 
-    for name in all_hook_names() {
-        let path = root.join(HOOKS_RELDIR).join(name);
-        if !path.exists() {
-            continue;
+    let (removed, warnings) = purge_hooks_dir(&root.join(HOOKS_RELDIR), PurgeScope::Installation);
+    result.installed = removed;
+    result.warnings.extend(warnings);
+
+    // CR-106: an installation is repo-global — `core.hooksPath` lives in the
+    // shared config and is about to be unset for every working tree — so the
+    // removal must be repo-global too. Purging the source scripts first leaves
+    // the seeded symlinks dangling, and a dangling link is exactly what this
+    // pass then clears, so an upgrade from a version that seeded nothing and
+    // one from a version that seeded symlinks both end clean.
+    for other in other_working_trees(root) {
+        let (removed, warnings) = purge_hooks_dir(&other.join(HOOKS_RELDIR), PurgeScope::SeededOnly);
+        if !removed.is_empty() {
+            result.worktrees.push(other.display().to_string());
         }
-        let body = std::fs::read_to_string(&path).unwrap_or_default();
-        if !body.contains(MANAGED_MARKER) {
-            result.warnings.push(format!(
-                "{HOOKS_RELDIR}/{name} is not logos-managed — left untouched"
-            ));
-            continue;
-        }
-        std::fs::remove_file(&path).with_context(|| format!("removing the {name} hook"))?;
-        result.installed.push(name.to_string());
+        result.warnings.extend(warnings);
     }
 
     if configured_hooks_path(root)?.as_deref() == Some(HOOKS_RELDIR) {
@@ -245,6 +287,602 @@ pub fn uninstall(root: &Path) -> Result<HooksResult> {
         }
     }
     Ok(result)
+}
+
+// ── Every-working-tree reachability (CR-106, [FR-WT-01]) ────────────────────
+//
+// `core.hooksPath` is deliberately the RELATIVE `.logos/hooks` ([FR-IN-06]
+// AC1), and git resolves a relative `core.hooksPath` against the top level of
+// **the working tree the command runs in**. In a linked worktree that is
+// `<worktree>/.logos/hooks` — a directory [ADR-15]'s seed-from-main never
+// created, because it seeds a database, not a hooks directory. So no logos
+// hook ever fired in a linked worktree, while every observable signal read as
+// success: `init` reported the hooks installed, `git config` returned a value,
+// and the scripts were on disk.
+//
+// Reachability therefore comes from **seeding**, never from absolutising the
+// path — absolutising is the exact breach [FR-IN-06] AC1 forbids, and it would
+// trade this silent failure for another (a moved or re-cloned repo finding
+// nothing at a recorded absolute path). Each working tree gets its own
+// `.logos/hooks/` holding SYMLINKS to the one real copy of each script, so a
+// re-install that updates a script cannot leave a worktree running a stale
+// one. Where the platform or filesystem refuses symlinks the fallback is
+// copies **plus** [`COPY_FALLBACK_MARKER`], which [`reachability_findings`]
+// reads — never silent copies.
+//
+// [ADR-15]: ../../../docs/specs/architecture/decisions/ADR-15.md
+// [FR-WT-01]: ../../../docs/specs/requirements/FR-WT-01.md
+
+/// Marker file a copy-fallback seed leaves beside the copies it made, naming
+/// the checkout they were copied from.
+///
+/// Its presence is the *only* thing that distinguishes a copy-seeded working
+/// tree from a symlinked one, so [`reachability_findings`] can report copies
+/// (and detect them going stale) instead of letting them pass silently
+/// ([NFR-CC-04]) — the failure shape CR-106 exists to close.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+pub(crate) const COPY_FALLBACK_MARKER: &str = ".seeded-by-copy";
+
+/// The key line inside [`COPY_FALLBACK_MARKER`] naming the source checkout.
+const COPY_FALLBACK_SOURCE_KEY: &str = "source: ";
+
+/// How a seeded worktree hook is materialised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkMode {
+    /// The contracted mechanism: a symlink to the source checkout's script,
+    /// so exactly one copy of each script exists and none can go stale.
+    Symlink,
+    /// The fallback for a platform or filesystem that refuses symlinks —
+    /// copies, always accompanied by [`COPY_FALLBACK_MARKER`].
+    ///
+    /// Production never *selects* this: [`place_hook`] discovers the refusal
+    /// by attempting the symlink, because a filesystem's answer is not
+    /// something a caller can know in advance. Naming it is what lets the
+    /// tests drive the fallback on a machine whose filesystem is perfectly
+    /// happy to make symlinks — the AC requires the path be exercised, not
+    /// assumed to work wherever CI happens to run.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Copy,
+}
+
+/// What became of one hook in one working tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    /// A symlink to the source script — freshly made or already correct.
+    Linked,
+    /// A marked copy (the symlink fallback).
+    Copied,
+    /// A managed script already sitting in the worktree that this seed left
+    /// exactly as it found it. The hooks directory is deliberately **not**
+    /// gitignored ([FR-IN-04]) so a team may commit its hooks and let them
+    /// travel through git; such a script arrives by checkout, already fires,
+    /// and replacing it with a symlink would dirty every working tree's `git
+    /// status` for no gain.
+    Present,
+    /// A script we did not write, left untouched ([FR-IN-01] posture).
+    Foreign,
+}
+
+/// One working tree's hook-seed outcome (CR-106).
+#[derive(Debug, Default, Serialize)]
+pub struct WorktreeSeedResult {
+    /// The working tree seeded.
+    pub worktree: String,
+    /// Hooks reachable there through a symlink to the source script.
+    pub linked: Vec<String>,
+    /// Hooks materialised as copies because symlinks were unavailable —
+    /// always accompanied by the staleness marker `doctor` reads.
+    pub copied: Vec<String>,
+    /// Hooks already reachable there and left exactly as found — a script the
+    /// team commits and lets travel through git ([FR-IN-04]). Reported, not
+    /// replaced: it already fires, and rewriting it as a symlink would dirty
+    /// every working tree's `git status` to no end.
+    #[serde(default)]
+    pub present: Vec<String>,
+    /// Why anything was skipped. Never fatal: a failed seed costs a working
+    /// tree its freshening, and `doctor` names it ([ADR-11] fail-soft).
+    pub warnings: Vec<String>,
+}
+
+impl WorktreeSeedResult {
+    /// Is no managed hook reachable in that working tree as a result of this
+    /// call — nothing placed, and nothing already there?
+    pub fn is_empty(&self) -> bool {
+        self.linked.is_empty() && self.copied.is_empty() && self.present.is_empty()
+    }
+}
+
+/// Seed `worktree_root`'s `.logos/hooks/` from the managed scripts in
+/// `source_root`'s, so the relative `core.hooksPath` resolves to real hooks
+/// there too (CR-106).
+///
+/// Idempotent: a hook already symlinked at the right target is left alone. A
+/// managed *copy* or a managed real script found in the worktree is replaced
+/// by a symlink, because a second copy is exactly what goes stale. A script
+/// the worktree owns and we did not write is never touched, in a worktree
+/// exactly as in the main checkout.
+///
+/// Seeds nothing when `source_root` has no managed hooks: opt-in stays opt-in,
+/// and an unhooked project must not grow a hooks directory.
+pub fn seed_worktree(source_root: &Path, worktree_root: &Path) -> WorktreeSeedResult {
+    seed_worktree_with(source_root, worktree_root, LinkMode::Symlink)
+}
+
+/// [`seed_worktree`] with the materialisation mechanism pinned — the seam the
+/// copy-fallback test drives, so the fallback path is *exercised* rather than
+/// assumed to work on the one filesystem CI happens to run on.
+fn seed_worktree_with(
+    source_root: &Path,
+    worktree_root: &Path,
+    mode: LinkMode,
+) -> WorktreeSeedResult {
+    let mut result = WorktreeSeedResult {
+        worktree: worktree_root.display().to_string(),
+        ..WorktreeSeedResult::default()
+    };
+    if crate::workspace::paths_equal(source_root, worktree_root) {
+        return result; // the real scripts already live here
+    }
+
+    let src_dir = source_root.join(HOOKS_RELDIR);
+    let sources: Vec<(&str, PathBuf)> = all_hook_names()
+        .map(|name| (name, src_dir.join(name)))
+        .filter(|(_, path)| is_managed_script(path))
+        .collect();
+    if sources.is_empty() {
+        return result; // nothing installed to make reachable
+    }
+
+    let dst_dir = worktree_root.join(HOOKS_RELDIR);
+    if let Err(err) = std::fs::create_dir_all(&dst_dir) {
+        result.warnings.push(format!(
+            "could not create {} — logos git hooks will not fire in this working tree: {err}",
+            dst_dir.display()
+        ));
+        return result;
+    }
+
+    // A marker beside the hooks says the copies there are OURS, so refreshing
+    // them is a duty rather than a clobber. Without it, a managed script found
+    // in the worktree came through git and stays put.
+    let refresh_copies = dst_dir.join(COPY_FALLBACK_MARKER).exists();
+
+    for (name, src) in sources {
+        match place_hook(&src, &dst_dir.join(name), mode, refresh_copies) {
+            Ok(Placement::Linked) => result.linked.push(name.to_string()),
+            Ok(Placement::Copied) => result.copied.push(name.to_string()),
+            Ok(Placement::Present) => result.present.push(name.to_string()),
+            Ok(Placement::Foreign) => result.warnings.push(format!(
+                "{HOOKS_RELDIR}/{name} in {} is not logos-managed — left untouched",
+                worktree_root.display()
+            )),
+            Err(err) => result.warnings.push(format!(
+                "could not seed the {name} hook into {}: {err:#}",
+                worktree_root.display()
+            )),
+        }
+    }
+
+    // The marker exists exactly while copies do, so `doctor` can never mistake
+    // a copy-seeded tree for a symlinked one.
+    let marker = dst_dir.join(COPY_FALLBACK_MARKER);
+    if result.copied.is_empty() {
+        let _ = std::fs::remove_file(&marker);
+    } else if let Err(err) = std::fs::write(&marker, copy_fallback_note(source_root)) {
+        result.warnings.push(format!(
+            "hooks were copied into {} but the staleness marker could not be written \
+             ({err}) — `doctor` cannot report them as copies",
+            worktree_root.display()
+        ));
+    }
+    result
+}
+
+/// Materialise one hook at `dst` from the source script at `src`.
+///
+/// `refresh_copies` says whether a managed **regular file** at `dst` is ours
+/// to replace — true only where [`COPY_FALLBACK_MARKER`] marks the directory
+/// as copy-seeded. Everywhere else such a file is a checked-in hook that
+/// travelled through git ([FR-IN-04]): it already fires, and replacing it
+/// would show up as a modification in every working tree.
+///
+/// # Errors
+/// Returns an error only for an I/O failure that leaves `dst` unusable; a
+/// refused symlink is not one — it falls back to a marked copy.
+fn place_hook(src: &Path, dst: &Path, mode: LinkMode, refresh_copies: bool) -> Result<Placement> {
+    match std::fs::symlink_metadata(dst) {
+        Ok(meta) => {
+            let is_link = meta.file_type().is_symlink();
+            // A DANGLING symlink cannot be read, but one under our own hooks
+            // directory is ours by construction — it is what an uninstall that
+            // purged the source first leaves behind — so it is replaceable,
+            // not foreign.
+            let managed = match std::fs::read_to_string(dst) {
+                Ok(body) => body.contains(MANAGED_MARKER),
+                Err(_) => is_link,
+            };
+            if !managed {
+                return Ok(Placement::Foreign);
+            }
+            if is_link && mode == LinkMode::Symlink && links_to(dst, src) {
+                return Ok(Placement::Linked); // already correct
+            }
+            if !is_link && !refresh_copies {
+                return Ok(Placement::Present); // the team's own, via git
+            }
+            std::fs::remove_file(dst)
+                .with_context(|| format!("replacing the seeded hook {}", dst.display()))?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err).with_context(|| format!("inspecting {}", dst.display()));
+        }
+    }
+
+    if mode == LinkMode::Symlink && symlink_file(src, dst).is_ok() {
+        return Ok(Placement::Linked);
+    }
+    std::fs::copy(src, dst)
+        .with_context(|| format!("copying the hook script to {}", dst.display()))?;
+    make_executable(dst)?;
+    Ok(Placement::Copied)
+}
+
+/// Does the symlink at `dst` already point at `src`?
+///
+/// Compared symlink-resolved, because the two paths reach the same script by
+/// different spellings routinely — an installer seeds from the root it was
+/// handed while the bootstrap seeds from `git`'s canonical
+/// `--git-common-dir` answer — and a literal mismatch would rewrite a
+/// perfectly good link on every engine start.
+fn links_to(dst: &Path, src: &Path) -> bool {
+    std::fs::read_link(dst).is_ok_and(|target| crate::workspace::paths_equal(&target, src))
+}
+
+/// A symlink at `dst` pointing to `src`, or the platform's refusal.
+///
+/// The target is **absolute**, which is safe here in a way an absolute
+/// `core.hooksPath` is not: this link lives in the gitignored, per-worktree
+/// `.logos/`, [`seed_from_primary`] re-derives it on every engine start, and
+/// [`reachability_findings`] reports it the moment it dangles — where a
+/// recorded absolute config value is re-derived by nothing and reported by
+/// nothing (CR-106 §3.3).
+fn symlink_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(src, dst)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(src, dst)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (src, dst);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this platform does not support symlinks",
+        ))
+    }
+}
+
+/// Does `path` hold one of our hook scripts (following a symlink)?
+fn is_managed_script(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|body| body.contains(MANAGED_MARKER))
+}
+
+/// The body of [`COPY_FALLBACK_MARKER`] — human-readable, and machine-readable
+/// on its `source:` line so the staleness comparison knows what to diff against.
+fn copy_fallback_note(source_root: &Path) -> String {
+    format!(
+        "{MANAGED_MARKER}: worktree seed fallback (CR-106)\n\
+         # Symlinks were unavailable here, so the hooks beside this file are\n\
+         # COPIES of the source checkout's scripts rather than links to them.\n\
+         # Copies can go stale, so `logos doctor` reads this marker and reports\n\
+         # them; seeding copies silently would recreate the very defect that\n\
+         # every-working-tree reachability closed.\n\
+         {COPY_FALLBACK_SOURCE_KEY}{}\n",
+        source_root.display()
+    )
+}
+
+/// Every working tree of `root`'s repository — the primary checkout and each
+/// linked worktree — as absolute paths.
+///
+/// Empty when git cannot answer (binary absent, not a repository): the caller
+/// then seeds nothing, which is the safe direction. A bare repository's entry
+/// is dropped — it has no working tree for a hook to fire in.
+fn working_trees(root: &Path) -> Vec<PathBuf> {
+    let Ok(output) = git(root, &["worktree", "list", "--porcelain"]) else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let mut trees: Vec<PathBuf> = Vec::new();
+    let mut current: Option<PathBuf> = None;
+    for line in listing.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            trees.extend(current.take());
+            current = Some(PathBuf::from(path));
+        } else if line == "bare" {
+            current = None;
+        }
+    }
+    trees.extend(current);
+    // A pruned-but-not-yet-removed entry no longer exists on disk.
+    trees.retain(|path| path.is_dir());
+    trees
+}
+
+/// The working trees of `root`'s repository other than `root` itself.
+fn other_working_trees(root: &Path) -> Vec<PathBuf> {
+    working_trees(root)
+        .into_iter()
+        .filter(|path| !crate::workspace::paths_equal(path, root))
+        .collect()
+}
+
+/// Seed every OTHER working tree of `root`'s repository from the managed
+/// scripts in `root`'s `.logos/hooks/` (CR-106).
+///
+/// This is what covers a worktree that existed **before** installation, by
+/// construction rather than by a later visit: [`install`] calls it, so every
+/// working tree in existence at install time is reachable the moment install
+/// returns. A worktree created **after** installation is covered instead by
+/// [`seed_from_primary`] on its first logos use.
+///
+/// Seeds nothing when `root` is itself a **linked worktree**. A seed points
+/// every other tree at one checkout's scripts, and a linked worktree is the
+/// one checkout that can be removed at any moment — anchoring the repository's
+/// hooks there would leave dangling links behind `git worktree remove`. The
+/// primary checkout is the only durable anchor, so an installation run from a
+/// worktree installs *there* and says so ([`install`] warns); the other trees
+/// then report themselves unreachable through [`reachability_findings`] rather
+/// than being wired to something that may vanish.
+pub fn seed_all_worktrees(root: &Path) -> Vec<WorktreeSeedResult> {
+    if crate::workspace::primary_root(root).is_some() {
+        return Vec::new();
+    }
+    other_working_trees(root)
+        .into_iter()
+        .map(|worktree| seed_worktree(root, &worktree))
+        .filter(|result| !result.is_empty() || !result.warnings.is_empty())
+        .collect()
+}
+
+/// Seed THIS working tree's hooks from the primary checkout, when `root` is a
+/// linked worktree whose primary has managed hooks installed (CR-106).
+///
+/// The bootstrap seam [`crate::Engine`] calls on every start, which is what
+/// covers a worktree created **after** installation: its first logos use makes
+/// the hooks reachable. `None` — nothing to do — in the primary checkout,
+/// outside a repository, in a submodule, and in any worktree whose primary has
+/// no hooks installed.
+///
+/// **The accepted timing gap** ([CRA-04]): the seed runs on first logos use,
+/// so a `git commit` made between `git worktree add` and the first logos
+/// command in the new worktree still runs unhooked. Closing it would require
+/// hooking `git worktree add`, which logos does not control;
+/// [`reachability_findings`] surfaces the window rather than hiding it.
+///
+/// [CRA-04]: ../../../docs/requests/CR-106-git-hooks-never-fire-in-a-linked-worktree.md
+pub fn seed_from_primary(root: &Path) -> Option<WorktreeSeedResult> {
+    // Cheap discriminator, no subprocess: only a linked worktree (or a
+    // submodule, which `primary_root` then rejects) has `.git` as a FILE. The
+    // primary checkout and a non-repository both stop here, so the common
+    // engine start pays one `stat` for this whole mechanism.
+    if !root.join(".git").is_file() {
+        return None;
+    }
+    let primary = crate::workspace::primary_root(root)?;
+    let result = seed_worktree(&primary, root);
+    (!result.is_empty() || !result.warnings.is_empty()).then_some(result)
+}
+
+/// How much of one hooks directory an uninstall may remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PurgeScope {
+    /// Every managed hook — the installation itself, in the working tree the
+    /// uninstall was asked for.
+    Installation,
+    /// Only what the worktree seeding placed: symlinks (dangling ones
+    /// included) and copies the fallback marker claims. A checked-in script
+    /// that travelled through git is the repository's, not this seed's, and
+    /// deleting it in N worktrees is not what "remove what I seeded" means.
+    SeededOnly,
+}
+
+/// Remove the managed hooks from one working tree's hooks directory, plus the
+/// copy-fallback marker, leaving anything we did not write untouched.
+///
+/// Returns `(removed hook names, warnings)`. Under [`PurgeScope::SeededOnly`]
+/// the now-empty directory goes too, so a seeded worktree is left with no
+/// trace; the attempt fails harmlessly when the user keeps something else
+/// there.
+fn purge_hooks_dir(dir: &Path, scope: PurgeScope) -> (Vec<String>, Vec<String>) {
+    let mut removed = Vec::new();
+    let mut warnings = Vec::new();
+    let seeded_copies = dir.join(COPY_FALLBACK_MARKER).exists();
+    for name in all_hook_names() {
+        let path = dir.join(name);
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let is_link = meta.file_type().is_symlink();
+        // As in `place_hook`: an unreadable symlink under our own directory is
+        // a dangling link of ours — precisely what must not survive an
+        // uninstall — not a foreign script to preserve.
+        let managed = match std::fs::read_to_string(&path) {
+            Ok(body) => body.contains(MANAGED_MARKER),
+            Err(_) => is_link,
+        };
+        if !managed {
+            warnings.push(format!(
+                "{HOOKS_RELDIR}/{name} is not logos-managed — left untouched"
+            ));
+            continue;
+        }
+        if scope == PurgeScope::SeededOnly && !is_link && !seeded_copies {
+            continue; // the repository's own checked-in hook
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed.push(name.to_string()),
+            Err(err) => warnings.push(format!("could not remove {}: {err}", path.display())),
+        }
+    }
+    let _ = std::fs::remove_file(dir.join(COPY_FALLBACK_MARKER));
+    if scope == PurgeScope::SeededOnly {
+        let _ = std::fs::remove_dir(dir);
+    }
+    (removed, warnings)
+}
+
+/// The hook-reachability findings for the working tree at `root` (CR-106,
+/// [FR-IN-03]) — what `doctor` reports so an installation that cannot fire is
+/// never again indistinguishable from one that can.
+///
+/// Empty — deliberately, and not as a degraded answer — when `core.hooksPath`
+/// is unset or belongs to another hook manager: opt-in stays opt-in and an
+/// unhooked project is not degraded by a finding it cannot act on. Empty too
+/// when git cannot answer at all, since `doctor` must not manufacture a
+/// finding from a misread ([NFR-CC-04]).
+///
+/// [FR-IN-03]: ../../../docs/specs/requirements/FR-IN-03.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+pub fn reachability_findings(root: &Path) -> Vec<String> {
+    if configured_hooks_path(root).ok().flatten().as_deref() != Some(HOOKS_RELDIR) {
+        return Vec::new();
+    }
+    let dir = root.join(HOOKS_RELDIR);
+    let mut findings = Vec::new();
+
+    // `is_file` follows the link, so a DANGLING symlink reads as missing —
+    // which is exactly what it is to git: nothing runs.
+    let missing: Vec<&str> = all_hook_names()
+        .filter(|name| !dir.join(name).is_file())
+        .collect();
+    if !missing.is_empty() {
+        findings.push(format!(
+            "core.hooksPath is `{HOOKS_RELDIR}`, but {} is missing {} — those git hooks \
+             do NOT fire in this working tree (CR-106). Run any `logos` command here to \
+             seed them from the primary checkout, or `logos init --hooks` in the primary \
+             checkout if the installation itself is gone.",
+            dir.display(),
+            missing.join(", ")
+        ));
+    }
+    findings.extend(copy_fallback_findings(&dir));
+    findings.extend(unseeded_foreign_hook_findings(root, &dir));
+    findings
+}
+
+/// The finding for a hook script that is **not ours**, sits in the source
+/// checkout's hooks directory, and is therefore configured to run — but is
+/// absent from this working tree, so it does not.
+///
+/// Seeding deliberately carries only the hooks logos manages: distributing a
+/// third party's script into a context its author never configured is a much
+/// larger claim than making our own installation reachable, and it is not the
+/// one CR-106 makes. But silence here would rebuild the defect one storey up —
+/// hooks appearing to work in a worktree while the user's own `pre-commit`
+/// quietly does not is *precisely* the "every signal reads as success" shape.
+/// So logos reports what it will not carry.
+fn unseeded_foreign_hook_findings(root: &Path, dir: &Path) -> Vec<String> {
+    let Some(source) = crate::workspace::primary_root(root) else {
+        return Vec::new(); // the primary checkout: the scripts are already here
+    };
+    let Ok(entries) = std::fs::read_dir(source.join(HOOKS_RELDIR)) else {
+        return Vec::new();
+    };
+    let mut unreachable: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            !name.starts_with('.')
+                && !all_hook_names().any(|managed| managed == name)
+                && is_hook_script(&source.join(HOOKS_RELDIR).join(name))
+                && !dir.join(name).is_file()
+        })
+        .collect();
+    if unreachable.is_empty() {
+        return Vec::new();
+    }
+    unreachable.sort(); // deterministic ordering (NFR-RA-06)
+    vec![format!(
+        "{} holds hook script(s) logos does not manage ({}) that are absent from {} — they \
+         run in that checkout and NOT in this working tree. Seeding carries only the hooks \
+         logos installed; copy or link the rest yourself if they are meant to run here.",
+        source.join(HOOKS_RELDIR).display(),
+        unreachable.join(", "),
+        dir.display()
+    )]
+}
+
+/// Is `path` a plain file that git would actually execute as a hook?
+fn is_hook_script(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
+}
+
+/// The findings [`COPY_FALLBACK_MARKER`] exists to make possible: this working
+/// tree's hooks are copies rather than symlinks, and whether they have gone
+/// stale against the source scripts they were copied from.
+fn copy_fallback_findings(dir: &Path) -> Vec<String> {
+    let Ok(note) = std::fs::read_to_string(dir.join(COPY_FALLBACK_MARKER)) else {
+        return Vec::new();
+    };
+    let source = note
+        .lines()
+        .find_map(|line| line.strip_prefix(COPY_FALLBACK_SOURCE_KEY))
+        .map(PathBuf::from);
+    let Some(source) = source else {
+        return vec![format!(
+            "{} records a copy-fallback hook seed but names no source checkout — the \
+             copies cannot be checked for staleness; re-run `logos init --hooks`.",
+            dir.join(COPY_FALLBACK_MARKER).display()
+        )];
+    };
+    let src_dir = source.join(HOOKS_RELDIR);
+    let stale: Vec<&str> = all_hook_names()
+        .filter(
+            |name| match (std::fs::read(src_dir.join(name)), std::fs::read(dir.join(name))) {
+                (Ok(source), Ok(local)) => source != local,
+                // An unreadable pair is not evidence of staleness; the missing
+                // half is already reported above where it matters.
+                _ => false,
+            },
+        )
+        .collect();
+    if stale.is_empty() {
+        vec![format!(
+            "the hooks in {} are COPIES of {}'s scripts, not symlinks (this filesystem \
+             refused symlinks): they cannot follow a re-install, so re-run \
+             `logos init --hooks` after upgrading logos.",
+            dir.display(),
+            source.display()
+        )]
+    } else {
+        vec![format!(
+            "the hooks in {} are STALE copies of {}'s scripts ({} differ): this working \
+             tree runs out-of-date hooks — re-run `logos init --hooks`.",
+            dir.display(),
+            source.display(),
+            stale.join(", ")
+        )]
+    }
 }
 
 /// The full script for one hook: marker, PATH guard, changed-set computation,

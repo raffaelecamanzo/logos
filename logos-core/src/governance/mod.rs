@@ -2770,6 +2770,14 @@ pub(crate) fn doctor(engine: &Engine) -> Result<DoctorReport> {
     // seam is infallible, so this advisory adds no way for `doctor` to fail.
     report.zero_admission_warning =
         engine.zero_admission_diagnostic(indexed_files).map(|d| d.to_string());
+    // CR-106 / FR-IN-03: an installed hook configuration that cannot fire from
+    // THIS working tree. Diagnostic only, like the two lines above — `ok` and
+    // the exit status still move on structural drift alone — but not optional:
+    // the every-working-tree defect survived precisely because "installed" was
+    // never checked against "fires", and every candidate reachability mechanism
+    // has its own way of silently ceasing to work, so the check outlives the
+    // choice of mechanism.
+    report.hook_warnings = crate::hooks::reachability_findings(engine.root());
     Ok(report)
 }
 
@@ -2886,6 +2894,10 @@ fn doctor_report(report: StructuralReport, admission: AdmissionCensus) -> Doctor
         // output as its `structural` field, and the zero-admission explanation is an
         // `index`/`status`/`doctor` surface ([FR-IX-13]).
         zero_admission_warning: None,
+        // Populated by `doctor` alone, for the same reason: hook reachability
+        // is a property of the working tree the command ran in, not of the
+        // graph `verify` re-derives (CR-106).
+        hook_warnings: Vec::new(),
         message,
     }
 }
