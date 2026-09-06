@@ -1596,28 +1596,56 @@ mod surface_parity {
         }
     }
 
-    /// Each text names the three planning-time capabilities, in whichever
-    /// spelling that surface uses ([FR-IN-09] AC 2).
+    /// The three planning-time capabilities ([FR-NV-11], [FR-NV-12], [FR-NV-13])
+    /// — tool name and CLI command spelling.
+    const CAPABILITIES: &[(&str, &str)] = &[
+        ("impact_intersection", "impact-intersection"),
+        ("precedent", "precedent"),
+        ("branch_overlap", "branch-overlap"),
+    ];
+
+    /// Each text names the three planning-time capabilities **as capabilities**,
+    /// in whichever spelling that surface uses ([FR-IN-09] AC 2).
     ///
     /// These are the capabilities the repositioning points at — guidance that
     /// says "scope first" without naming what to scope with is a slogan.
     ///
+    /// # Why this matches code spans and not the raw text
+    ///
+    /// "precedent" is an ordinary English word, and the lede of two of these
+    /// texts uses it in prose ("finding the precedent to follow"). A raw
+    /// `contains` therefore passed even with the `precedent` bullet deleted —
+    /// a false green on the AC this story exists to satisfy. A capability is
+    /// named when it appears as a code span, so that is what is asserted.
+    ///
     /// [FR-IN-09]: ../../docs/specs/requirements/FR-IN-09.md
+    /// [FR-NV-11]: ../../docs/specs/requirements/FR-NV-11.md
+    /// [FR-NV-12]: ../../docs/specs/requirements/FR-NV-12.md
+    /// [FR-NV-13]: ../../docs/specs/requirements/FR-NV-13.md
     #[test]
     fn the_shipped_guidance_names_the_planning_time_capabilities() {
-        // (tool name, CLI command spelling) — FR-NV-11, FR-NV-12, FR-NV-13.
-        const CAPABILITIES: &[(&str, &str)] = &[
-            ("impact_intersection", "impact-intersection"),
-            ("precedent", "precedent"),
-            ("branch_overlap", "branch-overlap"),
-        ];
         for g in shipped_guidance() {
+            let named: BTreeSet<String> = inline_code_spans(g.label, &g.text)
+                .iter()
+                .filter_map(|span| span.split(' ').next().map(str::to_string))
+                .collect();
             for (tool, command) in CAPABILITIES {
+                // The three accepted spellings: the MCP wire name bare
+                // (`precedent`), namespaced (`logos:precedent`), and the CLI
+                // command (`logos precedent`, whose first token is `logos`, so
+                // match the whole span's leading two words instead).
+                let named_as_capability = named.contains(*tool)
+                    || named.contains(&format!("logos:{tool}"))
+                    || inline_code_spans(g.label, &g.text)
+                        .iter()
+                        .any(|span| span == &format!("logos {command}")
+                            || span.starts_with(&format!("logos {command} ")));
                 assert!(
-                    g.text.contains(tool) || g.text.contains(command),
-                    "{} does not name the planning-time capability `{tool}` \
-                     (FR-IN-09): the repositioned guidance must say what to scope \
-                     with, not just that scoping comes first",
+                    named_as_capability,
+                    "{} does not name the planning-time capability `{tool}` as a \
+                     code span (FR-IN-09 AC 2). Prose that merely uses the word is \
+                     not naming the capability — the guidance must say what to \
+                     scope WITH, not just that scoping comes first",
                     g.label
                 );
             }
