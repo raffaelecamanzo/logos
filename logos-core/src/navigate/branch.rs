@@ -35,8 +35,9 @@
 //! [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use anyhow::Result;
 
@@ -452,9 +453,13 @@ type FileRanges = BTreeMap<String, Vec<(u32, u32)>>;
 /// `b/`). The header path still needs [`header_path`] — `--no-prefix` does not
 /// make the rest of the line a bare path.
 fn changed_ranges(root: &Path, base: &str, commit: &str) -> Result<FileRanges> {
-    let out = git(
-        root,
-        &[
+    // STREAMED, not buffered. The parse consumes only the four header line
+    // kinds and discards every `+`/`-` content line, but `Command::output()`
+    // would hold the entire diff in memory first — and a branch that deletes a
+    // vendored tree emits hundreds of megabytes of them, inside a long-lived
+    // `logos serve`. Peak memory here is proportional to hunk headers instead.
+    let mut child = git_command(root)
+        .args([
             "diff",
             "--no-color",
             "--no-ext-diff",
@@ -463,14 +468,36 @@ fn changed_ranges(root: &Path, base: &str, commit: &str) -> Result<FileRanges> {
             "--unified=0",
             base,
             commit,
-        ],
-    )?;
-    anyhow::ensure!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-    Ok(parse_diff(&String::from_utf8_lossy(&out.stdout)))
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let mut files: FileRanges = BTreeMap::new();
+    let mut header = FileHeader::start();
+    for line in BufReader::new(stdout).split(b'\n') {
+        // Decoded per line and dropped after dispatch, so a non-UTF-8 byte
+        // anywhere cannot force a second full copy of the diff.
+        let line = line?;
+        parse_diff_line(&String::from_utf8_lossy(&line), &mut header, &mut files);
+    }
+    // Drain first, wait second: the reverse deadlocks on a full pipe.
+    let out = child.wait_with_output()?;
+    anyhow::ensure!(out.status.success(), "{}", git_failure(&out.status, &out.stderr));
+    Ok(files)
+}
+
+/// A one-line cause for a failed git call.
+///
+/// The exit status is always available; stderr is not — a subprocess killed by
+/// a signal writes nothing, and a warning that reads `"... failed: "` tells the
+/// operator nothing at all.
+fn git_failure(status: &std::process::ExitStatus, stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    match stderr.trim() {
+        "" => format!("git {status} and wrote no diagnostic"),
+        message => message.to_string(),
+    }
 }
 
 /// The files whose content at `commit` differs from **the working tree** — the
@@ -501,20 +528,32 @@ fn paths_differing_from_snapshot(root: &Path, commit: &str) -> Option<BTreeSet<S
 /// contention this query exists to surface before a merge.
 const WHOLE_FILE: (u32, u32) = (1, u32::MAX);
 
-/// Parse `git diff --unified=0 --no-prefix` into per-file new-side ranges.
+/// Feed one line of `git diff --unified=0 --no-prefix` to the parse.
+///
+/// Line-at-a-time so [`changed_ranges`] can stream the child's stdout instead
+/// of buffering the whole diff; [`parse_diff`] is the whole-string form the
+/// unit tests drive.
+fn parse_diff_line(line: &str, header: &mut FileHeader, files: &mut FileRanges) {
+    if line.starts_with("diff --git ") {
+        *header = FileHeader::start();
+    } else if header.in_header && line.starts_with("--- ") {
+        header.old_path = header_path(&line[4..]);
+    } else if header.in_header && line.starts_with("+++ ") {
+        header.open(&line[4..], files);
+    } else if line.starts_with("@@ ") {
+        header.hunk(line, files);
+    }
+}
+
+/// Parse a whole `git diff --unified=0 --no-prefix` into per-file new-side
+/// ranges — the whole-string form of [`parse_diff_line`], for tests that drive
+/// the parser off a literal fixture. Production streams line by line.
+#[cfg(test)]
 fn parse_diff(diff: &str) -> FileRanges {
     let mut files: FileRanges = BTreeMap::new();
     let mut header = FileHeader::start();
     for line in diff.lines() {
-        if line.starts_with("diff --git ") {
-            header = FileHeader::start();
-        } else if header.in_header && line.starts_with("--- ") {
-            header.old_path = header_path(&line[4..]);
-        } else if header.in_header && line.starts_with("+++ ") {
-            header.open(&line[4..], &mut files);
-        } else if line.starts_with("@@ ") {
-            header.hunk(line, &mut files);
-        }
+        parse_diff_line(line, &mut header, &mut files);
     }
     files
 }
@@ -720,12 +759,18 @@ fn rev_parse(root: &Path, reference: &str) -> Option<String> {
 /// `core.quotePath=false` keeps non-ASCII paths literal (no octal quoting) so
 /// the diff parser sees real bytes — the same boundary the history miner sets.
 fn git(root: &Path, args: &[&str]) -> std::io::Result<Output> {
-    Command::new("git")
+    git_command(root).args(args).output()
+}
+
+/// `git -C <root> -c core.quotePath=false`, ready for more args — the spawn
+/// form [`changed_ranges`] needs so it can stream rather than buffer.
+fn git_command(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(root)
-        .args(["-c", "core.quotePath=false"])
-        .args(args)
-        .output()
+        .args(["-c", "core.quotePath=false"]);
+    command
 }
 
 #[cfg(test)]
