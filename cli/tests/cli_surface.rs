@@ -990,21 +990,25 @@ fn serve_mcp_speaks_jsonrpc_on_stdout_and_exits_cleanly_on_disconnect() {
         "logos",
         "the host derives logos:<tool> from this identity (FR-MC-01)"
     );
+    // Derived from the real router, never written down (S-361): a hand-written
+    // count is what two Sprint 64 sessions each got wrong on the same line, and
+    // git merged the identical edits without a conflict. `list_tools` reads the
+    // static tool attrs, so the throwaway engine needs no index — this asserts
+    // that the SHIPPED BINARY's stdio server registers the same roster the
+    // in-process router declares, which is the half a spawned process can hide.
+    let registered = mcp::LogosMcp::new(logos_core::Engine::open(
+        TempDir::new().expect("tempdir").path(),
+    ))
+    .list_tools()
+    .len();
     assert_eq!(
         tools.unwrap()["result"]["tools"]
             .as_array()
             .expect("tools array")
             .len(),
-        30,
-        "all 30 tools register through the shipped binary (FR-MC-01)"
+        registered,
+        "all {registered} registered tools reach the host through the shipped binary (FR-MC-01)"
     );
-    // The roster this count tracks is declared as a LIST in two places, and a
-    // tool added to only one surface is named for you by the guards there
-    // rather than reduced to an off-by-one here: `mcp/tests/support/roster.rs`
-    // (the MCP names) and `cli/src/main.rs::surface_parity` (their CLI twins,
-    // FR-CL-06). Neither is reachable from this crate's integration tests — the
-    // first is another crate's test module, the second is inside the binary —
-    // so this number stays hand-written. Update it there first.
 
     // Host disconnect → the process winds down by itself with exit 0.
     drop(stdin);
