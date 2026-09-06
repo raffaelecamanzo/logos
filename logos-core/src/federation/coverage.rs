@@ -2481,6 +2481,23 @@ mod tests {
         assert_eq!(cov.references.len(), 1);
         assert_eq!(cov.references[0].state, CoverageState::Bound);
         assert_eq!(cov.references[0].relation, "grpc-call");
+        // [CR-118] on the SECOND exactly-one arm. The `to` doc names `route` and
+        // `grpc-call` together; only `route` was covered. This is also the only
+        // `Sole` + `Invocation` pairing in the suite — a captured call site binding
+        // a single cross-member provider, which is the commonest bound row shape on
+        // a real workspace.
+        let to = cov.references[0]
+            .to
+            .as_ref()
+            .expect("a bound gRPC row names its provider");
+        assert_eq!(to.member, "svc");
+        assert_eq!(to.symbol, LogosSymbol::parse("local svc").unwrap());
+        assert_eq!(
+            cov.references[0].intake,
+            Some(BridgeIntake::Invocation),
+            "a stub call is a captured call site, not a declared contract"
+        );
+        assert!(cov.references[0].candidates.is_none());
     }
 
     /// Acceptance (3): a qualifiable gRPC stub call with no provider anywhere in
@@ -2554,6 +2571,16 @@ mod tests {
         assert_eq!(cov.ambiguous, 1);
         assert_eq!(cov.bound, 0);
         assert_eq!(cov.references[0].state.bucket(), "ambiguous");
+        // [CR-118]: the tie is named on the gRPC arm too, not only on `route`.
+        let tied = cov.references[0]
+            .candidates
+            .as_ref()
+            .expect("the gRPC tie is named");
+        assert_eq!(tied.disposition, ProviderDisposition::TiedBetween);
+        assert_eq!(tied.total, 2);
+        let members: Vec<&str> = tied.providers.iter().map(|p| p.member.as_str()).collect();
+        assert_eq!(members, ["svc1", "svc2"]);
+        assert_eq!(tied.summary, "2 tied providers, all listed; none bound");
     }
 
     // ── S-254 / FR-WS-10: broker-topic consumers in the coverage tier ─────────
