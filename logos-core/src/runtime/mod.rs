@@ -261,13 +261,6 @@ impl Default for RuntimeConfig {
     }
 }
 
-/// The owner of all in-process concurrency (see the module docs).
-///
-/// `Runtime` is `Send + Sync`: the writer's RW connection lives *inside* the
-/// writer thread (never in this struct), reader connections live inside an mpmc
-/// channel, and `rayon::ThreadPool` is itself `Send + Sync` — so a long-lived
-/// `Engine` holding a `Runtime` can be shared behind an `Arc` across the MCP
-/// surface's blocking tasks.
 /// Per-phase timings for [`Runtime::open_with_config_timed`] ([CR-116],
 /// [NFR-PE-05]).
 ///
@@ -279,10 +272,18 @@ pub(crate) struct RuntimePhaseTimings {
     pub store_connect: Duration,
     /// Running the writer store's schema migrations.
     pub schema_migration: Duration,
-    /// Opening the read-only pool plus building (or attaching) the worker pool.
+    /// Spawning the writer actor thread, opening the read-only pool, and
+    /// building (or attaching) the worker pool.
     pub pool_startup: Duration,
 }
 
+/// The owner of all in-process concurrency (see the module docs).
+///
+/// `Runtime` is `Send + Sync`: the writer's RW connection lives *inside* the
+/// writer thread (never in this struct), reader connections live inside an mpmc
+/// channel, and `rayon::ThreadPool` is itself `Send + Sync` — so a long-lived
+/// `Engine` holding a `Runtime` can be shared behind an `Arc` across the MCP
+/// surface's blocking tasks.
 pub struct Runtime {
     writer: WriterActor,
     readers: ReaderPool,
@@ -365,9 +366,9 @@ impl Runtime {
 
         let (store, store_timings) = SqliteGraphStore::open_with_timings(&db_path)
             .with_context(|| format!("opening the writer store at {}", db_path.display()))?;
-        let writer = WriterActor::spawn(store, config.write_queue_capacity);
 
         let t = Instant::now();
+        let writer = WriterActor::spawn(store, config.write_queue_capacity);
         let readers = ReaderPool::open(&db_path, config.reader_pool_size)?;
         let pool = match config.worker_pool {
             Some(shared) => shared,
