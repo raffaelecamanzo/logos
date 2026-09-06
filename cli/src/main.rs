@@ -1045,8 +1045,12 @@ mod surface_parity {
         (
             "gate",
             "the CI gate and the release-only `--save` bless. Its agent-facing \
-             spellings ARE tools: session_start is `gate --save`, session_end is \
-             a bare `gate` (FR-GV-04/05).",
+             spellings ARE tools: `session_end` is literally `gate` with no save \
+             (`Engine::session_end` calls `governance::gate(.., None, false, \
+             true)`), and `session_start` is the separate \
+             `Engine::session_start` baseline write next to it (FR-GV-04/05) — \
+             a different read-model and a different telemetry tool, not a \
+             spelling of `gate --save`.",
         ),
         (
             "doc-gaps",
