@@ -164,9 +164,12 @@ const CANDIDATE_LIMIT: usize = 8;
 
 /// What the providers listed on a coverage row *are* to that row ([CR-118]).
 ///
-/// Read this, never the row's [`bucket`](ReferenceCoverage::bucket), to decide
-/// whether a listed provider is actually reached: the two sets are the same shape
-/// on the wire and mean opposite things.
+/// A bound set and a tied set are the same shape on the wire and mean opposite
+/// things, so the object that carries them carries its own meaning: a consumer
+/// holding a [`ProviderCandidates`] alone — as the web wire type declares it —
+/// need not reach up to the row's [`bucket`](ReferenceCoverage::bucket) to know
+/// whether anything was reached. The two cannot disagree; both come from one
+/// [`tier`] match arm.
 ///
 /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -309,8 +312,13 @@ enum ProviderEvidence {
 /// One reference's provider-side provenance: what [`tier`] resolved, plus the
 /// intake the consumer arrived through ([CR-118], [CR-083]).
 ///
-/// Bundled rather than passed as two arguments so a later arm adding a consumer
-/// loop extends one struct instead of every `record` call site.
+/// Bundled so the two adjacent, unrelated values arrive **named** at each
+/// `record` call site rather than as a fifth and sixth positional argument.
+///
+/// It is deliberately not claimed that a later arm benefits: the two successors
+/// scheduled into this file (S-339, S-370) add new `record` *call sites* carrying
+/// `Unnamed` evidence, not new provenance *fields*, so they gain nothing from the
+/// struct beyond the naming.
 ///
 /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
 /// [CR-083]: ../../../docs/requests/CR-083-reachability-invocation-edge-roots.md
@@ -403,14 +411,40 @@ impl ReferenceCoverage {
                 (None, Some(ProviderCandidates::new(disposition, endpoints)))
             }
         };
+        // An intake describes an edge; only a bound row has one. Computed here
+        // rather than inside the struct literal, where it read as a use of `state`
+        // after that field had moved — sound only because `CoverageState` is `Copy`.
+        let intake = matches!(state, CoverageState::Bound).then_some(provenance.intake);
+        // The three row invariants, at the one place all three are decidable:
+        // `to` only on a bound row, a `bound-to` set only on a bound row, and a
+        // `tied-between` set never on one. `tier` is the sole producer today and
+        // pairs them atomically, so these are cheap guards on the successors this
+        // file is scheduled to receive rather than on any live defect.
+        debug_assert!(
+            to.is_none() || matches!(state, CoverageState::Bound),
+            "a non-bound row must name no provider it bound to"
+        );
+        debug_assert!(
+            !matches!(
+                candidates.as_ref().map(|c| c.disposition),
+                Some(ProviderDisposition::BoundTo)
+            ) || matches!(state, CoverageState::Bound),
+            "a `bound-to` set claims every listed provider is reached"
+        );
+        debug_assert!(
+            !matches!(
+                candidates.as_ref().map(|c| c.disposition),
+                Some(ProviderDisposition::TiedBetween)
+            ) || !matches!(state, CoverageState::Bound),
+            "a `tied-between` set claims NONE is reached (NFR-RA-05)"
+        );
         Self {
             relation,
             from,
             bucket: state.bucket(),
             state,
             to,
-            // An intake describes an edge; only a bound row has one.
-            intake: matches!(state, CoverageState::Bound).then_some(provenance.intake),
+            intake,
             candidates,
         }
     }
@@ -1543,6 +1577,16 @@ mod tests {
         assert_eq!(tied.total, 12, "the total is the tie BEFORE truncation");
         assert_eq!(tied.providers.len(), CANDIDATE_LIMIT);
         assert_eq!(tied.omitted, 4);
+        // WHICH eight survive, not merely how many: the `providers` doc claims the
+        // bridge's own deterministic bucket order ([NFR-RA-06]), and truncation is
+        // where that claim earns its keep — an unordered bucket would drop an
+        // arbitrary four.
+        let kept: Vec<&str> = tied.providers.iter().map(|p| p.member.as_str()).collect();
+        assert_eq!(
+            kept,
+            ["p00", "p01", "p02", "p03", "p04", "p05", "p06", "p07"],
+            "the first eight in bucket order, deterministically"
+        );
         assert_eq!(
             tied.summary, "12 tied providers, 8 listed, 4 omitted; none bound",
             "the remainder is disclosed in words as well as in a field"
