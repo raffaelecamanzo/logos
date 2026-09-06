@@ -420,3 +420,46 @@ fn uninstall_clears_the_seeded_worktree_hooks_and_leaves_a_checked_in_one() {
     );
     assert!(!dir.join(COPY_FALLBACK_MARKER).exists());
 }
+
+#[test]
+fn concurrent_seeds_never_truncate_the_source_scripts() {
+    // Every engine start seeds, and nothing serialises them: two logos
+    // processes starting in the same fresh worktree race on `place_hook`. The
+    // invariant that matters is not who wins — it is that the PRIMARY's single
+    // real copy of each script survives intact. A seed that copied onto a
+    // symlink still resolving to the source would truncate it to zero bytes,
+    // and an empty executable exits 0, silently disabling the `pre-push` gate
+    // for the whole repository while every call returned `Ok`.
+    let (primary, worktree) = installed_repo_and_worktree();
+    let before: Vec<(String, String)> = all_hook_names()
+        .map(|name| {
+            let path = primary.path().join(HOOKS_RELDIR).join(name);
+            (name.to_string(), std::fs::read_to_string(path).expect("source script"))
+        })
+        .collect();
+
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                seed_worktree(primary.path(), worktree.path());
+            });
+        }
+    });
+
+    for (name, body) in &before {
+        assert!(!body.is_empty(), "fixture sanity: {name} was non-empty to begin with");
+        assert_eq!(
+            &std::fs::read_to_string(primary.path().join(HOOKS_RELDIR).join(name))
+                .expect("the source script must survive every racing seed"),
+            body,
+            "{name} in the primary checkout was corrupted by a concurrent seed"
+        );
+        // …and the worktree ends up reachable, not merely uncorrupted.
+        assert_eq!(
+            &std::fs::read_to_string(worktree.path().join(HOOKS_RELDIR).join(name))
+                .expect("the seeded hook resolves"),
+            body,
+            "{name} is not reachable from the worktree after the race"
+        );
+    }
+}

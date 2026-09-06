@@ -520,8 +520,32 @@ fn place_hook(src: &Path, dst: &Path, mode: LinkMode, refresh_copies: bool) -> R
         }
     }
 
-    if mode == LinkMode::Symlink && symlink_file(src, dst).is_ok() {
-        return Ok(Placement::Linked);
+    if mode == LinkMode::Symlink {
+        if symlink_file(src, dst).is_ok() {
+            return Ok(Placement::Linked);
+        }
+        // A refused symlink has two very different causes demanding opposite
+        // responses: the platform genuinely cannot make one — what the copy
+        // fallback exists for — or another logos process placed the very link
+        // we wanted between the `symlink_metadata` above and this call. Every
+        // engine start seeds and nothing serialises them, so that race is
+        // ordinary, not exotic. Re-read the destination instead of assuming
+        // the first cause.
+        if links_to(dst, src) {
+            return Ok(Placement::Linked);
+        }
+    }
+
+    // Never copy ONTO a symlink. `fs::copy` opens the destination with
+    // truncate, so a link still resolving to `src` would truncate the one real
+    // copy of the script — silently emptying the primary checkout's `pre-push`
+    // and disabling the [FR-IN-06] gate for the entire repository, while every
+    // call still returned `Ok`. Clear the path first; whatever is there is
+    // ours, having passed the ownership check above or appeared concurrently
+    // from another logos process seeding the same worktree.
+    if std::fs::symlink_metadata(dst).is_ok() {
+        std::fs::remove_file(dst)
+            .with_context(|| format!("clearing {} before the copy", dst.display()))?;
     }
     std::fs::copy(src, dst)
         .with_context(|| format!("copying the hook script to {}", dst.display()))?;
