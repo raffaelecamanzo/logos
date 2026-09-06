@@ -457,44 +457,78 @@ fn changed_paths(root: &Path, other: &str, commit: &str) -> Option<BTreeSet<Stri
 const WHOLE_FILE: (u32, u32) = (1, u32::MAX);
 
 /// Parse `git diff --unified=0 --no-prefix` into per-file new-side ranges.
-///
-/// The header lines (`---`/`+++`) are only read while inside a file header —
-/// between `diff --git` and that file's first `@@`. Without that state an added
-/// line whose own content begins `++ ` would be misread as a path, which is the
-/// classic way a hand-rolled diff parser goes wrong.
 fn parse_diff(diff: &str) -> FileRanges {
     let mut files: FileRanges = BTreeMap::new();
-    let mut in_header = false;
-    let mut old_path: Option<String> = None;
-    let mut current: Option<String> = None;
-    // A deleted file's hunks are all old-side; its ranges come from `WHOLE_FILE`
-    // instead, so the `@@` arm below must not also push a phantom new-side range.
-    let mut new_side = true;
+    let mut header = FileHeader::start();
     for line in diff.lines() {
         if line.starts_with("diff --git ") {
-            (in_header, old_path, current, new_side) = (true, None, None, true);
-        } else if in_header && line.starts_with("--- ") {
-            old_path = strip_dev_null(&line[4..]);
-        } else if in_header && line.starts_with("+++ ") {
-            new_side = line[4..] != *"/dev/null";
-            current = strip_dev_null(&line[4..]).or_else(|| old_path.clone());
-            if let Some(path) = &current {
-                let ranges = files.entry(path.clone()).or_default();
-                if !new_side {
-                    ranges.push(WHOLE_FILE);
-                }
-            }
+            header = FileHeader::start();
+        } else if header.in_header && line.starts_with("--- ") {
+            header.old_path = strip_dev_null(&line[4..]);
+        } else if header.in_header && line.starts_with("+++ ") {
+            header.open(&line[4..], &mut files);
         } else if line.starts_with("@@ ") {
-            in_header = false;
-            if !new_side {
-                continue;
-            }
-            if let (Some(path), Some(range)) = (&current, hunk_range(line)) {
-                files.entry(path.clone()).or_default().push(range);
-            }
+            header.hunk(line, &mut files);
         }
     }
     files
+}
+
+/// The per-file state a `--unified=0` diff parse carries between lines.
+///
+/// It exists for [`in_header`](Self::in_header). The `---`/`+++` lines are only
+/// read while inside a file header — between `diff --git` and that file's first
+/// `@@` — because with zero context an added line whose own content begins
+/// `++ ` is indistinguishable from a path header by prefix alone. That is the
+/// classic way a hand-rolled diff parser goes wrong.
+struct FileHeader {
+    /// Whether the parse is inside a file header.
+    in_header: bool,
+    /// The `---` path, kept so a deletion can be recorded under its old name.
+    old_path: Option<String>,
+    /// The file the following hunks belong to.
+    current: Option<String>,
+    /// `false` once `+++ /dev/null` says this file has no new side.
+    new_side: bool,
+}
+
+impl FileHeader {
+    /// The state at the start of a file's header (and of the whole diff).
+    fn start() -> Self {
+        FileHeader {
+            in_header: true,
+            old_path: None,
+            current: None,
+            new_side: true,
+        }
+    }
+
+    /// Read a `+++` line: register the changed file, and give a deletion the
+    /// whole-file range it has no hunks to express.
+    fn open(&mut self, path: &str, files: &mut FileRanges) {
+        self.new_side = path != "/dev/null";
+        self.current = strip_dev_null(path).or_else(|| self.old_path.clone());
+        let Some(current) = self.current.clone() else {
+            return;
+        };
+        let ranges = files.entry(current).or_default();
+        if !self.new_side {
+            ranges.push(WHOLE_FILE);
+        }
+    }
+
+    /// Read an `@@` line, which also ends the header. A file with no new side
+    /// has only old-side hunks — they describe lines that no longer exist, and
+    /// its range already came from [`open`](Self::open).
+    fn hunk(&mut self, line: &str, files: &mut FileRanges) {
+        self.in_header = false;
+        let (Some(current), Some(range)) = (self.current.clone(), hunk_range(line)) else {
+            return;
+        };
+        if self.new_side {
+            files.entry(current).or_default().push(range);
+        }
+    }
 }
 
 /// A diff header path, or `None` for git's `/dev/null` absent-side marker.
