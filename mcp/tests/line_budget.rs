@@ -24,11 +24,11 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
     total
 }
 
-/// Budget: ≤ 962 non-blank lines of Rust across the whole MCP adapter
+/// Budget: ≤ 982 non-blank lines of Rust across the whole MCP adapter
 /// (NFR-MA-02 thick-core/thin-surface invariant).
 ///
-/// Derivation (combined S-020, S-022, S-048, S-051, S-053 re-base): 29 `#[tool]`
-/// registrations (9 navigation, 11 quality, 1 temporal `hotspots`, 3 coverage per
+/// Derivation (combined S-020, S-022, S-048, S-051, S-053 re-base): 30 `#[tool]`
+/// registrations (11 navigation, 10 quality, 1 temporal `hotspots`, 3 coverage per
 /// CR-007/CR-036, 5 wiki per CR-008/CR-062), each a mechanical attribute, signature,
 /// and ONE Engine call — cost ~15 non-blank lines each ≈420; the typed parameter
 /// structs (6 navigation, 4 quality, 1 temporal, 1 coverage, 3 wiki) ≈135; the
