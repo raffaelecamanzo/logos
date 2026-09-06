@@ -1422,6 +1422,12 @@ mod surface_parity {
         ///
         /// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
         hypothesis_marker: &'static str,
+        /// The fewest tool/command claims this text must actually reconcile
+        /// against the shipped binary. A floor, not a count: it exists so a text
+        /// that stops naming anything — or that the span parser stops reading —
+        /// fails instead of passing vacuously. Set below today's real figure so
+        /// ordinary prose edits do not trip it.
+        min_reconciled_claims: usize,
     }
 
     /// The repository root — `CARGO_MANIFEST_DIR` is `<root>/cli`.
@@ -1458,6 +1464,7 @@ mod surface_parity {
                 scoping_marker: "### Primary — before you decompose the work",
                 navigation_marker: "### Secondary — while you are editing",
                 hypothesis_marker: "hypothesis under measurement, not a settled finding",
+                min_reconciled_claims: 12,
             },
             Guidance {
                 label: "the MCP server instructions",
@@ -1466,6 +1473,7 @@ mod surface_parity {
                 scoping_marker: "## Primary — before the work is decomposed",
                 navigation_marker: "## Secondary — while editing",
                 hypothesis_marker: "hypothesis, not a finding",
+                min_reconciled_claims: 16,
             },
             Guidance {
                 label: "the README",
@@ -1474,6 +1482,7 @@ mod surface_parity {
                 scoping_marker: "## What it is primarily for: scoping work before you decompose it",
                 navigation_marker: "is the secondary mode",
                 hypothesis_marker: "hypothesis under measurement, not a settled finding",
+                min_reconciled_claims: 10,
             },
         ]
     }
@@ -1482,7 +1491,17 @@ mod surface_parity {
     /// a span broken across two source lines reads as one, and with fenced code
     /// blocks removed (their content is not backtick-delimited, and the fences
     /// themselves would unbalance the split).
-    fn inline_code_spans(markdown: &str) -> Vec<String> {
+    ///
+    /// # Why this panics instead of returning what it managed to parse
+    ///
+    /// The split takes odd-indexed pieces, which is only the span set while the
+    /// backtick count is even. One stray backtick flips the parity of every span
+    /// after it, so the walk then inspects the *prose between* the spans — which
+    /// never starts `logos ` or `logos:` and is therefore silently skipped. The
+    /// guard would stop guarding and stay green. An unterminated fence does the
+    /// same to the tail of the file. Both are malformed input, not licence to
+    /// check less, so both fail loudly and name the text.
+    fn inline_code_spans(label: &str, markdown: &str) -> Vec<String> {
         let mut unfenced = String::new();
         let mut fenced = false;
         for line in markdown.lines() {
@@ -1493,6 +1512,18 @@ mod surface_parity {
                 unfenced.push('\n');
             }
         }
+        assert!(
+            !fenced,
+            "{label} has an unterminated ``` fence — everything after it was not \
+             checked. Close the fence."
+        );
+        assert_eq!(
+            unfenced.matches('`').count() % 2,
+            0,
+            "{label} has an odd number of backticks outside its fenced blocks — \
+             the span parser cannot be trusted and would silently check nothing. \
+             Balance them."
+        );
         unfenced
             .split('`')
             .skip(1)
@@ -1603,6 +1634,17 @@ mod surface_parity {
     /// than shipping into every initialised project's agent memory.
     ///
     /// [FR-IN-09]: ../../docs/specs/requirements/FR-IN-09.md
+    /// Bare backticked words in the MCP instructions that are deliberately NOT
+    /// tool claims. The instructions name tools bare (`context`, `precedent`),
+    /// so every other bare span has to be listed here rather than filtered by a
+    /// heuristic — an exception a reviewer can read beats a rule that quietly
+    /// exempts sixteen real claims.
+    const MCP_BARE_NON_TOOLS: &[&str] = &[
+        // The bare-name ambiguity example in the "disambiguate by symbol" bullet.
+        "new", "map", "severity", // `doctor`'s verdict value.
+        "ok",
+    ];
+
     #[test]
     fn the_shipped_guidance_names_only_tools_and_commands_the_binary_has() {
         let tools = mcp_tool_names();
@@ -1611,46 +1653,107 @@ mod surface_parity {
         let commands = all_cli_command_paths();
 
         for g in shipped_guidance() {
-            for span in inline_code_spans(&g.text) {
+            // How many spans this text actually RECONCILED against the binary.
+            // Without a floor, a text the parser mis-reads (or a future edit that
+            // drops every backticked claim) checks nothing and still passes.
+            let mut reconciled = 0_usize;
+            for span in inline_code_spans(g.label, &g.text) {
                 // `logos:*` is the tool NAMESPACE, not a tool.
                 if span == "logos:*" {
                     continue;
                 }
                 if let Some(rest) = span.strip_prefix("logos:") {
-                    let tool = rest.split(' ').next().unwrap_or_default();
+                    let tool = rest.split(' ').next().expect("split yields one item");
                     assert!(
                         tools.contains(tool),
                         "{} names the MCP tool `logos:{tool}`, which the shipped \
                          server does not register (FR-IN-09). Span: `{span}`",
                         g.label
                     );
+                    reconciled += 1;
                 } else if let Some(rest) = span.strip_prefix("logos ") {
-                    assert_command_path_exists(&commands, rest, &span, g.label);
-                } else if g.bare_names_are_tools && span.contains('_') && is_plain_token(&span) {
+                    reconciled += usize::from(assert_command_path_exists(
+                        &commands, rest, &span, g.label,
+                    ));
+                } else if g.bare_names_are_tools
+                    && is_plain_token(&span)
+                    && !MCP_BARE_NON_TOOLS.contains(&span.as_str())
+                {
                     assert!(
                         tools.contains(span.as_str()),
-                        "{} names `{span}` as a tool, which the shipped server \
-                         does not register (FR-IN-09)",
+                        "{} names `{span}` as a tool, which the shipped server does \
+                         not register (FR-IN-09). If it is not a tool claim, add it \
+                         to MCP_BARE_NON_TOOLS with the reason",
                         g.label
                     );
+                    reconciled += 1;
                 }
             }
+            assert!(
+                reconciled >= g.min_reconciled_claims,
+                "{} reconciled only {reconciled} claims against the shipped binary, \
+                 below its floor of {} (FR-IN-09 AC 4). Either the text stopped \
+                 naming tools and commands, or the span parser stopped seeing them \
+                 — a guard that checks nothing passes for the wrong reason",
+                g.label,
+                g.min_reconciled_claims
+            );
         }
+    }
+
+    /// The MCP instructions' negative claim — that `affected` has no tool on the
+    /// MCP surface — is true of the shipped router ([FR-IN-09] AC 4).
+    ///
+    /// The spans walk above only checks that a *named* tool exists. A claim that
+    /// something is absent needs the opposite assertion, and this is exactly the
+    /// shape that went stale for three sprints in the CLI-twin sentence.
+    ///
+    /// [FR-IN-09]: ../../docs/specs/requirements/FR-IN-09.md
+    #[test]
+    fn the_mcp_instructions_absence_claim_holds_against_the_router() {
+        let instructions = &shipped_guidance()
+            .into_iter()
+            .find(|g| g.label == "the MCP server instructions")
+            .expect("the instructions are one of the three guidance texts")
+            .text;
+        assert!(
+            instructions.contains("it has no tool on this surface"),
+            "the instructions no longer carry the `affected` absence claim — drop \
+             this test with it, or update the sentence it guards"
+        );
+        assert!(
+            !mcp_tool_names().contains("affected"),
+            "the MCP instructions claim `logos affected` has no tool on this \
+             surface, but the shipped server now registers one (FR-IN-09)"
+        );
     }
 
     /// The leading command tokens of `rest` name a real command path — either a
     /// leaf, or a group that some leaf lives under. The walk stops at the first
     /// token that is not a bare command word, so flags, placeholders and
     /// alternations end it rather than failing it.
+    ///
+    /// Returns whether a command was actually reconciled, so the caller can tell
+    /// a checked claim from a span it merely declined to check. A span that is
+    /// only global flags (`logos --version`) reconciles nothing and is not a
+    /// failure — it names no subcommand by design.
+    ///
+    /// A *group* (`wiki`, `coverage`) is accepted only as an intermediate step.
+    /// clap rejects `logos wiki` on its own, so a span that RUNS OUT of tokens on
+    /// a group is a false claim — unless the walk was cut short by a placeholder
+    /// or an alternation (`logos wiki write|read|…`), where the group is as far
+    /// as this parser can honestly get.
     fn assert_command_path_exists(
         commands: &BTreeSet<String>,
         rest: &str,
         span: &str,
         label: &str,
-    ) {
+    ) -> bool {
         let mut path = String::new();
+        let mut cut_short = false;
         for token in rest.split(' ') {
             if !is_plain_token(token) {
+                cut_short = true;
                 break;
             }
             let candidate = if path.is_empty() {
@@ -1668,10 +1771,15 @@ mod surface_parity {
             );
             path = candidate;
         }
+        if path.is_empty() {
+            return false;
+        }
         assert!(
-            !path.is_empty(),
-            "{label} has an inline `logos …` span naming no command at all. \
-             Span: `{span}`"
+            cut_short || commands.contains(&path),
+            "{label} names `logos {path}`, which is a command GROUP — clap requires \
+             a subcommand after it, so the span as written is not a runnable \
+             invocation (FR-IN-09). Span: `{span}`"
         );
+        true
     }
 }
