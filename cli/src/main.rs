@@ -1294,8 +1294,22 @@ mod surface_parity {
         );
     }
 
-    /// Every CLI twin carries `--json` ([FR-CL-02]) — the machine-readable mode
-    /// an agent directed at the CLI depends on.
+    /// The global `--json` reaches every CLI twin ([FR-CL-02]).
+    ///
+    /// # What this does and does not guard
+    ///
+    /// `--json` is declared `global = true` on the root, so `build()` propagates
+    /// it to every subcommand at every depth. This test therefore **cannot fail
+    /// for one newly added twin** — it fails only if the global itself is
+    /// removed or stops propagating, which is the structural half of
+    /// [FR-CL-02]. Read it as "the mechanism that gives every twin `--json` is
+    /// still in place", not as per-twin coverage.
+    ///
+    /// The per-twin half is asserted through the real executable, where a
+    /// missing `--json` shows up as unparseable stdout rather than an absent
+    /// clap arg: `cli/tests/cli_surface.rs::non_stub_subcommands_emit_valid_json_
+    /// with_json_flag` (which the three S-361 commands joined) and
+    /// `every_subcommand_parses_with_global_flags`.
     ///
     /// [FR-CL-02]: ../../docs/specs/requirements/FR-CL-02.md
     #[test]
