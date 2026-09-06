@@ -585,6 +585,12 @@ pub struct OverlapCoverage {
     pub unattributed_hunks: u32,
     /// Refs that did not resolve to a commit; they contribute nothing.
     pub unresolved_refs: Vec<String>,
+    /// Refs that resolved but whose diff against the base failed — a partial
+    /// clone with unfetched blobs, a killed subprocess. They contribute nothing
+    /// and, unlike a ref that genuinely changed nothing, they are **excluded
+    /// from `absent_from`**: "we did not look" is not "this ref did not touch
+    /// it", and `absent_from` is the field a reader acts on.
+    pub refs_not_diffed: Vec<String>,
 }
 
 /// Current index and sync health of the code graph (FR-NV-07).

@@ -68,7 +68,9 @@ unindexed language, an excluded path, or a symbol a ref adds that never reached 
 invisible to the symbol half of this answer, and only its file can be reported. Spans come from \
 the snapshot, so a symbol that moved between a ref and the snapshot may be attributed to its \
 neighbour; the drifted files are listed. `absent_from` marks refs that do not touch a symbol \
-their siblings share — the silent-drop shape, and a smell rather than a proof.";
+their siblings share — the silent-drop shape, and a smell rather than a proof; it is drawn only from \
+the refs that were actually diffed, so a ref listed under `unresolved_refs` or `refs_not_diffed` is \
+never reported as absent from anything.";
 
 /// `branch_overlap` — which refs collide, and what a merge did not carry
 /// ([FR-NV-13], CR-114).
@@ -169,9 +171,16 @@ pub(crate) fn branch_overlap(
                 result.refs[*index].files_changed = changes.len() as u32;
                 per_ref.push((*index, changes));
             }
-            Err(err) => result
-                .warnings
-                .push(format!("diffing {name} against the base failed: {err}")),
+            Err(err) => {
+                // The ref resolved but we have no data for it. It must NOT fall
+                // through to `absent_from` below: "we did not look" and "this
+                // ref did not touch it" are opposite claims, and `absent_from`
+                // is the field a reader acts on.
+                result.coverage.refs_not_diffed.push((*name).to_string());
+                result
+                    .warnings
+                    .push(format!("diffing {name} against the base failed: {err}"));
+            }
         }
     }
     let merge_changes = match (&merge_commit, merge) {
@@ -252,6 +261,11 @@ pub(crate) fn branch_overlap(
         drifted.into_iter().take(MAX_PATHS_LISTED).collect();
 
     // ── the collision half ([FR-NV-13] AC 1) ────────────────────────────────
+    // `absent_from` is drawn from the refs actually DIFFED, never merely from
+    // the refs that resolved: a ref whose diff failed is an unknown, and naming
+    // it as absent would manufacture exactly the silent-drop signal this query
+    // exists to make trustworthy.
+    let diffed: Vec<usize> = per_ref.iter().map(|(index, _)| *index).collect();
     let mut contended: Vec<ContendedSymbol> = modified
         .iter()
         .filter(|(_, by)| by.len() > 1)
@@ -260,9 +274,9 @@ pub(crate) fn branch_overlap(
             Some(ContendedSymbol {
                 symbol: symbol_ref(row),
                 modified_by: by.iter().map(|i| ref_names[*i].clone()).collect(),
-                absent_from: live
+                absent_from: diffed
                     .iter()
-                    .map(|(index, _, _)| *index)
+                    .copied()
                     .filter(|index| !by.contains(index))
                     .map(|index| ref_names[index].clone())
                     .collect(),
