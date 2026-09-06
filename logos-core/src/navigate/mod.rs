@@ -674,6 +674,26 @@ the stated depth bound. A surface the index does not cover — an unindexed lang
 path, a call resolved only at runtime — cannot contribute an intersection, so a `safe_parallel` \
 verdict is bounded by what is indexed and is not proof of independence.";
 
+/// One declared symbol of one work item, carried out of the single pooled
+/// resolution read ([FR-NV-11]).
+///
+/// A named struct rather than a tuple because the resolution round-trip has to
+/// hand back four independent things per declaration — which item asked, what
+/// was asked for, what (if anything) answered and how ambiguously, and the
+/// "did you mean" names for a miss — and positional access to that is where a
+/// silent field swap lives.
+struct DeclaredSymbol {
+    /// Index into the caller's item list.
+    item: usize,
+    /// The symbol text as declared.
+    text: String,
+    /// The resolved node and how many candidates the name matched; `None` when
+    /// the graph knows nothing by that name.
+    hit: Option<(NodeRow, usize)>,
+    /// "Did you mean" names, populated only for a miss ([FR-NV-09]).
+    suggestions: Vec<String>,
+}
+
 /// `impact_intersection` — which planned work items collide, and on what
 /// ([FR-NV-11], CR-114).
 ///
@@ -723,16 +743,18 @@ pub(crate) fn impact_intersection(
         .flat_map(|(i, item)| item.symbols.iter().map(move |s| (i, s.clone())))
         .collect();
     let resolved = runtime.submit_read(move |store| {
-        let mut out: Vec<(usize, String, Option<(NodeRow, usize)>, Vec<String>)> =
-            Vec::with_capacity(declared.len());
-        for (index, text) in declared {
-            match resolve_counting_candidates(store, &text)? {
-                Some(hit) => out.push((index, text, Some(hit), Vec::new())),
-                None => {
-                    let suggestions = store.suggest(&text, SUGGEST_LIMIT)?;
-                    out.push((index, text, None, suggestions));
-                }
-            }
+        let mut out: Vec<DeclaredSymbol> = Vec::with_capacity(declared.len());
+        for (item, text) in declared {
+            let (hit, suggestions) = match resolve_counting_candidates(store, &text)? {
+                Some(hit) => (Some(hit), Vec::new()),
+                None => (None, store.suggest(&text, SUGGEST_LIMIT)?),
+            };
+            out.push(DeclaredSymbol {
+                item,
+                text,
+                hit,
+                suggestions,
+            });
         }
         Ok(out)
     })?;
@@ -756,8 +778,14 @@ pub(crate) fn impact_intersection(
     let mut seeds: Vec<BTreeSet<NodeIndex>> = vec![BTreeSet::new(); items.len()];
     let mut reach: Vec<BTreeSet<NodeIndex>> = vec![BTreeSet::new(); items.len()];
 
-    for (index, text, resolution, suggestions) in resolved {
-        let Some((row, candidates)) = resolution else {
+    for DeclaredSymbol {
+        item: index,
+        text,
+        hit,
+        suggestions,
+    } in resolved
+    {
+        let Some((row, candidates)) = hit else {
             coverage.unresolved.push(UnresolvedDeclaration {
                 item: items[index].id.clone(),
                 symbol: text,
