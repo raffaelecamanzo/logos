@@ -977,3 +977,56 @@ fn an_empty_list_always_names_its_reason() {
         }
     }
 }
+
+/// A file with many symbols is compared in full but **listed** bounded, and the
+/// remainder is counted ([NFR-CC-04]).
+///
+/// The comparison bound and the listing bound answer different questions:
+/// comparing 300 symbols is cheap graph work, listing 300 `SymbolRef`s is
+/// thousands of tokens on a tool whose thesis is token economy.
+#[test]
+fn a_large_file_target_is_compared_in_full_but_listed_bounded() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/util.rs",
+        "pub fn helper_a() {}\npub fn helper_b() {}\n",
+    );
+    let mut body = String::from("use crate::util::{helper_a, helper_b};\n");
+    for n in 0..40 {
+        let _ = write!(
+            body,
+            "pub fn member_{n}() {{\n    helper_a();\n    helper_b();\n}}\n"
+        );
+    }
+    write(tmp.path(), "src/wide.rs", &body);
+    // A sibling outside the file, so the answer is non-empty and the coverage
+    // block is exercised on a real result rather than an empty one.
+    write(
+        tmp.path(),
+        "src/outsider.rs",
+        "use crate::util::{helper_a, helper_b};\npub fn outsider() {\n    helper_a();\n    helper_b();\n}\n",
+    );
+    let engine = indexed_engine(&tmp);
+
+    let result = engine.precedent("src/wide.rs", None);
+
+    assert_eq!(
+        result.coverage.compared.len(),
+        25,
+        "the listing is bounded: {}",
+        summarise(&result)
+    );
+    assert!(
+        result.coverage.compared_elided >= 16,
+        "the 40 members plus the module, minus the 25 listed, are counted: {} elided",
+        result.coverage.compared_elided
+    );
+    // Everything was still COMPARED — the outsider is found through a member
+    // that the bounded list does not name.
+    assert!(
+        result.precedents.iter().any(|p| p.symbol.name == "outsider"),
+        "the whole file is compared even though the list is bounded: {}",
+        summarise(&result)
+    );
+}

@@ -994,6 +994,12 @@ const MAX_VIA_LISTED: usize = 5;
 const MAX_FILE_SEEDS: usize = 300;
 /// How many ubiquitous anchors the coverage block names before it stops.
 const MAX_UBIQUITOUS_LISTED: usize = 20;
+/// How many compared symbols the coverage block lists. Deliberately far below
+/// [`MAX_FILE_SEEDS`]: comparing 300 of a file's symbols is cheap graph work,
+/// but *listing* 300 `SymbolRef`s is thousands of tokens on a tool whose whole
+/// thesis is token economy. The bound on what is compared and the bound on what
+/// is printed are different questions; `compared_elided` carries the remainder.
+const MAX_COMPARED_LISTED: usize = 25;
 
 /// The standing coverage-limits statement carried by every precedent answer
 /// ([FR-NV-12] AC 4, [NFR-CC-04]).
@@ -1166,6 +1172,8 @@ pub(crate) fn precedent(
 
     let query = target.to_string();
     let resolution = runtime.submit_read(move |store| resolve_precedent_target(store, &query))?;
+    // How many symbols the target actually spans, before either bound.
+    let mut compared_total = 1usize;
     let seed_rows = match resolution {
         PrecedentTarget::Unresolved(suggestions) => {
             result.suggestions = suggestions;
@@ -1194,11 +1202,20 @@ pub(crate) fn precedent(
         PrecedentTarget::File { path, seeds, total } => {
             result.target_kind = PrecedentTargetKind::File;
             result.target_file = Some(path);
-            result.coverage.compared_elided = total.saturating_sub(seeds.len()) as u32;
+            // Everything the file defines beyond the comparison bound, counted
+            // now; the listing bound adds to it below.
+            compared_total = total;
             seeds
         }
     };
-    result.coverage.compared = seed_rows.iter().map(symbol_ref).collect();
+    result.coverage.compared = seed_rows
+        .iter()
+        .take(MAX_COMPARED_LISTED)
+        .map(symbol_ref)
+        .collect();
+    result.coverage.compared_elided = compared_total
+        .max(seed_rows.len())
+        .saturating_sub(result.coverage.compared.len()) as u32;
 
     // The FULL symbol view, not the `ExcludeContains` dependency view the
     // blast-radius queries run on: that view deliberately drops `Implements`

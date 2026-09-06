@@ -636,10 +636,13 @@ pub struct EmptyPrecedent {
 pub struct PrecedentCoverage {
     /// The standing statement of what the answer can and cannot see.
     pub statement: String,
-    /// The symbols whose structure was actually compared: the target itself in
-    /// symbol mode, the file's own symbols in file mode.
+    /// The symbols whose structure was compared: the target itself in symbol
+    /// mode, the file's own symbols in file mode. Bounded — a file with
+    /// hundreds of symbols is compared in full but not listed in full.
     pub compared: Vec<SymbolRef>,
-    /// How many symbols the file mode's comparison set omitted at its bound.
+    /// How many compared symbols this list omits, whether they fell past the
+    /// listing bound or past the comparison bound itself. `0` when the list is
+    /// whole.
     pub compared_elided: u32,
     /// Shared nodes discarded as ubiquitous — a helper called from everywhere
     /// is not evidence of analogy, and saying which ones were dropped is how a
