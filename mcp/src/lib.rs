@@ -24,7 +24,7 @@
 
 mod server;
 
-pub use server::LogosMcp;
+pub use server::{LogosMcp, INSTRUCTIONS};
 
 use std::path::Path;
 

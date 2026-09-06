@@ -1431,6 +1431,9 @@ mod surface_parity {
     }
 
     /// The repository root — `CARGO_MANIFEST_DIR` is `<root>/cli`.
+    ///
+    /// Only `docs/` needs this: it belongs to no crate, so there is no constant
+    /// to read it from. The other two texts come from the shipped binary itself.
     fn repo_root() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1468,7 +1471,11 @@ mod surface_parity {
             },
             Guidance {
                 label: "the MCP server instructions",
-                text: read(repo_root().join("mcp/src/instructions.md")),
+                // The SHIPPED constant, not a path-derived copy: `server.rs`
+                // hands this very string to `with_instructions`, so the guard
+                // asserts what a host receives — the same reasoning as
+                // generating the managed block through the real `init` above.
+                text: mcp::INSTRUCTIONS.to_string(),
                 bare_names_are_tools: true,
                 scoping_marker: "## Primary — before the work is decomposed",
                 navigation_marker: "## Secondary — while editing",

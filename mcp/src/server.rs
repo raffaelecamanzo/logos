@@ -27,7 +27,9 @@ use serde::Deserialize;
 /// `server-instructions` steering graph-first usage, the session-gate
 /// protocol, and status-vs-health disambiguation (FR-MC-03, NFR-UX-04).
 /// Prose is data, not logic — it lives in Markdown beside this module.
-const INSTRUCTIONS: &str = include_str!("instructions.md");
+/// Public so guards assert against the string the server SERVES rather than a
+/// path-derived copy of the file (S-362, FR-IN-09).
+pub const INSTRUCTIONS: &str = include_str!("instructions.md");
 
 /// The Logos MCP server — a pure protocol adapter (ADR-01): every tool
 /// delegates to one [`Engine`] method (or, for `xservice_*`, one [`query`]
