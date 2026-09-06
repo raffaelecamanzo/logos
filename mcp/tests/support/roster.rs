@@ -28,7 +28,7 @@
 /// The navigation tools wired to `Engine` methods (FR-NV-01..07;
 /// `impact_intersection` added by S-358/CR-114, FR-NV-11; `precedent` by
 /// S-359/CR-114, FR-NV-12; `branch_overlap` by S-360/CR-114, FR-NV-13).
-pub const NAV_TOOLS: [&str; 11] = [
+pub const NAV_TOOLS: &[&str] = &[
     "search",
     "context",
     "explore",
@@ -45,7 +45,7 @@ pub const NAV_TOOLS: [&str; 11] = [
 /// The quality tools wired to the governance engine (S-020, FR-MC-01;
 /// `doctor` added by S-204/CR-052, `verify` by S-205/CR-052, FR-GV-18/FR-GV-19;
 /// the static test-gap tool removed by S-289/CR-079).
-pub const QUALITY_TOOLS: [&str; 10] = [
+pub const QUALITY_TOOLS: &[&str] = &[
     "scan",
     "health",
     "doctor",
@@ -59,17 +59,17 @@ pub const QUALITY_TOOLS: [&str; 10] = [
 ];
 
 /// The temporal tool wired to the history engine (S-048, CR-006, FR-GH-06).
-pub const TEMPORAL_TOOLS: [&str; 1] = ["hotspots"];
+pub const TEMPORAL_TOOLS: &[&str] = &["hotspots"];
 
 /// The coverage tools wired to the evidence store (S-051, CR-007, FR-CV-06/07;
 /// `coverage_refresh` added by S-140/CR-036, FR-CV-10).
-pub const COVERAGE_TOOLS: [&str; 3] =
-    ["coverage_ingest", "coverage_status", "coverage_refresh"];
+pub const COVERAGE_TOOLS: &[&str] =
+    &["coverage_ingest", "coverage_status", "coverage_refresh"];
 
 /// The wiki twins wired to the wiki store (S-053, CR-008, FR-WK-09;
 /// `wiki_materialize` added by S-263/CR-062, FR-WK-20). `wiki delete`/`wiki
 /// skill` are CLI-only — destructive/install ops off the agent surface.
-pub const WIKI_TOOLS: [&str; 5] = [
+pub const WIKI_TOOLS: &[&str] = &[
     "wiki_write",
     "wiki_read",
     "wiki_search",
@@ -81,7 +81,7 @@ pub const WIKI_TOOLS: [&str; 5] = [
 /// single-root roster (S-248/CR-061 FR-WS-05; `workspace_reachability` by
 /// S-257, FR-WS-12; `workspace_check` by S-258, FR-WS-13). Alphabetical —
 /// `list_all` sorts by name, so this doubles as the expected added-set order.
-pub const XSERVICE_TOOLS: [&str; 7] = [
+pub const XSERVICE_TOOLS: &[&str] = &[
     "workspace_check",
     "workspace_reachability",
     "workspace_status",
