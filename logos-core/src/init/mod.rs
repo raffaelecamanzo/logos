@@ -296,7 +296,8 @@ pub(crate) fn ignored_state() -> Vec<&'static str> {
 /// Ordered **scoping first, navigation second** since S-362/CR-114. The two
 /// texts are deliberately parallel: an agent that reads only one of them should
 /// come away with the same ordering, so `mcp/src/instructions.md` moves with
-/// this constant (`cli/tests/shipped_guidance.rs` asserts they agree).
+/// this constant (`cli/src/main.rs`'s `surface_parity` module asserts each of
+/// the three satisfies [FR-IN-09]).
 ///
 /// The ordering is a hypothesis, not a finding, and the block says so — the
 /// evidence is one project's telemetry, and [FR-OB-11]'s tool class is what
