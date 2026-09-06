@@ -1572,6 +1572,38 @@ mod surface_parity {
                 g.scoping_marker,
                 g.navigation_marker
             );
+
+            // Headings alone are a weak anchor: swapping the two sections' BODIES,
+            // or inserting a navigation-first section above the scoping heading,
+            // leaves both offsets untouched. Anchor to the material as well — the
+            // first planning-time capability must be named before the first
+            // navigate-while-coding tool.
+            // Matched on the OPENING backtick only: a span may wrap across two
+            // source lines (`logos impact-intersection\n  --item …`), so a form
+            // that also required the closing backtick would miss it.
+            let first_capability = CAPABILITIES
+                .iter()
+                .filter_map(|(tool, command)| {
+                    [format!("`{tool}"), format!("`logos:{tool}"), format!("`logos {command}")]
+                        .iter()
+                        .filter_map(|form| g.text.find(form.as_str()))
+                        .min()
+                })
+                .min()
+                .expect("a planning-time capability is named (asserted separately)");
+            let first_navigation = ["`callers", "`logos:callers", "`callees", "`logos:callees"]
+                .iter()
+                .filter_map(|form| g.text.find(form))
+                .min()
+                .expect("a navigate-while-coding tool is named");
+            assert!(
+                first_capability < first_navigation,
+                "{} names a navigate-while-coding tool (offset {first_navigation}) \
+                 before the first planning-time capability (offset \
+                 {first_capability}) (FR-IN-09 AC 1). The headings say scoping is \
+                 primary; the material must too",
+                g.label
+            );
         }
     }
 
