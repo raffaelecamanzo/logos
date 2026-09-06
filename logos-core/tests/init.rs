@@ -361,6 +361,71 @@ fn fresh_claude_md_is_created_when_absent() {
     assert!(read(tmp.path(), "CLAUDE.md").contains("<!-- logos:managed:begin -->"));
 }
 
+/// FR-IN-09 AC 3, over an already-initialised project: repositioning the block's
+/// content changes nothing about the upsert contract — a re-run rewrites the
+/// marker span and leaves user content on **both** sides of it byte-identical.
+///
+/// The same property `init::tests::upsert_replaces_only_the_marker_span` pins at
+/// unit level, but over the **MD** marker pair and through the real
+/// `Engine::init_with`. What it adds over
+/// `claude_md_managed_block_is_created_and_user_content_preserved` above is
+/// trailing user content and byte-equality of the whole file: that test only has
+/// content *before* the block and asserts `starts_with` + `contains`, which a
+/// truncate-from-the-begin-marker regeneration would also satisfy.
+#[test]
+fn regenerating_the_managed_block_rewrites_only_the_marker_span() {
+    let tmp = TempDir::new().unwrap();
+    Engine::init_with(tmp.path(), &interactive()).unwrap();
+
+    // Sandwich the managed block between user content on both sides.
+    let generated = read(tmp.path(), "CLAUDE.md");
+    let before = "# House rules\n\nNever commit to main.\n\n";
+    let after = "\n## My own notes\n\nThe `logos:*` tools are wired via .mcp.json.\n";
+    let sandwiched = format!("{before}{generated}{after}");
+    fs::write(tmp.path().join("CLAUDE.md"), &sandwiched).unwrap();
+
+    // Tamper INSIDE the markers, then re-run.
+    let tampered = sandwiched.replace("structural code intelligence", "TAMPERED");
+    assert_ne!(tampered, sandwiched, "the tamper actually changed the body");
+    fs::write(tmp.path().join("CLAUDE.md"), &tampered).unwrap();
+    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
+
+    let refreshed = read(tmp.path(), "CLAUDE.md");
+    assert_eq!(
+        refreshed, sandwiched,
+        "regeneration restores the managed span and touches nothing outside it"
+    );
+    assert_eq!(step(&result, "CLAUDE.md").action, InitAction::Updated);
+
+    // And a clean re-run over the sandwich is a no-op, not a rewrite.
+    let again = Engine::init_with(tmp.path(), &interactive()).unwrap();
+    assert_eq!(read(tmp.path(), "CLAUDE.md"), sandwiched);
+    assert_eq!(step(&again, "CLAUDE.md").action, InitAction::Unchanged);
+}
+
+/// DL-07 non-clobber for the MD marker pair: a half-deleted managed block (a
+/// begin marker with no end) is refused, not guessed at, and the file is left
+/// byte-identical.
+///
+/// `init::tests::upsert_refuses_unbalanced_markers` covers the decision at unit
+/// level against the `#` gitignore markers; this drives the same refusal through
+/// `Engine::init_with` on the file a user actually edits.
+#[test]
+fn a_half_deleted_managed_block_is_refused_not_guessed() {
+    let tmp = TempDir::new().unwrap();
+    let mangled = "# My rules\n\n<!-- logos:managed:begin -->\nhalf a block\n";
+    fs::write(tmp.path().join("CLAUDE.md"), mangled).unwrap();
+
+    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
+
+    assert_eq!(
+        read(tmp.path(), "CLAUDE.md"),
+        mangled,
+        "an unbalanced managed block is left exactly as the user left it (DL-07)"
+    );
+    assert_eq!(step(&result, "CLAUDE.md").action, InitAction::Skipped);
+}
+
 // ── FR-IN-03 / FR-SY-05: git hooks via core.hooksPath ─────────────────────
 
 fn hook_opts() -> InitOptions {

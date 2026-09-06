@@ -13,8 +13,9 @@
 //! - the `logos` MCP server block injected into the project's `.mcp.json`
 //!   host config, skipping if already present ([FR-IN-02], [MCP Host]);
 //! - a delimited, re-generatable managed block in the project `CLAUDE.md`
-//!   priming graph-first usage, preserving user content outside the markers
-//!   ([FR-IN-02]);
+//!   priming graph-first usage — scoping before decomposition first, navigation
+//!   while editing second ([FR-IN-09]) — preserving user content outside the
+//!   markers ([FR-IN-02]);
 //! - the optional git-hook installer via `core.hooksPath` ([FR-IN-03],
 //!   [FR-SY-05]);
 //! - the embedded wiki-generation skill materialized into the canonical
@@ -31,6 +32,7 @@
 //! [FR-IN-02]: ../../../docs/specs/requirements/FR-IN-02.md
 //! [FR-IN-03]: ../../../docs/specs/requirements/FR-IN-03.md
 //! [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
+//! [FR-IN-09]: ../../../docs/specs/requirements/FR-IN-09.md
 //! [FR-SY-05]: ../../../docs/specs/requirements/FR-SY-05.md
 //! [MCP Host]: ../../../docs/specs/architecture/integrations/mcp-host.md
 
@@ -288,25 +290,58 @@ pub(crate) fn ignored_state() -> Vec<&'static str> {
         .collect()
 }
 
-/// The managed `CLAUDE.md` block (FR-IN-02): the graph-first usage steer —
-/// the project-memory twin of the MCP `server-instructions`.
+/// The managed `CLAUDE.md` block (FR-IN-02, FR-IN-09): the graph-first usage
+/// steer — the project-memory twin of the MCP `server-instructions`.
+///
+/// Ordered **scoping first, navigation second** since S-362/CR-114. The two
+/// texts are deliberately parallel: an agent that reads only one of them should
+/// come away with the same ordering, so `mcp/src/instructions.md` moves with
+/// this constant (`cli/src/main.rs`'s `surface_parity` module asserts each of
+/// the three satisfies [FR-IN-09]).
+///
+/// The ordering is a hypothesis, not a finding, and the block says so — the
+/// evidence is one project's telemetry, and [FR-OB-11]'s tool class is what
+/// re-measures it ([NFR-CC-04]: an explicit caveat over a confident claim).
+///
+/// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 const CLAUDE_MD_BLOCK: &str = "\
 <!-- logos:managed:begin -->
 ## Logos — structural code intelligence
 
-This project is indexed by Logos. Use the `logos:*` MCP graph tools to navigate by
-structure, and reach for them by the *shape* of the question:
+This project is indexed by Logos. The graph's primary use is **scoping work before
+you decompose it**. Navigating while you code is the secondary mode.
 
-- **Relational / cross-file** (\"who calls this?\", \"what breaks if I change it?\",
-  \"where is X used?\", dead code, blast radius) — start with `logos:context` (one
-  call replaces several speculative reads), then `logos:node` / `logos:callers` /
-  `logos:callees` / `logos:impact`. The graph beats grep here.
+### Primary — before you decompose the work
+
+Each tool's own description says what it returns; these are the moments to ask.
+
+- **What does this task touch?** — `logos:context` with the task in one sentence.
+  The first move of a task, not a mid-edit lookup.
+- **Can these two work items run in parallel?** — `logos:impact_intersection`.
+  Split colliding items across iterations instead of colliding at merge.
+- **Has this already been done here?** — `logos:precedent` on what you are about
+  to write. Follow the sibling rather than inventing a second spelling.
+- **How large is the change really?** — `logos:impact` for one symbol;
+  `logos affected <file>…` for a changed set, the pre-review reach check.
+- **Which branches collide, and did the merge carry everything?** —
+  `logos:branch_overlap`. A clean merge is not a complete merge.
+
+### Secondary — while you are editing
+
+- **Relational / cross-file** (\"who calls this?\", \"where is X used?\", dead code)
+  — `logos:node` / `logos:callers` / `logos:callees`, and `logos:search` /
+  `logos:explore` to find and group. The graph beats grep here.
 - **Localized lookups** (a string, a value, a formula inside a file you can already
   name) — a direct read or grep is fine, sometimes faster. Don't force the graph on
   a question grep already answers.
 - **Disambiguate by symbol** — prefer a unique name as the entry point. `logos:node`
   on a common bare name (`new`, `map`, `severity`) resolves to one arbitrary match;
   pivot from a unique caller or qualify the path instead.
+
+This ordering is a **hypothesis under measurement, not a settled finding** — it comes
+from one project's telemetry. `logos stats --json` breaks calls down by tool class
+and origin; read the figure for THIS project there.
 
 Wrap editing sessions in the quality gate: `logos:session_start` before edits,
 `logos:session_end` after — on a failing gate, stop and fix the regression before
@@ -320,10 +355,11 @@ it), **report** (`logos scan` surfaces the 0–10000 signal; the session-start h
 prints it), and **bless** (`logos gate --save` records a new baseline, at release only). The
 copy-pasteable CI recipe is `docs/howto/ci-integration.md`.
 
-Every tool has a CLI twin (`logos context`, `logos search`, …) with `--json` output,
-with one deliberate exception: `rescan` is MCP-only, because it replays the
-parameters of the last scan **in the same server process** and a one-shot CLI
-invocation has no earlier scan to replay — run `logos scan` instead.
+Every tool has a CLI twin (`logos impact-intersection`, `logos precedent`,
+`logos branch-overlap`, …) with `--json` output, with one deliberate exception:
+`rescan` is MCP-only, because it replays the parameters of the last scan **in the
+same server process** and a one-shot CLI invocation has no earlier scan to replay —
+run `logos scan` instead.
 
 This block is managed by `logos init -i`: edits inside the markers are regenerated on
 re-run; content outside the markers is never touched.

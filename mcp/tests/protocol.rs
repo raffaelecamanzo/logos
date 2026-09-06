@@ -172,6 +172,34 @@ async fn server_instructions_contain_all_three_steers() {
     );
 }
 
+/// FR-IN-09 (S-362/CR-114): the served text is the shipped `INSTRUCTIONS`
+/// constant, byte for byte.
+///
+/// `mcp::INSTRUCTIONS` is what `cli/src/main.rs::surface_parity` asserts the
+/// FR-IN-09 content properties over — the ordering, the three planning-time
+/// tools, and the NFR-CC-04 hypothesis caveat. Restating those here would be a
+/// second copy of the same assertions; what the wire adds, and only the wire can
+/// give, is that the constant is the thing a host actually receives. So this
+/// pins the identity and lets `surface_parity` own the content.
+#[tokio::test]
+async fn served_instructions_are_the_shipped_constant() {
+    let (client, _server, _dir) = connect().await;
+
+    let info = client.peer_info().expect("server info");
+    let instructions = info
+        .instructions
+        .as_deref()
+        .expect("server-instructions must be served (FR-MC-03)");
+
+    assert_eq!(
+        instructions,
+        mcp::INSTRUCTIONS,
+        "the served instructions must be the shipped `INSTRUCTIONS` constant — \
+         surface_parity's FR-IN-09 guards assert over that constant, and they are \
+         only meaningful while it is what crosses the wire"
+    );
+}
+
 // ── FR-MC-02 / UAT-MC-01: the 10 navigation tools delegate and answer ─────
 
 #[tokio::test]
