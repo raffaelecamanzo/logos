@@ -131,7 +131,8 @@ pub struct ColdStartPhases {
     pub store_open: Duration,
     /// Running the writer store's schema migrations.
     pub schema_migration: Duration,
-    /// Opening the read-only pool plus building (or attaching) the worker pool.
+    /// Spawning the writer actor thread, opening the read-only pool, and
+    /// building (or attaching) the worker pool.
     pub pool_startup: Duration,
     /// Everything on the cold path that is not one of the six phases above:
     /// worktree-root resolution, `.logos/` directory creation, worktree-seed
@@ -3260,6 +3261,34 @@ mod tests {
         assert_serialize::<crate::config::ConfigWriteOutcome>();
         // Config apply (S-097): the explicit-apply summary.
         assert_serialize::<crate::config::ConfigApplyOutcome>();
+    }
+
+    /// [`ColdStartPhases::sum`] and
+    /// [`ColdStartPhases::nfr_pe05_enumerated_total`] ([CR-116], [S-368]) as
+    /// pure functions over known field values — the two numbers CR-116 §3.2
+    /// turns on, checked exactly rather than only ever against noisy
+    /// wall-clock reconciliation in the integration test.
+    ///
+    /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+    /// [S-368]: ../../../docs/planning/journal.md#s-368-attribute-the-cold-start-cost-across-its-phases
+    #[test]
+    fn cold_start_phases_sum_and_enumerated_total_are_exact() {
+        let phases = ColdStartPhases {
+            plugin_toml_parse: Duration::from_millis(1),
+            registry_construction: Duration::from_millis(2),
+            query_compilation: Duration::from_millis(4),
+            store_open: Duration::from_millis(8),
+            schema_migration: Duration::from_millis(16),
+            pool_startup: Duration::from_millis(32),
+            other: Duration::from_millis(64),
+        };
+        assert_eq!(phases.sum(), Duration::from_millis(1 + 2 + 4 + 8 + 16 + 32 + 64));
+        // Only the three NFR-PE-05-enumerated phases — store open, schema
+        // migration, pool startup and other must NOT be folded in.
+        assert_eq!(
+            phases.nfr_pe05_enumerated_total(),
+            Duration::from_millis(1 + 2 + 4)
+        );
     }
 
     /// The config write-back seam round-trips through the façade (S-096,
