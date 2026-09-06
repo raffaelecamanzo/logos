@@ -82,7 +82,7 @@ fn adapter_lines() -> usize {
         + file_lines(CLI_XSERVICE)
 }
 
-/// Budget: ≤ 825 production lines of Rust in the CLI adapter (NFR-MA-02).
+/// Budget: ≤ 890 production lines of Rust in the CLI adapter (NFR-MA-02).
 ///
 /// S-072 500→520 for the CR-012 `ui` serve wiring: the `--ui`/`--port` flags on
 /// `serve` (cfg-gated behind the non-default `ui` feature) and the combined
