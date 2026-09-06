@@ -241,22 +241,8 @@ pub(crate) fn branch_overlap(
     let mut rows: BTreeMap<NodeId, &NodeRow> = BTreeMap::new();
     let mut modified: BTreeMap<NodeId, Vec<usize>> = BTreeMap::new();
     for (index, changes) in &per_ref {
-        let mut touched: BTreeSet<NodeId> = BTreeSet::new();
-        for (path, ranges) in changes {
-            let Some(nodes) = by_path.get(path.as_str()) else {
-                continue;
-            };
-            for range in ranges {
-                let hit = innermost(nodes, *range);
-                if hit.is_empty() {
-                    result.coverage.unattributed_hunks += 1;
-                }
-                for row in hit {
-                    rows.insert(row.id, row);
-                    touched.insert(row.id);
-                }
-            }
-        }
+        let (touched, unattributed) = touched_symbols(&by_path, changes, &mut rows);
+        result.coverage.unattributed_hunks += unattributed;
         result.refs[*index].symbols_modified = touched.len() as u32;
         for id in touched {
             modified.entry(id).or_default().push(*index);
@@ -315,15 +301,11 @@ pub(crate) fn branch_overlap(
 
     // ── the silent-drop half ([FR-NV-13] AC 2) ──────────────────────────────
     if let (Some(name), Some(changes)) = (merge, &merge_changes) {
-        let mut merged_symbols: BTreeSet<NodeId> = BTreeSet::new();
-        for (path, ranges) in changes {
-            let Some(nodes) = by_path.get(path.as_str()) else {
-                continue;
-            };
-            for range in ranges {
-                merged_symbols.extend(innermost(nodes, *range).into_iter().map(|row| row.id));
-            }
-        }
+        // The discarded second element is deliberate: a hunk of the merge
+        // result that lands in no span is not a coverage limit of the refs'
+        // answer, and counting it would inflate a number the caller reads as
+        // "changes I could not attribute to YOUR refs".
+        let (merged_symbols, _) = touched_symbols(&by_path, changes, &mut rows);
         let mut lost_symbols: Vec<LostSymbol> = modified
             .iter()
             .filter(|(id, _)| !merged_symbols.contains(id))
@@ -705,6 +687,41 @@ fn hunk_range(line: &str) -> Option<(u32, u32)> {
         0 => (start.max(1), start.max(1) + 1),
         count => (start, start + count - 1),
     })
+}
+
+/// The indexed symbols a ref's (or the merge result's) changed ranges land in,
+/// and how many of those ranges landed in no span at all.
+///
+/// **One primitive, called twice, on purpose.** The silent-drop half of this
+/// query is the set difference `modified \ merged_symbols`; if the two sides
+/// ever attributed by different rules, the difference would report losses that
+/// are a parse artefact rather than a fact. Holding that invariant by two loops
+/// seventy lines apart looking alike is how it stops being held.
+///
+/// `rows` accumulates the `NodeRow` behind every symbol either side touches, so
+/// the payload can be built without a second store read.
+fn touched_symbols<'a>(
+    by_path: &BTreeMap<&str, Vec<&'a NodeRow>>,
+    changes: &FileRanges,
+    rows: &mut BTreeMap<NodeId, &'a NodeRow>,
+) -> (BTreeSet<NodeId>, u32) {
+    let (mut touched, mut unattributed) = (BTreeSet::new(), 0);
+    for (path, ranges) in changes {
+        let Some(nodes) = by_path.get(path.as_str()) else {
+            continue;
+        };
+        for range in ranges {
+            let hit = innermost(nodes, *range);
+            if hit.is_empty() {
+                unattributed += 1;
+            }
+            for row in hit {
+                rows.insert(row.id, row);
+                touched.insert(row.id);
+            }
+        }
+    }
+    (touched, unattributed)
 }
 
 /// The **innermost** indexed symbols a changed range lands in.
