@@ -1303,16 +1303,37 @@ pub(crate) fn precedent(
     let mut ranked = rank_precedents(graph, hits, &mut result.coverage);
     result.total_found = ranked.len() as u32;
     if ranked.is_empty() {
-        result.empty_reason = Some(EmptyPrecedent {
-            code: "anchors_are_unshared".to_string(),
-            detail: format!(
-                "the target's {} structural anchor(s) are attached to no other node under this \
-                 notion ({} candidate(s) shared an anchor but none cleared a facet, {} anchor(s) \
-                 were discarded as ubiquitous)",
-                anchors.len(),
-                result.coverage.candidates_considered,
-                discarded
-            ),
+        // Two different truths, and they call for different next actions, so
+        // they get different codes. "Unshared" says nothing else in the graph
+        // looks like this; "ubiquitous" says the target's only structure is
+        // shared with everything, which is the opposite claim — the anchors are
+        // attached to hundreds of nodes, and that is precisely why they were
+        // dropped. Reporting the first for the second would have a consumer
+        // branching on the closed vocabulary read "nothing resembles you" off a
+        // graph that resembles you too much ([NFR-CC-04]).
+        result.empty_reason = Some(if discarded == anchors.len() {
+            EmptyPrecedent {
+                code: "anchors_are_ubiquitous".to_string(),
+                detail: format!(
+                    "every one of the target's {} structural anchor(s) links more than \
+                     {MAX_ANCHOR_FAN} nodes and was discarded as ubiquitous utility — the \
+                     target's only structure is shared with everything, so nothing is analogous \
+                     to it in particular (see coverage.ubiquitous_anchors)",
+                    anchors.len()
+                ),
+            }
+        } else {
+            EmptyPrecedent {
+                code: "anchors_are_unshared".to_string(),
+                detail: format!(
+                    "the target's {} structural anchor(s) are attached to no other node under \
+                     this notion ({} candidate(s) shared an anchor but none cleared a facet, {} \
+                     anchor(s) were discarded as ubiquitous)",
+                    anchors.len(),
+                    result.coverage.candidates_considered,
+                    discarded
+                ),
+            }
         });
         return Ok(result);
     }
@@ -1436,9 +1457,21 @@ fn resolve_precedent_target(store: &dyn GraphStore, target: &str) -> Result<Prec
         return Ok(PrecedentTarget::Symbol { row, candidates });
     }
     let path = target.strip_prefix("./").unwrap_or(target);
+    // `node_names_for_path` carries no DISTINCT and `nodes_by_name` has no
+    // supporting index, so each name costs a table scan and a repeated name
+    // costs the same scan twice. Deduplicating first, and taking at most
+    // `MAX_FILE_SEEDS` names, bounds the resolution by the FILE's size rather
+    // than by (file size × repo size) — without it a generated file was an
+    // unauthenticated way to buy seconds of scanning on the `/api/v1` surface,
+    // and the seeds beyond the cap were resolved only to be thrown away
+    // ([NFR-PE-01]).
+    let mut names = store.node_names_for_path(path)?;
+    names.sort();
+    names.dedup();
+    let total = names.len();
     let mut seeds: Vec<NodeRow> = Vec::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
-    for name in store.node_names_for_path(path)? {
+    for name in names.into_iter().take(MAX_FILE_SEEDS) {
         for row in store.nodes_by_name(&name)? {
             // `nodes_by_name` is name-scoped, not file-scoped: a name shared
             // with another file must not drag that file's node in as a seed.
@@ -1449,12 +1482,10 @@ fn resolve_precedent_target(store: &dyn GraphStore, target: &str) -> Result<Prec
     }
     if !seeds.is_empty() {
         seeds.sort_by(|a, b| a.symbol.as_str().cmp(b.symbol.as_str()));
-        let total = seeds.len();
-        seeds.truncate(MAX_FILE_SEEDS);
         return Ok(PrecedentTarget::File {
             path: path.to_string(),
+            total: total.max(seeds.len()),
             seeds,
-            total,
         });
     }
     Ok(PrecedentTarget::Unresolved(store.suggest(target, SUGGEST_LIMIT)?))

@@ -623,8 +623,9 @@ pub struct PrecedentReason {
 #[derive(Debug, Clone, Serialize)]
 pub struct EmptyPrecedent {
     /// One of `target_unresolved`, `graph_empty`, `target_absent_from_view`,
-    /// `no_structural_anchors`, `anchors_are_unshared` — plus `query_failed`
-    /// and `results_unavailable` on the two degraded paths.
+    /// `no_structural_anchors`, `anchors_are_unshared`, `anchors_are_ubiquitous`
+    /// — plus `query_failed` and `results_unavailable` on the two degraded
+    /// paths.
     pub code: String,
     /// The same reason in words, with the numbers behind it.
     pub detail: String,

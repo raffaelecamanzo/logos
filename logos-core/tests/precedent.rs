@@ -505,11 +505,24 @@ fn a_ubiquitous_helper_is_named_rather_than_treated_as_evidence() {
 
     let result = engine.precedent("caller_0", None);
 
+    // NOT `anchors_are_unshared`: the anchor is attached to 239 other nodes,
+    // which is exactly why it was dropped. A consumer branching on the closed
+    // vocabulary must not read "nothing resembles you" off a graph that
+    // resembles you too much.
     assert_eq!(
         result.empty_reason.as_ref().map(|e| e.code.as_str()),
-        Some("anchors_are_unshared"),
+        Some("anchors_are_ubiquitous"),
         "{}",
         summarise(&result)
+    );
+    assert!(
+        result
+            .empty_reason
+            .as_ref()
+            .unwrap()
+            .detail
+            .contains("shared with everything"),
+        "the detail must state the opposite claim from `anchors_are_unshared`"
     );
     let named: Vec<&str> = result
         .coverage

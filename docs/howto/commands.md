@@ -443,7 +443,7 @@ of them it matched and through which nodes:
 | Facet | What it means |
 |---|---|
 | `shared_supertype` | The result implements or extends a trait/interface/superclass the target also does. |
-| `shared_registration` | Some third node depends on the result and on the target the same way — a registry, dispatcher, factory, route table, importer or signature that names both. This is the facet that finds sibling arms of one capability. |
+| `shared_registration` | Some third node *does something with* both the result and the target the same way — a registry, dispatcher, factory, route table or signature that calls, instantiates, references, routes to, or is typed by both. This is the facet that finds sibling arms of one capability. A module's `use` list is deliberately **not** a registration: admitting it made every pair of co-imported symbols "analogous". |
 | `shared_callee` | The result and the target call the same functions — a matching call shape. Counted from **2** shared callees up; one shared helper is coincidence, and the candidates that threshold drops are counted in `coverage.dropped_single_callee_matches`. |
 
 Results are ranked lexicographically by counted facts, all of them printed in
@@ -463,9 +463,11 @@ a low-confidence guess. `empty_reason.code` is one of a closed set:
 `target_unresolved` (with "did you mean" suggestions), `graph_empty`,
 `target_absent_from_view` (a documentation or config node, which the code graph
 excludes by construction), `no_structural_anchors` (the target implements
-nothing, is registered by nothing and calls nothing), and `anchors_are_unshared`
-(it has structure, but nothing else shares it) — plus `query_failed` and
-`results_unavailable` on the two degraded paths.
+nothing, is registered by nothing and calls nothing), `anchors_are_unshared` (it
+has structure, but nothing else shares it), and `anchors_are_ubiquitous` (its
+only structure is shared with everything — the opposite claim, and it calls for
+a different next step) — plus `query_failed` and `results_unavailable` on the
+two degraded paths.
 
 `coverage` states the limits: which symbols were compared, how many candidates
 were considered, and — under `ubiquitous_anchors` — which shared nodes were
