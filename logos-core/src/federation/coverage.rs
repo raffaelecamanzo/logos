@@ -1676,13 +1676,20 @@ mod tests {
         assert_eq!(value["reason"], "no-provider-in-workspace");
     }
 
-    /// **The [CR-118] invariant: no reference changes bucket.** Over a fixture
-    /// carrying all four buckets at once, the counts are what they were before the
-    /// provider fields existed — this story changes reporting, not matching.
+    /// **The [CR-118] invariant: no reference changes bucket.** Every bucket, in one
+    /// run: the mixed fixture's counts match the classification the unchanged
+    /// single-bucket tests above pin individually.
     ///
-    /// The criterion exists so a matching regression cannot hide inside a payload
-    /// change, which is why it is asserted on a mixed fixture rather than left to
-    /// the single-bucket tests above.
+    /// **What this test does and does not prove.** It cannot itself be a
+    /// before/after — its fixture was written in the same commit as the change, so
+    /// its golden counts are this author's expectation, not a recorded prior. The
+    /// real before/after evidence is that the ~40 pre-existing classification tests
+    /// in this module pass with **zero assertion edits**; the only pre-existing test
+    /// touched is `state_serializes_flat_not_double_nested`, and only to pass the
+    /// new constructor argument. What this test adds is the *mixed* fixture — all
+    /// four buckets in a single pass, which no single-bucket test gives — so a
+    /// change that shifted one bucket into another at the boundaries would show up
+    /// here.
     ///
     /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
     #[test]
@@ -1715,6 +1722,15 @@ mod tests {
         assert_eq!(cov.bound_ratio, Some(1.0 / 3.0));
         assert_eq!(cov.bound_ratio_measured, 3);
 
+        // Guard the guard: without this, the loop below is vacuous — if `candidates`
+        // stopped being populated at all, its body would never execute and the test
+        // whose whole subject is "naming is not binding" would pass by naming
+        // nothing.
+        assert_eq!(
+            cov.references.iter().filter(|r| r.candidates.is_some()).count(),
+            1,
+            "exactly the tied row names a set"
+        );
         // Every named candidate belongs to a row that is STILL unbound — naming is
         // not binding, and no ArtifactBinding is emitted for any of it
         // (NFR-RA-05): this tier writes no edges at all, it only classifies.
@@ -1820,17 +1836,21 @@ mod tests {
              {before} → {after} bytes (+{:.1}%)",
             growth * 100.0
         );
-        // Measured at +59.6% on this shape (195,044 → 311,202 bytes), which
-        // projects the ~260 KB reference baseline to ~415 KB. Almost all of it is
-        // the 146 four-way ties: naming what a reference tied between IS the
-        // payload, so the cost is the feature, and the guard is against a
-        // blow-up — a doubling, a per-row string, an unbounded set — not against
-        // the intended rider. Headroom above the measured figure so a longer
-        // symbol vocabulary does not flake it.
+        // Measured at ~+60% on this shape, which projects the ~260 KB reference
+        // baseline to roughly 415 KB. Almost all of it is the 146 four-way ties:
+        // naming what a reference tied between IS the payload, so the cost is the
+        // feature, and the ceiling guards against a blow-up — a doubling, a
+        // per-row string, an unbounded set — not against the intended rider.
+        //
+        // The **floor** is the half that matters more. Stripping the three keys is
+        // how `before` is computed, so if the fields silently stopped being emitted
+        // `after == before`, growth would be 0.0, and a one-sided `< 0.75` would
+        // pass green over a completely dead feature — in the very test named for
+        // measuring it. A range fails in both directions.
         assert!(
-            growth < 0.75,
-            "provider identity must stay a rider on the payload, not a rewrite of it: \
-             {before} → {after} bytes (+{:.1}%)",
+            (0.40..0.75).contains(&growth),
+            "provider identity must stay a rider on the payload — present, and not a \
+             rewrite of it: {before} → {after} bytes (+{:.1}%)",
             growth * 100.0
         );
     }
