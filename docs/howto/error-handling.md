@@ -60,6 +60,7 @@ scripting contract (full table in
 | `1` | Completed, but violations/threshold failures found (`check`, `gate`), or structural/admission drift detected (`doctor`, `verify`) |
 | `2` | Usage error: bad flags, or an invalid `config.toml`/`rules.toml` |
 | `3` | Internal/environment error — no index, a corrupt store, an engine fault |
+| `4` | `check` only: **no rules contract was loaded and nothing fired** — the evaluated set was empty, so there is no verdict to report (pass `--allow-no-rules` to restore exit `0`) |
 
 Try the two most common ones yourself:
 

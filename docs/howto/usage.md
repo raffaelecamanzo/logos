@@ -171,6 +171,7 @@ Exit codes are a stable contract for scripting:
 | `1` | Completed, but the answer is not the answer it claims to be: violations/threshold failures (`check`, `gate`), structural drift (`doctor`, `verify`), or **result-level incompleteness** — a `workspace` subcommand that could not **open** one or more members ([FR-CL-03](../specs/requirements/FR-CL-03.md), [FR-WS-16](../specs/requirements/FR-WS-16.md)). |
 | `2` | Usage error: bad flags, invalid config/rules file. |
 | `3` | Internal/environment error — e.g. no index present (the message tells you to run `logos index`), engine failure. Never a raw panic. |
+| `4` | `check` only: **no rules contract was loaded and nothing fired** ([FR-GV-22](../specs/requirements/FR-GV-22.md)). A verdict over an empty evaluated set is not a verdict, so `check` reports `passed: null` rather than a vacuous `true`. Note an always-on fold-in (structural, admission) can still raise a real violation with no `rules.toml` present — that stays exit `1`, not `4`. Pass `--allow-no-rules` to restore exit `0` when you have deliberately authored no contract yet. |
 
 These codes are the CLI projection of Logos's **fail-soft / fail-loud** error
 contract: a *degraded* condition (a skipped file, a partial resolution) warns
@@ -262,6 +263,16 @@ external orchestration tooling
   checkout's DB** (found via `git rev-parse --git-common-dir`) and reconciles
   only the git-diff from the primary — O(diff-from-main), not a cold O(repo)
   index ([ADR-15](../specs/architecture/decisions/ADR-15.md)).
+- **The seed carries the governance contract too.** Alongside the DB, the
+  first-time seed copies `.logos/rules.toml` and `.logos/config.toml` from the
+  primary checkout, byte for byte
+  ([FR-WT-06](../specs/requirements/FR-WT-06.md)) — so a seeded session
+  evaluates the *same* rules as its primary and `logos check` does not exit
+  [`4`](#global-flags-and-exit-codes) merely because `.logos/` is gitignored.
+  It **never fabricates** (a primary missing a file seeds a worktree missing
+  it) and **never overwrites** (a policy file that arrived through git on the
+  branch, per [FR-WT-02](../specs/requirements/FR-WT-02.md), is left untouched).
+  A failed copy is fail-soft, not fatal.
 - **A gitignored file inside the worktree is never indexed.** The same
   `AdmissionAuthority` that guards `sync`/the watcher in the primary checkout
   guards the worktree's own `sync` too — parity, not a separate rule.

@@ -1013,11 +1013,12 @@ deterministically ordered, top-10 list of the specific functions/containers
 dragging each score (report-only; it never gates). Constraints declared in
 `rules.toml` are not evaluated here — use `check` for that.
 
-### `check [--rules <FILE>]`
+### `check [--rules <FILE>] [--allow-no-rules]`
 
 ```bash
 logos check                              # use .logos/rules.toml
 logos check --rules path/to/rules.toml
+logos check --allow-no-rules             # exit 0 even with no contract loaded
 ```
 
 Architecture-rules compliance check: reconciles the index, then evaluates
@@ -1038,6 +1039,22 @@ orphan-row invariant, and a distinct `graph-admission-drift` rule id for the
 admission tripwire. Neither is persisted to the `violations` table (they are
 live invariant checks, not authored rules), but both fail `check` (exit 1) the
 same way an authored `error`-severity rule would.
+
+**No contract loaded exits 4** ([FR-GV-22](../specs/requirements/FR-GV-22.md)).
+A verdict over an empty evaluated set is not a verdict, so when no `rules.toml`
+was loaded *and* nothing fired, `check` reports `passed: null` with
+`rules_present: false` and exits **4** rather than a vacuous `passed: true`.
+Two ways in are a git worktree that was seeded without the contract, and an
+`index` run in a directory that was never `logos init`-ed.
+
+Read `rules_present`, never `checked_rules`, to tell the states apart — a fresh
+`init` legitimately has `rules_present: true` with `checked_rules: 0`. Note the
+always-on fold-ins above are independent of the contract: if one of them raises
+a real violation with no `rules.toml` present, the verdict is `passed: false`
+and the exit is **1**, not 4. Only the genuinely empty case reports 4.
+
+Pass `--allow-no-rules` to restore exit 0 for callers that have deliberately
+authored no contract yet.
 
 ### `gate [--save] [--threshold <N>] [--label <L>]`
 
