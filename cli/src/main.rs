@@ -1097,11 +1097,12 @@ mod surface_parity {
     ];
 
     /// Every command path the shipped CLI accepts — leaves only, space-joined,
-    /// hidden commands and clap's generated `help` excluded.
-    fn cli_command_paths() -> BTreeSet<String> {
-        fn walk(cmd: &clap::Command, prefix: &str, out: &mut BTreeSet<String>) {
+    /// clap's generated `help` excluded. `hidden` selects whether `hide = true`
+    /// commands are included.
+    fn command_paths(hidden: bool) -> BTreeSet<String> {
+        fn walk(cmd: &clap::Command, prefix: &str, hidden: bool, out: &mut BTreeSet<String>) {
             for sub in cmd.get_subcommands() {
-                if sub.is_hide_set() || sub.get_name() == "help" {
+                if (!hidden && sub.is_hide_set()) || sub.get_name() == "help" {
                     continue;
                 }
                 let path = if prefix.is_empty() {
@@ -1110,15 +1111,28 @@ mod surface_parity {
                     format!("{prefix} {}", sub.get_name())
                 };
                 if sub.get_subcommands().next().is_some() {
-                    walk(sub, &path, out);
+                    walk(sub, &path, hidden, out);
                 } else {
                     out.insert(path);
                 }
             }
         }
         let mut out = BTreeSet::new();
-        walk(&Cli::command(), "", &mut out);
+        walk(&Cli::command(), "", hidden, &mut out);
         out
+    }
+
+    /// The PUBLIC command surface — what `logos --help` offers. This is the set
+    /// the two-way roster contract is written against.
+    fn cli_command_paths() -> BTreeSet<String> {
+        command_paths(false)
+    }
+
+    /// Every command the binary accepts, `hide = true` ones included. A hidden
+    /// command is still shipped, so it can still falsify an "MCP-only" claim
+    /// even though it is not part of the public roster contract.
+    fn all_cli_command_paths() -> BTreeSet<String> {
+        command_paths(true)
     }
 
     /// Every tool the shipped server registers, read off the real router.
@@ -1196,12 +1210,22 @@ mod surface_parity {
                     // The default CLI spelling of a tool name: `_` → `-` flat,
                     // or the first `_` as a subcommand group. If either exists,
                     // the tool is reachable and the McpOnly claim is stale.
+                    //
+                    // Checked against the UNFILTERED command set on purpose: a
+                    // hidden command still ships, so it can still falsify an
+                    // "MCP-only" claim, and this check must not inherit the
+                    // walker's `hide` exemption.
                     let flat = tool.replace('_', "-");
                     let grouped = tool.replacen('_', " ", 1).replace('_', "-");
+                    let reachable = all_cli_command_paths();
+                    let found = [&flat, &grouped]
+                        .into_iter()
+                        .find(|spelling| reachable.contains(*spelling));
                     assert!(
-                        !cli.contains(&flat) && !cli.contains(&grouped),
-                        "tool `{tool}` is declared MCP-only but `logos {flat}` \
-                         exists — declare it a Twin instead (FR-CL-06)"
+                        found.is_none(),
+                        "tool `{tool}` is declared MCP-only but `logos {}` \
+                         exists — declare it a Twin instead (FR-CL-06)",
+                        found.map_or("", String::as_str)
                     );
                 }
             }
@@ -1219,6 +1243,21 @@ mod surface_parity {
                 McpOnly(_) => None,
             })
             .collect();
+        // A `BTreeMap` would silently swallow a second tool claiming the same
+        // path — and that is the shortcut this roster invites: writing
+        // `("rescan", Twin("scan"))` to "resolve" the asymmetry would satisfy
+        // every other assertion here while certifying a `logos rescan` that
+        // does not exist.
+        let twin_count = MCP_SURFACE
+            .iter()
+            .filter(|(_, reach)| matches!(reach, Twin(_)))
+            .count();
+        assert_eq!(
+            twins.len(),
+            twin_count,
+            "two tools declare the same CLI twin path — one of them is borrowing \
+             another tool's command instead of having its own (FR-CL-06)"
+        );
         let cli_only: BTreeMap<&str, &str> = CLI_ONLY.iter().copied().collect();
 
         for (path, reason) in &cli_only {
