@@ -9,6 +9,14 @@
 //! plausibly drift: the spelling is parsed in `logos_core`, not in either
 //! adapter, and this is what holds that seam in place.
 //!
+//! **What it does NOT cover.** `cli_payload` calls the `Engine` accessor the
+//! CLI arm calls; it does not spawn the binary, so argv plumbing — a dropped
+//! `--depth`, a mis-declared `--item` arity — is invisible here. That half is
+//! asserted through the real executable by
+//! `cli/tests/cli_surface.rs::impact_intersection_reports_the_collision_through_the_binary`.
+//! The split follows `hotspots_parity.rs`, whose `CARGO_BIN_EXE_logos` is not
+//! reachable from this crate.
+//!
 //! It is the fifth registration point of the pattern S-358 establishes for the
 //! CR-114 query family — navigation-service body, CLI command with `--json`,
 //! `/api/v1` route, MCP tool, and this parity guard. S-359 and S-360 follow it.

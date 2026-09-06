@@ -684,10 +684,10 @@ impl Engine {
         })
         .unwrap_or_else(|err| {
             tracing::warn!("impact_intersection failed: {err:#}");
-            ImpactIntersectionResult {
-                warnings: vec![format!("impact_intersection failed: {err}")],
-                ..ImpactIntersectionResult::default()
-            }
+            crate::navigate::intersection_degraded(
+                depth,
+                format!("impact_intersection failed: {err}"),
+            )
         })
     }
 

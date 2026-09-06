@@ -260,10 +260,13 @@ fn adapter_lines() -> usize {
 /// 3-line dispatch arm delegating to ONE `Engine::impact_intersection` call.
 ///
 /// The S-321 note above told the next author to expect a duplication of core
-/// logic to delete. There is none: every remaining function in `cli/src` is a
-/// clap declaration, one of the four `Output` chokepoints, or surface I/O (the
-/// TTY prompt, `--body-file`, the detached supervisor argv). That was checked
-/// before raising, not asserted after.
+/// logic to delete. The one this file already records — the `stats`/`languages`
+/// `open_query` fold, in the S-319 paragraph above — was re-examined and is
+/// still net-negative here: the helper costs eight lines to save six under this
+/// file's multi-line-signature convention. Beyond it there is nothing: every
+/// remaining function in `cli/src` is a clap declaration, one of the four
+/// `Output` chokepoints, or surface I/O (the TTY prompt, `--body-file`, the
+/// detached supervisor argv). Checked before raising, not asserted after.
 ///
 /// What the raise bought back instead is the reduction this guard actually
 /// wants. The `<id>=<symbol>[,<symbol>...]` work-item spelling is parsed in

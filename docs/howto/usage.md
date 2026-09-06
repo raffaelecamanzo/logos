@@ -534,7 +534,9 @@ each a JSON serialization of an `Engine` read-model
 otherwise), loopback-only (`403` for a non-local `Host`), and **write-free** — a
 read mutates no store and leaves every metric/cycle/DSM/dead-code scope
 byte-identical. The endpoints are: `/api/v1/overview`, `/api/v1/health`,
-`/api/v1/graph`, `/api/v1/query`, `/api/v1/impact`, `/api/v1/node`,
+`/api/v1/graph`, `/api/v1/query`, `/api/v1/impact`,
+`/api/v1/impact-intersection` (repeatable `item=<id>=<symbol>[,<symbol>]`,
+optional `depth`), `/api/v1/node`,
 `/api/v1/search`, `/api/v1/architecture`, `/api/v1/gaps`, `/api/v1/files`,
 `/api/v1/coverage`, `/api/v1/wiki`, `/api/v1/wiki/nav`,
 `/api/v1/wiki/search`, `/api/v1/wiki/page/*slug`, `/api/v1/wiki/asset/*path`

@@ -1054,6 +1054,58 @@ fn impact_intersection_reports_the_collision_through_the_binary() {
     assert!(statement.contains("indexed code graph"), "{statement}");
     assert_eq!(payload["depth"], 3, "the default depth is reported");
 
+    // `--depth` reaches the engine through the binary: at depth 0 only directly
+    // declared symbols can collide, so the transitive S-1/S-2 overlap vanishes.
+    // The parity test compares read-models, not argv, so this is the only place
+    // a dropped or mis-plumbed CLI flag would be caught.
+    let out = logos(
+        tmp.path(),
+        &[
+            "impact-intersection",
+            "--item",
+            "S-1=top",
+            "--item",
+            "S-2=base",
+            "--depth",
+            "0",
+            "--json",
+        ],
+    );
+    assert_eq!(exit_code(&out), 0);
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(payload["depth"], 0, "--depth reaches the engine: {payload}");
+    assert!(
+        payload["intersecting"].as_array().unwrap().is_empty(),
+        "at depth 0 the transitive collision is gone: {payload}"
+    );
+    assert_eq!(payload["safe_parallel"].as_array().unwrap().len(), 1);
+
+    // An unknown symbol is a coverage limit on an exit-0 payload, never an error.
+    let out = logos(
+        tmp.path(),
+        &[
+            "impact-intersection",
+            "--item",
+            "S-1=top",
+            "--item",
+            "S-2=no_such_symbol",
+            "--json",
+        ],
+    );
+    assert_eq!(exit_code(&out), 0, "an unknown symbol is not a fault");
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(payload["coverage"]["unresolved"][0]["item"], "S-2", "{payload}");
+    assert_eq!(
+        payload["coverage"]["unresolved"][0]["symbol"], "no_such_symbol",
+        "{payload}"
+    );
+    assert_eq!(
+        payload["coverage"]["items_without_resolved_symbols"],
+        serde_json::json!(["S-2"]),
+        "the item resting on nothing is named, so `safe_parallel` is not read as \
+         evidence of independence: {payload}"
+    );
+
     // A malformed spec is warned about, not silently dropped, and never an error.
     let out = logos(
         tmp.path(),

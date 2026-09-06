@@ -373,18 +373,70 @@ async fn impact_intersection_endpoint_serializes_the_read_model_and_keeps_every_
     let (status, body, headers) = body_string(resp).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_json_self_only_csp(&headers, path);
-    for key in ["\"items\"", "\"intersecting\"", "\"safe_parallel\"", "\"coverage\"", "\"depth\""] {
-        assert!(body.contains(key), "the body carries {key}: {body}");
-    }
     let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+
+    // A repeated `item` param is KEPT — the reason this handler reads ordered
+    // pairs rather than the map its neighbours use.
     assert_eq!(
         payload["items"].as_array().map(Vec::len),
         Some(2),
         "a repeated `item` param is kept, not overwritten: {body}"
     );
+    // The route must be shown to COMPUTE, not merely to serialise field names:
+    // both items declare `f`, so the pair collides on `f` and is attributed to
+    // both. Asserting the keys exist would hold against an empty answer.
+    let intersecting = payload["intersecting"].as_array().expect("intersecting");
+    assert_eq!(intersecting.len(), 1, "{body}");
+    assert_eq!(intersecting[0]["left"], "S-1");
+    assert_eq!(intersecting[0]["right"], "S-2");
+    let shared = intersecting[0]["shared"].as_array().expect("shared");
+    assert!(
+        shared.iter().any(|s| s["name"] == "f"),
+        "the shared symbol is named: {body}"
+    );
+    assert_eq!(
+        shared[0]["declared_by"],
+        serde_json::json!(["S-1", "S-2"]),
+        "both items declared it: {body}"
+    );
+    assert!(
+        payload["safe_parallel"].as_array().unwrap().is_empty(),
+        "a colliding pair is never also safely parallel: {body}"
+    );
     assert!(
         !payload["coverage"]["statement"].as_str().unwrap_or_default().is_empty(),
         "the coverage limits ride the payload (NFR-CC-04): {body}"
+    );
+
+    // `?depth=` reaches the engine, and a malformed depth degrades to the
+    // default rather than failing the request.
+    for (query, expected) in [("&depth=1", 1), ("&depth=abc", 3)] {
+        let resp = router
+            .clone()
+            .oneshot(get(&format!("{path}{query}")))
+            .await
+            .unwrap();
+        let (status, body, _headers) = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(payload["depth"], expected, "{query}: {body}");
+    }
+
+    // An unknown symbol reaches the wire as a coverage limit, not an error.
+    let resp = router
+        .clone()
+        .oneshot(get("/api/v1/impact-intersection?item=S-1=f&item=S-2=nope"))
+        .await
+        .unwrap();
+    let (status, body, _headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "an unknown symbol is not a 4xx");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(payload["coverage"]["unresolved"][0]["item"], "S-2", "{body}");
+    assert_eq!(payload["coverage"]["unresolved"][0]["symbol"], "nope", "{body}");
+    assert_eq!(
+        payload["coverage"]["items_without_resolved_symbols"],
+        serde_json::json!(["S-2"]),
+        "an item resting on nothing is named as such: {body}"
     );
 
     // No items at all → the honest empty default, not a 4xx.

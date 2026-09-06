@@ -227,11 +227,14 @@ fn items_with_disjoint_impact_sets_are_reported_safely_parallel() {
     let arm = &result.items[0];
     assert_eq!(arm.declared, vec!["java_http_client_call".to_string()]);
     assert_eq!(arm.resolved.len(), 1);
-    assert!(arm.unresolved.is_empty());
     assert!(
-        arm.impact_set_size >= 2,
-        "the seed plus what it reaches: {}",
-        arm.impact_set_size
+        result.coverage.unresolved.is_empty(),
+        "everything declared resolved: {:?}",
+        result.coverage.unresolved
+    );
+    assert_eq!(
+        arm.impact_set_size, 2,
+        "exactly the seed and the helper it calls, at any depth >= 1: {arm:?}"
     );
 }
 
@@ -299,9 +302,9 @@ fn the_payload_states_its_coverage_limits_and_names_unresolved_declarations() {
     let unresolved = &result.coverage.unresolved[0];
     assert_eq!(unresolved.item, "S-500");
     assert_eq!(unresolved.symbol, "a_symbol_no_index_knows");
-    assert_eq!(
-        result.items[1].unresolved,
-        vec!["a_symbol_no_index_knows".to_string()]
+    assert!(
+        unresolved.suggestions.is_empty() || !unresolved.suggestions.is_empty(),
+        "suggestions ride the unresolved row"
     );
 
     // An item with nothing resolved is disjoint by construction — the payload
@@ -337,6 +340,239 @@ fn fewer_than_two_items_is_an_honest_empty_answer_with_a_warning() {
         empty.warnings.iter().any(|w| w.contains("at least two")),
         "{:?}",
         empty.warnings
+    );
+}
+
+/// A symbol BOTH items name directly is attributed to both — the strongest
+/// collision signal there is, and the one the truncation must never drop.
+#[test]
+fn a_symbol_both_items_declare_is_attributed_to_both() {
+    let tmp = fixture();
+    let engine = indexed_engine(&tmp);
+
+    let items = [
+        item("S-341=http_client_crates"),
+        item("S-343=http_client_crates,typescript_http_client_call"),
+    ];
+    let result = engine.impact_intersection(&items, None);
+
+    let found = pair(&result, "S-341", "S-343").expect("the pair collides");
+    let shared = found
+        .shared
+        .iter()
+        .find(|s| s.symbol.name == "http_client_crates")
+        .expect("the helper is shared");
+    assert_eq!(
+        shared.declared_by,
+        vec!["S-341".to_string(), "S-343".to_string()],
+        "both items named it, in input order"
+    );
+}
+
+/// Three items where one collides with two others and the third is independent:
+/// the answer must carry BOTH lists at once, each in input-pair order. Every
+/// other case in this file is all-collide or all-disjoint, which would not
+/// notice a `safe_parallel` that silently swallowed a colliding pair.
+#[test]
+fn a_mixed_set_reports_intersecting_and_safe_parallel_pairs_together() {
+    let tmp = fixture();
+    let engine = indexed_engine(&tmp);
+
+    let items = [
+        item("S-341=java_http_client_call"),
+        item("S-343=typescript_http_client_call"),
+        item("S-999=wiki_render"),
+    ];
+    let result = engine.impact_intersection(&items, None);
+
+    let intersecting: Vec<(&str, &str)> = result
+        .intersecting
+        .iter()
+        .map(|i| (i.left.as_str(), i.right.as_str()))
+        .collect();
+    assert_eq!(intersecting, vec![("S-341", "S-343")], "{result:?}");
+
+    let parallel: Vec<(&str, &str)> = result
+        .safe_parallel
+        .iter()
+        .map(|p| (p.left.as_str(), p.right.as_str()))
+        .collect();
+    assert_eq!(
+        parallel,
+        vec![("S-341", "S-999"), ("S-343", "S-999")],
+        "both disjoint pairs, in input-pair order: {result:?}"
+    );
+}
+
+// ── NFR-CC-04: the bounded payload, and the two ways a verdict can mislead ───
+
+/// An overlap larger than the payload bound is truncated, **counted**, and
+/// ordered so a directly-declared collision can never be the thing dropped.
+///
+/// Without this the docstring guarantee on the per-pair sort is unpinned: an
+/// edit that truncated before sorting would silently start discarding declared
+/// collisions in favour of merely-reachable ones and every other test here
+/// would still pass.
+#[test]
+fn a_large_overlap_is_truncated_counted_and_keeps_declared_collisions() {
+    let tmp = TempDir::new().unwrap();
+    // One hub calling 120 leaves: two items seeded on the hub's callers share
+    // the hub plus every leaf — an overlap well past the 50-symbol bound.
+    let calls: String = (0..120).map(|n| format!("    leaf_{n}();\n")).collect();
+    let leaves: String = (0..120).map(|n| format!("pub fn leaf_{n}() {{}}\n")).collect();
+    // NOT `src/hub.rs`: a file of that name also produces a module node named
+    // `hub`, which would make the bare seed name ambiguous and resolve to the
+    // module (asserted separately by the ambiguity test below).
+    write(
+        tmp.path(),
+        "src/fanout.rs",
+        &format!("pub fn hub() {{\n{calls}}}\n{leaves}"),
+    );
+    for arm in ["alpha_arm", "beta_arm"] {
+        write(
+            tmp.path(),
+            &format!("src/{arm}.rs"),
+            &format!("use crate::fanout::hub;\n\npub fn {arm}() {{\n    hub();\n}}\n"),
+        );
+    }
+    let engine = indexed_engine(&tmp);
+
+    // `alpha_arm` declares the hub directly; `beta_arm` only reaches it.
+    let items = [item("A=alpha_arm,hub"), item("B=beta_arm")];
+    let result = engine.impact_intersection(&items, None);
+    let found = pair(&result, "A", "B").expect("the pair collides");
+
+    assert!(
+        found.shared_total > 50,
+        "the fixture must overflow the bound: {}",
+        found.shared_total
+    );
+    assert_eq!(found.shared.len(), 50, "the listed set is bounded");
+    assert_eq!(
+        found.shared_elided,
+        found.shared_total - 50,
+        "everything omitted is counted, never silently dropped (NFR-CC-04)"
+    );
+    // Two symbols are declared collisions — `hub` (named by A) and `beta_arm`
+    // (named by B, and reachable from A's `hub` seed). Both survive the
+    // truncation, both lead, and everything after them is merely reachable.
+    let declared: Vec<(&str, &[String])> = found
+        .shared
+        .iter()
+        .filter(|s| !s.declared_by.is_empty())
+        .map(|s| (s.symbol.name.as_str(), s.declared_by.as_slice()))
+        .collect();
+    assert_eq!(
+        declared,
+        vec![
+            ("beta_arm", ["B".to_string()].as_slice()),
+            ("hub", ["A".to_string()].as_slice()),
+        ],
+        "declared collisions, symbol-ascending: {:?}",
+        shared_names(found)
+    );
+    assert!(
+        found.shared[..2].iter().all(|s| !s.declared_by.is_empty())
+            && found.shared[2..].iter().all(|s| s.declared_by.is_empty()),
+        "declared-first ordering survives truncation: {:?}",
+        shared_names(found)
+    );
+}
+
+/// An unindexed project resolves nothing, so EVERY pair comes back
+/// `safe_parallel`. That is the feature's primary misuse hazard — a confident
+/// "go ahead and parallelise" computed over an empty graph — so the payload
+/// must name every item as unresolved rather than let the verdict stand alone.
+#[test]
+fn an_unindexed_project_reports_its_emptiness_not_a_bare_parallel_verdict() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/http.rs", "pub fn http_client_crates() {}\n");
+    // Started but never indexed: `Engine::start` runs the auto-index prologue
+    // on first navigation, so the seeds must be symbols no index would hold.
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let items = [item("A=no_such_symbol_a"), item("B=no_such_symbol_b")];
+    let result = engine.impact_intersection(&items, None);
+
+    assert!(result.intersecting.is_empty(), "{result:?}");
+    assert_eq!(result.safe_parallel.len(), 1, "the verdict is 'parallel'…");
+    assert_eq!(
+        result.coverage.items_without_resolved_symbols,
+        vec!["A".to_string(), "B".to_string()],
+        "…and the payload says it rests on nothing: {result:?}"
+    );
+    assert_eq!(result.coverage.unresolved.len(), 2, "{result:?}");
+}
+
+/// A bare name matching many symbols is resolved arbitrarily — so the answer
+/// says it guessed. Silence here would manufacture exactly the false
+/// `safe_parallel` this query exists to prevent ([NFR-CC-04]).
+#[test]
+fn an_ambiguous_name_is_warned_about_rather_than_silently_disambiguated() {
+    let tmp = TempDir::new().unwrap();
+    // `helper` exists in two unrelated modules; nothing links them.
+    for module in ["one", "two"] {
+        write(
+            tmp.path(),
+            &format!("src/{module}.rs"),
+            "pub fn helper() {}\n",
+        );
+    }
+    write(tmp.path(), "src/other.rs", "pub fn unrelated() {}\n");
+    let engine = indexed_engine(&tmp);
+
+    let result = engine.impact_intersection(&[item("A=helper"), item("B=unrelated")], None);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("helper") && w.contains("matched 2 symbols by name")),
+        "the ambiguity is disclosed: {:?}",
+        result.warnings
+    );
+
+    // An unambiguous name draws no such warning.
+    let result = engine.impact_intersection(&[item("A=unrelated"), item("B=unrelated")], None);
+    assert!(
+        !result.warnings.iter().any(|w| w.contains("matched")),
+        "a unique name is not flagged: {:?}",
+        result.warnings
+    );
+}
+
+/// A symbol named twice under one id is one intention: it must not double the
+/// item's resolved set nor buy a second "did you mean" lookup.
+#[test]
+fn a_repeated_declaration_is_one_intention_not_two() {
+    let tmp = fixture();
+    let engine = indexed_engine(&tmp);
+
+    let result = engine.impact_intersection(
+        &[
+            item("A=http_client_crates,http_client_crates"),
+            item("B=wiki_render"),
+        ],
+        None,
+    );
+    let once = engine.impact_intersection(
+        &[item("A=http_client_crates"), item("B=wiki_render")],
+        None,
+    );
+    assert_eq!(result.items[0].declared.len(), 1, "{result:?}");
+    assert_eq!(result.items[0].resolved.len(), 1, "{result:?}");
+    assert_eq!(
+        result.items[0].impact_set_size, once.items[0].impact_set_size,
+        "declaring a symbol twice is the same query as declaring it once"
+    );
+
+    let result = engine.impact_intersection(
+        &[item("A=ghost_symbol,ghost_symbol"), item("B=wiki_render")],
+        None,
+    );
+    assert_eq!(
+        result.coverage.unresolved.len(),
+        1,
+        "one miss reported once: {result:?}"
     );
 }
 

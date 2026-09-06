@@ -322,6 +322,14 @@ impl WorkItem {
                 None => items.push(parsed),
             }
         }
+        // A symbol named twice under one id is one intention, not two: leaving
+        // the repeat in would double an entry in every per-item projection and
+        // buy a second "did you mean" lookup for the same miss. Order is first
+        // appearance, so the caller's spelling order still drives the payload.
+        for item in &mut items {
+            let mut seen = std::collections::HashSet::new();
+            item.symbols.retain(|symbol| seen.insert(symbol.clone()));
+        }
         (items, warnings)
     }
 }
@@ -356,12 +364,14 @@ pub struct WorkItemImpact {
     pub item: String,
     /// The symbols it declared, as given.
     pub declared: Vec<String>,
-    /// The nodes those symbols resolved to (deterministic, symbol asc).
+    /// The distinct nodes those symbols resolved to (deterministic, symbol
+    /// asc). Two spellings naming one node appear once.
+    ///
+    /// Declared symbols that resolved to nothing are NOT mirrored here: they
+    /// are a coverage limit, and [`IntersectionCoverage::unresolved`] is the
+    /// one place limits are stated — with the "did you mean" suggestions this
+    /// row could not carry ([NFR-CC-04]).
     pub resolved: Vec<SymbolRef>,
-    /// Declared symbols the graph does not know. They contribute no
-    /// intersection, so their absence is a coverage limit and not evidence of
-    /// independence ([NFR-CC-04]).
-    pub unresolved: Vec<String>,
     /// Size of the transitive impact set: the resolved seeds plus everything
     /// upstream and downstream of them within `depth`.
     pub impact_set_size: u32,
