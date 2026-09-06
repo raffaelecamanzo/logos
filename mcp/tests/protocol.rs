@@ -149,7 +149,7 @@ async fn all_twenty_eight_tools_register_with_bare_names() {
     expected.sort_unstable();
     assert_eq!(
         names, expected,
-        "exactly the 9 navigation + 10 quality + 1 temporal + 3 coverage + 5 wiki tools must register (FR-MC-01)"
+        "exactly the 10 navigation + 10 quality + 1 temporal + 3 coverage + 5 wiki tools must register (FR-MC-01)"
     );
 
     // Namespacing is the HOST's job, derived from the server identity: names

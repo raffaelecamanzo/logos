@@ -1852,6 +1852,11 @@ fn overlap_fixture() -> TempDir {
                 "user.name=Logos Dev",
                 "-c",
                 "commit.gpgsign=false",
+                // See the note in logos-core/tests/branch_overlap.rs: a global
+                // `core.hooksPath` would let a foreign pre-commit hook veto
+                // these commits.
+                "-c",
+                "core.hooksPath=",
             ])
             .args(args)
             .output()
@@ -1922,8 +1927,12 @@ fn branch_overlap_reports_contention_and_loss_through_the_binary() {
         "the coverage limits ride the payload (NFR-CC-04): {payload}"
     );
 
-    // `--merge` reaches the engine: the merge result carries `left`'s edit and
-    // not `right`'s, so `right`'s work on `mid` is reported lost.
+    // `--merge` reaches the engine. What is reported lost is `right`'s edit to
+    // `base` and its whole file `src/right_only.rs` — work the merge result
+    // does not carry at all. Its edit to `mid` is NOT reported lost, because
+    // the merge changed that symbol too (taking `left`'s version): the merge
+    // check compares which symbols changed, not their content, and the payload
+    // states that limit. `contended` above is what carries that shape.
     let out = logos(
         tmp.path(),
         &[

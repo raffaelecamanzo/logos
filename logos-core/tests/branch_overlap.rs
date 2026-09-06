@@ -45,6 +45,13 @@ fn git(cwd: &Path, args: &[&str]) {
             "user.name=Logos Dev",
             "-c",
             "commit.gpgsign=false",
+            // A global `core.hooksPath` — which this project's own
+            // `logos init --hooks` teaches users to set — makes a foreign
+            // `pre-commit` veto the fixture's commits and fails the suite on
+            // the developer's machine but not in CI. An empty value disables
+            // hook lookup entirely.
+            "-c",
+            "core.hooksPath=",
         ])
         .args(args)
         .output()

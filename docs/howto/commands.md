@@ -20,6 +20,8 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`callers`](#callers) | ✅ | Direct callers of a symbol |
 | [`callees`](#callees) | ✅ | Direct callees of a symbol |
 | [`impact`](#impact) | ✅ | Transitive impact, both directions |
+| [`impact-intersection`](#impact-intersection) | ✅ | Which planned work items collide, and on what |
+| [`branch-overlap`](#branch-overlap) | ✅ | Which git refs collide, and what a merge did not carry |
 | [`affected`](#affected) | ✅ | Files affected by a changed set |
 | [`implements`](#implements) | ✅ | Code that implements a doc node or requirement |
 | [`referencing-docs`](#referencing-docs) | ✅ | Doc sections that reference a symbol |

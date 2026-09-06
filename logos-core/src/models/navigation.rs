@@ -1,5 +1,8 @@
-//! Navigation read-models — the eight navigation-service result types
-//! (S-013, [FR-NV-01..09]).
+//! Navigation read-models — the navigation-service result types
+//! (S-013, [FR-NV-01..13]).
+//!
+//! Countless on purpose: the header used to say "the eight", and two
+//! consecutive stories added to this file without noticing.
 //!
 //! Each struct corresponds to one `Engine` navigation method (ADR-01).
 //! All types derive [`serde::Serialize`] so CLI and MCP adapters can
