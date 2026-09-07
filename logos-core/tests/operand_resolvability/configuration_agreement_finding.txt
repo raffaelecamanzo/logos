@@ -1,0 +1,51 @@
+S-365, measured 2026-09-07 against ~/source/pec-services (84 members, cold).
+
+  BOTH CRA-01 ASSUMPTIONS HOLD. Neither change request is falsified.
+
+  arm           denom   NEW    %   disagree  missing  no-key
+  client-call     140    79   56%         2        0      59
+  broker           54    38   70%         0        0      16
+  COMBINED        194   117   60%         2        0      75
+
+Reported separately and combined; the per-arm figures, not the combined one,
+decide the two change requests. Materiality floor, declared before the run:
+>= 5 sites AND >= 10% of the arm's own denominator.
+
+CLIENT CALL (CR-115). 79 of the 140 sites the arm refuses today resolve to a
+configuration key on whose value every committed source agrees; 79 of the 88
+S-355 labelled a configuration lookup. Only 2 sites are refused for
+disagreement (both `mailserver.api.uri-get-archive`, whose it-jenkins profile
+diverges from the other two sources) and none for a missing key. The residue
+is 59 sites that resolve to no key at all: 41 Go names the unit never binds,
+14 unrecognised shapes (9 of them the `uriBuilder -> …` lambdas S-355 already
+named), and 4 Java method parameters.
+
+BROKER PUBLISH (CR-117 §3.3). 38 of 54 message-header publish sites resolve
+and agree. The 16 refusals are exactly CRA-04's parameter-passed topics — the
+intra-procedural hop that change request puts out of scope — so the residue
+after CR-117 is known rather than surprising. The real `brokers.scm` admits
+NONE of these 54 today: it matches a `(string_literal)` topic in argument
+position and never the header form at all.
+
+THE BASE URL, CR-115's other half. 25 `.baseUrl(…)` sites; 21 resolve to a
+key, of which 16 agree and 6 disagree. Of the 79 newly-admitted client sites,
+51 sit in a unit whose base URL also agrees, 8 in a unit whose base URL does
+not, and 20 in a unit that sets no base URL of its own. So the strict reading
+— the whole absolute URL must be proven — admits 51, and the FR-WS-08
+route-key reading (CR-115 §3.4: "the host need not resolve") admits 79. Both
+are material; both are on the record so the CR is decided on the reading it
+means.
+
+CONFIGURATION CORPUS. 174 sources (169 .yml, 3 .properties, 2 .yaml), 44
+unprofiled and 130 profiled across 5 profiles (docker, it, it-jenkins,
+it-local, local), defining 872 distinct keys. 69 @ConfigurationProperties
+classes indexed; 13 simple-name collisions resolve to nothing rather than to a
+guess. CR-115 CRA-03 — that the sources are committed and discoverable by the
+existing FR-SY-11 corpus admission — is confirmed as a by-product.
+
+WHY DISAGREEMENT IS RARE HERE, STATED SO IT IS NOT OVER-READ. The corpus varies
+its HOSTS per profile and not its PATHS: `base-url` is redefined in nearly every
+test profile, `uri-*` almost never. That is why the path arm shows 2
+disagreements and the base-URL arm shows 6 out of a much smaller population.
+A corpus that templated its route paths per environment would measure very
+differently, and this figure should not be extrapolated to one.

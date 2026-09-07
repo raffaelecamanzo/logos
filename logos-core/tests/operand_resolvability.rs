@@ -124,6 +124,18 @@ use logos_core::model::ArtifactRelation;
 use logos_core::plugin::{LanguagePlugin, LanguageRegistry};
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
+/// S-365's extension: configuration-key resolvability and profile agreement,
+/// over this harness's client-call corpus **and** the broker-publish corpus.
+/// One binary, one walk, one report — see its module docs for why the two arms
+/// share a gate.
+///
+/// `#[path]`-attached: a plain `tests/configuration_agreement.rs` would be
+/// auto-discovered by cargo as a *second* test target, which is precisely what
+/// the story forbids — one gate, not two measurements drifting apart. A
+/// directory alongside the root file carries no target.
+#[path = "operand_resolvability/configuration_agreement.rs"]
+mod configuration_agreement;
+
 // ── The taxonomy ────────────────────────────────────────────────────────────
 
 /// The operand taxonomy [S-355]'s first acceptance criterion names (and
@@ -322,12 +334,39 @@ struct Binding<'t> {
     decl_head: String,
     /// Whether the declaration head carries a const/final marker.
     is_const: bool,
+    /// The binding's **declared type**, when the grammar field-names one
+    /// (S-365). Read from the node rather than from `decl_head`, so a Java
+    /// `private final MailServerConfigurationApi mailServerConfigurationApi;`
+    /// yields the type it declares and not the first token of its modifiers.
+    decl_type: Option<String>,
 }
 
 /// Every name the compilation unit binds, with each binding kept — a name bound
 /// twice keeps both, so classification can take the most resolvable.
 struct Unit<'t> {
     bindings: BTreeMap<String, Vec<Binding<'t>>>,
+}
+
+impl Unit<'_> {
+    /// The **simple** type name a binding of `name` declares, when the unit
+    /// shows one (S-365). The first binding that carries a type wins; a name
+    /// the unit declares twice with different types is a shadowing the source
+    /// itself does not disambiguate at this layer, and the resulting key is
+    /// reported per-site so it can be audited.
+    fn declared_type(&self, name: &str) -> Option<&str> {
+        self.bindings
+            .get(name)?
+            .iter()
+            .find_map(|b| b.decl_type.as_deref())
+            .map(simple_type_name)
+    }
+}
+
+/// The simple name of a possibly-generic, possibly-qualified type:
+/// `com.acme.Props<String>` → `Props`.
+fn simple_type_name(declared: &str) -> &str {
+    let head = declared.split(['<', '[']).next().unwrap_or(declared).trim();
+    head.rsplit(['.', ':']).next().unwrap_or(head)
 }
 
 /// Declaration keywords that mark a binding **immutable** across the supported
@@ -418,6 +457,14 @@ impl<'t> Unit<'t> {
                     .split(|c: char| !c.is_alphanumeric() && c != '_')
                     .any(|tok| tok == *m)
             });
+            // The binding's own `type` field first (a parameter declares its
+            // own), then the declaration's (a Java field declares the type once
+            // for all its declarators).
+            let decl_type = node
+                .child_by_field_name("type")
+                .or_else(|| decl.child_by_field_name("type"))
+                .and_then(|n| n.utf8_text(src).ok())
+                .map(str::to_string);
 
             for (i, name_node) in name_nodes.iter().enumerate() {
                 let Some(name) = operand_name(*name_node, src) else {
@@ -434,6 +481,7 @@ impl<'t> Unit<'t> {
                     decl_kind: decl.kind().to_string(),
                     decl_head: decl_head.clone(),
                     is_const,
+                    decl_type: decl_type.clone(),
                 });
             }
         }
@@ -791,6 +839,11 @@ struct Site {
     /// refused.
     placeholder_folded: Option<String>,
     gate_admitted: bool,
+    /// S-365: what each operand's configuration accessor resolved to, `None`
+    /// for an operand that is not a configuration lookup.
+    key_outcomes: Vec<Option<configuration_agreement::KeyOutcome>>,
+    /// S-365: what [CR-115] §3.4's agreement rule does with this site.
+    cr115: configuration_agreement::Verdict,
 }
 
 impl Site {
@@ -903,22 +956,50 @@ struct Measurement {
     per_language: BTreeMap<String, LangStats>,
     /// Sites admitted under the strict reading (`final`/`const` bindings only).
     strict_const_admits: usize,
+    /// S-365: the committed configuration sources and what they prove.
+    config: configuration_agreement::ConfigCorpus,
+    /// S-365: the `@ConfigurationProperties` classes the corpus declares.
+    properties: configuration_agreement::PropertiesIndex,
+    /// S-365: the broker-publish arm, keyed by language.
+    broker: BTreeMap<String, configuration_agreement::BrokerStats>,
+    /// S-365: the `.baseUrl(…)` sites [CR-115] is titled after, keyed by
+    /// language. Reported separately from the path operands the headline
+    /// counts — see `report_base_urls` for why the two must not be merged.
+    base_urls: BTreeMap<String, Vec<configuration_agreement::BaseUrlSite>>,
 }
 
-fn scan_file(
-    rel: &str,
-    source: &str,
-    plugin: &dyn LanguagePlugin,
-    ctx: &SymbolContext,
-    stats: &mut LangStats,
-    strict: &mut usize,
-) {
+/// Everything a file scan needs besides the file itself. A struct rather than
+/// six more parameters: S-365 added the configuration corpus, the properties
+/// index and the module scope to a signature that was already at its limit.
+struct ScanCtx<'a> {
+    plugin: &'a dyn LanguagePlugin,
+    symbols: &'a SymbolContext,
+    config: &'a configuration_agreement::ConfigCorpus,
+    properties: &'a configuration_agreement::PropertiesIndex,
+    /// The module root the file belongs to — the scope [CR-115] §3.4's
+    /// agreement is taken over (see the S-365 module docs for why the
+    /// workspace scope is reported alongside rather than instead).
+    module: String,
+}
+
+impl<'a> ScanCtx<'a> {
+    fn resolver(&'a self) -> configuration_agreement::Resolver<'a> {
+        configuration_agreement::Resolver {
+            corpus: self.config,
+            props: self.properties,
+            module: &self.module,
+        }
+    }
+}
+
+fn scan_file(rel: &str, source: &str, ctx: &ScanCtx<'_>, stats: &mut LangStats, strict: &mut usize) {
+    let plugin = ctx.plugin;
     let Some(query) = plugin.query("invocations") else {
         return;
     };
     stats.files_scanned += 1;
 
-    let facts = extract::extract(&FileInput::new(rel, source), plugin, ctx);
+    let facts = extract::extract(&FileInput::new(rel, source), plugin, ctx.symbols);
     let detectors = &plugin.semantics().http_client_detectors;
     let gate = !detectors.is_empty()
         && facts
@@ -951,6 +1032,13 @@ fn scan_file(
         &plugin.semantics().invocation_methods,
     ) {
         let (kinds, folded, placeholder_folded, strictly) = classify_site(arg, src, &unit);
+        // S-365 rides the same captured argument: `operands` is deterministic,
+        // so re-decomposing costs a walk of one expression and keeps the S-355
+        // path — `classify_site` — untouched.
+        let mut nodes = Vec::new();
+        operands(arg, src, &mut nodes);
+        let judgement =
+            configuration_agreement::judge(&nodes, &kinds, src, &unit, ctx.resolver(), true);
         let site = Site {
             file: rel.to_string(),
             line,
@@ -964,6 +1052,8 @@ fn scan_file(
             folded,
             placeholder_folded,
             gate_admitted: gate,
+            key_outcomes: judgement.outcomes,
+            cr115: judgement.verdict,
         };
         if gate && site.newly_admissible_with_placeholders() && strictly {
             *strict += 1;
@@ -1049,10 +1139,34 @@ fn corpus_root() -> Option<PathBuf> {
     Some(expanded)
 }
 
+/// The corpus measurement, computed **once** per test binary.
+///
+/// S-355's test and S-365's read the same walk. `LOGOS_REF_WORKSPACE` is read
+/// once per process, so the two callers always pass the same `root`; a second
+/// root would silently reuse the first, which is why nothing else may call
+/// this.
+fn measurement(root: &Path) -> &'static Measurement {
+    static ONCE: std::sync::OnceLock<Measurement> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| measure(root))
+}
+
 fn measure(root: &Path) -> Measurement {
     let registry = LanguageRegistry::load(root).expect("plugin registry loads");
-    let ctx = SymbolContext::default();
-    let mut m = Measurement::default();
+    let symbols = SymbolContext::default();
+
+    // S-365, pass one: the committed configuration sources, the module
+    // partition, and the `@ConfigurationProperties` classes they bind. Both
+    // must exist before a single call site is judged, so this is a separate
+    // (cheap — parse-free except for the annotated classes) traversal rather
+    // than a second walk of the source corpus.
+    let config = configuration_agreement::ConfigCorpus::discover(root);
+    let properties = match registry.for_path("Probe.java") {
+        Some(java) => {
+            configuration_agreement::PropertiesIndex::build(root, &config, java.language())
+        }
+        None => configuration_agreement::PropertiesIndex::default(),
+    };
+    let mut m = Measurement { config, properties, ..Measurement::default() };
 
     // `parents(false)` matches production's `admission_walk_builder`
     // (containment: never read ignore files above the root). `git_global` and
@@ -1077,24 +1191,107 @@ fn measure(root: &Path) -> Measurement {
         let Some(plugin) = registry.for_path(&rel) else {
             continue;
         };
-        if plugin.query("invocations").is_none() {
+        // S-365 widened the admission from `invocations` alone: a language that
+        // ships `brokers` and not `invocations` carries the broker arm's corpus
+        // and must be walked. `scan_file` still counts only files whose plugin
+        // ships `invocations`, so the S-355 denominators are unchanged.
+        if plugin.query("invocations").is_none() && plugin.query("brokers").is_none() {
             continue;
         }
         let Ok(source) = std::fs::read_to_string(entry.path()) else {
             continue;
         };
         let lang = plugin.name().to_string();
-        let stats = m.per_language.entry(lang).or_default();
-        scan_file(
-            &rel,
-            &source,
+        let ctx = ScanCtx {
             plugin,
-            &ctx,
-            stats,
-            &mut m.strict_const_admits,
-        );
+            symbols: &symbols,
+            config: &m.config,
+            properties: &m.properties,
+            module: m.config.module_of(&rel).to_string(),
+        };
+        let stats = m.per_language.entry(lang.clone()).or_default();
+        scan_file(&rel, &source, &ctx, stats, &mut m.strict_const_admits);
+        let broker = m.broker.entry(lang.clone()).or_default();
+        scan_broker_file(&rel, &source, &ctx, broker);
+        let base_urls = scan_base_urls(&rel, &source, &ctx);
+        if !base_urls.is_empty() {
+            m.base_urls.entry(lang).or_default().extend(base_urls);
+        }
     }
     m
+}
+
+/// The `.baseUrl(…)` sites of one file (S-365, [CR-115]'s other half).
+fn scan_base_urls(
+    rel: &str,
+    source: &str,
+    ctx: &ScanCtx<'_>,
+) -> Vec<configuration_agreement::BaseUrlSite> {
+    let plugin = ctx.plugin;
+    let Some(query) = configuration_agreement::base_url_query(plugin.language()) else {
+        return Vec::new();
+    };
+    let mut parser = Parser::new();
+    if parser.set_language(plugin.language()).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+    let src = source.as_bytes();
+    let unit = Unit::build(tree.root_node(), src);
+    configuration_agreement::collect_base_urls(
+        &query,
+        tree.root_node(),
+        src,
+        &unit,
+        rel,
+        ctx.resolver(),
+    )
+}
+
+/// The broker-publish arm of the same walk (S-365, [CR-117] §3.3).
+///
+/// Two readings of one file: what the **real** `brokers.scm` captures today
+/// (the denominator of what the arm already emits), and the message-header
+/// publish form it cannot see, whose topic operand is classified and judged by
+/// exactly the same configuration rule the client arm uses.
+fn scan_broker_file(
+    rel: &str,
+    source: &str,
+    ctx: &ScanCtx<'_>,
+    stats: &mut configuration_agreement::BrokerStats,
+) {
+    let plugin = ctx.plugin;
+    let Some(brokers) = plugin.query("brokers") else {
+        return;
+    };
+    stats.files_scanned += 1;
+
+    let mut parser = Parser::new();
+    if parser.set_language(plugin.language()).is_err() {
+        return;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return;
+    };
+    let src = source.as_bytes();
+    configuration_agreement::count_broker_captures(brokers, tree.root_node(), src, stats);
+
+    let Some(header_query) = configuration_agreement::header_publish_query(plugin.language())
+    else {
+        return;
+    };
+    stats.header_form_supported = true;
+    let unit = Unit::build(tree.root_node(), src);
+    stats.sites.extend(configuration_agreement::collect_header_publishes(
+        &header_query,
+        tree.root_node(),
+        src,
+        &unit,
+        rel,
+        ctx.resolver(),
+    ));
 }
 
 /// Print the measurement and return the headline newly-admitted count.
@@ -1237,8 +1434,8 @@ fn measure_operand_resolvability_over_the_reference_workspace() {
         );
         return;
     };
-    let m = measure(&root);
-    let total_new = report(&m);
+    let m = measurement(&root);
+    let total_new = report(m);
 
     // Cross-check the harness against the real pass: every reference the arm
     // actually emitted must correspond to a site the harness classified as a
@@ -1349,6 +1546,10 @@ fn analyse(filename: &str, source: &str) -> Analysed {
             folded: folded.clone(),
             placeholder_folded: placeholder.clone(),
             gate_admitted: true,
+            // S-355's fixtures assert folding, not configuration resolution;
+            // the S-365 fixtures drive `judge` through its own entry point.
+            key_outcomes: Vec::new(),
+            cr115: configuration_agreement::Verdict::NotConfigurationBound,
         },
         kinds,
         folded,
