@@ -142,7 +142,7 @@ pub fn git_root_known(path: &Path) -> Option<bool> {
 /// both need when matching a symlink-resolved `git` output path against a hint
 /// that may not be. If either path cannot be canonicalised (it does not exist,
 /// or is inaccessible), the comparison falls back to literal path equality.
-fn paths_equal(a: &Path, b: &Path) -> bool {
+pub(crate) fn paths_equal(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,

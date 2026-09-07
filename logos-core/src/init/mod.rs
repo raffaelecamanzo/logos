@@ -826,10 +826,39 @@ fn install_hooks(root: &Path) -> Result<InitStep> {
         }
         wrote = true;
     }
+
+    // CR-106: `core.hooksPath` stays the relative `.logos/hooks`, which git
+    // resolves against whichever working tree the command runs in — so every
+    // OTHER working tree of this repository needs its own hooks directory or
+    // the installation this step just reported fires nothing there. Seeding
+    // runs on the unchanged path too: an existing installation predating this
+    // behaviour has worktrees that were never seeded.
+    let seeded = crate::hooks::seed_all_worktrees(root).len();
+    let worktrees = match crate::hooks::linked_worktree_install_notice(root) {
+        // Installed from inside a linked worktree: it covers this tree alone,
+        // and saying so is not optional. `init --hooks` is the command users
+        // actually run, so a silent partial installation here is exactly the
+        // "every signal reads as success" failure CR-106 exists to close.
+        Some(notice) => format!("; {notice}"),
+        None => match seeded {
+            0 => String::new(),
+            1 => "; 1 linked worktree seeded".to_string(),
+            n => format!("; {n} linked worktrees seeded"),
+        },
+    };
+
     Ok(match (wrote, any_existed) {
-        (false, _) => step(TARGET, InitAction::Unchanged, ""),
-        (true, false) => step(TARGET, InitAction::Created, "core.hooksPath → .logos/hooks"),
-        (true, true) => step(TARGET, InitAction::Updated, "managed hooks regenerated"),
+        (false, _) => step(TARGET, InitAction::Unchanged, worktrees.trim_start_matches("; ")),
+        (true, false) => step(
+            TARGET,
+            InitAction::Created,
+            format!("core.hooksPath → .logos/hooks{worktrees}"),
+        ),
+        (true, true) => step(
+            TARGET,
+            InitAction::Updated,
+            format!("managed hooks regenerated{worktrees}"),
+        ),
     })
 }
 

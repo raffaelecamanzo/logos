@@ -913,3 +913,73 @@ fn init_i_quality_report_never_overwrites_a_foreign_settings_file() {
         "the foreign file is untouched by the quality-report merge"
     );
 }
+
+// ── CR-106 / FR-IN-03: `init --hooks` covers every working tree ──────────────
+//
+// These exercise the path a user actually takes. `logos init --hooks` reaches
+// `crate::init::install_hooks`, a separate implementation from the
+// `hooks::install` library seam the `tests/worktree_hooks.rs` suite drives —
+// and a reachability defect that survives only on the shipped path is exactly
+// the shape CR-106 exists to close, so the shipped path needs its own proof.
+
+/// A committed repo plus a linked worktree on a new branch.
+fn repo_with_worktree(name: &str) -> (TempDir, TempDir, std::path::PathBuf) {
+    let main = TempDir::new().unwrap();
+    let trees = TempDir::new().unwrap();
+    git_init(main.path());
+    assert!(git(main.path(), &["config", "user.email", "t@example.invalid"]).status.success());
+    assert!(git(main.path(), &["config", "user.name", "Logos Test"]).status.success());
+    fs::write(main.path().join("base.rs"), "pub fn base() {}\n").unwrap();
+    assert!(git(main.path(), &["add", "--", "base.rs"]).status.success());
+    assert!(git(main.path(), &["commit", "-q", "-m", "base"]).status.success());
+
+    let worktree = trees.path().join(name);
+    let added = git(
+        main.path(),
+        &["worktree", "add", "-q", "-b", name, &worktree.display().to_string()],
+    );
+    assert!(added.status.success(), "{}", String::from_utf8_lossy(&added.stderr));
+    (main, trees, worktree)
+}
+
+#[test]
+fn init_hooks_seeds_the_repositorys_other_working_trees() {
+    let (main, _trees, worktree) = repo_with_worktree("feature");
+
+    let result = Engine::init_with(main.path(), &hook_opts()).unwrap();
+
+    let s = step(&result, ".logos/hooks");
+    assert_eq!(s.action, InitAction::Created);
+    assert!(s.detail.contains("1 linked worktree seeded"), "{s:?}");
+    for hook in ["post-commit", "post-checkout", "post-merge", "pre-push"] {
+        let seeded = worktree.join(".logos/hooks").join(hook);
+        assert!(
+            fs::symlink_metadata(&seeded).is_ok_and(|m| m.file_type().is_symlink()),
+            "{hook} must be seeded into the worktree as a symlink"
+        );
+        assert!(seeded.is_file(), "{hook} must resolve to the primary's script");
+    }
+    // The relative path is preserved — reachability came from seeding
+    // (FR-IN-06 AC1), and it reads the same from the worktree.
+    for tree in [main.path(), worktree.as_path()] {
+        let configured = git(tree, &["config", "core.hooksPath"]);
+        assert_eq!(String::from_utf8_lossy(&configured.stdout).trim(), ".logos/hooks");
+    }
+}
+
+#[test]
+fn init_hooks_from_a_linked_worktree_names_the_limit_it_installed_under() {
+    let (main, _trees, worktree) = repo_with_worktree("feature");
+
+    let result = Engine::init_with(&worktree, &hook_opts()).unwrap();
+
+    // It installs where it was asked to…
+    assert!(worktree.join(".logos/hooks/pre-push").is_file());
+    // …and does not silently present that as repository-wide coverage.
+    let s = step(&result, ".logos/hooks");
+    assert!(s.detail.contains("primary checkout"), "{s:?}");
+    assert!(
+        !main.path().join(".logos/hooks").exists(),
+        "the primary must not be wired to a worktree's scripts"
+    );
+}
