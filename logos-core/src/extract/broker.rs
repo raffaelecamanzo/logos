@@ -42,6 +42,19 @@
 //! not a literal is its own site and does report, alongside the first attribute's
 //! bound topic.
 //!
+//! **Both roles of the arm use this vocabulary** (S-370, [CR-117]). [CR-107] reached
+//! it from the subscribe side alone; the publish side now records refusals too, from
+//! its *header* form — a `MessageBuilder…setHeader(KafkaHeaders.TOPIC, …)` site,
+//! which is where idiomatic Spring actually puts a topic and which the arm did not
+//! recognise at all while it looked only in argument position. The interpreter below
+//! needed no change for it: `@broker.publish.topic.slot` / `@broker.publish.site`
+//! were already interpreted, and `unkeyable_reason` already maps the publish
+//! relation to `topic-not-literal`, so recognising the site was purely a `.scm`
+//! edit. What that buys on a real estate is refusals, not edges — measured, **all
+//! 54** header-form sites of the 84-member reference workspace carry a non-literal
+//! operand, so the arm's honest output there is 54 recorded refusals and zero
+//! producers ([CR-117] §2).
+//!
 //! [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
 //! [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
 //! [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
@@ -560,6 +573,71 @@ fn consume_slice(consumer: &Consumer) {
             dynamic.refs.iter().all(|r| r.relation.is_none()),
             "the Rust arm records no refusal — see this test's doc comment: {:?}",
             dynamic.refs
+        );
+    }
+
+    /// **S-370 / [CR-117]'s Rust publish-side audit, recorded as a test.**
+    ///
+    /// S-370 requires `plugins/rust/queries/brokers.scm` to be audited for the same
+    /// publish-side blind spot the Java arm had — a topic that never reaches the
+    /// `send` call — and the finding recorded **either way**, including "no
+    /// equivalent form exists in the Rust corpus" if that is the answer. It is that
+    /// answer, and this test is the finding's evidence: the file is unchanged and
+    /// its behaviour is pinned so the gap is a stated decision rather than an
+    /// omission.
+    ///
+    /// Measured 2026-09-07: the 84-member reference workspace holds **0** `.rs`
+    /// files, and this repository declares no broker-client dependency and carries
+    /// no real producer site — so there is no Rust broker source for the arm to be
+    /// blind to. The nearest structural analogue, rdkafka's `FutureRecord::to(…)`
+    /// record builder, is asserted below to capture nothing today and to
+    /// manufacture no refusal either. That is Java's blind spot in a different
+    /// shape — a builder method, not a header constant — and closing it needs its
+    /// own reasoning and a corpus to measure a `to("…")` pattern's false-positive
+    /// rate against, which `brokers.scm`'s own scope note explains this repository
+    /// cannot supply.
+    ///
+    /// [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
+    #[test]
+    fn the_rust_publish_side_has_no_header_form_equivalent_and_is_unchanged() {
+        // The argument-position form the Rust arm DOES recognise still does — the
+        // baseline this audit leaves untouched.
+        let captured = extract_rust(r#"
+fn emit(bus: &Bus, payload: &str) {
+    bus.publish("orders", payload);
+}
+"#);
+        assert_eq!(
+            targets(&captured, ArtifactRelation::BrokerPublish),
+            vec!["orders".to_string()],
+            "the audit changes nothing about what the Rust arm already captures: {:?}",
+            captured.refs
+        );
+
+        // The analogue of Java's blind spot: the topic is on the record builder and
+        // `send` receives the assembled record. Captured: nothing. Refused: nothing
+        // recorded either — the Rust arm records no refusals at all, by the decision
+        // `brokers.scm` documents (bare method verbs with no receiver typing would
+        // manufacture a coverage denominator out of ordinary code).
+        let builder_form = extract_rust(r#"
+async fn emit(producer: &FutureProducer, payload: &str) {
+    let record = FutureRecord::to("orders").payload(payload).key("k");
+    producer.send(record, Duration::from_secs(0)).await.unwrap();
+}
+"#);
+        assert!(
+            builder_form
+                .refs
+                .iter()
+                .all(|r| r.relation != Some(ArtifactRelation::BrokerPublish)),
+            "the rdkafka builder form is NOT recognised — the recorded gap, pinned so \
+             a future story finds a decision rather than an omission: {:?}",
+            builder_form.refs
+        );
+        assert!(
+            builder_form.refs.iter().all(|r| r.relation.is_none()),
+            "and no refusal is manufactured for it either: {:?}",
+            builder_form.refs
         );
     }
 
@@ -1297,5 +1375,412 @@ class Relay {
         assert!(broker.iter().all(|r| r.source.as_str().contains("relay")
             && r.target == "orders"
             && r.form == RefForm::Method));
+    }
+    /// **S-370 / [CR-117] acceptance: the header-form publish site, and its whole
+    /// operand table.**
+    ///
+    /// The publish arm recognised a topic only in **argument** position
+    /// (`kafkaTemplate.send("orders", …)`), and idiomatic Spring never puts it
+    /// there: the topic reaches the message through
+    /// `MessageBuilder…setHeader(KafkaHeaders.TOPIC, …)` and `send(message)`
+    /// receives the assembled `Message`. Measured on the 84-member reference
+    /// estate, **all 54** `KafkaHeaders.TOPIC` sites are written that way and
+    /// **zero** publish sites anywhere carry a topic-shaped first argument, so
+    /// [FR-WS-10]'s producer promise yielded 0 `Producer` nodes
+    /// ([CR-117] §2).
+    ///
+    /// One test, one table — because a single case would leave the class untested,
+    /// and because each row's outcome is decided by a *different* part of the
+    /// query. Each operand shape is either **captured** (a static literal, whatever
+    /// characters it carries) or **refused with the reason it earns** (one keyless
+    /// `topic-not-literal` row, [NFR-CC-04]). The whole table lives in one file so
+    /// the patterns are also proven not to shadow each other — the failure mode
+    /// S-339 measured when a wildcard slot silently cost the literal patterns their
+    /// matches.
+    ///
+    /// **Zero captures is the expected outcome on the real corpus, and it is not a
+    /// failure of this story.** S-365 measured that none of the 54 header-form sites
+    /// carries a literal topic, so recognition alone admits nothing; keying a
+    /// configuration-bound operand is [CR-117] §3.2's canonical-identity rule, which
+    /// S-371 owns and which is not planned. What this story delivers is the honest
+    /// refusal rows — the site is visible and says why it did not bind, instead of
+    /// being indistinguishable from a codebase with no producer at all.
+    ///
+    /// [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn every_header_form_publish_operand_shape_is_captured_or_refused_with_its_reason() {
+        // The two literal rows are written exactly as the reference estate writes a
+        // topic *would* it write one (`${…}` is Spring's standard form), and the five
+        // refused rows are the shapes the estate actually writes: 16 sites pass the
+        // topic as a method parameter and 35 read it off a `@ConfigurationProperties`
+        // getter.
+        let src = r#"
+package com.acme;
+class KafkaProducer {
+    private static final String PREFIX = "acme.";
+    private KafkaTemplate<String, SpecificRecord> kafkaTemplate;
+    private KafkaTopics kafkaTopics;
+    private String topicField;
+
+    @Value("${spring.kafka.topics.notifications}")
+    private String notificationTopic;
+
+    // ── captured: a plain static literal.
+    public void byLiteral(SpecificRecord payload) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, "orders")
+                .build());
+    }
+
+    // ── captured: a `${…}` placeholder literal — a static literal like any other,
+    //    keyed by its own text ([CR-107]).
+    public void byPlaceholderLiteral(SpecificRecord payload) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, "${spring.kafka.topics.shipments}")
+                .build());
+    }
+
+    // ── refused: a `@Value`-injected field, referenced bare. The estate's own
+    //    shape for three of its sites.
+    public void byInjectedField(SpecificRecord payload) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, notificationTopic)
+                .build());
+    }
+
+    // ── refused: a `@ConfigurationProperties` getter — the estate's majority shape.
+    public void byConfigurationGetter(SpecificRecord payload) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, kafkaTopics.getArchiveCommands())
+                .build());
+    }
+
+    // ── refused: a method parameter. All 13 src/main sites are this shape.
+    public void byMethodParameter(SpecificRecord payload, String topic) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, topic)
+                .build());
+    }
+
+    // ── refused: a concatenation. Note the operand *contains* a literal, and that
+    //    literal must not bind — the topic is `PREFIX + "orders"`, which has no
+    //    static identity.
+    public void byConcatenation(SpecificRecord payload) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, PREFIX + "orders")
+                .build());
+    }
+
+    // ── refused: a qualified field. Asserted because deleting `(field_access)`
+    //    from the slot enumeration would otherwise be undetectable — the mutation
+    //    S-339's review caught on the subscribe side.
+    public void byQualifiedField(SpecificRecord payload) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, this.topicField)
+                .build());
+    }
+}
+"#;
+        let facts = extract_java(src);
+
+        // ── The captured half of the table: exactly the two literals, keyed by their
+        //    own text. `send(message)` carries no string argument, so the pre-existing
+        //    argument-position pattern contributes nothing here — no site is counted
+        //    twice.
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish)
+                .into_iter()
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>(),
+            vec![
+                "${spring.kafka.topics.shipments}".to_string(),
+                "orders".to_string(),
+            ],
+            "both header-form literals bind, keyed as written, and nothing else does: {:?}",
+            facts.refs
+        );
+
+        // ── The refused half: one keyless row per site, attributed to the publishing
+        //    method that earned it. Named per method rather than counted, so a
+        //    refusal recorded against the wrong shape cannot pass.
+        let mut refused: Vec<&str> = facts
+            .refs
+            .iter()
+            .filter(|r| {
+                r.relation == Some(ArtifactRelation::BrokerPublish) && r.target.is_empty()
+            })
+            .map(|r| r.source.as_str())
+            .collect();
+        refused.sort();
+        for want in [
+            "byInjectedField",
+            "byConfigurationGetter",
+            "byMethodParameter",
+            "byConcatenation",
+            "byQualifiedField",
+        ] {
+            assert!(
+                refused.iter().any(|s| s.contains(want)),
+                "the `{want}` operand is refused and its site recorded: {refused:?}"
+            );
+        }
+        assert_eq!(
+            refused.len(),
+            5,
+            "five non-keyable operands are five refusals — and the two literal sites \
+             record none, because they bound: {refused:?}"
+        );
+
+        // ── Never fabricated: no refusal carries the operand's source text as a
+        //    topic key, which is the failure `broker_topic_key` and this row's empty
+        //    target exist to prevent ([NFR-RA-05]).
+        for forbidden in [
+            "topic",
+            "notificationTopic",
+            "this.topicField",
+            "topicField",
+            "kafkaTopics.getArchiveCommands()",
+            "PREFIX + \"orders\"",
+            "PREFIX",
+        ] {
+            assert!(
+                !targets(&facts, ArtifactRelation::BrokerPublish)
+                    .iter()
+                    .any(|t| t == forbidden),
+                "`{forbidden}` is an operand, never a topic key: {:?}",
+                facts.refs
+            );
+        }
+    }
+
+    /// **S-370's near-miss guard.** The site is recognised by the **topic header
+    /// constant**, never by the builder type — so a message builder from another
+    /// library setting an unrelated header is not a publish site, and no coverage
+    /// denominator is manufactured out of ordinary code.
+    ///
+    /// The sharp case is the last one: a *different* class's `TOPIC` constant. It
+    /// proves the query keys on `KafkaHeaders.TOPIC` **as written** rather than on a
+    /// bare `TOPIC` name — the over-match a `field: (identifier) @k (#eq? @k
+    /// "TOPIC")` predicate alone would let through. The reference estate writes all
+    /// 54 of its sites in the qualified form and none through a static import, so
+    /// the qualified form is what is recognised; a statically-imported bare `TOPIC`
+    /// is deliberately not, and that decision is recorded in `brokers.scm`.
+    #[test]
+    fn a_near_miss_builder_setting_an_unrelated_header_is_not_a_publish_site() {
+        let src = r#"
+package com.acme;
+class NotAProducer {
+    private String topic;
+
+    // A message builder from another library, setting headers that have nothing to
+    // do with a Kafka topic.
+    public void enrich(String payload, String correlationId) {
+        SomeOtherBuilder.withPayload(payload)
+                .setHeader(HttpHeaders.CONTENT_TYPE, "application/json")
+                .setHeader("X-Correlation-Id", correlationId)
+                .setHeader(AmqpHeaders.ROUTING_KEY, topic)
+                .build();
+    }
+
+    // Spring's own builder, but an unrelated Kafka header: the message key is not
+    // the topic.
+    public void keyOnly(String payload, String key) {
+        MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.MESSAGE_KEY, key)
+                .build();
+    }
+
+    // The sharp near miss: another class's `TOPIC` constant.
+    public void otherTopicConstant(String payload) {
+        MessageBuilder.withPayload(payload)
+                .setHeader(MyHeaders.TOPIC, topic)
+                .build();
+    }
+
+    // A *read* of the Kafka topic header is not a publish either.
+    public String inspect(MessageHeaders headers) {
+        return (String) headers.get(KafkaHeaders.TOPIC);
+    }
+
+    // Two arguments in exactly the recognised positions, but the call is not a
+    // header SETTER — it builds a map. This is the case that gives the
+    // `setHeader`/`setHeaderIfAbsent` predicate its coverage: `headers.get(…)`
+    // above is excluded by arity alone, so without this row deleting the predicate
+    // would be undetectable.
+    public Map<String, Object> headerMap(String topic) {
+        return Map.of(KafkaHeaders.TOPIC, topic);
+    }
+
+    // INVERTED: the Kafka topic header appears as the header's *value*, not as its
+    // key — a trace header whose value happens to be the string `"kafka_topic"`.
+    // Nothing about it is a publish. (Sibling order is enough to exclude it: a
+    // tree-sitter query matches sibling child patterns in order, so the header
+    // pattern can never be assigned to a node that follows the operand slot.)
+    public void invertedHeader(String payload) {
+        MessageBuilder.withPayload(payload)
+                .setHeader(Tracing.FORWARDED_FROM, KafkaHeaders.TOPIC)
+                .build();
+    }
+
+    // NOT THE FIRST TWO ARGUMENTS: a three-argument `setHeader` from some other
+    // API, where the Kafka topic header sits in the middle. This is what gives the
+    // query's position anchors their coverage — sibling order alone admits it,
+    // because the header still precedes the operand; only the leading `.` (the
+    // header is the FIRST argument) and the middle `.` (the operand is IMMEDIATELY
+    // after it) exclude it.
+    public void scopedSetHeader(String payload, String topic) {
+        ScopedHeaders.withPayload(payload)
+                .setHeader(Scope.OUTBOUND, KafkaHeaders.TOPIC, topic)
+                .build();
+    }
+
+    // The same two near misses again with a LITERAL operand, which is what reaches
+    // the BINDING pattern rather than the refusal slot. Without these rows, dropping
+    // either of the binding pattern's own predicates would be undetectable: every
+    // other row here carries a non-literal operand and so exercises only the slot.
+    public void otherTopicConstantWithLiteral(String payload) {
+        MessageBuilder.withPayload(payload)
+                .setHeader(MyHeaders.TOPIC, "orders")
+                .build();
+    }
+
+    public Map<String, Object> headerMapWithLiteral() {
+        return Map.of(KafkaHeaders.TOPIC, "orders");
+    }
+
+    public void scopedSetHeaderWithLiteral(String payload) {
+        ScopedHeaders.withPayload(payload)
+                .setHeader(Scope.OUTBOUND, KafkaHeaders.TOPIC, "orders")
+                .build();
+    }
+}
+"#;
+        let facts = extract_java(src);
+        let publishes: Vec<String> = facts
+            .refs
+            .iter()
+            .filter(|r| r.relation == Some(ArtifactRelation::BrokerPublish))
+            .map(|r| format!("{} -> {:?}", r.source.as_str(), r.target))
+            .collect();
+        assert!(
+            publishes.is_empty(),
+            "no near-miss header is a publish site — neither bound nor refused, \
+             because there is no broker site to attribute a refusal to: {publishes:?}"
+        );
+    }
+
+    /// **Why the operand shapes are ENUMERATED and not a `(_)` wildcard, asserted
+    /// rather than asserted-in-prose.**
+    ///
+    /// The subscribe slots carry this rule already, but for a reason that does
+    /// **not** transfer, and it is worth being exact rather than inheriting the
+    /// argument: there, `value: (_)` overlaps the `value: (string_literal)`
+    /// patterns on the same node and measurably cost the scalar literal patterns
+    /// their matches. Measured on the publish side, a wildcard does **not** do
+    /// that — the header form's position anchors and the interpreter's own site
+    /// reconcile between them keep a literal operand binding and cancel the
+    /// candidate the wildcard raises at that same site.
+    ///
+    /// So the enumeration here buys precision, not de-shadowing: the arm reports a
+    /// refusal only for an operand shape it has actually reasoned about, and the
+    /// two sides of the arm keep ONE vocabulary rather than two. The boundary that
+    /// follows is asserted here so it is a decision rather than an accident — a
+    /// ternary topic operand is refused (it binds nothing, never fabricates) and is
+    /// deliberately **not reported**, exactly as the subscribe side treats an
+    /// operand shape outside its own four.
+    ///
+    /// If a future story judges that boundary too quiet for [NFR-CC-04], the fix is
+    /// to add the shape to BOTH sides' enumerations and change this test — not to
+    /// widen one side to a wildcard.
+    #[test]
+    fn an_operand_shape_outside_the_enumeration_binds_nothing_and_is_not_reported() {
+        let src = r#"
+package com.acme;
+class C {
+    private KafkaTemplate<String, String> kafkaTemplate;
+
+    public void byTernary(String payload, boolean urgent) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, urgent ? "urgent" : "normal")
+                .build());
+    }
+}
+"#;
+        let facts = extract_java(src);
+        let publishes: Vec<String> = facts
+            .refs
+            .iter()
+            .filter(|r| r.relation == Some(ArtifactRelation::BrokerPublish))
+            .map(|r| format!("{} -> {:?}", r.source.as_str(), r.target))
+            .collect();
+        assert!(
+            publishes.is_empty(),
+            "a ternary operand is outside the enumeration: it fabricates no topic \
+             (the half that matters, [NFR-RA-05]) and reports no refusal — the \
+             pre-[CR-107] behaviour the subscribe side also keeps: {publishes:?}"
+        );
+    }
+
+    /// **The no-re-keying guard.** This story *adds* sites; it must not change the
+    /// key of a topic that already bound. The argument-position publish and the
+    /// annotation subscribe keep byte-identical keys with the header-form patterns
+    /// in place, including in one file where a header-form site sits beside them.
+    #[test]
+    fn adding_the_header_form_leaves_already_captured_topic_keys_byte_identical() {
+        let src = r#"
+package com.acme;
+class Mixed {
+    private KafkaTemplate<String, String> kafkaTemplate;
+
+    @KafkaListener(topics = "${spring.kafka.topics.orders}")
+    public void onOrder(String msg) {}
+
+    public void byArgument(String payload) {
+        kafkaTemplate.send("orders", payload);
+    }
+
+    public void byHeader(String payload) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, "orders")
+                .build());
+    }
+}
+"#;
+        let facts = extract_java(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["${spring.kafka.topics.orders}".to_string()],
+            "the subscribe key is unchanged, byte for byte: {:?}",
+            facts.refs
+        );
+        // Two publish sites on one topic in one class: the argument form and the
+        // header form. They key identically — which is the point — and the ledger
+        // dedup the production caller runs collapses them to one row, so the
+        // interpreter's own output is asserted here before that collapse.
+        let publishes: Vec<&str> = facts
+            .refs
+            .iter()
+            .filter(|r| r.relation == Some(ArtifactRelation::BrokerPublish))
+            .map(|r| r.target.as_str())
+            .collect();
+        assert_eq!(
+            publishes,
+            vec!["orders", "orders"],
+            "both publish forms key the topic identically: {:?}",
+            facts.refs
+        );
+        let sources: Vec<&str> = facts
+            .refs
+            .iter()
+            .filter(|r| r.relation == Some(ArtifactRelation::BrokerPublish))
+            .map(|r| r.source.as_str())
+            .collect();
+        assert!(
+            sources.iter().any(|s| s.contains("byArgument"))
+                && sources.iter().any(|s| s.contains("byHeader")),
+            "each form is attributed to its own publishing method: {sources:?}"
+        );
     }
 }

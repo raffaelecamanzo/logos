@@ -374,3 +374,223 @@ fn real_listener_sources_promote_a_non_empty_member_topic_inventory() {
         assert!(!summary.topic.trim().is_empty(), "no keyless topic: {summary:?}");
     }
 }
+
+/// **S-370 / [CR-117]'s corpus criterion: the PUBLISH half.**
+///
+/// The measurement above reconciles the subscribe side and, in its recorded
+/// finding, attributes the publish side's `0` to a named cause on the other half of
+/// the arm — the `MessageBuilder` header form the query did not recognise. This
+/// test is that half, measured the same way: it walks the reference workspace
+/// read-only, runs the real `extract` over each admitted file, and reconciles what
+/// the arm now says about the publish side against textual markers derived
+/// independently of the capture.
+///
+/// # What "reconciled" means here, and why the answer is 0 producers
+///
+/// S-365 measured — before this story was written — that **none** of the estate's
+/// header-form sites carries a literal topic operand. So recognising the site
+/// admits no topic and promotes no `Producer` node, and that is the expected
+/// outcome rather than a failure: the deliverable is the refusal rows. What this
+/// test holds the arm to is therefore not a capture count but the [NFR-CC-04]
+/// property: **no file that publishes is silent**. Every file carrying
+/// `KafkaHeaders.TOPIC` either captures a topic or records a refusal that says why
+/// it did not, and the refusal count reconciles site-for-site against the textual
+/// marker.
+///
+/// # Recorded finding
+///
+/// ```text
+/// S-370 / CR-117, measured 2026-09-07 against ~/source/pec-services (84 members,
+/// 2447 admitted .java files).
+///
+///   files carrying KafkaHeaders.TOPIC:                52   (13 in src/main, across 12 members)
+///   textual `.setHeader(KafkaHeaders.TOPIC, …)` sites: 54
+///     of which the operand is a bare `topic` parameter: 16   (13 main + 3 test)
+///     of which a @ConfigurationProperties getter:       35
+///     of which another identifier (@Value-injected):     3
+///     of which a static string literal:                  0   ← why 0 producers
+///   recognised publish sites (captured + refused):     54   ← 54 of 54
+///   captured publish topic keys:                        0
+///   recorded `topic-not-literal` publish refusals:     54
+///   header-form files that are silent:                  0   ← the NFR-CC-04 claim
+///
+/// BEFORE this story the same walk recognised 0 of the 54 and recorded 0 refusals:
+/// the arm looked for a topic in argument position, and no publish site in the
+/// estate has one. That is the whole of FR-WS-10's producer promise yielding 0
+/// Producer nodes on a 12-member Kafka estate.
+/// ```
+///
+/// [CR-117]: ../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[test]
+fn the_reference_workspace_reports_reconciled_publish_sites_when_one_is_configured() {
+    let Some(root) = corpus_root() else {
+        eprintln!(
+            "SKIPPED: set LOGOS_REF_WORKSPACE=<path to the reference workspace> to run the \
+             S-370 broker publish corpus measurement (this test's docs carry the recorded \
+             finding it reproduces)."
+        );
+        return;
+    };
+
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    let java = registry.for_extension("java").expect("java plugin present");
+
+    // Textual markers, derived independently of the capture so the reconciliation is
+    // a join and not a tautology.
+    let mut header_files: BTreeSet<String> = BTreeSet::new();
+    let mut main_header_files: BTreeSet<String> = BTreeSet::new();
+    let mut main_header_members: BTreeSet<String> = BTreeSet::new();
+    let mut textual_sites = 0usize;
+    let mut textual_parameter_sites = 0usize;
+    // What the arm says.
+    let mut captured: BTreeMap<String, usize> = BTreeMap::new();
+    let mut refusals: BTreeMap<String, usize> = BTreeMap::new();
+    let mut captured_keys: BTreeSet<String> = BTreeSet::new();
+
+    let walker = ignore::WalkBuilder::new(&root)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(false)
+        .ignore(false)
+        .parents(false)
+        .build();
+
+    for entry in walker.flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("java") {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(&root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().to_string();
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if !source.contains("KafkaHeaders.TOPIC") {
+            continue;
+        }
+        header_files.insert(rel.clone());
+        if rel.contains("/src/main/") {
+            main_header_files.insert(rel.clone());
+            // The workspace member is the first path segment — `deprecated-mailbox-core`
+            // owns two Maven modules, so files and members do not count 1:1.
+            if let Some(member) = rel.split('/').next() {
+                main_header_members.insert(member.to_string());
+            }
+        }
+        textual_sites += source.matches("setHeader(KafkaHeaders.TOPIC,").count();
+        textual_parameter_sites += source.matches("setHeader(KafkaHeaders.TOPIC, topic)").count();
+
+        let facts = extract(&FileInput::new(&rel, &source), java, &SymbolContext::default());
+        for reference in &facts.refs {
+            if reference.relation != Some(ArtifactRelation::BrokerPublish) {
+                continue;
+            }
+            if reference.target.is_empty() {
+                *refusals.entry(rel.clone()).or_default() += 1;
+            } else {
+                *captured.entry(rel.clone()).or_default() += 1;
+                captured_keys.insert(reference.target.clone());
+            }
+        }
+    }
+
+    let captured_total: usize = captured.values().sum();
+    let refused_total: usize = refusals.values().sum();
+    let silent: Vec<&String> = header_files
+        .iter()
+        .filter(|f| !captured.contains_key(*f) && !refusals.contains_key(*f))
+        .collect();
+
+    eprintln!(
+        "S-370 corpus: root={}\n  \
+         files carrying KafkaHeaders.TOPIC: {} ({} in src/main across {} members)\n  \
+         textual setHeader(KafkaHeaders.TOPIC, …) sites: {textual_sites} \
+         ({textual_parameter_sites} pass a bare `topic` parameter)\n  \
+         captured publish topic keys: {captured_total}\n  \
+         recorded topic-not-literal publish refusals: {refused_total} across {} files\n  \
+         header-form files that are silent: {}",
+        root.display(),
+        header_files.len(),
+        main_header_files.len(),
+        main_header_members.len(),
+        refusals.len(),
+        silent.len(),
+    );
+
+    // (0) The corpus is the one the finding was recorded against. Asserted so a
+    //     changed capture cannot be mistaken for a changed corpus, and vice versa —
+    //     the reason this module states the figures at all.
+    assert_eq!(
+        main_header_files.len(),
+        13,
+        "the recorded finding is 13 src/main files carrying the header form; \
+         the corpus now has {} — investigate before trusting the counts below: {:?}",
+        main_header_files.len(),
+        main_header_files,
+    );
+    assert_eq!(
+        main_header_members.len(),
+        12,
+        "…across 12 members: {main_header_members:?}"
+    );
+    assert_eq!(
+        textual_parameter_sites, 16,
+        "the recorded finding is 16 method-parameter sites (13 main + 3 test)"
+    );
+
+    // (1) THE STATEMENT THAT WAS FALSE: the arm recognises the header form at all.
+    //     Before this story, `recognised` was 0 on this estate.
+    let recognised = captured_total + refused_total;
+    assert!(
+        recognised > 0,
+        "the corpus carries {textual_sites} header-form publish sites and the arm \
+         recognised none — the CR-117 condition, unfixed"
+    );
+
+    // (2) It reconciles SITE FOR SITE against the textual marker. A weaker
+    //     "some were recognised" would hide a pattern that matches the common shape
+    //     and misses a variant, which is the failure mode a fixture cannot see.
+    assert_eq!(
+        recognised, textual_sites,
+        "every textual header-form site must be recognised — captured or refused. \
+         {recognised} of {textual_sites} were; the shortfall is a query gap, and a \
+         mismatch is investigated, not accepted"
+    );
+
+    // (3) The refusal count reconciles against the 16 known method-parameter sites:
+    //     every one of them is refused, and they are a subset of the refusals rather
+    //     than the whole of them (35 configuration getters refuse too).
+    assert!(
+        refused_total >= textual_parameter_sites,
+        "all {textual_parameter_sites} method-parameter sites must record a refusal; \
+         only {refused_total} refusals exist in total"
+    );
+
+    // (4) NFR-CC-04, the property this story exists for: no publishing file is
+    //     silent. This is the assertion that would have failed before S-370 for all
+    //     52 header-form files.
+    assert!(
+        silent.is_empty(),
+        "{} file(s) carry KafkaHeaders.TOPIC but neither captured a topic nor \
+         recorded a refusal — silence is the defect: {silent:?}",
+        silent.len(),
+    );
+
+    // (5) Never fabricated: a captured key is a literal's own text, never an
+    //     operand's source. On this estate `captured_keys` is EMPTY — there is no
+    //     literal operand to capture — so this is a guard against a future
+    //     over-eager key rule rather than a live measurement, and it is stated that
+    //     way so a reader does not mistake a passing assertion for an exercised one.
+    for key in &captured_keys {
+        assert!(
+            !key.contains('(') && !key.contains('+'),
+            "a captured topic key is a literal's text, never an operand's source: {key:?}"
+        );
+    }
+}

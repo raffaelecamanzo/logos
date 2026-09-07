@@ -842,3 +842,159 @@ class OrderService {
     assert_eq!(edges_of(rt, EdgeKind::Publishes).len(), 1);
     assert_eq!(edges_of(rt, EdgeKind::Subscribes).len(), 1);
 }
+
+/// **S-370 / [CR-117], end to end: the header-form publish site.** A `Message`
+/// assembled with `MessageBuilder` and a `KafkaHeaders.TOPIC` header is a publish
+/// site, and the whole chain — capture → ledger → promotion — treats it exactly as
+/// the argument form is treated: a static literal operand promotes a `Producer`
+/// node and a `Topic` node under the key rule in force, joined by a `publishes`
+/// edge; a non-keyable operand promotes **nothing** and leaves one recorded
+/// keyless `broker-publish` row instead of silence ([NFR-CC-04], [NFR-RA-05]).
+///
+/// Both halves in one fixture, because the interesting property is that they
+/// coexist: recording the refusal must not become a back door through which a
+/// refused site promotes a node, and the promotion must not be suppressed by the
+/// presence of a refusal in the same file.
+///
+/// The literal case is the one no real Spring estate writes — S-365 measured 0
+/// literal operands across all 54 header-form sites of the reference workspace —
+/// which is exactly why it needs a fixture: without one, the `Producer`-node half
+/// of the criterion would be argued rather than exercised.
+///
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+fn a_header_form_publish_promotes_on_a_literal_and_records_a_refusal_otherwise() {
+    const HEADER_FORM: &str = r#"
+package com.acme;
+class KafkaProducer {
+    private KafkaTemplate<String, SpecificRecord> kafkaTemplate;
+    private KafkaTopics kafkaTopics;
+
+    // A static literal operand: promotes.
+    public void sendKept(SpecificRecord payload) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, "kept")
+                .build());
+    }
+
+    // A method parameter — the estate's own shape for all 13 of its src/main
+    // sites. Promotes nothing, records a refusal.
+    public void sendDynamic(SpecificRecord payload, String topic) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, topic)
+                .build());
+    }
+
+    // A configuration-bound getter — the estate's majority shape.
+    public void sendConfigured(SpecificRecord payload) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, kafkaTopics.getArchiveCommands())
+                .build());
+    }
+}
+"#;
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/KafkaProducer.java", HEADER_FORM);
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.index();
+
+    // The literal half: a `Topic` and a `Producer` node, and nothing named after an
+    // operand — no `topic`, no `kafkaTopics.getArchiveCommands()`.
+    assert_eq!(names_of(rt, NodeKind::Topic), ["kept"]);
+    assert_eq!(names_of(rt, NodeKind::Producer), ["kept"]);
+    assert!(
+        names_of(rt, NodeKind::Consumer).is_empty(),
+        "a publish-only file promotes no consumer"
+    );
+
+    // Joined by a `publishes` edge whose endpoints are the kinds they claim.
+    let kinds = kinds_by_id(rt);
+    let publishes = edges_of(rt, EdgeKind::Publishes);
+    assert_eq!(publishes.len(), 1, "one publishes edge: {publishes:?}");
+    assert_eq!(kinds.get(&publishes[0].0), Some(&NodeKind::Producer));
+    assert_eq!(kinds.get(&publishes[0].1), Some(&NodeKind::Topic));
+
+    // The refused half: two keyless `broker-publish` rows, one per site, attributed
+    // to the publishing methods that earned them.
+    let mut rows = rt
+        .submit_read(|store| {
+            Ok(store
+                .unresolved_refs()?
+                .into_iter()
+                .filter(|r| r.payload.as_deref() == Some("broker-publish") && r.target.is_empty())
+                .map(|r| r.source_symbol)
+                .collect::<Vec<_>>())
+        })
+        .expect("read runs");
+    rows.sort();
+    assert_eq!(rows.len(), 2, "one recorded refusal per refused site: {rows:?}");
+    for want in ["sendDynamic", "sendConfigured"] {
+        assert!(
+            rows.iter().any(|s| s.contains(want)),
+            "the refusal at `{want}` is on the record: {rows:?}"
+        );
+    }
+    assert!(
+        !rows.iter().any(|s| s.contains("sendKept")),
+        "the site that bound records no refusal — `topic-not-literal` would be the \
+         wrong reason for it: {rows:?}"
+    );
+}
+
+/// **S-370's no-migration criterion, asserted rather than asserted-in-prose.**
+///
+/// This story adds two `.scm` patterns and no schema: the store's
+/// `PRAGMA user_version` is unchanged at the latest embedded migration, the broker
+/// node kinds stay 35/36/37, and a graph with no broker topics is unaffected —
+/// which `a_repo_with_no_broker_topics_is_unaffected` above proves for the whole
+/// pass and which the header form cannot change, since it contributes a reference
+/// only where it matches ([FR-WS-11], [NFR-RA-06]).
+///
+/// The reason to spend a test on values that "obviously" did not change: a `.scm`
+/// edit is the cheapest place in this codebase to accidentally acquire a schema
+/// dependency (a new capture name that needs a column), and the criterion asks for
+/// the guarantee, not for the intent.
+///
+/// [FR-WS-11]: ../../docs/specs/requirements/FR-WS-11.md
+/// [NFR-RA-06]: ../../docs/specs/requirements/NFR-RA-06.md
+#[test]
+fn the_header_form_adds_no_migration_and_no_new_node_kinds() {
+    // The broker kinds are exactly the three S-255 migrated in — S-370 adds none.
+    assert_eq!(NodeKind::Topic.as_i32(), 35);
+    assert_eq!(NodeKind::Producer.as_i32(), 36);
+    assert_eq!(NodeKind::Consumer.as_i32(), 37);
+
+    // A store indexed with the header form present carries the same schema version
+    // as the migration set declares. Read from a real indexed store, so the
+    // assertion covers the store this story's captures actually land in.
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/KafkaProducer.java",
+        r#"
+package com.acme;
+class KafkaProducer {
+    private KafkaTemplate<String, SpecificRecord> kafkaTemplate;
+    public void send(SpecificRecord payload, String topic) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, topic)
+                .build());
+    }
+}
+"#,
+    );
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    let version: i64 = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db"))
+        .expect("store opens")
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("user_version reads");
+    assert_eq!(
+        version, 18,
+        "S-370 is core/plugin-only: no migration, so the store stays at the schema \
+         version the migration set already declared"
+    );
+}

@@ -44,6 +44,46 @@
 ;    `resolve::framework::drop_non_path_routes` documents on the route side.
 ;    Recording Rust refusals needs receiver scoping first.
 ;
+; -- S-370 / [CR-117] publish-side audit, recorded EITHER WAY ----------------
+;
+; S-370 found the Java publish arm blind to the form idiomatic Spring actually
+; writes: the topic reaches the message through `setHeader(KafkaHeaders.TOPIC, …)`
+; and `send(message)` receives no topic at all. Its criteria require this file to be
+; audited for the same publish-side blind spot, and the finding recorded whichever
+; way it comes out. It comes out as **no change here**, on three measured grounds.
+;
+; 1. NO EQUIVALENT FORM EXISTS IN THE RUST CORPUS. The finding the criterion offers
+;    as one possible answer is the correct one. Measured 2026-09-07: the 84-member
+;    reference workspace contains **0** `.rs` files — it is entirely JVM — and this
+;    repository declares no `rdkafka`/broker-client dependency and carries no real
+;    producer site of its own (`extract::broker`'s Rust fixtures are the only
+;    `.publish("…")`/`.send("…")` strings in the tree, which is the same
+;    no-false-positive measurement the scope note below records). There is no Rust
+;    broker source to be blind to.
+;
+; 2. THE HEADER IDIOM HAS NO RUST ANALOGUE. Java's blind spot is specifically a
+;    *header constant* — a topic passed as a named header rather than as an
+;    argument. Rust broker clients have no header-constant idiom for the topic; the
+;    nearest structural analogue is rdkafka's record builder,
+;    `FutureRecord::to("orders")`, where the topic sits in a builder method and
+;    `producer.send(record, timeout)` carries none. That form is already named as
+;    unmatched in this file's header above, and it is a *builder-method* blind spot,
+;    not a header one — so it would need its own pattern and its own reasoning, not
+;    a port of S-370's.
+;
+; 3. ADDING THE BUILDER PATTERN SPECULATIVELY WOULD REPEAT THE HAZARD THIS FILE
+;    ALREADY RECORDS. A `to("literal")` pattern keys on one of the most common
+;    method names in Rust with no receiver typing, which is the same
+;    manufacture-a-denominator failure that decision (2) above declines for refusal
+;    slots. With no corpus to measure the false-positive rate against, the honest
+;    move is to leave the gap named rather than to close it blind.
+;
+; So: audited, and the finding is that Java's blind spot does not have a Rust twin
+; to fix. Recorded as a test — `extract::broker::rust_capture_tests::the_rust_publish_side_has_no_header_form_equivalent_and_is_unchanged`
+; — so the gap stays a stated decision rather than an omission, and so a future
+; story that acquires a Rust broker corpus finds the reasoning instead of
+; re-deriving it.
+;
 ; Vocabulary rationale: Rust has no annotation-based listener idiom (Java's
 ; `@KafkaListener`), so the capture keys on the generic message-bus method verbs
 ; a broker client exposes — `publish`/`send` for a producer, `subscribe` for a
