@@ -690,6 +690,39 @@ fn the_warm_start_notice_is_advisory_on_stderr_and_quiet_suppresses_it() {
     assert_eq!(report["warm_start"]["members"], 2, "the machine payload is unaffected");
 }
 
+/// **The non-happy-path wiring, proven end to end.** A settled re-run (no
+/// newly-approved delta) must reach `report.warm_start` with `members: 0` AND
+/// `started: false` — not just the pure `WarmStartDisclosure::notice()` shape
+/// unit-tested elsewhere, but the actual `run()` composition at
+/// `enable::WarmStartDisclosure::new(approved_new.len(), warm(&approved_new,
+/// declared_k))`, through the REAL `spawn_supervisor` (never a stub): an empty
+/// delta hits its own `members.is_empty()` guard and returns `false`, so this
+/// one settled re-run exercises both fields' false/zero path together. A
+/// regression that hardcoded `started: true` or miscounted the delta would
+/// pass every other warm-start test, which all exercise a non-empty delta.
+#[test]
+fn a_settled_rerun_reports_no_new_delta_and_no_warm_started() {
+    let tmp = two_member_fixture();
+    let first = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&first), 0, "{}", String::from_utf8_lossy(&first.stderr));
+
+    let second = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&second), 0, "{}", String::from_utf8_lossy(&second.stderr));
+
+    let report: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(report["warm_start"]["members"], 0, "no new delta on a settled re-run: {report}");
+    assert_eq!(
+        report["warm_start"]["started"], false,
+        "the real spawn_supervisor returns false over an empty delta: {report}"
+    );
+
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        !stderr.contains("background warming"),
+        "no delta ⇒ no warm-start notice on the settled re-run: {stderr}"
+    );
+}
+
 /// A member enrolled through `init --workspace` reports a next step that is
 /// true in the workspace context — enrolled and queued for background
 /// warming — and never names `logos index`, which at the workspace root
