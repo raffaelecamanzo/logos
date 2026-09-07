@@ -1392,11 +1392,22 @@ class Relay {
     /// One test, one table — because a single case would leave the class untested,
     /// and because each row's outcome is decided by a *different* part of the
     /// query. Each operand shape is either **captured** (a static literal, whatever
-    /// characters it carries) or **refused with the reason it earns** (one keyless
-    /// `topic-not-literal` row, [NFR-CC-04]). The whole table lives in one file so
-    /// the patterns are also proven not to shadow each other — the failure mode
-    /// S-339 measured when a wildcard slot silently cost the literal patterns their
-    /// matches.
+    /// characters it carries), **refused with the reason it earns** (one keyless
+    /// `topic-not-literal` row, [NFR-CC-04]), or one of the three **deliberate
+    /// silences** — a blank literal, an all-whitespace literal, and an operand
+    /// shape outside the four the slot enumerates — which bind nothing and report
+    /// nothing, exactly as the subscribe side treats them. The silences are
+    /// asserted by name, not merely absent from a count: every refusal filter in
+    /// these tests keys on `target.is_empty()`, so a blank literal that ever *did*
+    /// emit a row would be indistinguishable from a refusal.
+    ///
+    /// The whole table lives in one file so the patterns are also proven not to
+    /// shadow each other — the failure mode S-339 measured when a wildcard slot
+    /// silently cost the literal patterns their matches. It covers both setters
+    /// (`setHeader` and `setHeaderIfAbsent`) and one method carrying **both** a
+    /// bound and a refused publish, which is what holds the site reconcile: the
+    /// bound literal must not cancel the refusal at a different call in the same
+    /// method.
     ///
     /// **Zero captures is the expected outcome on the real corpus, and it is not a
     /// failure of this story.** S-365 measured that none of the 54 header-form sites
@@ -1481,6 +1492,66 @@ class KafkaProducer {
                 .setHeader(KafkaHeaders.TOPIC, this.topicField)
                 .build());
     }
+
+    // ── captured / refused through `setHeaderIfAbsent`, `MessageBuilder`'s sibling
+    //    setter. The estate writes only `setHeader`, so this arm of the predicate
+    //    rides on the API's shape — and rode untested: narrowing both predicates to
+    //    `#eq? "setHeader"` removed the capability with the whole suite still
+    //    green. One row per half makes a later narrowing a visible decision.
+    public void byIfAbsentLiteral(SpecificRecord payload) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeaderIfAbsent(KafkaHeaders.TOPIC, "shipments-if-absent")
+                .build());
+    }
+
+    public void byIfAbsentParameter(SpecificRecord payload, String topic) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeaderIfAbsent(KafkaHeaders.TOPIC, topic)
+                .build());
+    }
+
+    // ── DELIBERATELY SILENT: a blank literal. It matches the binding pattern, so
+    //    it produces no refusal candidate, and `broker_topic_key` then refuses its
+    //    empty key — the same shape the subscribe side treats this way. Pinned here
+    //    because every refusal filter in these tests keys on `target.is_empty()`,
+    //    so a blank literal that ever DID emit a row would be indistinguishable
+    //    from a refusal.
+    public void byBlankLiteral(SpecificRecord payload) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, "")
+                .build());
+    }
+
+    public void byWhitespaceLiteral(SpecificRecord payload) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, "   ")
+                .build());
+    }
+
+    // ── DELIBERATELY SILENT: an operand shape outside the four the slot
+    //    enumerates. It binds nothing (the half that matters, [NFR-RA-05]) and
+    //    reports nothing — exactly as the subscribe side treats a shape outside its
+    //    own four. Asserted so the boundary stays a decision rather than an
+    //    accident; widening it is a change to BOTH sides' enumerations, never a
+    //    wildcard on one.
+    public void byTernary(SpecificRecord payload, boolean urgent) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, urgent ? "urgent" : "normal")
+                .build());
+    }
+
+    // ── ONE METHOD, BOTH OUTCOMES: a bound literal beside a refused parameter.
+    //    The site reconcile must not let the bound sibling suppress the refusal —
+    //    the candidate's site is its OWN `setHeader` argument list, so a literal
+    //    from a different call in the same method never falls inside it.
+    public void byBothBoundAndRefused(SpecificRecord payload, String topic) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, "both-bound")
+                .build());
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, topic)
+                .build());
+    }
 }
 "#;
         let facts = extract_java(src);
@@ -1496,9 +1567,12 @@ class KafkaProducer {
                 .collect::<Vec<_>>(),
             vec![
                 "${spring.kafka.topics.shipments}".to_string(),
+                "both-bound".to_string(),
                 "orders".to_string(),
+                "shipments-if-absent".to_string(),
             ],
-            "both header-form literals bind, keyed as written, and nothing else does: {:?}",
+            "every header-form literal binds, keyed as written, through either setter, \
+             and nothing else does — no blank literal and no ternary: {:?}",
             facts.refs
         );
 
@@ -1520,17 +1594,40 @@ class KafkaProducer {
             "byMethodParameter",
             "byConcatenation",
             "byQualifiedField",
+            "byIfAbsentParameter",
+            "byBothBoundAndRefused",
         ] {
             assert!(
                 refused.iter().any(|s| s.contains(want)),
                 "the `{want}` operand is refused and its site recorded: {refused:?}"
             );
         }
+        // Seven refusals, and specifically NOT nine: the two blank-literal sites and
+        // the ternary site are the deliberate silences, and the four literal sites
+        // record nothing because they bound.
         assert_eq!(
             refused.len(),
-            5,
-            "five non-keyable operands are five refusals — and the two literal sites \
-             record none, because they bound: {refused:?}"
+            7,
+            "seven non-keyable operands are seven refusals; the blank literals and \
+             the ternary are silent, and the bound sites record none: {refused:?}"
+        );
+        for silent in ["byBlankLiteral", "byWhitespaceLiteral", "byTernary"] {
+            assert!(
+                !refused.iter().any(|s| s.contains(silent)),
+                "`{silent}` is a DELIBERATE silence — it binds nothing and reports \
+                 nothing, the same boundary the subscribe side draws: {refused:?}"
+            );
+        }
+        // `byBothBoundAndRefused` appears in BOTH halves: one keyed row and one
+        // keyless row on the same source symbol. They survive the ledger dedup
+        // because their targets differ, and the reconcile does not let the bound
+        // literal cancel the refusal at the other call.
+        assert!(
+            targets(&facts, ArtifactRelation::BrokerPublish)
+                .iter()
+                .any(|t| t == "both-bound"),
+            "the bound half of `byBothBoundAndRefused` keys: {:?}",
+            facts.refs
         );
 
         // ── Never fabricated: no refusal carries the operand's source text as a
@@ -1701,39 +1798,41 @@ class NotAProducer {
         );
     }
 
-    /// **Why the operand shapes are ENUMERATED and not a `(_)` wildcard, asserted
-    /// rather than asserted-in-prose.**
+    /// **The one shape the anchors cannot see, recorded rather than hidden.**
     ///
-    /// The subscribe slots carry this rule already, but for a reason that does
-    /// **not** transfer, and it is worth being exact rather than inheriting the
-    /// argument: there, `value: (_)` overlaps the `value: (string_literal)`
-    /// patterns on the same node and measurably cost the scalar literal patterns
-    /// their matches. Measured on the publish side, a wildcard does **not** do
-    /// that — the header form's position anchors and the interpreter's own site
-    /// reconcile between them keep a literal operand binding and cancel the
-    /// candidate the wildcard raises at that same site.
+    /// Tree-sitter counts a `comment` as an intervening named sibling, so a comment
+    /// inside the argument list breaks the anchors' adjacency and the site matches
+    /// NEITHER pattern — captured as nothing and refused as nothing. That is the
+    /// invisible loss [NFR-CC-04] forbids, in the one shape this arm cannot
+    /// express: no tree-sitter construct skips extras inside an anchored sequence.
     ///
-    /// So the enumeration here buys precision, not de-shadowing: the arm reports a
-    /// refusal only for an operand shape it has actually reasoned about, and the
-    /// two sides of the arm keep ONE vocabulary rather than two. The boundary that
-    /// follows is asserted here so it is a decision rather than an accident — a
-    /// ternary topic operand is refused (it binds nothing, never fabricates) and is
-    /// deliberately **not reported**, exactly as the subscribe side treats an
-    /// operand shape outside its own four.
+    /// So it is pinned here instead of fixed, and `brokers.scm` records it in the
+    /// same "not recognised" list as the static-import form. The reference estate
+    /// writes 0 such sites. A future story that needs them must drop the middle
+    /// anchor and re-measure the false-positive cost the leading/trailing pair
+    /// buys — the 3-arity over-match this story's review found is what that pair
+    /// currently excludes — never silently widen one pattern.
     ///
-    /// If a future story judges that boundary too quiet for [NFR-CC-04], the fix is
-    /// to add the shape to BOTH sides' enumerations and change this test — not to
-    /// widen one side to a wildcard.
+    /// The subscribe side is unaffected: it matches on the `value:` field rather
+    /// than on an anchor, so `@KafkaListener(topics = /*x*/ TOPIC)` still records
+    /// its refusal. The hazard arrives with the anchored publish patterns, which is
+    /// why it is asserted on this side only.
     #[test]
-    fn an_operand_shape_outside_the_enumeration_binds_nothing_and_is_not_reported() {
+    fn a_commented_argument_list_is_the_one_shape_the_anchors_cannot_see() {
         let src = r#"
 package com.acme;
 class C {
     private KafkaTemplate<String, String> kafkaTemplate;
 
-    public void byTernary(String payload, boolean urgent) {
+    public void commentBetweenTheArguments(String payload, String topic) {
         kafkaTemplate.send(MessageBuilder.withPayload(payload)
-                .setHeader(KafkaHeaders.TOPIC, urgent ? "urgent" : "normal")
+                .setHeader(KafkaHeaders.TOPIC, /*topic*/ topic)
+                .build());
+    }
+
+    public void commentBeforeTheHeader(String payload, String topic) {
+        kafkaTemplate.send(MessageBuilder.withPayload(payload)
+                .setHeader(/*hdr*/ KafkaHeaders.TOPIC, topic)
                 .build());
     }
 }
@@ -1747,9 +1846,34 @@ class C {
             .collect();
         assert!(
             publishes.is_empty(),
-            "a ternary operand is outside the enumeration: it fabricates no topic \
-             (the half that matters, [NFR-RA-05]) and reports no refusal — the \
-             pre-[CR-107] behaviour the subscribe side also keeps: {publishes:?}"
+            "a commented argument list is silent — NOT the behaviour anyone wants, \
+             but the measured behaviour, recorded so it is a known boundary rather \
+             than an invisible loss. If this test starts failing because the shape \
+             became recognised, that is an improvement: delete the test and the \
+             `brokers.scm` note together: {publishes:?}"
+        );
+
+        // The subscribe side, through the same comment, still records its refusal —
+        // so the silence is attributable to the publish anchors specifically.
+        let subscribe = extract_java(r#"
+package com.acme;
+class D {
+    @KafkaListener(topics = /*x*/ TOPIC)
+    public void onOrder(String msg) {}
+}
+"#);
+        assert_eq!(
+            subscribe
+                .refs
+                .iter()
+                .filter(|r| {
+                    r.relation == Some(ArtifactRelation::BrokerSubscribe) && r.target.is_empty()
+                })
+                .count(),
+            1,
+            "the subscribe side matches on `value:`, not on an anchor, so a comment \
+             does not silence it: {:?}",
+            subscribe.refs
         );
     }
 
