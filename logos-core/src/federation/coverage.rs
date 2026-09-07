@@ -82,7 +82,22 @@ pub enum UnboundReason {
     /// [NFR-CC-04] forbids. What a captured literal *contains* is not a refusal
     /// ground: `"${spring.kafka.topics.orders}"` is a static literal and binds.
     ///
+    /// **Both roles of the arm report under it, for different capture reasons.**
+    /// [CR-107] reached this reason from the arm's *provider* role only — the
+    /// `@KafkaListener(topics = TOPIC)` subscribe. S-370 / [CR-117] adds the
+    /// *consumer* role: a `MessageBuilder…setHeader(KafkaHeaders.TOPIC, …)` publish
+    /// site, which the arm did not recognise at all until then because it looked for
+    /// a topic in argument position and idiomatic Spring puts it in a header. That
+    /// half is where the reason does most of its work in practice — measured on the
+    /// 84-member reference estate, **all 54** header-form sites carry a non-literal
+    /// operand (16 a method parameter, 35 a `@ConfigurationProperties` getter), so
+    /// the arm's honest output there is 54 refusals and zero producers. Reading a
+    /// `topic-not-literal` count as a capture defect would therefore be a
+    /// misreading: it is the estate's own configuration style, reported rather than
+    /// hidden.
+    ///
     /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    /// [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
     /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
@@ -2858,6 +2873,116 @@ mod tests {
         assert_eq!(cov.no_provider_in_workspace, 0);
         assert_eq!(cov.ambiguous, 0);
         assert_eq!(cov.bound, 0);
+    }
+
+    /// **S-370 / [CR-117] acceptance: a refused header-form publish reaches the
+    /// [FR-WS-05] payload, once per site.**
+    ///
+    /// **What is genuinely new here, stated precisely — the path itself is already
+    /// covered.** [CR-107] proved the reason for the arm's *provider* role (the
+    /// listener), and the consumer role does travel a different path through this
+    /// function — the `inv_consumers` loop and [`unkeyable_reason`] rather than the
+    /// `unkeyable_providers` bucket. But that consumer path is **not** untested:
+    /// [`a_refused_topic_indexes_no_provider_and_binds_no_publish`] already drives a
+    /// keyless `broker_publish` through `cross_service_coverage` and asserts
+    /// `TopicNotLiteral`, and [`an_unkeyable_row_is_reported_under_its_own_arms_reason`]
+    /// asserts the relation→reason map directly.
+    ///
+    /// What this test adds is two things neither of those covers: a **bound publish
+    /// coexisting with refusals** (so the refusals cannot be an artefact of a
+    /// fixture in which nothing binds), and the **row shape** a consumer-side
+    /// refusal carries — `to`, `candidates` and `intake` all absent, filed under
+    /// `broker-topic`, bucketed `unbound`. S-370 is what makes the shape reachable
+    /// from real source: before it the arm did not recognise a header-form publish
+    /// at all, so no such row existed to classify.
+    ///
+    /// Three sites, one keyless each: a method parameter, a configuration-bound
+    /// getter and a `@Value`-injected field — the three operand shapes the reference
+    /// estate actually writes. Each is its own row, each reads `topic-not-literal`
+    /// and not `path-not-composed`, and the bound publish beside them is unaffected.
+    ///
+    /// Be exact about the grain, because it is easy to overstate: three refused
+    /// publishes reach this tier as three rows when they sit in three **methods**,
+    /// which is what this fixture's three distinct symbols model. Three in ONE
+    /// method reach the ledger as ONE row — `dedup_sort_refs` keys on
+    /// `(source, target, form, kind, relation)` and every refusal shares an empty
+    /// target — so the "at most once per site" discipline is enforced upstream in
+    /// [`crate::extract::broker`], not here. This test asserts what this layer
+    /// actually owns: that whatever rows arrive are classified under the arm's own
+    /// reason.
+    ///
+    /// [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    #[test]
+    fn refused_header_form_publishes_are_reported_topic_not_literal_once_per_site() {
+        reset();
+        // The producer member: one publish that keyed, three that were refused. A
+        // refusal is a keyless row, which is what `extract::broker` records for a
+        // recognised publish site whose topic operand is not a literal.
+        set_consumers(
+            "producer",
+            vec![
+                broker_publish("orders", "local sendKept"),
+                broker_publish("", "local sendByParameter"),
+                broker_publish("", "local sendByConfiguredGetter"),
+                broker_publish("", "local sendByInjectedField"),
+            ],
+        );
+        // A subscriber on the keyed topic, so the bound row really binds and the
+        // refusals are not the only thing this fixture can produce.
+        set_consumers("consumer", vec![broker_subscribe("orders", "local onOrder")]);
+        set_member("producer", vec![]);
+        set_member("consumer", vec![]);
+
+        let cov = cross_service_coverage(&registry(&["consumer", "producer"]));
+
+        let mut refused: Vec<&str> = cov
+            .references
+            .iter()
+            .filter(|r| {
+                r.state
+                    == CoverageState::Unbound {
+                        reason: UnboundReason::TopicNotLiteral,
+                    }
+            })
+            .map(|r| r.from.symbol.as_str())
+            .collect();
+        refused.sort();
+        assert_eq!(
+            refused,
+            vec![
+                "local sendByConfiguredGetter",
+                "local sendByInjectedField",
+                "local sendByParameter",
+            ],
+            "each refused publish site is its own row, named by the method that \
+             refused: {:?}",
+            cov.references
+        );
+
+        // Filed under the arm's own word, with nothing to name — it never had a key
+        // to look a provider up with.
+        for reference in cov.references.iter().filter(|r| {
+            r.state
+                == CoverageState::Unbound {
+                    reason: UnboundReason::TopicNotLiteral,
+                }
+        }) {
+            assert_eq!(reference.relation, "broker-topic", "{reference:?}");
+            assert_eq!(reference.from.member, "producer", "{reference:?}");
+            assert_eq!(reference.bucket, "unbound", "{reference:?}");
+            assert!(reference.to.is_none(), "{reference:?}");
+            assert!(reference.candidates.is_none(), "{reference:?}");
+            assert!(reference.intake.is_none(), "{reference:?}");
+        }
+
+        // The keyed publish is untouched by the refusals beside it: it binds to the
+        // subscriber's provider row — the property this fixture exists for, since a
+        // refusal-only fixture cannot show that the two do not interfere.
+        assert_eq!(cov.bound, 1, "{:?}", cov.references);
+        assert_eq!(cov.unbound, 3, "{:?}", cov.references);
+        assert_eq!(cov.no_provider_in_workspace, 0);
+        assert_eq!(cov.ambiguous, 0);
     }
 
     /// A refused topic indexes **no provider**, so a cross-member publish on a real

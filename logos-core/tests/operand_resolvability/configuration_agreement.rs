@@ -30,7 +30,7 @@
 //! | arm | corpus (the denominator) | admitted today |
 //! |-----|--------------------------|----------------|
 //! | client call | a verb-anchored `invocations` match inside a ledger-gate-admitted file (S-355's corpus) whose least-resolvable operand is a configuration lookup | a single static literal |
-//! | broker publish | a **message-header publish form** — `setHeader(KafkaHeaders.TOPIC, <operand>)` — in a file of a language shipping `brokers` | nothing: the real `brokers.scm` matches only a `(string_literal)` topic in argument position, and never the header form at all |
+//! | broker publish | a **message-header publish form** — `setHeader(KafkaHeaders.TOPIC, <operand>)` — in a file of a language shipping `brokers` | a single static literal: since S-370 the real `brokers.scm` recognises the header form and admits a literal operand there on its own. A configuration-bound operand is still refused, and that is what this measurement counts |
 //!
 //! The denominators differ and are printed separately for that reason. The
 //! broker arm has **no ledger gate** (`brokers.scm` is not detector-gated) and

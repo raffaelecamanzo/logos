@@ -24,12 +24,16 @@
 //! reconciliation below therefore compares captured topics against **declaring
 //! files**, which is the join the CR's criterion names.
 //!
-//! # Skips loudly, like the S-355/S-365 measurements
+//! # Skips when unconfigured, and says so — but only under `--nocapture`
 //!
-//! Set `LOGOS_REF_WORKSPACE=<path>` to run it (`~` is expanded). With no corpus
-//! configured the test prints a `SKIPPED:` line and passes: a measurement that
-//! measured nothing must not read as a green assertion, and it must not fail a
-//! machine that has no corpus either.
+//! Set `LOGOS_REF_WORKSPACE=<path>` to run these (`~` is expanded). With no corpus
+//! configured each test prints a `SKIPPED:` line and passes: it must not fail a
+//! machine that has no corpus either. Be exact about the limit of that, because the
+//! mechanism is weaker than it reads — libtest captures `eprintln!` for a test that
+//! PASSES, so a default `cargo test` run shows only `... ok` and the `SKIPPED:` line
+//! is invisible. A green summary here therefore does **not** establish that the
+//! measurement ran: look for the printed figures, or run with `--nocapture`. Each
+//! test name carries `when_one_is_configured` for exactly that reason.
 //!
 //! # Recorded finding
 //!
@@ -106,6 +110,26 @@ fn corpus_root() -> Option<PathBuf> {
     Some(expanded)
 }
 
+/// The corpus walk, with the five flags that make a published figure reproducible.
+///
+/// `parents(false)` / `git_global(false)` / `ignore(false)` matches production's
+/// admission walk and the S-355/S-365 measurements: the corpus must be the same on
+/// every machine, so a developer's global ignore file cannot quietly move a
+/// published figure.
+///
+/// This exists as one function because the flags were written out at each of the
+/// three walk sites and the comment explaining them sat only on the first — which
+/// is how one copy gets "tidied up" and a published figure silently moves.
+fn corpus_walker(root: &std::path::Path) -> ignore::Walk {
+    ignore::WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(false)
+        .ignore(false)
+        .parents(false)
+        .build()
+}
+
 /// What the walk found.
 #[derive(Default)]
 struct Corpus {
@@ -159,17 +183,7 @@ fn the_reference_workspace_reports_a_reconciled_subscribe_topic_inventory_when_o
     let java = registry.for_extension("java").expect("java plugin present");
     let mut corpus = Corpus::default();
 
-    // `parents(false)` / `git_global(false)` / `ignore(false)` matches production's
-    // admission walk and the S-355/S-365 measurements: the corpus must be the same
-    // on every machine, so a developer's global ignore file cannot quietly move a
-    // published figure.
-    let walker = ignore::WalkBuilder::new(&root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(false)
-        .ignore(false)
-        .parents(false)
-        .build();
+    let walker = corpus_walker(&root);
 
     for entry in walker.flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -314,13 +328,7 @@ fn real_listener_sources_promote_a_non_empty_member_topic_inventory() {
 
     let tmp = tempfile::TempDir::new().expect("temp project");
     let mut copied = 0usize;
-    let walker = ignore::WalkBuilder::new(&root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(false)
-        .ignore(false)
-        .parents(false)
-        .build();
+    let walker = corpus_walker(&root);
     for entry in walker.flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
@@ -372,5 +380,292 @@ fn real_listener_sources_promote_a_non_empty_member_topic_inventory() {
     // none is a fabricated empty key.
     for summary in &surface {
         assert!(!summary.topic.trim().is_empty(), "no keyless topic: {summary:?}");
+    }
+}
+
+/// **S-370 / [CR-117]'s corpus criterion: the PUBLISH half.**
+///
+/// The measurement above reconciles the subscribe side and, in its recorded
+/// finding, attributes the publish side's `0` to a named cause on the other half of
+/// the arm — the `MessageBuilder` header form the query did not recognise. This
+/// test is that half, measured the same way: it walks the reference workspace
+/// read-only, runs the real `extract` over each admitted file, and reconciles what
+/// the arm now says about the publish side against textual markers derived
+/// independently of the capture.
+///
+/// # What "reconciled" means here, and why the answer is 0 producers
+///
+/// S-365 measured — before this story was written — that **none** of the estate's
+/// header-form sites carries a literal topic operand. So recognising the site
+/// admits no topic and promotes no `Producer` node, and that is the expected
+/// outcome rather than a failure: the deliverable is the refusal rows. What this
+/// test holds the arm to is therefore not a capture count but the [NFR-CC-04]
+/// property: **no file that publishes is silent**. Every file carrying
+/// `KafkaHeaders.TOPIC` either captures a topic or records a refusal that says why
+/// it did not, and the refusal count reconciles site-for-site against the textual
+/// marker.
+///
+/// # Recorded finding
+///
+/// ```text
+/// S-370 / CR-117, measured 2026-09-07 against ~/source/pec-services (84 members,
+/// 2447 admitted .java files).
+///
+///   files carrying KafkaHeaders.TOPIC:                52   (13 in src/main, across 12 members)
+///   textual `.setHeader(KafkaHeaders.TOPIC, …)` sites: 54
+///     of which in src/main:                            13
+///     of which in test sources:                        41   ← see the note below
+///     of which the operand is a bare `topic` parameter: 16   (13 main + 3 test)
+///     of which a @ConfigurationProperties getter:       35
+///     of which another identifier (@Value-injected):     3
+///     of which a static string literal:                  0   ← why 0 producers
+///   recognised publish sites (captured + refused):     54   ← 54 of 54
+///   captured publish topic keys:                        0
+///   recorded `topic-not-literal` publish refusals:     54
+///   header-form files that are silent:                  0   ← the NFR-CC-04 claim
+///
+/// BEFORE this story the same walk recognised 0 of the 54 and recorded 0 refusals:
+/// the arm looked for a topic in argument position, and no publish site in the
+/// estate has one. That is the whole of FR-WS-10's producer promise yielding 0
+/// Producer nodes on a 12-member Kafka estate.
+///
+/// MOST OF THE 54 IS TEST CODE — 41 of the sites, 76%. Stated here because the
+/// headline "54 refusals" is otherwise easy to read as 54 production publishers.
+/// There is no test-path exclusion in admission, so all 41 are indexed, all record
+/// `topic-not-literal`, and all land in the FR-WS-05 coverage denominator; a JUnit
+/// fixture that built a message with a literal topic would likewise promote a real
+/// Producer node. Whether the coverage tier SHOULD exclude test sources is a policy
+/// question this story does not own and does not decide — it is recorded so the
+/// current answer is visible rather than inferable only from the file counts.
+/// ```
+///
+/// [CR-117]: ../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[test]
+fn the_reference_workspace_reports_reconciled_publish_sites_when_one_is_configured() {
+    let Some(root) = corpus_root() else {
+        eprintln!(
+            "SKIPPED: set LOGOS_REF_WORKSPACE=<path to the reference workspace> to run the \
+             S-370 broker publish corpus measurement (this test's docs carry the recorded \
+             finding it reproduces)."
+        );
+        return;
+    };
+
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    let java = registry.for_extension("java").expect("java plugin present");
+
+    // Textual markers, derived independently of the capture so the reconciliation is
+    // a join and not a tautology.
+    let mut header_files: BTreeSet<String> = BTreeSet::new();
+    let mut main_header_files: BTreeSet<String> = BTreeSet::new();
+    let mut main_header_members: BTreeSet<String> = BTreeSet::new();
+    let mut textual_sites = 0usize;
+    let mut textual_parameter_sites = 0usize;
+    // The src/main vs test split of the SITES (not the files). The headline refusal
+    // count is mostly test code and must say so — see the recorded finding.
+    let mut main_sites = 0usize;
+    // What the arm says.
+    let mut captured: BTreeMap<String, usize> = BTreeMap::new();
+    let mut refusals: BTreeMap<String, usize> = BTreeMap::new();
+    let mut captured_keys: BTreeSet<String> = BTreeSet::new();
+
+    let walker = corpus_walker(&root);
+
+    for entry in walker.flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("java") {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(&root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().to_string();
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if !source.contains("KafkaHeaders.TOPIC") {
+            continue;
+        }
+        header_files.insert(rel.clone());
+        if rel.contains("/src/main/") {
+            main_header_files.insert(rel.clone());
+            // The workspace member is the first path segment — `deprecated-mailbox-core`
+            // owns two Maven modules, so files and members do not count 1:1.
+            if let Some(member) = rel.split('/').next() {
+                main_header_members.insert(member.to_string());
+            }
+        }
+        // BOTH setter spellings the query's predicate admits. Counting only
+        // `setHeader(` would drift from what the arm recognises the day the estate
+        // gains a `setHeaderIfAbsent` site — and would fail the equality below with
+        // the *opposite* diagnosis ("a query gap"). The two substrings cannot
+        // overlap, so summing them double-counts nothing.
+        let sites_here = source.matches("setHeader(KafkaHeaders.TOPIC,").count()
+            + source.matches("setHeaderIfAbsent(KafkaHeaders.TOPIC,").count();
+        textual_sites += sites_here;
+        if rel.contains("/src/main/") {
+            main_sites += sites_here;
+        }
+        textual_parameter_sites += source.matches("setHeader(KafkaHeaders.TOPIC, topic)").count()
+            + source
+                .matches("setHeaderIfAbsent(KafkaHeaders.TOPIC, topic)")
+                .count();
+
+        let facts = extract(&FileInput::new(&rel, &source), java, &SymbolContext::default());
+        for reference in &facts.refs {
+            if reference.relation != Some(ArtifactRelation::BrokerPublish) {
+                continue;
+            }
+            if reference.target.is_empty() {
+                *refusals.entry(rel.clone()).or_default() += 1;
+            } else {
+                *captured.entry(rel.clone()).or_default() += 1;
+                captured_keys.insert(reference.target.clone());
+            }
+        }
+    }
+
+    let captured_total: usize = captured.values().sum();
+    let refused_total: usize = refusals.values().sum();
+    let silent: Vec<&String> = header_files
+        .iter()
+        .filter(|f| !captured.contains_key(*f) && !refusals.contains_key(*f))
+        .collect();
+
+    eprintln!(
+        "S-370 corpus: root={}\n  \
+         files carrying KafkaHeaders.TOPIC: {} ({} in src/main across {} members)\n  \
+         textual setHeader(KafkaHeaders.TOPIC, …) sites: {textual_sites} \
+         ({textual_parameter_sites} pass a bare `topic` parameter)\n  \
+         of those sites, {main_sites} are in src/main and {} are test sources\n  \
+         captured publish topic keys: {captured_total}\n  \
+         recorded topic-not-literal publish refusals: {refused_total} across {} files\n  \
+         header-form files that are silent: {}",
+        root.display(),
+        header_files.len(),
+        main_header_files.len(),
+        main_header_members.len(),
+        textual_sites - main_sites,
+        refusals.len(),
+        silent.len(),
+    );
+
+    // (0) The corpus is the one the finding was recorded against. Asserted so a
+    //     changed capture cannot be mistaken for a changed corpus, and vice versa —
+    //     the reason this module states the figures at all.
+    assert_eq!(
+        main_header_files.len(),
+        13,
+        "the recorded finding is 13 src/main files carrying the header form; \
+         the corpus now has {} — investigate before trusting the counts below: {:?}",
+        main_header_files.len(),
+        main_header_files,
+    );
+    assert_eq!(
+        main_header_members.len(),
+        12,
+        "…across 12 members: {main_header_members:?}"
+    );
+    assert_eq!(
+        textual_parameter_sites, 16,
+        "the recorded finding is 16 method-parameter sites (13 main + 3 test)"
+    );
+    // ZERO captured keys is the recorded finding, not a regression: S-365 measured
+    // that no header-form site in this estate carries a literal topic operand, so
+    // recognition admits nothing here and the arm's honest output is refusals.
+    // Asserted because it is what makes (4) below entail "each of the 16 refused",
+    // and because if this ever becomes non-zero the recorded finding — and S-371's
+    // whole premise — needs re-deriving rather than quietly absorbing the change.
+    assert_eq!(
+        captured_total, 0,
+        "S-365 measured 0 literal topic operands across all {textual_sites} \
+         header-form sites; {captured_total} captured now. That is not a failure — \
+         it may be a better key rule or a changed corpus — but it invalidates this \
+         module's recorded finding, so re-derive it rather than updating this number"
+    );
+
+    // (1) THE STATEMENT THAT WAS FALSE: the arm recognises the header form at all.
+    //     Before this story, `recognised` was 0 on this estate.
+    let recognised = captured_total + refused_total;
+    assert!(
+        recognised > 0,
+        "the corpus carries {textual_sites} header-form publish sites and the arm \
+         recognised none — the CR-117 condition, unfixed"
+    );
+
+    // (2) FILE-GRAIN reconciliation — the one the ledger cannot collapse. Every file
+    //     carrying the header form yields at least one row, so this equality is
+    //     immune to the dedup described in (3) and is the assertion to trust first.
+    assert_eq!(
+        refusals.len() + captured.len(),
+        header_files.len(),
+        "every file carrying KafkaHeaders.TOPIC must yield at least one row; \
+         {} of {} did",
+        refusals.len() + captured.len(),
+        header_files.len(),
+    );
+
+    // (3) SITE-FOR-SITE reconciliation. Sharper than (2) — it would catch a pattern
+    //     that matches the common shape and misses a variant, which no fixture can
+    //     see — but the two sides are counted at DIFFERENT grains, so its failure
+    //     message must name both causes it can have.
+    //
+    //     `textual_sites` counts call sites. `recognised` counts rows from
+    //     `extract()`, which has already run `dedup_sort_refs` — keyed on
+    //     `(source, target, form, kind, relation)`, ignoring `line`. Every refusal
+    //     shares `target == ""`, so two refused header-form sites in ONE enclosing
+    //     declaration reach the ledger as ONE row (documented at
+    //     `extract::broker::record_refusals`, and asserted directly by
+    //     `refusals_are_attributed_per_declaration_not_per_line`). The equality
+    //     therefore holds only while no method carries two header-form publishes —
+    //     true of this estate (its two multi-site files put them in separate test
+    //     methods), but a property of the corpus, not of the arm.
+    assert_eq!(
+        recognised, textual_sites,
+        "site-for-site reconciliation failed: {recognised} of {textual_sites}. \
+         TWO possible causes, and they need opposite fixes — (a) a query gap: the \
+         arm does not recognise a variant the marker counted; or (b) declaration- \
+         level dedup: two header-form sites now share one enclosing method, so the \
+         ledger legitimately collapses them and the MARKER is what needs \
+         re-graining. Check (b) first — assertion (2) above stays green under (b) \
+         and fails under (a). A mismatch is investigated, not accepted"
+    );
+
+    // (4) The refusal count reconciles against the 16 known method-parameter sites:
+    //     every one of them is refused, and they are a subset of the refusals rather
+    //     than the whole of them (35 configuration getters refuse too). Paired with
+    //     the `captured_total == 0` assertion in (0), the two together do entail
+    //     "each of the 16 refused" — without it, a future change that captured 16
+    //     and lost 16 refusals would satisfy this inequality.
+    assert!(
+        refused_total >= textual_parameter_sites,
+        "all {textual_parameter_sites} method-parameter sites must record a refusal; \
+         only {refused_total} refusals exist in total"
+    );
+
+    // (4) NFR-CC-04, the property this story exists for: no publishing file is
+    //     silent. This is the assertion that would have failed before S-370 for all
+    //     52 header-form files.
+    assert!(
+        silent.is_empty(),
+        "{} file(s) carry KafkaHeaders.TOPIC but neither captured a topic nor \
+         recorded a refusal — silence is the defect: {silent:?}",
+        silent.len(),
+    );
+
+    // (5) Never fabricated: a captured key is a literal's own text, never an
+    //     operand's source. On this estate `captured_keys` is EMPTY — there is no
+    //     literal operand to capture — so this is a guard against a future
+    //     over-eager key rule rather than a live measurement, and it is stated that
+    //     way so a reader does not mistake a passing assertion for an exercised one.
+    for key in &captured_keys {
+        assert!(
+            !key.contains('(') && !key.contains('+'),
+            "a captured topic key is a literal's text, never an operand's source: {key:?}"
+        );
     }
 }
