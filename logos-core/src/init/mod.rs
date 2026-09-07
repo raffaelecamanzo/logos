@@ -72,6 +72,19 @@ pub struct InitOptions {
     /// (The PostToolUse wiki-augmentation hook this once also installed
     /// alongside was retired — CR-070.)
     pub install_quality_report_hook: bool,
+    /// This `init` is running as one member of `logos init --workspace`
+    /// ([FR-WS-02], CR-119) — changes only the `message`
+    /// [`Engine::init_with`](crate::Engine::init_with) returns, never what it
+    /// does. The single-repo message recommending `logos index` is wrong twice
+    /// over in this context: the [FR-WS-14] warm supervisor `init --workspace`
+    /// just spawned is already indexing this member, and `logos index` run at
+    /// the workspace root builds only the root, not this member. Set only by
+    /// [`crate::federation::enable::enable`]; every other caller takes the
+    /// default `false`.
+    ///
+    /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
+    /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+    pub workspace_member: bool,
 }
 
 // ── Generated content ──────────────────────────────────────────────────────

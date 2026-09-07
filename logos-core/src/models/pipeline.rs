@@ -213,6 +213,13 @@ pub struct IndexResult {
     /// `INCOMPLETE` freshness line from (NFR-RA-11, ADR-11, S-020); each is
     /// also described in `warnings`.
     pub files_failed: Vec<String>,
+    /// Advisory scope notes — never a `warnings` entry, so `FR-CL-03`'s
+    /// exit-code contract and a CI parser scanning `warnings` are both
+    /// unaffected (CR-119). Elided from the serialized report when empty, so a
+    /// root with nothing to note renders byte-identical to before this field
+    /// existed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// Result of an incremental sync run (FR-SY-01..06).

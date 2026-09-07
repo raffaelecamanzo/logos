@@ -289,6 +289,10 @@ pub fn index(
         },
         warnings,
         files_failed,
+        // The FR-WS-02 root-scope note (CR-119) is appended by the caller
+        // (`Engine::run_index`), which alone knows the project root; this
+        // pipeline function is root-agnostic.
+        notes: Vec::new(),
     })
 }
 

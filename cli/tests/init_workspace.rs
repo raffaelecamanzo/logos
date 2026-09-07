@@ -630,6 +630,125 @@ fn the_footprint_note_is_advisory_on_stderr_and_quiet_suppresses_it() {
     assert_eq!(report["footprint"]["fresh"], 2, "the machine payload is unaffected");
 }
 
+// ── the warm-start disclosure (CR-119, FR-WS-02, FR-WS-15, FR-WS-17) ───────
+
+/// Enabling a fresh workspace discloses that background warming has begun,
+/// over how many members, and names `logos workspace status` as the surface
+/// that reports progress and outcome — in **both** renderings, and as one
+/// workspace-level field rather than per-member text (asserted by shape: the
+/// value must be a scalar count, never an array keyed by member name).
+#[test]
+fn both_output_forms_carry_the_warm_start_disclosure() {
+    let tmp = two_member_fixture();
+
+    let machine = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&machine), 0, "{}", String::from_utf8_lossy(&machine.stderr));
+    let json: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    let warm_start = &json["warm_start"];
+    assert_eq!(warm_start["members"], 2, "both newly-approved members are counted: {warm_start}");
+    assert_eq!(warm_start["started"], true, "the supervisor was spawned: {warm_start}");
+    assert_eq!(warm_start["status_command"], "logos workspace status");
+    // ONE field, not eighty-four: a scalar count, never a per-member array/object.
+    assert!(warm_start["members"].is_number(), "{warm_start}");
+
+    // A second, human-rendered run over a third member: same field, same shape.
+    let batch = tmp.path().join("batch");
+    init_repo(&batch);
+    let human = logos(tmp.path(), &["init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&human), 0, "{}", String::from_utf8_lossy(&human.stderr));
+    let pretty: serde_json::Value = serde_json::from_slice(&human.stdout)
+        .expect("the human rendering is pretty JSON, not prose");
+    assert_eq!(
+        pretty["warm_start"]["members"], 1,
+        "only the new delta is counted, not the whole membership: {pretty}"
+    );
+}
+
+/// The disclosure's prose half goes to stderr, alongside the footprint note —
+/// stdout stays exactly one machine document, and `--quiet` suppresses it
+/// without emptying the report.
+#[test]
+fn the_warm_start_notice_is_advisory_on_stderr_and_quiet_suppresses_it() {
+    let tmp = two_member_fixture();
+    let out = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&out), 0);
+
+    serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .expect("stdout is exactly one JSON document, the note is not on it");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("background warming") && stderr.contains("logos workspace status"),
+        "the operator is told warming started and where to watch it: {stderr}"
+    );
+
+    let quiet_tmp = two_member_fixture();
+    let quiet = logos(quiet_tmp.path(), &["--json", "--quiet", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&quiet), 0);
+    let stderr = String::from_utf8_lossy(&quiet.stderr);
+    assert!(!stderr.contains("background warming"), "--quiet silences the advisory: {stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&quiet.stdout).unwrap();
+    assert_eq!(report["warm_start"]["members"], 2, "the machine payload is unaffected");
+}
+
+/// **The non-happy-path wiring, proven end to end.** A settled re-run (no
+/// newly-approved delta) must reach `report.warm_start` with `members: 0` AND
+/// `started: false` — not just the pure `WarmStartDisclosure::notice()` shape
+/// unit-tested elsewhere, but the actual `run()` composition at
+/// `enable::WarmStartDisclosure::new(approved_new.len(), warm(&approved_new,
+/// declared_k))`, through the REAL `spawn_supervisor` (never a stub): an empty
+/// delta hits its own `members.is_empty()` guard and returns `false`, so this
+/// one settled re-run exercises both fields' false/zero path together. A
+/// regression that hardcoded `started: true` or miscounted the delta would
+/// pass every other warm-start test, which all exercise a non-empty delta.
+#[test]
+fn a_settled_rerun_reports_no_new_delta_and_no_warm_started() {
+    let tmp = two_member_fixture();
+    let first = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&first), 0, "{}", String::from_utf8_lossy(&first.stderr));
+
+    let second = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&second), 0, "{}", String::from_utf8_lossy(&second.stderr));
+
+    let report: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(report["warm_start"]["members"], 0, "no new delta on a settled re-run: {report}");
+    assert_eq!(
+        report["warm_start"]["started"], false,
+        "the real spawn_supervisor returns false over an empty delta: {report}"
+    );
+
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        !stderr.contains("background warming"),
+        "no delta ⇒ no warm-start notice on the settled re-run: {stderr}"
+    );
+}
+
+/// A member enrolled through `init --workspace` reports a next step that is
+/// true in the workspace context — enrolled and queued for background
+/// warming — and never names `logos index`, which at the workspace root
+/// would build only the root, not this member (CR-119).
+#[test]
+fn a_member_next_step_never_names_logos_index() {
+    let tmp = two_member_fixture();
+    let out = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    for member in report["members"].as_array().unwrap() {
+        let message = member["message"].as_str().unwrap_or_default();
+        assert!(
+            !message.contains("logos index"),
+            "{}: must not be told to run a command that builds only the root: {message}",
+            member["name"]
+        );
+        assert!(
+            message.contains("enrolled") && message.contains("background warming"),
+            "{}: must state what is actually true: {message}",
+            member["name"]
+        );
+    }
+}
+
 // ── the plain-`logos init` parent-of-repos nudge (S-319, FR-IN-08) ─────────
 
 /// Run the real binary with stdin held open as a pipe nobody writes to after
