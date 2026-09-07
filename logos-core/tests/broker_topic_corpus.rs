@@ -282,3 +282,95 @@ fn the_reference_workspace_reports_a_reconciled_subscribe_topic_inventory_when_o
         corpus.topics.keys().collect::<Vec<_>>(),
     );
 }
+
+/// **The promotion + per-member topic-surface stages, on REAL source.**
+///
+/// The measurement above stops at capture, so on its own it leaves the criterion's
+/// named surface — `logos workspace status` reporting a non-empty topic inventory —
+/// argued rather than exercised on the real estate. This closes the gap without
+/// re-indexing the reference workspace itself: it copies the `@KafkaListener`-bearing
+/// Java sources of the corpus into a temp project, runs a real `Engine::index`, and
+/// reads the **same** `topic_surface()` projection that `workspace status` builds a
+/// member's inventory from ([FR-WS-11]).
+///
+/// So the chain capture → ledger → promotion → per-member topic surface is measured
+/// end to end on committed production source. The one remaining stage is the
+/// federation rollup that concatenates per-member surfaces, which is what S-256's
+/// own tests cover and which cannot turn a non-empty member surface into `topics: []`.
+///
+/// Copying rather than indexing in place is deliberate: the reference workspace's
+/// enrolment state belongs to other work, and a test must not mutate it.
+///
+/// [FR-WS-11]: ../../docs/specs/requirements/FR-WS-11.md
+#[test]
+fn real_listener_sources_promote_a_non_empty_member_topic_inventory() {
+    let Some(root) = corpus_root() else {
+        eprintln!(
+            "SKIPPED: set LOGOS_REF_WORKSPACE=<path to the reference workspace> to run the \
+             S-339 promotion check on real listener sources."
+        );
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("temp project");
+    let mut copied = 0usize;
+    let walker = ignore::WalkBuilder::new(&root)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(false)
+        .ignore(false)
+        .parents(false)
+        .build();
+    for entry in walker.flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("java") {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if !source.contains("@KafkaListener") {
+            continue;
+        }
+        // Flatten into one project: the topic identity is repo-scoped and carries no
+        // path, so the directory layout does not affect what is promoted.
+        let dest = tmp.path().join("src").join(format!("Listener{copied}.java"));
+        std::fs::create_dir_all(dest.parent().unwrap()).expect("mkdir");
+        std::fs::write(&dest, &source).expect("write");
+        copied += 1;
+    }
+    assert!(
+        copied > 0,
+        "the corpus carries no @KafkaListener source to promote from"
+    );
+
+    let engine = logos_core::Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+
+    // The exact projection `workspace status` reports a member's inventory from.
+    let surface = {
+        use logos_core::federation::MemberContracts;
+        engine.topic_surface().expect("the topic surface reads")
+    };
+    let mut topics: Vec<&str> = surface.iter().map(|t| t.topic.as_str()).collect();
+    topics.sort();
+    eprintln!(
+        "S-339 promotion: {copied} listener source(s) → {} topic(s) in the member \
+         inventory: {topics:?}",
+        topics.len()
+    );
+
+    assert!(
+        !topics.is_empty(),
+        "real listener sources must promote a non-empty topic inventory — \
+         `topics: []` is the CR-107 condition"
+    );
+    // Every promoted topic has at least one subscribing declaration behind it, and
+    // none is a fabricated empty key.
+    for summary in &surface {
+        assert!(!summary.topic.trim().is_empty(), "no keyless topic: {summary:?}");
+    }
+}
