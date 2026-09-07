@@ -92,6 +92,20 @@
 //!   [CR-117]'s *canonical topic identity* needs, because a publish in one
 //!   member must meet a subscribe in another.
 //!
+//! # These tables stay here
+//!
+//! `HEADER_PUBLISH_QUERY`, `BASE_URL_METHODS`, [`names_topic_header`], the
+//! `@ConfigurationProperties` index and the relaxed-binding rules are
+//! Spring-API-coupled measurement tables. They fall under the parent harness's
+//! carve-out (see its module docs) and **must not be lifted into
+//! `logos-core/src/resolve/`**, which
+//! `resolve::framework::tests::jvm_parity::no_language_specific_composition_code_exists`
+//! forbids. The real arm's capture belongs in `plugins/<lang>/*.scm` as pure
+//! plugin data ([ADR-54]); a measurement is allowed to know what a framework
+//! looks like, a resolver is not.
+//!
+//! [ADR-54]: ../../docs/specs/architecture/decisions/ADR-54.md
+//!
 //! # Materiality is declared before the run, not after it
 //!
 //! [CR-113] closed because folding admitted zero. "Immaterial" must not be a
@@ -102,24 +116,16 @@
 //!
 //! # Recorded finding (2026-09-07, `~/source/pec-services`, 84 members)
 //!
-//! **Both CRA-01 assumptions HOLD.** Neither change request is falsified, so
-//! this story does not block:
+//! **[CR-115] CRA-01 holds. [CR-117] CRA-01 is falsified on production source.**
+//! The two arms answer differently, and the split that decides them is one
+//! level deeper than the arms: **production source versus test source**. The
+//! broker arm admits 38 of 54 overall — and every one of the 38 is an IT test
+//! class, while all 13 of its production publish sites are refused.
 //!
-//! ```text
-//! arm           denom   NEW    %   disagree  missing  no-key
-//! client-call     140    79   56%         2        0      59
-//! broker           54    38   70%         0        0      16
-//! COMBINED        194   117   60%         2        0      75
-//! ```
-//!
-//! Disagreement is **rare on this corpus and that is a fact about this corpus**:
-//! it varies its hosts per profile and not its paths. `base-url` is redefined in
-//! nearly every test profile — 6 of the 21 resolvable `.baseUrl(…)` sites
-//! disagree — while `uri-*` almost never is. Read the base-URL figures beside
-//! the headline before extrapolating either.
-//!
-//! See [`RECORDED_FINDING`] for the full text, printed by the run and pinned by
-//! the verdict assertion in
+//! [`RECORDED_FINDING`] carries the full text and the tables; it is
+//! `include_str!`-ed so the run prints exactly what the documents quote, rather
+//! than a second hand-maintained copy that can drift from it. The verdict —
+//! per arm, read off the production row — is asserted in
 //! [`measure_configuration_agreement_over_the_reference_workspace`].
 //!
 //! [CR-113]: ../../docs/requests/CR-113-constant-folded-base-url-composition.md
@@ -203,6 +209,30 @@ pub enum Agreement {
 }
 
 impl Agreement {
+    /// The full statement [CR-115] AC2 asks for: how many committed sources
+    /// define the key **and** whether they agree. `label()` alone answered only
+    /// the second half, so an agreed census line never said how much evidence
+    /// stood behind it.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Agreed { value, sources: 0 } => {
+                format!("proven at the call site: {value:?}")
+            }
+            Self::Agreed { value, sources } => {
+                format!("agreed across {sources} source(s): {value:?}")
+            }
+            Self::Disagreed { values } => format!(
+                "disagreement across {} source(s), {} distinct values",
+                values.iter().map(|(_, files)| files.len()).sum::<usize>(),
+                values.len(),
+            ),
+            Self::Placeholder { sources } => {
+                format!("defined by {sources} source(s), but the value is a `${{…}}` indirection")
+            }
+            Self::Missing => "no committed source defines it".to_string(),
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Self::Agreed { .. } => "agreed",
@@ -374,17 +404,50 @@ pub fn canonical_key(key: &str) -> String {
         .join(".")
 }
 
+/// Strip a YAML inline comment, honouring quotes.
+///
+/// Separate from [`canonical_value`] and applied **before** the empty/block
+/// tests in [`parse_yaml`], because a comment changes what those tests see:
+/// `api:   # the mail API` is a mapping header, not a scalar, and reading it as
+/// one re-parents its whole subtree.
+///
+/// A quoted scalar ends at its closing quote and anything after it is comment;
+/// an unquoted one ends at the first ` #`. A bare `#` at the start is a
+/// comment entire.
+fn strip_yaml_comment(rest: &str) -> &str {
+    let rest = rest.trim();
+    for quote in ['"', '\''] {
+        if let Some(body) = rest.strip_prefix(quote) {
+            return match body.find(quote) {
+                // Keep both quotes; `canonical_value` unwraps them.
+                Some(end) => &rest[..end + 2],
+                None => rest,
+            };
+        }
+    }
+    if rest.starts_with('#') {
+        return "";
+    }
+    match rest.find(" #") {
+        Some(hash) => rest[..hash].trim_end(),
+        None => rest,
+    }
+}
+
 /// A configuration value as the sources prove it: trimmed, with one layer of
-/// matching quotes removed, and an inline `#` comment dropped from an unquoted
-/// scalar.
+/// matching quotes removed.
+///
+/// Comment stripping is **not** done here. It is a YAML rule and this runs for
+/// `.properties` too, where `#` is only a comment at the start of a line and a
+/// quote is a literal character — putting `.properties` values through the YAML
+/// rules turned `app.url=/x # main` into `/x`, which is a different value from
+/// the one Java's `Properties` reads and could make two sources falsely agree.
 fn canonical_value(raw: &str) -> String {
-    let mut text = raw.trim();
+    let text = raw.trim();
     let quoted = (text.starts_with('"') && text.ends_with('"') && text.len() >= 2)
         || (text.starts_with('\'') && text.ends_with('\'') && text.len() >= 2);
     if quoted {
-        text = &text[1..text.len() - 1];
-    } else if let Some(hash) = text.find(" #") {
-        text = text[..hash].trim_end();
+        return text[1..text.len() - 1].to_string();
     }
     text.to_string()
 }
@@ -394,16 +457,24 @@ fn canonical_value(raw: &str) -> String {
 /// Flatten the scalar subset of YAML the corpus's `application*.yml` files use:
 /// nested mappings of scalars, `---` document separators, `#` comments.
 ///
-/// A **deliberate subset**, not a YAML parser. Block scalars (`|`, `>`) and
-/// sequences bind no scalar key here, so a key whose value is a list is simply
-/// absent — which the agreement rule then reports as `missing key` rather than
-/// as an agreed value it never read. Under-reading is the safe direction: it
-/// can only lower the newly-admitted count, never inflate it.
+/// A **deliberate subset**, not a YAML parser. Block scalars (`|`, `>`, and
+/// their `|+`/`>-`/`|2` indicator forms) and sequences bind no scalar key here,
+/// so a key whose value is a list is simply absent — which the agreement rule
+/// then reports as `missing key` rather than as an agreed value it never read.
+/// Under-reading is the safe direction: it can only lower the newly-admitted
+/// count, never inflate it.
+///
+/// Both skips must consume the **body**, not just the header line. Skipping a
+/// `-` item line while leaving the indent stack untouched let the item's own
+/// continuation lines register as direct children of the enclosing mapping, so
+/// a `routes:` list fabricated a real-looking `spring.cloud.gateway.routes.uri`
+/// key from a list element — an invented value, not an absent one.
 pub fn parse_yaml(text: &str) -> BTreeMap<String, BTreeSet<String>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     // (indent, key) of every open mapping level.
     let mut stack: Vec<(usize, String)> = Vec::new();
     let mut skip_block_until: Option<usize> = None;
+    let mut skip_sequence_until: Option<usize> = None;
     for line in text.lines() {
         let indent = line.len() - line.trim_start().len();
         let trimmed = line.trim();
@@ -415,6 +486,14 @@ pub fn parse_yaml(text: &str) -> BTreeMap<String, BTreeSet<String>> {
             }
             skip_block_until = None;
         }
+        if let Some(seq_indent) = skip_sequence_until {
+            // The continuation lines of a `- name: x` item are indented past
+            // the dash and are the ITEM's keys, not the parent mapping's.
+            if trimmed.is_empty() || indent > seq_indent {
+                continue;
+            }
+            skip_sequence_until = None;
+        }
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
@@ -423,7 +502,7 @@ pub fn parse_yaml(text: &str) -> BTreeMap<String, BTreeSet<String>> {
             continue;
         }
         if trimmed.starts_with('-') {
-            // A sequence item: it binds no scalar key at this level.
+            skip_sequence_until = Some(indent);
             continue;
         }
         let Some((key, rest)) = split_yaml_entry(trimmed) else {
@@ -432,13 +511,25 @@ pub fn parse_yaml(text: &str) -> BTreeMap<String, BTreeSet<String>> {
         while stack.last().is_some_and(|(i, _)| *i >= indent) {
             stack.pop();
         }
-        let rest = rest.trim();
+        // Before anything is decided about `rest`: a trailing comment must not
+        // make a mapping header look like a scalar.
+        let rest = strip_yaml_comment(rest);
         if rest.is_empty() {
             stack.push((indent, key));
             continue;
         }
-        if rest == "|" || rest == ">" || rest.starts_with("|-") || rest.starts_with(">-") {
+        // Any block-scalar indicator, not just the four bare spellings: `|+`,
+        // `>-`, `|2` and friends all introduce a body that is not YAML. A plain
+        // scalar never begins with `|` or `>`, and a quoted one took the branch
+        // above.
+        if rest.starts_with('|') || rest.starts_with('>') {
             skip_block_until = Some(indent);
+            continue;
+        }
+        // An anchor or alias (`&name`, `*name`) is not a value: `defaults: &d`
+        // is a mapping header whose children must stay under it.
+        if rest.starts_with('&') {
+            stack.push((indent, key));
             continue;
         }
         // A flow collection (`[a, b]`, `{k: v}`) is not a scalar. Recording its
@@ -481,6 +572,12 @@ fn split_yaml_entry(line: &str) -> Option<(String, &str)> {
 
 /// Parse a `.properties` file: `key=value` or `key:value`, `#`/`!` comments,
 /// and trailing-backslash line continuation.
+///
+/// Two rules that differ from YAML and cost a wrong value if borrowed from it:
+/// a line continues only on an **odd** number of trailing backslashes (`a=C:\\`
+/// is a value ending in one literal backslash, not a continuation that swallows
+/// the next entry), and `#` is a comment only at the start of a line, never
+/// inline. Values are therefore trimmed but not comment-stripped or unquoted.
 pub fn parse_properties(text: &str) -> BTreeMap<String, BTreeSet<String>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut pending = String::new();
@@ -489,7 +586,9 @@ pub fn parse_properties(text: &str) -> BTreeMap<String, BTreeSet<String>> {
         if pending.is_empty() && (trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!')) {
             continue;
         }
-        if let Some(head) = trimmed.strip_suffix('\\') {
+        let trailing_backslashes = trimmed.chars().rev().take_while(|c| *c == '\\').count();
+        if trailing_backslashes % 2 == 1 {
+            let head = &trimmed[..trimmed.len() - 1];
             pending.push_str(head.trim_end());
             continue;
         }
@@ -504,7 +603,9 @@ pub fn parse_properties(text: &str) -> BTreeMap<String, BTreeSet<String>> {
         if key.is_empty() {
             continue;
         }
-        out.entry(canonical_key(key)).or_default().insert(canonical_value(value));
+        // Trim only: see the note above on why the YAML value rules must not
+        // reach a `.properties` value.
+        out.entry(canonical_key(key)).or_default().insert(value.trim().to_string());
     }
     out
 }
@@ -621,8 +722,14 @@ impl PropertiesIndex {
     /// first, then the workspace's when every remaining declaration agrees.
     pub fn get(&self, simple_type: &str, module: &str) -> Option<&PropertiesClass> {
         let declarations = self.classes.get(simple_type)?;
-        if let Some(own) = declarations.iter().find(|c| c.module == module) {
-            return Some(own);
+        // The own-module subset gets the same distinct-declaration test as the
+        // workspace one: two classes of the same simple name in different
+        // packages of ONE module is the same ambiguity the collision rule
+        // exists for, and picking the first is the guess it forbids.
+        let mut own = declarations.iter().filter(|c| c.module == module);
+        if let Some(first) = own.next() {
+            let ambiguous = own.any(|c| c.prefix != first.prefix || c.properties != first.properties);
+            return (!ambiguous).then_some(first);
         }
         (!self.collisions.contains(simple_type)).then(|| declarations.first()).flatten()
     }
@@ -707,7 +814,17 @@ fn declared_properties(class: Node<'_>, src: &[u8]) -> BTreeSet<String> {
                     }
                 }
             }
-            "formal_parameter" => {
+            // A record's own components (Spring 3 constructor binding) — NOT
+            // every parameter in the class body. Unrestricted, this registered
+            // a setter's or helper's parameter as a declared property, which
+            // loosens `PropertyNotDeclared` and, where a source happens to
+            // define `<prefix>.<paramName>`, admits a site outright.
+            "formal_parameter"
+                if class.kind() == "record_declaration"
+                    && node
+                        .parent()
+                        .is_some_and(|p| p.parent().is_some_and(|g| g.id() == class.id())) =>
+            {
                 if let Some(name) =
                     node.child_by_field_name("name").and_then(|n| n.utf8_text(src).ok())
                 {
@@ -755,6 +872,9 @@ pub enum Refusal {
     MethodParameter,
     /// A name the compilation unit does not bind at all.
     UnboundName,
+    /// A name the unit binds to two different configuration accessors. The
+    /// source does not prove which one the call site sees, so neither is used.
+    AmbiguousBinding,
     /// The receiver resolves, but the member read is not a getter.
     NotAGetter,
     /// The receiver's declared type is not visible in the compilation unit.
@@ -774,6 +894,7 @@ impl Refusal {
             Self::NestedAccessor => "nested accessor",
             Self::MethodParameter => "method parameter (one call frame away)",
             Self::UnboundName => "name unbound in this unit",
+            Self::AmbiguousBinding => "name bound to two different accessors",
             Self::NotAGetter => "not a getter",
             Self::ReceiverTypeUnknown => "receiver type unknown",
             Self::NoPropertiesClass => "no @ConfigurationProperties class",
@@ -782,10 +903,11 @@ impl Refusal {
         }
     }
 
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::NestedAccessor,
         Self::MethodParameter,
         Self::UnboundName,
+        Self::AmbiguousBinding,
         Self::NotAGetter,
         Self::ReceiverTypeUnknown,
         Self::NoPropertiesClass,
@@ -801,9 +923,23 @@ pub enum KeySource {
     Properties,
     /// A `@Value("${key}")`-annotated name.
     ValueAnnotation,
-    /// An environment read. Resolved so it can be *looked up* and reported as
-    /// undefined by any committed source, rather than dismissed as unreadable.
+    /// Not configuration at all: a literal or same-unit constant the call site
+    /// itself proves. Carries the empty key.
+    CallSite,
+    /// An environment read. Resolved so the census can name the variable, but
+    /// never admitted — [CR-115] §3.3 puts it out of scope.
     Environment,
+}
+
+impl KeySource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Properties => "@ConfigurationProperties",
+            Self::ValueAnnotation => "@Value",
+            Self::CallSite => "the call site",
+            Self::Environment => "the environment",
+        }
+    }
 }
 
 /// What one configuration-lookup operand resolved to.
@@ -861,6 +997,28 @@ fn resolve_key_at(
     }
     // A bare (or qualified) name: `@Value("${…}")` is the only one-hop form.
     if let Some(name) = operand_name(node, src) {
+        // A parameter is decided FIRST, before any annotation is read — the
+        // same rule `classify_binding` applies in the parent module.
+        //
+        // `Unit` is file-scoped, not scope-aware, so a `@Value`-annotated field
+        // and a method parameter that shadows it share one entry, and the
+        // field's key answered for the parameter. Testing "are ALL bindings
+        // parameters?" does not settle it either, because the field binding
+        // makes that false. So resolve it by SCOPE: does the method actually
+        // enclosing this operand declare a parameter of that name? Field /
+        // parameter collision is idiomatic Spring, and both readings of it are
+        // wrong in a different direction.
+        if encloses_parameter_named(node, &name, src) {
+            return KeyOutcome::Unresolved(Refusal::MethodParameter);
+        }
+        let all_parameters = unit.bindings.get(&name).is_some_and(|bs| {
+            bs.iter().all(|b| {
+                super::is_parameter_kind(&b.bind_kind) || super::is_parameter_kind(&b.decl_kind)
+            })
+        });
+        if all_parameters {
+            return KeyOutcome::Unresolved(Refusal::MethodParameter);
+        }
         if let Some(key) = value_annotation_key(&name, unit) {
             return KeyOutcome::Resolved {
                 key,
@@ -874,48 +1032,103 @@ fn resolve_key_at(
         let Some(bindings) = unit.bindings.get(&name) else {
             return KeyOutcome::Unresolved(Refusal::UnboundName);
         };
+        // Collect EVERY binding's key, not the first that resolves. `folded_text`
+        // in the parent refuses a name bound to two different literals because
+        // "the source does not prove which the call site sees"; the same is true
+        // of a name bound to two different accessors, and `Unit::build` fills
+        // this vec in DFS order, so "first" is not even source order.
+        let mut keys: BTreeSet<String> = BTreeSet::new();
+        let mut resolved: Option<KeyOutcome> = None;
         for binding in bindings {
             let Some(value) = binding.value else { continue };
             if value.id() == node.id() || depth == 0 {
                 continue;
             }
             let outcome = resolve_key_at(value, src, unit, resolver, depth - 1);
-            if outcome.key().is_some() {
-                return outcome;
+            if let Some(key) = outcome.key() {
+                keys.insert(key.to_string());
+                resolved.get_or_insert(outcome);
             }
         }
-        // Bound only as a parameter: the value is a caller's, not this unit's.
-        if bindings.iter().all(|b| {
-            super::is_parameter_kind(&b.bind_kind) || super::is_parameter_kind(&b.decl_kind)
-        }) {
-            return KeyOutcome::Unresolved(Refusal::MethodParameter);
+        match keys.len() {
+            1 => return resolved.unwrap_or(KeyOutcome::Unresolved(Refusal::UnrecognisedAccessor)),
+            n if n > 1 => return KeyOutcome::Unresolved(Refusal::AmbiguousBinding),
+            _ => {}
         }
     }
     KeyOutcome::Unresolved(Refusal::UnrecognisedAccessor)
 }
 
+/// Whether a method/constructor/lambda enclosing `node` declares a parameter
+/// called `name` — i.e. whether the operand refers to a parameter rather than
+/// to a same-named field of the class.
+fn encloses_parameter_named(node: Node<'_>, name: &str, src: &[u8]) -> bool {
+    let mut current = node.parent();
+    while let Some(scope) = current {
+        if matches!(
+            scope.kind(),
+            "method_declaration" | "constructor_declaration" | "lambda_expression"
+        ) {
+            if let Some(params) = scope.child_by_field_name("parameters") {
+                let mut cursor = params.walk();
+                let declared = params.named_children(&mut cursor).any(|p| {
+                    p.child_by_field_name("name")
+                        .and_then(|n| n.utf8_text(src).ok())
+                        .is_some_and(|n| n == name)
+                });
+                if declared {
+                    return true;
+                }
+            }
+        }
+        current = scope.parent();
+    }
+    false
+}
+
 /// `System.getenv("X")`, `os.Getenv("X")`, `process.env.X`, `os.environ["X"]`.
 fn environment_key(node: Node<'_>, src: &[u8]) -> Option<String> {
     let text = node.utf8_text(src).ok()?.trim();
-    let lower = text.to_ascii_lowercase();
-    if lower.starts_with("process.env.") {
-        return Some(text["process.env.".len()..].to_string());
+    if let Some(rest) = text.strip_prefix("process.env.") {
+        return (!rest.is_empty() && rest.chars().all(|c| c.is_alphanumeric() || c == '_'))
+            .then(|| rest.to_string());
     }
-    let is_env_call = lower.contains("getenv(") || lower.contains("environ[") || lower.contains("environ.get(");
-    if !is_env_call {
+    // Case-SENSITIVE needles. Lower-casing the operand first made
+    // `configApi.getEnv("A")` — an ordinary bean getter — read as an
+    // environment read and pre-empt the properties lookup. `getenv` and
+    // `Getenv` are the actual spellings Java/PHP and Go use; `getEnv` is not
+    // one of them.
+    let (arg_start, close) = ["getenv(", "Getenv(", "environ[", "environ.get("]
+        .iter()
+        .find_map(|needle| {
+            let at = text.find(needle)?;
+            Some((at + needle.len(), if needle.contains('[') { ']' } else { ')' }))
+        })?;
+    let arg = text.get(arg_start..)?;
+    let end = arg.find(close)?;
+    // The operand must BE the environment read, not merely contain one.
+    // `Optional.ofNullable(System.getenv("HOST")).orElse("/x")` is an
+    // expression whose value the environment does not decide; reading it as
+    // `HOST` silently dropped the fallback.
+    if arg_start + end + 1 != text.len() {
         return None;
     }
-    let open = text.find(['(', '[' ])?;
-    let arg = &text[open + 1..];
-    let end = arg.find([')', ']'])?;
     let name = arg[..end].trim().trim_matches(['"', '\'']);
-    (!name.is_empty()).then(|| name.to_string())
+    (!name.is_empty() && !name.contains(['(', ' ', '+'])).then(|| name.to_string())
 }
 
 /// The `${key}` of a `@Value` annotation on a same-unit binding of `name`.
 fn value_annotation_key(name: &str, unit: &Unit<'_>) -> Option<String> {
     let bindings = unit.bindings.get(name)?;
-    bindings.iter().find_map(|b| {
+    bindings
+        .iter()
+        .filter(|b| {
+            // A parameter's `decl_head` is its own declaration, but a caller
+            // supplies its value; an annotation elsewhere on a same-named field
+            // does not describe it.
+            !super::is_parameter_kind(&b.bind_kind) && !super::is_parameter_kind(&b.decl_kind)
+        })
+        .find_map(|b| {
         let at = b.decl_head.find("@Value")?;
         let head = &b.decl_head[at..];
         let open = head.find("${")?;
@@ -1006,6 +1219,9 @@ pub enum Verdict {
     PlaceholderValue,
     /// At least one accessor does not resolve to a key.
     NoKey(Refusal),
+    /// The value comes from an environment variable, which is not a committed
+    /// source — out of scope for [CR-115] §3.3 whatever the sources say.
+    OutOfScopeSource,
 }
 
 impl Verdict {
@@ -1019,6 +1235,7 @@ impl Verdict {
             Self::MissingKey => "refused: missing key",
             Self::PlaceholderValue => "refused: placeholder value",
             Self::NoKey(_) => "refused: no key",
+            Self::OutOfScopeSource => "refused: environment variable, not a committed source",
         }
     }
 
@@ -1079,7 +1296,9 @@ pub fn judge(
         outcomes.push((!kind.is_foldable()).then(|| resolve_key(*node, src, unit, resolver)));
     }
     // Already admitted: a single static literal needs nothing from this change.
-    if kinds == [OperandKind::Literal] {
+    // Shares the parent's predicate rather than restating it — two spellings of
+    // "already admitted" could disagree and each publish a different figure.
+    if super::is_already_static_literal(kinds) {
         return Judgement { outcomes, verdict: Verdict::AlreadyAdmitted };
     }
     if outcomes.iter().all(Option::is_none) {
@@ -1105,6 +1324,19 @@ pub fn judge(
     // conflicting configuration value is not a route parameter: turning it into
     // `{}` because it happens to be trailing would be the default-profile guess
     // [CR-115] §3.4 exists to refuse, wearing a different hat.
+    // An environment variable is not a committed source, so its scope is
+    // decided before its agreement: [CR-115] §3.3 excludes it whatever the
+    // sources say, and `canonical_key` lower-cases and strips separators, so
+    // `getenv("BASE_URL")` would otherwise collide with a yml `base-url` and be
+    // counted in the headline as though the repository proved it.
+    if outcomes
+        .iter()
+        .flatten()
+        .any(|o| matches!(o, KeyOutcome::Resolved { source: KeySource::Environment, .. }))
+    {
+        return Judgement { outcomes, verdict: Verdict::OutOfScopeSource };
+    }
+
     let agreements: Vec<Option<Agreement>> = outcomes
         .iter()
         .map(|o| o.as_ref().and_then(KeyOutcome::key).map(|k| resolver.agreement(k)))
@@ -1122,7 +1354,31 @@ pub fn judge(
     // source alone, or from a trailing placeholder. Either way S-355 already
     // measured it and this arm must not re-count it as its own recovery.
     if !outcomes.iter().flatten().any(|o| o.key().is_some()) {
-        return Judgement { outcomes, verdict: Verdict::NotConfigurationBound };
+        // ...unless a configuration accessor was recognised and simply could
+        // not be read. Position decided this before: a LEADING unresolved
+        // lookup was fatal and counted, a TRAILING one fell through to
+        // `NotConfigurationBound`, which `Tally::add` drops from `denominator`
+        // and `report_census` hides. The same refusal was in or out of the
+        // published denominator purely by where it sat in the composition —
+        // shrinking the denominator and so inflating the recovered share the
+        // verdict turns on. [CR-115] AC1 also requires every such site be
+        // reported with its reason.
+        let unread_lookup = kinds
+            .iter()
+            .zip(&outcomes)
+            .find_map(|(kind, outcome)| match outcome {
+                Some(KeyOutcome::Unresolved(refusal))
+                    if *kind == OperandKind::ConfigurationLookup =>
+                {
+                    Some(*refusal)
+                }
+                _ => None,
+            });
+        let verdict = match unread_lookup {
+            Some(refusal) => Verdict::NoKey(refusal),
+            None => Verdict::NotConfigurationBound,
+        };
+        return Judgement { outcomes, verdict };
     }
 
     // Every configuration operand agrees. Compose what the site resolves to:
@@ -1142,7 +1398,13 @@ pub fn judge(
 /// The text the site resolves to. Returns `None` when the **leading** operand
 /// resolves to nothing — a composition whose prefix is unknown is not resolved
 /// at all, whatever its tail says ([CR-113] §3.2, inherited by [CR-115]).
-fn compose(
+///
+/// Shared with the parent module's S-355 headline, which passes an all-`None`
+/// `agreements` slice: with no configuration values in play this is exactly
+/// [FR-WS-18] AC1's placeholder rule. The two headlines rest on one
+/// implementation of that rule so a change to it cannot make them mean
+/// different things.
+pub(super) fn compose(
     nodes: &[Node<'_>],
     agreements: &[Option<Agreement>],
     src: &[u8],
@@ -1194,10 +1456,15 @@ pub fn binds_a_route(template: &str) -> bool {
 /// The message-header publish form, as a harness-local query.
 ///
 /// Deliberately shape-only: the header constant and the method name are
-/// filtered in Rust, because `tree_sitter::QueryCursor` does not evaluate
-/// `#eq?`/`#match?` predicates and a query that silently ignored them would
-/// match every two-argument call in the corpus. The parent module's
-/// `collect_sites` gates its verb the same way, for the same reason.
+/// filtered in Rust rather than by query predicates.
+///
+/// Not because predicates do not work — `tree_sitter` 0.25 *does* evaluate the
+/// text predicates (`#eq?`, `#match?`, `#any-of?`) inside `QueryMatches`, which
+/// is why `count_broker_captures` can rely on the real `brokers.scm`'s
+/// `#any-of?` firing. The reason is that this arm's filter is not a text
+/// predicate at all: it accepts four different spellings of the topic header
+/// (qualified, statically imported, and the wire name) and must stay readable
+/// beside `names_topic_header`, which the fixtures pin directly.
 const HEADER_PUBLISH_QUERY: &str = r"
 (method_invocation
   name: (identifier) @publish.method
@@ -1402,9 +1669,12 @@ pub fn collect_base_urls(
         let folded = folded_text(arg, src, unit, FOLD_DEPTH);
         let (outcome, agreement) = match folded {
             Some(value) => (
+                // An empty key is the sentinel `report_base_urls` reads as
+                // "proven at the call site". `KeySource::CallSite` names it
+                // honestly: recording it as `@Value` was simply false.
                 KeyOutcome::Resolved {
                     key: String::new(),
-                    source: KeySource::ValueAnnotation,
+                    source: KeySource::CallSite,
                     declared_in: None,
                 },
                 Agreement::Agreed { value, sources: 0 },
@@ -1458,6 +1728,8 @@ pub struct Tally {
     pub placeholder: usize,
     pub no_key: usize,
     pub not_a_route: usize,
+    /// Resolved, but from an environment variable — [CR-115] §3.3 out of scope.
+    pub out_of_scope: usize,
     pub already_admitted: usize,
 }
 
@@ -1487,6 +1759,7 @@ impl Tally {
             Verdict::PlaceholderValue => self.placeholder += 1,
             Verdict::NoKey(_) => self.no_key += 1,
             Verdict::NotARoute { .. } => self.not_a_route += 1,
+            Verdict::OutOfScopeSource => self.out_of_scope += 1,
             Verdict::AlreadyAdmitted | Verdict::NotConfigurationBound => unreachable!(),
         }
     }
@@ -1501,6 +1774,7 @@ impl Tally {
         self.placeholder += other.placeholder;
         self.no_key += other.no_key;
         self.not_a_route += other.not_a_route;
+        self.out_of_scope += other.out_of_scope;
         self.already_admitted += other.already_admitted;
     }
 
@@ -1519,7 +1793,7 @@ impl Tally {
 
     fn header() -> String {
         format!(
-            "{:<12} {:>6} {:>7} {:>6} {:>8} {:>7} {:>8} {:>6} {:>9} {:>6}",
+            "{:<12} {:>6} {:>7} {:>6} {:>8} {:>7} {:>8} {:>6} {:>9} {:>4} {:>6}",
             "language",
             "denom",
             "cfg-lbl",
@@ -1529,13 +1803,14 @@ impl Tally {
             "placehld",
             "no-key",
             "not-route",
+            "env",
             "literal",
         )
     }
 
     fn row(&self, label: &str) -> String {
         format!(
-            "{:<12} {:>6} {:>7} {:>6} {:>8} {:>7} {:>8} {:>6} {:>9} {:>6}",
+            "{:<12} {:>6} {:>7} {:>6} {:>8} {:>7} {:>8} {:>6} {:>9} {:>4} {:>6}",
             label,
             self.denominator,
             self.config_labelled,
@@ -1545,17 +1820,71 @@ impl Tally {
             self.placeholder,
             self.no_key,
             self.not_a_route,
+            self.out_of_scope,
             self.already_admitted,
         )
     }
 }
 
+/// Whether a site lives in production source or in a test tree.
+///
+/// This exists because the arm split alone hid an inversion. The broker arm
+/// reported 38 of 54 admitted — and **every one of the 38 was an IT test
+/// class**, while all 13 sites in `src/main` were refused. A cross-service
+/// coupling edge derived from a test fixture is not the coupling [CR-117] is
+/// about, and [CR-117] §6's acceptance criterion is written over the
+/// main-source population specifically. The story's own rule — "a material
+/// figure for one and an immaterial figure for the other must not be averaged
+/// away" — applies one level deeper than the two arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tree {
+    Main,
+    Test,
+}
+
+impl Tree {
+    /// Classify by path. Deliberately broad: Maven/Gradle `src/test`, a
+    /// top-level `test`/`tests` directory, Go's `_test.go`, and the `IT`/`Test`
+    /// class-name suffixes the corpus uses.
+    pub fn of(path: &str) -> Self {
+        let lower = path.to_ascii_lowercase();
+        let in_test_dir = lower.contains("/src/test/")
+            || lower.starts_with("src/test/")
+            || lower.contains("/test/")
+            || lower.contains("/tests/")
+            || lower.starts_with("test/")
+            || lower.starts_with("tests/");
+        let test_named = lower.ends_with("_test.go")
+            || lower.ends_with("it.java")
+            || lower.ends_with("test.java")
+            || lower.ends_with("tests.java")
+            || lower.ends_with(".test.ts")
+            || lower.ends_with(".spec.ts");
+        if in_test_dir || test_named {
+            Self::Test
+        } else {
+            Self::Main
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Test => "test",
+        }
+    }
+}
+
 /// Both arms' figures, separately and combined — the object the verdict is read
-/// off, so the two are never averaged into one.
+/// off, so the two are never averaged into one. Each arm is additionally split
+/// by [`Tree`], because a yield that lives entirely in test source is a
+/// different verdict from the same yield in production source.
 #[derive(Debug, Default)]
 pub struct Verdicts {
     pub client: BTreeMap<String, Tally>,
     pub broker: BTreeMap<String, Tally>,
+    /// Per arm ("client-call" / "broker"), per tree.
+    pub by_tree: BTreeMap<(&'static str, Tree), Tally>,
 }
 
 impl Verdicts {
@@ -1599,7 +1928,13 @@ pub fn report(m: &super::Measurement) -> Verdicts {
     report_broker_arm(m, &mut verdicts);
     report_newly_admitted(m);
     report_base_urls(m);
+    let (workspace_agreed, headline_total) = workspace_scope_headline(m);
     report_totals(&verdicts);
+    println!(
+        "  workspace-scope check: of the {headline_total} sites the module-scoped rule admits, \
+         {workspace_agreed} also agree\n  across EVERY source in the workspace — CR-115 §3.4 read \
+         strictly admits {workspace_agreed}, not {headline_total}."
+    );
     report_refusals(m);
     report_census(m);
     verdicts
@@ -1661,6 +1996,11 @@ fn report_client_arm(m: &super::Measurement, verdicts: &mut Verdicts) {
         let mut tally = Tally::default();
         for site in stats.sites.iter().filter(|s| s.gate_admitted) {
             tally.add(&site.cr115, &site.kinds);
+            verdicts
+                .by_tree
+                .entry(("client-call", Tree::of(&site.file)))
+                .or_default()
+                .add(&site.cr115, &site.kinds);
         }
         println!("{}", tally.row(lang));
         verdicts.client.insert(lang.clone(), tally);
@@ -1684,6 +2024,11 @@ fn report_broker_arm(m: &super::Measurement, verdicts: &mut Verdicts) {
         let mut tally = Tally::default();
         for site in &stats.sites {
             tally.add(&site.verdict, &site.kinds);
+            verdicts
+                .by_tree
+                .entry(("broker", Tree::of(&site.file)))
+                .or_default()
+                .add(&site.verdict, &site.kinds);
         }
         println!("{}", tally.row(lang));
         verdicts.broker.insert(lang.clone(), tally);
@@ -1706,6 +2051,43 @@ fn report_broker_arm(m: &super::Measurement, verdicts: &mut Verdicts) {
     }
 }
 
+/// The strict [CR-115] §3.4 reading — "every discovered source **in the
+/// workspace** that defines the key agrees" — recomputed over the same sites.
+///
+/// The headline is module-scoped, because a Maven module is the classpath one
+/// deployable actually assembles and two members may legitimately bind one key
+/// differently. But §3.4's words are workspace-wide, and on this corpus the two
+/// differ, so the report must state which produced the headline and what the
+/// other would have given.
+fn workspace_scope_headline(m: &super::Measurement) -> (usize, usize) {
+    let client = m
+        .per_language
+        .values()
+        .flat_map(|s| s.sites.iter())
+        .filter(|s| s.gate_admitted && s.cr115.is_newly_admitted())
+        .map(|s| &s.key_outcomes);
+    let broker = m
+        .broker
+        .values()
+        .flat_map(|s| s.sites.iter())
+        .filter(|s| s.verdict.is_newly_admitted())
+        .map(|s| &s.outcomes);
+
+    let mut total = 0usize;
+    let mut agreed = 0usize;
+    for outcomes in client.chain(broker) {
+        total += 1;
+        let holds = outcomes.iter().flatten().all(|outcome| match outcome.key() {
+            Some(key) => matches!(m.config.agreement(key, None), Agreement::Agreed { .. }),
+            None => true,
+        });
+        if holds {
+            agreed += 1;
+        }
+    }
+    (agreed, total)
+}
+
 fn report_totals(verdicts: &Verdicts) {
     let client = verdicts.client_total();
     let broker = verdicts.broker_total();
@@ -1718,6 +2100,25 @@ fn report_totals(verdicts: &Verdicts) {
     println!("{}", broker.row("broker"));
     println!("{}", combined.row("COMBINED"));
     println!(
+        "\n--- each arm split by PRODUCTION vs TEST source ---\n\
+         The arm split alone is not enough. A yield that lives entirely in test fixtures is\n\
+         a different verdict from the same yield in production code, and CR-117 §6's\n\
+         acceptance criterion is written over the main-source population specifically.\n"
+    );
+    println!("{}", Tally::header());
+    for arm in ["client-call", "broker"] {
+        for tree in [Tree::Main, Tree::Test] {
+            let tally = verdicts.by_tree.get(&(arm, tree)).copied().unwrap_or_default();
+            println!("{}", tally.row(&format!("{arm}/{}", tree.label())));
+        }
+    }
+    println!(
+        "\nSCOPE: the headline is MODULE-scoped — agreement is taken over the sources under\n\
+         the call site's own build module, which is the classpath one deployable assembles.\n\
+         CR-115 §3.4's words are workspace-wide; that stricter reading is printed beside it\n\
+         so the CR is decided on the reading it means."
+    );
+    println!(
         "\nmateriality floor, declared before the run: >= {MATERIAL_FLOOR_SITES} sites AND \
          >= {MATERIAL_FLOOR_PCT}% of the arm's own denominator"
     );
@@ -1725,16 +2126,32 @@ fn report_totals(verdicts: &Verdicts) {
         ("client-call", client, "CR-115"),
         ("broker", broker, "CR-117"),
     ] {
+        let main = verdicts.by_tree.get(&(name, Tree::Main)).copied().unwrap_or_default();
         println!(
             "  {name:<12} {} newly admitted / {} refused-today sites = {}%  \
-             [within the taxonomy-labelled subset: {} of {}]  ->  {cr} CRA-01 {}",
+             [taxonomy-labelled subset: {} of {}]",
             tally.newly_admitted,
             tally.denominator,
             tally.percent(),
             tally.newly_admitted_labelled,
             tally.config_labelled,
-            if tally.is_material() { "HOLDS" } else { "FALSIFIED" },
         );
+        println!(
+            "  {:<12}   of which in PRODUCTION source: {} of {} = {}%  ->  {cr} CRA-01 {}",
+            "",
+            main.newly_admitted,
+            main.denominator,
+            main.percent(),
+            if main.is_material() { "HOLDS" } else { "FALSIFIED" },
+        );
+        if tally.is_material() != main.is_material() {
+            println!(
+                "  {:<12}   ** the whole-arm figure and the production figure DISAGREE. \
+                 The production one decides {cr}: an edge derived from a test fixture is not \
+                 the coupling it is about. **",
+                "",
+            );
+        }
     }
 }
 
@@ -1895,13 +2312,14 @@ fn describe_keys(outcomes: &[Option<KeyOutcome>], corpus: &ConfigCorpus, module:
             KeyOutcome::Unresolved(refusal) => {
                 out.push_str(&format!("\n      <unresolved: {}>", refusal.label()));
             }
-            KeyOutcome::Resolved { key, declared_in, .. } => {
+            KeyOutcome::Resolved { key, declared_in, source } => {
                 let scoped = corpus.agreement(key, Some(module));
                 let workspace = corpus.agreement(key, None);
                 out.push_str(&format!(
-                    "\n      {key}  module: {}  workspace: {}{}",
-                    scoped.label(),
-                    workspace.label(),
+                    "\n      {key}  via {}  module: {}  workspace: {}{}",
+                    source.label(),
+                    scoped.detail(),
+                    workspace.detail(),
                     declared_in
                         .as_deref()
                         .map(|f| format!("  declared in {f}"))
@@ -1933,6 +2351,8 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
     };
     let m = super::measurement(&root);
     let verdicts = report(m);
+    let client = verdicts.client_total();
+    let broker = verdicts.broker_total();
     println!("\n--- recorded finding ---\n{RECORDED_FINDING}");
 
     assert!(
@@ -1940,6 +2360,37 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
         "the corpus at {} yielded no application.{{yml,yaml,properties}} source, so no \
          agreement was measured — refusing to report a green run that measured nothing",
         root.display(),
+    );
+    // The materiality floor (5 sites / 10%) cannot notice a collapsed harness:
+    // a broker arm that regressed to 6 sites of which 5 admit still reads
+    // "material". These guard the ORDER OF MAGNITUDE the finding was recorded
+    // at, loosely enough to survive corpus churn.
+    assert!(
+        client.denominator >= 100 && broker.denominator >= 40,
+        "the recorded finding measured 140 client / 54 broker refused-today sites; this run \
+         saw {} / {}. A collapsed denominator is a broken harness, not a new finding.",
+        client.denominator,
+        broker.denominator,
+    );
+    assert!(
+        !m.base_urls.is_empty(),
+        "the CR-115 base-URL arm found no `.baseUrl(…)` site, so half of what CR-115 is \
+         titled after was not measured at all",
+    );
+    assert!(
+        m.config.profiles().len() >= 2,
+        "a corpus with fewer than two profiles cannot exercise profile disagreement, which \
+         is the rule CR-115 §3.4 is judged on — this run measured agreement that could not \
+         have failed",
+    );
+    assert!(
+        m.per_language
+            .values()
+            .flat_map(|s| s.sites.iter())
+            .any(|s| s.gate_admitted && s.cr115 == Verdict::Disagreement),
+        "no site anywhere was refused for disagreement, so the agreement rule's refusal path \
+         was never taken. A run that never refuses is not evidence the rule works — and a \
+         regression that stopped producing Disagreed would make every arm look MORE material",
     );
     assert!(
         !m.properties.is_empty(),
@@ -1952,23 +2403,41 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
     // The verdict is what blocks CR-115 and CR-117, so it is asserted rather
     // than printed. Both arms are pinned independently: a change that flipped
     // one and not the other must fail here, not average out.
-    let client = verdicts.client_total();
-    let broker = verdicts.broker_total();
-    for (arm, tally, cr) in [("client-call", client, "CR-115"), ("broker", broker, "CR-117")] {
-        assert!(
-            tally.is_material(),
-            "S-365's recorded finding is that the agreement rule newly admits a MATERIAL \
-             number of {arm} sites, and that {cr} CRA-01 therefore HOLDS. This run newly \
-             admitted {} of {} ({}%), below the floor of {MATERIAL_FLOOR_SITES} sites and \
-             {MATERIAL_FLOOR_PCT}% declared before the measurement was taken. That is a \
-             falsification, not a broken test: mark {cr} CRA-01 falsified with this run's \
-             evidence and date, leave the stories it gates unplanned, and re-decide the \
-             change request before changing this assertion.",
-            tally.newly_admitted,
-            tally.denominator,
-            tally.percent(),
-        );
-    }
+    //
+    // The verdict is read off PRODUCTION source, per arm. The whole-arm figure
+    // is printed beside it but does not decide anything: the broker arm's 38
+    // admits are all IT test classes and its 13 production sites yield zero, so
+    // a whole-arm reading would have recorded CR-117 CRA-01 as holding on the
+    // strength of test fixtures.
+    let client_main =
+        verdicts.by_tree.get(&("client-call", Tree::Main)).copied().unwrap_or_default();
+    let broker_main = verdicts.by_tree.get(&("broker", Tree::Main)).copied().unwrap_or_default();
+
+    assert!(
+        client_main.is_material(),
+        "S-365's recorded finding is that CR-115 CRA-01 HOLDS: the agreement rule newly \
+         admits a MATERIAL number of PRODUCTION client-call sites. This run admitted {} of \
+         {} ({}%), below the floor of {MATERIAL_FLOOR_SITES} sites and {MATERIAL_FLOOR_PCT}% \
+         declared before the measurement was taken. That is a falsification, not a broken \
+         test: mark CR-115 CRA-01 falsified with this run's evidence and date, leave S-366 \
+         and S-367 unplanned, and re-decide the CR before changing this assertion.",
+        client_main.newly_admitted,
+        client_main.denominator,
+        client_main.percent(),
+    );
+    assert!(
+        !broker_main.is_material(),
+        "S-365's recorded finding is that CR-117 CRA-01 is FALSIFIED on production source: \
+         all {} of the broker arm's production publish sites are refused, and every site the \
+         rule admits is an IT test class. This run admitted {} of {} production sites ({}%), \
+         which CLEARS the declared floor — the corpus or the harness has changed. Re-read \
+         CR-117 §8 CRA-01 and re-decide the CR before changing this assertion; a genuine \
+         production yield would make S-371 plannable again.",
+        broker_main.denominator,
+        broker_main.newly_admitted,
+        broker_main.denominator,
+        broker_main.percent(),
+    );
 
     // The verdicts are pinned per arm and never on the combined figure: a
     // material arm must not rescue an immaterial one. The fixture
@@ -2250,6 +2719,279 @@ mod fixtures {
         );
     }
 
+    // ── Regression fixtures: every defect the S-365 review found ───────────
+    //
+    // Each of these failed before its fix. They are grouped because they share
+    // a property: all were invisible to the 46 fixtures that preceded them, and
+    // most moved a published number.
+
+    #[test]
+    fn a_commented_mapping_header_is_not_read_as_a_scalar() {
+        // Was: `api:   # the mail API` recorded `mailserver.api => "# the mail
+        // API"` AND re-parented the whole subtree, so the real key vanished.
+        let flat = parse_yaml(
+            "mailserver:\n  api:   # the mail API\n    uri-get-archive: /a\n",
+        );
+        assert_eq!(
+            flat.get("mailserver.api.urigetarchive").map(|v| v.iter().next().unwrap().as_str()),
+            Some("/a"),
+            "the subtree must stay under its header; got {flat:?}",
+        );
+        assert!(!flat.contains_key("mailserver.api"), "got {flat:?}");
+    }
+
+    #[test]
+    fn a_sequence_items_own_keys_do_not_become_the_parents() {
+        // Was: `- name: primary` was skipped but the item's CONTINUATION lines
+        // registered at the parent path, fabricating a real-looking key from a
+        // list element.
+        let flat = parse_yaml(
+            "mailserver:\n  api:\n    - name: primary\n      uri-get-archive: /wrong\n",
+        );
+        assert!(!flat.contains_key("mailserver.api.urigetarchive"), "got {flat:?}");
+        assert!(!flat.contains_key("mailserver.api.name"), "got {flat:?}");
+    }
+
+    #[test]
+    fn a_sequence_does_not_swallow_the_key_that_follows_it() {
+        let flat = parse_yaml("list:\n  - a: 1\n    b: 2\nafter: v\n");
+        assert_eq!(flat.get("after").map(|v| v.iter().next().unwrap().as_str()), Some("v"));
+    }
+
+    #[test]
+    fn a_quoted_value_with_a_trailing_comment_loses_both() {
+        // Was: the quote test required the string to END with the quote, which
+        // a trailing comment defeats, so the value kept its quotes — a false
+        // disagreement against an unquoted definition elsewhere.
+        let flat = parse_yaml("a: \"/x\" # why\nb: '/y' # why\n");
+        assert_eq!(flat.get("a").map(|v| v.iter().next().unwrap().as_str()), Some("/x"));
+        assert_eq!(flat.get("b").map(|v| v.iter().next().unwrap().as_str()), Some("/y"));
+    }
+
+    #[test]
+    fn a_value_may_contain_a_hash_that_is_not_a_comment() {
+        let flat = parse_yaml("frag: \"/x#anchor\"\n");
+        assert_eq!(flat.get("frag").map(|v| v.iter().next().unwrap().as_str()), Some("/x#anchor"));
+    }
+
+    #[test]
+    fn every_block_scalar_indicator_skips_its_body() {
+        // Was: only the four bare spellings were caught, so `|+` and `|2` were
+        // recorded as VALUES and their bodies parsed as YAML — a bogus agreed
+        // value plus phantom keys lifted out of the block.
+        for indicator in ["|", ">", "|-", ">-", "|+", ">+", "|2"] {
+            let flat = parse_yaml(&format!("banner: {indicator}\n  one\n  key: v\nnext: n\n"));
+            assert!(!flat.contains_key("banner"), "{indicator}: got {flat:?}");
+            assert!(!flat.contains_key("key"), "{indicator}: leaked a block line: {flat:?}");
+            assert_eq!(
+                flat.get("next").map(|v| v.iter().next().unwrap().as_str()),
+                Some("n"),
+                "{indicator}: lost the key after the block",
+            );
+        }
+    }
+
+    #[test]
+    fn an_anchor_is_a_mapping_header_not_a_value() {
+        let flat = parse_yaml("defaults: &d\n  url: /a\n");
+        assert_eq!(
+            flat.get("defaults.url").map(|v| v.iter().next().unwrap().as_str()),
+            Some("/a"),
+            "got {flat:?}",
+        );
+        assert!(!flat.contains_key("defaults"), "got {flat:?}");
+    }
+
+    #[test]
+    fn a_properties_value_is_not_put_through_the_yaml_rules() {
+        // In a .properties file `#` is not an inline comment and quotes are
+        // literal. Borrowing the YAML rules changed the value Java would read,
+        // which can make two sources falsely agree.
+        let flat = parse_properties("a=/x # main\nb=\"/y\"\n");
+        assert_eq!(flat.get("a").map(|v| v.iter().next().unwrap().as_str()), Some("/x # main"));
+        assert_eq!(flat.get("b").map(|v| v.iter().next().unwrap().as_str()), Some("\"/y\""));
+    }
+
+    #[test]
+    fn a_properties_escaped_backslash_is_a_value_not_a_continuation() {
+        // Was: any trailing backslash continued the line, so `a=C:\\tmp\\`
+        // swallowed the entry after it and `b` disappeared entirely.
+        let flat = parse_properties("a=C:\\\\tmp\\\\\nb=2\n");
+        assert!(flat.contains_key("b"), "the next entry was swallowed: {flat:?}");
+        assert_eq!(flat.get("b").map(|v| v.iter().next().unwrap().as_str()), Some("2"));
+    }
+
+    #[test]
+    fn a_properties_odd_backslash_still_continues() {
+        let flat = parse_properties("a=one\\\ntwo\n");
+        assert_eq!(flat.get("a").map(|v| v.iter().next().unwrap().as_str()), Some("onetwo"));
+    }
+
+    #[test]
+    fn a_value_annotated_field_does_not_answer_for_a_parameter_that_shadows_it() {
+        // Was: `Unit` is file-scoped, so the field's @Value key resolved for the
+        // PARAMETER of the same name and the site counted as admitted. Field /
+        // parameter name collision is idiomatic Spring.
+        let f = Fixture::new(&[], &[("application.yml", "app:\n  path: /from-yml\n")]);
+        assert_eq!(
+            f.judge_uri(&unit(
+                "@Value(\"${app.path}\") private String path;\n\
+                 void go(String path) { probe(path); }"
+            )),
+            Verdict::NoKey(Refusal::MethodParameter),
+            "the operand is the parameter, whose value a caller supplies",
+        );
+    }
+
+    #[test]
+    fn a_bean_getter_named_get_env_is_not_an_environment_read() {
+        // Was: the needle `getenv(` was matched against the lower-cased whole
+        // operand, so `configApi.getEnv("A")` was misread as an environment
+        // read and pre-empted the properties lookup.
+        let f = Fixture::new(&[PROPS], &[("application.yml", "a: 1\n")]);
+        assert_eq!(
+            f.judge_uri(&unit("void go() { probe(mailServerConfigurationApi.getEnv(\"A\")); }\n\
+                               private MailServerConfigurationApi mailServerConfigurationApi;")),
+            Verdict::NoKey(Refusal::PropertyNotDeclared),
+            "this is a bean getter, not System.getenv",
+        );
+    }
+
+    #[test]
+    fn an_environment_read_nested_in_an_expression_does_not_fabricate_a_key() {
+        // Was: the delimiter search anchored on the FIRST `(` in the operand,
+        // so this yielded the key `System.getenv("HOST` — a fabricated key
+        // replacing a real refusal reason.
+        let f = Fixture::new(&[], &[("application.yml", "a: 1\n")]);
+        let verdict = f.judge_uri(&unit(
+            "void go() { probe(Optional.ofNullable(System.getenv(\"HOST\")).orElse(\"/x\")); }",
+        ));
+        assert!(
+            matches!(verdict, Verdict::NoKey(_) | Verdict::NotConfigurationBound),
+            "expected a refusal, got {verdict:?}",
+        );
+    }
+
+    #[test]
+    fn an_environment_variable_is_never_admitted_even_when_a_key_agrees() {
+        // CR-115 §3.3 puts environment variables out of scope. `canonical_key`
+        // lower-cases and strips separators, so getenv("BASE_URL") collides
+        // with a yml `base-url`; without the scope rule that collision counted
+        // in the headline as though the repository proved it.
+        let f = Fixture::new(&[], &[("application.yml", "base-url: /from-yml\n")]);
+        assert_eq!(
+            f.judge_uri(&unit("void go() { probe(System.getenv(\"BASE_URL\")); }")),
+            Verdict::OutOfScopeSource,
+        );
+    }
+
+    #[test]
+    fn a_method_parameter_of_a_class_is_not_a_declared_property() {
+        // Was: the record-component arm fired for ANY formal_parameter in the
+        // class body, so a helper's parameter became a declared property —
+        // loosening PropertyNotDeclared and, where a source defined the same
+        // key, admitting the site outright.
+        let mut props = PropertiesIndex::default();
+        let language = java_language();
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("java language");
+        let body = r#"
+            @ConfigurationProperties(prefix = "api")
+            public class P { private String a; public void helper(String uriGetArchive) {} }
+        "#;
+        let tree = parser.parse(body, None).expect("parse");
+        props.absorb("P.java", "", tree.root_node(), body.as_bytes());
+        props.seal();
+        let class = props.get("P", "").expect("indexed");
+        assert!(class.properties.contains(&canonical_key("a")));
+        assert!(
+            !class.properties.contains(&canonical_key("uriGetArchive")),
+            "a method parameter is not a bound property",
+        );
+    }
+
+    #[test]
+    fn a_nested_types_fields_are_not_the_outer_classs_properties() {
+        let mut props = PropertiesIndex::default();
+        let language = java_language();
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("java language");
+        let body = r#"
+            @ConfigurationProperties(prefix = "api")
+            public class P { private String a; static class Inner { private String b; } }
+        "#;
+        let tree = parser.parse(body, None).expect("parse");
+        props.absorb("P.java", "", tree.root_node(), body.as_bytes());
+        props.seal();
+        let class = props.get("P", "").expect("indexed");
+        assert!(class.properties.contains(&canonical_key("a")));
+        assert!(!class.properties.contains(&canonical_key("b")));
+    }
+
+    #[test]
+    fn two_same_named_classes_in_one_module_resolve_to_nothing_rather_than_a_guess() {
+        // The own-module lookup used to return the first match without the
+        // collision test — the same guess the workspace lookup forbids.
+        let mut props = PropertiesIndex::default();
+        let language = java_language();
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("java language");
+        for (file, prefix) in [("m/a/C.java", "one"), ("m/b/C.java", "two")] {
+            let body = format!(
+                "@ConfigurationProperties(prefix = \"{prefix}\")\npublic class C {{ private String x; }}"
+            );
+            let tree = parser.parse(&body, None).expect("parse");
+            props.absorb(file, "m", tree.root_node(), body.as_bytes());
+        }
+        props.seal();
+        assert!(props.get("C", "m").is_none(), "one module, two different C — must not guess");
+    }
+
+    #[test]
+    fn a_name_bound_to_two_different_accessors_resolves_to_neither() {
+        // `folded_text` in the parent refuses a name bound to two literals for
+        // exactly this reason; resolution used to pick whichever the DFS
+        // reached first, which is not even source order.
+        let f = Fixture::new(
+            &[PROPS, TOPICS],
+            &[(
+                "application.yml",
+                "mailserver:\n  api:\n    uri-get-archive: /a\nspring:\n  kafka:\n                     topics:\n      archive-commands: ac\n",
+            )],
+        );
+        assert_eq!(
+            f.judge_uri(&unit(
+                "private MailServerConfigurationApi mailServerConfigurationApi;\n\
+                 private KafkaTopics kafkaTopics;\n\
+                 void go() { String u = mailServerConfigurationApi.getUriGetArchive(); \
+                 u = kafkaTopics.getArchiveCommands(); probe(u); }"
+            )),
+            Verdict::NoKey(Refusal::AmbiguousBinding),
+        );
+    }
+
+    #[test]
+    fn a_refused_configuration_lookup_counts_wherever_it_sits_in_the_composition() {
+        // Was: a LEADING unresolved lookup was fatal and counted; a TRAILING
+        // one fell through to NotConfigurationBound, which Tally::add drops
+        // from the denominator and the census hides. The same refusal was in
+        // or out of the published denominator purely by position — shrinking
+        // the denominator and so inflating the recovered share.
+        let f = Fixture::new(&[PROPS], &[("application.yml", "a: 1\n")]);
+        let decl = "private MailServerConfigurationApi mailServerConfigurationApi;";
+        let leading = f.judge_uri(&unit(&format!(
+            "{decl}\nvoid go() {{ probe(mailServerConfigurationApi.getUriPutArchive() + \"/x\"); }}"
+        )));
+        let trailing = f.judge_uri(&unit(&format!(
+            "{decl}\nvoid go() {{ probe(\"/x\" + mailServerConfigurationApi.getUriPutArchive()); }}"
+        )));
+        assert_eq!(leading, Verdict::NoKey(Refusal::PropertyNotDeclared));
+        assert_eq!(
+            trailing, leading,
+            "position must not decide whether a refusal is counted",
+        );
+    }
+
     #[test]
     fn a_profile_variant_is_recognised_whole() {
         assert_eq!(config_profile("application.yml"), Some(None));
@@ -2456,13 +3198,14 @@ mod fixtures {
     }
 
     #[test]
-    fn an_environment_read_resolves_to_its_variable_and_is_reported_as_undefined() {
-        // Resolved on purpose: "no committed source defines it" is a more
-        // useful answer than "unreadable shape".
+    fn an_environment_read_resolves_to_its_variable_and_is_reported_out_of_scope() {
+        // Resolved on purpose — the census can then name the variable rather
+        // than shrug at an "unreadable shape" — but never admitted: CR-115 §3.3
+        // excludes environment variables because they are not committed.
         let f = Fixture::new(&[], &[("application.yml", "a: 1\n")]);
         assert_eq!(
             f.judge_uri(&unit("void go() { probe(System.getenv(\"API_HOST\")); }")),
-            Verdict::MissingKey,
+            Verdict::OutOfScopeSource,
         );
     }
 
@@ -2689,6 +3432,199 @@ mod fixtures {
     }
 
     // ── the two arms are never averaged ─────────────────────────────────────
+
+    // ── The accounting itself, which every published number passes through ─
+
+    #[test]
+    fn the_tally_counts_each_verdict_into_exactly_one_bucket() {
+        // `Tally::add` was reached only by the corpus walk: both materiality
+        // fixtures built `Tally` literals instead. A one-line change letting
+        // `AlreadyAdmitted` fall through to `denominator += 1` would move every
+        // percentage in the finding with nothing failing.
+        let cfg = [OperandKind::ConfigurationLookup];
+        let lit = [OperandKind::Literal];
+        let other = [OperandKind::Other];
+        let mut t = Tally::default();
+        t.add(&Verdict::AlreadyAdmitted, &lit);
+        t.add(&Verdict::NotConfigurationBound, &lit);
+        t.add(&Verdict::NewlyAdmitted { resolved: "/a".into() }, &cfg);
+        t.add(&Verdict::NewlyAdmitted { resolved: "/b".into() }, &other);
+        t.add(&Verdict::Disagreement, &cfg);
+        t.add(&Verdict::MissingKey, &cfg);
+        t.add(&Verdict::PlaceholderValue, &cfg);
+        t.add(&Verdict::NoKey(Refusal::UnboundName), &other);
+        t.add(&Verdict::NotARoute { resolved: "x".into() }, &cfg);
+        t.add(&Verdict::OutOfScopeSource, &cfg);
+
+        assert_eq!(t.already_admitted, 1);
+        assert_eq!(
+            t.denominator, 8,
+            "AlreadyAdmitted and NotConfigurationBound are excluded from the denominator",
+        );
+        assert_eq!(
+            t.newly_admitted + t.disagreement + t.missing_key + t.placeholder + t.no_key
+                + t.not_a_route + t.out_of_scope,
+            t.denominator,
+            "the buckets must partition the denominator exactly",
+        );
+        assert_eq!(t.config_labelled, 6);
+        assert_eq!(t.newly_admitted, 2);
+        assert_eq!(t.newly_admitted_labelled, 1, "the labelled subset is CR-115's criterion");
+    }
+
+    #[test]
+    fn merge_carries_every_field() {
+        let a = Tally {
+            denominator: 1,
+            config_labelled: 2,
+            newly_admitted_labelled: 3,
+            newly_admitted: 4,
+            disagreement: 5,
+            missing_key: 6,
+            placeholder: 7,
+            no_key: 8,
+            not_a_route: 9,
+            out_of_scope: 10,
+            already_admitted: 11,
+        };
+        let mut b = a;
+        b.merge(&a);
+        assert_eq!(
+            (
+                b.denominator,
+                b.config_labelled,
+                b.newly_admitted_labelled,
+                b.newly_admitted,
+                b.disagreement,
+                b.missing_key,
+                b.placeholder,
+                b.no_key,
+                b.not_a_route,
+                b.out_of_scope,
+                b.already_admitted,
+            ),
+            (2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22),
+            "a dropped line in `merge` silently under-reports a bucket",
+        );
+    }
+
+    #[test]
+    fn every_refusal_variant_is_listed_in_all_with_a_distinct_label() {
+        // `report_refusals` iterates `ALL`; a variant added without extending
+        // it disappears from the published refusal census silently.
+        let labels: BTreeSet<&str> = Refusal::ALL.iter().map(|r| r.label()).collect();
+        assert_eq!(labels.len(), Refusal::ALL.len(), "two refusals share a label");
+        // An exhaustive match: adding a variant fails to compile until `ALL`
+        // and this list are both extended.
+        for refusal in Refusal::ALL {
+            match refusal {
+                Refusal::NestedAccessor
+                | Refusal::MethodParameter
+                | Refusal::UnboundName
+                | Refusal::AmbiguousBinding
+                | Refusal::NotAGetter
+                | Refusal::ReceiverTypeUnknown
+                | Refusal::NoPropertiesClass
+                | Refusal::PropertyNotDeclared
+                | Refusal::UnrecognisedAccessor => {}
+            }
+        }
+    }
+
+    #[test]
+    fn a_name_the_unit_never_binds_is_refused_as_unbound() {
+        // The largest single refusal bucket in the published finding (41 of the
+        // client arm's 59) had no fixture at all.
+        let f = Fixture::new(&[PROPS], &[("application.yml", "a: 1\n")]);
+        assert_eq!(
+            f.judge_topic(&unit("void go() { probe(neverBoundAnywhere); }")),
+            Verdict::NoKey(Refusal::UnboundName),
+        );
+    }
+
+    #[test]
+    fn a_topic_with_a_trailing_unresolvable_operand_is_refused_because_it_is_not_a_topic() {
+        // The one place the arms genuinely differ, and every broker fixture
+        // passed a SINGLE operand, so `i == 0 || !route_required` was never
+        // exercised on the `!route_required` half. Mutating it to `i == 0`
+        // left every fixture green while turning refused multi-operand topics
+        // into admitted ones — inflating exactly the number CR-117 turns on.
+        let sources =
+            [("application.yml", "spring:\n  kafka:\n    topics:\n      archive-commands: ac\n")];
+        let f = Fixture::new(&[TOPICS], &sources);
+        let source = unit(
+            "private KafkaTopics kafkaTopics;\n\
+             void send(String suffix) { probe(kafkaTopics.getArchiveCommands() + suffix); }",
+        );
+        assert_eq!(
+            f.judge_topic(&source),
+            Verdict::NoKey(Refusal::MethodParameter),
+            "FR-WS-10 binds a topic on its value: a topic with a `{{}}` in it is not a topic",
+        );
+        assert_eq!(
+            f.judge_uri(&source),
+            Verdict::NotARoute { resolved: "ac{}".to_string() },
+            "the client arm SPENDS the same trailing operand as a `{{}}` placeholder and \
+             composes a template — it is then judged on the route shape, not refused at the \
+             operand. (`ac{{}}` is no route, so this one still ends refused; what differs is \
+             WHY.)",
+        );
+    }
+
+    #[test]
+    fn refusal_precedence_is_worst_fault_first_across_several_operands() {
+        // Every previous fixture had exactly one configuration operand, so the
+        // Missing -> Placeholder -> Disagreed ordering was never exercised.
+        let f = Fixture::new(
+            &[PROPS],
+            &[
+                ("application.yml", "mailserver:\n  api:\n    base-url: /a\n"),
+                ("application-prod.yml", "mailserver:\n  api:\n    base-url: /b\n"),
+            ],
+        );
+        // `uriGetArchive` is declared on the class but defined by no source
+        // (missing); `baseUrl` is defined by two sources that disagree.
+        assert_eq!(
+            f.judge_uri(&unit(
+                "private MailServerConfigurationApi c;\n\
+                 void go() { probe(c.getBaseUrl() + c.getUriGetArchive()); }"
+            )),
+            Verdict::MissingKey,
+            "a missing key is a deeper fault than a disagreement and must be reported first",
+        );
+    }
+
+    #[test]
+    fn a_literal_plus_a_parameter_is_still_s355_territory() {
+        // The guard exists for exactly this shape: nothing is fatal, nothing
+        // resolved to a key, and without it the site composes to `/a/{}`,
+        // clears `binds_a_route` and inflates the CR-115 headline.
+        let f = Fixture::new(&[PROPS], &[("application.yml", "a: 1\n")]);
+        assert_eq!(
+            f.judge_uri(&unit("void go(String id) { probe(\"/a/\" + id); }")),
+            Verdict::NotConfigurationBound,
+        );
+    }
+
+    #[test]
+    fn the_production_and_test_trees_are_told_apart() {
+        // The split that inverted CR-117's verdict.
+        for main in [
+            "archive-api/src/main/java/com/x/KafkaProducer.java",
+            "internal/flow/handler.go",
+            "web/src/app.ts",
+        ] {
+            assert_eq!(Tree::of(main), Tree::Main, "{main}");
+        }
+        for test in [
+            "archive-api/src/test/java/com/x/KafkaProducerIT.java",
+            "archive-api/src/main/java/com/x/FooTest.java",
+            "internal/flow/handler_test.go",
+            "tests/e2e/probe.java",
+        ] {
+            assert_eq!(Tree::of(test), Tree::Test, "{test}");
+        }
+    }
 
     #[test]
     fn an_immaterial_arm_is_not_rescued_by_a_material_one() {

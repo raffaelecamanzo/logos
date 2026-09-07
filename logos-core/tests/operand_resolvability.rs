@@ -105,10 +105,19 @@
 //! # This harness is deliberately language-specific
 //!
 //! [`CONST_MARKERS`], [`BINDING_KINDS`], [`looks_like_configuration`]'s needle
-//! list and the per-grammar node-kind tests are exactly the kind of table
+//! list, the per-grammar node-kind tests, **and every Spring-specific table in
+//! the `configuration_agreement` submodule** — `HEADER_PUBLISH_QUERY`,
+//! `BASE_URL_METHODS`, `names_topic_header`, the `@ConfigurationProperties`
+//! index and the relaxed-binding rules — are exactly the kind of table
 //! `resolve::framework::tests::jvm_parity::no_language_specific_composition_code_exists`
 //! forbids under `logos-core/src/resolve/`. They are legitimate *here*, in a
 //! measurement over a fixed corpus, and must not be lifted into the resolver.
+//!
+//! This list is **open, not closed**: anything of that kind added to this
+//! harness or its submodules is covered by the same carve-out and the same
+//! prohibition. The fitness function cannot enforce it — it scans
+//! `src/resolve/` only — so extending the enumeration when the surface grows is
+//! the whole guard.
 //!
 //! [S-341]: ../../docs/planning/journal.md
 //! [CR-113]: ../../docs/requests/CR-113-constant-folded-base-url-composition.md
@@ -752,6 +761,11 @@ fn is_http_method(name: &str) -> bool {
 /// the same capture names and the same HTTP-verb gate `collect_invocation_sites`
 /// applies, so the harness counts the arm's corpus, not a grep's.
 ///
+/// The verb gate is applied in Rust rather than as a query predicate because it
+/// consults `invocation_methods` — a per-plugin normalizer table, not a text
+/// match. (`tree_sitter` 0.25 does evaluate `#eq?`/`#match?`/`#any-of?`; the
+/// S-365 submodule's note says so and this is the same situation.)
+///
 /// **One stated divergence:** production additionally drops a site whose anchor
 /// has no attributable enclosing symbol; this does not. The omission can only
 /// *add* sites, so it biases in favour of CRA-01 like every other judgement
@@ -854,7 +868,7 @@ impl Site {
     /// A single static literal is what the arm admits **today**; folding adds
     /// nothing here.
     fn already_static_literal(&self) -> bool {
-        self.kinds == [OperandKind::Literal]
+        is_already_static_literal(&self.kinds)
     }
 
     /// Newly admissible under the **strict** reading: every operand folds, to
@@ -883,6 +897,16 @@ impl Site {
     fn foldable_but_unfolded(&self) -> bool {
         self.foldable() && self.folded.is_none()
     }
+}
+
+/// Whether a site is already admitted by the arm today.
+///
+/// A free function because S-365's `judge` needs the same predicate and had
+/// spelled it out a second time: the parent's newly-admissible counts and the
+/// S-365 `literal` column both rest on it, so two copies could disagree about
+/// what "already admitted" means and each publish a different figure.
+fn is_already_static_literal(kinds: &[OperandKind]) -> bool {
+    kinds == [OperandKind::Literal]
 }
 
 /// Classify one captured path argument: its operand kinds, the strict folded
@@ -923,22 +947,22 @@ fn classify_site(
 /// The template a composition folds to under [FR-WS-18] AC1: the leading
 /// operand must fold, and each later operand either folds or becomes the `{}`
 /// placeholder a route template already expresses.
+///
+/// Delegates to `configuration_agreement::compose` with no configuration values
+/// supplied. The two were separate implementations of one rule — this one
+/// produced the S-355 headline and that one the S-365 headline — so a change to
+/// the placeholder rule in either would silently have made the two figures mean
+/// different things.
 fn placeholder_template(
     nodes: &[Node<'_>],
     src: &[u8],
     unit: &Unit<'_>,
     depth: usize,
 ) -> Option<String> {
-    let (first, rest) = nodes.split_first()?;
-    let mut out = folded_text(*first, src, unit, depth)?;
-    for node in rest {
-        match folded_text(*node, src, unit, depth) {
-            Some(text) => out.push_str(&text),
-            None => out.push_str("{}"),
-        }
-    }
-    let out = out.trim().to_string();
-    (!out.is_empty()).then_some(out)
+    debug_assert_eq!(depth, FOLD_DEPTH, "compose folds at FOLD_DEPTH");
+    let none: Vec<Option<configuration_agreement::Agreement>> =
+        std::iter::repeat_with(|| None).take(nodes.len()).collect();
+    configuration_agreement::compose(nodes, &none, src, unit, true)
 }
 
 // ── The measurement ─────────────────────────────────────────────────────────
