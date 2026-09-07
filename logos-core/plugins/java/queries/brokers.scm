@@ -228,18 +228,48 @@
 ;       estate uses only `setHeader`, so that arm of the predicate is carried on the
 ;       API's shape rather than on a measurement.
 ;
-;    3. **The two arguments are ANCHORED** by position — the header constant first
-;       (the leading `.`), the topic operand immediately after it (the middle `.`).
-;       What this does NOT guard against is worth stating, because it is the
+;    3. **The argument list is EXACTLY the two, anchored by position** — the header
+;       constant first (the leading `.`), the topic operand immediately after it
+;       (the middle `.`), and nothing after that (the trailing `.`). Both Spring
+;       setters are strictly 2-arity, so a third argument means the call is a
+;       different API.
+;
+;       What the anchors do NOT guard against is worth stating, because it is the
 ;       plausible-sounding wrong reason: a tree-sitter query matches sibling child
 ;       patterns **in order**, so the operand alternation's `(field_access)` can
 ;       never be assigned to the header constant itself even though
-;       `KafkaHeaders.TOPIC` is a `field_access`. Sibling order handles that. The
-;       anchors exclude the case order does not: a call where the topic header is
-;       present but is not the first argument, or where the operand is not the one
-;       immediately following it — `setHeader(Scope.OUTBOUND, KafkaHeaders.TOPIC,
-;       topic)`, which sets a scoped header on some other API and is not a publish
-;       site. Covered by `a_near_miss_builder_setting_an_unrelated_header_is_not_a_publish_site`.
+;       `KafkaHeaders.TOPIC` is a `field_access`. Sibling order handles that. Each
+;       anchor earns its place on a case order does not exclude, and all three were
+;       measured:
+;         - leading  — `setHeader(Scope.OUTBOUND, KafkaHeaders.TOPIC, topic)`: the
+;           header is present but not first.
+;         - trailing — `Weird.setHeader(KafkaHeaders.TOPIC, "orders", true)`: the
+;           header IS first, so order and the leading anchor both admit it. Without
+;           the trailing anchor this bound `target="orders"` — a foreign 3-arity
+;           `setHeader(name, value, flag)` API fabricating a Kafka topic — and its
+;           dynamic twin manufactured a refusal for it.
+;       All four rows live in
+;       `a_near_miss_builder_setting_an_unrelated_header_is_not_a_publish_site`.
+;
+;       THE PRICE OF THE ANCHORS, stated because it is a real silence. Tree-sitter
+;       counts a `comment` as an intervening named sibling, so a comment inside the
+;       argument list breaks adjacency and the site matches NEITHER pattern:
+;       `setHeader(KafkaHeaders.TOPIC, /*topic*/ t)` and
+;       `setHeader(/*hdr*/ KafkaHeaders.TOPIC, t)` are captured as nothing and
+;       refused as nothing — the invisible loss [NFR-CC-04] forbids, in the one
+;       shape this arm cannot see. No tree-sitter construct skips extras inside an
+;       anchored sequence, so it is recorded here and pinned by fixture
+;       (`a_commented_argument_list_is_the_one_shape_the_anchors_cannot_see`) rather
+;       than fixed. The estate writes 0 such sites. A future story that needs them
+;       must drop the middle anchor and re-measure the false-positive cost the
+;       leading/trailing pair currently buys — not silently widen one pattern.
+;
+;       Also not recognised, and for a reason that is NOT import resolution: the
+;       inline fully-qualified form
+;       `setHeader(org.springframework.kafka.support.KafkaHeaders.TOPIC, t)`, whose
+;       qualifier parses as a nested `(field_access)` rather than an `(identifier)`.
+;       0 estate sites; widening `object:` to accept it would need a `#match?` on
+;       the qualifier tail.
 ;
 ;    Node shapes established by dumping the parse tree of the estate's real form
 ;    under the pinned tree-sitter-java 0.23.5 BEFORE these patterns were written
@@ -274,7 +304,8 @@
       object: (identifier) @_pub_hdr_obj
       field: (identifier) @_pub_hdr_key)
     .
-    (string_literal) @broker.publish.topic)
+    (string_literal) @broker.publish.topic
+    .)
   (#any-of? @_pub_hdr_m "setHeader" "setHeaderIfAbsent")
   (#eq? @_pub_hdr_obj "KafkaHeaders")
   (#eq? @_pub_hdr_key "TOPIC"))
@@ -322,7 +353,8 @@
       (field_access)
       (binary_expression)
       (method_invocation)
-    ] @broker.publish.topic.slot) @broker.publish.site
+    ] @broker.publish.topic.slot
+    .) @broker.publish.site
   (#any-of? @_pub_hdr_slot_m "setHeader" "setHeaderIfAbsent")
   (#eq? @_pub_hdr_slot_obj "KafkaHeaders")
   (#eq? @_pub_hdr_slot_key "TOPIC"))

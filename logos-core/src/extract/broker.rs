@@ -1655,6 +1655,36 @@ class NotAProducer {
                 .setHeader(Scope.OUTBOUND, KafkaHeaders.TOPIC, "orders")
                 .build();
     }
+
+    // HEADER FIRST but a THIRD argument follows — a foreign 3-arity
+    // `setHeader(name, value, flag)` API. Spring's `MessageBuilder.setHeader` and
+    // `MessageHeaderAccessor.setHeader` are both strictly 2-arity, so a third
+    // argument means this is not them. Sibling order and the leading anchor both
+    // ADMIT this shape (the header really is first); only the TRAILING anchor
+    // excludes it. Measured before that anchor existed: the literal row below
+    // bound `target="orders"` — a foreign API fabricating a Kafka topic — and the
+    // dynamic row manufactured a refusal for it.
+    public void trailingArgWithLiteral(String payload) {
+        Weird.setHeader(KafkaHeaders.TOPIC, "orders", true);
+    }
+
+    public void trailingArgDynamic(String payload, String topic) {
+        Weird.setHeader(KafkaHeaders.TOPIC, topic, Scope.OUTBOUND);
+    }
+
+    // A different Kafka header with a LITERAL value: a message key is not a topic.
+    // This row exists because without it, dropping the BINDING pattern's
+    // `#eq? @_pub_hdr_key "TOPIC"` predicate is undetectable — `keyOnly` above
+    // carries a non-literal operand and so exercises only the refusal slot's copy
+    // of that predicate. Measured with the predicate deleted, `GROUP_ID`,
+    // `MESSAGE_KEY` and `RECEIVED_PARTITION` literals all became `Topic` nodes:
+    // a fabricated topic identity, which is the [NFR-RA-05] failure this arm
+    // exists to prevent.
+    public void messageKeyWithLiteral(String payload) {
+        MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.MESSAGE_KEY, "customer-42")
+                .build();
+    }
 }
 "#;
         let facts = extract_java(src);
