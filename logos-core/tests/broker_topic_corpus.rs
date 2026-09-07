@@ -24,12 +24,16 @@
 //! reconciliation below therefore compares captured topics against **declaring
 //! files**, which is the join the CR's criterion names.
 //!
-//! # Skips loudly, like the S-355/S-365 measurements
+//! # Skips when unconfigured, and says so — but only under `--nocapture`
 //!
-//! Set `LOGOS_REF_WORKSPACE=<path>` to run it (`~` is expanded). With no corpus
-//! configured the test prints a `SKIPPED:` line and passes: a measurement that
-//! measured nothing must not read as a green assertion, and it must not fail a
-//! machine that has no corpus either.
+//! Set `LOGOS_REF_WORKSPACE=<path>` to run these (`~` is expanded). With no corpus
+//! configured each test prints a `SKIPPED:` line and passes: it must not fail a
+//! machine that has no corpus either. Be exact about the limit of that, because the
+//! mechanism is weaker than it reads — libtest captures `eprintln!` for a test that
+//! PASSES, so a default `cargo test` run shows only `... ok` and the `SKIPPED:` line
+//! is invisible. A green summary here therefore does **not** establish that the
+//! measurement ran: look for the printed figures, or run with `--nocapture`. Each
+//! test name carries `when_one_is_configured` for exactly that reason.
 //!
 //! # Recorded finding
 //!
@@ -106,6 +110,26 @@ fn corpus_root() -> Option<PathBuf> {
     Some(expanded)
 }
 
+/// The corpus walk, with the five flags that make a published figure reproducible.
+///
+/// `parents(false)` / `git_global(false)` / `ignore(false)` matches production's
+/// admission walk and the S-355/S-365 measurements: the corpus must be the same on
+/// every machine, so a developer's global ignore file cannot quietly move a
+/// published figure.
+///
+/// This exists as one function because the flags were written out at each of the
+/// three walk sites and the comment explaining them sat only on the first — which
+/// is how one copy gets "tidied up" and a published figure silently moves.
+fn corpus_walker(root: &std::path::Path) -> ignore::Walk {
+    ignore::WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(false)
+        .ignore(false)
+        .parents(false)
+        .build()
+}
+
 /// What the walk found.
 #[derive(Default)]
 struct Corpus {
@@ -159,17 +183,7 @@ fn the_reference_workspace_reports_a_reconciled_subscribe_topic_inventory_when_o
     let java = registry.for_extension("java").expect("java plugin present");
     let mut corpus = Corpus::default();
 
-    // `parents(false)` / `git_global(false)` / `ignore(false)` matches production's
-    // admission walk and the S-355/S-365 measurements: the corpus must be the same
-    // on every machine, so a developer's global ignore file cannot quietly move a
-    // published figure.
-    let walker = ignore::WalkBuilder::new(&root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(false)
-        .ignore(false)
-        .parents(false)
-        .build();
+    let walker = corpus_walker(&root);
 
     for entry in walker.flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -314,13 +328,7 @@ fn real_listener_sources_promote_a_non_empty_member_topic_inventory() {
 
     let tmp = tempfile::TempDir::new().expect("temp project");
     let mut copied = 0usize;
-    let walker = ignore::WalkBuilder::new(&root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(false)
-        .ignore(false)
-        .parents(false)
-        .build();
+    let walker = corpus_walker(&root);
     for entry in walker.flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
@@ -405,6 +413,8 @@ fn real_listener_sources_promote_a_non_empty_member_topic_inventory() {
 ///
 ///   files carrying KafkaHeaders.TOPIC:                52   (13 in src/main, across 12 members)
 ///   textual `.setHeader(KafkaHeaders.TOPIC, …)` sites: 54
+///     of which in src/main:                            13
+///     of which in test sources:                        41   ← see the note below
 ///     of which the operand is a bare `topic` parameter: 16   (13 main + 3 test)
 ///     of which a @ConfigurationProperties getter:       35
 ///     of which another identifier (@Value-injected):     3
@@ -418,6 +428,15 @@ fn real_listener_sources_promote_a_non_empty_member_topic_inventory() {
 /// the arm looked for a topic in argument position, and no publish site in the
 /// estate has one. That is the whole of FR-WS-10's producer promise yielding 0
 /// Producer nodes on a 12-member Kafka estate.
+///
+/// MOST OF THE 54 IS TEST CODE — 41 of the sites, 76%. Stated here because the
+/// headline "54 refusals" is otherwise easy to read as 54 production publishers.
+/// There is no test-path exclusion in admission, so all 41 are indexed, all record
+/// `topic-not-literal`, and all land in the FR-WS-05 coverage denominator; a JUnit
+/// fixture that built a message with a literal topic would likewise promote a real
+/// Producer node. Whether the coverage tier SHOULD exclude test sources is a policy
+/// question this story does not own and does not decide — it is recorded so the
+/// current answer is visible rather than inferable only from the file counts.
 /// ```
 ///
 /// [CR-117]: ../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
@@ -443,18 +462,15 @@ fn the_reference_workspace_reports_reconciled_publish_sites_when_one_is_configur
     let mut main_header_members: BTreeSet<String> = BTreeSet::new();
     let mut textual_sites = 0usize;
     let mut textual_parameter_sites = 0usize;
+    // The src/main vs test split of the SITES (not the files). The headline refusal
+    // count is mostly test code and must say so — see the recorded finding.
+    let mut main_sites = 0usize;
     // What the arm says.
     let mut captured: BTreeMap<String, usize> = BTreeMap::new();
     let mut refusals: BTreeMap<String, usize> = BTreeMap::new();
     let mut captured_keys: BTreeSet<String> = BTreeSet::new();
 
-    let walker = ignore::WalkBuilder::new(&root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(false)
-        .ignore(false)
-        .parents(false)
-        .build();
+    let walker = corpus_walker(&root);
 
     for entry in walker.flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -483,8 +499,21 @@ fn the_reference_workspace_reports_reconciled_publish_sites_when_one_is_configur
                 main_header_members.insert(member.to_string());
             }
         }
-        textual_sites += source.matches("setHeader(KafkaHeaders.TOPIC,").count();
-        textual_parameter_sites += source.matches("setHeader(KafkaHeaders.TOPIC, topic)").count();
+        // BOTH setter spellings the query's predicate admits. Counting only
+        // `setHeader(` would drift from what the arm recognises the day the estate
+        // gains a `setHeaderIfAbsent` site — and would fail the equality below with
+        // the *opposite* diagnosis ("a query gap"). The two substrings cannot
+        // overlap, so summing them double-counts nothing.
+        let sites_here = source.matches("setHeader(KafkaHeaders.TOPIC,").count()
+            + source.matches("setHeaderIfAbsent(KafkaHeaders.TOPIC,").count();
+        textual_sites += sites_here;
+        if rel.contains("/src/main/") {
+            main_sites += sites_here;
+        }
+        textual_parameter_sites += source.matches("setHeader(KafkaHeaders.TOPIC, topic)").count()
+            + source
+                .matches("setHeaderIfAbsent(KafkaHeaders.TOPIC, topic)")
+                .count();
 
         let facts = extract(&FileInput::new(&rel, &source), java, &SymbolContext::default());
         for reference in &facts.refs {
@@ -512,6 +541,7 @@ fn the_reference_workspace_reports_reconciled_publish_sites_when_one_is_configur
          files carrying KafkaHeaders.TOPIC: {} ({} in src/main across {} members)\n  \
          textual setHeader(KafkaHeaders.TOPIC, …) sites: {textual_sites} \
          ({textual_parameter_sites} pass a bare `topic` parameter)\n  \
+         of those sites, {main_sites} are in src/main and {} are test sources\n  \
          captured publish topic keys: {captured_total}\n  \
          recorded topic-not-literal publish refusals: {refused_total} across {} files\n  \
          header-form files that are silent: {}",
@@ -519,6 +549,7 @@ fn the_reference_workspace_reports_reconciled_publish_sites_when_one_is_configur
         header_files.len(),
         main_header_files.len(),
         main_header_members.len(),
+        textual_sites - main_sites,
         refusals.len(),
         silent.len(),
     );
@@ -543,6 +574,19 @@ fn the_reference_workspace_reports_reconciled_publish_sites_when_one_is_configur
         textual_parameter_sites, 16,
         "the recorded finding is 16 method-parameter sites (13 main + 3 test)"
     );
+    // ZERO captured keys is the recorded finding, not a regression: S-365 measured
+    // that no header-form site in this estate carries a literal topic operand, so
+    // recognition admits nothing here and the arm's honest output is refusals.
+    // Asserted because it is what makes (4) below entail "each of the 16 refused",
+    // and because if this ever becomes non-zero the recorded finding — and S-371's
+    // whole premise — needs re-deriving rather than quietly absorbing the change.
+    assert_eq!(
+        captured_total, 0,
+        "S-365 measured 0 literal topic operands across all {textual_sites} \
+         header-form sites; {captured_total} captured now. That is not a failure — \
+         it may be a better key rule or a changed corpus — but it invalidates this \
+         module's recorded finding, so re-derive it rather than updating this number"
+    );
 
     // (1) THE STATEMENT THAT WAS FALSE: the arm recognises the header form at all.
     //     Before this story, `recognised` was 0 on this estate.
@@ -553,19 +597,50 @@ fn the_reference_workspace_reports_reconciled_publish_sites_when_one_is_configur
          recognised none — the CR-117 condition, unfixed"
     );
 
-    // (2) It reconciles SITE FOR SITE against the textual marker. A weaker
-    //     "some were recognised" would hide a pattern that matches the common shape
-    //     and misses a variant, which is the failure mode a fixture cannot see.
+    // (2) FILE-GRAIN reconciliation — the one the ledger cannot collapse. Every file
+    //     carrying the header form yields at least one row, so this equality is
+    //     immune to the dedup described in (3) and is the assertion to trust first.
     assert_eq!(
-        recognised, textual_sites,
-        "every textual header-form site must be recognised — captured or refused. \
-         {recognised} of {textual_sites} were; the shortfall is a query gap, and a \
-         mismatch is investigated, not accepted"
+        refusals.len() + captured.len(),
+        header_files.len(),
+        "every file carrying KafkaHeaders.TOPIC must yield at least one row; \
+         {} of {} did",
+        refusals.len() + captured.len(),
+        header_files.len(),
     );
 
-    // (3) The refusal count reconciles against the 16 known method-parameter sites:
+    // (3) SITE-FOR-SITE reconciliation. Sharper than (2) — it would catch a pattern
+    //     that matches the common shape and misses a variant, which no fixture can
+    //     see — but the two sides are counted at DIFFERENT grains, so its failure
+    //     message must name both causes it can have.
+    //
+    //     `textual_sites` counts call sites. `recognised` counts rows from
+    //     `extract()`, which has already run `dedup_sort_refs` — keyed on
+    //     `(source, target, form, kind, relation)`, ignoring `line`. Every refusal
+    //     shares `target == ""`, so two refused header-form sites in ONE enclosing
+    //     declaration reach the ledger as ONE row (documented at
+    //     `extract::broker::record_refusals`, and asserted directly by
+    //     `refusals_are_attributed_per_declaration_not_per_line`). The equality
+    //     therefore holds only while no method carries two header-form publishes —
+    //     true of this estate (its two multi-site files put them in separate test
+    //     methods), but a property of the corpus, not of the arm.
+    assert_eq!(
+        recognised, textual_sites,
+        "site-for-site reconciliation failed: {recognised} of {textual_sites}. \
+         TWO possible causes, and they need opposite fixes — (a) a query gap: the \
+         arm does not recognise a variant the marker counted; or (b) declaration- \
+         level dedup: two header-form sites now share one enclosing method, so the \
+         ledger legitimately collapses them and the MARKER is what needs \
+         re-graining. Check (b) first — assertion (2) above stays green under (b) \
+         and fails under (a). A mismatch is investigated, not accepted"
+    );
+
+    // (4) The refusal count reconciles against the 16 known method-parameter sites:
     //     every one of them is refused, and they are a subset of the refusals rather
-    //     than the whole of them (35 configuration getters refuse too).
+    //     than the whole of them (35 configuration getters refuse too). Paired with
+    //     the `captured_total == 0` assertion in (0), the two together do entail
+    //     "each of the 16 refused" — without it, a future change that captured 16
+    //     and lost 16 refusals would satisfy this inequality.
     assert!(
         refused_total >= textual_parameter_sites,
         "all {textual_parameter_sites} method-parameter sites must record a refusal; \
