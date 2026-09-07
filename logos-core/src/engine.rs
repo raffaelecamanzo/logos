@@ -742,7 +742,13 @@ impl Engine {
                     // message below — the FR-WS-14 supervisor `init --workspace`
                     // just spawned is already warming this member, and `logos
                     // index` at the workspace root would build only the root.
-                    "enrolled — queued for background warming (see `logos workspace status`)".to_string()
+                    // Names `WarmStartDisclosure::STATUS_COMMAND` rather than a
+                    // second literal, so this and the workspace-level disclosure
+                    // cannot drift onto different surface names.
+                    format!(
+                        "enrolled — queued for background warming (see `{}`)",
+                        crate::federation::enable::WarmStartDisclosure::STATUS_COMMAND
+                    )
                 } else {
                     "initialised — run `logos index` to build the code graph".to_string()
                 },
