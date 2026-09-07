@@ -136,8 +136,9 @@ pub struct ColdStartPhases {
     pub pool_startup: Duration,
     /// Everything on the cold path that is not one of the six phases above:
     /// worktree-root resolution, `.logos/` directory creation, worktree-seed
-    /// detection/copy, governance-contract seeding, and the post-construction
-    /// seed-diff reconcile. Exists so [`sum`](Self::sum) reconciles with the
+    /// detection/copy, governance-contract seeding, linked-worktree git-hook
+    /// seeding (CR-106), and the post-construction seed-diff reconcile. Exists
+    /// so [`sum`](Self::sum) reconciles with the
     /// externally measured wall time rather than merely approximating it
     /// (CR-116 AC1).
     pub other: Duration,
@@ -468,7 +469,8 @@ impl Engine {
     ///
     /// [`ColdStartPhases::other`] absorbs everything that is not one of the
     /// six named phases — root resolution, directory creation, worktree-seed
-    /// detection/copy, and the post-construction seed-diff reconcile — so
+    /// detection/copy, linked-worktree git-hook seeding (CR-106), and the
+    /// post-construction seed-diff reconcile — so
     /// [`ColdStartPhases::sum`] reconciles with the externally measured wall
     /// time to within the noise of the handful of `Instant::now()` calls
     /// themselves, not merely "within a stated margin" by approximation.
@@ -543,6 +545,32 @@ impl Engine {
 
             seed
         };
+
+        // Mirrors `start_with_configs`'s hook-reachability step (CR-106,
+        // S-338), which landed in the same iteration as this twin and is
+        // deliberately OUTSIDE the DB-less gate above — so it runs on every
+        // start and belongs inside the measured cold path, attributed to
+        // `other`. Omitting it here would make the attribution understate the
+        // production total by exactly this step's cost on the roots where it
+        // does work (a linked worktree with hooks installed: one
+        // `--git-common-dir` subprocess plus a readlink/symlink per managed
+        // hook), which is the wrong direction for a measurement CR-116 §3.2 is
+        // decided on. `sprint-65`'s sprint review found it missing and added
+        // it; `a_phase_reported_engine_start_seeds_the_worktree_hooks_too`
+        // (logos-core/tests/worktree_hooks.rs) is the guard that keeps the two
+        // step lists together.
+        if let Some(seeded) = crate::hooks::seed_from_primary(&root) {
+            for warning in &seeded.warnings {
+                tracing::warn!("seeding this worktree's git hooks: {warning}");
+            }
+            if !seeded.is_empty() {
+                tracing::info!(
+                    linked = seeded.linked.len(),
+                    copied = seeded.copied.len(),
+                    "made the installed git hooks reachable from this worktree (CR-106)"
+                );
+            }
+        }
         phases.other += t_other.elapsed();
 
         let (runtime, runtime_timings) =
