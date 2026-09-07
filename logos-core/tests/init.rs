@@ -22,6 +22,7 @@ fn interactive() -> InitOptions {
         install_hooks: false,
         materialize_skill: true,
         install_quality_report_hook: true,
+        workspace_member: false,
     }
 }
 
@@ -112,6 +113,82 @@ fn re_init_never_clobbers_edited_policy_files() {
     assert_eq!(
         step(&result, ".logos/rules.toml").action,
         InitAction::Unchanged
+    );
+}
+
+// ── CR-119: the `init` message is context-aware, single-repo unchanged ────
+
+/// **The single-repo byte-identical anchor.** The plain (non-workspace)
+/// `init` message must read exactly as it always has — CR-119 changes only
+/// the workspace-member path, never this one. Pinned literally so a future
+/// edit to either branch of `Engine::init_with`'s message selection cannot
+/// silently drift the one CR-119 promises is untouched.
+#[test]
+fn a_fresh_plain_init_message_is_byte_identical_to_before_cr_119() {
+    let tmp = TempDir::new().unwrap();
+    let result = Engine::init(tmp.path()).expect("init succeeds");
+    assert_eq!(
+        result.message,
+        "initialised — run `logos index` to build the code graph",
+        "the single-repo message must not move"
+    );
+}
+
+/// The already-initialised branch is likewise untouched by CR-119 — it was
+/// never misleading, so it is not in scope.
+#[test]
+fn a_re_init_message_is_byte_identical_to_before_cr_119() {
+    let tmp = TempDir::new().unwrap();
+    Engine::init(tmp.path()).unwrap();
+    let result = Engine::init(tmp.path()).expect("re-init succeeds");
+    assert_eq!(
+        result.message,
+        "already initialised — store opened, pending migrations applied"
+    );
+}
+
+/// The workspace-member context (`InitOptions::workspace_member`) reports a
+/// next step that is true there: enrolled and queued for background
+/// warming, never naming `logos index` — the command that, run at the
+/// workspace root, would build only the root (CR-119).
+#[test]
+fn a_workspace_member_init_message_never_names_logos_index() {
+    let tmp = TempDir::new().unwrap();
+    let result = Engine::init_with(
+        tmp.path(),
+        &InitOptions {
+            workspace_member: true,
+            ..InitOptions::default()
+        },
+    )
+    .expect("init succeeds");
+
+    assert!(
+        !result.message.contains("logos index"),
+        "must not direct the user to a command that builds only the root: {}",
+        result.message
+    );
+    assert!(
+        result.message.contains("enrolled") && result.message.contains("background warming"),
+        "must state what is actually true: {}",
+        result.message
+    );
+}
+
+/// And on a re-run (store already exists), the workspace-member option makes
+/// no difference — the already-initialised message was never wrong.
+#[test]
+fn a_re_init_workspace_member_message_matches_the_plain_re_init() {
+    let tmp = TempDir::new().unwrap();
+    let opts = InitOptions {
+        workspace_member: true,
+        ..InitOptions::default()
+    };
+    Engine::init_with(tmp.path(), &opts).unwrap();
+    let result = Engine::init_with(tmp.path(), &opts).expect("re-init succeeds");
+    assert_eq!(
+        result.message,
+        "already initialised — store opened, pending migrations applied"
     );
 }
 

@@ -245,6 +245,118 @@ fn zero_admission_index_warns_but_still_exits_zero() {
     assert!(named[0].contains("svc-00"), "bounded sample given: {}", named[0]);
 }
 
+// ── CR-119: the `index` root-scope note over an enabled workspace root ─────
+
+/// A committed git repo at `dir` with one source file — real enough for
+/// `init --workspace`'s candidate discovery (`git rev-parse --show-toplevel`
+/// must actually succeed), unlike the fake `.git/HEAD` fixtures above that
+/// only need to satisfy the existence-only nested-git prune rule.
+fn init_git_repo(dir: &Path) {
+    fs::create_dir_all(dir).unwrap();
+    sh_git(dir, &["init", "-q", "-b", "main"]);
+    fs::write(dir.join("lib.rs"), "pub fn f() {}\n").unwrap();
+    sh_git(dir, &["add", "."]);
+    sh_git(dir, &["commit", "-q", "-m", "init"]);
+}
+
+/// At a root with no `logos.workspace.toml`, `index --json` carries no
+/// `notes` field at all — not an empty array, an absent key — which is what
+/// makes the output byte-identical to before this field existed (CR-119).
+#[test]
+fn index_without_a_workspace_manifest_has_no_notes_field() {
+    let tmp = fixture();
+    let out = logos(tmp.path(), &["index", "--json"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    assert!(
+        json.as_object().unwrap().get("notes").is_none(),
+        "no manifest ⇒ no `notes` key at all, not merely an empty one: {json}"
+    );
+}
+
+/// A root carrying `logos.workspace.toml` gets a root-scope note from
+/// `index`: it built the root project only, members are indexed
+/// independently, and `workspace status` is named. Advisory throughout — no
+/// `warnings` entry, exit 0 unchanged (CR-119, FR-CL-03).
+#[test]
+fn index_at_an_enabled_workspace_root_emits_a_root_scope_note() {
+    let tmp = fixture();
+    fs::write(
+        tmp.path().join("logos.workspace.toml"),
+        "[workspace]\nname = \"w\"\nmembers = []\n",
+    )
+    .unwrap();
+
+    let out = logos(tmp.path(), &["index", "--json"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    let notes = json["notes"].as_array().expect("a manifest yields a notes array: {json}");
+    assert_eq!(notes.len(), 1, "exactly one root-scope note: {notes:?}");
+    let note = notes[0].as_str().unwrap();
+    assert!(note.contains("root project only"), "{note}");
+    assert!(note.contains("logos workspace status"), "{note}");
+
+    // Advisory: no warnings entry, and the exit code already asserted 0 above.
+    assert!(
+        json["warnings"].as_array().unwrap().is_empty(),
+        "the note must never ride `warnings`: {json}"
+    );
+}
+
+/// **The transition CR-119 exists to close.** The same parent-of-repos root
+/// gives the FR-IX-13 zero-admission warning before `init --workspace`, and
+/// the FR-WS-02 root-scope note after — never both, never neither. Asserting
+/// either state alone would not have caught the gap CR-119 describes: a
+/// diagnostic that fires before enablement and falls silent after, with
+/// nothing filling the silence.
+#[test]
+fn the_zero_admission_warning_becomes_a_root_scope_note_after_enrolment() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(&tmp.path().join("api"));
+    init_git_repo(&tmp.path().join("web"));
+
+    // ── before: the FR-IX-13 diagnostic fires ──────────────────────────────
+    let before = logos(tmp.path(), &["index", "--json"]);
+    assert_eq!(exit_code(&before), 0, "{}", String::from_utf8_lossy(&before.stderr));
+    let before_json: serde_json::Value = serde_json::from_slice(&before.stdout).unwrap();
+    assert_eq!(before_json["files_indexed"], 0, "nothing admitted before enrolment");
+    let before_warnings = before_json["warnings"].as_array().unwrap();
+    assert!(
+        before_warnings.iter().any(|w| w.as_str().unwrap_or("").contains("logos init --workspace")),
+        "the zero-admission warning fires before enrolment: {before_warnings:?}"
+    );
+    assert!(
+        before_json.get("notes").is_none(),
+        "no manifest yet, so no root-scope note either: {before_json}"
+    );
+
+    // ── enable the workspace ────────────────────────────────────────────────
+    let enabled = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&enabled), 0, "{}", String::from_utf8_lossy(&enabled.stderr));
+    assert!(tmp.path().join("logos.workspace.toml").is_file());
+
+    // ── after: the root-scope note fires, the zero-admission warning does not ──
+    let after = logos(tmp.path(), &["index", "--json"]);
+    assert_eq!(exit_code(&after), 0, "{}", String::from_utf8_lossy(&after.stderr));
+    let after_json: serde_json::Value = serde_json::from_slice(&after.stdout).unwrap();
+    assert!(
+        after_json["files_indexed"].as_u64().unwrap() > 0,
+        "the root itself now admits its own manifest: {after_json}"
+    );
+    let after_warnings = after_json["warnings"].as_array().unwrap();
+    assert!(
+        !after_warnings.iter().any(|w| w.as_str().unwrap_or("").contains("logos init --workspace")),
+        "post-enrolment, the zero-admission trigger cannot fire (non-zero admission): {after_warnings:?}"
+    );
+    let after_notes = after_json["notes"].as_array().expect("post-enrolment, the root-scope note fires: {after_json}");
+    assert!(
+        after_notes.iter().any(|n| n.as_str().unwrap_or("").contains("root project only")),
+        "{after_notes:?}"
+    );
+}
+
 #[test]
 fn usage_errors_exit_two() {
     let tmp = TempDir::new().unwrap();

@@ -661,6 +661,9 @@ pub(crate) fn init_options(interactive: bool, hooks: bool) -> InitOptions {
         materialize_skill: interactive && ask("materialize the logos-wiki generation skill?", true),
         install_quality_report_hook: interactive
             && ask("install the Claude Code session-start quality-report hook?", true),
+        // The plain single-repo `init` path — never the workspace-member
+        // context `federation::enable::enable` sets (CR-119).
+        workspace_member: false,
     }
 }
 

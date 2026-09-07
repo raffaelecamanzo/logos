@@ -109,11 +109,14 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm
         return Ok(0);
     }
 
-    let report = enable::enable(&workspace_root, &name, &members)?;
+    let mut report = enable::enable(&workspace_root, &name, &members)?;
     // ONE call with the whole delta — never a per-member loop, which is the
     // exact shape this story replaced. Injected (like `gate`'s `approve`) so a
-    // test can assert the call count and the slice it received.
-    warm(&approved_new, declared_k);
+    // test can assert the call count and the slice it received. Its return
+    // (whether the supervisor was actually spawned) feeds the warm-start
+    // disclosure (FR-WS-02, FR-WS-15, FR-WS-17, CR-119) directly: `enable`
+    // itself never blocks on indexing, so only this caller of `warm` can know.
+    report.warm_start = enable::WarmStartDisclosure::new(approved_new.len(), warm(&approved_new, declared_k));
 
     out.print(&report)?;
     // The footprint rides the report itself, so both the human and `--json`
@@ -122,6 +125,12 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm
     // document (FR-CL-02), the same split `xservice::run_workspace` uses for the
     // degraded roll-up.
     if let Some(notice) = report.footprint.notice().filter(|_| !out.quiet) {
+        eprintln!("{notice}");
+    }
+    // The warm-start disclosure alongside it — what CR-119 exists to add:
+    // enablement used to say nothing about the background warming it just
+    // started.
+    if let Some(notice) = report.warm_start.notice().filter(|_| !out.quiet) {
         eprintln!("{notice}");
     }
     Ok(0)

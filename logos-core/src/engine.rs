@@ -737,6 +737,12 @@ impl Engine {
                 db_path: db_path.display().to_string(),
                 message: if existed {
                     "already initialised — store opened, pending migrations applied".to_string()
+                } else if options.workspace_member {
+                    // CR-119: true in the workspace context, unlike the plain
+                    // message below — the FR-WS-14 supervisor `init --workspace`
+                    // just spawned is already warming this member, and `logos
+                    // index` at the workspace root would build only the root.
+                    "enrolled — queued for background warming (see `logos workspace status`)".to_string()
                 } else {
                     "initialised — run `logos index` to build the code graph".to_string()
                 },
@@ -3076,11 +3082,28 @@ impl Engine {
     /// Fallible body of [`index`](Self::index).
     fn run_index(&self) -> Result<IndexResult> {
         let (runtime, registry, config) = self.pipeline_ctx()?;
-        let result = crate::pipeline::index(runtime, registry, &self.root, &config)?;
+        let mut result = crate::pipeline::index(runtime, registry, &self.root, &config)?;
         // Invalidate the hydration cache so the next hydrate() reflects the new
         // graph state ([ADR-04], [ADR-05], [S-009]).
         self.advance_sync_stamp();
         self.record_full_index();
+        // FR-WS-02 root-scope note (CR-119): a root carrying a workspace
+        // manifest is one project among N — `index` here builds only the root,
+        // never the members (BR-44, NFR-PE-06 forbid a member fan-out from this
+        // command). Advisory only: pushed to `notes`, never `warnings`, so it
+        // cannot trip a CI parser or move the FR-CL-03 exit code, and a root
+        // without a manifest is byte-identical to today (`notes` stays empty
+        // and is elided from the serialized report).
+        if self.root.join(crate::federation::MANIFEST_FILENAME).is_file() {
+            result.notes.push(format!(
+                "note: this root carries a workspace manifest ({}) — `index` built the \
+                 root project only ({} files); members are indexed independently by the \
+                 background warm started by `logos init --workspace` (see `logos workspace \
+                 status`).",
+                crate::federation::MANIFEST_FILENAME,
+                result.files_indexed,
+            ));
+        }
         Ok(result)
     }
 

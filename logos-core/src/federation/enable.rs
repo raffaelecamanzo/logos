@@ -78,6 +78,87 @@ pub struct WorkspaceEnableReport {
     ///
     /// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
     pub footprint: WorkingTreeFootprint,
+    /// Whether background warming started, over how many members, and where
+    /// to watch it ([FR-WS-02], CR-119) — the fact that `init --workspace`
+    /// used to leave unsaid entirely. Populated by the CLI adapter once the
+    /// warm supervisor decision is known (this core function returns before
+    /// that decision is made — [`enable`] never blocks on indexing).
+    pub warm_start: WarmStartDisclosure,
+}
+
+/// Background warm-start disclosure ([FR-WS-02], [FR-WS-15], [FR-WS-17],
+/// CR-119): whether this run kicked off the detached warm supervisor over the
+/// newly-approved members, and where to watch it.
+///
+/// **One workspace-level field, never per-member text** — the same shape
+/// [`WorkingTreeFootprint`] already uses, and for the same reason: an
+/// 84-member workspace's disclosure must cost one line, not eighty-four.
+#[derive(Debug, Default, Serialize)]
+pub struct WarmStartDisclosure {
+    /// Newly-approved members handed to the background warm this run — the
+    /// delta, not the whole membership. Already-manifested members are not
+    /// re-warmed on an incremental re-run (they were warmed, or fell back to
+    /// lazy indexing, on the run that first added them), so `0` there is
+    /// correct, not a gap.
+    pub members: usize,
+    /// Whether the detached warm supervisor was actually spawned ([FR-WS-14]).
+    /// `false` on an empty delta, or a best-effort spawn failure — the warm is
+    /// never fatal to `init --workspace`, so this never blocks the command.
+    ///
+    /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+    pub started: bool,
+    /// The surface reporting warm progress and outcome ([FR-WS-15] status
+    /// roll-up, [FR-WS-17] durable sidecar) — named here so the operator does
+    /// not have to go looking for it.
+    ///
+    /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+    /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+    pub status_command: &'static str,
+}
+
+impl WarmStartDisclosure {
+    /// The single source for the surface name this disclosure carries, so the
+    /// core and the CLI's own `workspace status` subcommand cannot drift onto
+    /// different names ([FR-WS-15]).
+    ///
+    /// [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
+    pub const STATUS_COMMAND: &'static str = "logos workspace status";
+
+    /// Build the disclosure for `members` newly-approved delta members,
+    /// `started` from whether the CLI's warm-supervisor spawn actually
+    /// succeeded (CR-119) — a one-line call site keeps the composition here
+    /// rather than duplicated at the CLI adapter (NFR-MA-02).
+    #[must_use]
+    pub const fn new(members: usize, started: bool) -> Self {
+        Self {
+            members,
+            started,
+            status_command: Self::STATUS_COMMAND,
+        }
+    }
+
+    /// The operator-facing sentence, or `None` when no member was newly
+    /// warmed this run (the settled re-run, mirroring
+    /// [`WorkingTreeFootprint::notice`]).
+    #[must_use]
+    pub fn notice(&self) -> Option<String> {
+        if self.members == 0 {
+            return None;
+        }
+        let verb = if self.started {
+            "has begun"
+        } else {
+            "could not be started (best-effort — the lazy `ensure_indexed` \
+             fallback still covers these members, FR-IX-07)"
+        };
+        Some(format!(
+            "note: background warming {verb} for {} newly-enrolled member{} — `{}` reports \
+             progress and outcome.",
+            self.members,
+            if self.members == 1 { "" } else { "s" },
+            self.status_command,
+        ))
+    }
 }
 
 /// The working-tree footprint workspace enablement left behind ([FR-WS-02]).
@@ -416,7 +497,13 @@ pub fn enable(root: &Path, name: &str, members: &[Member]) -> Result<WorkspaceEn
         .map(|member| MemberReport {
             name: member.name.clone(),
             root: member.root.display().to_string(),
-            outcome: match crate::Engine::init_with(&member.root, &InitOptions::default()) {
+            outcome: match crate::Engine::init_with(
+                &member.root,
+                &InitOptions {
+                    workspace_member: true,
+                    ..InitOptions::default()
+                },
+            ) {
                 Ok(result) => MemberOutcome::Ready(result),
                 // `{err:#}` (not `{err}`/`.to_string()`) to keep the causal
                 // chain: `Engine::init_with`'s steps wrap I/O failures with
@@ -443,6 +530,9 @@ pub fn enable(root: &Path, name: &str, members: &[Member]) -> Result<WorkspaceEn
         manifest: manifest_step,
         mcp: mcp_step,
         footprint,
+        // The CLI adapter overwrites this once the warm-supervisor decision is
+        // known — `enable` itself never blocks on indexing ([FR-WS-02]).
+        warm_start: WarmStartDisclosure::default(),
     })
 }
 
@@ -523,6 +613,31 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(tmp.path().join(".mcp.json")).unwrap()).unwrap();
         assert!(mcp["mcpServers"]["logos-workspace"].is_object());
         assert!(mcp["mcpServers"].get("logos").is_none(), "no per-repo entry at the parent");
+    }
+
+    /// Each member's own `init` runs in the workspace-member context (CR-119):
+    /// its next-step message states what is true there, never the single-repo
+    /// `logos index` advice, which at the workspace root builds only the root.
+    #[test]
+    fn enable_inits_each_member_in_the_workspace_member_context() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(&tmp.path().join("api"));
+        let members = discover_candidates(tmp.path());
+
+        let report = enable(tmp.path(), "shop", &members).expect("enables");
+        let MemberOutcome::Ready(result) = &report.members[0].outcome else {
+            panic!("api must init successfully: {:?}", report.members[0].outcome);
+        };
+        assert!(
+            !result.message.contains("logos index"),
+            "a workspace member must not be told to run a command that builds only the root: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains("enrolled") && result.message.contains("background warming"),
+            "the member message must state what is actually true: {}",
+            result.message
+        );
     }
 
     #[test]
@@ -791,6 +906,51 @@ mod tests {
         assert!(!ignored(".logos/config.toml"), "config.toml must stay committable");
         assert!(!ignored(".logos/rules.toml"), "rules.toml must stay committable");
         assert!(ignored(".logos/logos.db"), "the derived store is ignored");
+    }
+
+    // ── WarmStartDisclosure (FR-WS-02, FR-WS-15, FR-WS-17, CR-119) ────────
+
+    /// A settled re-run (no newly-approved delta) says nothing — mirroring
+    /// `WorkingTreeFootprint`'s own `fresh == 0` silence.
+    #[test]
+    fn no_newly_warmed_members_has_no_notice() {
+        let d = WarmStartDisclosure {
+            members: 0,
+            started: false,
+            status_command: "logos workspace status",
+        };
+        assert!(d.notice().is_none());
+    }
+
+    /// The disclosure states the count and names the observation surface —
+    /// this is the ONE workspace-level field the story requires, never
+    /// per-member text.
+    #[test]
+    fn a_started_warm_names_the_count_and_the_status_surface() {
+        let d = WarmStartDisclosure {
+            members: 84,
+            started: true,
+            status_command: "logos workspace status",
+        };
+        let notice = d.notice().expect("a non-empty delta is worth a word");
+        assert!(notice.contains("84"), "{notice}");
+        assert!(notice.contains("has begun"), "{notice}");
+        assert!(notice.contains("logos workspace status"), "{notice}");
+    }
+
+    /// A best-effort spawn failure is disclosed honestly rather than claimed as
+    /// success — the warm is still covered by the FR-IX-07 lazy fallback, which
+    /// the notice says so a reader is not left thinking nothing will happen.
+    #[test]
+    fn a_failed_spawn_is_disclosed_not_claimed() {
+        let d = WarmStartDisclosure {
+            members: 3,
+            started: false,
+            status_command: "logos workspace status",
+        };
+        let notice = d.notice().expect("still worth a word");
+        assert!(!notice.contains("has begun"), "{notice}");
+        assert!(notice.contains("FR-IX-07"), "the fallback is named: {notice}");
     }
 
     // ── ParentOfRepos: the `logos init` nudge shape (FR-IN-08) ────────────
