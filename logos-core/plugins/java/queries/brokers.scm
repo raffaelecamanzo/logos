@@ -24,7 +24,10 @@
 ; form is Spring's *standard* way to write a topic, and it is a static literal like
 ; any other; a previous `$`/`{` character rule in `ArtifactRelation::classify_target`
 ; dropped every one of them, which is why a real 84-member Spring estate reported an
-; empty topic inventory while 34 files declared Kafka wiring ([CR-107] §2). The topic
+; empty topic inventory while 16 files declared a `@KafkaListener` ([CR-107] §2 said
+; "34 files declare Kafka wiring"; that figure came from a grep the CR did not record
+; and could not be reproduced — the reconciled markers are in
+; `logos-core/tests/broker_topic_corpus.rs`, and the subscribe half is 16 of 16). The topic
 ; key is the literal as written; resolving a placeholder against committed
 ; configuration is [CR-117] §3.2's canonical-identity rule, not this file's business.
 ;
