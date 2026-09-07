@@ -228,6 +228,60 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
     expect(screen.getByText(/no cross-boundary references found/i)).toBeInTheDocument();
   });
+
+  // CR-118 §4.5: the provider-identity fields are OPTIONAL, and the view must
+  // render rows both with and without them. `COVERAGE` above is the WITHOUT
+  // shape (an older store, or a current one with no provider to name) and is
+  // already exercised by every test in this block; this is the WITH shape,
+  // asserted to render the identical board — the widened payload informs the
+  // per-reference detail, it does not move a count on this screen.
+  it("renders the identical board from rows carrying the CR-118 provider fields", async () => {
+    const widened: CrossServiceCoverage = {
+      ...COVERAGE,
+      references: COVERAGE.references.map((ref) =>
+        ref.bucket === "bound"
+          ? { ...ref, to: { member: "web", symbol: "route_get" }, intake: "contract-surface" as const }
+          : ref.bucket === "ambiguous"
+            ? {
+                ...ref,
+                candidates: {
+                  disposition: "tied-between" as const,
+                  providers: [
+                    { member: "mailbox-aggregator-api", symbol: "route_agg" },
+                    { member: "funnel-aggregator-api", symbol: "route_funnel" },
+                    { member: "mailbox-core", symbol: "route_core" },
+                  ],
+                  total: 3,
+                  omitted: 0,
+                  summary: "3 tied providers, all listed; none bound",
+                },
+              }
+            : ref,
+      ),
+    };
+    stubApi({ coverage: widened, providers: [BINDING] });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
+
+    expect(screen.getAllByText("33.3%").length).toBeGreaterThan(0);
+    // The `route` arm carries `to`; the `grpc-call` arm is the one carrying
+    // `candidates`. Assert BOTH — asserting only the first leaves the arm whose
+    // rows gained the tied-candidate set covered by the headline alone.
+    const routeRow = screen.getByRole("cell", { name: /HTTP \(OpenAPI ↔ route\)/ }).closest("tr")!;
+    expect([...routeRow.querySelectorAll("td")].map((c) => c.textContent).slice(1, 5)).toEqual([
+      "1",
+      "0",
+      "1",
+      "2",
+    ]);
+    const grpcRow = screen.getByRole("cell", { name: /gRPC/ }).closest("tr")!;
+    expect([...grpcRow.querySelectorAll("td")].map((c) => c.textContent).slice(1, 5)).toEqual([
+      "0",
+      "1",
+      "0",
+      "0",
+    ]);
+  });
 });
 
 describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {

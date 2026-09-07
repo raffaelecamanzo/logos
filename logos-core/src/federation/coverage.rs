@@ -36,7 +36,7 @@ use crate::resolve::http_client_call::ClientCallRefusal;
 
 use super::bridge::{
     bucket_candidates, classify, consumer_portable_key, index_provider, read_members,
-    sort_buckets, BridgeEndpoint, MemberContracts, PortableKey, ProviderIndex,
+    sort_buckets, BridgeEndpoint, BridgeIntake, MemberContracts, PortableKey, ProviderIndex,
     Role,
 };
 use super::registry::{EngineRegistry, MemberEngine};
@@ -146,6 +146,187 @@ impl CoverageState {
     }
 }
 
+/// How many providers one coverage row lists before it truncates ([CR-118],
+/// [NFR-CC-04]).
+///
+/// The measured ceiling on the 84-member reference workspace is **four** members
+/// co-serving one normalized template — three aggregators re-exposing the paths
+/// they proxy, plus the origin service — so eight is double the observed worst
+/// case. That is headroom enough that the aggregator pattern this field exists to
+/// make legible is never itself truncated, while a pathological bucket still
+/// cannot grow the payload without limit. Truncation is never silent:
+/// [`ProviderCandidates::omitted`] states the remainder and
+/// [`ProviderCandidates::summary`] says it in words.
+///
+/// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+const CANDIDATE_LIMIT: usize = 8;
+
+/// What the providers listed on a coverage row *are* to that row ([CR-118]).
+///
+/// A bound set and a tied set are the same shape on the wire and mean opposite
+/// things, so the object that carries them carries its own meaning: a consumer
+/// holding a [`ProviderCandidates`] alone — as the web wire type declares it —
+/// need not reach up to the row's [`bucket`](ReferenceCoverage::bucket) to know
+/// whether anything was reached. The two cannot disagree; both come from one
+/// [`tier`] match arm.
+///
+/// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderDisposition {
+    /// **Every** listed provider is bound — the fan-out discipline's shape
+    /// ([FR-WS-10]): one publish reaches every cross-member subscriber, so a
+    /// bound broker row names a *set* rather than a single
+    /// [`to`](ReferenceCoverage::to).
+    ///
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    BoundTo,
+    /// The listed providers **tied** at the exactly-one test: not one of them is
+    /// bound, no edge exists, and the row's `state` stays `unbound`. Naming a
+    /// candidate is not binding to it ([NFR-RA-05]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    TiedBetween,
+}
+
+/// The providers named on one coverage row — bounded, and never silently trimmed
+/// ([CR-118], [NFR-CC-04]).
+///
+/// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderCandidates {
+    /// Whether these providers are bound or merely tied ([`ProviderDisposition`]).
+    /// Declared first because it is the field that decides what every other field
+    /// here means.
+    pub disposition: ProviderDisposition,
+    /// The providers themselves, at most [`CANDIDATE_LIMIT`] of them, in the
+    /// bridge's own `(member, symbol)` bucket order ([NFR-RA-06]).
+    ///
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    pub providers: Vec<BridgeEndpoint>,
+    /// How many providers there were **before** truncation.
+    pub total: u64,
+    /// How many of [`total`](Self::total) are omitted from
+    /// [`providers`](Self::providers) — `0` when nothing was truncated, and
+    /// stated even then, so a reader never has to infer the absence of truncation
+    /// from a list length ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub omitted: u64,
+    /// The set, never presented bare: its size, how much of it is listed, and what
+    /// it means — e.g. `"4 tied providers, all listed; none bound"`,
+    /// `"12 bound providers (fan-out), 8 listed, 4 omitted"`, or, at the ordinary
+    /// two-service arity, `"1 bound provider (fan-out), all listed"`.
+    ///
+    /// The prose is the one thing a reader gets from a pretty-printed read-model
+    /// that the sibling fields do not spell out — `disposition` names the meaning
+    /// and `total`/`omitted` the arithmetic, but only this line puts "none bound"
+    /// beside a list of four members, which is the misreading it exists to
+    /// prevent. It is *derived*, so it is also the only field here that can be
+    /// wrong on its own; it is asserted verbatim at every arity it can render.
+    ///
+    /// Kin to [`CrossServiceCoverage::bound_ratio_summary`] ([CR-111]) in shape,
+    /// though not in force: that line carries a denominator the payload otherwise
+    /// hides, whereas this one restates siblings that are present.
+    ///
+    /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+    pub summary: String,
+}
+
+impl ProviderCandidates {
+    /// Bound `providers` to [`CANDIDATE_LIMIT`] and compose the disclosure line.
+    ///
+    /// `total` is read **before** the truncation, so the remainder is the real
+    /// one and not a count of what happened to survive.
+    fn new(disposition: ProviderDisposition, mut providers: Vec<BridgeEndpoint>) -> Self {
+        let total = providers.len() as u64;
+        providers.truncate(CANDIDATE_LIMIT);
+        let omitted = total - providers.len() as u64;
+        Self {
+            disposition,
+            providers,
+            total,
+            omitted,
+            summary: summarize_candidates(disposition, total, omitted),
+        }
+    }
+}
+
+/// Compose the [`ProviderCandidates::summary`] line ([CR-118], [NFR-CC-04]).
+///
+/// The `; none bound` tail is the whole point of the line on a tied set: a reader
+/// skimming a list of four members needs the row's refusal restated beside them,
+/// not inferred from a `state` field further up the object.
+///
+/// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn summarize_candidates(disposition: ProviderDisposition, total: u64, omitted: u64) -> String {
+    // `listed` is not a third independent fact — it is `total - omitted`, and taking
+    // it as a parameter would create a consistency obligation nothing enforces.
+    let extent = if omitted == 0 {
+        "all listed".to_string()
+    } else {
+        format!("{} listed, {omitted} omitted", total - omitted)
+    };
+    // A fan-out bound to exactly ONE cross-member subscriber is the ordinary
+    // two-service shape, not an edge case, so this line must be grammatical at
+    // arity 1 — the idiom the rest of the codebase uses for the same reason.
+    let plural = if total == 1 { "" } else { "s" };
+    match disposition {
+        ProviderDisposition::BoundTo => {
+            format!("{total} bound provider{plural} (fan-out), {extent}")
+        }
+        // A tie is 2-or-more by construction (the sole-candidate and empty-bucket
+        // cases are intercepted before it), so this arm never renders arity 1 —
+        // it is pluralized alongside its sibling rather than relying on that.
+        ProviderDisposition::TiedBetween => {
+            format!("{total} tied provider{plural}, {extent}; none bound")
+        }
+    }
+}
+
+/// The provider side [`tier`] resolved for one reference — the half a coverage row
+/// never carried before [CR-118], and which the matcher already had in hand
+/// ([`bucket_candidates`] returns the whole narrowed bucket, discarding nothing).
+///
+/// Internal: it is projected onto the row's optional wire fields by
+/// [`ReferenceCoverage::new`], which is the single place the projection happens.
+///
+/// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+enum ProviderEvidence {
+    /// No provider to name: nothing in the workspace provides this key, or the
+    /// reference's own template never composed into one. The row carries neither
+    /// `to` nor `candidates` — absence, not an empty list ([NFR-CC-04]).
+    Unnamed,
+    /// Exactly one cross-member provider, bound — the row's
+    /// [`to`](ReferenceCoverage::to), and the identical `(member, symbol)` pair
+    /// `xservice route-providers` reports for this reference.
+    Sole(BridgeEndpoint),
+    /// Several providers, all bound (fan-out) or all tied (ambiguous) — the row's
+    /// [`candidates`](ReferenceCoverage::candidates).
+    Several(ProviderDisposition, Vec<BridgeEndpoint>),
+}
+
+/// One reference's provider-side provenance: what [`tier`] resolved, plus the
+/// intake the consumer arrived through ([CR-118], [CR-083]).
+///
+/// Bundled so the two adjacent, unrelated values arrive **named** at each
+/// `record` call site rather than as a fifth and sixth positional argument.
+///
+/// It is deliberately not claimed that a later arm benefits: the two successors
+/// scheduled into this file (S-339, S-370) add new `record` *call sites* carrying
+/// `Unnamed` evidence, not new provenance *fields*, so they gain nothing from the
+/// struct beyond the naming.
+///
+/// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+/// [CR-083]: ../../../docs/requests/CR-083-reachability-invocation-edge-roots.md
+struct RowProvenance {
+    providers: ProviderEvidence,
+    intake: BridgeIntake,
+}
+
 /// One cross-boundary reference's coverage classification ([FR-WS-05]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReferenceCoverage {
@@ -164,17 +345,107 @@ pub struct ReferenceCoverage {
     /// under a second `state` object.
     #[serde(flatten)]
     pub state: CoverageState,
+    /// The **provider this reference bound to**, under an exactly-one discipline
+    /// (`route`, `grpc-call`) — the same `(member, symbol)` pair
+    /// `xservice route-providers` reports for it ([CR-118], [FR-WS-05]).
+    ///
+    /// **Optional.** Absent on every non-bound row, and absent on a *fan-out*
+    /// bound row, which binds a set and reports it in
+    /// [`candidates`](Self::candidates) rather than fabricating a single
+    /// provider for it. A consumer that does not know this field reads the row
+    /// exactly as it did before [CR-118].
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<BridgeEndpoint>,
+    /// How this row's binding entered the overlay ([CR-083]).
+    ///
+    /// **Optional, and present only on a bound row**: an intake describes an
+    /// *edge*, and a row that bound nothing has none. Stamping one on an
+    /// ambiguous row would read as provenance for a binding that does not exist
+    /// ([NFR-RA-05]).
+    ///
+    /// [CR-083]: ../../../docs/requests/CR-083-reachability-invocation-edge-roots.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intake: Option<BridgeIntake>,
+    /// The providers this reference **tied between** (ambiguous) or **fanned out
+    /// to** (a bound broker row) — bounded, with any truncation disclosed
+    /// ([CR-118], [NFR-CC-04]).
+    ///
+    /// **Optional.** Absent whenever there is no set to name — a sole bound
+    /// provider (that is [`to`](Self::to)), an uncomposable template, or no
+    /// provider anywhere in the workspace.
+    ///
+    /// On an ambiguous row this is the single most actionable thing the payload
+    /// carries: it is what turns `ambiguous: 146` from a number into a diagnosis,
+    /// because a reader who sees four aggregator members on one template
+    /// recognises the architecture instead of suspecting the matcher ([FR-CG-09]
+    /// Notes — that ambiguity is call-site-gated, not match-gated). Naming them
+    /// creates no edge and moves no bucket ([NFR-RA-05]).
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    /// [FR-CG-09]: ../../../docs/specs/requirements/FR-CG-09.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidates: Option<ProviderCandidates>,
 }
 
 impl ReferenceCoverage {
     /// Build a [`ReferenceCoverage`], deriving [`bucket`](Self::bucket) from
-    /// `state` so the two can never disagree.
-    fn new(relation: String, from: BridgeEndpoint, state: CoverageState) -> Self {
+    /// `state` so the two can never disagree — and projecting the tier's
+    /// [`ProviderEvidence`] onto the row's optional provider fields here, once,
+    /// for the same reason.
+    fn new(
+        relation: String,
+        from: BridgeEndpoint,
+        state: CoverageState,
+        provenance: RowProvenance,
+    ) -> Self {
+        let (to, candidates) = match provenance.providers {
+            ProviderEvidence::Unnamed => (None, None),
+            ProviderEvidence::Sole(endpoint) => (Some(endpoint), None),
+            ProviderEvidence::Several(disposition, endpoints) => {
+                (None, Some(ProviderCandidates::new(disposition, endpoints)))
+            }
+        };
+        // An intake describes an edge; only a bound row has one. Computed here
+        // rather than inside the struct literal, where it read as a use of `state`
+        // after that field had moved — sound only because `CoverageState` is `Copy`.
+        let intake = matches!(state, CoverageState::Bound).then_some(provenance.intake);
+        // The three row invariants, at the one place all three are decidable:
+        // `to` only on a bound row, a `bound-to` set only on a bound row, and a
+        // `tied-between` set never on one. `tier` is the sole producer today and
+        // pairs them atomically, so these are cheap guards on the successors this
+        // file is scheduled to receive rather than on any live defect.
+        debug_assert!(
+            to.is_none() || matches!(state, CoverageState::Bound),
+            "a non-bound row must name no provider it bound to"
+        );
+        debug_assert!(
+            !matches!(
+                candidates.as_ref().map(|c| c.disposition),
+                Some(ProviderDisposition::BoundTo)
+            ) || matches!(state, CoverageState::Bound),
+            "a `bound-to` set claims every listed provider is reached"
+        );
+        debug_assert!(
+            !matches!(
+                candidates.as_ref().map(|c| c.disposition),
+                Some(ProviderDisposition::TiedBetween)
+            ) || !matches!(state, CoverageState::Bound),
+            "a `tied-between` set claims NONE is reached (NFR-RA-05)"
+        );
         Self {
             relation,
             from,
             bucket: state.bucket(),
             state,
+            to,
+            intake,
+            candidates,
         }
     }
 }
@@ -304,6 +575,10 @@ where
     // `(member, consumer)` pairs read from each member's ledger, classified below
     // through the same provider index as the contract-surface consumers.
     let mut inv_consumers: Vec<(String, super::bridge::InvocationRef)> = Vec::new();
+    // Ledger-provider endpoints already indexed, so one endpoint is filed once —
+    // the collapse `broker_edges` performs before its own fan-out ([NFR-RA-05]).
+    let mut ledger_providers: std::collections::HashSet<(PortableKey, String, String)> =
+        std::collections::HashSet::new();
 
     let surfaces = read_members(registry, "contract surface", |e| e.contract_surface());
     // The members that actually contributed — the numerator of the coverage
@@ -358,6 +633,24 @@ where
                     else {
                         continue; // an unkeyable arm contributes no provider
                     };
+                    // One endpoint per (key, member, symbol) — the SAME collapse
+                    // [`super::broker::broker_edges`] applies before its fan-out, and
+                    // for the same reason: a ledger can hold two rows for one endpoint
+                    // (they differ in `form` or `payload`, both outside the
+                    // `unresolved_refs` unique key), and the fan-out treats each as a
+                    // separate provider. The bridge de-duplicates, so before [CR-118]
+                    // this tier could differ only in a boolean nobody could see. Now
+                    // the set is NAMED and COUNTED, so a duplicate would report "3
+                    // bound providers (fan-out)" beside two bridge edges — a
+                    // fabricated count ([NFR-RA-05]) and exactly the classifier drift
+                    // this module exists to prevent.
+                    if !ledger_providers.insert((
+                        key.clone(),
+                        member.clone(),
+                        reference.symbol.as_str().to_string(),
+                    )) {
+                        continue; // a repeat of this exact endpoint on this key
+                    }
                     index_provider(
                         &mut providers,
                         key,
@@ -389,13 +682,29 @@ where
                 CoverageState::Unbound {
                     reason: UnboundReason::PathNotComposed,
                 },
+                // A template that never composed has no provider to name.
+                RowProvenance {
+                    providers: ProviderEvidence::Unnamed,
+                    intake: BridgeIntake::ContractSurface,
+                },
             );
             continue;
         };
         let relation = key.relation().to_string();
 
-        if let Some(state) = tier(&key, &member, &providers) {
-            tally.record(relation, from, state);
+        if let Some((state, evidence)) = tier(&key, &member, &providers) {
+            // A contract-surface consumer *declares* an endpoint rather than
+            // calling one — the same intake the bridge stamps on its edge
+            // ([CR-083]), read here from the loop the consumer arrived in.
+            tally.record(
+                relation,
+                from,
+                state,
+                RowProvenance {
+                    providers: evidence,
+                    intake: BridgeIntake::ContractSurface,
+                },
+            );
         }
     }
 
@@ -423,12 +732,26 @@ where
                 CoverageState::Unbound {
                     reason: UnboundReason::PathNotComposed,
                 },
+                RowProvenance {
+                    providers: ProviderEvidence::Unnamed,
+                    intake: BridgeIntake::Invocation,
+                },
             );
             continue;
         };
 
-        if let Some(state) = tier(&key, &member, &providers) {
-            tally.record(relation, from, state);
+        if let Some((state, evidence)) = tier(&key, &member, &providers) {
+            // A ledger reference is a captured call site, so its binding carries
+            // the invocation intake — exactly as the bridge stamps it ([CR-083]).
+            tally.record(
+                relation,
+                from,
+                state,
+                RowProvenance {
+                    providers: evidence,
+                    intake: BridgeIntake::Invocation,
+                },
+            );
         }
     }
 
@@ -448,7 +771,13 @@ struct Tally {
 }
 
 impl Tally {
-    fn record(&mut self, relation: String, from: BridgeEndpoint, state: CoverageState) {
+    fn record(
+        &mut self,
+        relation: String,
+        from: BridgeEndpoint,
+        state: CoverageState,
+        provenance: RowProvenance,
+    ) {
         match &state {
             CoverageState::Bound => self.bound += 1,
             CoverageState::Unbound { reason } => match reason {
@@ -461,7 +790,7 @@ impl Tally {
             },
         }
         self.references
-            .push(ReferenceCoverage::new(relation, from, state));
+            .push(ReferenceCoverage::new(relation, from, state, provenance));
     }
 
     /// Seal the tally into the read-model, over a workspace of `members_total`
@@ -536,7 +865,7 @@ fn tier(
     key: &PortableKey,
     member: &str,
     providers: &ProviderIndex,
-) -> Option<CoverageState> {
+) -> Option<(CoverageState, ProviderEvidence)> {
     // The bridge's own bucket reduction ([CR-109]): a wildcard provider serves
     // every verb, an exact-method provider outranks it. Running the *same*
     // helper is what stops the coverage board from reporting a reference the
@@ -548,9 +877,12 @@ fn tier(
         // are the same answer, deliberately: it is the reading a
         // `(method, template)`-keyed index gave for a method mismatch before
         // wildcards existed.
-        return Some(CoverageState::Unbound {
-            reason: UnboundReason::NoProviderInWorkspace,
-        });
+        return Some((
+            CoverageState::Unbound {
+                reason: UnboundReason::NoProviderInWorkspace,
+            },
+            ProviderEvidence::Unnamed,
+        ));
     }
 
     match key.namespace().match_discipline() {
@@ -558,23 +890,53 @@ fn tier(
             // A sole same-member provider is intra-repo — not a cross-boundary
             // reference (unchanged from the pre-S-256 tier).
             [only] if only.member == member => None,
-            [_only] => Some(CoverageState::Bound),
+            [only] => Some((
+                CoverageState::Bound,
+                // The provider was in hand the whole time: `bucket_candidates`
+                // returns the narrowed bucket and discards nothing, so naming the
+                // bound end costs one clone and no re-computation ([CR-118]
+                // CRA-01, confirmed here rather than assumed).
+                ProviderEvidence::Sole((*only).clone()),
+            )),
             // Two or more surviving candidates for one key: the sole-provider rule
             // fails, so the bridge fabricates no edge and this is honestly
             // ambiguous. The wildcard rule narrows the bucket before this point but
             // never breaks a tie among equally-specific providers ([NFR-RA-05]).
-            _ => Some(CoverageState::Unbound {
-                reason: UnboundReason::Ambiguous,
-            }),
+            //
+            // Every tied candidate is listed, **including a same-member one**: the
+            // tie is what refused the binding, and dropping a participant from it
+            // would misreport why ([CR-118] CRA-02 — the losers are not discarded,
+            // they are right here).
+            _ => Some((
+                CoverageState::Unbound {
+                    reason: UnboundReason::Ambiguous,
+                },
+                ProviderEvidence::Several(
+                    ProviderDisposition::TiedBetween,
+                    candidates.iter().map(|e| (*e).clone()).collect(),
+                ),
+            )),
         },
         // Fan-out (a broker topic): one publish binds EVERY cross-member subscriber,
         // so any cross-member provider means bound — many subscribers is the arm
         // working as designed, never an ambiguity ([FR-WS-10]). All-same-member
         // subscribers are the intra-repo fan-out the per-repo graph owns.
-        MatchDiscipline::FanOut => candidates
-            .iter()
-            .any(|p| p.member != member)
-            .then_some(CoverageState::Bound),
+        //
+        // The bound row therefore names a **set**, and names exactly the set
+        // `xservice route-providers` reports: the bridge emits one edge per
+        // cross-member subscriber and skips the same-member ones, so the filter
+        // here is the same filter there ([FR-WS-10], [FR-WS-11]).
+        MatchDiscipline::FanOut => {
+            let bound: Vec<BridgeEndpoint> = candidates
+                .iter()
+                .filter(|p| p.member != member)
+                .map(|p| (*p).clone())
+                .collect();
+            (!bound.is_empty()).then_some((
+                CoverageState::Bound,
+                ProviderEvidence::Several(ProviderDisposition::BoundTo, bound),
+            ))
+        }
     }
 }
 
@@ -898,6 +1260,17 @@ mod tests {
         assert_eq!(cov.bound_ratio, Some(1.0));
     }
 
+    /// A row built with no provider evidence at all — the shape every row had
+    /// before [CR-118], and the shape a `path-not-composed` row still has.
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    fn unnamed() -> RowProvenance {
+        RowProvenance {
+            providers: ProviderEvidence::Unnamed,
+            intake: BridgeIntake::ContractSurface,
+        }
+    }
+
     /// The flattened `state` field serializes as one top-level `"state"` key
     /// (never a nested `state.state`), with `reason` present only when
     /// unbound, and `bucket` always present as the direct 3-state label
@@ -912,6 +1285,7 @@ mod tests {
                 symbol: LogosSymbol::parse("local op_get").unwrap(),
             },
             CoverageState::Bound,
+            unnamed(),
         );
         let bound_json = serde_json::to_value(&bound).unwrap();
         assert_eq!(bound_json["state"], "bound");
@@ -924,6 +1298,7 @@ mod tests {
             CoverageState::Unbound {
                 reason: UnboundReason::NoProviderInWorkspace,
             },
+            unnamed(),
         );
         let unbound_json = serde_json::to_value(&unbound).unwrap();
         assert_eq!(unbound_json["state"], "unbound");
@@ -936,11 +1311,599 @@ mod tests {
             CoverageState::Unbound {
                 reason: UnboundReason::Ambiguous,
             },
+            unnamed(),
         );
         let ambiguous_json = serde_json::to_value(&ambiguous).unwrap();
         assert_eq!(
             ambiguous_json["bucket"], "ambiguous",
             "an ambiguous reason gets its own bucket, distinct from the generic unbound bucket"
+        );
+    }
+
+    // ── CR-118 / FR-WS-05: the row names the other end ────────────────────────
+
+    /// **[CR-118] CRA-01, confirmed rather than assumed.** A bound row carries the
+    /// provider it bound to — member *and* symbol — plus the intake the binding
+    /// entered through.
+    ///
+    /// The `to` key was absent on all 875 rows of the 84-member reference
+    /// workspace while `xservice route-providers` reported the identical set with
+    /// both ends named. This is that gap closed at the point the row is emitted.
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    #[test]
+    fn a_bound_row_names_the_provider_it_bound_to() {
+        reset();
+        set_member("api", vec![op("GET /users/{id}", "local op_get")]);
+        set_member("web", vec![route("GET /users/{id}", "local route_get")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "web"]));
+
+        let row = &cov.references[0];
+        assert_eq!(row.state, CoverageState::Bound);
+        let to = row.to.as_ref().expect("a bound row names its provider");
+        assert_eq!(to.member, "web");
+        assert_eq!(to.symbol, LogosSymbol::parse("local route_get").unwrap());
+        assert_eq!(
+            row.intake,
+            Some(BridgeIntake::ContractSurface),
+            "an OpenAPI operation DECLARES an endpoint; the intake says so, exactly \
+             as the bridge stamps it on the same binding (CR-083)"
+        );
+        assert!(
+            row.candidates.is_none(),
+            "a sole provider is `to`, not a one-element candidate set"
+        );
+
+        let value = serde_json::to_value(row).unwrap();
+        assert_eq!(value["to"]["member"], "web");
+        assert_eq!(value["intake"], "contract-surface");
+    }
+
+    /// The bound row's `to` is the **same** `(member, symbol)` pair the bridge
+    /// puts on its edge — the two surfaces computed from one pass agree, which is
+    /// the whole premise of [CR-118] §2.1 (the answer already existed; it was the
+    /// surface framing the question that lacked it).
+    ///
+    /// Asserted here against the bridge itself, over one registry, so a drift
+    /// between the coverage tier's provider and `xservice route-providers`'
+    /// provider fails at the unit layer rather than only end-to-end.
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    #[test]
+    fn the_bound_rows_provider_is_the_one_route_providers_reports() {
+        reset();
+        set_member("api", vec![op("GET /users/{id}", "local op_get")]);
+        set_member("web", vec![route("GET /users/{id}", "local route_get")]);
+
+        let reg = registry(&["api", "web"]);
+        let cov = cross_service_coverage(&reg);
+        let edges = super::super::bridge::ContractBridge::new().edges(&reg);
+
+        assert_eq!(edges.len(), 1, "one cross-service binding: {edges:?}");
+        let bound: Vec<_> = cov.references.iter().filter(|r| r.bucket == "bound").collect();
+        assert_eq!(bound.len(), 1);
+        assert_eq!(
+            bound[0].to.as_ref(),
+            Some(&edges[0].to),
+            "the coverage row and the bridge edge name the SAME provider"
+        );
+        assert_eq!(bound[0].from, edges[0].from);
+        assert_eq!(bound[0].intake, Some(edges[0].intake));
+    }
+
+    /// **[CR-118] CRA-02, confirmed.** An ambiguous row carries the providers it
+    /// tied between — the matcher did not discard the losers, they are the very
+    /// list the exactly-one test refused.
+    ///
+    /// **The aggregator ceiling, demonstrated** ([FR-CG-09] Notes). Three members
+    /// serve one normalized template, every provider wildcard-method (`ANY`), so
+    /// [CR-109]'s exact-method precedence has nothing to prefer — the corpus
+    /// shape measured on the reference workspace, where 15 of 86 templates are
+    /// multi-provider because the aggregators re-expose the paths they proxy. The
+    /// rule refuses correctly; the row now says *between what*, so a reader
+    /// recognises the architecture instead of filing a matching defect.
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    /// [FR-CG-09]: ../../../docs/specs/requirements/FR-CG-09.md
+    /// [CR-109]: ../../../docs/requests/CR-109-wildcard-method-route-matching.md
+    #[test]
+    fn an_ambiguous_row_names_the_three_aggregators_it_tied_between() {
+        reset();
+        let template = "/v1/users/{userId}/mailboxes/{mailboxId}";
+        set_member("mailbox-api", vec![op(&format!("GET {template}"), "local op_mailbox")]);
+        // Three providers of one template, every one of them wildcard-method —
+        // the reference workspace's exact shape.
+        set_member("mailbox-core", vec![route(&format!("ANY {template}"), "local route_core")]);
+        set_member(
+            "mailbox-aggregator-api",
+            vec![route(&format!("ANY {template}"), "local route_mailbox_agg")],
+        );
+        set_member(
+            "funnel-aggregator-api",
+            vec![route(&format!("ANY {template}"), "local route_funnel_agg")],
+        );
+
+        let cov = cross_service_coverage(&registry(&[
+            "mailbox-api",
+            "mailbox-core",
+            "mailbox-aggregator-api",
+            "funnel-aggregator-api",
+        ]));
+
+        assert_eq!(cov.ambiguous, 1);
+        assert_eq!(cov.bound, 0, "the exactly-one rule refuses, correctly");
+        let row = &cov.references[0];
+        assert_eq!(row.bucket, "ambiguous");
+        assert_eq!(
+            row.state,
+            CoverageState::Unbound {
+                reason: UnboundReason::Ambiguous
+            },
+            "naming the candidates does NOT bind to them — the state stays unbound \
+             and no edge exists (NFR-RA-05)"
+        );
+        assert!(
+            row.to.is_none(),
+            "nothing bound, so there is no `to` to name"
+        );
+        assert_eq!(
+            row.intake, None,
+            "an intake describes an edge; a tie has none"
+        );
+
+        let tied = row.candidates.as_ref().expect("the tie is named");
+        assert_eq!(tied.disposition, ProviderDisposition::TiedBetween);
+        assert_eq!(tied.total, 3);
+        assert_eq!(tied.omitted, 0);
+        // The (member, symbol) PAIRS, not each half separately: the AC says "each
+        // with member and symbol", and an implementation that carried the consumer's
+        // symbol — or cloned one candidate's symbol across all three — would satisfy
+        // a members-only assertion. Order is the bridge's own deterministic bucket
+        // order ([NFR-RA-06]).
+        let pairs: Vec<(&str, String)> = tied
+            .providers
+            .iter()
+            .map(|p| (p.member.as_str(), p.symbol.to_string()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("funnel-aggregator-api", "local route_funnel_agg".to_string()),
+                ("mailbox-aggregator-api", "local route_mailbox_agg".to_string()),
+                ("mailbox-core", "local route_core".to_string()),
+            ]
+        );
+        assert_eq!(tied.summary, "3 tied providers, all listed; none bound");
+
+        // The WIRE shape, pinned here because `web/ui/src/api/types.ts` and the
+        // `docs/howto/commands.md` payload block are hand-written mirrors of it: a
+        // `rename_all` change or a field rename would otherwise ship a broken UI
+        // contract with a fully green suite.
+        let value = serde_json::to_value(row).unwrap();
+        assert_eq!(value["candidates"]["disposition"], "tied-between");
+        assert_eq!(value["candidates"]["total"], 3);
+        assert_eq!(
+            value["candidates"]["omitted"], 0,
+            "present even at zero — absence of truncation is stated, not inferred (NFR-CC-04)"
+        );
+        assert_eq!(
+            value["candidates"]["providers"][0]["member"],
+            "funnel-aggregator-api"
+        );
+        assert_eq!(
+            value["candidates"]["summary"],
+            "3 tied providers, all listed; none bound"
+        );
+        assert!(
+            value.get("to").is_none() && value.get("intake").is_none(),
+            "a tie names no `to` and carries no intake: {value}"
+        );
+    }
+
+    /// The **fan-out** truncation branch — the fourth `summarize_candidates` string,
+    /// and the one the [`ProviderCandidates::summary`] doc uses as its worked
+    /// example. Truncation must disclose its remainder on *both* dispositions, not
+    /// only on a tie ([NFR-CC-04]).
+    ///
+    /// This branch is also where the arity-1 pluralization defect lived unseen: the
+    /// only fan-out test bound two subscribers, so no test ever rendered a fan-out
+    /// summary at any other arity.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn a_truncated_fan_out_set_states_how_many_subscribers_it_omits() {
+        reset();
+        set_consumers("orders", vec![broker_publish("orders.created", "local publish")]);
+        let subs: Vec<String> = (0..12).map(|i| format!("s{i:02}")).collect();
+        for name in &subs {
+            set_consumers(
+                name,
+                vec![broker_subscribe("orders.created", &format!("local sub_{name}"))],
+            );
+        }
+        let mut names: Vec<&str> = subs.iter().map(String::as_str).collect();
+        names.push("orders");
+
+        let cov = cross_service_coverage(&registry(&names));
+
+        let publish = cov
+            .references
+            .iter()
+            .find(|r| r.relation == "broker-topic" && r.bucket == "bound")
+            .expect("the publish binds its cross-member subscribers");
+        let bound = publish.candidates.as_ref().expect("the bound set is named");
+        assert_eq!(bound.disposition, ProviderDisposition::BoundTo);
+        assert_eq!(bound.total, 12, "the total is the set BEFORE truncation");
+        assert_eq!(bound.providers.len(), CANDIDATE_LIMIT);
+        assert_eq!(bound.omitted, 4);
+        assert_eq!(bound.summary, "12 bound providers (fan-out), 8 listed, 4 omitted");
+        assert_eq!(
+            cov.bound, 1,
+            "truncating the NAMED set moves no reference between buckets"
+        );
+        // The `bound-to` wire token, pinned for the same hand-written-mirror reason
+        // as its `tied-between` sibling above.
+        let value = serde_json::to_value(publish).unwrap();
+        assert_eq!(value["candidates"]["disposition"], "bound-to");
+        assert_eq!(value["candidates"]["omitted"], 4);
+    }
+
+    /// A tie larger than [`CANDIDATE_LIMIT`] is truncated with the remainder
+    /// **stated** — in a machine field and in the composed line. No silent trim
+    /// ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn a_truncated_candidate_set_states_how_many_it_omits() {
+        reset();
+        set_member("consumer", vec![op("GET /users/{id}", "local op_get")]);
+        let providers: Vec<String> = (0..12).map(|i| format!("p{i:02}")).collect();
+        for name in &providers {
+            set_member(name, vec![route("ANY /users/{id}", &format!("local route_{name}"))]);
+        }
+        let mut names: Vec<&str> = providers.iter().map(String::as_str).collect();
+        names.push("consumer");
+
+        let cov = cross_service_coverage(&registry(&names));
+
+        assert_eq!(cov.ambiguous, 1);
+        let tied = cov.references[0]
+            .candidates
+            .as_ref()
+            .expect("the tie is named");
+        assert_eq!(tied.total, 12, "the total is the tie BEFORE truncation");
+        assert_eq!(tied.providers.len(), CANDIDATE_LIMIT);
+        assert_eq!(tied.omitted, 4);
+        // WHICH eight survive, not merely how many: the `providers` doc claims the
+        // bridge's own deterministic bucket order ([NFR-RA-06]), and truncation is
+        // where that claim earns its keep — an unordered bucket would drop an
+        // arbitrary four.
+        let kept: Vec<&str> = tied.providers.iter().map(|p| p.member.as_str()).collect();
+        assert_eq!(
+            kept,
+            ["p00", "p01", "p02", "p03", "p04", "p05", "p06", "p07"],
+            "the first eight in bucket order, deterministically"
+        );
+        assert_eq!(
+            tied.summary, "12 tied providers, 8 listed, 4 omitted; none bound",
+            "the remainder is disclosed in words as well as in a field"
+        );
+    }
+
+    /// A **fan-out** bound row names the set it fanned out to, not a fabricated
+    /// single provider: one publish reaches every cross-member subscriber
+    /// ([FR-WS-10]), which is exactly the set `xservice route-providers` reports
+    /// as one edge per subscriber.
+    ///
+    /// The same-member subscriber is excluded from the set for the same reason
+    /// the bridge emits no edge for it — it is the intra-repo fan-out the
+    /// per-repo graph already owns.
+    ///
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    #[test]
+    fn a_fan_out_bound_row_names_every_subscriber_it_binds() {
+        reset();
+        set_consumers(
+            "orders",
+            vec![
+                broker_publish("orders.created", "local publish"),
+                // A same-member subscribe: intra-repo fan-out, never a bound end.
+                broker_subscribe("orders.created", "local self_sub"),
+            ],
+        );
+        set_consumers("billing", vec![broker_subscribe("orders.created", "local bill_sub")]);
+        set_consumers("shipping", vec![broker_subscribe("orders.created", "local ship_sub")]);
+
+        let cov = cross_service_coverage(&registry(&["orders", "billing", "shipping"]));
+
+        let publish = cov
+            .references
+            .iter()
+            .find(|r| r.relation == "broker-topic" && r.bucket == "bound")
+            .expect("the publish binds its cross-member subscribers");
+        assert!(
+            publish.to.is_none(),
+            "a fan-out binding has no single `to` — naming one would fabricate a \
+             sole provider where the arm binds a set"
+        );
+        assert_eq!(publish.intake, Some(BridgeIntake::Invocation));
+        let bound = publish.candidates.as_ref().expect("the bound set is named");
+        assert_eq!(bound.disposition, ProviderDisposition::BoundTo);
+        let members: Vec<&str> = bound.providers.iter().map(|p| p.member.as_str()).collect();
+        assert_eq!(
+            members,
+            ["billing", "shipping"],
+            "every cross-member subscriber, and only those — the same filter the \
+             bridge applies when it emits one edge per subscriber"
+        );
+        assert_eq!(bound.total, 2);
+        assert_eq!(bound.summary, "2 bound providers (fan-out), all listed");
+    }
+
+    /// **The bridge de-duplicates fan-out endpoints; so does this tier.** A ledger
+    /// holding two rows for one subscribe endpoint must name that subscriber
+    /// **once** — and the coverage row's count must equal the number of edges the
+    /// bridge emits, asserted here against the real bridge rather than assumed.
+    ///
+    /// Before [CR-118] this tier's fan-out arm asked only `.any(|p| …)`, so a
+    /// duplicate changed a boolean nobody could observe. Now the set is named and
+    /// counted, so the same duplicate would publish "2 bound providers (fan-out)"
+    /// beside a single bridge edge — a fabricated count ([NFR-RA-05]) and the
+    /// classifier drift this module's contract forbids.
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn a_repeated_ledger_endpoint_is_named_once_and_counted_once() {
+        reset();
+        set_consumers("orders", vec![broker_publish("orders.created", "local publish")]);
+        // The SAME subscribe endpoint twice — two ledger rows, one subscriber.
+        set_consumers(
+            "billing",
+            vec![
+                broker_subscribe("orders.created", "local bill_sub"),
+                broker_subscribe("orders.created", "local bill_sub"),
+            ],
+        );
+
+        let reg = registry(&["orders", "billing"]);
+        let cov = cross_service_coverage(&reg);
+        let edges = super::super::bridge::ContractBridge::new().edges(&reg);
+
+        let publish = cov
+            .references
+            .iter()
+            .find(|r| r.relation == "broker-topic" && r.bucket == "bound")
+            .expect("the publish binds its cross-member subscriber");
+        let bound = publish.candidates.as_ref().expect("the bound set is named");
+        assert_eq!(
+            bound.total, 1,
+            "one subscriber, named once — not once per ledger row"
+        );
+        assert_eq!(bound.providers.len(), 1);
+        assert_eq!(bound.summary, "1 bound provider (fan-out), all listed");
+        assert_eq!(
+            bound.total as usize,
+            edges.len(),
+            "the named count equals the edges the bridge emits — one classifier, no drift"
+        );
+    }
+
+    /// The new fields are **optional**, and a row with nothing to name carries
+    /// none of them — absence, never an empty object or a null. This is the shape
+    /// an older store's rows have, and the shape the web coverage view must keep
+    /// rendering ([CR-118] §4.5).
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    #[test]
+    fn a_row_with_no_provider_to_name_omits_every_new_field() {
+        reset();
+        set_member("api", vec![op("GET /orphans/{id}", "local op_orphan")]);
+        set_member("web", vec![]);
+
+        let cov = cross_service_coverage(&registry(&["api", "web"]));
+
+        let value = serde_json::to_value(&cov.references[0]).unwrap();
+        for field in ["to", "intake", "candidates"] {
+            assert!(
+                value.get(field).is_none(),
+                "`{field}` is absent, not null: {value}"
+            );
+        }
+        // And the pre-CR-118 fields are untouched, so a consumer that ignores the
+        // new ones reads this row exactly as it read it before.
+        assert_eq!(value["state"], "unbound");
+        assert_eq!(value["bucket"], "unbound");
+        assert_eq!(value["reason"], "no-provider-in-workspace");
+    }
+
+    /// **The [CR-118] invariant: no reference changes bucket.** Every bucket, in one
+    /// run: the mixed fixture's counts match the classification the unchanged
+    /// single-bucket tests above pin individually.
+    ///
+    /// **What this test does and does not prove.** It cannot itself be a
+    /// before/after — its fixture was written in the same commit as the change, so
+    /// its golden counts are this author's expectation, not a recorded prior. The
+    /// real before/after evidence is that the ~40 pre-existing classification tests
+    /// in this module pass with **zero assertion edits**; the only pre-existing test
+    /// touched is `state_serializes_flat_not_double_nested`, and only to pass the
+    /// new constructor argument. What this test adds is the *mixed* fixture — all
+    /// four buckets in a single pass, which no single-bucket test gives — so a
+    /// change that shifted one bucket into another at the boundaries would show up
+    /// here.
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    #[test]
+    fn naming_providers_moves_no_reference_between_buckets() {
+        reset();
+        set_member(
+            "api",
+            vec![
+                op("GET /users/{id}", "local op_bound"),    // → bound
+                op("GET /tied/{id}", "local op_tied"),      // → ambiguous
+                op("GET /orphans/{id}", "local op_orphan"), // → no-provider
+                op("nonsense", "local op_nonsense"),        // → path-not-composed
+            ],
+        );
+        set_member(
+            "web",
+            vec![
+                route("GET /users/{id}", "local route_users"),
+                route("GET /tied/{id}", "local route_tied_web"),
+            ],
+        );
+        set_member("admin", vec![route("GET /tied/{userId}", "local route_tied_admin")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "web", "admin"]));
+
+        assert_eq!(cov.bound, 1);
+        assert_eq!(cov.ambiguous, 1);
+        assert_eq!(cov.unbound, 1, "the uncomposable template");
+        assert_eq!(cov.no_provider_in_workspace, 1);
+        assert_eq!(cov.bound_ratio, Some(1.0 / 3.0));
+        assert_eq!(cov.bound_ratio_measured, 3);
+
+        // Guard the guard: without this, the loop below is vacuous — if `candidates`
+        // stopped being populated at all, its body would never execute and the test
+        // whose whole subject is "naming is not binding" would pass by naming
+        // nothing.
+        assert_eq!(
+            cov.references.iter().filter(|r| r.candidates.is_some()).count(),
+            1,
+            "exactly the tied row names a set"
+        );
+        // Every named candidate belongs to a row that is STILL unbound — naming is
+        // not binding, and no ArtifactBinding is emitted for any of it
+        // (NFR-RA-05): this tier writes no edges at all, it only classifies.
+        for row in &cov.references {
+            if let Some(candidates) = &row.candidates {
+                assert_eq!(candidates.disposition, ProviderDisposition::TiedBetween);
+                assert_eq!(row.bucket, "ambiguous");
+                assert_eq!(
+                    row.state,
+                    CoverageState::Unbound {
+                        reason: UnboundReason::Ambiguous
+                    }
+                );
+            }
+        }
+    }
+
+    /// **Payload growth, measured against the reference workspace's shape**
+    /// ([CR-118] §7, [NFR-CC-04]).
+    ///
+    /// The 84-member `pec-services` workspace is un-enrolled, so this reproduces
+    /// its *measured shape* rather than re-running it: 875 references — 81 bound,
+    /// 146 ambiguous, the rest with no provider in the workspace — every tie
+    /// four-way (the measured aggregator ceiling: three aggregators plus the
+    /// origin), over SCIP symbols of realistic length. The before/after figures
+    /// are printed, so the growth is a number, not an assurance.
+    ///
+    /// The `--json` baseline there is ~260 KB; this fixture's own baseline is
+    /// printed beside its grown size, and the ratio is what carries over — the
+    /// absolute figure scales with symbol length, which is a property of the
+    /// corpus, not of this change.
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn payload_growth_is_measured_against_the_reference_workspace_shape() {
+        reset();
+        // A SCIP symbol of the length this codebase's own graph carries.
+        let sym = |member: &str, name: &str| {
+            format!("logos . . . {member}/src/main/java/com/example/`{name}.java`/{name}#handle().")
+        };
+        let mut consumers = Vec::new();
+        for i in 0..81 {
+            consumers.push(op(&format!("GET /v1/bound/{i}/{{id}}"), &sym("consumer", &format!("BoundClient{i}"))));
+        }
+        for i in 0..146 {
+            consumers.push(op(&format!("GET /v1/tied/{i}/{{id}}"), &sym("consumer", &format!("TiedClient{i}"))));
+        }
+        for i in 0..648 {
+            consumers.push(op(&format!("GET /v1/orphan/{i}/{{id}}"), &sym("consumer", &format!("OrphanClient{i}"))));
+        }
+        set_member("consumer", consumers);
+
+        // One sole provider per bound reference, and a FOUR-way tie per ambiguous
+        // one — the measured ceiling, spread over four aggregator members.
+        set_member(
+            "origin-api",
+            (0..81)
+                .map(|i| route(&format!("GET /v1/bound/{i}/{{id}}"), &sym("origin-api", &format!("BoundRoute{i}"))))
+                .chain((0..146).map(|i| {
+                    route(&format!("ANY /v1/tied/{i}/{{id}}"), &sym("origin-api", &format!("TiedRoute{i}")))
+                }))
+                .collect(),
+        );
+        for agg in ["mailbox-aggregator-api", "funnel-aggregator-api", "deprecated-mailbox-core"] {
+            set_member(
+                agg,
+                (0..146)
+                    .map(|i| route(&format!("ANY /v1/tied/{i}/{{id}}"), &sym(agg, &format!("TiedRoute{i}"))))
+                    .collect(),
+            );
+        }
+
+        let cov = cross_service_coverage(&registry(&[
+            "consumer",
+            "origin-api",
+            "mailbox-aggregator-api",
+            "funnel-aggregator-api",
+            "deprecated-mailbox-core",
+        ]));
+
+        // The shape is the reference workspace's, so the growth figure describes it.
+        assert_eq!(cov.references.len(), 875);
+        assert_eq!(cov.bound, 81);
+        assert_eq!(cov.ambiguous, 146);
+        assert_eq!(cov.no_provider_in_workspace, 648);
+
+        let after = serde_json::to_string(&cov).unwrap().len();
+        // The same payload as it was before CR-118: strip exactly the three new
+        // optional keys from every row, changing nothing else.
+        let mut value = serde_json::to_value(&cov).unwrap();
+        for row in value["references"].as_array_mut().unwrap() {
+            let row = row.as_object_mut().unwrap();
+            for field in ["to", "intake", "candidates"] {
+                row.remove(field);
+            }
+        }
+        let before = serde_json::to_string(&value).unwrap().len();
+        let growth = (after - before) as f64 / before as f64;
+        // The HUMAN rendering too, because `workspace status` has no formatter of
+        // its own — `Output::print` pretty-prints this same read-model, so the
+        // "stays readable on an 84-member workspace" criterion is a claim about
+        // THIS figure and its line count, not about a layout. Measured rather than
+        // asserted: the bound that keeps it readable is `CANDIDATE_LIMIT`, and a
+        // reviewer is entitled to the number it produces.
+        let pretty = serde_json::to_string_pretty(&cov).unwrap();
+        let pretty_lines = pretty.lines().count();
+        println!(
+            "CR-118 payload growth at the reference workspace's shape \
+             (875 refs: 81 bound / 146 ambiguous / 648 no-provider, ties four-way): \
+             compact {before} → {after} bytes (+{:.1}%); \
+             human (pretty) {} bytes over {pretty_lines} lines",
+            growth * 100.0,
+            pretty.len()
+        );
+        // Measured at ~+60% on this shape, which projects the ~260 KB reference
+        // baseline to roughly 415 KB. Almost all of it is the 146 four-way ties:
+        // naming what a reference tied between IS the payload, so the cost is the
+        // feature, and the ceiling guards against a blow-up — a doubling, a
+        // per-row string, an unbounded set — not against the intended rider.
+        //
+        // The **floor** is the half that matters more. Stripping the three keys is
+        // how `before` is computed, so if the fields silently stopped being emitted
+        // `after == before`, growth would be 0.0, and a one-sided `< 0.75` would
+        // pass green over a completely dead feature — in the very test named for
+        // measuring it. A range fails in both directions.
+        assert!(
+            (0.40..0.75).contains(&growth),
+            "provider identity must stay a rider on the payload — present, and not a \
+             rewrite of it: {before} → {after} bytes (+{:.1}%)",
+            growth * 100.0
         );
     }
 
@@ -1012,9 +1975,82 @@ mod tests {
         );
         set_member("web", vec![route("GET /users/{id}", "local route_web")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let reg = registry(&["api", "web"]);
+        let cov = cross_service_coverage(&reg);
         assert_eq!(cov.ambiguous, 1);
         assert_eq!(cov.bound, 0);
+
+        // **[CR-118] CRA-02: the tie lists its same-member participant too.** The
+        // consumer's own member holds one of the two tied routes, and it is named:
+        // the tie is what refused the binding, so dropping a participant would
+        // misreport *why*. This is the one place the tied set deliberately DIVERGES
+        // from the fan-out set, which excludes same-member subscribers because the
+        // bridge emits no edge for them — an invariant stated emphatically in
+        // `tier`, and therefore asserted here rather than left to the comment.
+        let tied = cov.references[0]
+            .candidates
+            .as_ref()
+            .expect("the tie is named");
+        assert_eq!(tied.total, 2);
+        let members: Vec<&str> = tied.providers.iter().map(|p| p.member.as_str()).collect();
+        assert_eq!(members, ["api", "web"], "including the consumer's own member");
+
+        // **AC: naming candidates creates no edge** ([NFR-RA-05]). Asserted against
+        // the real bridge, mirroring the bound twin's `edges.len() == 1` — this is
+        // the story's one claim that was otherwise carried by argument alone.
+        assert!(
+            super::super::bridge::ContractBridge::new().edges(&reg).is_empty(),
+            "a tie fabricates no edge, so there is no ArtifactBinding to emit"
+        );
+    }
+
+    /// A tie whose candidates are **all in the consumer's own member** — pinned, not
+    /// changed.
+    ///
+    /// Only the *sole* same-member provider is excluded as intra-repo
+    /// (`[only] if only.member == member => None`); a two-or-more tie applies no
+    /// member filter, so this classifies `ambiguous` on the cross-service board with
+    /// no cross-boundary participant at all. That is **pre-existing** tier
+    /// behaviour — the bridge agrees, emitting no edge either way — and [CR-118] is
+    /// only what made it legible, by naming the participants. Changing it would move
+    /// a reference between buckets, which this story's own acceptance criterion
+    /// forbids.
+    ///
+    /// Recorded as a test so the next reader meets it as a known property rather
+    /// than as a [CR-118] regression.
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    #[test]
+    fn an_all_same_member_tie_is_pre_existing_behaviour_and_names_only_intra_repo_candidates() {
+        reset();
+        set_member(
+            "api",
+            vec![
+                op("GET /users/{id}", "local op_get"),
+                route("GET /users/{id}", "local route_one"),
+                route("GET /users/{userId}", "local route_two"),
+            ],
+        );
+
+        let reg = registry(&["api"]);
+        let cov = cross_service_coverage(&reg);
+
+        assert_eq!(cov.ambiguous, 1, "pre-existing: a 2+ tie applies no member filter");
+        let tied = cov.references[0]
+            .candidates
+            .as_ref()
+            .expect("the tie is named");
+        let members: Vec<&str> = tied.providers.iter().map(|p| p.member.as_str()).collect();
+        assert_eq!(
+            members,
+            ["api", "api"],
+            "every named participant is the consumer's own member — the property \
+             CR-118 makes visible, not one it introduces"
+        );
+        assert!(
+            super::super::bridge::ContractBridge::new().edges(&reg).is_empty(),
+            "and the bridge agrees: no edge either way"
+        );
     }
 
     /// A route whose template does not normalize is never a provider
@@ -1497,6 +2533,23 @@ mod tests {
         assert_eq!(cov.references.len(), 1);
         assert_eq!(cov.references[0].state, CoverageState::Bound);
         assert_eq!(cov.references[0].relation, "grpc-call");
+        // [CR-118] on the SECOND exactly-one arm. The `to` doc names `route` and
+        // `grpc-call` together; only `route` was covered. This is also the only
+        // `Sole` + `Invocation` pairing in the suite — a captured call site binding
+        // a single cross-member provider, which is the commonest bound row shape on
+        // a real workspace.
+        let to = cov.references[0]
+            .to
+            .as_ref()
+            .expect("a bound gRPC row names its provider");
+        assert_eq!(to.member, "svc");
+        assert_eq!(to.symbol, LogosSymbol::parse("local svc").unwrap());
+        assert_eq!(
+            cov.references[0].intake,
+            Some(BridgeIntake::Invocation),
+            "a stub call is a captured call site, not a declared contract"
+        );
+        assert!(cov.references[0].candidates.is_none());
     }
 
     /// Acceptance (3): a qualifiable gRPC stub call with no provider anywhere in
@@ -1570,6 +2623,16 @@ mod tests {
         assert_eq!(cov.ambiguous, 1);
         assert_eq!(cov.bound, 0);
         assert_eq!(cov.references[0].state.bucket(), "ambiguous");
+        // [CR-118]: the tie is named on the gRPC arm too, not only on `route`.
+        let tied = cov.references[0]
+            .candidates
+            .as_ref()
+            .expect("the gRPC tie is named");
+        assert_eq!(tied.disposition, ProviderDisposition::TiedBetween);
+        assert_eq!(tied.total, 2);
+        let members: Vec<&str> = tied.providers.iter().map(|p| p.member.as_str()).collect();
+        assert_eq!(members, ["svc1", "svc2"]);
+        assert_eq!(tied.summary, "2 tied providers, all listed; none bound");
     }
 
     // ── S-254 / FR-WS-10: broker-topic consumers in the coverage tier ─────────

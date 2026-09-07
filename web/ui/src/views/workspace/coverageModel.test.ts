@@ -243,4 +243,48 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
     expect(reasonLabel("some-new-reason")).toBe("some-new-reason");
     expect(reasonLabel("ambiguous")).toMatch(/Two or more providers/);
   });
+
+  // ── CR-118: the provider-identity riders are OPTIONAL ─────────────────────
+
+  it("builds the identical dashboard from rows with and without the CR-118 provider fields", () => {
+    // The two shapes a real deployment serves: an OLDER store's rows, which
+    // predate `to`/`intake`/`candidates` entirely, and a current store's rows,
+    // which carry them. CR-118 §4.5 makes the fields optional precisely so the
+    // view does not break on the first shape — and this asserts the stronger
+    // claim the CR actually needs: the aggregation is IDENTICAL either way, so
+    // the widened payload cannot silently move a count on this screen.
+    const withoutFields = [...bound("route", 1), ...unbound("route", "ambiguous", 1)];
+    const withFields: ReferenceCoverage[] = [
+      {
+        ...withoutFields[0],
+        to: { member: "web", symbol: "route_get" },
+        intake: "contract-surface",
+      },
+      {
+        ...withoutFields[1],
+        candidates: {
+          disposition: "tied-between",
+          providers: [
+            { member: "mailbox-aggregator-api", symbol: "route_agg" },
+            { member: "mailbox-core", symbol: "route_core" },
+          ],
+          total: 2,
+          omitted: 0,
+          summary: "2 tied providers, all listed; none bound",
+        },
+      },
+    ];
+    const summary = { bound: 1, ambiguous: 1, bound_ratio: 0.5, bound_ratio_measured: 2 };
+
+    const older = buildCoverageDashboard(coverage(withoutFields, summary));
+    const current = buildCoverageDashboard(coverage(withFields, summary));
+
+    expect(older).toEqual(current);
+    // And the old shape still produces the figures it always did — the guard is
+    // not merely "the two agree", which two identically-broken models would also
+    // satisfy.
+    expect(older.arms[0].bound).toBe(1);
+    expect(older.arms[0].ambiguous).toBe(1);
+    expect(older.arms[0].total).toBe(2);
+  });
 });

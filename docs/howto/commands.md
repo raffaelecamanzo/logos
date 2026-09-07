@@ -842,6 +842,69 @@ when the excluded bucket dominates the denominator. When `bound_ratio` is absent
 on a zero denominator, the excluded count is **still** reported — "0 measured,
 N excluded" is the informative statement.
 
+##### Each reference names the other end
+
+`bound: 81` and `ambiguous: 146` are not actionable on their own — the obvious
+next question is *bound to what?*, and *ambiguous between what?*. Every row in
+`coverage.references` answers it:
+
+```jsonc
+// a BOUND row: the provider it bound to, and how the binding was captured
+{ "relation": "route", "from": { "member": "orders", "symbol": "…" },
+  "bucket": "bound", "state": "bound",
+  "to": { "member": "mailbox-api", "symbol": "…" },
+  "intake": "contract-surface" }
+
+// an AMBIGUOUS row: the providers it tied between — none of them bound
+{ "relation": "route", "from": { "member": "orders", "symbol": "…" },
+  "bucket": "ambiguous", "state": "unbound", "reason": "ambiguous",
+  "candidates": {
+    "disposition": "tied-between",
+    "providers": [ { "member": "deprecated-mailbox-core", "symbol": "…" },
+                   { "member": "funnel-aggregator-api",   "symbol": "…" },
+                   { "member": "mailbox-aggregator-api",  "symbol": "…" } ],
+    "total": 3, "omitted": 0,
+    "summary": "3 tied providers, all listed; none bound" } }
+```
+
+A bound row's `to` is the **same** pair
+[`xservice route-providers`](#xservice-workspace-federation-queries) reports for that
+reference — the two surfaces are computed from one pass and cannot disagree.
+
+Three things worth knowing about these fields:
+
+- **They are optional.** A row with no provider to name (`no-provider-in-workspace`,
+  `path-not-composed`) carries none of them — absent, never `null` or an empty
+  list. A store indexed before this existed has them nowhere; every consumer must
+  read a row without them.
+- **`candidates` is bounded and never silently trimmed.** At most 8 providers are
+  listed; `total` is the count *before* truncation and `omitted` is the remainder,
+  stated in a field and again in `summary`.
+- **Naming a candidate is not binding to it.** An ambiguous row's `state` stays
+  `unbound` and no edge exists — `disposition` says which of the two a listed set
+  is (`tied-between` = none bound; `bound-to` = all bound, the broker fan-out
+  shape, where one publish reaches every cross-member subscriber).
+
+##### Reading a large `ambiguous` count
+
+A high `ambiguous` figure is usually **not** a matching defect, and reaching for
+the matcher is the wrong move. Where two or more members legitimately serve the
+same normalized template — the aggregator pattern, in which a façade re-exposes
+the paths of the services it proxies — the exactly-one rule is refusing
+*correctly*, and no refinement of path normalisation or method precedence can
+resolve it. The evidence that decides which provider a consumer meant lives in
+the consumer's own call site. That ambiguity is **call-site-gated, not
+match-gated** ([FR-CG-09](../specs/requirements/FR-CG-09.md) Notes). The
+`candidates` list is what lets you see this at a glance: four aggregator members
+on one template is an architecture, not a bug.
+
+One shape that surprises people: a tie whose candidates are **all in the
+consumer's own member**. Only a *sole* same-member provider is excluded as an
+intra-repo fact; a two-or-more tie applies no member filter, so it is reported
+here with every participant named and none of them cross-boundary. That is
+long-standing behaviour of the exactly-one rule — the bridge agrees, emitting no
+edge either way — and `candidates` is simply the first thing to make it visible.
+
 #### Two per-member axes: `warm_state` and `open_state`
 
 Each member row carries **two independent labels**, and conflating them is the
