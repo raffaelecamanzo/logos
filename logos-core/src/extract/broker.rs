@@ -34,8 +34,13 @@
 //! refused site: it fabricates no topic (the target is empty, which
 //! [`crate::resolve::topics`] already refuses to promote — "a keyless row is not a
 //! topic"), and the [FR-WS-05] coverage tier reports it as `topic-not-literal`.
-//! A site that captured at least one literal records nothing, so the array and
-//! multi-attribute forms never report a refusal.
+//!
+//! The grain is the **site** the `.scm` declares, not the annotation: the array form
+//! reports nothing because its operand matches no slot pattern, and a
+//! multi-attribute annotation reports nothing for the sibling attributes its key
+//! predicate excludes — but a *second* topic-keyed attribute whose own operand is
+//! not a literal is its own site and does report, alongside the first attribute's
+//! bound topic.
 //!
 //! [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
 //! [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
@@ -90,8 +95,17 @@ where
     // The byte range of every topic literal that bound, and every refusal
     // candidate with the site range it belongs to. Both are collected across the
     // whole file and reconciled *after* the loop, so the outcome cannot depend on
-    // match order: a `topics = {"a", "b"}` array produces two literal matches and
-    // one slot match for the same site, and the refusal must lose either way.
+    // the order tree-sitter reports competing patterns in.
+    //
+    // No SHIPPED `.scm` produces a cancellable pair: the Java slot patterns
+    // enumerate only non-literal operand shapes, so the array
+    // (`topics = {"a","b"}`) and multi-attribute forms yield no candidate at all —
+    // that is the query's enumeration and its `@_sub_slot_key` predicate doing the
+    // work, not this reconcile. The reconcile guards the case a **droppable** query
+    // can still create ([FR-PL-04]): a slot pointed at an operand that is, or
+    // contains, a literal another pattern admitted. Covered by
+    // `a_site_that_bound_a_literal_records_no_refusal_even_when_a_slot_matched_it`,
+    // which supplies such a query, because nothing in the shipped set reaches it.
     let mut bound: Vec<(Side, Range<usize>)> = Vec::new();
     let mut candidates: Vec<RefusalCandidate<'_>> = Vec::new();
 
@@ -192,7 +206,7 @@ where
         subscribes,
         broker_topic_key,
     );
-    emitted += record_refusals(candidates, &bound, source, &enclosing, facts);
+    emitted += record_refusals(candidates, &bound, &enclosing, facts);
     emitted
 }
 
@@ -213,17 +227,27 @@ struct RefusalCandidate<'t> {
 /// many were recorded ([FR-WS-05], [NFR-CC-04], [CR-107]).
 ///
 /// A candidate survives iff **no** admitted topic literal of the same side lies
-/// within its site range. That is what makes the array form
-/// (`topics = {"a", "b"}` — two literals, one slot) and the multi-attribute form
-/// report nothing, while a genuinely non-literal operand (`topics = TOPIC`,
-/// `Topics.ORDERS`, `PREFIX + "orders"`) reports once.
+/// within its site range. With the shipped Java query that condition is never
+/// false, because its slot patterns enumerate non-literal operand shapes only — so
+/// the array form (`topics = {"a","b"}`) and the multi-attribute form yield no
+/// candidate to cancel in the first place, and it is the query's enumeration, not
+/// this reconcile, that keeps them quiet. The reconcile is what stops a
+/// **droppable** query ([FR-PL-04]) from reporting a refusal at a site that bound.
 ///
-/// Survivors are then deduped to one row per `(side, enclosing declaration, line)`.
-/// The dedup is deliberately coarser than the raw site: a `.scm` may legitimately
+/// A genuinely non-literal operand (`topics = TOPIC`, `Topics.ORDERS`,
+/// `PREFIX + "orders"`, `config.topic()`) reports once.
+///
+/// Survivors are then deduped to one row per `(side, enclosing declaration, line)`
+/// — the "at most once per registration site" discipline
+/// [`crate::resolve::framework`] applies to `path-not-composed`. The dedup is
+/// deliberately coarser than the raw site, because a `.scm` may legitimately
 /// capture nested sites for one operand (an attribute pair *and* its argument
-/// list), and the refusal grain promised is one per **site**, never one per pattern
-/// that happened to match it — the same "at most once per registration site"
-/// discipline [`crate::resolve::framework`] applies to `path-not-composed`.
+/// list). Note this is not the only thing collapsing rows: the production caller
+/// re-runs `dedup_sort_refs`, which keys on `(source, target, form, kind, relation)`
+/// and ignores `line`, so two refused sites in one declaration reach the ledger as
+/// one row even on different lines. This dedup keeps the grain local and
+/// independent of that key — it is asserted directly, through the interpreter, by
+/// `two_refused_topic_attributes_on_one_site_record_one_refusal`.
 ///
 /// The row's target is **empty**: no topic key is fabricated, not even the
 /// operand's source text. A keyless broker row is inert by contracts that already
@@ -238,7 +262,6 @@ struct RefusalCandidate<'t> {
 fn record_refusals<F>(
     candidates: Vec<RefusalCandidate<'_>>,
     bound: &[(Side, Range<usize>)],
-    source: &[u8],
     enclosing: &F,
     facts: &mut Facts,
 ) -> usize
@@ -254,13 +277,6 @@ where
                 && at.start >= candidate.site.start
                 && at.end <= candidate.site.end
         }) {
-            continue;
-        }
-        // Defence in depth against a `.scm` that points a slot at a literal it
-        // forgot to also capture as a topic: an operand that IS a literal is not a
-        // `topic-not-literal` refusal, whatever the query said.
-        if candidate.node.kind() == "string_literal" && literal_text(candidate.node, source).is_some()
-        {
             continue;
         }
         let Some(symbol) = enclosing(candidate.node) else {
@@ -682,6 +698,165 @@ class OrderService {
             publish.source.as_str().contains("publish"),
             "the publish is sourced from its sending method: {}",
             publish.source.as_str()
+        );
+    }
+
+    /// Parse `src` and run `capture_broker_invocations` with a **custom** query,
+    /// bypassing the shipped `brokers.scm`.
+    ///
+    /// The interpreter is called directly, which is what makes the two guards
+    /// below observable at all: the production path (`extract::capture_broker_invocation_arm`)
+    /// re-runs `dedup_sort_refs` afterwards, and that collapses rows on
+    /// `(source, target, form, kind, relation)` — ignoring `line` — so it masks
+    /// anything either guard does. Every site is attributed to one fixed symbol,
+    /// since attribution is not what these tests are about.
+    fn capture_with(query_src: &str, src: &str) -> Facts {
+        let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+        let plugin = registry.for_extension("java").expect("java plugin present");
+        let language = plugin.language();
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(language).expect("java language loads");
+        let tree = parser.parse(src, None).expect("java parses");
+        let query = Query::new(language, query_src).expect("the test query compiles");
+        let symbol = LogosSymbol::parse("local handler").expect("symbol parses");
+        let mut facts = Facts {
+            path: "Svc.java".to_string(),
+            language: "java".to_string(),
+            partial: false,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            refs: Vec::new(),
+            warnings: Vec::new(),
+        };
+        capture_broker_invocations(
+            &query,
+            tree.root_node(),
+            src.as_bytes(),
+            |_| Some(symbol.clone()),
+            &mut facts,
+        );
+        facts
+    }
+
+    /// **The reconcile, covered.** A `.scm` that points a refusal slot at an
+    /// operand another pattern admitted as a topic must record **no** refusal — the
+    /// site bound, so `topic-not-literal` would be a wrong reason ([NFR-CC-04]).
+    ///
+    /// No **shipped** query can reach this: the Java slot patterns enumerate only
+    /// non-literal operand shapes, so a literal never produces a candidate. But a
+    /// `brokers.scm` is droppable on disk ([FR-PL-04]), so a query outside this
+    /// repository can create exactly the pair this guard exists for — and the
+    /// `value: (_)` wildcard that this story reverted is precisely that shape. This
+    /// test uses that wildcard deliberately, which is the only way to exercise the
+    /// containment check; mutation testing showed it otherwise unreachable across
+    /// the whole suite and all 2,447 Java files of the reference corpus.
+    ///
+    /// [FR-PL-04]: ../../../docs/specs/requirements/FR-PL-04.md
+    #[test]
+    fn a_site_that_bound_a_literal_records_no_refusal_even_when_a_slot_matched_it() {
+        // A container slot: the topic pattern admits each literal INSIDE the array,
+        // while the slot points at the array node itself. The candidate's operand is
+        // therefore not a literal — so no node-kind test can save it — and only the
+        // range containment tells us the site bound. This is the shape a droppable
+        // query most plausibly takes, and the one that isolates the check.
+        let query = r#"
+(element_value_pair
+  key: (identifier) @_k
+  value: (element_value_array_initializer
+    (string_literal) @broker.subscribe.topic))
+
+(element_value_pair
+  key: (identifier) @_k2
+  value: (element_value_array_initializer) @broker.subscribe.topic.slot) @broker.subscribe.site
+"#;
+        let facts = capture_with(query, r#"
+class C {
+    @KafkaListener(topics = {"orders", "shipments"})
+    void a(String m) {}
+}
+"#);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["orders".to_string(), "shipments".to_string()],
+            "both literals bind and their site records no refusal: {:?}",
+            facts.refs
+        );
+
+        // The complement, through the same query shape: an array that admits NO
+        // literal still refuses, so the check is discriminating rather than simply
+        // suppressing every candidate that has a site.
+        let refused = capture_with(query, r#"
+class C {
+    @KafkaListener(topics = {FIRST, SECOND})
+    void a(String m) {}
+}
+"#);
+        assert_eq!(
+            targets(&refused, ArtifactRelation::BrokerSubscribe),
+            vec![String::new()],
+            "an array with no literal in it records its refusal: {:?}",
+            refused.refs
+        );
+
+        // And the degenerate form — a slot pointed at the admitted literal itself
+        // (the `value: (_)` wildcard this story reverted) — is cancelled by the same
+        // containment test, since equal ranges are contained.
+        let wildcard = r#"
+(element_value_pair
+  key: (identifier) @_k
+  value: (string_literal) @broker.subscribe.topic)
+
+(element_value_pair
+  key: (identifier) @_k2
+  value: (_) @broker.subscribe.topic.slot) @broker.subscribe.site
+"#;
+        let scalar = capture_with(wildcard, r#"
+class C {
+    @KafkaListener(topics = "orders")
+    void a(String m) {}
+}
+"#);
+        assert_eq!(
+            targets(&scalar, ArtifactRelation::BrokerSubscribe),
+            vec!["orders".to_string()],
+            "a slot pointed at the admitted literal itself records no refusal: {:?}",
+            scalar.refs
+        );
+    }
+
+    /// **The per-site dedup, covered.** Two refused topic attributes on one
+    /// annotation are one refused *site* and record **one** row — the "at most once
+    /// per site" grain, matching `resolve::framework`'s `path-not-composed`
+    /// discipline.
+    ///
+    /// Asserted through the interpreter directly because `dedup_sort_refs` collapses
+    /// keyless rows on `(source, target, …)` regardless, so on the production path
+    /// this guarantee is unobservable and the dedup untestable.
+    #[test]
+    fn two_refused_topic_attributes_on_one_site_record_one_refusal() {
+        let query = r#"
+(element_value_pair
+  key: (identifier) @_k
+  value: (identifier) @broker.subscribe.topic.slot) @broker.subscribe.site
+"#;
+        // Two topic-keyed attributes, both non-literal, on the same line.
+        let facts = capture_with(query, r#"
+class C {
+    @KafkaListener(topics = TOPIC, queues = OTHER)
+    void a(String m) {}
+}
+"#);
+        let keyless = facts
+            .refs
+            .iter()
+            .filter(|r| {
+                r.relation == Some(ArtifactRelation::BrokerSubscribe) && r.target.is_empty()
+            })
+            .count();
+        assert_eq!(
+            keyless, 1,
+            "one refused site is one row, before any ledger dedup: {:?}",
+            facts.refs
         );
     }
 

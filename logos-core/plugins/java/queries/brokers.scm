@@ -32,11 +32,25 @@
 ;
 ; A topic operand that is NOT a string literal — a constant reference
 ; (`topics = TOPIC`), a field (`Topics.ORDERS`), a concatenation
-; (`PREFIX + "orders"`) — is still refused and binds nothing ([NFR-RA-05]). It is no
-; longer *silent*: the `.slot` + `.site` pair records the refusal so it reaches the
-; [FR-WS-05] coverage payload as `topic-not-literal`, once per site. A site that
-; captured at least one literal records no refusal, so the array and multi-attribute
-; forms never report one.
+; (`PREFIX + "orders"`), a call (`config.topic()`) — is still refused and binds
+; nothing ([NFR-RA-05]). It is no longer *silent*: the `.slot` + `.site` pair records
+; the refusal so it reaches the [FR-WS-05] coverage payload as `topic-not-literal`,
+; once per site.
+;
+; The array and multi-attribute forms never report a refusal, and it is worth being
+; exact about why: NOT because the interpreter cancels their candidate, but because
+; they never produce one. The slot patterns below enumerate non-literal operand
+; shapes, so an `element_value_array_initializer` matches no slot; and
+; `#any-of? @_sub_slot_key` excludes a sibling attribute like `containerFactory`.
+; The interpreter's own site reconcile is the guard for a DROPPABLE query
+; ([FR-PL-04]) that slots an operand another pattern admitted — no query in this
+; repository reaches it.
+;
+; One shape stays deliberately silent: a BLANK literal (`topics = ""` or all
+; whitespace) binds nothing and reports nothing. It matches the binding pattern, so
+; it produces no refusal candidate, and `broker_topic_key` then refuses its empty
+; key. Reporting it would mean slotting `(string_literal)`, which reintroduces the
+; overlap hazard described below for the sake of a shape no real listener writes.
 ;
 ; The publish side carries NO `.slot` pattern on purpose. `send`/`convertAndSend`/
 ; `publish` is a bare method-name predicate, so a slot there would record a refusal
