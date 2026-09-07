@@ -174,6 +174,34 @@ it from the directory that contains your service repos. It:
    parent `.mcp.json` (distinct from the per-repo `logos` key so a member's own
    entry is never shadowed).
 
+**What it tells you, and what `index` at the root does not cover.** Because
+warming is hybrid (below), the output says so rather than sending you to a
+command that would not help
+([CR-119](../requests/CR-119-workspace-enablement-misdirects-to-an-index-that-builds-only-the-root.md),
+[FR-WS-02](../specs/requirements/FR-WS-02.md)):
+
+- Each enrolled member reports `enrolled — queued for background warming (see
+  \`logos workspace status\`)`. It does **not** tell you to run `logos index` —
+  the supervisor is already doing exactly that, per member.
+- One workspace-level note states that background warming started, over how
+  many members, and names `logos workspace status` as the surface reporting
+  progress and outcome ([FR-WS-15](../specs/requirements/FR-WS-15.md),
+  [FR-WS-17](../specs/requirements/FR-WS-17.md)) — in both the human and
+  `--json` renderings.
+- A plain single-repo `logos init` message is unchanged.
+- Running [`logos index`](#index) **at a root carrying `logos.workspace.toml`**
+  emits an advisory note that it built the root project only, and that members
+  are indexed independently. This matters because the root of a
+  parent-of-repos workspace is nearly empty: the nested-`.git` boundary rule
+  prunes every member, so a root `index` legitimately reports a handful of
+  files while thousands are indexed across the members. The note is advisory —
+  `index` still exits `0` and adds no `warnings` entry a CI parser would trip
+  on — and `index` never grows a member fan-out
+  ([NFR-PE-06](../specs/requirements/NFR-PE-06.md)).
+- Before enablement, the same root still gives the
+  [`FR-IX-13`](../specs/requirements/FR-IX-13.md) zero-admission warning
+  (`files_indexed: 0`). The two states are distinct and both are asserted.
+
 Indexing is **hybrid**: the command returns immediately while a **single
 detached supervisor** warms the approved members through a bounded queue — at
 most `max(1, cores / 4)` members index concurrently, capped at 4

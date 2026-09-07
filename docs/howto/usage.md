@@ -273,6 +273,23 @@ external orchestration tooling
   it) and **never overwrites** (a policy file that arrived through git on the
   branch, per [FR-WT-02](../specs/requirements/FR-WT-02.md), is left untouched).
   A failed copy is fail-soft, not fatal.
+- **Installed git hooks fire in the worktree too.** `logos init --hooks` sets
+  `core.hooksPath` to the *relative* `.logos/hooks`, and git resolves a relative
+  `core.hooksPath` against the top level of the working tree the command runs in
+  — so in a linked worktree it resolves to `<worktree>/.logos/hooks`, which the
+  DB seed alone never created. The first-time seed therefore also creates that
+  directory, as **symlinks** back to the primary's scripts, so a re-install that
+  updates a script can never leave a worktree running a stale copy
+  ([CR-106](../requests/CR-106-git-hooks-never-fire-in-a-linked-worktree.md),
+  [FR-IN-06](../specs/requirements/FR-IN-06.md)). `core.hooksPath` itself stays
+  relative — reachability comes from seeding, never from absolutising the path.
+  A hook that fires in a worktree acts on *that worktree's* graph, not the
+  primary's. On a platform without usable symlinks the fallback is copies plus a
+  staleness marker that `logos doctor` reads; silent copies are never left
+  behind. `logos init --hooks --uninstall` removes both the primary installation
+  and any worktree `hooks/` directories the seed created, so an upgrade leaves
+  no dangling symlinks.
+
 - **A gitignored file inside the worktree is never indexed.** The same
   `AdmissionAuthority` that guards `sync`/the watcher in the primary checkout
   guards the worktree's own `sync` too — parity, not a separate rule.
