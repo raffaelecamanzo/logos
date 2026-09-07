@@ -330,7 +330,6 @@ class DynamicListeners {
     );
 }
 
-
 /// **The refusal path reconciles like any other, across a sync.** The plain case
 /// has two reconcile tests; the refusal path had none, so nothing held the
 /// transition a real edit makes: a listener whose topic is externalised into a

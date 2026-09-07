@@ -95,7 +95,15 @@ pub enum UnboundReason {
 /// One stored ledger row that does not reduce to a portable key means different
 /// things per arm, and reporting one arm's word for it across all of them is the
 /// classifier drift this module exists to prevent: an HTTP consumer's template did
-/// not *compose*, a broker site's topic was not a *literal*. Every arm's normalizer
+/// not *compose*, a broker site's topic was not a *literal*.
+///
+/// **Two of the three arms have their own word.** An unkeyable gRPC row still reads
+/// `path-not-composed`, and a `package.Service/Method` FQN is not a path — but that
+/// is the pre-[CR-107] behaviour for every arm, and giving gRPC its own reason is a
+/// change to the [FR-WS-05] reason set that no acceptance criterion here asks for.
+/// Stated rather than left for a reader to discover from the `_` arm.
+///
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md Every arm's normalizer
 /// refuses before the ledger, so a row reaching here is either a refusal the arm
 /// deliberately recorded (the broker arm's keyless row, [CR-107]) or a target that
 /// stopped normalizing — both honestly unbound, neither fabricated.
@@ -107,6 +115,24 @@ fn unkeyable_reason(relation: crate::model::ArtifactRelation) -> UnboundReason {
         Some(BridgeNamespace::BrokerTopic) => UnboundReason::TopicNotLiteral,
         _ => UnboundReason::PathNotComposed,
     }
+}
+
+/// The wire word one coverage row is filed under — the arm's own
+/// [`BridgeNamespace`] relation name where it has one, else the relation's own
+/// token ([ADR-54]).
+///
+/// One home, so a *consumer* row and a *provider* row on the same arm can never be
+/// filed under two different words: this module's `Tally` exists for the same
+/// reason on the counters ("one `record` point, so a state and its counter can
+/// never drift apart"), and the reason vocabulary already has one in
+/// [`unkeyable_reason`].
+///
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+fn arm_relation(relation: crate::model::ArtifactRelation) -> String {
+    relation
+        .bridge_namespace()
+        .map(|ns| ns.relation().to_string())
+        .unwrap_or_else(|| relation.as_str().to_string())
 }
 
 impl From<RouteRefusal> for UnboundReason {
@@ -685,9 +711,12 @@ where
                     // One endpoint per (key, member, symbol) — the SAME collapse
                     // [`super::broker::broker_edges`] applies before its fan-out, and
                     // for the same reason: a ledger can hold two rows for one endpoint
-                    // (they differ in `form` or `payload`, both outside the
-                    // `unresolved_refs` unique key), and the fan-out treats each as a
-                    // separate provider. The bridge de-duplicates, so before [CR-118]
+                    // (they differ in `form`, which is outside the ledger's effective
+                    // identity — `idx_unresolved_refs_identity` over
+                    // `(source_symbol, target, form, kind, COALESCE(payload, ''))`
+                    // since migration 18, so `payload` is *inside* it, unlike what
+                    // this comment claimed before [CR-107] reviewed it), and the
+                    // fan-out treats each as a separate provider. The bridge de-duplicates, so before [CR-118]
                     // this tier could differ only in a boolean nobody could see. Now
                     // the set is NAMED and COUNTED, so a duplicate would report "3
                     // bound providers (fan-out)" beside two bridge edges — a
@@ -768,11 +797,7 @@ where
             member: member.clone(),
             symbol: consumer.symbol,
         };
-        let relation = consumer
-            .relation
-            .bridge_namespace()
-            .map(|ns| ns.relation().to_string())
-            .unwrap_or_else(|| consumer.relation.as_str().to_string());
+        let relation = arm_relation(consumer.relation);
 
         let Some(key) = consumer_portable_key(consumer.relation, &consumer.target) else {
             tally.record(
@@ -810,11 +835,7 @@ where
     // after the classified rows so the tally's own ordering is untouched;
     // `finish` sorts the references by endpoint regardless.
     for (member, provider) in unkeyable_providers {
-        let relation = provider
-            .relation
-            .bridge_namespace()
-            .map(|ns| ns.relation().to_string())
-            .unwrap_or_else(|| provider.relation.as_str().to_string());
+        let relation = arm_relation(provider.relation);
         tally.record(
             relation,
             BridgeEndpoint {
@@ -874,6 +895,29 @@ impl Tally {
 
     /// Seal the tally into the read-model, over a workspace of `members_total`
     /// members of which `members_read` contributed ([FR-WS-05], [FR-WS-16]).
+    ///
+    /// # A broker subscribe can only ever depress the ratio ([CR-107], open)
+    ///
+    /// Stated because it is asymmetric and the asymmetry is not obvious. A *bound*
+    /// broker subscribe is a **provider**, and a provider is not a reference — it
+    /// contributes no [`ReferenceCoverage`] row and so no numerator. A *refused*
+    /// one now contributes an `unbound` row, which **is** inside this denominator.
+    /// So a member whose listeners are half captured reads `bound_ratio: 0.000`,
+    /// and one whose listeners are all captured reads no ratio at all.
+    ///
+    /// The `path-not-composed` precedent this arm was asked to match is not exact:
+    /// that reason sits on the *consumer* side, where its bound counterpart **is**
+    /// counted, so its ratio is over one population. Whether `topic-not-literal`
+    /// should instead get its own bucket outside the denominator — the
+    /// [`NoProviderInWorkspace`](UnboundReason::NoProviderInWorkspace) treatment,
+    /// whose stated ground in [ADR-53] ("not a *broken* binding") applies verbatim
+    /// to a capture refusal — is a change to [FR-WS-05]'s ratio semantics that no
+    /// acceptance criterion settles. **Deferred, deliberately, and recorded here
+    /// rather than left to be rediscovered from the arithmetic.** It gets sharper
+    /// once the publish side records refusals too.
+    ///
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
     ///
     /// The zero-denominator ratio is reported **absent**, never `1.0`: nothing
     /// to bind is not full coverage, it is no measurement, and a fabricated

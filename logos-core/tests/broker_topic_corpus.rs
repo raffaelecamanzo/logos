@@ -84,7 +84,6 @@ use logos_core::extract::{extract, FileInput, SymbolContext};
 use logos_core::model::ArtifactRelation;
 use logos_core::plugin::LanguageRegistry;
 
-
 /// The reference workspace, or `None` when none is configured — the same
 /// `LOGOS_REF_WORKSPACE` contract the S-355/S-365 measurements read.
 fn corpus_root() -> Option<PathBuf> {
@@ -133,8 +132,20 @@ struct Corpus {
 /// The reconciliation is an assertion, not a printout, precisely because the
 /// criterion says a mismatch is investigated and not accepted. If a listener file
 /// stops capturing, this fails and names the file.
+///
+/// **What it does NOT measure, said plainly.** Clause (2) below is satisfied by its
+/// *capture* disjunct alone on this estate: refusals measured **0**, because every
+/// listener writes a placeholder literal and none writes a constant. So the
+/// refusal-recording half of this story has no real-corpus evidence — that is a
+/// fact about the corpus, not a passing measurement, and the `0` in the recorded
+/// finding should be read that way. The refusal path's evidence is the fixture
+/// tests in `extract::broker` and `broker_topic_promotion`.
+///
+/// The test name says "when one is configured" because with no corpus it skips and
+/// passes: the `SKIPPED:` line goes to stderr, which `cargo test` captures, so the
+/// name is the only thing a reader of a green summary sees.
 #[test]
-fn the_reference_workspace_reports_a_reconciled_subscribe_topic_inventory() {
+fn the_reference_workspace_reports_a_reconciled_subscribe_topic_inventory_when_one_is_configured() {
     let Some(root) = corpus_root() else {
         eprintln!(
             "SKIPPED: set LOGOS_REF_WORKSPACE=<path to the reference workspace> to run the \

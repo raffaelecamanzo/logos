@@ -71,9 +71,25 @@ use crate::plugin::LanguagePlugin;
 /// Returns `true` when the reference was captured (a workspace-relative
 /// candidate), `false` when it was classified external and dropped.
 ///
+/// # The one admitted non-candidate ([CR-107])
+///
+/// A broker-arm reference with an **empty** target is a recorded
+/// `topic-not-literal` refusal, not a candidate: it is deliberately admitted here
+/// (an empty target is no external form, so the gate above passes it) and then
+/// refused by every consumer downstream — `resolve::topics::broker_refs`,
+/// `federation::bridge::consumer_portable_key`, `federation::broker::classify` and
+/// `resolve::binder`'s empty-name guard. So it reaches the [FR-WS-05] coverage
+/// payload as a reason and can never become an edge or a `Topic` node. It is the
+/// only sanctioned exception to "the ledger is a work list of genuine
+/// workspace-relative misses" ([ADR-26]), and it is named here because this is the
+/// function that enforces that rule.
+///
+/// [CR-107]: ../../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+/// [FR-WS-05]: ../../../../docs/specs/requirements/FR-WS-05.md
+///
 /// [FR-CG-07]: ../../../../docs/specs/requirements/FR-CG-07.md
 /// [ADR-26]: ../../../../docs/specs/architecture/decisions/ADR-26.md
-pub(crate) fn push_artifact_ref(
+pub(in crate::extract) fn push_artifact_ref(
     facts: &mut Facts,
     source: &LogosSymbol,
     target: &str,

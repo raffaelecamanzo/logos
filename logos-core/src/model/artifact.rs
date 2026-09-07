@@ -467,7 +467,7 @@ impl ArtifactRelation {
             // universal absolute-URL rule; the `grpc_key` normalizer already
             // refused any target it could not fully qualify before it reached the
             // ledger, so a captured gRPC key is always a workspace candidate.
-            | ArtifactRelation::GrpcCall => TargetClass::Workspace,
+            | ArtifactRelation::GrpcCall
             // A broker topic key carries no external form beyond the universal
             // absolute-URL rule, and deliberately **no character rule** ([CR-107],
             // [FR-WS-10] AC3).
@@ -493,9 +493,8 @@ impl ArtifactRelation {
             // [`broker_topic_key`](crate::extract::broker), which refuse a constant
             // reference, a variable or a concatenation and record the refusal. It is
             // not "does the key look composed".
-            ArtifactRelation::BrokerPublish | ArtifactRelation::BrokerSubscribe => {
-                TargetClass::Workspace
-            }
+            | ArtifactRelation::BrokerPublish
+            | ArtifactRelation::BrokerSubscribe => TargetClass::Workspace,
         }
     }
 
