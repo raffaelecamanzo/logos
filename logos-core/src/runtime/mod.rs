@@ -53,6 +53,7 @@ mod writer;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -260,6 +261,22 @@ impl Default for RuntimeConfig {
     }
 }
 
+/// Per-phase timings for [`Runtime::open_with_config_timed`] ([CR-116],
+/// [NFR-PE-05]).
+///
+/// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+/// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct RuntimePhaseTimings {
+    /// Opening the writer store's file and applying the pragma contract.
+    pub store_connect: Duration,
+    /// Running the writer store's schema migrations.
+    pub schema_migration: Duration,
+    /// Spawning the writer actor thread, opening the read-only pool, and
+    /// building (or attaching) the worker pool.
+    pub pool_startup: Duration,
+}
+
 /// The owner of all in-process concurrency (see the module docs).
 ///
 /// `Runtime` is `Send + Sync`: the writer's RW connection lives *inside* the
@@ -325,6 +342,53 @@ impl Runtime {
             pool,
             db_path,
         })
+    }
+
+    /// [`open_with_config`](Self::open_with_config), timed per phase
+    /// ([CR-116], [NFR-PE-05]): store-connect and schema-migration come from
+    /// [`SqliteGraphStore::open_with_timings`], and reader-pool-plus-worker-pool
+    /// startup is timed as one `pool_startup` bucket, matching the
+    /// [NFR-PE-05]-enumerated grouping. `open_with_config` is untouched, so
+    /// this diagnostic path's own cost never lands on the production
+    /// cold-start path — used only by
+    /// [`Engine::start_with_phase_report`](crate::Engine::start_with_phase_report).
+    ///
+    /// # Errors
+    /// As [`open_with_config`](Self::open_with_config).
+    ///
+    /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+    /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+    pub(crate) fn open_with_config_timed(
+        db_path: impl AsRef<Path>,
+        config: RuntimeConfig,
+    ) -> Result<(Self, RuntimePhaseTimings)> {
+        let db_path = db_path.as_ref().to_path_buf();
+
+        let (store, store_timings) = SqliteGraphStore::open_with_timings(&db_path)
+            .with_context(|| format!("opening the writer store at {}", db_path.display()))?;
+
+        let t = Instant::now();
+        let writer = WriterActor::spawn(store, config.write_queue_capacity);
+        let readers = ReaderPool::open(&db_path, config.reader_pool_size)?;
+        let pool = match config.worker_pool {
+            Some(shared) => shared,
+            None => SharedWorkerPool::named(config.worker_threads, "logos-core")?,
+        };
+        let pool_startup = t.elapsed();
+
+        Ok((
+            Self {
+                writer,
+                readers,
+                pool,
+                db_path,
+            },
+            RuntimePhaseTimings {
+                store_connect: store_timings.connect,
+                schema_migration: store_timings.migrate,
+                pool_startup,
+            },
+        ))
     }
 
     /// Submit a write batch to the single writer and block until it completes.

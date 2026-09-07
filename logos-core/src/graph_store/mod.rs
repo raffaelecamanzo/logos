@@ -46,7 +46,7 @@ mod migrate;
 mod schema;
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -1434,6 +1434,19 @@ pub struct SqliteGraphStore {
     conn: Connection,
 }
 
+/// Per-phase timings for [`SqliteGraphStore::open_with_timings`] ([CR-116],
+/// [NFR-PE-05]).
+///
+/// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+/// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct StoreOpenTimings {
+    /// Opening the file and applying the per-connection pragma contract.
+    pub connect: Duration,
+    /// Running the forward-only schema migrations.
+    pub migrate: Duration,
+}
+
 impl SqliteGraphStore {
     /// Open (creating if absent) the database at `path`, apply the connection
     /// contract, and run any pending migrations.
@@ -1520,6 +1533,34 @@ impl SqliteGraphStore {
         configure_connection(&conn)?;
         migrate::apply_migrations(&mut conn)?;
         Ok(Self { conn })
+    }
+
+    /// [`open`](Self::open), timed per phase ([CR-116], [NFR-PE-05]): splits
+    /// the connection-open-plus-pragma-contract phase from schema migration,
+    /// which `open` (via [`from_connection`](Self::from_connection)) times as
+    /// one indivisible call. `open` is untouched, so this diagnostic path's own
+    /// cost never lands on the production cold-start path — used only by
+    /// [`Engine::start_with_phase_report`](crate::Engine::start_with_phase_report).
+    ///
+    /// # Errors
+    /// As [`open`](Self::open).
+    ///
+    /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+    /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+    pub(crate) fn open_with_timings(path: impl AsRef<Path>) -> Result<(Self, StoreOpenTimings)> {
+        let path = path.as_ref();
+
+        let t = Instant::now();
+        let mut conn = Connection::open(path)
+            .with_context(|| format!("opening graph store at {}", path.display()))?;
+        configure_connection(&conn)?;
+        let connect = t.elapsed();
+
+        let t = Instant::now();
+        migrate::apply_migrations(&mut conn)?;
+        let migrate = t.elapsed();
+
+        Ok((Self { conn }, StoreOpenTimings { connect, migrate }))
     }
 
     /// The schema version recorded in `PRAGMA user_version`.
