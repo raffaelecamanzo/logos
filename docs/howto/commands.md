@@ -800,7 +800,8 @@ Per-member freshness (each member's index/sync state) plus the **3-state
 cross-service coverage summary** — every cross-boundary reference classified
 `bound` / `ambiguous` / `unbound`, each unbound one carrying a reason
 (`no-provider-in-workspace`, `path-not-composed`, `base-url-runtime`,
-`ambiguous`, `schema-mismatch`). The coverage tier is **advisory only** — it is
+`ambiguous`, `schema-mismatch`, `topic-not-literal`). The coverage tier is
+**advisory only** — it is
 bucketed separately (`no-provider-in-workspace` never depresses the bound-ratio)
 and never feeds any member's quality gate ([ADR-53](../specs/architecture/decisions/ADR-53.md)).
 
@@ -874,7 +875,7 @@ reference — the two surfaces are computed from one pass and cannot disagree.
 Three things worth knowing about these fields:
 
 - **They are optional.** A row with no provider to name (`no-provider-in-workspace`,
-  `path-not-composed`) carries none of them — absent, never `null` or an empty
+  `path-not-composed`, `topic-not-literal`) carries none of them — absent, never `null` or an empty
   list. A store indexed before this existed has them nowhere; every consumer must
   read a row without them.
 - **`candidates` is bounded and never silently trimmed.** At most 8 providers are

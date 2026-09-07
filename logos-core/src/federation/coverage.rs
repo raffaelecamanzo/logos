@@ -2874,6 +2874,94 @@ mod tests {
         assert_eq!(cov.references[0].state, CoverageState::Bound);
     }
 
+    /// **The cross-surface guard, inverted so a closed list cannot rot.**
+    /// [CR-107] added one `UnboundReason` variant and it had to be mirrored by hand
+    /// onto five other surfaces — this enum, the operator manual, the frontend
+    /// design's enumerated list, the TypeScript union, and its label map. The first
+    /// four were updated and `docs/howto/commands.md` was missed, because nothing
+    /// checked it: this module's own comment concedes those mirrors are hand-written,
+    /// and the wire-shape test beside it pins field names, not the reason set.
+    ///
+    /// So the guard is written the way a guard over an enumerated surface has to be:
+    /// it enumerates the **variants** and requires each to be documented, rather
+    /// than listing the documented tokens and checking them off. `wire` is an
+    /// exhaustive `match`, and `ALL` is a fixed-length array — so the next arm's
+    /// reason fails to compile here until it is classified, and then fails this
+    /// assertion until it is documented. Appending one entry cannot satisfy it.
+    ///
+    /// `docs/howto/commands.md` is tracked in this repository. `docs/specs/` is a
+    /// symlink into the separate docs repository, so its absence is tolerated (a
+    /// vendored or packaged checkout has no `docs/specs`) while its presence is
+    /// checked — the one thing never done is passing silently on a file that *is*
+    /// readable and *is* missing the token.
+    ///
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    #[test]
+    fn every_unbound_reason_is_documented_on_every_surface_that_enumerates_them() {
+        /// The wire token of one reason. Exhaustive on purpose: a new variant does
+        /// not compile until it is named here.
+        fn wire(reason: UnboundReason) -> &'static str {
+            match reason {
+                UnboundReason::NoProviderInWorkspace => "no-provider-in-workspace",
+                UnboundReason::PathNotComposed => "path-not-composed",
+                UnboundReason::BaseUrlRuntime => "base-url-runtime",
+                UnboundReason::Ambiguous => "ambiguous",
+                UnboundReason::SchemaMismatch => "schema-mismatch",
+                UnboundReason::TopicNotLiteral => "topic-not-literal",
+            }
+        }
+        /// Every variant. The fixed length is the second half of the guard: adding a
+        /// variant without extending this fails to compile.
+        const ALL: [UnboundReason; 6] = [
+            UnboundReason::NoProviderInWorkspace,
+            UnboundReason::PathNotComposed,
+            UnboundReason::BaseUrlRuntime,
+            UnboundReason::Ambiguous,
+            UnboundReason::SchemaMismatch,
+            UnboundReason::TopicNotLiteral,
+        ];
+
+        // The wire token really is what serde emits — otherwise this guard would
+        // check a string the payload never carries.
+        for reason in ALL {
+            assert_eq!(
+                serde_json::to_value(reason).unwrap(),
+                wire(reason),
+                "{reason:?} must serialise as its documented token"
+            );
+        }
+
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("logos-core sits under the repository root");
+        let surfaces = [
+            // (path, tracked in THIS repository)
+            ("docs/howto/commands.md", true),
+            ("docs/specs/frontend-design.md", false),
+            ("web/ui/src/api/types.ts", true),
+            ("web/ui/src/views/workspace/coverageModel.ts", true),
+        ];
+        for (rel, tracked_here) in surfaces {
+            let path = repo.join(rel);
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                assert!(
+                    !tracked_here,
+                    "{rel} is tracked in this repository and must be readable"
+                );
+                continue;
+            };
+            for reason in ALL {
+                assert!(
+                    text.contains(wire(reason)),
+                    "{rel} enumerates the unbound reasons but does not mention \
+                     `{}` — a reason the payload can carry that this surface cannot \
+                     explain ([NFR-CC-04])",
+                    wire(reason)
+                );
+            }
+        }
+    }
+
     /// `topic-not-literal` is the **broker** arm's word for an unkeyable row, and
     /// `path-not-composed` remains the HTTP arm's — chosen by the arm's own
     /// namespace, not by a shared default. Both render as their FR-WS-05 wire

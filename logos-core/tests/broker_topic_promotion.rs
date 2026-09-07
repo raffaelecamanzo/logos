@@ -331,6 +331,99 @@ class DynamicListeners {
 }
 
 
+/// **The refusal path reconciles like any other, across a sync.** The plain case
+/// has two reconcile tests; the refusal path had none, so nothing held the
+/// transition a real edit makes: a listener whose topic is externalised into a
+/// constant.
+///
+/// All three states are asserted — a literal topic promoted, the same listener
+/// demoted to a bare keyless row after the edit, and promoted again when the
+/// literal comes back. The middle state is the one that matters: the promotion pass
+/// must *demote* on a refusal rather than leave a stale `Topic`/`Consumer` behind,
+/// and the ledger must hold exactly one row for the site rather than accumulating
+/// the keyed and keyless shapes side by side — which the `unresolved_refs` identity
+/// index would happily admit, since they differ in `target`.
+#[test]
+fn a_listener_that_becomes_non_literal_is_demoted_and_leaves_only_a_keyless_row() {
+    const LITERAL: &str = r#"
+package com.acme;
+class Listener {
+    @KafkaListener(topics = "orders")
+    public void onOrder(String msg) {}
+}
+"#;
+    const REFUSED: &str = r#"
+package com.acme;
+class Listener {
+    private static final String TOPIC = "orders";
+
+    @KafkaListener(topics = TOPIC)
+    public void onOrder(String msg) {}
+}
+"#;
+    /// Every broker-arm ledger row as `(target, payload)`, sorted.
+    fn broker_rows(rt: &Runtime) -> Vec<(String, String)> {
+        let mut rows: Vec<(String, String)> = rt
+            .submit_read(|store| {
+                Ok(store
+                    .unresolved_refs()?
+                    .into_iter()
+                    .filter(|r| {
+                        r.payload
+                            .as_deref()
+                            .is_some_and(|p| p.starts_with("broker-"))
+                    })
+                    .map(|r| (r.target, r.payload.unwrap_or_default()))
+                    .collect::<Vec<_>>())
+            })
+            .expect("read runs");
+        rows.sort();
+        rows
+    }
+
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/Listener.java", LITERAL);
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.index();
+
+    assert_eq!(names_of(rt, NodeKind::Topic), ["orders"]);
+    assert_eq!(names_of(rt, NodeKind::Consumer), ["orders"]);
+    assert_eq!(
+        broker_rows(rt),
+        [("orders".to_string(), "broker-subscribe".to_string())]
+    );
+
+    // The edit: the topic moves into a constant, so the site is refused.
+    write(tmp.path(), "src/Listener.java", REFUSED);
+    engine.sync(&[PathBuf::from("src/Listener.java")]);
+
+    assert!(
+        names_of(rt, NodeKind::Topic).is_empty(),
+        "the topic is demoted, not left stale: {:?}",
+        names_of(rt, NodeKind::Topic)
+    );
+    assert!(names_of(rt, NodeKind::Consumer).is_empty());
+    assert_eq!(
+        broker_rows(rt),
+        [(String::new(), "broker-subscribe".to_string())],
+        "exactly one row — the recorded refusal — with no keyed residue beside it"
+    );
+
+    // And back: the literal returns, the topic is promoted again, no residue.
+    write(tmp.path(), "src/Listener.java", LITERAL);
+    engine.sync(&[PathBuf::from("src/Listener.java")]);
+
+    assert_eq!(names_of(rt, NodeKind::Topic), ["orders"]);
+    assert_eq!(names_of(rt, NodeKind::Consumer), ["orders"]);
+    assert_eq!(
+        broker_rows(rt),
+        [("orders".to_string(), "broker-subscribe".to_string())],
+        "the keyless row is gone, not accumulated alongside the keyed one"
+    );
+}
+
 /// Acceptance (3): a repo with **no broker coupling** is byte-for-byte unaffected —
 /// the promotion adds no node, no edge, and (being a pure reconcile over an empty
 /// desired set) writes nothing at all ([FR-WS-11], [NFR-RA-06]).
