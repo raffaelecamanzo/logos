@@ -927,9 +927,21 @@ impl Tally {
     /// [`NoProviderInWorkspace`](UnboundReason::NoProviderInWorkspace) treatment,
     /// whose stated ground in [ADR-53] ("not a *broken* binding") applies verbatim
     /// to a capture refusal — is a change to [FR-WS-05]'s ratio semantics that no
-    /// acceptance criterion settles. **Deferred, deliberately, and recorded here
-    /// rather than left to be rediscovered from the arithmetic.** It gets sharper
-    /// once the publish side records refusals too.
+    /// acceptance criterion settles.
+    ///
+    /// **DECIDED at the Sprint 65 human review (2026-09-07): `topic-not-literal`
+    /// stays INSIDE the denominator. No change.** The
+    /// [`NoProviderInWorkspace`](UnboundReason::NoProviderInWorkspace) analogy does
+    /// not hold: that reason means the coupling genuinely *leaves* the workspace, so
+    /// there was never anything here to bind, whereas a capture refusal means the
+    /// coupling is *inside* the workspace and this extractor could not resolve it.
+    /// Excluding it would make `bound_ratio` improve precisely because [CR-107] and
+    /// [CR-117] made previously-invisible losses visible — a measure that rewards
+    /// better instrumentation by reading better is the wrong shape, and the opposite
+    /// of what [NFR-CC-04] asks for. The count stays legible either way: the
+    /// [CR-111] summary line always prints the denominator and the excluded count,
+    /// so a reader can see what the ratio was computed over. On the reference estate
+    /// this decision holds ~54 rows inside the denominator rather than outside it.
     ///
     /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
     /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
