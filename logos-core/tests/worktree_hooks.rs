@@ -480,6 +480,48 @@ fn starting_an_engine_in_a_linked_worktree_makes_the_hooks_fire() {
     );
 }
 
+/// **The same seam, through the phase-timed twin** — the sprint-level check
+/// that the two hand-mirrored cold paths did not drift apart.
+///
+/// `Engine::start_with_phase_report` (S-368, [CR-116]) is a deliberate
+/// near-duplicate of `Engine::start`'s call sequence, written so the timing
+/// instrumentation never lands on the production path. S-338 then added the
+/// hook-reachability step to `start_with_configs` in the *same* iteration, and
+/// the twin was not extended — so the attribution silently omitted a real cold
+/// path step, and no assertion noticed: the existing equivalence check compares
+/// the loaded registry, which this step does not touch, and the phase-sum
+/// reconciliation runs over a bare `TempDir`, where the step is a single `stat`
+/// that costs nothing.
+///
+/// So the guard has to be an **observable side effect in a linked worktree**,
+/// exactly as the rest of this file argues. A commit after a phase-reported
+/// start must fire the hook, which it can only do if the twin seeded.
+///
+/// [CR-116]: ../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+#[test]
+fn a_phase_reported_engine_start_seeds_the_worktree_hooks_too() {
+    let repo = Repo::new("exit 0");
+    repo.install();
+    let wt = repo.add_worktree("feature");
+
+    let (engine, _phases) =
+        logos_core::Engine::start_with_phase_report(&wt).expect("instrumented engine starts");
+    drop(engine);
+
+    repo.commit(
+        &wt,
+        "after_phase_report.rs",
+        "pub fn after_phase_report() {}\n",
+        "after a phase-reported engine start",
+    );
+
+    assert!(
+        repo.log(&wt).iter().any(|c| c.contains("after_phase_report.rs")),
+        "the phase-timed twin must seed the hooks exactly as Engine::start does: {:?}",
+        repo.log(&wt)
+    );
+}
+
 // ── Uninstall, and the non-clobber posture ──────────────────────────────────
 
 /// `uninstall` leaves no seeded worktree hooks behind — no dangling symlinks,

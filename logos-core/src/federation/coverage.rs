@@ -1871,6 +1871,31 @@ mod tests {
     /// change that shifted one bucket into another at the boundaries would show up
     /// here.
     ///
+    /// # Both arms, in the same pass — extended at the sprint-65 sprint review
+    ///
+    /// The fixture was originally HTTP-only, written in the iteration *before*
+    /// [CR-107]/[CR-117] gave the broker arm rows in this same tally. That left the
+    /// sprint's own risk — "S-372's no-reference-changes-bucket assertion runs
+    /// pre-merge, before the broker refusal rows exist" — resting on the argument
+    /// that the two arms are counted separately rather than on a test. It now rests
+    /// on a test: the broker arm's three row shapes sit here beside the four HTTP
+    /// ones, and the four bucket counters are asserted over the union.
+    ///
+    /// The two arms reach `Tally::record` down *different* paths — the HTTP rows
+    /// through the consumer loop, the keyless broker subscribe through the
+    /// `unkeyable_providers` loop — so a refusal mis-filed into `ambiguous` or
+    /// `no-provider-in-workspace` (both of which sit outside `unbound`, and one of
+    /// which sits outside the ratio denominator entirely) is exactly the shape this
+    /// guard has to be able to see.
+    ///
+    /// It also pins the one place the two stories' shapes genuinely meet: a
+    /// *fan-out* bound broker row carries [`ProviderCandidates`] with
+    /// [`ProviderDisposition::BoundTo`], the same container the tied HTTP row
+    /// carries with [`TiedBetween`](ProviderDisposition::TiedBetween) — the same
+    /// shape meaning opposite things, which is why `disposition` exists.
+    ///
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    /// [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
     /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
     #[test]
     fn naming_providers_moves_no_reference_between_buckets() {
@@ -1892,40 +1917,108 @@ mod tests {
             ],
         );
         set_member("admin", vec![route("GET /tied/{userId}", "local route_tied_admin")]);
+        // The broker arm, in the same pass as the four HTTP rows above.
+        set_consumers(
+            "api",
+            vec![
+                broker_publish("orders", "local emitOrder"), // → bound (fan-out)
+                broker_publish("", "local emitDynamic"),     // → topic-not-literal
+            ],
+        );
+        set_consumers(
+            "web",
+            vec![
+                // The subscriber that makes the publish above bind. A bound
+                // subscribe is a provider, so it contributes no row of its own.
+                broker_subscribe("orders", "local onOrder"),
+                // A refused subscribe — the provider-role refusal, which reaches
+                // the tally through `unkeyable_providers`, not the consumer loop.
+                broker_subscribe("", "local onByConstant"), // → topic-not-literal
+            ],
+        );
 
         let cov = cross_service_coverage(&registry(&["api", "web", "admin"]));
 
-        assert_eq!(cov.bound, 1);
+        assert_eq!(cov.bound, 2, "the HTTP route and the broker fan-out");
         assert_eq!(cov.ambiguous, 1);
-        assert_eq!(cov.unbound, 1, "the uncomposable template");
+        assert_eq!(
+            cov.unbound, 3,
+            "the uncomposable template plus both broker refusals: {:?}",
+            cov.references
+        );
         assert_eq!(cov.no_provider_in_workspace, 1);
-        assert_eq!(cov.bound_ratio, Some(1.0 / 3.0));
-        assert_eq!(cov.bound_ratio_measured, 3);
+        assert_eq!(cov.bound_ratio, Some(2.0 / 6.0));
+        assert_eq!(cov.bound_ratio_measured, 6);
+
+        // Each arm's contribution, so a count that moved between the arms cannot
+        // hide inside a total that happens to reconcile.
+        let broker_refusals = cov
+            .references
+            .iter()
+            .filter(|r| {
+                r.state
+                    == CoverageState::Unbound {
+                        reason: UnboundReason::TopicNotLiteral,
+                    }
+            })
+            .count();
+        assert_eq!(broker_refusals, 2, "{:?}", cov.references);
+        assert_eq!(
+            cov.references
+                .iter()
+                .filter(|r| r.relation == "broker-topic")
+                .count(),
+            3,
+            "one bound fan-out plus the two refusals: {:?}",
+            cov.references
+        );
 
         // Guard the guard: without this, the loop below is vacuous — if `candidates`
         // stopped being populated at all, its body would never execute and the test
         // whose whole subject is "naming is not binding" would pass by naming
-        // nothing.
+        // nothing. Two rows name a set now, and they mean opposite things.
         assert_eq!(
             cov.references.iter().filter(|r| r.candidates.is_some()).count(),
-            1,
-            "exactly the tied row names a set"
+            2,
+            "the tied HTTP row and the fanned-out broker row: {:?}",
+            cov.references
         );
-        // Every named candidate belongs to a row that is STILL unbound — naming is
-        // not binding, and no ArtifactBinding is emitted for any of it
-        // (NFR-RA-05): this tier writes no edges at all, it only classifies.
+        // Every named candidate belongs to a row whose bucket matches its
+        // disposition — a tied set is STILL unbound, so naming is not binding and no
+        // ArtifactBinding is emitted for any of it (NFR-RA-05); a fanned-out set is
+        // bound, and reads that way. This tier writes no edges at all either way, it
+        // only classifies.
+        let mut seen = Vec::new();
         for row in &cov.references {
             if let Some(candidates) = &row.candidates {
-                assert_eq!(candidates.disposition, ProviderDisposition::TiedBetween);
-                assert_eq!(row.bucket, "ambiguous");
-                assert_eq!(
-                    row.state,
-                    CoverageState::Unbound {
-                        reason: UnboundReason::Ambiguous
+                seen.push(candidates.disposition);
+                match candidates.disposition {
+                    ProviderDisposition::TiedBetween => {
+                        assert_eq!(row.bucket, "ambiguous");
+                        assert_eq!(
+                            row.state,
+                            CoverageState::Unbound {
+                                reason: UnboundReason::Ambiguous
+                            }
+                        );
                     }
-                );
+                    ProviderDisposition::BoundTo => {
+                        assert_eq!(row.bucket, "bound");
+                        assert_eq!(row.state, CoverageState::Bound);
+                        assert_eq!(row.relation, "broker-topic");
+                    }
+                }
             }
         }
+        seen.sort_by_key(|d| format!("{d:?}"));
+        assert_eq!(
+            seen,
+            vec![
+                ProviderDisposition::BoundTo,
+                ProviderDisposition::TiedBetween
+            ],
+            "both dispositions appear, so neither arm's branch is vacuous"
+        );
     }
 
     /// **Payload growth, measured against the reference workspace's shape**
