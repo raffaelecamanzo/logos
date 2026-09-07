@@ -204,9 +204,9 @@
 ;    `KafkaHeaders.TOPIC` and say nothing about `MessageBuilder`, for two reasons
 ;    that pull the same way: a near-miss message builder from another library
 ;    (`SomeOtherBuilder.setHeader(AmqpHeaders.ROUTING_KEY, …)`) must not
-;    over-match, and Spring's topic header is set through several builders
-;    (`MessageBuilder`, `MessageHeaderAccessor`, a `Map` of headers) which a
-;    builder-typed pattern would have to enumerate and would still miss.
+;    over-match, and Spring's topic header is set through more than one builder
+;    (`MessageBuilder`, `MessageHeaderAccessor`) which a builder-typed pattern would
+;    have to enumerate and would still miss.
 ;
 ;    Three narrowing decisions, each measured against the estate:
 ;
@@ -219,14 +219,29 @@
 ;       it would need import resolution, which this layer does not have.
 ;
 ;    2. **The method name is a SETTER** — `setHeader`/`setHeaderIfAbsent`. Without
-;       it, any two-argument call whose first argument is the topic header matches:
-;       `Map.of(KafkaHeaders.TOPIC, t)` is the concrete case, and a header map is
-;       not a publish. (A *read* — `headers.get(KafkaHeaders.TOPIC)` — is excluded
-;       by arity alone, so it is not what earns this predicate; naming it as the
-;       reason would be the plausible-sounding wrong one.) `setHeaderIfAbsent` is
-;       `MessageBuilder`'s own sibling setter with identical topic semantics; the
-;       estate uses only `setHeader`, so that arm of the predicate is carried on the
-;       API's shape rather than on a measurement.
+;       it, any two-argument call whose first argument is the topic header matches,
+;       and `Map.of(KafkaHeaders.TOPIC, t)` is the concrete case. (A *read* —
+;       `headers.get(KafkaHeaders.TOPIC)` — is excluded by arity alone, so it is not
+;       what earns this predicate; naming it as the reason would be the
+;       plausible-sounding wrong one.)
+;
+;       BUT SAY WHAT THAT COSTS, because a header map is not "not a publish":
+;       `new GenericMessage<>(payload, Map.of(KafkaHeaders.TOPIC, topic))` is a
+;       genuine Spring publish. Excluding it is therefore a deliberate, named FALSE
+;       NEGATIVE, not a near miss — keying on the map form would also admit every
+;       unrelated two-argument call of that shape, and there are 0 occurrences in
+;       the estate to measure the trade against. Recognising it needs its own
+;       pattern and its own corpus evidence. Note the asymmetry this leaves, so it
+;       is not discovered as a surprise: a `setHeader(KafkaHeaders.TOPIC, …)` on a
+;       builder that is never sent IS admitted, so "not attached to a send" is not
+;       the reason the map form is refused — the reason is the setter predicate and
+;       nothing else.
+;
+;       `setHeaderIfAbsent` is `MessageBuilder`'s own sibling setter with identical
+;       topic semantics; the estate uses only `setHeader`, so that arm of the
+;       predicate is carried on the API's shape rather than on a measurement — and
+;       is pinned by two fixture rows, because narrowing both predicates to
+;       `#eq? "setHeader"` once removed the capability with the whole suite green.
 ;
 ;    3. **The argument list is EXACTLY the two, anchored by position** — the header
 ;       constant first (the leading `.`), the topic operand immediately after it
@@ -289,8 +304,9 @@
 ;    `topic-not-literal` refusals, so a producer-bearing estate stops reading like
 ;    one with no producer at all ([NFR-CC-04]). Keying a configuration-bound operand
 ;    against committed configuration is [CR-117] §3.2's canonical-identity rule
-;    (S-371), which is unplanned precisely because S-365 falsified its yield on this
-;    corpus: 0 of the 13 src/main sites would be admitted even with it.
+;    (S-371), and S-365 measured that even WITH it 0 of the 13 src/main sites would
+;    be admitted on this corpus — all 38 arm-level admits are IT test classes.
+;    Whether that rule is worth building is a journal question, not this file's.
 
 ; Publish (header form), BINDING: the topic operand is a static string literal.
 ; Keyed by the literal's own text, `${…}` placeholders included — the same
@@ -314,13 +330,19 @@
 ; shapes below, so the site is recognised as a publish and reported as
 ; `topic-not-literal` rather than left silent ([FR-WS-05], [NFR-CC-04]).
 ;
-; The shapes are ENUMERATED, never a `(_)` wildcard — but NOT for the subscribe
-; slots' reason, and inheriting their argument here would be wrong. There, a
-; `value: (_)` overlaps the `value: (string_literal)` patterns on the same node and
-; measurably cost the scalar literal patterns their matches. Measured on this side,
-; a wildcard does not do that: the position anchors below and the interpreter's own
-; site reconcile between them keep a literal operand binding and cancel the
-; candidate a wildcard would raise at that same site.
+; The shapes are ENUMERATED, never a `(_)` wildcard. The subscribe slots give a
+; reason for that — a `value: (_)` overlaps their `value: (string_literal)` patterns
+; on the same node and measurably cost the scalar literal patterns their matches —
+; and it would be easy to inherit that reason here. Do not: the mechanism has NOT
+; been established on this side. What was measured is only the OUTCOME, that with a
+; `(_)` operand slot the two literal fixtures still bound; the anchors cannot be the
+; differentiator (both patterns carry identical anchors, so anchors do not
+; distinguish this side from the subscribe side), and the site reconcile cannot be
+; either (it can only cancel a candidate once a literal has already reached `bound`,
+; which is the very thing shadowing would prevent). So the honest statement is: a
+; wildcard MIGHT shadow here, the subscribe side's measurement says it can, the
+; structural relationship is the same — two patterns competing at one
+; `argument_list` position — and the enumeration makes the question moot.
 ;
 ; What the enumeration buys here is PRECISION and one vocabulary across the arm: a
 ; refusal is reported only for an operand shape the arm has actually reasoned
@@ -330,9 +352,11 @@
 ; a concatenation). An operand of some other shape — a ternary, a cast — binds
 ; nothing (the half that matters, [NFR-RA-05]) and is deliberately not reported,
 ; exactly as the subscribe side treats a shape outside its own four. That boundary
-; is asserted by `an_operand_shape_outside_the_enumeration_binds_nothing_and_is_not_reported`
-; so it stays a decision rather than an accident; widening it is a change to BOTH
-; sides' enumerations, never a wildcard on one.
+; is asserted by the `byTernary` row of
+; `every_header_form_publish_operand_shape_is_captured_or_refused_with_its_reason`,
+; so it stays a decision rather than an accident. Widening it is a change to BOTH
+; sides' enumerations, never a wildcard on one — and widening either side to `(_)`
+; means re-running S-339's shadowing measurement first.
 ;
 ; The site — and so the dedup grain, one refusal per site — is the `setHeader`
 ; call's own `argument_list`. Unlike the publish arm's bare `send`/`publish`

@@ -56,20 +56,24 @@
 ;    as one possible answer is the correct one. Measured 2026-09-07: the 84-member
 ;    reference workspace contains **0** `.rs` files — it is entirely JVM — and this
 ;    repository declares no `rdkafka`/broker-client dependency and carries no real
-;    producer site of its own (`extract::broker`'s Rust fixtures are the only
-;    `.publish("…")`/`.send("…")` strings in the tree, which is the same
-;    no-false-positive measurement the scope note below records). There is no Rust
-;    broker source to be blind to.
+;    producer site of its own. Precisely: the `.publish("…")`/`.send("…")` strings
+;    that DO exist in the tree are all extraction FIXTURES — `extract::broker`'s
+;    Rust tests and `tests/xservice_reachability_broker_promotion.rs` — never a
+;    production site, which is the same no-false-positive measurement the scope
+;    note below records. There is no Rust broker source to be blind to.
 ;
 ; 2. THE HEADER IDIOM HAS NO RUST ANALOGUE. Java's blind spot is specifically a
 ;    *header constant* — a topic passed as a named header rather than as an
 ;    argument. Rust broker clients have no header-constant idiom for the topic; the
 ;    nearest structural analogue is rdkafka's record builder,
 ;    `FutureRecord::to("orders")`, where the topic sits in a builder method and
-;    `producer.send(record, timeout)` carries none. That form is already named as
-;    unmatched in this file's header above, and it is a *builder-method* blind spot,
-;    not a header one — so it would need its own pattern and its own reasoning, not
-;    a port of S-370's.
+;    `producer.send(record, timeout)` carries none. Be exact about WHY that is
+;    unmatched, because the header above names a neighbouring case for a different
+;    reason: it names `to(topic_var)`, unmatched because it is not a string literal.
+;    `to("orders")` **is** a literal, and is unmatched because no pattern in this
+;    file targets the `to` method at all. It is a *builder-method* blind spot, not a
+;    header one — so it would need its own pattern and its own reasoning, not a port
+;    of S-370's.
 ;
 ; 3. ADDING THE BUILDER PATTERN SPECULATIVELY WOULD REPEAT THE HAZARD THIS FILE
 ;    ALREADY RECORDS. A `to("literal")` pattern keys on one of the most common

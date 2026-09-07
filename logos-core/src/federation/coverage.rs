@@ -2888,10 +2888,18 @@ mod tests {
     ///
     /// Three sites, one keyless each: a method parameter, a configuration-bound
     /// getter and a `@Value`-injected field — the three operand shapes the reference
-    /// estate actually writes. Each is its own row (the grain is the site, so a
-    /// producer class with three publishes reports three refusals, not one), each
-    /// reads `topic-not-literal` and not `path-not-composed`, and the bound publish
-    /// beside them is unaffected.
+    /// estate actually writes. Each is its own row, each reads `topic-not-literal`
+    /// and not `path-not-composed`, and the bound publish beside them is unaffected.
+    ///
+    /// Be exact about the grain, because it is easy to overstate: three refused
+    /// publishes reach this tier as three rows when they sit in three **methods**,
+    /// which is what this fixture's three distinct symbols model. Three in ONE
+    /// method reach the ledger as ONE row — `dedup_sort_refs` keys on
+    /// `(source, target, form, kind, relation)` and every refusal shares an empty
+    /// target — so the "at most once per site" discipline is enforced upstream in
+    /// [`crate::extract::broker`], not here. This test asserts what this layer
+    /// actually owns: that whatever rows arrive are classified under the arm's own
+    /// reason.
     ///
     /// [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md

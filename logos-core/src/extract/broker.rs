@@ -1910,9 +1910,14 @@ class Mixed {
             facts.refs
         );
         // Two publish sites on one topic in one class: the argument form and the
-        // header form. They key identically — which is the point — and the ledger
-        // dedup the production caller runs collapses them to one row, so the
-        // interpreter's own output is asserted here before that collapse.
+        // header form. They key identically — which is the point — and BOTH rows
+        // survive here, but not for the reason an earlier version of this comment
+        // claimed. `extract_java` IS the production caller (dedup included); the
+        // rows survive because their SOURCE symbols differ (`byArgument` vs
+        // `byHeader`). Two header-form publishes in ONE method on one topic would
+        // legitimately collapse to a single row, which is what
+        // `refusals_are_attributed_per_declaration_not_per_line` asserts on the
+        // refusal side.
         let publishes: Vec<&str> = facts
             .refs
             .iter()
