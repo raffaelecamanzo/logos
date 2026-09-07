@@ -468,19 +468,33 @@ impl ArtifactRelation {
             // refused any target it could not fully qualify before it reached the
             // ledger, so a captured gRPC key is always a workspace candidate.
             | ArtifactRelation::GrpcCall => TargetClass::Workspace,
-            // A broker topic key is a workspace candidate unless it carries an
-            // interpolation marker — a dynamically-composed topic (`"orders." +
-            // env`, `${region}-orders`) is not a static, matchable identity and
-            // is never a candidate ([FR-WS-10], [NFR-RA-05]). The topic
-            // normalizer refuses these before the ledger; this is the
-            // defence-in-depth twin of the `ShellSource` interpolation rule so a
-            // dynamic key can never reach an edge even if a capture leaked one.
+            // A broker topic key carries no external form beyond the universal
+            // absolute-URL rule, and deliberately **no character rule** ([CR-107],
+            // [FR-WS-10] AC3).
+            //
+            // This gate used to classify any key containing `$` or `{` external, as
+            // the "defence-in-depth twin" of the `ShellSource` interpolation rule.
+            // The two cases are not twins. A `ShellSource` target is a *path* the
+            // shell composes at run time, so an interpolation marker in it really
+            // does mean "not a literal workspace path". A broker topic key is
+            // whatever the arm's capture admitted, and the capture admits a
+            // `(string_literal)` and nothing else — so `"${spring.kafka.topics.orders}"`
+            // is a fully static literal that happens to contain `$` and `{`, and
+            // Spring's *standard* way of writing a topic. Re-guessing staticness
+            // from the key's characters here dropped the reference, the
+            // [FR-WS-11] `Topic`/`Consumer` nodes and the coverage row, leaving
+            // `topics: []` on every member of a real 84-member Spring estate while
+            // every signal read as success — the sparsity-indistinguishable-from-
+            // absence dishonesty [NFR-CC-04] forbids.
+            //
+            // The never-fabricate boundary ([NFR-RA-05]) is unchanged and lives where
+            // the question can actually be answered: **is the operand a string
+            // literal** — decided by the per-language `brokers.scm` capture and
+            // [`broker_topic_key`](crate::extract::broker), which refuse a constant
+            // reference, a variable or a concatenation and record the refusal. It is
+            // not "does the key look composed".
             ArtifactRelation::BrokerPublish | ArtifactRelation::BrokerSubscribe => {
-                if target.contains('$') || target.contains('{') {
-                    TargetClass::External
-                } else {
-                    TargetClass::Workspace
-                }
+                TargetClass::Workspace
             }
         }
     }
@@ -954,24 +968,48 @@ mod tests {
         );
     }
 
-    /// A dynamically-composed topic is never a candidate: an interpolation marker
-    /// classifies the topic key external, so the ledger never records it and no
-    /// edge can be fabricated ([FR-WS-10], [NFR-RA-05]). A static topic (with or
-    /// without a `#`-appended message-schema FQN guard) is a workspace candidate.
+    /// **[CR-107] regression, and the character class it names.** A captured broker
+    /// topic key is a workspace candidate whatever characters it contains: this gate
+    /// applies no character rule, because the capture already admitted a *static
+    /// string literal* and the literal's content is not evidence about how it was
+    /// composed ([FR-WS-10] AC3, [NFR-CC-04]).
+    ///
+    /// The whole measured class is asserted, not just the placeholder that surfaced
+    /// the defect — `$` and `{` each independently classified a topic external
+    /// before the fix, which is why every `"${…}"` topic in a real Spring estate
+    /// vanished. A single case here would leave the class untested.
+    ///
+    /// The one external form that remains is the universal absolute-URL rule, which
+    /// is not a broker rule at all.
+    ///
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
     #[test]
-    fn broker_dynamic_topics_are_external_static_topics_are_not() {
+    fn a_broker_topic_key_is_a_candidate_whatever_characters_the_literal_carries() {
         for rel in [
             ArtifactRelation::BrokerPublish,
             ArtifactRelation::BrokerSubscribe,
         ] {
-            assert!(rel.is_external("${region}-orders"), "{}", rel.as_str());
-            assert!(rel.is_external("orders.$env"), "{}", rel.as_str());
-            assert_eq!(rel.classify_target("orders"), TargetClass::Workspace);
-            assert_eq!(
-                rel.classify_target("orders#com.acme.OrderCreated"),
-                TargetClass::Workspace,
-                "a topic guarded by a message-schema FQN is still a static candidate"
-            );
+            for key in [
+                "orders",
+                "dotted.topic.name",
+                "has-dash",
+                "${spring.kafka.topics.orders}",
+                "${region}-orders",
+                "braces{only}",
+                "closing}only",
+                "dollar$only",
+                "orders.$env",
+                "orders#com.acme.OrderCreated",
+            ] {
+                assert_eq!(
+                    rel.classify_target(key),
+                    TargetClass::Workspace,
+                    "{} must admit the static literal `{key}`",
+                    rel.as_str()
+                );
+            }
+            // The universal rule still holds: an absolute URL is no topic.
+            assert!(rel.is_external("https://example.com/orders"), "{}", rel.as_str());
         }
     }
 

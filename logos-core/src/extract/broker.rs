@@ -14,10 +14,33 @@
 //! # Never fabricate a dynamic topic ([NFR-RA-05])
 //! A site's topic is normalized by [`broker_topic_key`]: a captured static topic
 //! (optionally guarded by a message-schema FQN) yields a stable key; a site with
-//! no static topic slot is **refused** (`None`), contributing no reference and no
-//! ledger entry. The per-language `.scm` already narrows the capture to
-//! `(string_literal)` topics, so a dynamically-composed topic (a constant, a
-//! variable, a concatenation) never matches — the refusal is defence-in-depth.
+//! no static topic slot is **refused** (`None`), contributing no reference. The
+//! per-language `.scm` narrows the binding capture to `(string_literal)` topics, so
+//! a dynamically-composed topic (a constant, a variable, a concatenation) never
+//! binds — the normalizer is defence-in-depth behind that.
+//!
+//! What a literal *contains* is not part of that boundary. A Spring property
+//! placeholder — `@KafkaListener(topics = "${spring.kafka.topics.orders}")` — is a
+//! static string literal like any other and binds, keyed by the placeholder text as
+//! written; resolving it against committed configuration is [CR-117] §3.2's
+//! canonical-identity rule, downstream of this capture ([CR-107], [FR-WS-10] AC3).
+//!
+//! # A refusal is recorded, not silent ([FR-WS-05], [NFR-CC-04])
+//! A refused topic used to leave *nothing* — no reference, no ledger row, no
+//! coverage entry — so a Spring estate whose topics are all externalised was
+//! indistinguishable from one with no broker wiring at all. A `.scm` that captures
+//! the topic **operand** (`@broker.*.topic.slot`) alongside the **site** it belongs
+//! to (`@broker.*.site`) now leaves one **keyless** broker-arm ledger row per
+//! refused site: it fabricates no topic (the target is empty, which
+//! [`crate::resolve::topics`] already refuses to promote — "a keyless row is not a
+//! topic"), and the [FR-WS-05] coverage tier reports it as `topic-not-literal`.
+//! A site that captured at least one literal records nothing, so the array and
+//! multi-attribute forms never report a refusal.
+//!
+//! [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+//! [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
+//! [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+//! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 //!
 //! [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
 //! [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
@@ -25,17 +48,18 @@
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 //! [`capture_invocation_refs`]: crate::extract::config::refs::capture_invocation_refs
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::ops::Range;
 
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
-use crate::extract::config::refs::{capture_invocation_refs, InvocationSite};
+use crate::extract::config::refs::{capture_invocation_refs, push_artifact_ref, InvocationSite};
 use crate::extract::refs::unquote;
 use crate::extract::Facts;
 use crate::model::{ArtifactRelation, LogosSymbol, RefForm};
 
 /// Which side of the broker arm a captured site is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Side {
     Publish,
     Subscribe,
@@ -63,16 +87,25 @@ where
     let capture_names = query.capture_names();
     let mut publishes: Vec<InvocationSite> = Vec::new();
     let mut subscribes: Vec<InvocationSite> = Vec::new();
+    // The byte range of every topic literal that bound, and every refusal
+    // candidate with the site range it belongs to. Both are collected across the
+    // whole file and reconciled *after* the loop, so the outcome cannot depend on
+    // match order: a `topics = {"a", "b"}` array produces two literal matches and
+    // one slot match for the same site, and the refusal must lose either way.
+    let mut bound: Vec<(Side, Range<usize>)> = Vec::new();
+    let mut candidates: Vec<RefusalCandidate<'_>> = Vec::new();
 
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
     while let Some(m) = matches.next() {
         // One match is one publish or subscribe site: find its topic node, its
-        // side, and (optionally) its message-schema node. The `@_*` predicate
-        // captures are ignored.
+        // side, and (optionally) its message-schema node and its refusal
+        // slot/site pair. The `@_*` predicate captures are ignored.
         let mut side: Option<Side> = None;
         let mut topic_node: Option<Node<'_>> = None;
         let mut schema_node: Option<Node<'_>> = None;
+        let mut slot: Option<(Side, Node<'_>)> = None;
+        let mut site_node: Option<Node<'_>> = None;
         for cap in m.captures {
             match capture_names[cap.index as usize] {
                 "broker.publish.topic" => {
@@ -86,9 +119,25 @@ where
                 "broker.publish.schema" | "broker.subscribe.schema" => {
                     schema_node = Some(cap.node);
                 }
+                // The refusal vocabulary: the topic OPERAND whatever its shape,
+                // plus the site it is deduped by. Both are required — a slot with
+                // no site names nothing to dedup on and is ignored, so a `.scm`
+                // cannot half-adopt the vocabulary.
+                "broker.publish.topic.slot" => slot = Some((Side::Publish, cap.node)),
+                "broker.subscribe.topic.slot" => slot = Some((Side::Subscribe, cap.node)),
+                "broker.publish.site" | "broker.subscribe.site" => site_node = Some(cap.node),
                 _ => {}
             }
         }
+
+        if let (Some((slot_side, slot_node)), Some(site)) = (slot, site_node) {
+            candidates.push(RefusalCandidate {
+                side: slot_side,
+                site: site.byte_range(),
+                node: slot_node,
+            });
+        }
+
         let (Some(side), Some(topic_node)) = (side, topic_node) else {
             continue;
         };
@@ -96,6 +145,11 @@ where
         let Some(topic) = literal_text(topic_node, source) else {
             continue;
         };
+        // Recorded before the enclosing-symbol lookup: a literal whose enclosing
+        // declaration is unknown still binds *nothing*, but it did parse as a
+        // literal, so reporting its site `topic-not-literal` would be a wrong
+        // reason ([NFR-CC-04]).
+        bound.push((side, topic_node.byte_range()));
         // The site is attributed to its enclosing publishing/subscribing symbol.
         let Some(source_symbol) = enclosing(topic_node) else {
             continue;
@@ -138,7 +192,93 @@ where
         subscribes,
         broker_topic_key,
     );
+    emitted += record_refusals(candidates, &bound, source, &enclosing, facts);
     emitted
+}
+
+/// One site whose topic operand was captured but may not be a literal — a
+/// `topic-not-literal` refusal *candidate*, pending the reconcile against what
+/// actually bound.
+struct RefusalCandidate<'t> {
+    side: Side,
+    /// The byte range of the `@broker.*.site` node: the grain a refusal is deduped
+    /// by, and the range an admitted literal must fall inside to cancel it.
+    site: Range<usize>,
+    /// The `@broker.*.topic.slot` node — the operand itself, which supplies the
+    /// enclosing declaration and the reported line.
+    node: Node<'t>,
+}
+
+/// Record one **keyless** broker-arm ledger row per refused site, and return how
+/// many were recorded ([FR-WS-05], [NFR-CC-04], [CR-107]).
+///
+/// A candidate survives iff **no** admitted topic literal of the same side lies
+/// within its site range. That is what makes the array form
+/// (`topics = {"a", "b"}` — two literals, one slot) and the multi-attribute form
+/// report nothing, while a genuinely non-literal operand (`topics = TOPIC`,
+/// `Topics.ORDERS`, `PREFIX + "orders"`) reports once.
+///
+/// Survivors are then deduped to one row per `(side, enclosing declaration, line)`.
+/// The dedup is deliberately coarser than the raw site: a `.scm` may legitimately
+/// capture nested sites for one operand (an attribute pair *and* its argument
+/// list), and the refusal grain promised is one per **site**, never one per pattern
+/// that happened to match it — the same "at most once per registration site"
+/// discipline [`crate::resolve::framework`] applies to `path-not-composed`.
+///
+/// The row's target is **empty**: no topic key is fabricated, not even the
+/// operand's source text. A keyless broker row is inert by contracts that already
+/// exist — [`crate::resolve::topics`] refuses to promote one ("a keyless row is not
+/// a topic"), and the bridge's own key builders refuse it — so a refusal can never
+/// become a `Topic` node or a cross-service edge ([NFR-RA-05]).
+///
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+fn record_refusals<F>(
+    candidates: Vec<RefusalCandidate<'_>>,
+    bound: &[(Side, Range<usize>)],
+    source: &[u8],
+    enclosing: &F,
+    facts: &mut Facts,
+) -> usize
+where
+    F: Fn(Node<'_>) -> Option<LogosSymbol>,
+{
+    let mut seen: HashSet<(Side, String, u32)> = HashSet::new();
+    let mut recorded = 0;
+    for candidate in candidates {
+        // Did anything at this site bind? Then it is not a refusal.
+        if bound.iter().any(|(side, at)| {
+            *side == candidate.side
+                && at.start >= candidate.site.start
+                && at.end <= candidate.site.end
+        }) {
+            continue;
+        }
+        // Defence in depth against a `.scm` that points a slot at a literal it
+        // forgot to also capture as a topic: an operand that IS a literal is not a
+        // `topic-not-literal` refusal, whatever the query said.
+        if candidate.node.kind() == "string_literal" && literal_text(candidate.node, source).is_some()
+        {
+            continue;
+        }
+        let Some(symbol) = enclosing(candidate.node) else {
+            continue; // no enclosing declaration to attribute the refusal to
+        };
+        let line = candidate.node.start_position().row as u32 + 1;
+        if !seen.insert((candidate.side, symbol.as_str().to_string(), line)) {
+            continue; // this site already recorded its one refusal
+        }
+        let relation = match candidate.side {
+            Side::Publish => ArtifactRelation::BrokerPublish,
+            Side::Subscribe => ArtifactRelation::BrokerSubscribe,
+        };
+        if push_artifact_ref(facts, &symbol, "", relation, RefForm::Method, line) {
+            recorded += 1;
+        }
+    }
+    recorded
 }
 
 /// Normalize a captured broker site's slots into the portable topic key two
@@ -336,6 +476,77 @@ fn emit_dynamic(bus: &Bus, payload: &str) {
         }
     }
 
+    /// **[CR-107]'s Rust audit, recorded as a test.** The audit finding is that
+    /// `plugins/rust/queries/brokers.scm` carried **no** character sensitivity of its
+    /// own — the `$`/`{` rule lived in `ArtifactRelation::classify_target`, which is
+    /// language-agnostic, so the Rust arm dropped a `$`- or `{`-bearing topic for the
+    /// *same* reason the Java arm did and is repaired by the *same* change. No Rust
+    /// `.scm` edit was needed for the character class.
+    ///
+    /// This test is the finding's evidence, and the guard that the fix is genuinely
+    /// in the shared layer rather than tuned per language.
+    ///
+    /// Two further audit findings, recorded here because they are decisions not to
+    /// change the file:
+    /// - **the array form was already handled** — the rdkafka slice pattern
+    ///   (`subscribe(&["a", "b"])`) predates this CR and is asserted by
+    ///   [`rdkafka_slice_subscribe_captures_every_topic`];
+    /// - **no refusal slot was added.** The Rust arm keys on bare method verbs with
+    ///   no receiver typing (its own header comment records the resulting
+    ///   false-positive exposure), so a `.slot` pattern would record a
+    ///   `topic-not-literal` refusal for every `channel.send(x)` and
+    ///   `.subscribe(handler)` in an arbitrary codebase — manufacturing a coverage
+    ///   denominator out of ordinary code, which is the failure mode
+    ///   `resolve::framework::drop_non_path_routes` documents on the route side.
+    ///   Refusals are recorded where a site is *identifiable* as a broker site;
+    ///   for Rust that needs receiver scoping first.
+    #[test]
+    fn a_rust_topic_literal_binds_whatever_characters_it_carries() {
+        let src = r#"
+fn consume(bus: &Bus) {
+    bus.subscribe("${env}-orders");
+}
+
+fn consume_braced(bus: &Bus) {
+    bus.subscribe("braces{only}");
+}
+
+fn emit(bus: &Bus, payload: &str) {
+    bus.publish("dollar$only", payload);
+}
+
+fn consume_slice(consumer: &Consumer) {
+    consumer.subscribe(&["${a}", "b{c}"]);
+}
+"#;
+        let facts = extract_rust(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec![
+                "${a}".to_string(),
+                "${env}-orders".to_string(),
+                "braces{only}".to_string(),
+                "b{c}".to_string(),
+            ],
+            "scalar and slice Rust subscribe topics bind whatever they contain: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["dollar$only".to_string()],
+            "the Rust publish side too: {:?}",
+            facts.refs
+        );
+        // And the audit's third finding: no Rust `.scm` slot pattern, so no refusal
+        // row is manufactured for a non-literal operand here.
+        let dynamic = extract_rust("fn emit(bus: &Bus) { bus.publish(TOPIC, 1); }");
+        assert!(
+            dynamic.refs.iter().all(|r| r.relation.is_none()),
+            "the Rust arm records no refusal — see this test's doc comment: {:?}",
+            dynamic.refs
+        );
+    }
+
     /// The rdkafka slice form `consumer.subscribe(&["a", "b"])` captures each
     /// topic in the borrowed array, attributed to the enclosing handler.
     #[test]
@@ -472,6 +683,253 @@ class OrderService {
             "the publish is sourced from its sending method: {}",
             publish.source.as_str()
         );
+    }
+
+    /// **[CR-107] acceptance: the literal-shape table.** One test, every shape a
+    /// real Spring listener writes, asserted as a table so the next character class
+    /// cannot regress silently — plain, dotted, dashed, a property placeholder
+    /// `${x}`, a brace-bearing literal, a `$`-bearing literal, and the multi-topic
+    /// array form. Every one of them is a **static string literal**, so every one
+    /// binds, keyed by the literal's own text.
+    ///
+    /// Before the fix, `dotted`/`dashed`/`plain` bound and the last four did not:
+    /// the drop was `ArtifactRelation::classify_target`'s `$`/`{` character rule,
+    /// not the grammar (the parse tree for `"${x}"` is shape-identical to
+    /// `"orders"` — `string_literal` → `string_fragment` — under the pinned
+    /// `tree-sitter-java`). A single `${…}` case would have left the class untested,
+    /// which is exactly why this is a table.
+    ///
+    /// The negative half — a genuinely non-literal topic refused **and** recorded —
+    /// is [`a_non_literal_topic_is_refused_and_recorded_once_per_site`].
+    ///
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    #[test]
+    fn every_static_topic_literal_shape_is_captured_whatever_characters_it_carries() {
+        // (source fragment, the topic keys it must yield) — the shape table.
+        let cases: &[(&str, &[&str])] = &[
+            (r#"@KafkaListener(topics = "orders")"#, &["orders"]),
+            (
+                r#"@KafkaListener(topics = "dotted.topic.name")"#,
+                &["dotted.topic.name"],
+            ),
+            (r#"@KafkaListener(topics = "has-dash")"#, &["has-dash"]),
+            (
+                r#"@KafkaListener(topics = "${spring.kafka.topics.orders}")"#,
+                &["${spring.kafka.topics.orders}"],
+            ),
+            (r#"@KafkaListener(topics = "braces{only}")"#, &["braces{only}"]),
+            (r#"@KafkaListener(topics = "dollar$only")"#, &["dollar$only"]),
+            // The array form: one declaration, one topic per literal.
+            (
+                r#"@KafkaListener(topics = {"orders", "shipments"})"#,
+                &["orders", "shipments"],
+            ),
+            // The single-value array form real listeners also write.
+            (
+                r#"@KafkaListener({"alpha", "beta"})"#,
+                &["alpha", "beta"],
+            ),
+            // Sibling attributes do not disturb the capture — real listeners carry
+            // a container factory, a group id, an ack mode.
+            (
+                r#"@KafkaListener(topics = "${orders.topic}", containerFactory = KafkaConfig.FACTORY, groupId = "g")"#,
+                &["${orders.topic}"],
+            ),
+            // The other two listener annotations and their own attribute keys.
+            (r#"@RabbitListener(queues = "${q.name}")"#, &["${q.name}"]),
+            (
+                r#"@JmsListener(destination = "dest{0}")"#,
+                &["dest{0}"],
+            ),
+        ];
+
+        for (annotation, want) in cases {
+            let src = format!(
+                "package com.acme;\nclass C {{\n    {annotation}\n    public void handle(String m) {{}}\n}}\n"
+            );
+            let facts = extract_java(&src);
+            let mut expected: Vec<String> = want.iter().map(|t| (*t).to_string()).collect();
+            expected.sort();
+            assert_eq!(
+                targets(&facts, ArtifactRelation::BrokerSubscribe),
+                expected,
+                "`{annotation}` must bind {want:?}: {:?}",
+                facts.refs
+            );
+            // Nothing is refused at a site that bound: no keyless companion row.
+            assert!(
+                !facts.refs.iter().any(|r| {
+                    r.relation == Some(ArtifactRelation::BrokerSubscribe) && r.target.is_empty()
+                }),
+                "`{annotation}` bound, so it records no refusal: {:?}",
+                facts.refs
+            );
+        }
+    }
+
+    /// **The interaction guard, and the regression that motivated it.** Every shape
+    /// in ONE file, extracted in ONE pass — because a per-shape table extracts each
+    /// annotation on its own and therefore cannot see the patterns *compete*.
+    ///
+    /// It caught a real defect during this story. The refusal slot was first written
+    /// as `value: (_)`, which overlaps `value: (string_literal)` on the same node;
+    /// tree-sitter then reported only one of the competing patterns per site, and the
+    /// measured effect was that the **scalar** literal patterns lost their matches
+    /// while the array pattern kept its own. Every shape still passed in isolation,
+    /// so the shape table was green and `topics = "${x}"` had silently stopped
+    /// binding — precisely the "passes the fixtures and misses the class" failure
+    /// [CR-107] §7 names. The `.scm` now enumerates the non-literal operand shapes
+    /// instead of wildcarding them, and this test is what holds that.
+    ///
+    /// So the assertion is deliberately about co-existence: four bound topics from
+    /// three literal-bearing declarations, plus one refusal from the declaration that
+    /// bound nothing, all from a single extraction.
+    #[test]
+    fn every_shape_in_one_file_binds_without_the_patterns_shadowing_each_other() {
+        let src = r#"
+package com.acme;
+class Mixed {
+    @KafkaListener(topics = "${spring.kafka.topics.orders}")
+    public void onOrder(String m) {}
+
+    @KafkaListener(topics = {"plain-one", "plain-two"})
+    public void onBoth(String m) {}
+
+    @KafkaListener(topics = "${archive.topic}", containerFactory = KafkaConfig.FACTORY)
+    public void onArchive(String m) {}
+
+    @KafkaListener(topics = TOPIC)
+    public void onDynamic(String m) {}
+}
+"#;
+        let facts = extract_java(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec![
+                // The refused site's keyless row sorts first.
+                String::new(),
+                "${archive.topic}".to_string(),
+                "${spring.kafka.topics.orders}".to_string(),
+                "plain-one".to_string(),
+                "plain-two".to_string(),
+            ],
+            "scalar, array, multi-attribute and refused sites all co-exist in one \
+             extraction: {:?}",
+            facts.refs
+        );
+        // The refusal belongs to the one declaration that bound nothing — a shape
+        // that binds must never also report a refusal, and vice versa.
+        let refused: Vec<&str> = facts
+            .refs
+            .iter()
+            .filter(|r| {
+                r.relation == Some(ArtifactRelation::BrokerSubscribe) && r.target.is_empty()
+            })
+            .map(|r| r.source.as_str())
+            .collect();
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].contains("onDynamic"), "{refused:?}");
+    }
+
+    /// **[CR-107] acceptance: the array form's cardinality.**
+    /// `topics = {"orders", "shipments"}` is **one** declaration on **two** topics,
+    /// which the `(declaration, topic)` counting contract already covers ([FR-WS-11]) —
+    /// so it yields two subscribe references from one listener method, both
+    /// attributed to that method, and no publish reference at all.
+    #[test]
+    fn an_array_topic_form_yields_one_subscribe_per_literal_from_one_declaration() {
+        let src = r#"
+package com.acme;
+class C {
+    @KafkaListener(topics = {"orders", "shipments"})
+    public void handle(String m) {}
+}
+"#;
+        let facts = extract_java(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["orders".to_string(), "shipments".to_string()],
+            "one declaration on two topics is two (declaration, topic) pairs: {:?}",
+            facts.refs
+        );
+        assert!(
+            targets(&facts, ArtifactRelation::BrokerPublish).is_empty(),
+            "a listener is not a producer — the array form yields no publish: {:?}",
+            facts.refs
+        );
+        // Both are attributed to the one listener method, not the file module: this
+        // is what makes them two `Consumer` nodes off one declaration downstream.
+        let subs: Vec<_> = facts
+            .refs
+            .iter()
+            .filter(|r| r.relation == Some(ArtifactRelation::BrokerSubscribe))
+            .collect();
+        assert_eq!(subs.len(), 2);
+        assert!(
+            subs.iter().all(|r| r.source.as_str().contains("handle")),
+            "each array topic is sourced from its listener method: {subs:?}"
+        );
+    }
+
+    /// **[CR-107] acceptance: the refusal is recorded, not silent.** A topic that is
+    /// genuinely **not** a string literal — a constant reference, a variable, a
+    /// concatenation — is still refused ([NFR-RA-05]): it binds nothing and
+    /// fabricates no topic key. What changes is that it no longer *vanishes*. The
+    /// site leaves one keyless broker-arm ledger row, at most once per site, which
+    /// the [FR-WS-05] coverage tier reports as `topic-not-literal`.
+    ///
+    /// A keyless row is inert everywhere else by an already-documented contract:
+    /// `resolve::topics::broker_refs` refuses an empty target ("a keyless row is not
+    /// a topic — never fabricate one"), so no `Topic`/`Consumer` node is promoted
+    /// from it and no bridge edge can be built on it.
+    #[test]
+    fn a_non_literal_topic_is_refused_and_recorded_once_per_site() {
+        let src = r#"
+package com.acme;
+class C {
+    private static final String TOPIC = "never-captured";
+
+    // A constant reference.
+    @KafkaListener(topics = TOPIC)
+    public void byConstant(String m) {}
+
+    // A field/variable reference through a qualifier.
+    @KafkaListener(topics = Topics.ORDERS)
+    public void byField(String m) {}
+
+    // A concatenation.
+    @KafkaListener(topics = PREFIX + "orders")
+    public void byConcatenation(String m) {}
+}
+"#;
+        let facts = extract_java(src);
+
+        // Nothing bound: no fabricated key, and in particular never the operand's
+        // source text (`TOPIC`, `Topics.ORDERS`) masquerading as a topic name.
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec![String::new(), String::new(), String::new()],
+            "three refused sites, three keyless rows, no fabricated topic: {:?}",
+            facts.refs
+        );
+
+        // One row per refused site, attributed to that site's own method.
+        let mut sources: Vec<&str> = facts
+            .refs
+            .iter()
+            .filter(|r| {
+                r.relation == Some(ArtifactRelation::BrokerSubscribe) && r.target.is_empty()
+            })
+            .map(|r| r.source.as_str())
+            .collect();
+        sources.sort();
+        assert_eq!(sources.len(), 3, "at most once per site: {:?}", facts.refs);
+        for want in ["byConcatenation", "byConstant", "byField"] {
+            assert!(
+                sources.iter().any(|s| s.contains(want)),
+                "the refusal at `{want}` is attributed to it: {sources:?}"
+            );
+        }
     }
 
     /// The single-value annotation form `@KafkaListener("orders")` is captured

@@ -33,6 +33,7 @@ export const REASON_LABEL: Record<UnboundReason, string> = {
   "base-url-runtime": "Base URL resolved at runtime",
   ambiguous: "Two or more providers (ambiguous)",
   "schema-mismatch": "Consumer / provider schema mismatch",
+  "topic-not-literal": "Broker topic is not a static literal",
 };
 
 /** The human label for each relation arm. Unknown arms (a later M-milestone's) are

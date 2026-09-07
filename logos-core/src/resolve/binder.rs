@@ -1453,6 +1453,16 @@ impl Ctx<'_> {
     /// [ADR-26]: ../../../docs/specs/architecture/decisions/ADR-26.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     fn resolve_artifact_name(&self, name: &str, want_kind: Option<NodeKind>) -> Res {
+        // A **keyless** row names nothing and can bind to nothing. The broker arm
+        // records its `topic-not-literal` refusals as keyless ledger rows ([CR-107]),
+        // and this is the gate that keeps one from binding to some artifact node that
+        // happens to carry an empty name — a fabricated edge out of a refusal, which
+        // is the opposite of what recording it is for ([NFR-RA-05]).
+        //
+        // [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+        if name.trim().is_empty() {
+            return Res::NotFound;
+        }
         let Some(all) = self.ix.by_name.get(name) else {
             return Res::NotFound;
         };

@@ -182,6 +182,155 @@ fn broker_coupling_is_promoted_to_topic_producer_and_consumer_nodes() {
     }
 }
 
+/// **[CR-107] top acceptance, end to end.**
+/// `@KafkaListener(topics = "${spring.kafka.topics.orders}")` yields a `Topic` node
+/// **and** a `Consumer` node — the exact statement that was false on every member of
+/// the real 84-member `pec-services` workspace, which reported `topics: []` while 34
+/// files declared Kafka wiring.
+///
+/// Asserted through a real `Engine::index`, not at the capture seam, because the
+/// defect spanned capture (`ArtifactRelation::classify_target`'s `$`/`{` character
+/// rule dropped the reference) and everything downstream of it: with no reference
+/// there was nothing for the promotion pass to promote, so a unit test of either
+/// layer alone would have passed throughout.
+///
+/// The array form is asserted in the same fixture: one declaration on two topics is
+/// two `Topic` nodes and two `Consumer` nodes, which the `(declaration, topic)`
+/// counting contract already covers ([FR-WS-11]) — and **not** two producers.
+///
+/// The topic key is the placeholder text as written. Reducing it to the committed
+/// configured value is [CR-117]'s canonical-identity rule, downstream of this
+/// story's capture path.
+///
+/// [CR-107]: ../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+/// [CR-117]: ../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
+#[test]
+fn placeholder_and_array_listener_topics_are_promoted_to_topic_and_consumer_nodes() {
+    const LISTENERS: &str = r#"
+package com.acme;
+class ArchiveListeners {
+    @KafkaListener(topics = "${spring.kafka.topics.orders}")
+    public void onOrder(String msg) {}
+
+    @KafkaListener(topics = {"plain-one", "plain-two"})
+    public void onBoth(String msg) {}
+
+    @KafkaListener(topics = "${archive.topic}", containerFactory = KafkaConfig.FACTORY)
+    public void onArchive(String msg) {}
+}
+"#;
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/ArchiveListeners.java", LISTENERS);
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.index();
+
+    assert_eq!(
+        names_of(rt, NodeKind::Topic),
+        [
+            "${archive.topic}",
+            "${spring.kafka.topics.orders}",
+            "plain-one",
+            "plain-two"
+        ],
+        "a placeholder literal is a topic key exactly as written, and each array \
+         element is its own topic"
+    );
+    // Four (declaration, topic) pairs over three declarations — and no producer:
+    // a listener is not a publisher, so the array form must not invent one.
+    assert_eq!(
+        names_of(rt, NodeKind::Consumer),
+        [
+            "${archive.topic}",
+            "${spring.kafka.topics.orders}",
+            "plain-one",
+            "plain-two"
+        ],
+        "one consumer per (declaration, topic) pair"
+    );
+    assert!(
+        names_of(rt, NodeKind::Producer).is_empty(),
+        "a listener declares no producer"
+    );
+
+    // Each consumer is joined to its topic by a `Subscribes` edge whose endpoints
+    // really are the kinds they claim — the promotion, not just the node count.
+    let kinds = kinds_by_id(rt);
+    let subscribes = edges_of(rt, EdgeKind::Subscribes);
+    assert_eq!(subscribes.len(), 4, "one Subscribes edge per pair: {subscribes:?}");
+    for (source, target) in &subscribes {
+        assert_eq!(kinds.get(source), Some(&NodeKind::Consumer));
+        assert_eq!(kinds.get(target), Some(&NodeKind::Topic));
+    }
+    assert!(
+        edges_of(rt, EdgeKind::Publishes).is_empty(),
+        "no publish side in this fixture"
+    );
+}
+
+/// **[CR-107], the refusal half, end to end.** A listener whose topic is genuinely
+/// not a literal promotes **nothing** — no `Topic`, no `Consumer`, no fabricated key
+/// out of the operand's source text ([NFR-RA-05]) — while the site does leave a
+/// keyless broker-arm ledger row, which is what the [FR-WS-05] coverage tier reports
+/// as `topic-not-literal` instead of the silence that made the loss invisible
+/// ([NFR-CC-04]).
+///
+/// Both halves matter together: recording the refusal must not become a back door
+/// through which a refused site promotes a node. `resolve::topics::broker_refs`
+/// refuses a keyless row by a contract that predates this change; this test is what
+/// holds that contract to it now that keyless rows actually exist.
+///
+/// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[test]
+fn a_refused_listener_topic_promotes_nothing_but_leaves_a_recorded_refusal() {
+    const REFUSED: &str = r#"
+package com.acme;
+class DynamicListeners {
+    private static final String TOPIC = "never-promoted";
+
+    @KafkaListener(topics = TOPIC)
+    public void byConstant(String msg) {}
+
+    @KafkaListener(topics = "kept")
+    public void byLiteral(String msg) {}
+}
+"#;
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/DynamicListeners.java", REFUSED);
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.index();
+
+    // Only the literal listener promotes. Nothing named `TOPIC` or
+    // `never-promoted` exists — the refusal fabricates no identity.
+    assert_eq!(names_of(rt, NodeKind::Topic), ["kept"]);
+    assert_eq!(names_of(rt, NodeKind::Consumer), ["kept"]);
+
+    // The refusal is on the record: one keyless `broker-subscribe` ledger row,
+    // attributed to the method that refused.
+    let rows = rt
+        .submit_read(|store| {
+            Ok(store
+                .unresolved_refs()?
+                .into_iter()
+                .filter(|r| {
+                    r.payload.as_deref() == Some("broker-subscribe") && r.target.is_empty()
+                })
+                .map(|r| r.source_symbol)
+                .collect::<Vec<_>>())
+        })
+        .expect("read runs");
+    assert_eq!(rows.len(), 1, "one recorded refusal, once per site: {rows:?}");
+    assert!(
+        rows[0].contains("byConstant"),
+        "the refusal is attributed to the refusing method: {rows:?}"
+    );
+}
+
+
 /// Acceptance (3): a repo with **no broker coupling** is byte-for-byte unaffected —
 /// the promotion adds no node, no edge, and (being a pure reconcile over an empty
 /// desired set) writes nothing at all ([FR-WS-11], [NFR-RA-06]).

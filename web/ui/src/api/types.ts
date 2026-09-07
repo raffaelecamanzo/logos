@@ -1018,7 +1018,12 @@ export type UnboundReason =
   | "path-not-composed"
   | "base-url-runtime"
   | "ambiguous"
-  | "schema-mismatch";
+  | "schema-mismatch"
+  /** A broker site's topic operand is not a static string literal, so no topic
+   *  identity exists to match on (CR-107). Note the reason grouping in
+   *  `coverageModel` must keep treating this union as OPEN — the payload may
+   *  carry a reason a later arm added and this build does not know. */
+  | "topic-not-literal";
 
 /** The 3-state display bucket of one reference (FR-WS-05). `ambiguous` is its own
  *  bucket, never folded into `unbound`. */

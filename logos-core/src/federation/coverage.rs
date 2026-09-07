@@ -30,7 +30,7 @@
 
 use serde::Serialize;
 
-use crate::model::{BridgeRole, MatchDiscipline, NodeKind};
+use crate::model::{BridgeNamespace, BridgeRole, MatchDiscipline, NodeKind};
 use crate::resolve::framework::RouteRefusal;
 use crate::resolve::http_client_call::ClientCallRefusal;
 
@@ -70,6 +70,43 @@ pub enum UnboundReason {
     /// The consumer and provider shapes at this key diverge — deferred to a
     /// later invocation arm's schema check ([ADR-54]).
     SchemaMismatch,
+    /// A broker site's topic operand is **not a static string literal** — a
+    /// constant reference, a variable, a concatenation — so no topic identity
+    /// exists to match on and none is fabricated ([NFR-RA-05], [FR-WS-10] AC3).
+    ///
+    /// The broker arm's counterpart to [`PathNotComposed`](UnboundReason::PathNotComposed),
+    /// and the reason that makes the refusal *visible*: before [CR-107] a refused
+    /// topic left no reference, no ledger row and no coverage entry, so a Spring
+    /// estate whose topics are all externalised read exactly like one with no broker
+    /// wiring at all — the sparsity-indistinguishable-from-absence dishonesty
+    /// [NFR-CC-04] forbids. What a captured literal *contains* is not a refusal
+    /// ground: `"${spring.kafka.topics.orders}"` is a static literal and binds.
+    ///
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    TopicNotLiteral,
+}
+
+/// The reason an **unkeyable** invocation reference is reported under, chosen by the
+/// arm's own [`BridgeNamespace`] rather than by a hardcoded default ([ADR-54]).
+///
+/// One stored ledger row that does not reduce to a portable key means different
+/// things per arm, and reporting one arm's word for it across all of them is the
+/// classifier drift this module exists to prevent: an HTTP consumer's template did
+/// not *compose*, a broker site's topic was not a *literal*. Every arm's normalizer
+/// refuses before the ledger, so a row reaching here is either a refusal the arm
+/// deliberately recorded (the broker arm's keyless row, [CR-107]) or a target that
+/// stopped normalizing — both honestly unbound, neither fabricated.
+///
+/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+/// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+fn unkeyable_reason(relation: crate::model::ArtifactRelation) -> UnboundReason {
+    match relation.bridge_namespace() {
+        Some(BridgeNamespace::BrokerTopic) => UnboundReason::TopicNotLiteral,
+        _ => UnboundReason::PathNotComposed,
+    }
 }
 
 impl From<RouteRefusal> for UnboundReason {
@@ -575,6 +612,10 @@ where
     // `(member, consumer)` pairs read from each member's ledger, classified below
     // through the same provider index as the contract-surface consumers.
     let mut inv_consumers: Vec<(String, super::bridge::InvocationRef)> = Vec::new();
+    // Provider-role ledger rows that do not reduce to a portable key. They index no
+    // provider, but they are captured sites and are reported — the broker arm's
+    // recorded `topic-not-literal` refusals arrive here ([CR-107], [NFR-CC-04]).
+    let mut unkeyable_providers: Vec<(String, super::bridge::InvocationRef)> = Vec::new();
     // Ledger-provider endpoints already indexed, so one endpoint is filed once —
     // the collapse `broker_edges` performs before its own fan-out ([NFR-RA-05]).
     let mut ledger_providers: std::collections::HashSet<(PortableKey, String, String)> =
@@ -631,7 +672,15 @@ where
                     // the same way they meet in the bridge's.
                     let Some(key) = consumer_portable_key(reference.relation, &reference.target)
                     else {
-                        continue; // an unkeyable arm contributes no provider
+                        // An unkeyable provider contributes no provider — but it is a
+                        // captured site, so it is *reported* rather than dropped. This
+                        // is where the broker arm's recorded refusal (a keyless
+                        // `@KafkaListener(topics = TOPIC)` row) becomes a
+                        // `topic-not-literal` coverage row: the listener side is the
+                        // provider role, so before [CR-107] it fell out of the tier
+                        // here and the loss was invisible ([NFR-CC-04]).
+                        unkeyable_providers.push((member.clone(), reference));
+                        continue;
                     };
                     // One endpoint per (key, member, symbol) — the SAME collapse
                     // [`super::broker::broker_edges`] applies before its fan-out, and
@@ -730,7 +779,9 @@ where
                 relation,
                 from,
                 CoverageState::Unbound {
-                    reason: UnboundReason::PathNotComposed,
+                    // The arm's own word for "this did not key" — `path-not-composed`
+                    // for a template, `topic-not-literal` for a broker topic ([CR-107]).
+                    reason: unkeyable_reason(consumer.relation),
                 },
                 RowProvenance {
                     providers: ProviderEvidence::Unnamed,
@@ -753,6 +804,34 @@ where
                 },
             );
         }
+    }
+
+    // The recorded refusals on the provider side of an arm ([CR-107]). Reported
+    // after the classified rows so the tally's own ordering is untouched;
+    // `finish` sorts the references by endpoint regardless.
+    for (member, provider) in unkeyable_providers {
+        let relation = provider
+            .relation
+            .bridge_namespace()
+            .map(|ns| ns.relation().to_string())
+            .unwrap_or_else(|| provider.relation.as_str().to_string());
+        tally.record(
+            relation,
+            BridgeEndpoint {
+                member,
+                symbol: provider.symbol,
+            },
+            CoverageState::Unbound {
+                reason: unkeyable_reason(provider.relation),
+            },
+            // A refusal has no provider to name — it never had a key to look one up
+            // with ([CR-118]'s `Unnamed` shape, which is what a `path-not-composed`
+            // row already carries).
+            RowProvenance {
+                providers: ProviderEvidence::Unnamed,
+                intake: BridgeIntake::Invocation,
+            },
+        );
     }
 
     tally.finish(members_read, registry.members().len())
@@ -2674,6 +2753,155 @@ mod tests {
         // the denominator entirely, and 0/0 is reported absent rather than as a
         // perfect score ([NFR-CC-04]).
         assert_eq!(cov.bound_ratio, None);
+    }
+
+    /// **[CR-107] acceptance: a refused topic reaches the payload.** The
+    /// `@KafkaListener(topics = TOPIC)` case. The listener side is the arm's
+    /// **provider** role, so its recorded keyless row used to fall out of this tier
+    /// entirely — no reference, no reason, nothing to distinguish "every topic here
+    /// is externalised" from "there is no broker wiring here" ([NFR-CC-04]). It is
+    /// now one `topic-not-literal` row, and specifically **not**
+    /// `path-not-composed`: that is the HTTP arm's word and reporting it here would
+    /// be the classifier drift this module exists to prevent.
+    ///
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    #[test]
+    fn a_refused_broker_topic_is_reported_topic_not_literal() {
+        reset();
+        // One listener whose topic is a literal, one whose topic was refused. The
+        // keyless row is what `extract::broker` records for the refusal.
+        set_consumers(
+            "svc",
+            vec![
+                broker_subscribe("orders", "local onOrder"),
+                broker_subscribe("", "local byConstant"),
+            ],
+        );
+        set_member("api", vec![]);
+
+        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+
+        let refused: Vec<&ReferenceCoverage> = cov
+            .references
+            .iter()
+            .filter(|r| {
+                r.state
+                    == CoverageState::Unbound {
+                        reason: UnboundReason::TopicNotLiteral,
+                    }
+            })
+            .collect();
+        assert_eq!(
+            refused.len(),
+            1,
+            "the refused listener is one row, the bound one is not: {:?}",
+            cov.references
+        );
+        assert_eq!(refused[0].relation, "broker-topic");
+        assert_eq!(refused[0].from.member, "svc");
+        assert_eq!(refused[0].from.symbol.as_str(), "local byConstant");
+        // It has no provider to name and no intake to stamp — it never had a key to
+        // look one up with, and it bound no edge ([CR-118]'s `Unnamed` shape, which
+        // is exactly what a `path-not-composed` row already carries).
+        assert!(refused[0].to.is_none(), "{:?}", refused[0]);
+        assert!(refused[0].candidates.is_none(), "{:?}", refused[0]);
+        assert!(refused[0].intake.is_none(), "{:?}", refused[0]);
+        assert_eq!(refused[0].bucket, "unbound");
+        // The keyed subscribe indexed a provider and reported nothing itself (a
+        // provider is not a reference), so the refusal is the only row.
+        assert_eq!(cov.references.len(), 1, "{:?}", cov.references);
+        assert_eq!(cov.unbound, 1);
+        assert_eq!(cov.no_provider_in_workspace, 0);
+        assert_eq!(cov.ambiguous, 0);
+        assert_eq!(cov.bound, 0);
+    }
+
+    /// A refused topic indexes **no provider**, so a cross-member publish on a real
+    /// topic cannot bind to it — the refusal is reported, never matched
+    /// ([NFR-RA-05]). Guards the keyless-row gate in `consumer_portable_key`: if a
+    /// keyless row keyed as the empty topic it would sit in the provider index and
+    /// a publish on the empty key would bind to it.
+    #[test]
+    fn a_refused_topic_indexes_no_provider_and_binds_no_publish() {
+        reset();
+        set_consumers("svc", vec![broker_subscribe("", "local byConstant")]);
+        set_consumers("api", vec![broker_publish("", "local emitDynamic")]);
+        set_member("api", vec![]);
+        set_member("svc", vec![]);
+
+        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+
+        assert_eq!(cov.bound, 0, "a refusal binds nothing: {:?}", cov.references);
+        assert_eq!(cov.unbound, 2, "both refusals are reported: {:?}", cov.references);
+        for reference in &cov.references {
+            assert_eq!(
+                reference.state,
+                CoverageState::Unbound {
+                    reason: UnboundReason::TopicNotLiteral
+                },
+                "{reference:?}"
+            );
+        }
+    }
+
+    /// A placeholder topic is a **static literal**, so it keys and binds like any
+    /// other — the coverage half of [CR-107]'s capture fix. A publish and a subscribe
+    /// on `"${spring.kafka.topics.orders}"` meet on that key, and the row is `bound`,
+    /// never `topic-not-literal`.
+    ///
+    /// The key here is the placeholder text as written: reducing it to the committed
+    /// configured value is [CR-117](
+    /// ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md)
+    /// §3.2's canonical-identity rule, which this story does not own.
+    #[test]
+    fn a_placeholder_topic_keys_and_binds_like_any_other_literal() {
+        reset();
+        let topic = "${spring.kafka.topics.orders}";
+        set_consumers("api", vec![broker_publish(topic, "local emit_order")]);
+        set_consumers("svc", vec![broker_subscribe(topic, "local onOrder")]);
+        set_member("api", vec![]);
+        set_member("svc", vec![]);
+
+        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+
+        assert_eq!(
+            cov.bound, 1,
+            "a placeholder literal is a topic identity: {:?}",
+            cov.references
+        );
+        assert_eq!(cov.unbound, 0);
+        assert_eq!(cov.references.len(), 1);
+        assert_eq!(cov.references[0].state, CoverageState::Bound);
+    }
+
+    /// `topic-not-literal` is the **broker** arm's word for an unkeyable row, and
+    /// `path-not-composed` remains the HTTP arm's — chosen by the arm's own
+    /// namespace, not by a shared default. Both render as their FR-WS-05 wire
+    /// tokens.
+    #[test]
+    fn an_unkeyable_row_is_reported_under_its_own_arms_reason() {
+        use crate::model::ArtifactRelation;
+
+        assert_eq!(
+            unkeyable_reason(ArtifactRelation::BrokerSubscribe),
+            UnboundReason::TopicNotLiteral
+        );
+        assert_eq!(
+            unkeyable_reason(ArtifactRelation::BrokerPublish),
+            UnboundReason::TopicNotLiteral
+        );
+        assert_eq!(
+            unkeyable_reason(ArtifactRelation::HttpClientCall),
+            UnboundReason::PathNotComposed
+        );
+        assert_eq!(
+            unkeyable_reason(ArtifactRelation::GrpcCall),
+            UnboundReason::PathNotComposed
+        );
+        assert_eq!(
+            serde_json::to_value(UnboundReason::TopicNotLiteral).unwrap(),
+            "topic-not-literal"
+        );
     }
 
     // ── S-256 / FR-WS-11: the coverage tier and the bridge must not disagree ──

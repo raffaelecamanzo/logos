@@ -86,6 +86,12 @@ pub(super) fn classify(relation: ArtifactRelation, topic_key: &str) -> Option<(P
     if namespace != BridgeNamespace::BrokerTopic {
         return None;
     }
+    // A keyless row is the arm's recorded `topic-not-literal` refusal ([CR-107]),
+    // never a topic: it fans out to nothing and is indexed as nothing, so a refusal
+    // can never become a cross-service edge ([NFR-RA-05]).
+    if topic_key.trim().is_empty() {
+        return None;
+    }
     let role = relation.bridge_role()?;
     Some((PortableKey::broker(topic_key.to_string()), role))
 }

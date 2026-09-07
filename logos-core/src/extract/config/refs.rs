@@ -73,7 +73,7 @@ use crate::plugin::LanguagePlugin;
 ///
 /// [FR-CG-07]: ../../../../docs/specs/requirements/FR-CG-07.md
 /// [ADR-26]: ../../../../docs/specs/architecture/decisions/ADR-26.md
-pub(super) fn push_artifact_ref(
+pub(crate) fn push_artifact_ref(
     facts: &mut Facts,
     source: &LogosSymbol,
     target: &str,
