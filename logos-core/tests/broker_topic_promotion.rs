@@ -944,32 +944,39 @@ class KafkaProducer {
     );
 }
 
-/// **S-370's no-migration criterion, asserted rather than asserted-in-prose.**
+/// **S-370's no-migration criterion — and a LIVE fixture, not a decorative one.**
 ///
-/// This story adds two `.scm` patterns and no schema: the store's
-/// `PRAGMA user_version` is unchanged at the latest embedded migration, the broker
-/// node kinds stay 35/36/37, and a graph with no broker topics is unaffected —
-/// which `a_repo_with_no_broker_topics_is_unaffected` above proves for the whole
-/// pass and which the header form cannot change, since it contributes a reference
-/// only where it matches ([FR-WS-11], [NFR-RA-06]).
+/// This story adds two `.scm` patterns and no schema, so the broker node kinds must
+/// still be exactly the three S-255 migrated in ([FR-WS-11], [NFR-RA-06]). A graph
+/// with no broker topics is unaffected by `a_repo_with_no_broker_topics_is_unaffected`
+/// above, which this story does not touch and which asserts node/edge *identity*
+/// rather than counts.
 ///
-/// The reason to spend a test on values that "obviously" did not change: a `.scm`
-/// edit is the cheapest place in this codebase to accidentally acquire a schema
-/// dependency (a new capture name that needs a column), and the criterion asks for
-/// the guarantee, not for the intent.
+/// **Why there is no `PRAGMA user_version` assertion here.** An earlier version of
+/// this test opened the indexed store and asserted `user_version == 18`. Review
+/// found that made it the **third** copy of that literal — `federation::broker`'s
+/// `the_broker_arm_introduces_no_schema_migration` and `tests/governance.rs` already
+/// own it — so migration 19 would redden three tests, one of them blaming *this*
+/// story with "S-370 is core/plugin-only". The global schema version is not this
+/// story's invariant to encode; "this story adds no migration" is already proven by
+/// the two owners plus the node-kind assertions below.
+///
+/// **Why the fixture is asserted at all.** The same review found the earlier version
+/// passed with the header form **entirely deleted** from `brokers.scm` — the indexed
+/// Java source was decorative, since nothing about its capture was asserted. A test
+/// named for this story that survives the story's removal holds nothing, so the
+/// keyless row is now asserted: the fixture is live, and if the header form ever
+/// stops matching, this fails alongside the promotion test rather than staying green.
 ///
 /// [FR-WS-11]: ../../docs/specs/requirements/FR-WS-11.md
 /// [NFR-RA-06]: ../../docs/specs/requirements/NFR-RA-06.md
 #[test]
-fn the_header_form_adds_no_migration_and_no_new_node_kinds() {
+fn the_header_form_adds_no_new_node_kinds_and_its_fixture_is_live() {
     // The broker kinds are exactly the three S-255 migrated in — S-370 adds none.
     assert_eq!(NodeKind::Topic.as_i32(), 35);
     assert_eq!(NodeKind::Producer.as_i32(), 36);
     assert_eq!(NodeKind::Consumer.as_i32(), 37);
 
-    // A store indexed with the header form present carries the same schema version
-    // as the migration set declares. Read from a real indexed store, so the
-    // assertion covers the store this story's captures actually land in.
     let tmp = TempDir::new().unwrap();
     write(
         tmp.path(),
@@ -987,14 +994,34 @@ class KafkaProducer {
 "#,
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
     engine.index();
-    let version: i64 = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db"))
-        .expect("store opens")
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .expect("user_version reads");
+
+    // No broker NODE is promoted from a refusal — the kinds above stay unused here.
+    for kind in [NodeKind::Topic, NodeKind::Producer, NodeKind::Consumer] {
+        assert!(
+            names_of(rt, kind).is_empty(),
+            "a refused publish promotes no {kind:?} node"
+        );
+    }
+
+    // …and the fixture really did match: one keyless `broker-publish` row. This is
+    // the assertion that makes the test fail if the header form stops matching.
+    let rows = rt
+        .submit_read(|store| {
+            Ok(store
+                .unresolved_refs()?
+                .into_iter()
+                .filter(|r| r.payload.as_deref() == Some("broker-publish") && r.target.is_empty())
+                .map(|r| r.source_symbol)
+                .collect::<Vec<_>>())
+        })
+        .expect("read runs");
     assert_eq!(
-        version, 18,
-        "S-370 is core/plugin-only: no migration, so the store stays at the schema \
-         version the migration set already declared"
+        rows.len(),
+        1,
+        "the header-form fixture must actually be recognised, or this test holds \
+         nothing: {rows:?}"
     );
+    assert!(rows[0].contains("send"), "attributed to the sending method: {rows:?}");
 }

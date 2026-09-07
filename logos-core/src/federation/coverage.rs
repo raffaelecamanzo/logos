@@ -2878,13 +2878,23 @@ mod tests {
     /// **S-370 / [CR-117] acceptance: a refused header-form publish reaches the
     /// [FR-WS-05] payload, once per site.**
     ///
-    /// [CR-107] proved this for the arm's *provider* role (the listener). The
-    /// consumer role travels a different path through this function — the
-    /// `inv_consumers` loop and [`unkeyable_reason`] rather than the
-    /// `unkeyable_providers` bucket — so "the subscribe half works" is not evidence
-    /// for it, and the header-form publish that S-370 recognises is the shape that
-    /// makes that path load-bearing on real source. Before S-370 the arm did not
-    /// recognise the site at all, so there was no row to classify.
+    /// **What is genuinely new here, stated precisely — the path itself is already
+    /// covered.** [CR-107] proved the reason for the arm's *provider* role (the
+    /// listener), and the consumer role does travel a different path through this
+    /// function — the `inv_consumers` loop and [`unkeyable_reason`] rather than the
+    /// `unkeyable_providers` bucket. But that consumer path is **not** untested:
+    /// [`a_refused_topic_indexes_no_provider_and_binds_no_publish`] already drives a
+    /// keyless `broker_publish` through `cross_service_coverage` and asserts
+    /// `TopicNotLiteral`, and [`an_unkeyable_row_is_reported_under_its_own_arms_reason`]
+    /// asserts the relation→reason map directly.
+    ///
+    /// What this test adds is two things neither of those covers: a **bound publish
+    /// coexisting with refusals** (so the refusals cannot be an artefact of a
+    /// fixture in which nothing binds), and the **row shape** a consumer-side
+    /// refusal carries — `to`, `candidates` and `intake` all absent, filed under
+    /// `broker-topic`, bucketed `unbound`. S-370 is what makes the shape reachable
+    /// from real source: before it the arm did not recognise a header-form publish
+    /// at all, so no such row existed to classify.
     ///
     /// Three sites, one keyless each: a method parameter, a configuration-bound
     /// getter and a `@Value`-injected field — the three operand shapes the reference
@@ -2966,24 +2976,9 @@ mod tests {
             assert!(reference.intake.is_none(), "{reference:?}");
         }
 
-        // And specifically NOT the HTTP arm's word — the classifier drift this
-        // module exists to prevent, asserted on the consumer role as [CR-107]
-        // asserted it on the provider role.
-        assert_eq!(
-            cov.references
-                .iter()
-                .filter(|r| r.state
-                    == CoverageState::Unbound {
-                        reason: UnboundReason::PathNotComposed
-                    })
-                .count(),
-            0,
-            "a refused broker topic is never `path-not-composed`: {:?}",
-            cov.references
-        );
-
         // The keyed publish is untouched by the refusals beside it: it binds to the
-        // subscriber's provider row.
+        // subscriber's provider row — the property this fixture exists for, since a
+        // refusal-only fixture cannot show that the two do not interfere.
         assert_eq!(cov.bound, 1, "{:?}", cov.references);
         assert_eq!(cov.unbound, 3, "{:?}", cov.references);
         assert_eq!(cov.no_provider_in_workspace, 0);
