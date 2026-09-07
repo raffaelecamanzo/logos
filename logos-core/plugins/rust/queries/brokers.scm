@@ -20,6 +20,30 @@
 ; edge ([NFR-RA-05]). The `@_*` captures exist only for the method-name
 ; predicates and are ignored by the interpreter.
 ;
+; "Static" is a rule about the operand's grammatical shape, never about the
+; characters the literal carries ([CR-107], [FR-WS-10] AC3): `"${env}-orders"` and
+; `"braces{only}"` are static string literals and are captured, keyed by their own
+; text. A `$`/`{` character rule in `ArtifactRelation::classify_target` used to drop
+; them — that rule was language-agnostic, so this file was affected identically to
+; the Java one and is repaired by the same change, with no edit here. Asserted by
+; `extract::broker::rust_capture_tests::a_rust_topic_literal_binds_whatever_characters_it_carries`.
+;
+; -- Two audit decisions NOT to change this file ([CR-107] §4.4) --------------
+;
+; 1. The multi-topic array form was already handled: the rdkafka slice pattern
+;    below captures each literal in `subscribe(&["a", "b"])`.
+;
+; 2. No `@broker.*.topic.slot` / `@broker.*.site` refusal pattern is added here,
+;    although the interpreter supports the vocabulary and the Java query uses it.
+;    A refusal record is only honest where the site is identifiable as a broker
+;    site, and this query keys on bare method verbs with no receiver typing (see
+;    the false-positive scope note below). A slot pattern would therefore record a
+;    `topic-not-literal` refusal for every `channel.send(x)` and
+;    `.subscribe(handler)` in an arbitrary Rust codebase -- manufacturing a
+;    coverage denominator out of ordinary code, the failure mode
+;    `resolve::framework::drop_non_path_routes` documents on the route side.
+;    Recording Rust refusals needs receiver scoping first.
+;
 ; Vocabulary rationale: Rust has no annotation-based listener idiom (Java's
 ; `@KafkaListener`), so the capture keys on the generic message-bus method verbs
 ; a broker client exposes — `publish`/`send` for a producer, `subscribe` for a

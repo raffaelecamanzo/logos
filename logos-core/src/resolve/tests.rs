@@ -859,6 +859,38 @@ fn artifact_path_ref_binds_to_the_one_config_file_at_the_path() {
     );
 }
 
+/// **[CR-107] never-fabricate guard.** A **keyless** artifact reference names
+/// nothing and must bind to nothing, even when an artifact-layer node in the graph
+/// happens to carry an empty name.
+///
+/// This is the gate the broker arm's recorded `topic-not-literal` refusals rely on.
+/// A refusal is emitted as `(EdgeKind::ArtifactRef, RefForm::Method)` with an empty
+/// target and no declared `target_kind`, which `bind`'s dispatch routes to
+/// `resolve_artifact_name` with `want_kind = None` — where "any artifact-layer node
+/// is a candidate". Without the empty-name guard the sole empty-named node below is
+/// exactly one candidate, so the `exactly_one` rule would bind it: a refusal turned
+/// into an edge, which is the opposite of what recording it is for ([NFR-RA-05]).
+///
+/// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+fn a_keyless_artifact_ref_binds_to_nothing_even_beside_an_empty_named_node() {
+    // One artifact-layer node whose name is empty — the sole candidate an
+    // unguarded empty-name lookup would find and bind.
+    let nodes = vec![
+        cfg_node(SVC_PROTO, "svc.proto", NodeKind::ConfigFile, "svc.proto"),
+        cfg_node(31, "", NodeKind::ProtoMessage, "svc.proto"),
+    ];
+    for target in ["", "   "] {
+        let r = artifact_ref(target, RefForm::Method, ArtifactRelation::BrokerSubscribe);
+        assert_eq!(
+            bind_artifact(&nodes, &r),
+            Outcome::Unbound,
+            "a keyless broker refusal row must never bind (target {target:?})"
+        );
+    }
+}
+
 #[test]
 fn artifact_path_ref_is_unbound_until_its_target_is_indexed() {
     // The late-bind contract (FR-CG-07, FR-RS-03): with the sibling absent the

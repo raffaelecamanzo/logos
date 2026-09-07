@@ -244,6 +244,22 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
     expect(reasonLabel("ambiguous")).toMatch(/Two or more providers/);
   });
 
+  it("labels the broker arm's topic-not-literal refusal (CR-107)", () => {
+    // The reason a refused broker topic now arrives under. It must read as words,
+    // not as a bare wire token, because the whole point of recording the refusal is
+    // that "topics: []" stopped being indistinguishable from "no broker here"
+    // (NFR-CC-04) — and a token nobody can read reintroduces that.
+    expect(reasonLabel("topic-not-literal")).toMatch(/not a static literal/i);
+    // And it groups like any other reason, inside the unbound bucket.
+    const model = buildCoverageDashboard(
+      coverage(unbound("broker-topic", "topic-not-literal", 3)),
+    );
+    expect(model.arms[0].unbound).toBe(3);
+    expect(model.arms[0].reasons).toEqual([
+      { reason: "topic-not-literal", count: 3 },
+    ]);
+  });
+
   // ── CR-118: the provider-identity riders are OPTIONAL ─────────────────────
 
   it("builds the identical dashboard from rows with and without the CR-118 provider fields", () => {

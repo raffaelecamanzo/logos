@@ -774,6 +774,14 @@ pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) ->
         // runs the *same* namespace-generic [`match_indexed`] loop. Keying the
         // publish here still matters: it keeps the coverage tier from reporting a
         // perfectly-composed topic as `path-not-composed`.
+        //
+        // A **keyless** broker row — an empty target — is the arm's recorded
+        // `topic-not-literal` refusal ([CR-107]), not a topic: it is refused here so
+        // it can never index a provider or bind a publish, and the coverage tier
+        // reports it under the arm's own reason. Trimmed, because an all-whitespace
+        // topic is no more of an identity than an absent one (the same test
+        // `broker_topic_key` applies at capture).
+        BridgeNamespace::BrokerTopic if target.trim().is_empty() => None,
         BridgeNamespace::BrokerTopic => Some(PortableKey::broker(target.to_string())),
     }
 }

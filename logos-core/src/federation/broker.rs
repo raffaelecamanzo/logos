@@ -86,6 +86,12 @@ pub(super) fn classify(relation: ArtifactRelation, topic_key: &str) -> Option<(P
     if namespace != BridgeNamespace::BrokerTopic {
         return None;
     }
+    // A keyless row is the arm's recorded `topic-not-literal` refusal ([CR-107]),
+    // never a topic: it fans out to nothing and is indexed as nothing, so a refusal
+    // can never become a cross-service edge ([NFR-RA-05]).
+    if topic_key.trim().is_empty() {
+        return None;
+    }
     let role = relation.bridge_role()?;
     Some((PortableKey::broker(topic_key.to_string()), role))
 }
@@ -174,6 +180,56 @@ mod tests {
             classify(ArtifactRelation::Route, "GET /x").is_none(),
             "a non-broker relation is not this arm's candidate"
         );
+
+        // A **keyless** row is the arm's recorded `topic-not-literal` refusal
+        // ([CR-107]), never a topic, so it classifies to nothing. This guard is on
+        // a live path, not defence in depth: `ContractBridge::compute_edges` builds
+        // `broker_candidates` straight from each member's `invocation_refs()` — the
+        // raw ledger, refusal rows included — and hands them here, bypassing
+        // `consumer_portable_key`'s own keyless gate entirely.
+        //
+        // [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+        for relation in [
+            ArtifactRelation::BrokerPublish,
+            ArtifactRelation::BrokerSubscribe,
+        ] {
+            assert!(classify(relation, "").is_none(), "{}", relation.as_str());
+            assert!(classify(relation, "   ").is_none(), "{}", relation.as_str());
+        }
+    }
+
+    /// **[CR-107] never-fabricate guard.** Two sites whose topics were *refused*
+    /// must not bind to each other. Each leaves a keyless ledger row, and an empty
+    /// key is not an identity two members can meet on — so the fan-out produces
+    /// **no** edge ([NFR-RA-05]).
+    ///
+    /// This pins the consequence rather than the classifier: with `classify`'s
+    /// keyless guard removed, this exact fixture fabricates a real
+    /// `broker-topic` bridge edge from `api/emitDynamic` to `billing/onDynamic` —
+    /// a cross-service coupling asserted between two services that named no topic
+    /// at all. Recording a refusal must never become a way to bind one.
+    #[test]
+    fn keyless_refusal_rows_never_fan_out_an_edge() {
+        assert!(
+            broker_edges([
+                pubc("", "api", "local emitDynamic"),
+                subc("", "billing", "local onDynamic"),
+                subc("   ", "ship", "local onBlank"),
+            ])
+            .is_empty(),
+            "a refused topic is reported, never matched"
+        );
+
+        // And a refusal alongside a real topic leaves the real bind untouched.
+        let edges = broker_edges([
+            pubc("orders", "api", "local pub_orders"),
+            pubc("", "api", "local emitDynamic"),
+            subc("orders", "billing", "local sub_bill"),
+            subc("", "billing", "local onDynamic"),
+        ]);
+        assert_eq!(edges.len(), 1, "only the keyed pair binds: {edges:?}");
+        assert_eq!(edges[0].from.symbol.as_str(), "local pub_orders");
+        assert_eq!(edges[0].to.symbol.as_str(), "local sub_bill");
     }
 
     /// Acceptance (1): a publish on `orders` binds **every** subscribe on

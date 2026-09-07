@@ -4,16 +4,65 @@
 ; BrokerPublish / BrokerSubscribe fan-out arm ([FR-WS-10], [ADR-54]). Capture
 ; vocabulary (interpreted by `extract::broker::capture_broker_invocations`):
 ;
-;   @broker.publish.topic   — a publish site's topic/queue string literal
-;   @broker.subscribe.topic — a subscribe site's topic/queue string literal
+;   @broker.publish.topic        — a publish site's topic/queue string literal
+;   @broker.subscribe.topic      — a subscribe site's topic/queue string literal
+;   @broker.subscribe.topic.slot — a subscribe site's topic OPERAND, literal or not
+;   @broker.subscribe.site       — the site a refusal is attributed to and deduped by
 ;
-; Only a STATIC `(string_literal)` topic is captured. A dynamically-composed
-; topic (a constant reference, a variable, a `"x" + env` expression, a
-; `topics = {…}` array) does not match a `(string_literal)` node, so it produces
-; no capture and stays honestly unbound — never a guessed edge ([NFR-RA-05]).
-; The `@_*` captures exist only for the annotation-/method-name predicates.
+; ── What is captured, and what is refused ────────────────────────────────────
 ;
-; Droppable on disk at `.logos/plugins/java/queries/brokers.scm`.
+; A topic binds iff its operand is a STATIC `(string_literal)`. That is the whole
+; rule, and it is a rule about the operand's *grammatical shape* — never about the
+; characters the literal happens to carry ([FR-WS-10] AC3, [CR-107]). So all of
+;
+;   "orders"   "dotted.topic.name"   "has-dash"
+;   "${spring.kafka.topics.orders}"  "braces{only}"  "dollar$only"
+;
+; are captured, keyed by the literal's own text. The `${…}` property-placeholder
+; form is Spring's *standard* way to write a topic, and it is a static literal like
+; any other; a previous `$`/`{` character rule in `ArtifactRelation::classify_target`
+; dropped every one of them, which is why a real 84-member Spring estate reported an
+; empty topic inventory while 34 files declared Kafka wiring ([CR-107] §2). The topic
+; key is the literal as written; resolving a placeholder against committed
+; configuration is [CR-117] §3.2's canonical-identity rule, not this file's business.
+;
+; A `topics = {"a", "b"}` array is one declaration on N topics: each element is
+; captured as its own topic, which the `(declaration, topic)` counting contract
+; already covers ([FR-WS-11]).
+;
+; A topic operand that is NOT a string literal — a constant reference
+; (`topics = TOPIC`), a field (`Topics.ORDERS`), a concatenation
+; (`PREFIX + "orders"`), a call (`config.topic()`) — is still refused and binds
+; nothing ([NFR-RA-05]). It is no longer *silent*: the `.slot` + `.site` pair records
+; the refusal so it reaches the [FR-WS-05] coverage payload as `topic-not-literal`,
+; once per site.
+;
+; The array and multi-attribute forms never report a refusal, and it is worth being
+; exact about why: NOT because the interpreter cancels their candidate, but because
+; they never produce one. The slot patterns below enumerate non-literal operand
+; shapes, so an `element_value_array_initializer` matches no slot; and
+; `#any-of? @_sub_slot_key` excludes a sibling attribute like `containerFactory`.
+; The interpreter's own site reconcile is the guard for a DROPPABLE query
+; ([FR-PL-04]) that slots an operand another pattern admitted — no query in this
+; repository reaches it.
+;
+; One shape stays deliberately silent: a BLANK literal (`topics = ""` or all
+; whitespace) binds nothing and reports nothing. It matches the binding pattern, so
+; it produces no refusal candidate, and `broker_topic_key` then refuses its empty
+; key. Reporting it would mean slotting `(string_literal)`, which reintroduces the
+; overlap hazard described below for the sake of a shape no real listener writes.
+;
+; The publish side carries NO `.slot` pattern on purpose. `send`/`convertAndSend`/
+; `publish` is a bare method-name predicate, so a slot there would record a refusal
+; for every `send(pojo)` in the codebase — manufacturing a coverage denominator out
+; of ordinary code. Recognising a real publish site by its topic-bearing header form
+; (`MessageBuilder` + `KafkaHeaders.TOPIC`) and recording *its* refusals is
+; [CR-117] / S-370's work.
+;
+; The `@_*` captures exist only for the annotation-/method-name predicates and are
+; ignored by the interpreter.
+;
+; Droppable on disk at `.logos/plugins/java/queries/brokers.scm` ([FR-PL-04]).
 
 ; ── Subscribe: a Spring listener annotation naming a topic/queue via a
 ;    key = "value" attribute — @KafkaListener(topics = "orders"),
@@ -30,6 +79,22 @@
   (#any-of? @_sub_ann "KafkaListener" "RabbitListener" "JmsListener")
   (#any-of? @_sub_key "topics" "queues" "destination" "value"))
 
+; ── Subscribe: the multi-topic array attribute form —
+;    @KafkaListener(topics = {"orders", "shipments"}). One match per element, so
+;    one declaration on N topics yields N subscribe references, all attributed to
+;    the same handler ([FR-WS-11]'s (declaration, topic) grain).
+(method_declaration
+  (modifiers
+    (annotation
+      name: (identifier) @_sub_arr_ann
+      arguments: (annotation_argument_list
+        (element_value_pair
+          key: (identifier) @_sub_arr_key
+          value: (element_value_array_initializer
+            (string_literal) @broker.subscribe.topic)))))
+  (#any-of? @_sub_arr_ann "KafkaListener" "RabbitListener" "JmsListener")
+  (#any-of? @_sub_arr_key "topics" "queues" "destination" "value"))
+
 ; ── Subscribe: the single-value annotation form — @KafkaListener("orders").
 (method_declaration
   (modifiers
@@ -38,6 +103,68 @@
       arguments: (annotation_argument_list
         . (string_literal) @broker.subscribe.topic)))
   (#any-of? @_sub_ann1 "KafkaListener" "RabbitListener" "JmsListener"))
+
+; ── Subscribe: the single-value array form — @KafkaListener({"a", "b"}).
+(method_declaration
+  (modifiers
+    (annotation
+      name: (identifier) @_sub_arr_ann1
+      arguments: (annotation_argument_list
+        . (element_value_array_initializer
+          (string_literal) @broker.subscribe.topic))))
+  (#any-of? @_sub_arr_ann1 "KafkaListener" "RabbitListener" "JmsListener"))
+
+; ── Subscribe REFUSAL slots: a listener whose topic operand is one of the
+;    NON-LITERAL shapes below. The interpreter records a `topic-not-literal`
+;    refusal for a site that captured no `@broker.subscribe.topic`, so the
+;    patterns above decide what binds and these decide only what is *reported*
+;    when nothing did ([FR-WS-05], [NFR-CC-04]). The site capture is the dedup
+;    grain — one attribute (or one single-value argument list) is one site, so an
+;    array of five literals and a five-attribute annotation each refuse at most
+;    once.
+;
+;    The operand shapes are ENUMERATED, never a `(_)` wildcard. A wildcard here
+;    is not merely broad, it is wrong: `value: (_)` overlaps the
+;    `value: (string_literal)` patterns above on the same node, and tree-sitter
+;    then reports only one of the competing patterns per site — measured, it
+;    silently cost the *scalar* literal patterns their matches while the array
+;    pattern kept its own, so `topics = "${x}"` stopped binding as soon as the
+;    refusal slot was added. An enumeration cannot overlap a literal, so the two
+;    concerns stay independent.
+;
+;    The four shapes are exactly [CR-107]'s named cases: a constant reference
+;    (`TOPIC`), a qualified field (`Topics.ORDERS`), a concatenation
+;    (`PREFIX + "orders"`), and a call (`config.topic()`). An operand of some
+;    other shape is simply not reported — the pre-[CR-107] behaviour, never a
+;    mis-captured topic.
+(method_declaration
+  (modifiers
+    (annotation
+      name: (identifier) @_sub_slot_ann
+      arguments: (annotation_argument_list
+        (element_value_pair
+          key: (identifier) @_sub_slot_key
+          value: [
+            (identifier)
+            (field_access)
+            (binary_expression)
+            (method_invocation)
+          ] @broker.subscribe.topic.slot) @broker.subscribe.site)))
+  (#any-of? @_sub_slot_ann "KafkaListener" "RabbitListener" "JmsListener")
+  (#any-of? @_sub_slot_key "topics" "queues" "destination" "value"))
+
+(method_declaration
+  (modifiers
+    (annotation
+      name: (identifier) @_sub_slot_ann1
+      arguments: (annotation_argument_list
+        . [
+          (identifier)
+          (field_access)
+          (binary_expression)
+          (method_invocation)
+        ] @broker.subscribe.topic.slot) @broker.subscribe.site))
+  (#any-of? @_sub_slot_ann1 "KafkaListener" "RabbitListener" "JmsListener"))
 
 ; ── Publish: a broker-template send whose first argument is a topic string
 ;    literal — kafkaTemplate.send("orders", payload),
