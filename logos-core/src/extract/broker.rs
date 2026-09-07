@@ -1046,6 +1046,123 @@ class C {
         );
     }
 
+    /// The **other two listener annotations'** array forms. The array patterns'
+    /// `#any-of?` predicates cover `@RabbitListener`/`@JmsListener` and all four
+    /// attribute keys, but the shape table exercises only the Kafka array — so
+    /// deleting an array pattern is caught while *narrowing its predicate lists* is
+    /// not. This closes that.
+    #[test]
+    fn rabbit_and_jms_array_attribute_forms_capture_every_element() {
+        let src = r#"
+package com.acme;
+class C {
+    @RabbitListener(queues = {"${q.a}", "q-b"})
+    public void onQueue(String m) {}
+
+    @JmsListener(destination = {"d{0}", "d$1"})
+    public void onDestination(String m) {}
+}
+"#;
+        let facts = extract_java(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec![
+                "${q.a}".to_string(),
+                "d$1".to_string(),
+                "d{0}".to_string(),
+                "q-b".to_string(),
+            ],
+            "every element of a Rabbit/JMS array binds, characters and all: {:?}",
+            facts.refs
+        );
+    }
+
+    /// A **blank** topic literal is deliberately silent, and this pins that choice
+    /// so it is a decision on the record rather than an accident.
+    ///
+    /// `topics = ""` matches the *binding* pattern — it is a `(string_literal)` —
+    /// so it produces no refusal candidate, and `broker_topic_key` then refuses its
+    /// empty key. The result is a site that reports nothing, which is the shape of
+    /// silence this story otherwise removes ([NFR-CC-04]).
+    ///
+    /// Recording it would mean adding `(string_literal)` to the slot enumeration,
+    /// which reintroduces exactly the pattern overlap that cost this story its
+    /// scalar-literal matches once already (see
+    /// [`every_shape_in_one_file_binds_without_the_patterns_shadowing_each_other`]),
+    /// in exchange for a shape no real listener writes. If a later story does want
+    /// it, the hook is `literal_text` returning `None` — not a wider slot pattern.
+    #[test]
+    fn a_blank_topic_literal_binds_nothing_and_is_deliberately_not_recorded() {
+        let src = r#"
+package com.acme;
+class C {
+    @KafkaListener(topics = "")
+    public void onEmpty(String m) {}
+
+    @KafkaListener(topics = "   ")
+    public void onBlank(String m) {}
+
+    @KafkaListener(topics = "kept")
+    public void onKept(String m) {}
+}
+"#;
+        let facts = extract_java(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["kept".to_string()],
+            "a blank literal neither binds nor records; only the real topic does: {:?}",
+            facts.refs
+        );
+    }
+
+    /// Refusals are attributed per **declaration**, so two refused listeners that
+    /// share a source line are two rows, and a refusal inside a nested class is
+    /// attributed to the nested method rather than to the outer class.
+    ///
+    /// The per-site dedup keys on `(side, symbol, line)`, so the same-line pair is
+    /// the case that would collapse if the symbol were ever dropped from that key —
+    /// which is what makes it worth asserting rather than assuming.
+    #[test]
+    fn refusals_are_attributed_per_declaration_not_per_line() {
+        let src = r#"
+package com.acme;
+class Outer {
+    @KafkaListener(topics = A) public void m1(String m) {} @KafkaListener(topics = B) public void m2(String m) {}
+
+    class Inner {
+        @KafkaListener(topics = C)
+        public void onNested(String m) {}
+    }
+}
+"#;
+        let facts = extract_java(src);
+        let mut sources: Vec<&str> = facts
+            .refs
+            .iter()
+            .filter(|r| {
+                r.relation == Some(ArtifactRelation::BrokerSubscribe) && r.target.is_empty()
+            })
+            .map(|r| r.source.as_str())
+            .collect();
+        sources.sort();
+        assert_eq!(
+            sources.len(),
+            3,
+            "two same-line declarations and one nested one are three sites: {sources:?}"
+        );
+        for want in ["m1", "m2", "onNested"] {
+            assert!(
+                sources.iter().any(|s| s.contains(want)),
+                "the refusal at `{want}` is attributed to it: {sources:?}"
+            );
+        }
+        // The nested one is attributed inside `Inner`, not to the outer class.
+        assert!(
+            sources.iter().any(|s| s.contains("Inner") && s.contains("onNested")),
+            "the nested refusal names its own enclosing declaration: {sources:?}"
+        );
+    }
+
     /// **[CR-107] acceptance: the refusal is recorded, not silent.** A topic that is
     /// genuinely **not** a string literal — a constant reference, a variable, a
     /// concatenation — is still refused ([NFR-RA-05]): it binds nothing and
@@ -1075,6 +1192,11 @@ class C {
     // A concatenation.
     @KafkaListener(topics = PREFIX + "orders")
     public void byConcatenation(String m) {}
+
+    // A call. The fourth shape the `.scm` enumerates — asserted because deleting
+    // `(method_invocation)` from both slot patterns was otherwise undetectable.
+    @KafkaListener(topics = config.topic())
+    public void byCall(String m) {}
 }
 "#;
         let facts = extract_java(src);
@@ -1083,8 +1205,8 @@ class C {
         // source text (`TOPIC`, `Topics.ORDERS`) masquerading as a topic name.
         assert_eq!(
             targets(&facts, ArtifactRelation::BrokerSubscribe),
-            vec![String::new(), String::new(), String::new()],
-            "three refused sites, three keyless rows, no fabricated topic: {:?}",
+            vec![String::new(), String::new(), String::new(), String::new()],
+            "four refused sites, four keyless rows, no fabricated topic: {:?}",
             facts.refs
         );
 
@@ -1098,8 +1220,8 @@ class C {
             .map(|r| r.source.as_str())
             .collect();
         sources.sort();
-        assert_eq!(sources.len(), 3, "at most once per site: {:?}", facts.refs);
-        for want in ["byConcatenation", "byConstant", "byField"] {
+        assert_eq!(sources.len(), 4, "at most once per site: {:?}", facts.refs);
+        for want in ["byCall", "byConcatenation", "byConstant", "byField"] {
             assert!(
                 sources.iter().any(|s| s.contains(want)),
                 "the refusal at `{want}` is attributed to it: {sources:?}"
