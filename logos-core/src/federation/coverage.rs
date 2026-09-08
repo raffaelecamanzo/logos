@@ -45,7 +45,7 @@ use super::registry::{EngineRegistry, MemberEngine};
 /// **Every variant is a reason some arm reaches from an index run.**
 /// `BaseUrlRuntime` was the one exception until S-374: it is the coverage word
 /// for [ADR-54]'s base-URL-composition accuracy ceiling, and the HTTP
-/// client-call arm now records one keyless ledger row per call site it declines,
+/// client-call arm now records one keyless ledger row per declining declaration,
 /// which this tier reports under it, via [`client_call_refusal`] and the
 /// `From<ClientCallRefusal>` impl below. It is no longer forward-declared
 /// vocabulary.

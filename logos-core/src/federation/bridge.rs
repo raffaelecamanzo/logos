@@ -1972,7 +1972,7 @@ mod tests {
 
     /// **S-374 never-fabricate guard: a recorded client-call refusal is not a key.**
     ///
-    /// The HTTP arm now writes one **keyless** ledger row per declined call site
+    /// The HTTP arm now writes one **keyless** ledger row per declining declaration
     /// ([CR-120]), and `compute_edges` reads the raw ledger — refusal rows
     /// included — so this is the gate standing between "the refusal was recorded"
     /// and "the refusal bound something". The broker arm needed the same guard in

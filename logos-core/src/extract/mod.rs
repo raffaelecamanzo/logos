@@ -930,7 +930,8 @@ fn capture_http_client_call_arm(
         crate::resolve::http_client_call::render_client_call_target,
     );
     // The refused half, through the SAME recorder the broker arm uses (S-370) —
-    // one keyless row per declined site, reconciled against what bound and
+    // one keyless row per declining declaration, reconciled against what the arm
+    // resolved and
     // deduped per `(relation, declaration, line)`. The mechanism is documented
     // once, on `record_refusals`.
     crate::extract::config::record_refusals(
