@@ -21,8 +21,23 @@ use serde::Serialize;
 pub struct RelationCoverage {
     /// References of this relation class currently bound to an edge.
     pub bound: u64,
-    /// References of this relation class persisted for retry — never fabricated
+    /// References of this relation class not bound to an edge — never fabricated
     /// ([NFR-RA-05]).
+    ///
+    /// **Two populations, and the difference is not visible here.** Most rows are
+    /// persisted for retry: a genuine workspace-relative miss that a later sync
+    /// may bind. An invocation arm's **recorded refusal** is not — a keyless row
+    /// (empty target) the arm wrote to report a site it declined ([CR-107] on the
+    /// broker arm, [CR-120] on the HTTP client-call arm) can never bind, by
+    /// construction. It is counted here because it *is* an unbound reference and
+    /// hiding it would be the [NFR-CC-04] failure the refusal ledger exists to
+    /// correct; it is named here because "persisted for retry" is not true of it.
+    /// The reason each refusal carries is reported by the [FR-WS-05] coverage
+    /// tier, not by this count.
+    ///
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     pub unresolved: u64,
 }
 
@@ -38,7 +53,9 @@ pub struct ResolutionStats {
     /// References currently bound to an edge.
     pub refs_resolved: u64,
     /// References that could not be bound — persisted and retried each sync
-    /// (FR-RS-03, NFR-RA-05).
+    /// (FR-RS-03, NFR-RA-05), **except an invocation arm's recorded refusals**,
+    /// which are unbindable by construction and are counted rather than hidden.
+    /// See [`RelationCoverage::unresolved`], which states that split once.
     pub refs_unresolved: u64,
     /// Edges actually inserted by this run (`0` for a pure coverage read).
     pub edges_created: u64,
