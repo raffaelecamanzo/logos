@@ -31,7 +31,6 @@
 use serde::Serialize;
 
 use crate::model::{BridgeNamespace, BridgeRole, MatchDiscipline, NodeKind};
-use crate::resolve::framework::RouteRefusal;
 use crate::resolve::http_client_call::ClientCallRefusal;
 
 use super::bridge::{
@@ -43,15 +42,29 @@ use super::registry::{EngineRegistry, MemberEngine};
 
 /// Why one cross-boundary reference did not bind ([FR-WS-05], [ADR-53]).
 ///
-/// `BaseUrlRuntime` and `SchemaMismatch` are forward-declared vocabulary for
-/// the gRPC/broker/GraphQL invocation arms ([ADR-54]) — the bridge only
-/// resolves the HTTP key in this story, so this classifier never emits them
-/// yet; they exist now so those arms extend the same reason enum rather than
-/// growing a second one.
+/// **Every variant is a reason some arm can reach.** `BaseUrlRuntime` is the
+/// one that is not reached *yet*: it is the coverage word for [ADR-54]'s
+/// base-URL-composition accuracy ceiling, and S-374 gives it a production
+/// producer by having the HTTP client-call arm record the sites it declines.
+/// It is forward-declared for a named arm that ships in this same increment,
+/// not held open for an arm nobody has designed.
+///
+/// A `SchemaMismatch` variant used to sit here, described as forward-declared
+/// vocabulary for "the gRPC/broker/GraphQL invocation arms ([ADR-54])". S-378
+/// removed it: [ADR-54] defines no GraphQL arm and no schema check anywhere —
+/// it enumerates exactly three accuracy ceilings (base-URL composition,
+/// un-joined route prefixes, dynamic topics), each of which already has its
+/// own variant above. So the variant was not deferred vocabulary awaiting its
+/// arm; it was vocabulary no decision in this repository ever anticipated, and
+/// a reason the payload can never carry is the advertised-but-empty capability
+/// [NFR-CC-04] disfavours. Re-adding it is additive and needs no migration
+/// ([CR-120] §7), so the schema arm that one day wants it loses nothing.
 ///
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UnboundReason {
@@ -62,14 +75,13 @@ pub enum UnboundReason {
     /// (e.g. a catch-all route) — never approximately matched ([NFR-RA-05]).
     PathNotComposed,
     /// The provider's address is resolved only at runtime (a dynamic base
-    /// URL) — deferred to a later invocation arm ([ADR-54]).
+    /// URL) — [ADR-54]'s base-URL-composition accuracy ceiling. Gains a
+    /// production producer once S-374 lands the HTTP client-call arm's refusal
+    /// ledger; **no production path constructs it today**.
     BaseUrlRuntime,
     /// Two or more providers expose the same key across the workspace — never
     /// fabricated ([NFR-RA-05]).
     Ambiguous,
-    /// The consumer and provider shapes at this key diverge — deferred to a
-    /// later invocation arm's schema check ([ADR-54]).
-    SchemaMismatch,
     /// A broker site's topic operand is **not a static string literal** — a
     /// constant reference, a variable, a concatenation — so no topic identity
     /// exists to match on and none is fabricated ([NFR-RA-05], [FR-WS-10] AC3).
@@ -150,37 +162,54 @@ fn arm_relation(relation: crate::model::ArtifactRelation) -> String {
         .unwrap_or_else(|| relation.as_str().to_string())
 }
 
-impl From<RouteRefusal> for UnboundReason {
-    /// Align the framework pass's composition refusal ([`RouteRefusal`], S-329)
-    /// with the shared coverage vocabulary: a route refused for an unreadable
-    /// class-level prefix belongs under the *same* reason this tier already
-    /// reports for a template it could not reduce, so the two sides of one
-    /// endpoint never disagree about the word for it.
-    ///
-    /// **This is vocabulary, not yet a report.** Like the [`ClientCallRefusal`]
-    /// mapping below — whose production sites construct the variant directly —
-    /// nothing calls this at runtime today. A refused registration promotes no
-    /// `route` node, so this tier sees no provider to label and a consumer
-    /// naming that endpoint reads `no-provider-in-workspace`. Emitting
-    /// `path-not-composed` for it needs the refusal to leave a ledger trace the
-    /// framework pass does not persist; [FR-FW-05](
-    /// ../../../docs/specs/requirements/FR-FW-05.md)'s "the resulting reference
-    /// reports `path-not-composed`" is therefore not met by this impl alone.
-    fn from(refusal: RouteRefusal) -> Self {
-        match refusal {
-            RouteRefusal::PathNotComposed => UnboundReason::PathNotComposed,
-        }
-    }
-}
+// ── the route-composition refusal has no mapping here, by construction ──────
+//
+// An `impl From<RouteRefusal> for UnboundReason` used to sit at this point,
+// mapping the framework pass's composition refusal onto `PathNotComposed`. It
+// had no runtime caller and its own doc comment said so; S-378 removed it, and
+// the removal is structural rather than tidying.
+//
+// A `RouteRefusal` is a provider-side event: a route *registration* the
+// framework pass declined to promote. This tier classifies consumer-side
+// references, so a refused registration produces no row here for any reason to
+// label — a consumer naming that endpoint reads `no-provider-in-workspace`, the
+// bucket ADR-53 deliberately holds outside the ratio denominator. That is what
+// makes it unlike the `ClientCallRefusal` mapping below, which S-374 makes
+// live: a declined *call site* is consumer-side, so it has a row.
+// `a_registration_that_promoted_no_route_reads_no_provider_not_path_not_composed`
+// in this file's tests pins that classification.
+//
+// What the framework pass reports instead — the per-run
+// `FrameworkStats::routes_not_composed` count — and why the comment removed here
+// misquoted FR-FW-05 to claim otherwise, is recorded once, on the `RouteRefusal`
+// enum in `resolve/framework.rs`. That is where the statistic is produced, and
+// this file no longer imports the type; a second copy of the argument here is
+// how the two would drift.
 
 impl From<ClientCallRefusal> for UnboundReason {
     /// Map the HTTP client-call arm's refusal ([`ClientCallRefusal`], S-252) onto
     /// the shared coverage vocabulary — so a call the arm's normalizer refused
     /// (contributing no reference, [FR-WS-08]) surfaces under the *same* reason
-    /// bucket the read-model reports for the composable cases. This is the point
-    /// where "the normalizer returned `None`" becomes an advisory coverage reason.
+    /// bucket the read-model reports for the composable cases. This is where
+    /// "the normalizer returned `None`" *will* become an advisory coverage
+    /// reason.
+    ///
+    /// **Not yet a report: nothing calls this at runtime today.** The refusal
+    /// has to reach a ledger row before this tier can label it, and S-374
+    /// supplies exactly that — a keyless `unresolved_refs` row per declined
+    /// call site. Until it lands, [FR-WS-08]'s surfacing promise is unmet and
+    /// this impl is reachable only from its own tests.
+    ///
+    /// This qualifier used to live on the `From<RouteRefusal>` impl above,
+    /// which said "Like the [`ClientCallRefusal`] mapping below … nothing calls
+    /// this at runtime today" and so disclosed the fact for *both* mappings.
+    /// S-378 removed that impl, which would have left this one presenting an
+    /// unbuilt capability as fact — the honest-absence failure [NFR-CC-04]
+    /// disfavours — so the disclosure is restated here, where it now belongs
+    /// alone.
     ///
     /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     fn from(refusal: ClientCallRefusal) -> Self {
         match refusal {
             ClientCallRefusal::BaseUrlRuntime => UnboundReason::BaseUrlRuntime,
@@ -2615,8 +2644,10 @@ mod tests {
     /// Acceptance (2): the HTTP arm's refusals map onto the coverage vocabulary —
     /// a base-URL-composed call is `base-url-runtime`, a non-normalizable one is
     /// `path-not-composed`. This is the reason a call the normalizer refused (and
-    /// therefore left out of the ledger) is reported under, tying the arm's
-    /// `None` render to the coverage reason enum.
+    /// therefore left out of the ledger) *will be* reported under, tying the arm's
+    /// `None` render to the coverage reason enum — the mapping is pinned here, but
+    /// no production path reaches it until S-374 records the refusal (see the
+    /// impl's own note).
     #[test]
     fn client_call_refusals_map_to_the_coverage_reasons() {
         assert_eq!(
@@ -2638,24 +2669,64 @@ mod tests {
         );
     }
 
-    /// The framework pass's composition refusal ([FR-FW-05]) lands in the
-    /// *same* bucket as the consumer-side one above, so the two sides of one
-    /// endpoint never disagree about the word for it. This pins the
-    /// **vocabulary** only — see the impl's own note: no production path emits
-    /// it yet, because a refused registration promotes no provider for this
-    /// tier to label.
+    /// **The route-composition refusal has no mapping onto this vocabulary, and
+    /// that is the assertion.**
     ///
+    /// This test replaces `route_composition_refusals_map_to_the_same_coverage_reason`,
+    /// which pinned an `impl From<RouteRefusal> for UnboundReason` that had no
+    /// runtime caller (S-378, [CR-120]) — the test itself was the only caller of the
+    /// code it covered, which is how dead code stays compiling and reads as coverage.
+    ///
+    /// **What replaces it is the fact that made the mapping unnecessary**, not an
+    /// assertion that the impl is absent. Rust has no stable way to say a trait is
+    /// *not* implemented, and a test dressed up to look like it could would be the
+    /// same class of defect as the doc comment this story corrects. So nothing here
+    /// mechanically prevents the mapping being re-added; what is recorded is the
+    /// reason re-adding it would be wrong, in a form that fails if the reason ever
+    /// stops being true.
+    ///
+    /// A refused registration promotes **no `route` node**, so the provider member
+    /// carries nothing at that key. That is reproduced here exactly: `web` names
+    /// `GET /v1/users` and `api` holds an unrelated route, which is
+    /// indistinguishable at this tier from `api` having refused to compose
+    /// `/v1/users`. The consumer is reported `no-provider-in-workspace` — the
+    /// bucket [ADR-53] holds outside the ratio denominator — and **not**
+    /// `path-not-composed`. There is therefore no row a `RouteRefusal` mapping
+    /// could ever have labelled, which is why removing it changes no output.
+    ///
+    /// The grain [FR-FW-05] actually asks for — `FrameworkStats::routes_not_composed`
+    /// — is pinned from a real index run by
+    /// `spring_non_literal_prefix_promotes_no_route_and_is_counted` in
+    /// `logos-core/tests/multilang.rs` (and its Kotlin twin). The consumer-side
+    /// mapping that survives is pinned by
+    /// `client_call_refusals_map_to_the_coverage_reasons` two functions above.
+    /// Neither is re-asserted here: mirroring an existing assertion into a second
+    /// place is how the two copies later disagree.
+    ///
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
     /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
     #[test]
-    fn route_composition_refusals_map_to_the_same_coverage_reason() {
+    fn a_registration_that_promoted_no_route_reads_no_provider_not_path_not_composed() {
+        reset();
+        set_member("web", vec![op("GET /v1/users", "local op_list")]);
+        // What a refused registration leaves behind: the member is present and
+        // indexed, and simply has no `route` node at the consumer's key.
+        set_member("api", vec![route("GET /v1/health", "local route_health")]);
+
+        let cov = cross_service_coverage(&registry(&["web", "api"]));
+
+        assert_eq!(cov.references.len(), 1, "{:?}", cov.references);
         assert_eq!(
-            UnboundReason::from(RouteRefusal::PathNotComposed),
-            UnboundReason::PathNotComposed
+            cov.references[0].state,
+            CoverageState::Unbound {
+                reason: UnboundReason::NoProviderInWorkspace
+            },
+            "a refused registration leaves no provider to label, so this tier \
+             reports no-provider-in-workspace and never path-not-composed"
         );
-        assert_eq!(
-            UnboundReason::from(RouteRefusal::PathNotComposed),
-            UnboundReason::from(ClientCallRefusal::PathNotComposed),
-        );
+        assert_eq!(cov.no_provider_in_workspace, 1);
+        assert_eq!(cov.bound, 0);
     }
 
     // ── CR-109 / S-349: wildcard-method matching with exact-method precedence ──
@@ -3163,11 +3234,14 @@ mod tests {
     /// reason fails to compile here until it is classified, and then fails this
     /// assertion until it is documented. Appending one entry cannot satisfy it.
     ///
-    /// `docs/howto/commands.md` is tracked in this repository. `docs/specs/` is a
-    /// symlink into the separate docs repository, so its absence is tolerated (a
-    /// vendored or packaged checkout has no `docs/specs`) while its presence is
-    /// checked — the one thing never done is passing silently on a file that *is*
-    /// readable and *is* missing the token.
+    /// Which files count as surfaces, and how a missing `docs/specs` symlink is
+    /// treated, live in [`readable_reason_surfaces`] — shared with the removal
+    /// proof beside it so the two halves cannot cover different file sets.
+    ///
+    /// **This guard covers only one direction.** It cannot notice a token a surface
+    /// still enumerates after the variant behind it is *removed*, because a closed
+    /// list stops mentioning what it no longer contains — hence
+    /// [`the_removed_schema_mismatch_reason_is_absent_from_every_surface`].
     ///
     /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
     #[test]
@@ -3180,18 +3254,16 @@ mod tests {
                 UnboundReason::PathNotComposed => "path-not-composed",
                 UnboundReason::BaseUrlRuntime => "base-url-runtime",
                 UnboundReason::Ambiguous => "ambiguous",
-                UnboundReason::SchemaMismatch => "schema-mismatch",
                 UnboundReason::TopicNotLiteral => "topic-not-literal",
             }
         }
         /// Every variant. The fixed length is the second half of the guard: adding a
         /// variant without extending this fails to compile.
-        const ALL: [UnboundReason; 6] = [
+        const ALL: [UnboundReason; 5] = [
             UnboundReason::NoProviderInWorkspace,
             UnboundReason::PathNotComposed,
             UnboundReason::BaseUrlRuntime,
             UnboundReason::Ambiguous,
-            UnboundReason::SchemaMismatch,
             UnboundReason::TopicNotLiteral,
         ];
 
@@ -3205,34 +3277,211 @@ mod tests {
             );
         }
 
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("logos-core sits under the repository root");
-        let surfaces = [
-            // (path, tracked in THIS repository)
-            ("docs/howto/commands.md", true),
-            ("docs/specs/frontend-design.md", false),
-            ("web/ui/src/api/types.ts", true),
-            ("web/ui/src/views/workspace/coverageModel.ts", true),
-        ];
-        for (rel, tracked_here) in surfaces {
-            let path = repo.join(rel);
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                assert!(
-                    !tracked_here,
-                    "{rel} is tracked in this repository and must be readable"
-                );
+        /// Is `token` present as a *reason token* rather than as an ordinary word?
+        ///
+        /// Bare substring matching made one arm of this guard unfalsifiable.
+        /// `ambiguous` is not only a reason: it is also the `CoverageState` tag, the
+        /// TypeScript `CoverageBucket` member, and an English word these surfaces
+        /// use freely ("bound/ambiguous/unbound", `ambiguous-candidate`). So
+        /// `contains("ambiguous")` could not fail, and dropping `Ambiguous` from a
+        /// surface's enumeration would have gone unnoticed — the one token of the
+        /// five with that problem.
+        ///
+        /// So the form required is an *enumeration* shape, not merely a delimited
+        /// one: a markdown backtick, a union arm `| "token"`, or a map key
+        /// `token:` / `"token":`. A plain `"token"` is deliberately **not**
+        /// enough — `coverageModel.ts` contains `ref.bucket === "ambiguous"`, a
+        /// bucket comparison, and accepting that left the arm exactly as
+        /// unfalsifiable as the bare substring it replaced.
+        ///
+        /// # `ambiguous` on the two `web/ui` surfaces is still not falsifiable
+        ///
+        /// Stated rather than left implied, because a guard that looks stronger
+        /// than it is, is the defect this story exists to remove. `ambiguous` is
+        /// the one wire word shared by two enums: `UnboundReason::Ambiguous` *and*
+        /// the 3-state `CoverageBucket`/`CoverageState` tag. So `types.ts` supplies
+        /// `| "ambiguous"` from `CoverageBucket` (`"bound" | "ambiguous" |
+        /// "unbound"`) and `coverageModel.ts` supplies `ambiguous:` from its
+        /// counter fields, whatever the reason union and the label map say. Deleting
+        /// the real reason entry from either file was tried and the guard still
+        /// passed. No textual check can separate the two meanings there; only
+        /// parsing the declarations could, which is more machinery than an
+        /// enumeration mirror is worth.
+        ///
+        /// The tightening still earns its place: the other four tokens are now
+        /// genuinely checked on all six surfaces (each fails when removed), and the
+        /// pure-prose loophole is closed on the markdown surfaces — where
+        /// `ambiguous` *is* falsifiable, since they write it in backticks.
+        fn enumerated(text: &str, token: &str) -> bool {
+            text.contains(&format!("`{token}`"))
+                || text.contains(&format!("| \"{token}\""))
+                || text.contains(&format!("\"{token}\":"))
+                || text.contains(&format!("\n  {token}:"))
+        }
+
+        for (rel, text, enumerates_all) in readable_reason_surfaces() {
+            if !enumerates_all {
                 continue;
-            };
+            }
             for reason in ALL {
                 assert!(
-                    text.contains(wire(reason)),
+                    enumerated(&text, wire(reason)),
                     "{rel} enumerates the unbound reasons but does not mention \
-                     `{}` — a reason the payload can carry that this surface cannot \
-                     explain ([NFR-CC-04])",
+                     `{}` as a reason token — a reason the payload can carry that \
+                     this surface cannot explain ([NFR-CC-04])",
                     wire(reason)
                 );
             }
+        }
+    }
+
+    /// Every surface that enumerates the reason vocabulary, with its text — the
+    /// **one** list, read by the positive guard above and by the removal proof
+    /// below.
+    ///
+    /// Shared deliberately. Sprint 66's own risk register names a hand-mirrored
+    /// twin in this file as the recorded failure mode, and a second copy of this
+    /// list is exactly that shape: the copy that keeps a *removed* token out
+    /// would silently stop covering a surface the copy that keeps *present*
+    /// tokens in had already grown.
+    ///
+    /// `docs/howto/commands.md` and the two `web/ui` files are tracked in this
+    /// repository and must be readable. The four `docs/specs` entries reach a
+    /// symlink into the separate docs repository, so their absence is tolerated
+    /// (a vendored or packaged checkout has no `docs/specs`) while their presence
+    /// is checked — the one thing never done is passing silently on a file that
+    /// *is* readable.
+    ///
+    /// **So the enforcement floor is the tracked trio, not all seven.** In CI and
+    /// in any fresh clone `docs/specs` does not exist, and those four entries are
+    /// skipped; the spec surfaces are enforced only on a developer checkout that
+    /// carries the `logos-docs` symlink. Stated because the negative direction
+    /// makes this load-bearing in a way the old positive-only guard never was: a
+    /// *stale* `logos-docs` checkout is present-but-wrong, so it fails the removal
+    /// proof for a reason outside this repository. That is the intended signal —
+    /// the two repositories disagree — but it means a branch touching this
+    /// vocabulary must land with its `logos-docs` commit, not after it.
+    fn readable_reason_surfaces() -> Vec<(&'static str, String, bool)> {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("logos-core sits under the repository root");
+        /// One surface the reason vocabulary is mirrored onto.
+        ///
+        /// `enumerates_all` is the distinction between the two guards, and it is
+        /// not cosmetic. A surface that lists the *whole* vocabulary owes every
+        /// surviving reason an entry — that is the parity guard. A surface that
+        /// merely *names* a reason in passing owes nothing positive, but still must
+        /// not offer a reader a retired one — that is the removal proof. Collapsing
+        /// the two made the parity guard demand a full enumeration from
+        /// `FR-WS-10`, the broker-arm requirement, which has no business carrying
+        /// one.
+        struct Surface {
+            rel: &'static str,
+            /// Tracked in THIS repository, so a read failure is a guard defect.
+            tracked_here: bool,
+            /// Keeps revision history under a trailing `## Notes` heading.
+            has_notes_history: bool,
+            /// Enumerates the complete reason vocabulary (⇒ subject to the parity
+            /// guard, not only the removal proof).
+            enumerates_all: bool,
+        }
+        const fn s(
+            rel: &'static str,
+            tracked_here: bool,
+            has_notes_history: bool,
+            enumerates_all: bool,
+        ) -> Surface {
+            Surface { rel, tracked_here, has_notes_history, enumerates_all }
+        }
+        let surfaces = [
+            s("docs/howto/commands.md", true, false, true),
+            s("docs/specs/frontend-design.md", false, false, true),
+            s("docs/specs/requirements/FR-WS-05.md", false, true, true),
+            s("docs/specs/architecture/decisions/ADR-53.md", false, true, true),
+            // Names a reason in passing; does not enumerate the vocabulary.
+            s("docs/specs/requirements/FR-WS-10.md", false, true, false),
+            s("web/ui/src/api/types.ts", true, false, true),
+            s("web/ui/src/views/workspace/coverageModel.ts", true, false, true),
+        ];
+        /// The **normative** part of a surface: everything before its trailing
+        /// `## Notes` heading.
+        ///
+        /// A requirement's or ADR's Notes section is its revision history, and this
+        /// repository's amendment convention requires a superseded value to be
+        /// *shown as superseded* rather than deleted — so a Notes paragraph
+        /// legitimately quotes a retired reason token by name. Checking the
+        /// normative body is what keeps the removal guard below from forbidding the
+        /// very record that explains the removal, without weakening it: the
+        /// enumeration a reader acts on is in the Statement or the Decision, not
+        /// the history.
+        ///
+        /// Applied **only** to the surfaces that declare the convention. Blanket
+        /// truncation would be a silent hole in the other four: nothing stops the
+        /// 96 KB operator manual or a `.ts` doc block growing a `## Notes` line,
+        /// and every enumeration after it would stop being checked by both guards
+        /// with no failure — the same closed-list blind spot the removal proof
+        /// exists to cover.
+        fn normative(text: String) -> String {
+            match text.find("\n## Notes") {
+                Some(at) => text[..at].to_string(),
+                None => text,
+            }
+        }
+
+        let mut out = Vec::new();
+        for Surface { rel, tracked_here, has_notes_history, enumerates_all } in surfaces {
+            match std::fs::read_to_string(repo.join(rel)) {
+                Ok(text) => out.push((
+                    rel,
+                    if has_notes_history { normative(text) } else { text },
+                    enumerates_all,
+                )),
+                // Only a `docs/specs` file that is genuinely *not present* may be
+                // skipped. A tracked surface, or one that exists but cannot be read
+                // (a dangling symlink, a permission error, invalid UTF-8), is the
+                // guard silently covering nothing — which is the failure mode it is
+                // here to prevent, so it fails loudly instead.
+                Err(e) => assert!(
+                    !tracked_here && e.kind() == std::io::ErrorKind::NotFound,
+                    "{rel} must be readable to be guarded, but failed: {e}"
+                ),
+            }
+        }
+        out
+    }
+
+    /// **The removal proof for `schema-mismatch` (S-378, [CR-120] §7).**
+    ///
+    /// The variant is gone from the enum, so the positive guard above can no longer
+    /// say anything about it — a closed list stops mentioning what it no longer
+    /// contains, which is precisely how a retired token survives on four other
+    /// surfaces for releases. This asserts the other half: no surface still offers
+    /// a reader a reason the payload can never carry.
+    ///
+    /// `docs/specs/requirements/FR-WS-05.md` is in the shared list for this reason.
+    /// Its Statement enumerates the reason vocabulary, so leaving `schema-mismatch`
+    /// there would have moved the dishonesty from the code into the specification
+    /// rather than removing it. Only its normative body is read — its Notes section
+    /// records the removal and must name the token to do so; see
+    /// [`readable_reason_surfaces`].
+    ///
+    /// Why an absent-token guard is not written for *every* conceivable retired
+    /// name: this one is named because it was really removed and the surfaces
+    /// really did carry it. A general "no unknown token" guard would need the
+    /// closed vocabulary these surfaces deliberately do not have — the TypeScript
+    /// union's own comment requires readers to treat it as **open**, so a later
+    /// arm's reason can reach a build that predates it.
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    #[test]
+    fn the_removed_schema_mismatch_reason_is_absent_from_every_surface() {
+        for (rel, text, _) in readable_reason_surfaces() {
+            assert!(
+                !text.contains("schema-mismatch"),
+                "{rel} still enumerates `schema-mismatch`, a reason S-378 removed \
+                 because no producer for it exists anywhere in the tree — a surface \
+                 offering a reader a reason the payload can never carry ([NFR-CC-04])"
+            );
         }
     }
 
@@ -3416,7 +3665,7 @@ mod tests {
                 "ambiguous",
                 "path-not-composed",
                 "base-url-runtime",
-                "schema-mismatch",
+                "topic-not-literal",
                 "no-provider-in-workspace",
             ] {
                 assert!(

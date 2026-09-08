@@ -1018,7 +1018,6 @@ export type UnboundReason =
   | "path-not-composed"
   | "base-url-runtime"
   | "ambiguous"
-  | "schema-mismatch"
   /** A broker site's topic operand is not a static string literal, so no topic
    *  identity exists to match on (CR-107). Note the reason grouping in
    *  `coverageModel` must keep treating this union as OPEN — the payload may

@@ -1253,7 +1253,11 @@ public class ArchiveController implements ArchiveApiV1 {
 /// The honesty half, end to end: a controller prefixed by a constant promotes
 /// **no** route — never one at the partial method path, which would advertise
 /// a provider at an address the service does not serve — and the run counts
-/// the refusal as the `path-not-composed` figure ([FR-FW-05], [NFR-RA-05]).
+/// the refusal in its `routes_not_composed` statistic ([FR-FW-05],
+/// [NFR-RA-05]). That statistic is the grain [FR-FW-05] asks for and the only
+/// one: this is the test S-378 cites as its production-producer pin, so its
+/// own header must not restate the `path-not-composed` misquote that story
+/// removed.
 ///
 /// [FR-FW-05]: ../../docs/specs/requirements/FR-FW-05.md
 /// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md

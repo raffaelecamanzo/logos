@@ -1116,8 +1116,8 @@ fn a_relative_django_urlconf_path_survives_the_guard() {
 }
 
 /// A dropped candidate leaves **nothing** — no route, and no refusal.
-/// [FR-FW-05]'s `path-not-composed` reason is for an endpoint Logos could not
-/// address; a property lookup was never an endpoint, and recording one would
+/// [FR-FW-05]'s refusal accounting is for an endpoint Logos could not address;
+/// a property lookup was never an endpoint, and recording one would
 /// manufacture a coverage denominator out of ordinary code (CR-110 §10).
 ///
 /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
@@ -1842,7 +1842,7 @@ public class C {
     }
 
     /// [BR-46] directly: a handler with no prefix in scope composes to its
-    /// method path alone and is never reported `path-not-composed`.
+    /// method path alone and is never refused.
     ///
     /// [BR-46]: ../../../docs/specs/software-spec.md#310-framework-extraction
     #[test]
@@ -1861,12 +1861,12 @@ public class C {
 
     /// A prefix that cannot be resolved to a literal — a constant reference, a
     /// qualified constant, a concatenation, in either the positional or the
-    /// named form — yields **no** path at all, and the registration is
-    /// reported `path-not-composed` ([FR-WS-05], [NFR-RA-05]). Promoting
-    /// `/users` here would advertise a provider at an address the service does
-    /// not serve.
+    /// named form — yields **no** path at all, and the registration is refused
+    /// and counted in the run's `routes_not_composed` statistic ([FR-FW-05],
+    /// [NFR-RA-05]). Promoting `/users` here would advertise a provider at an
+    /// address the service does not serve.
     ///
-    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     #[test]
     fn a_non_literal_prefix_refuses_the_route_instead_of_promoting_a_partial_path() {
@@ -3145,7 +3145,7 @@ class UserController : UserApi {
     }
 
     /// [BR-46] directly: a handler with no prefix in scope composes to its
-    /// method path alone and is never reported `path-not-composed`.
+    /// method path alone and is never refused.
     ///
     /// [BR-46]: ../../../docs/specs/software-spec.md#310-framework-extraction
     #[test]
@@ -3156,7 +3156,8 @@ class UserController : UserApi {
     }
 
     /// A prefix that cannot be resolved to a literal yields **no** path at all
-    /// and the registration is reported `path-not-composed` ([NFR-RA-05]).
+    /// and the registration is refused, counted in the run's
+    /// `routes_not_composed` statistic ([NFR-RA-05]).
     /// Kotlin adds three forms Java has no syntax for: a string template in
     /// either spelling, and a raw (`"""…"""`) literal, which the literal
     /// patterns deliberately do not read — the `(expression)` catch-all catches
