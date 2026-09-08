@@ -1323,7 +1323,8 @@ async fn f(client: Client) { client.get("/files/{*rest}").await; }"#,
     );
     assert!(
         http_client_call_targets(&catch_all).is_empty(),
-        "a catch-all path is path-not-composed — no reference AND, deliberately,          no recorded refusal: {:?}",
+        "a catch-all path is path-not-composed — no reference AND, \
+         deliberately, no recorded refusal: {:?}",
         http_client_call_targets(&catch_all)
     );
 

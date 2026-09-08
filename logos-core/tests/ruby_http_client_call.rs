@@ -80,12 +80,12 @@ fn client_call_references(facts: &Facts) -> Vec<String> {
 ///
 /// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
 fn client_call_refusals(facts: &Facts) -> usize {
-    facts
-        .refs
+    // Derived from `client_call_targets`, the one place in this file that spells
+    // the `HttpClientCall` predicate — as `client_call_references` beside it
+    // already is. Two readers over one predicate, not two predicates.
+    client_call_targets(facts)
         .iter()
-        .filter(|r| {
-            r.relation == Some(ArtifactRelation::HttpClientCall) && r.target.is_empty()
-        })
+        .filter(|t| t.is_empty())
         .count()
 }
 
