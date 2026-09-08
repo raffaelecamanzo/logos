@@ -189,8 +189,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # by `cc`, which inherits the active profile's opt-level — at `-O0` the
 # query-compile path is ~5-10× slower, and with the full S-015 grammar set
 # (6 grammars × 3 queries compiled at registry load) a *debug* cold start blows
-# the NFR-PE-05 ≤200ms budget that the *release* profile meets with ~10×
-# headroom. Optimising just these leaf C packages in dev keeps the budget test
+# the NFR-PE-05 cold-start budget that the *release* profile meets with wide
+# headroom. (No figure is quoted here on purpose — the budget has been revised
+# twice, 200 → 500 → 600 ms, and the five sibling comments below already cite it
+# by name alone.) Optimising just these leaf C packages in dev keeps the budget test
 # honest in both profiles without touching the budget itself; debuggability of
 # workspace code is unaffected.
 [profile.dev.package.tree-sitter]

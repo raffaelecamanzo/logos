@@ -1,23 +1,33 @@
 //! Per-phase cold-start attribution for `Engine::start` ([CR-116], [S-368],
 //! [NFR-PE-05]).
 //!
-//! [NFR-PE-05]'s ≤500 ms budget and `cold_start_to_ready_engine_is_within_pe05_budget`
-//! (`runtime_concurrency.rs`) do not enumerate the same phases: the requirement
-//! bounds `plugin.toml` parse, `LanguageRegistry` construction and query
-//! compilation (plus, under `serve`, watcher registration); the test measures
-//! the whole `Engine::start`, which additionally opens/migrates the store and
-//! brings up the pools, and does not register a watcher. Neither list is a
-//! subset of the other, so a number produced by one and judged against the
-//! other settles nothing (CR-116 §3.2).
+//! **Why this test exists.** [NFR-PE-05]'s then-≤500 ms budget and
+//! `cold_start_to_ready_engine_is_within_pe05_budget` (`runtime_concurrency.rs`)
+//! did not enumerate the same phases: the requirement bounded `plugin.toml`
+//! parse, `LanguageRegistry` construction and query compilation (plus, under
+//! `serve`, watcher registration); the test measured the whole `Engine::start`,
+//! which additionally opens/migrates the store and brings up the pools, and
+//! registers no watcher. Neither list was a subset of the other, so a number
+//! produced by one and judged against the other settled nothing (CR-116 §3.2).
 //!
-//! This test attributes the cost instead of guessing at it. It reports:
+//! **How it was settled.** This test attributed the cost instead of guessing at
+//! it, and the attribution decided CR-116's branch: the three enumerated phases
+//! were inside 500 ms in every sample (max 457.5 ms), so the excess sat in
+//! phases the requirement never named. [S-369] therefore amended
+//! [NFR-PE-05] to enumerate all six phases and re-derived its budget from the
+//! measured full total to **≤ 600 ms** — requirement and guard now enumerate
+//! the same phases, and this harness measures exactly what both mean. It still
+//! reports, and gates nothing: no budget assertion lives here.
+//!
+//! It reports:
 //!
 //! - the **distribution** (min/median/p90/max/mean) of every named phase,
-//!   plus the full measured total and the [NFR-PE-05]-enumerated subtotal —
-//!   not just a mean, so a bimodal cause is not averaged away (CR-116 CRA-02);
-//! - the [NFR-PE-05]-enumerated subtotal **explicitly and separately** — the
-//!   number that decides CR-116 §3.2 branch (a) (a genuine breach) versus
-//!   branch (b) (the guard bounds more than the requirement does);
+//!   plus the full measured total, the [NFR-PE-05]-enumerated six-phase total
+//!   and the plugin-substrate subtotal — not just a mean, so a bimodal cause is
+//!   not averaged away (CR-116 CRA-02);
+//! - the plugin-substrate subtotal **explicitly and separately** — the number
+//!   that decided CR-116 §3.2 branch (a) (a genuine breach) versus branch (b)
+//!   (the guards bounded more than the requirement enumerated);
 //! - the **instrumentation's own cost**: the mean of the per-sample delta
 //!   between the instrumented and uninstrumented totals (CR-116 R2).
 //!
@@ -41,9 +51,11 @@
 //! ramp-up show up in the reported distribution instead of being silently
 //! averaged away by a warm loop.
 //!
-//! This story changes no budget and widens no tolerance (CR-116 §3.3 scope,
-//! [S-368] AC6) — it reports, it does not gate. Nothing here asserts against
-//! the 500 ms figure; that reconciliation is [S-369]'s job.
+//! [S-368] changed no budget and widened no tolerance (CR-116 §3.3 scope,
+//! [S-368] AC6). Nothing here asserts against a budget figure, before or after
+//! [S-369]'s reconciliation — the assertions are the per-sample phase-sum
+//! reconciliation and a loose instrumentation-overhead sanity floor. Keep it
+//! that way: a wall-clock budget belongs in the one guard that owns it.
 //!
 //! ## Running it
 //!
@@ -54,7 +66,7 @@
 //!
 //! `LOGOS_COLD_START_SAMPLES` (default 8) sets how many fresh-process cold
 //! starts are measured — raise it for a tighter distribution at the cost of
-//! wall time (each sample is a real process launch plus a real ~500ms+ cold
+//! wall time (each sample is a real process launch plus a real ~500 ms cold
 //! start, so the default costs roughly `8 * 1s` end to end, more if the host
 //! is exhibiting the ramp-up effect above).
 //!
@@ -200,7 +212,12 @@ fn cold_start_phase_attribution_child_sample() {
         "uninstrumented_ms": ms(uninstrumented),
         "instrumented_ms": ms(instrumented),
         "phase_sum_ms": ms(phase_sum),
-        "nfr_pe05_enumerated_total_ms": ms(phases.nfr_pe05_enumerated_total()),
+        // The six phases NFR-PE-05 enumerates since S-369 (everything but
+        // `other`), and — separately — the plugin-substrate subtotal that was
+        // its whole enumeration before the amendment and is the figure that
+        // decided CR-116 §3.2.
+        "enumerated_phases_ms": ms(phases.enumerated_phases()),
+        "registry_subtotal_ms": ms(phases.registry_subtotal()),
         "phases_ms": {
             "plugin_toml_parse": ms(phases.plugin_toml_parse),
             "registry_construction": ms(phases.registry_construction),
@@ -243,6 +260,7 @@ fn cold_start_phase_attribution() {
     let mut instrumented_ms: Vec<f64> = Vec::with_capacity(n);
     let mut phase_sum_ms: Vec<f64> = Vec::with_capacity(n);
     let mut enumerated_ms: Vec<f64> = Vec::with_capacity(n);
+    let mut registry_subtotal_ms: Vec<f64> = Vec::with_capacity(n);
     let mut per_phase_ms: Vec<Vec<f64>> = phase_names.iter().map(|_| Vec::new()).collect();
     let mut paired_overhead_ms: Vec<f64> = Vec::with_capacity(n);
 
@@ -275,7 +293,8 @@ fn cold_start_phase_attribution() {
         uninstrumented_ms.push(un);
         instrumented_ms.push(ins);
         phase_sum_ms.push(get("phase_sum_ms"));
-        enumerated_ms.push(get("nfr_pe05_enumerated_total_ms"));
+        enumerated_ms.push(get("enumerated_phases_ms"));
+        registry_subtotal_ms.push(get("registry_subtotal_ms"));
         // Paired per-child delta: both arms ran in the same process, so they
         // share whatever warm/cold state that process happened to launch
         // into. Averaging *this* isolates the instrumentation's own cost from
@@ -304,9 +323,15 @@ fn cold_start_phase_attribution() {
         "instrumented_total_ms": stats(instrumented_ms),
         "phase_sum_ms": stats(phase_sum_ms),
         "phases_ms": phases_json,
-        // The number that decides CR-116 §3.2 branch (a) vs (b): the total
-        // for ONLY the phases NFR-PE-05 currently enumerates.
-        "nfr_pe05_enumerated_total_ms": stats(enumerated_ms),
+        // The six phases NFR-PE-05 enumerates since S-369. The requirement
+        // bounds `uninstrumented_total_ms` (the whole wait), not this — the
+        // split against `other` is diagnostic, not a pair of budgets.
+        "enumerated_phases_ms": stats(enumerated_ms),
+        // The plugin-substrate subtotal: the number that decided CR-116 §3.2
+        // branch (a) vs (b) back when it was NFR-PE-05's entire enumeration.
+        // Kept for continuity of the measurement; no longer named for the
+        // requirement, which bounds no subset of its phases separately.
+        "registry_subtotal_ms": stats(registry_subtotal_ms),
         "instrumentation_overhead_ms": {
             "mean_of_paired_per_sample_deltas": overhead_mean_ms,
             "pct_of_uninstrumented_mean": overhead_pct,

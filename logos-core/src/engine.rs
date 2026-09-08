@@ -108,15 +108,21 @@ pub struct Engine {
 /// Per-phase cold-start attribution, produced by
 /// [`Engine::start_with_phase_report`] ([CR-116], [NFR-PE-05], [S-368]).
 ///
-/// [`Engine::start`] itself is untouched — this struct and the function that
-/// produces it exist purely to answer CR-116 §3.2: whether the phases
-/// [NFR-PE-05] enumerates alone exceed the 500 ms budget, or whether the
-/// excess sits in the phases it does not enumerate (store open, schema
-/// migration, pool startup).
+/// [`Engine::start`] carries none of this timing — this struct and the function
+/// that produces it exist to answer CR-116 §3.2: whether the phases [NFR-PE-05]
+/// enumerated alone exceeded its then-500 ms budget, or whether the excess sat
+/// in phases it did not enumerate (store open, schema migration, pool
+/// startup). **It was the latter** — the three enumerated phases came in at
+/// max 457.5 ms across eight fresh-process samples, so [S-369] amended
+/// [NFR-PE-05] to enumerate all six phases below and re-derived its budget
+/// from the measured full total to ≤ 600 ms. The six phases are now exactly
+/// the requirement's enumeration; [`other`](Self::other) is the incidental
+/// cold-path work the requirement's *total* bound also covers.
 ///
 /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
 /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
 /// [S-368]: ../../../docs/planning/journal.md#s-368-attribute-the-cold-start-cost-across-its-phases
+/// [S-369]: ../../../docs/planning/journal.md#s-369-reconcile-the-cold-start-budget-with-what-it-actually-bounds
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ColdStartPhases {
     /// Parsing every grammar's embedded `plugin.toml`.
@@ -137,10 +143,18 @@ pub struct ColdStartPhases {
     /// Everything on the cold path that is not one of the six phases above:
     /// worktree-root resolution, `.logos/` directory creation, worktree-seed
     /// detection/copy, governance-contract seeding, linked-worktree git-hook
-    /// seeding (CR-106), and the post-construction seed-diff reconcile. Exists
+    /// seeding (CR-106), constructing the `Engine` value itself, and the
+    /// post-construction seed-diff reconcile. Exists
     /// so [`sum`](Self::sum) reconciles with the
     /// externally measured wall time rather than merely approximating it
     /// (CR-116 AC1).
+    ///
+    /// Not one of [NFR-PE-05]'s six enumerated phases, but inside its bound
+    /// all the same: the requirement bounds the **total** wall time to a ready
+    /// engine, precisely so no guard can pass by excluding work a user still
+    /// waits through.
+    ///
+    /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
     pub other: Duration,
 }
 
@@ -159,17 +173,45 @@ impl ColdStartPhases {
             + self.other
     }
 
-    /// The total for **only** the phases [NFR-PE-05] currently enumerates:
-    /// embedded `plugin.toml` parse, `LanguageRegistry` construction, query
-    /// compilation. Store open, schema migration and pool startup are
-    /// deliberately excluded — this is the number that decides
-    /// [CR-116] §3.2's branch (a) (a genuine breach) versus branch (b) (the
-    /// guard measures more than the requirement bounds).
+    /// The plugin-substrate subtotal: embedded `plugin.toml` parse +
+    /// `LanguageRegistry` construction + query compilation. Store open, schema
+    /// migration, pool startup and [`other`](Self::other) are excluded.
+    ///
+    /// These are the three phases [NFR-PE-05] enumerated **before** the
+    /// [S-369] amendment, and this is the number that decided [CR-116] §3.2 —
+    /// max 457.5 ms against a 500 ms budget over eight fresh-process samples,
+    /// ruling out branch (a) (a genuine breach) in favour of branch (b) (the
+    /// guards bounded more than the requirement enumerated).
+    ///
+    /// It is deliberately **not** named for [NFR-PE-05] any more. Since the
+    /// amendment the requirement enumerates all six phases and bounds only
+    /// their total, so no subset of them — this one included — is budgeted in
+    /// its name (the same rule that retired the 200 ms store-and-pool guard's
+    /// citation). Kept because it is the continuity of the measurement that
+    /// settled the CR, and because query compilation dominating it (~434 of
+    /// ~440 ms) is the standing fact about where cold start goes.
     ///
     /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
     /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
-    pub fn nfr_pe05_enumerated_total(&self) -> Duration {
+    /// [S-369]: ../../../docs/planning/journal.md#s-369-reconcile-the-cold-start-budget-with-what-it-actually-bounds
+    pub fn registry_subtotal(&self) -> Duration {
         self.plugin_toml_parse + self.registry_construction + self.query_compilation
+    }
+
+    /// The total of the **six** phases [NFR-PE-05] enumerates since [S-369]:
+    /// the [`registry_subtotal`](Self::registry_subtotal) three plus store
+    /// open, schema migration and pool startup. Excludes
+    /// [`other`](Self::other).
+    ///
+    /// The requirement bounds [`sum`](Self::sum) — the whole wait — not this,
+    /// so this is a diagnostic split (named phases versus incidental
+    /// cold-path work), not a budget. `sum() - enumerated_phases()` is exactly
+    /// [`other`](Self::other).
+    ///
+    /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+    /// [S-369]: ../../../docs/planning/journal.md#s-369-reconcile-the-cold-start-budget-with-what-it-actually-bounds
+    pub fn enumerated_phases(&self) -> Duration {
+        self.registry_subtotal() + self.store_open + self.schema_migration + self.pool_startup
     }
 }
 
@@ -210,7 +252,9 @@ impl Engine {
     /// Ensures `<root>/.logos/` exists, then brings up the [`Runtime`] over
     /// `<root>/.logos/logos.db`: the writer opens and migrates the store, the
     /// read-only pool attaches, and the shared worker pool spins up. The whole
-    /// sequence is the cold-start path measured against [NFR-PE-05]; afterwards
+    /// sequence — every phase of it, plus the incidental root/`.logos`/seed
+    /// work around them — is the cold-start path [NFR-PE-05] bounds at
+    /// ≤ 600 ms in total ([CR-116] §9, [S-369]); afterwards
     /// the engine is held for the process lifetime so the pools (and the derived
     /// caches layered on them) are reused across calls.
     ///
@@ -218,7 +262,9 @@ impl Engine {
     /// Returns an error if `.logos/` cannot be created or the runtime cannot be
     /// opened (store open/migrate, reader pool, or worker pool failure).
     ///
+    /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
     /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+    /// [S-369]: ../../../docs/planning/journal.md#s-369-reconcile-the-cold-start-budget-with-what-it-actually-bounds
     pub fn start(root: impl AsRef<Path>) -> Result<Self> {
         Self::start_with_hydration_config(root, HydrationConfig::default())
     }
@@ -323,27 +369,40 @@ impl Engine {
         let seed = if db_path.exists() {
             None
         } else {
-            let seed = crate::workspace::seed_source(&root).and_then(
-                |seed| match crate::graph_store::seed_copy(&seed.db_path, &db_path) {
-                    Ok(()) => {
-                        tracing::info!(
-                            primary = %seed.primary_root.display(),
-                            head = %seed.head,
-                            "seeded the worktree store from the primary checkout (ADR-15)"
-                        );
-                        Some(seed)
-                    }
-                    Err(err) => {
-                        // seed_copy cleaned up its partial db+wal pair; the
-                        // runtime below opens a fresh store.
-                        tracing::warn!(
-                            "seed-from-main copy failed; falling back to a fresh store \
-                             and a full index: {err:#}"
-                        );
-                        None
-                    }
-                },
-            );
+            // ONE `git rev-parse --git-common-dir` for both seeds (CR-116
+            // §9 item 5, S-369). The graph-store seed and the governance-contract
+            // seed below both need the primary checkout, and each used to
+            // resolve it with its own identical subprocess — pure waste on a
+            // cold path budgeted by NFR-PE-05, and the more schedule-sensitive
+            // half of it, since a process spawn varies far more than in-process
+            // work. `None` here means "no distinct primary": neither seed runs,
+            // exactly as before.
+            let primary = crate::workspace::primary_root(&root);
+
+            let seed = primary
+                .clone()
+                .and_then(crate::workspace::seed_source_from_primary)
+                .and_then(
+                    |seed| match crate::graph_store::seed_copy(&seed.db_path, &db_path) {
+                        Ok(()) => {
+                            tracing::info!(
+                                primary = %seed.primary_root.display(),
+                                head = %seed.head,
+                                "seeded the worktree store from the primary checkout (ADR-15)"
+                            );
+                            Some(seed)
+                        }
+                        Err(err) => {
+                            // seed_copy cleaned up its partial db+wal pair; the
+                            // runtime below opens a fresh store.
+                            tracing::warn!(
+                                "seed-from-main copy failed; falling back to a fresh store \
+                                 and a full index: {err:#}"
+                            );
+                            None
+                        }
+                    },
+                );
 
             // Governance-contract seeding ([FR-WT-06], CR-112): independent of
             // whether the graph-store copy above succeeded — a `rules.toml`
@@ -356,7 +415,10 @@ impl Engine {
             // absolute path into the primary checkout (FR-IN-06). A file the
             // worktree already has of its own — travelled through git
             // (FR-WT-02) or left by a prior partial seed — is left alone.
-            if let Some(primary) = crate::workspace::primary_root(&root) {
+            //
+            // Reuses the `primary` resolved above rather than re-running the
+            // identical `--git-common-dir` query (CR-116 §9 item 5, S-369).
+            if let Some(primary) = primary {
                 let contract = crate::workspace::seed_contract(&primary, &root);
                 for (name, outcome) in [
                     ("rules.toml", contract.rules),
@@ -461,16 +523,26 @@ impl Engine {
     ///
     /// Mirrors [`start_with_configs`](Self::start_with_configs) step for step,
     /// timing each phase with a plain `Instant` delta rather than routing
-    /// through it. `Engine::start` is byte-for-byte untouched, so this
-    /// diagnostic path's own overhead never lands on the measured production
-    /// cold start — the delta between this function's wall time and
-    /// `Engine::start`'s over the same root is the instrumentation's own cost
-    /// (CR-116 R2).
+    /// through it. `Engine::start` carries **no** instrumentation — every
+    /// `Instant` lives here — so this diagnostic path's own overhead never
+    /// lands on the measured production cold start, and the delta between this
+    /// function's wall time and `Engine::start`'s over the same root is the
+    /// instrumentation's own cost (CR-116 R2).
+    ///
+    /// This is a *mirror*, not a refactor: the production path is never routed
+    /// through this function. The price is that an edit to
+    /// [`start_with_configs`](Self::start_with_configs)'s call sequence must be
+    /// applied here too — S-338 (hook seeding) and S-369 (the shared
+    /// `--git-common-dir` resolution) both were, each with a side-effect guard
+    /// (`worktree_hooks.rs::a_phase_reported_engine_start_seeds_the_worktree_hooks_too`
+    /// and
+    /// `worktree.rs::a_phase_reported_engine_start_seeds_the_store_and_the_contract_too`).
     ///
     /// [`ColdStartPhases::other`] absorbs everything that is not one of the
-    /// six named phases — root resolution, directory creation, worktree-seed
-    /// detection/copy, linked-worktree git-hook seeding (CR-106), and the
-    /// post-construction seed-diff reconcile — so
+    /// six phases [NFR-PE-05] enumerates — root resolution, directory
+    /// creation, worktree-seed detection/copy, governance-contract seeding
+    /// (FR-WT-06), linked-worktree git-hook seeding (CR-106), engine
+    /// construction, and the post-construction seed-diff reconcile — so
     /// [`ColdStartPhases::sum`] reconciles with the externally measured wall
     /// time to within the noise of the handful of `Instant::now()` calls
     /// themselves, not merely "within a stated margin" by approximation.
@@ -494,27 +566,37 @@ impl Engine {
         let seed = if db_path.exists() {
             None
         } else {
-            let seed = crate::workspace::seed_source(&root).and_then(
-                |seed| match crate::graph_store::seed_copy(&seed.db_path, &db_path) {
-                    Ok(()) => {
-                        tracing::info!(
-                            primary = %seed.primary_root.display(),
-                            head = %seed.head,
-                            "seeded the worktree store from the primary checkout (ADR-15)"
-                        );
-                        Some(seed)
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            "seed-from-main copy failed; falling back to a fresh store \
-                             and a full index: {err:#}"
-                        );
-                        None
-                    }
-                },
-            );
+            // Mirrors `start_with_configs`'s single `--git-common-dir`
+            // resolution (CR-116 §9 item 5, S-369). It must stay mirrored: this
+            // twin exists to attribute the production cold path's cost, so a
+            // twin still paying for two subprocesses would over-report `other`
+            // by exactly the saving the production path made.
+            let primary = crate::workspace::primary_root(&root);
 
-            if let Some(primary) = crate::workspace::primary_root(&root) {
+            let seed = primary
+                .clone()
+                .and_then(crate::workspace::seed_source_from_primary)
+                .and_then(
+                    |seed| match crate::graph_store::seed_copy(&seed.db_path, &db_path) {
+                        Ok(()) => {
+                            tracing::info!(
+                                primary = %seed.primary_root.display(),
+                                head = %seed.head,
+                                "seeded the worktree store from the primary checkout (ADR-15)"
+                            );
+                            Some(seed)
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                "seed-from-main copy failed; falling back to a fresh store \
+                                 and a full index: {err:#}"
+                            );
+                            None
+                        }
+                    },
+                );
+
+            if let Some(primary) = primary {
                 let contract = crate::workspace::seed_contract(&primary, &root);
                 for (name, outcome) in [
                     ("rules.toml", contract.rules),
@@ -3346,16 +3428,19 @@ mod tests {
         assert_serialize::<crate::config::ConfigApplyOutcome>();
     }
 
-    /// [`ColdStartPhases::sum`] and
-    /// [`ColdStartPhases::nfr_pe05_enumerated_total`] ([CR-116], [S-368]) as
-    /// pure functions over known field values — the two numbers CR-116 §3.2
-    /// turns on, checked exactly rather than only ever against noisy
-    /// wall-clock reconciliation in the integration test.
+    /// [`ColdStartPhases`]'s three totals ([CR-116], [S-368], [S-369]) as pure
+    /// functions over known field values — checked exactly rather than only
+    /// ever against noisy wall-clock reconciliation in the integration test.
+    ///
+    /// Powers of two are used as the field values so each total can only come
+    /// out right by summing exactly the intended subset: any wrong subset
+    /// produces a different number.
     ///
     /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
     /// [S-368]: ../../../docs/planning/journal.md#s-368-attribute-the-cold-start-cost-across-its-phases
+    /// [S-369]: ../../../docs/planning/journal.md#s-369-reconcile-the-cold-start-budget-with-what-it-actually-bounds
     #[test]
-    fn cold_start_phases_sum_and_enumerated_total_are_exact() {
+    fn cold_start_phase_totals_are_exact() {
         let phases = ColdStartPhases {
             plugin_toml_parse: Duration::from_millis(1),
             registry_construction: Duration::from_millis(2),
@@ -3365,13 +3450,24 @@ mod tests {
             pool_startup: Duration::from_millis(32),
             other: Duration::from_millis(64),
         };
-        assert_eq!(phases.sum(), Duration::from_millis(1 + 2 + 4 + 8 + 16 + 32 + 64));
-        // Only the three NFR-PE-05-enumerated phases — store open, schema
-        // migration, pool startup and other must NOT be folded in.
+        // The whole measured wall time — what NFR-PE-05 bounds at ≤600 ms
+        // since S-369.
         assert_eq!(
-            phases.nfr_pe05_enumerated_total(),
-            Duration::from_millis(1 + 2 + 4)
+            phases.sum(),
+            Duration::from_millis(1 + 2 + 4 + 8 + 16 + 32 + 64)
         );
+        // The six phases NFR-PE-05 enumerates: everything but `other`.
+        assert_eq!(
+            phases.enumerated_phases(),
+            Duration::from_millis(1 + 2 + 4 + 8 + 16 + 32)
+        );
+        // The plugin-substrate subtotal alone — the pre-amendment three-phase
+        // figure that decided CR-116 §3.2. Store open, schema migration, pool
+        // startup and `other` must NOT be folded in.
+        assert_eq!(phases.registry_subtotal(), Duration::from_millis(1 + 2 + 4));
+        // The split is exhaustive by construction: the phases NFR-PE-05 names
+        // plus the incidental work it does not name is the whole bound.
+        assert_eq!(phases.enumerated_phases() + phases.other, phases.sum());
     }
 
     /// The config write-back seam round-trips through the façade (S-096,

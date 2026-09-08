@@ -311,8 +311,38 @@ fn many_reads_run_concurrently_up_to_the_pool_size() {
     });
 }
 
+/// A regression band on `Runtime::open` alone — connecting to the store,
+/// applying the pragma contract, migrating the schema, and bringing up the
+/// writer actor and both pools.
+///
+/// **This guard does not cite NFR-PE-05, deliberately** (CR-116 §9.4, S-369).
+/// It used to: it asserted 200 ms "as the store/pool half" of the cold-start
+/// budget while the requirement enumerated only the *other* half — plugin
+/// substrate parse, registry construction, query compilation — so it bounded a
+/// subset the requirement did not name, in the requirement's name. Since S-369
+/// the requirement enumerates all six phases and bounds **only their total**
+/// (≤ 600 ms to a ready engine), with no per-phase sub-budgets, so no subset of
+/// them may be gated as NFR-PE-05 conformance. The requirement's guard is
+/// `cold_start_to_ready_engine_is_within_pe05_budget`
+/// (`logos-core/tests/runtime_concurrency.rs`), which times the whole path.
+///
+/// The 200 ms band survives on its own terms, as a *local* regression band:
+/// these phases measured ~27 ms combined across eight fresh-process samples
+/// (store open 1.7 + schema migration 19.6 + pool startup 5.9 — S-368), so
+/// 200 ms is a ~7× ceiling.
+///
+/// **A breach is not by itself a cost regression.** This guard is known to
+/// flake under load: S-368's full-suite run recorded it failing at **278 ms**
+/// with no store or pool change (sprint-impl-65, alongside its whole-path
+/// sibling failing at 791 ms in the same run) — the cross-process CPU-ramp-up
+/// effect that harness exists to expose. Re-run it in isolation before
+/// treating a breach as a regression, the standing convention for every
+/// wall-clock assertion here. It is deliberately not scaled by
+/// `LOGOS_PERF_TOLERANCE`: that helper is local to
+/// `tests/runtime_concurrency.rs`, and duplicating it into `src` to band a
+/// diagnostic band would spread the knob without adding signal.
 #[test]
-fn cold_start_is_within_the_pe05_budget() {
+fn runtime_open_stays_within_its_store_and_pool_regression_band() {
     use std::time::Instant;
 
     let dir = TempDir::new().expect("temp dir");
@@ -326,13 +356,13 @@ fn cold_start_is_within_the_pe05_budget() {
     // and opening every reader connection, not a partially-initialized shell.
     assert_eq!(runtime.db_path(), db.as_path());
 
-    // NFR-PE-05: cold start ≤ 200 ms. The runtime open is the store/pool half of
-    // that budget (registry build is the other half, measured at the Engine
-    // level). Assert generously within budget; print the real number so a
-    // regression is visible in test output even before it breaches.
     assert!(
         elapsed < Duration::from_millis(200),
-        "runtime cold start took {elapsed:?}, exceeding the NFR-PE-05 ≤200ms budget"
+        "Runtime::open took {elapsed:?}, over its 200 ms store-and-pool regression band \
+         (measured ~27 ms). Re-run in isolation before calling it a regression — this \
+         guard is known to flake under full-suite load. NOTE: this band is NOT the \
+         NFR-PE-05 cold-start budget; that is \
+         cold_start_to_ready_engine_is_within_pe05_budget)"
     );
 }
 

@@ -40,7 +40,8 @@ use anyhow::{bail, Context, Result};
 
 /// The primary checkout a DB-less linked worktree can seed from ([FR-WT-03]).
 ///
-/// Produced by [`seed_source`] only when all the preconditions hold: the root
+/// Produced by [`seed_source`] (or [`seed_source_from_primary`]) only when
+/// all the preconditions hold: the root
 /// is a *linked* worktree (not the primary checkout itself), the primary's
 /// `.logos/logos.db` exists, and the primary's HEAD is resolvable (the
 /// diff-reconcile base).
@@ -237,11 +238,41 @@ pub fn current_branch(root: &Path) -> Option<String> {
 /// repo's worktree, or `root` *is* the primary), the primary has no
 /// `.logos/logos.db`, or its HEAD cannot be resolved.
 ///
+/// Resolves the primary checkout itself, so it costs one `git rev-parse
+/// --git-common-dir` subprocess. A caller that has *already* resolved the
+/// primary — [`Engine::start`](crate::Engine::start)'s cold path, which needs
+/// it for [`seed_contract`] too — should call
+/// [`seed_source_from_primary`] with that value instead of paying for the
+/// identical query twice ([CR-116] §9 item 5).
+///
 /// [ADR-15]: ../../docs/specs/architecture/decisions/ADR-15.md
+/// [CR-116]: ../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
 /// [FR-WT-03]: ../../docs/specs/requirements/FR-WT-03.md
 pub fn seed_source(root: &Path) -> Option<SeedSource> {
-    let primary_root = primary_root(root)?;
+    seed_source_from_primary(primary_root(root)?)
+}
 
+/// [`seed_source`] for a caller that has already resolved
+/// [`primary_root`] — the rest of the chain (the primary's
+/// `.logos/logos.db`, its HEAD) with no second `--git-common-dir` subprocess
+/// ([FR-WT-03], [CR-116] §9 item 5, [S-369]).
+///
+/// Follows [`seed_contract`]'s precedent of taking the resolved primary as an
+/// argument, for the same reason — though it takes it **owned**, because the
+/// value moves into [`SeedSource::primary_root`] rather than being borrowed
+/// and dropped. `seed_source` is this function composed with `primary_root`,
+/// so the two can never disagree about what a seed *is* — only about who paid
+/// to find the primary (`seed_source_agrees_with_seed_source_from_primary`
+/// pins that).
+///
+/// Returns `None` on the same terms as [`seed_source`], minus the
+/// primary-resolution step the caller already performed: the primary has no
+/// `.logos/logos.db`, or its HEAD cannot be resolved.
+///
+/// [CR-116]: ../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+/// [FR-WT-03]: ../../docs/specs/requirements/FR-WT-03.md
+/// [S-369]: ../../docs/planning/journal.md#s-369-reconcile-the-cold-start-budget-with-what-it-actually-bounds
+pub fn seed_source_from_primary(primary_root: PathBuf) -> Option<SeedSource> {
     let db_path = primary_root.join(".logos").join("logos.db");
     if !db_path.is_file() {
         return None; // no seed → full index (ADR-15 fallback)
@@ -662,6 +693,67 @@ mod tests {
     fn seed_source_is_none_outside_git() {
         let tmp = TempDir::new().unwrap();
         assert!(seed_source(tmp.path()).is_none());
+    }
+
+    /// `seed_source` and `seed_source_from_primary` must never disagree about
+    /// what a seed *is* — only about who paid the `--git-common-dir`
+    /// subprocess to find the primary (CR-116 §9 item 5, S-369). `Engine::start`'s
+    /// cold path calls the second form with a primary it resolved once for
+    /// both the graph seed and the governance-contract seed, so a divergence
+    /// here would silently change worktree bootstrap on the production path.
+    #[test]
+    fn seed_source_agrees_with_seed_source_from_primary() {
+        let (tmp, main) = repo_fixture();
+        fs::create_dir_all(main.join(".logos")).unwrap();
+        fs::write(main.join(".logos/logos.db"), b"db").unwrap();
+        let wt = add_worktree(&tmp, &main);
+
+        let via_root = seed_source(&wt).expect("worktree + primary DB → a seed");
+        let primary = primary_root(&wt).expect("a linked worktree has a primary");
+        let via_primary =
+            seed_source_from_primary(primary).expect("the same seed from the resolved primary");
+        assert_eq!(via_root.primary_root, via_primary.primary_root);
+        assert_eq!(via_root.db_path, via_primary.db_path);
+        assert_eq!(via_root.head, via_primary.head);
+
+        // And the `None` arm the two forms can BOTH be called on agrees: a
+        // linked worktree whose primary was never indexed has no
+        // `.logos/logos.db` to seed from. (The primary-checkout arm is not an
+        // agreement check — `primary_root` is `None` there, so
+        // `seed_source_from_primary` is unreachable by construction; it is
+        // covered by `seed_source_is_none_in_the_primary_checkout`.)
+        let (tmp2, main2) = repo_fixture();
+        let wt2 = add_worktree(&tmp2, &main2); // primary never indexed
+        let primary2 = primary_root(&wt2).expect("a linked worktree has a primary");
+        assert!(
+            seed_source(&wt2).is_none(),
+            "no primary DB → no seed, through the wrapper"
+        );
+        assert!(
+            seed_source_from_primary(primary2).is_none(),
+            "no primary DB → no seed, through the resolved-primary form too"
+        );
+    }
+
+    /// `seed_source_from_primary` takes an arbitrary path, so its
+    /// unresolvable-HEAD arm is reachable in a way `seed_source`'s never was
+    /// (through the wrapper you need a linked worktree, which implies a
+    /// commit). A `git init`-ed directory with a DB file and no commits hits
+    /// exactly that arm — it must return `None`, not panic (S-369).
+    #[test]
+    fn seed_source_from_primary_is_none_when_head_is_unresolvable() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("unborn");
+        fs::create_dir_all(&repo).unwrap();
+        sh_git(&repo, &["init", "-q", "-b", "main"]);
+        // A DB is present, so the `is_file` check passes and the HEAD lookup is
+        // what decides — but HEAD is unborn, so `rev-parse HEAD` fails.
+        fs::create_dir_all(repo.join(".logos")).unwrap();
+        fs::write(repo.join(".logos/logos.db"), b"db").unwrap();
+        assert!(
+            seed_source_from_primary(repo).is_none(),
+            "an unborn HEAD is no seed base — None, and no panic"
+        );
     }
 
     // ── seed_contract (FR-WT-06) ──────────────────────────────────────────

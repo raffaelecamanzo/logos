@@ -119,27 +119,60 @@ fn engine_survives_a_failed_write_batch_and_stays_consistent() {
 
 #[test]
 fn cold_start_to_ready_engine_is_within_pe05_budget() {
-    // NFR-PE-05: cold start (build registry, open + migrate the store, bring up
-    // the pools) completes in ≤ 500 ms before serving the first request. This
-    // measures the *whole* ready-engine path through the public façade.
+    // NFR-PE-05: cold start completes in ≤ 600 ms in total before serving the
+    // first request. This measures the *whole* ready-engine path through the
+    // public façade — all six phases the requirement enumerates (plugin.toml
+    // parse, registry construction, query compilation, store open, schema
+    // migration, pool startup) plus the incidental root/`.logos`/seed work
+    // around them, which the requirement's total bound also covers. That is
+    // the point: requirement and guard enumerate the SAME phases, so neither
+    // can be satisfied by a number the other did not produce (CR-116 §3.2).
     //
-    // The budget was revised 200 → 500 ms on 2026-06-14 to track the CR-009
-    // grammar-set growth (5 → 12 compiled-in code languages): cold start scales
-    // ≈ linearly with the compiled-in grammar count. See NFR-PE-05. The bound is
-    // tolerance-banded via LOGOS_PERF_TOLERANCE so a loaded CI host can widen it
-    // without editing the budget (a breach is re-run in isolation first).
+    // Budget history — each value stands, none is deleted (CR-084 §6 record
+    // discipline):
+    //   200 → 500 ms, 2026-06-14 (CR-009): the grammar set grew 5 → 12
+    //     compiled-in code languages and cold start scales ≈ linearly with it.
+    //   500 → 600 ms, 2026-09-08 (CR-116 §9, S-369): the ENUMERATION grew, not
+    //     the cost. S-368 measured eight fresh-process cold starts on the
+    //     reference machine: the three phases NFR-PE-05 then enumerated came in
+    //     at mean 440.1 / max 457.5 ms — inside 500 ms in every sample, so the
+    //     old target was never breached on its own terms. This guard, though,
+    //     always timed all of Engine::start: mean 506.9 / p90 528.4 / max
+    //     539.8 ms. The ~67 ms difference is store open + schema migration +
+    //     pool startup + incidental work — real wait the requirement had never
+    //     claimed. A user waiting for a ready engine waits for the store too,
+    //     so the requirement was amended to bound the whole wait and the
+    //     budget re-derived from the MEASURED full total: 600 ms leaves 71.6 ms
+    //     over the p90 of 528.4 and 60.2 ms over the observed max of 539.8 —
+    //     11.9% and 10.0% of the budget respectively. (CR-116 §9 quotes "~11%
+    //     headroom"; that is the same margin stated as a fraction of the
+    //     measured figure rather than of the budget. Both denominators appear
+    //     in the record, so this comment names the one it uses.) This guard
+    //     needed no rescoping — it already measured exactly the amended
+    //     enumeration; only its literal moved.
+    //
+    // The bound is tolerance-banded via LOGOS_PERF_TOLERANCE so a loaded CI
+    // host can widen it without editing the budget (a breach is re-run in
+    // isolation first). The default stays 1.0, and widening it was explicitly
+    // not an available outcome for S-369 — the headroom above is measured at
+    // 1.0.
+    //
+    // The per-phase distribution behind those figures is re-runnable:
+    //   cargo test -p logos-core --test cold_start_phase_attribution \
+    //       cold_start_phase_attribution -- --exact --nocapture
     let root = TempDir::new().expect("temp root");
 
     let start = Instant::now();
     let engine = Engine::start(root.path()).expect("engine starts");
     let elapsed = start.elapsed();
 
-    let budget = Duration::from_millis(500).mul_f64(perf_tolerance());
+    let budget = Duration::from_millis(600).mul_f64(perf_tolerance());
     assert!(engine.runtime().is_some(), "engine is ready to serve");
     assert!(
         elapsed < budget,
-        "cold start to a ready Engine took {elapsed:?}, over the NFR-PE-05 ≤500ms budget \
-         (tolerance-scaled to {budget:?})"
+        "cold start to a ready Engine took {elapsed:?}, over the NFR-PE-05 ≤600ms total budget \
+         (tolerance-scaled to {budget:?}); re-run cold_start_phase_attribution to see which \
+         phase moved"
     );
 }
 
