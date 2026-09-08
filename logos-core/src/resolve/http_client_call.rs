@@ -105,9 +105,14 @@ pub enum ClientCallRefusal {
     /// positionally normalize (a catch-all/regex/mixed segment). Surfaces as
     /// `path-not-composed` — never approximately matched.
     ///
-    /// Reached from the coverage tier for a **stored** HTTP target that does not
-    /// key, not from a recorded refusal: the capture arm drops such a site
-    /// without a row, for the reason given in this module's docs.
+    /// The variant **without** a producer reachable from an index run. The
+    /// capture arm drops such a site without a row (for the reason given in this
+    /// module's docs), and the coverage tier maps to it only from a *stored* HTTP
+    /// target that fails `route_key` — which the arm never stores, because
+    /// accepting the target is that same test. So it is reachable from this
+    /// classifier and from a row written by an older binary, not from anything
+    /// this one records. Stated rather than left to be inferred, on the sprint
+    /// that removed a sibling variant for exactly this.
     PathNotComposed,
 }
 

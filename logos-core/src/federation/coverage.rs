@@ -193,9 +193,19 @@ fn unkeyable_reason(
 ///   existed to store ([`ClientCallRefusal::BaseUrlRuntime`]);
 /// - a **non-empty** target that nonetheless does not key is a
 ///   `"METHOD /template"` the arm accepted and `route_key` later declined
-///   ([`ClientCallRefusal::PathNotComposed`]) — the pre-S-374 behaviour for
-///   every unkeyable HTTP row, now expressed through the arm's own vocabulary
-///   instead of a hardcoded default.
+///   ([`ClientCallRefusal::PathNotComposed`]) — the word every unkeyable HTTP row
+///   read before S-374, now expressed through the arm's own vocabulary instead
+///   of a hardcoded default.
+///
+/// **The second branch is defensive, not a live population.** The arm stores a
+/// target only after `classify_client_call` accepted it, and it accepts one only
+/// when `route_key` succeeds — which is the same test
+/// [`consumer_portable_key`](super::bridge::consumer_portable_key) applies here.
+/// So no store this binary writes can hold a non-empty HTTP target that fails to
+/// key; the branch is reachable only from a row written by an older binary whose
+/// target no longer normalizes. It is kept because that is exactly the row it
+/// should label, and because collapsing it into the keyless case would report a
+/// stored template as `base-url-runtime`.
 ///
 /// Trimmed, because an all-whitespace target is no more of a candidate than an
 /// absent one — the same test the bridge's keyless-broker guard applies.
@@ -260,13 +270,21 @@ impl From<ClientCallRefusal> for UnboundReason {
     ///
     /// **Live from an index run since S-374 ([CR-120]).** The refusal had to
     /// reach a ledger row before this tier could label it, and the arm now writes
-    /// one — a keyless `unresolved_refs` row per declined call site. The runtime
-    /// path is [`unkeyable_reason`] → [`client_call_refusal`] → here, reached for
-    /// every unkeyable row of the [`Http`](BridgeNamespace::Http) namespace, so
-    /// both arms of this `match` are production paths and [FR-WS-08] AC2's
-    /// surfacing promise is met. This impl's previous doc comment disclosed the
-    /// opposite ("nothing calls this at runtime today"); the disclosure is
-    /// removed rather than softened, because it is no longer true.
+    /// one — a keyless `unresolved_refs` row per declining declaration. The
+    /// runtime path is [`unkeyable_reason`] → [`client_call_refusal`] → here,
+    /// reached for every unkeyable row of the
+    /// [`Http`](BridgeNamespace::Http) namespace, so [FR-WS-08] AC2's surfacing
+    /// promise is met. This impl's previous doc comment disclosed the opposite
+    /// ("nothing calls this at runtime today"); the disclosure is removed rather
+    /// than softened, because it is no longer true.
+    ///
+    /// **Precisely which arm is live:** the `BaseUrlRuntime` one. The
+    /// `PathNotComposed` arm is reached only from a stored target that fails
+    /// `route_key`, and the arm never stores one that would — see
+    /// [`client_call_refusal`], which states the bound. Saying "both arms are
+    /// production paths" would repeat, for a variant rather than a reason, the
+    /// over-claim S-378 removed from the sibling impl this comment goes on to
+    /// describe.
     ///
     /// The same qualifier once covered a sibling `From<RouteRefusal>` impl, which
     /// S-378 removed for having no producer at all. The two were never the same
