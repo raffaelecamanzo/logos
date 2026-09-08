@@ -389,13 +389,20 @@ fn worktree_seed_carries_the_contract_even_when_the_primary_has_no_db() {
 /// The twin exists to attribute the production cold path's cost, so it is only
 /// honest while it does the same work. S-369 made both paths resolve the
 /// primary checkout with **one** `git rev-parse --git-common-dir` instead of
-/// two, feeding one resolution to the graph seed and the contract seed alike —
-/// a change that has to land in both twins or the attribution over-reports
-/// `other` by exactly the saving production made. This is the side-effect
-/// guard for that, in the same spirit as
-/// `worktree_hooks.rs::a_phase_reported_engine_start_seeds_the_worktree_hooks_too`:
-/// if a future edit drops the shared resolution from one twin, the seed it
-/// feeds stops happening and this fails.
+/// two, feeding that one resolution to the graph seed and the contract seed
+/// alike — a change that had to land in both twins or the attribution would
+/// over-report `other` by exactly the saving production made.
+///
+/// **What this test can and cannot catch.** It fails if the twin stops
+/// performing either seed: the graph seed is proved by `status()` (which
+/// deliberately skips the auto-index prologue) reporting a populated graph with
+/// no full index, and the contract seed by the byte-identical `rules.toml`.
+/// It does **not** guard the de-duplication itself — a twin restored to two
+/// `--git-common-dir` subprocesses still performs both seeds, and subprocess
+/// count is not observable from this seam. So this covers the *omitted-step*
+/// failure mode, the same one
+/// `worktree_hooks.rs::a_phase_reported_engine_start_seeds_the_worktree_hooks_too`
+/// covers, and not the de-duplication regressing.
 #[test]
 fn a_phase_reported_engine_start_seeds_the_store_and_the_contract_too() {
     let (tmp, main) = gitignored_repo_fixture();
@@ -416,10 +423,28 @@ fn a_phase_reported_engine_start_seeds_the_store_and_the_contract_too() {
     let (engine, phases) =
         Engine::start_with_phase_report(&wt).expect("the phase-reported twin starts");
 
-    // The graph seed fired: the worktree sees main's code without indexing it.
+    // The graph seed fired. `status` reads WITHOUT the auto-index prologue, so
+    // a populated graph here proves the seed happened at start, and an empty
+    // `last_full_index_at` proves it was seed + diff-reconcile rather than a
+    // full index — the same discipline
+    // `a_worktree_seeds_from_main_and_reflects_its_own_code` uses, and the
+    // reason `has_fn` alone will not do: `has_fn` navigates, navigation runs
+    // the FR-IX-07 prologue, and a full index would satisfy it with no seed at
+    // all (which is exactly what `a_worktree_without_a_primary_db_full_indexes`
+    // asserts). Read status BEFORE any navigation call.
+    let status = engine.status();
+    assert!(
+        status.indexed,
+        "the twin seeded the worktree store from the primary checkout, before \
+         any navigation call could auto-index: {status:?}"
+    );
+    assert!(
+        status.last_full_index_at.is_none(),
+        "no full index ran — the twin's bootstrap was seed + diff-reconcile"
+    );
     assert!(
         has_fn(&engine, "seeded_fn"),
-        "the twin seeded the worktree store from the primary checkout"
+        "the seeded graph carries main's symbols without a re-index"
     );
     // The contract seed fired off the same primary resolution.
     assert_eq!(
@@ -432,13 +457,27 @@ fn a_phase_reported_engine_start_seeds_the_store_and_the_contract_too() {
         .expect("worktree check_rules runs");
     assert!(report.rules_present, "the seeded worktree has a contract");
 
-    // And the attribution it exists to produce is still well-formed: the six
-    // enumerated phases plus `other` is the whole measured total (NFR-PE-05
-    // bounds that total, not any subset of it).
-    assert_eq!(phases.enumerated_phases() + phases.other, phases.sum());
+    // And the attribution it exists to produce timed real work in the phases
+    // this seam is the only place to check them. `enumerated_phases() + other
+    // == sum()` is NOT asserted here: it holds for every possible field
+    // assignment by construction, so it can never fail — the arithmetic is
+    // pinned against literals in `engine::tests::cold_start_phase_totals_are_exact`
+    // instead. What only this test can check is that the seed work actually
+    // landed somewhere: unlike the bare-`TempDir` cold starts the attribution
+    // harness measures, this root really seeds, so `other` (which absorbs the
+    // seed, the contract copy and the reconcile) must be non-zero.
     assert!(
         phases.query_compilation > std::time::Duration::ZERO,
         "a real registry load was timed, not a skipped one"
+    );
+    assert!(
+        phases.store_open > std::time::Duration::ZERO,
+        "a real store open was timed"
+    );
+    assert!(
+        phases.other > std::time::Duration::ZERO,
+        "the seed and contract-copy work landed in `other`, as NFR-PE-05's \
+         incidental-work clause describes: {phases:?}"
     );
 }
 
