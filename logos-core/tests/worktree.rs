@@ -481,6 +481,46 @@ fn a_phase_reported_engine_start_seeds_the_store_and_the_contract_too() {
     );
 }
 
+/// The arm the S-369 refactor most easily breaks, on the twin: the primary
+/// exists (so one `--git-common-dir` resolution succeeds) but has **no**
+/// `.logos/logos.db`, so the graph seed yields `None` while the
+/// governance-contract seed must still run off that same resolution.
+///
+/// A mis-edit nesting the contract seed inside the graph seed's `and_then`, or
+/// gating it on `seed.is_some()`, would break exactly this and nothing else.
+/// `worktree_seed_carries_the_contract_even_when_the_primary_has_no_db` covers
+/// it for `Engine::start`; the twin is the half that can silently drift, so it
+/// needs its own.
+#[test]
+fn a_phase_reported_engine_start_seeds_the_contract_when_the_primary_has_no_db() {
+    let (tmp, main) = gitignored_repo_fixture();
+    write(&main, ".logos/rules.toml", LAYERED_RULES);
+    assert!(
+        !main.join(".logos/logos.db").exists(),
+        "the primary never ran Engine::start — the graph seed must resolve to None"
+    );
+
+    let wt = add_worktree(&tmp, &main);
+    let (engine, _phases) = Engine::start_with_phase_report(&wt)
+        .expect("the twin starts without a primary DB to seed from");
+
+    // No graph seed was possible...
+    assert!(
+        !engine.status().indexed,
+        "no primary DB → nothing copied; the store starts empty"
+    );
+    // ...but the contract seed still fired off the shared resolution.
+    assert_eq!(
+        fs::read_to_string(wt.join(".logos/rules.toml")).unwrap(),
+        LAYERED_RULES,
+        "the contract is seeded even though the graph seed found nothing"
+    );
+    let report = engine
+        .check_rules(None, true)
+        .expect("worktree check_rules runs");
+    assert!(report.rules_present, "the seeded worktree has a contract");
+}
+
 /// [FR-WT-06] AC2: a primary checkout with no contract seeds a worktree with
 /// no contract — the seed copies, it never fabricates.
 #[test]

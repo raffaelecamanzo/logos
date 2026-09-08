@@ -714,11 +714,44 @@ mod tests {
         assert_eq!(via_root.db_path, via_primary.db_path);
         assert_eq!(via_root.head, via_primary.head);
 
-        // And the `None` arms agree too: the primary checkout is its own
-        // primary, so `primary_root` is `None` there and neither form yields a
-        // seed.
-        assert!(seed_source(&main).is_none());
-        assert!(primary_root(&main).is_none());
+        // And the `None` arm the two forms can BOTH be called on agrees: a
+        // linked worktree whose primary was never indexed has no
+        // `.logos/logos.db` to seed from. (The primary-checkout arm is not an
+        // agreement check — `primary_root` is `None` there, so
+        // `seed_source_from_primary` is unreachable by construction; it is
+        // covered by `seed_source_is_none_in_the_primary_checkout`.)
+        let (tmp2, main2) = repo_fixture();
+        let wt2 = add_worktree(&tmp2, &main2); // primary never indexed
+        let primary2 = primary_root(&wt2).expect("a linked worktree has a primary");
+        assert!(
+            seed_source(&wt2).is_none(),
+            "no primary DB → no seed, through the wrapper"
+        );
+        assert!(
+            seed_source_from_primary(primary2).is_none(),
+            "no primary DB → no seed, through the resolved-primary form too"
+        );
+    }
+
+    /// `seed_source_from_primary` takes an arbitrary path, so its
+    /// unresolvable-HEAD arm is reachable in a way `seed_source`'s never was
+    /// (through the wrapper you need a linked worktree, which implies a
+    /// commit). A `git init`-ed directory with a DB file and no commits hits
+    /// exactly that arm — it must return `None`, not panic (S-369).
+    #[test]
+    fn seed_source_from_primary_is_none_when_head_is_unresolvable() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("unborn");
+        fs::create_dir_all(&repo).unwrap();
+        sh_git(&repo, &["init", "-q", "-b", "main"]);
+        // A DB is present, so the `is_file` check passes and the HEAD lookup is
+        // what decides — but HEAD is unborn, so `rev-parse HEAD` fails.
+        fs::create_dir_all(repo.join(".logos")).unwrap();
+        fs::write(repo.join(".logos/logos.db"), b"db").unwrap();
+        assert!(
+            seed_source_from_primary(repo).is_none(),
+            "an unborn HEAD is no seed base — None, and no panic"
+        );
     }
 
     // ── seed_contract (FR-WT-06) ──────────────────────────────────────────
