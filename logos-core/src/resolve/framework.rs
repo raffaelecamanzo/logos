@@ -314,7 +314,10 @@ struct FileMatches {
     /// of what governed what (the unit tests assert on it).
     prefixes: Vec<PrefixScope>,
     /// Registrations composition refused, one entry each ([`RouteRefusal`]) —
-    /// the honest count behind the `path-not-composed` reason.
+    /// the honest count published as
+    /// [`FrameworkStats::routes_not_composed`](crate::models::pipeline::FrameworkStats::routes_not_composed).
+    /// Not a `path-not-composed` coverage reason: see the note on
+    /// [`RouteRefusal`].
     refusals: Vec<RouteRefusal>,
 }
 
@@ -703,7 +706,7 @@ fn compose_prefixes(out: &mut FileMatches) {
     out.prefixes = prefixes;
 }
 
-/// Record one `path-not-composed` refusal, at most once per registration site.
+/// Record one composition refusal, at most once per registration site.
 ///
 /// A site is one annotation; the several `RouteMatch`es a list-valued path
 /// produces for it are one refused registration, which is the grain
@@ -968,9 +971,9 @@ fn join_route_path(prefix: &str, path: &str) -> String {
 /// # No trace, not a refusal
 ///
 /// A dropped candidate leaves **no** node and **no** [`RouteRefusal`].
-/// [FR-FW-05]'s `path-not-composed` vocabulary is for an endpoint Logos could
-/// not address; a property lookup was never an endpoint, and recording one
-/// would manufacture a coverage denominator out of ordinary code. That is also
+/// [FR-FW-05]'s refusal accounting is for an endpoint Logos could not address;
+/// a property lookup was never an endpoint, and recording one would
+/// manufacture a coverage denominator out of ordinary code. That is also
 /// why this runs after [`compose_prefixes`]: composition decides the refusals,
 /// so nothing dropped here has already been counted.
 ///
