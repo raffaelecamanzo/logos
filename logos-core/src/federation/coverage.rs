@@ -42,12 +42,13 @@ use super::registry::{EngineRegistry, MemberEngine};
 
 /// Why one cross-boundary reference did not bind ([FR-WS-05], [ADR-53]).
 ///
-/// **Every variant is a reason some arm can reach.** `BaseUrlRuntime` is the
-/// one that is not reached *yet*: it is the coverage word for [ADR-54]'s
-/// base-URL-composition accuracy ceiling, and S-374 gives it a production
-/// producer by having the HTTP client-call arm record the sites it declines.
-/// It is forward-declared for a named arm that ships in this same increment,
-/// not held open for an arm nobody has designed.
+/// **Every variant is a reason some arm reaches from an index run.**
+/// `BaseUrlRuntime` was the one exception until S-374: it is the coverage word
+/// for [ADR-54]'s base-URL-composition accuracy ceiling, and the HTTP
+/// client-call arm now records one keyless ledger row per declining declaration,
+/// which this tier reports under it, via [`client_call_refusal`] and the
+/// `From<ClientCallRefusal>` impl below. It is no longer forward-declared
+/// vocabulary.
 ///
 /// A `SchemaMismatch` variant used to sit here, described as forward-declared
 /// vocabulary for "the gRPC/broker/GraphQL invocation arms ([ADR-54])". S-378
@@ -75,9 +76,28 @@ pub enum UnboundReason {
     /// (e.g. a catch-all route) — never approximately matched ([NFR-RA-05]).
     PathNotComposed,
     /// The provider's address is resolved only at runtime (a dynamic base
-    /// URL) — [ADR-54]'s base-URL-composition accuracy ceiling. Gains a
-    /// production producer once S-374 lands the HTTP client-call arm's refusal
-    /// ledger; **no production path constructs it today**.
+    /// URL) — [ADR-54]'s base-URL-composition accuracy ceiling.
+    ///
+    /// **The HTTP client-call arm's recorded refusal** (S-374, [CR-120]): a call
+    /// site the arm captured whose path is not a static absolute literal — a bare
+    /// variable, a base-URL join, an interpolated string, a builder lambda, a
+    /// helper-method return — leaves one keyless `unresolved_refs` row, and an
+    /// empty HTTP target is exactly what [`client_call_refusal`] reads as this
+    /// reason. Before S-374 such a site left nothing at all, so an estate whose
+    /// client paths are all composed at runtime was indistinguishable from one
+    /// with no outbound calls — the same sparsity-as-absence dishonesty
+    /// [CR-107] corrected on the broker arm ([NFR-CC-04]).
+    ///
+    /// **What it does not cover, so the count is not over-read.** A call the
+    /// arm's per-language query never matched — a stated capture ceiling, a
+    /// receiver the S-375 rule declines, a language shipping no `invocations`
+    /// query — is refused before any site exists, so it carries no reason at all
+    /// and is absent from this bucket rather than counted in it. The population
+    /// is enumerated once, on `extract::capture_http_client_call_arm`.
+    ///
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     BaseUrlRuntime,
     /// Two or more providers expose the same key across the workspace — never
     /// fabricated ([NFR-RA-05]).
@@ -124,23 +144,78 @@ pub enum UnboundReason {
 /// classifier drift this module exists to prevent: an HTTP consumer's template did
 /// not *compose*, a broker site's topic was not a *literal*.
 ///
-/// **Two of the three arms have their own word.** An unkeyable gRPC row still reads
-/// `path-not-composed`, and a `package.Service/Method` FQN is not a path — but that
-/// is the pre-[CR-107] behaviour for every arm, and giving gRPC its own reason is a
-/// change to the [FR-WS-05] reason set that no acceptance criterion here asks for.
-/// Stated rather than left for a reader to discover from the `_` arm.
+/// **Two of the three arms have their own word, and the HTTP arm has two of its
+/// own.** A broker site's topic was not a *literal*; an HTTP consumer's path was
+/// either never a static literal (`base-url-runtime`) or was one that did not
+/// *compose* (`path-not-composed`), which is why this function also reads the
+/// stored `target` — see [`client_call_refusal`]. An unkeyable gRPC row still
+/// reads `path-not-composed`, and a `package.Service/Method` FQN is not a path —
+/// but that is the pre-[CR-107] behaviour for every arm, and giving gRPC its own
+/// reason is a change to the [FR-WS-05] reason set that no acceptance criterion
+/// here asks for. Stated rather than left for a reader to discover from the `_`
+/// arm.
 ///
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md Every arm's normalizer
 /// refuses before the ledger, so a row reaching here is either a refusal the arm
-/// deliberately recorded (the broker arm's keyless row, [CR-107]) or a target that
-/// stopped normalizing — both honestly unbound, neither fabricated.
+/// deliberately recorded (the broker arm's keyless row, [CR-107]; the HTTP arm's,
+/// [CR-120]) or a target that stopped normalizing — both honestly unbound,
+/// neither fabricated.
+///
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 ///
 /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
 /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
-fn unkeyable_reason(relation: crate::model::ArtifactRelation) -> UnboundReason {
+fn unkeyable_reason(
+    relation: crate::model::ArtifactRelation,
+    target: &str,
+) -> UnboundReason {
     match relation.bridge_namespace() {
         Some(BridgeNamespace::BrokerTopic) => UnboundReason::TopicNotLiteral,
+        // The HTTP arm has TWO words, and the stored target says which. It is
+        // the only arm whose normalizer distinguishes "no static path was
+        // present" from "the path was present and would not normalize", so it is
+        // the only one whose reason is read from the row rather than from the
+        // relation alone — through the arm's own vocabulary, never a second
+        // mapping (S-374, [CR-120]).
+        Some(BridgeNamespace::Http) => UnboundReason::from(client_call_refusal(target)),
         _ => UnboundReason::PathNotComposed,
+    }
+}
+
+/// Which [`ClientCallRefusal`] a stored, unkeyable HTTP client-call row records
+/// (S-374, [CR-120]).
+///
+/// The arm's two refusals are distinguished in the ledger by **whether a target
+/// was stored at all**, which is the same distinction the normalizer makes:
+///
+/// - an **empty** target is the arm's recorded keyless refusal — the path was not
+///   a static absolute literal, so no `"METHOD /template"` candidate ever
+///   existed to store ([`ClientCallRefusal::BaseUrlRuntime`]);
+/// - a **non-empty** target that nonetheless does not key is a
+///   `"METHOD /template"` the arm accepted and `route_key` later declined
+///   ([`ClientCallRefusal::PathNotComposed`]) — the word every unkeyable HTTP row
+///   read before S-374, now expressed through the arm's own vocabulary instead
+///   of a hardcoded default.
+///
+/// **The second branch is defensive, not a live population.** The arm stores a
+/// target only after `classify_client_call` accepted it, and it accepts one only
+/// when `route_key` succeeds — which is the same test
+/// [`consumer_portable_key`](super::bridge::consumer_portable_key) applies here.
+/// So no store this binary writes can hold a non-empty HTTP target that fails to
+/// key; the branch is reachable only from a row written by an older binary whose
+/// target no longer normalizes. It is kept because that is exactly the row it
+/// should label, and because collapsing it into the keyless case would report a
+/// stored template as `base-url-runtime`.
+///
+/// Trimmed, because an all-whitespace target is no more of a candidate than an
+/// absent one — the same test the bridge's keyless-broker guard applies.
+///
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+fn client_call_refusal(target: &str) -> ClientCallRefusal {
+    if target.trim().is_empty() {
+        ClientCallRefusal::BaseUrlRuntime
+    } else {
+        ClientCallRefusal::PathNotComposed
     }
 }
 
@@ -174,7 +249,7 @@ fn arm_relation(relation: crate::model::ArtifactRelation) -> String {
 // references, so a refused registration produces no row here for any reason to
 // label — a consumer naming that endpoint reads `no-provider-in-workspace`, the
 // bucket ADR-53 deliberately holds outside the ratio denominator. That is what
-// makes it unlike the `ClientCallRefusal` mapping below, which S-374 makes
+// makes it unlike the `ClientCallRefusal` mapping below, which S-374 made
 // live: a declined *call site* is consumer-side, so it has a row.
 // `a_registration_that_promoted_no_route_reads_no_provider_not_path_not_composed`
 // in this file's tests pins that classification.
@@ -191,25 +266,35 @@ impl From<ClientCallRefusal> for UnboundReason {
     /// the shared coverage vocabulary — so a call the arm's normalizer refused
     /// (contributing no reference, [FR-WS-08]) surfaces under the *same* reason
     /// bucket the read-model reports for the composable cases. This is where
-    /// "the normalizer returned `None`" *will* become an advisory coverage
-    /// reason.
+    /// "the normalizer returned `None`" becomes an advisory coverage reason.
     ///
-    /// **Not yet a report: nothing calls this at runtime today.** The refusal
-    /// has to reach a ledger row before this tier can label it, and S-374
-    /// supplies exactly that — a keyless `unresolved_refs` row per declined
-    /// call site. Until it lands, [FR-WS-08]'s surfacing promise is unmet and
-    /// this impl is reachable only from its own tests.
+    /// **Live from an index run since S-374 ([CR-120]).** The refusal had to
+    /// reach a ledger row before this tier could label it, and the arm now writes
+    /// one — a keyless `unresolved_refs` row per declining declaration. The
+    /// runtime path is [`unkeyable_reason`] → [`client_call_refusal`] → here,
+    /// reached for every unkeyable row of the
+    /// [`Http`](BridgeNamespace::Http) namespace, so [FR-WS-08] AC2's surfacing
+    /// promise is met. This impl's previous doc comment disclosed the opposite
+    /// ("nothing calls this at runtime today"); the disclosure is removed rather
+    /// than softened, because it is no longer true.
     ///
-    /// This qualifier used to live on the `From<RouteRefusal>` impl above,
-    /// which said "Like the [`ClientCallRefusal`] mapping below … nothing calls
-    /// this at runtime today" and so disclosed the fact for *both* mappings.
-    /// S-378 removed that impl, which would have left this one presenting an
-    /// unbuilt capability as fact — the honest-absence failure [NFR-CC-04]
-    /// disfavours — so the disclosure is restated here, where it now belongs
-    /// alone.
+    /// **Precisely which arm is live:** the `BaseUrlRuntime` one. The
+    /// `PathNotComposed` arm is reached only from a stored target that fails
+    /// `route_key`, and the arm never stores one that would — see
+    /// [`client_call_refusal`], which states the bound. Saying "both arms are
+    /// production paths" would repeat, for a variant rather than a reason, the
+    /// over-claim S-378 removed from the sibling impl this comment goes on to
+    /// describe.
     ///
+    /// The same qualifier once covered a sibling `From<RouteRefusal>` impl, which
+    /// S-378 removed for having no producer at all. The two were never the same
+    /// case: a `RouteRefusal` is a **provider**-side event and this tier
+    /// classifies consumer-side references, so it had no row here to label —
+    /// whereas a declined *call site* is consumer-side and does. The comment
+    /// above the removal states that asymmetry once.
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
     /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
-    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     fn from(refusal: ClientCallRefusal) -> Self {
         match refusal {
             ClientCallRefusal::BaseUrlRuntime => UnboundReason::BaseUrlRuntime,
@@ -850,7 +935,7 @@ where
                 CoverageState::Unbound {
                     // The arm's own word for "this did not key" — `path-not-composed`
                     // for a template, `topic-not-literal` for a broker topic ([CR-107]).
-                    reason: unkeyable_reason(consumer.relation),
+                    reason: unkeyable_reason(consumer.relation, &consumer.target),
                 },
                 RowProvenance {
                     providers: ProviderEvidence::Unnamed,
@@ -887,7 +972,15 @@ where
                 symbol: provider.symbol,
             },
             CoverageState::Unbound {
-                reason: unkeyable_reason(provider.relation),
+                // The target is passed for symmetry with the consumer loop, and
+                // reaches nothing new: this loop is fed only from the
+                // `BridgeRole::Provider` arm, and `BrokerSubscribe` is the one
+                // relation with that role — so `unkeyable_reason`'s `Http` branch
+                // (the only one that reads the target) is unreachable from here.
+                // A future `Http`-namespaced provider arm must revisit this,
+                // because `client_call_refusal`'s empty-target rule is stated for
+                // a *consumer* row.
+                reason: unkeyable_reason(provider.relation, &provider.target),
             },
             // A refusal has no provider to name — it never had a key to look one up
             // with ([CR-118]'s `Unnamed` shape, which is what a `path-not-composed`
@@ -2643,11 +2736,14 @@ mod tests {
 
     /// Acceptance (2): the HTTP arm's refusals map onto the coverage vocabulary —
     /// a base-URL-composed call is `base-url-runtime`, a non-normalizable one is
-    /// `path-not-composed`. This is the reason a call the normalizer refused (and
-    /// therefore left out of the ledger) *will be* reported under, tying the arm's
-    /// `None` render to the coverage reason enum — the mapping is pinned here, but
-    /// no production path reaches it until S-374 records the refusal (see the
-    /// impl's own note).
+    /// `path-not-composed`. This ties the arm's refusal reason to the coverage
+    /// reason enum.
+    ///
+    /// Since S-374 both arms of the mapping are on a production path
+    /// ([`unkeyable_reason`] → [`client_call_refusal`] → here); the row-level
+    /// proof that a *recorded* refusal actually arrives under `base-url-runtime`
+    /// is [`a_recorded_client_call_refusal_is_reported_base_url_runtime`], which
+    /// is what stops this test being the only caller of the code it covers.
     #[test]
     fn client_call_refusals_map_to_the_coverage_reasons() {
         assert_eq!(
@@ -2667,6 +2763,104 @@ mod tests {
             serde_json::to_value(UnboundReason::PathNotComposed).unwrap(),
             "path-not-composed"
         );
+    }
+
+    /// **S-374 acceptance: a recorded client-call refusal reaches the [FR-WS-05]
+    /// payload as `base-url-runtime`, and reaches it as an unbound row rather
+    /// than as nothing.**
+    ///
+    /// The consumer-side twin of
+    /// [`a_refused_broker_topic_is_reported_topic_not_literal`]. Three refusing
+    /// call sites in three declarations — the keyless rows
+    /// `extract::capture_http_client_call_arm` writes — beside one call that
+    /// binds a provider in another member, so the refusals cannot be an artefact
+    /// of a fixture in which nothing binds.
+    ///
+    /// Two things are asserted that the mapping test above cannot reach: the
+    /// **reason** is `base-url-runtime` and specifically not `path-not-composed`
+    /// (the word this tier gave every unkeyable HTTP row before S-374, and
+    /// reporting a keyless row under it would be exactly the classifier drift
+    /// this module exists to prevent), and the **row shape** a refusal carries —
+    /// no provider named, no candidate set, no intake, filed under `route`,
+    /// bucketed `unbound`.
+    ///
+    /// A `path-not-composed` HTTP row is asserted alongside, because the two are
+    /// told apart by one thing only — whether a target was stored — and a test
+    /// that pinned only the keyless half would pass if the function returned
+    /// `base-url-runtime` unconditionally.
+    ///
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    #[test]
+    fn a_recorded_client_call_refusal_is_reported_base_url_runtime() {
+        reset();
+        set_consumers(
+            "web",
+            vec![
+                // The bound control: a static absolute literal that keys.
+                http_call("GET /users/{id}", "local get_user"),
+                // The recorded refusals — keyless rows, one per declaration.
+                http_call("", "local bare_variable"),
+                http_call("", "local base_url_join"),
+                http_call("", "local builder_lambda"),
+                // A stored target that does not normalize: the OTHER HTTP word.
+                http_call("GET /files/{*rest}", "local catch_all"),
+            ],
+        );
+        set_member("web", vec![]);
+        set_member("api", vec![route("GET /users/{id}", "local users_route")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "web"]));
+
+        let mut refused: Vec<&str> = cov
+            .references
+            .iter()
+            .filter(|r| {
+                r.state
+                    == CoverageState::Unbound {
+                        reason: UnboundReason::BaseUrlRuntime,
+                    }
+            })
+            .map(|r| r.from.symbol.as_str())
+            .collect();
+        refused.sort();
+        assert_eq!(
+            refused,
+            vec!["local bare_variable", "local base_url_join", "local builder_lambda"],
+            "each keyless row is one base-url-runtime reference: {:?}",
+            cov.references
+        );
+
+        // The other HTTP word is still reachable and still distinct.
+        let not_composed: Vec<&str> = cov
+            .references
+            .iter()
+            .filter(|r| {
+                r.state
+                    == CoverageState::Unbound {
+                        reason: UnboundReason::PathNotComposed,
+                    }
+            })
+            .map(|r| r.from.symbol.as_str())
+            .collect();
+        assert_eq!(not_composed, vec!["local catch_all"]);
+
+        // The row shape of a refusal: nothing to point at, nothing to stamp.
+        let row = cov
+            .references
+            .iter()
+            .find(|r| r.from.symbol.as_str() == "local bare_variable")
+            .expect("the refusal row");
+        assert_eq!(row.relation, "route");
+        assert_eq!(row.from.member, "web");
+        assert!(row.to.is_none(), "{row:?}");
+        assert!(row.candidates.is_none(), "{row:?}");
+        assert!(row.intake.is_none(), "{row:?}");
+        assert_eq!(row.bucket, "unbound");
+
+        // The control bound, so the refusals sit beside a real binding.
+        assert_eq!(cov.bound, 1);
+        assert_eq!(cov.unbound, 4);
+        assert_eq!(cov.ambiguous, 0);
     }
 
     /// **The route-composition refusal has no mapping onto this vocabulary, and
@@ -3485,33 +3679,64 @@ mod tests {
         }
     }
 
-    /// `topic-not-literal` is the **broker** arm's word for an unkeyable row, and
-    /// `path-not-composed` remains the HTTP arm's — chosen by the arm's own
-    /// namespace, not by a shared default. Both render as their FR-WS-05 wire
-    /// tokens.
+    /// `topic-not-literal` is the **broker** arm's word for an unkeyable row —
+    /// chosen by the arm's own namespace, not by a shared default — and the HTTP
+    /// arm has **two**, told apart by whether a target was stored at all
+    /// (S-374): a keyless row is its recorded `base-url-runtime` refusal, a
+    /// stored target that will not key is `path-not-composed`. Both render as
+    /// their FR-WS-05 wire tokens.
+    ///
+    /// The broker rows are asserted on **both** target shapes precisely because
+    /// the reason must NOT depend on the target there: the arm has one word, and
+    /// reading the row would be the drift this function exists to prevent.
     #[test]
     fn an_unkeyable_row_is_reported_under_its_own_arms_reason() {
         use crate::model::ArtifactRelation;
 
+        for target in ["", "orders"] {
+            assert_eq!(
+                unkeyable_reason(ArtifactRelation::BrokerSubscribe, target),
+                UnboundReason::TopicNotLiteral,
+                "the broker arm has one word whatever the row carries ({target:?})"
+            );
+            assert_eq!(
+                unkeyable_reason(ArtifactRelation::BrokerPublish, target),
+                UnboundReason::TopicNotLiteral
+            );
+            assert_eq!(
+                unkeyable_reason(ArtifactRelation::GrpcCall, target),
+                UnboundReason::PathNotComposed
+            );
+        }
+
+        // The HTTP arm's two words, and the empty/blank equivalence the ledger's
+        // keyless row relies on.
         assert_eq!(
-            unkeyable_reason(ArtifactRelation::BrokerSubscribe),
-            UnboundReason::TopicNotLiteral
-        );
-        assert_eq!(
-            unkeyable_reason(ArtifactRelation::BrokerPublish),
-            UnboundReason::TopicNotLiteral
-        );
-        assert_eq!(
-            unkeyable_reason(ArtifactRelation::HttpClientCall),
+            unkeyable_reason(ArtifactRelation::HttpClientCall, "GET /files/{*rest}"),
             UnboundReason::PathNotComposed
         );
+        for keyless in ["", "   "] {
+            assert_eq!(
+                unkeyable_reason(ArtifactRelation::HttpClientCall, keyless),
+                UnboundReason::BaseUrlRuntime,
+                "a keyless HTTP row is the arm's recorded base-url-runtime refusal"
+            );
+            assert_eq!(
+                client_call_refusal(keyless),
+                ClientCallRefusal::BaseUrlRuntime
+            );
+        }
         assert_eq!(
-            unkeyable_reason(ArtifactRelation::GrpcCall),
-            UnboundReason::PathNotComposed
+            client_call_refusal("GET /users/{id}"),
+            ClientCallRefusal::PathNotComposed
         );
         assert_eq!(
             serde_json::to_value(UnboundReason::TopicNotLiteral).unwrap(),
             "topic-not-literal"
+        );
+        assert_eq!(
+            serde_json::to_value(UnboundReason::BaseUrlRuntime).unwrap(),
+            "base-url-runtime"
         );
     }
 

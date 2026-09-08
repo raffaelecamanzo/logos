@@ -40,8 +40,9 @@ pub async fn fetch_user(client: Client) {
 "#;
 
 /// A client module whose request path is a **bare variable** — the URL is
-/// composed at runtime, so the arm refuses it (base-url-runtime): no reference,
-/// no ledger entry, no bind.
+/// composed at runtime, so the arm refuses it (base-url-runtime): no reference
+/// and no bind, but since S-374 **one keyless ledger row** recording the
+/// refusal.
 const CLIENT_COMPOSED: &str = r#"
 use reqwest::Client;
 
@@ -198,11 +199,31 @@ fn two_matching_routes_make_the_client_call_ambiguous() {
     assert_eq!(coverage.bound, 0);
 }
 
-/// Acceptance (2/3): a runtime-composed (bare-variable) client-call path never
-/// enters the ledger, so it binds nothing even when a matching route exists —
-/// no approximate edge is ever fabricated.
+/// Acceptance (2/3): a runtime-composed (bare-variable) client-call path binds
+/// nothing even when a matching route exists — no approximate edge is ever
+/// fabricated.
+///
+/// **S-374 changes what the site leaves behind, not what it binds.** The call
+/// now records one *keyless* `http-client-call` row, so [FR-WS-08] AC2's second
+/// half is met — the site appears under `base-url-runtime` instead of vanishing
+/// — and this test carries the proof that the row is inert while it does so:
+///
+/// - the ledger holds exactly one `http-client-call` row and its target is
+///   **empty** (no fabricated `"METHOD /template"`);
+/// - the member graph gains **no** node at that key — the route promotion in
+///   `api` is untouched and `web` promotes nothing;
+/// - the bridge computes **no** edge, and the resolution pass resolved the row
+///   to nothing, so it stays in the ledger rather than becoming an
+///   `ArtifactBinding`;
+/// - the coverage tier reports it `base-url-runtime`, not `path-not-composed`;
+/// - **a re-sync leaves one row, not two.** The refusal is deduped per site, so
+///   re-indexing the same unchanged source cannot accumulate rows — the property
+///   an idempotent extractor must have and the one a per-site ledger row is most
+///   likely to break.
+///
+/// [FR-WS-08]: ../../docs/specs/requirements/FR-WS-08.md
 #[test]
-fn a_runtime_composed_client_call_never_binds() {
+fn a_runtime_composed_client_call_records_a_keyless_refusal_and_never_binds() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
@@ -212,6 +233,45 @@ fn a_runtime_composed_client_call_never_binds() {
     write(&api, "src/main.rs", AXUM_MAIN);
     index_member(&web);
     index_member(&api);
+
+    // ── the recorded refusal, and its inertness in `web`'s own graph ─────────
+    let facts = member_facts(&web);
+    let rows = &facts.client_calls;
+    assert_eq!(
+        rows.len(),
+        1,
+        "the declined call site leaves exactly one ledger row: {rows:?}"
+    );
+    assert_eq!(
+        rows[0].1, "",
+        "and the row is KEYLESS — no fabricated template: {rows:?}"
+    );
+    assert!(
+        rows[0].0.contains("fetch_user"),
+        "attributed to the calling function: {rows:?}"
+    );
+    assert!(
+        !facts
+            .nodes
+            .iter()
+            .any(|(kind, name)| *kind == "route" || name.contains("METHOD")),
+        "a keyless refusal promotes no node in the calling member: {:?}",
+        facts.nodes
+    );
+    assert_eq!(
+        facts.artifact_bindings, 0,
+        "and it resolves to no edge — it stayed in the ledger, honestly unbound"
+    );
+
+    // ── re-sync: the same source cannot accumulate a second row ──────────────
+    index_member(&web);
+    let again = member_facts(&web).client_calls;
+    assert_eq!(
+        again.len(),
+        1,
+        "one call site is one row across re-syncs: {again:?}"
+    );
+    assert_eq!(&again, rows, "and it is byte-identical: {again:?}");
 
     let registry = EngineRegistry::<Engine>::new(
         federation(root, vec![member("web", &web), member("api", &api)]),
@@ -223,4 +283,64 @@ fn a_runtime_composed_client_call_never_binds() {
         edges.is_empty(),
         "a base-url-runtime client call never binds — no approximate edge: {edges:?}"
     );
+
+    // ── the coverage tier's own word for it ──────────────────────────────────
+    let coverage = cross_service_coverage(&registry);
+    assert_eq!(coverage.bound, 0);
+    let reasons: Vec<String> = coverage
+        .references
+        .iter()
+        .map(|r| serde_json::to_value(r.state).unwrap().to_string())
+        .collect();
+    assert_eq!(
+        coverage.unbound, 1,
+        "the refusal is one unbound row, not an absence: {reasons:?}"
+    );
+    assert!(
+        reasons.iter().any(|r| r.contains("base-url-runtime")),
+        "and it carries the arm's own reason, not `path-not-composed`: {reasons:?}"
+    );
+}
+
+/// One member's `http-client-call` ledger rows, its promoted nodes, and its
+/// `ArtifactBinding` edge count — the three things an S-374 keyless row must
+/// leave untouched.
+struct MemberFacts {
+    /// `(source symbol, target)` per `http-client-call` row, sorted.
+    client_calls: Vec<(String, String)>,
+    /// `(kind, name)` per node in the member's graph.
+    nodes: Vec<(String, String)>,
+    /// How many `ArtifactBinding` edges the resolution pass proved.
+    artifact_bindings: usize,
+}
+
+/// Read [`MemberFacts`] out of one member's own `.logos/logos.db`.
+fn member_facts(root: &Path) -> MemberFacts {
+    let engine = Engine::start(root).expect("engine starts");
+    let rt = engine.runtime().expect("runtime");
+    rt.submit_read(|store| {
+        let mut client_calls: Vec<(String, String)> = store
+            .unresolved_refs()?
+            .into_iter()
+            .filter(|r| r.payload.as_deref() == Some("http-client-call"))
+            .map(|r| (r.source_symbol, r.target))
+            .collect();
+        client_calls.sort();
+        let nodes: Vec<(String, String)> = store
+            .all_nodes()?
+            .into_iter()
+            .map(|n| (n.kind.as_str().to_string(), n.name))
+            .collect();
+        let artifact_bindings = store
+            .all_edges()?
+            .into_iter()
+            .filter(|e| e.kind == logos_core::model::EdgeKind::ArtifactBinding)
+            .count();
+        Ok(MemberFacts {
+            client_calls,
+            nodes,
+            artifact_bindings,
+        })
+    })
+    .expect("read runs")
 }

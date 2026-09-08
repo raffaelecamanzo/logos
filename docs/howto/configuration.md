@@ -901,3 +901,16 @@ no captures, and that is the honest answer rather than a defect. Route
 *registrations* (`app.get("/x", handler)`, `Route::get(...)`, a FastAPI decorator)
 are excluded structurally in every language — capturing one would bind another
 member's real route and invent a cross-service edge.
+
+**A refused call site is recorded, not dropped.** A `base-url-runtime` site leaves
+one keyless row per declining declaration, so `workspace status` counts it as an
+unbound reference under that reason instead of the site disappearing, and
+`logos status`'s unresolved-reference count includes it too. That is why enabling
+this capability on such a codebase makes the unbound count *rise* — the sites were
+always there and were previously not counted. A recorded refusal names no target,
+so it can never become a cross-service edge or a promoted node, and none of these
+figures is a gate input. Two things it still cannot show you: a call your
+language's query never matched (each stated capture ceiling is named in that
+language's `invocations.scm` — some declare them in the header, others in a
+"Stated coverage ceilings" section at the foot of the file) and the
+`path-not-composed` half, which is reported only when a target was stored.

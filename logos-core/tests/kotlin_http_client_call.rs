@@ -79,14 +79,38 @@ fun probe(restClient: RestClient): String =
     restClient.get().uri("/probe").retrieve().body(String::class.java)
 "#;
 
-/// Index `body` as a single Kotlin file and return every `http-client-call`
-/// reference target the arm wrote to the ledger, sorted.
+/// Index `body` as a single Kotlin file and return **every** `http-client-call`
+/// row the arm wrote to the ledger, sorted — refusals included, as the empty
+/// string that sorts first.
+///
+/// **Deliberately unfiltered (S-374)**, the discipline every other per-language
+/// suite keeps: a keyless refusal row is a real ledger row, and a reader that
+/// hid it would silently retire this file's "nothing at all was captured"
+/// assertions — a spurious keyless row turns `["GET /probe"]` into
+/// `["", "GET /probe"]` and fails the test. The split lives in
+/// [`client_call_rows`].
 fn client_calls(body: &str) -> Vec<String> {
     client_calls_raw(&format!("package com.example\n{CLIENT_IMPORTS}\n{body}"))
 }
 
+/// [`client_calls`]'s two populations: the arm's `(references, refusal rows)`.
+///
+/// The only reader that filters, and it hands back the count it removed — so a
+/// test whose contract is about a refusal pins both halves and neither can hide
+/// the other. One index run per call, because this suite indexes a whole engine
+/// per fixture.
+fn client_call_rows(body: &str) -> (Vec<String>, usize) {
+    let targets = client_calls(body);
+    let refusals = targets.iter().filter(|t| t.is_empty()).count();
+    (
+        targets.into_iter().filter(|t| !t.is_empty()).collect(),
+        refusals,
+    )
+}
+
 /// As [`client_calls`], but the caller supplies the whole compilation unit —
 /// used by the negative case that must ship *without* the client imports.
+/// Unfiltered, for the reason given on [`client_calls`].
 fn client_calls_raw(source: &str) -> Vec<String> {
     let tmp = tempfile::tempdir().expect("tempdir");
     fs::create_dir_all(tmp.path().join("src")).expect("mkdir");
@@ -409,9 +433,8 @@ class Calls(private val restClient: RestClient) {{
 /// guard it bound the runtime-composed template `/users/$id/roles`.
 #[test]
 fn a_string_template_path_emits_no_reference() {
-    assert!(
-        client_calls(
-            r#"
+    let (references, refusals) = client_call_rows(
+        r#"
 class Calls(private val restClient: RestClient, private val base: String) {
     fun bare(): String {
         return restClient.get().uri("$base/users").retrieve().body(String::class.java)
@@ -423,12 +446,18 @@ class Calls(private val restClient: RestClient, private val base: String) {
         return restClient.get().uri("/users/$id/roles").retrieve().body(String::class.java)
     }
 }
-"#
-        )
-        .is_empty(),
-        "a Kotlin string template composes its path at runtime — no reference, \
-         no ledger entry, no approximate bind"
+"#,
     );
+    assert!(
+        references.is_empty(),
+        "a Kotlin string template composes its path at runtime — no reference \
+         and no approximate bind: {references:?}"
+    );
+    // Since S-374 the refusal is also RECORDED, one keyless row per declining
+    // function — so the doc comment above no longer has to send a reader to a
+    // slot-level test to see that the reason is `base-url-runtime` rather than
+    // the site never existing: the row is the observable.
+    assert_eq!(refusals, 3);
 }
 
 // ── 3. The shared negative-case fixture contract (S-340, [FR-WS-08]) ─────────
@@ -502,9 +531,8 @@ class Calls(private val restClient: RestClient) {
 /// Kotlin's query fills the interpreter's slots such that the refusal fires.
 #[test]
 fn a_runtime_composed_path_emits_no_reference() {
-    assert!(
-        client_calls(
-            r#"
+    let (references, refusals) = client_call_rows(
+        r#"
 class Calls(private val restClient: RestClient, private val baseUrl: String) {
     fun bareVariable(path: String): String {
         return restClient.get().uri(path).retrieve().body(String::class.java)
@@ -522,12 +550,17 @@ class Calls(private val restClient: RestClient, private val baseUrl: String) {
         return restClient.get().uri(buildUserUrl(id)).retrieve().body(String::class.java)
     }
 }
-"#
-        )
-        .is_empty(),
+"#,
+    );
+    assert!(
+        references.is_empty(),
         "a bare variable, a concatenation, a relative literal, an escaped \
          Spring `${{…}}` placeholder literal and a helper-method call are each \
-         base-url-runtime — no reference, no ledger entry, no approximate bind"
+         base-url-runtime — no reference and no approximate bind: {references:?}"
+    );
+    assert_eq!(
+        refusals, 5,
+        "and each declining FUNCTION leaves one keyless row (S-374)"
     );
 }
 
@@ -546,7 +579,42 @@ class Calls(private val restClient: RestClient) {
 "#
         )
         .is_empty(),
-        "a catch-all template is honestly unbound, never approximately matched"
+        "a catch-all template is honestly unbound, never approximately matched — \
+         no reference AND, deliberately, no recorded refusal (that reason needs a \
+         non-keyless row, S-374)"
+    );
+}
+
+/// **The wrapped non-normalizing literal: two patterns, one call, and neither
+/// half may report the other's reason** (S-374, [NFR-CC-04]).
+///
+/// Kotlin inherits Java's `.uri(URI.create(…))` unwrap, so it inherits the same
+/// two-pattern overlap: the fluent verb-then-`uri` pattern's operand is the
+/// whole `URI.create(…)` expression (no static literal ⇒ `base-url-runtime`),
+/// the unwrapping pattern's operand is the literal. When the literal keys, the
+/// reference and the cancellation are pinned by
+/// [`a_jdk_http_client_builder_yields_one_reference_in_either_order`]; here it
+/// does not key, so the unwrapping pattern classifies it `path-not-composed` and
+/// records nothing — and that judgement must still cancel the enclosing match,
+/// or a static absolute literal is filed as a runtime-composed path.
+#[test]
+fn a_wrapped_non_normalizing_literal_records_neither_a_reference_nor_a_refusal() {
+    let (references, refusals) = client_call_rows(
+        r#"
+class Calls {
+    fun catchAll(): HttpRequest =
+        HttpRequest.newBuilder().GET().uri(URI.create("/files/**")).build()
+}
+"#,
+    );
+    assert!(
+        references.is_empty(),
+        "a catch-all template is never approximately matched: {references:?}"
+    );
+    assert_eq!(
+        refusals, 0,
+        "and the inner literal's `path-not-composed` judgement cancels the outer \
+         match's candidate — a static literal is not `base-url-runtime`"
     );
 }
 
@@ -734,19 +802,23 @@ class Calls(private val restTemplate: RestTemplate) {
 /// `create` factory does not smuggle a path into the JDK-builder patterns.
 #[test]
 fn only_uri_create_unwraps_a_builder_path() {
-    assert!(
-        client_calls(
-            r#"
+    let (references, refusals) = client_call_rows(
+        r#"
 class Calls {
     fun a(): HttpRequest {
         return HttpRequest.newBuilder().GET().uri(MyFactory.create("/internal/{id}"))
     }
 }
-"#
-        )
-        .is_empty(),
-        "`MyFactory.create(…)` is not `URI.create(…)` — no path is unwrapped"
+"#,
     );
+    assert!(
+        references.is_empty(),
+        "`MyFactory.create(…)` is not `URI.create(…)` — no path is unwrapped: \
+         {references:?}"
+    );
+    // The `.uri(…)` link is still matched, so the site exists with a non-literal
+    // operand: one recorded `base-url-runtime` refusal (S-374), not a silent drop.
+    assert_eq!(refusals, 1);
 }
 
 // ── 5. Stated coverage ceilings ([ADR-54]) ──────────────────────────────────

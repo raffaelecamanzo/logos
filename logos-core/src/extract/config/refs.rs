@@ -1,5 +1,10 @@
 //! The cross-artifact reference-capture seam of the config extraction walk
-//! (S-068, CR-011, [ADR-26], [FR-CG-07]) and its Protobuf/GraphQL arms (S-070).
+//! (S-068, CR-011, [ADR-26], [FR-CG-07]) and its Protobuf/GraphQL arms (S-070),
+//! plus the arm-agnostic **invocation** seam the *code* arms share —
+//! [`capture_invocation_refs`] for what they emit (S-251) and
+//! [`record_refusals`] for what they decline (S-370 broker, S-374 HTTP). Those
+//! two have no config-walk caller; they live here because they are the same kind
+//! of thing as [`push_artifact_ref`], which both of them funnel through.
 //!
 //! Sprint 10 ([ADR-25]) shipped the config & artifact layer `Contains`-only: its
 //! typed anchors (`ProtoMessage`, `TfBlock`, `SqlObject`, `ApiOperation`,
@@ -26,6 +31,12 @@
 //! work list of genuine workspace-relative misses, never a noise archive of
 //! permanently-unbindable externals ([ADR-26]).
 //!
+//! There is exactly one sanctioned exception, and it is stated on the function
+//! that admits it: an invocation arm's **recorded refusal**, a keyless row that
+//! reports a declined site as an [FR-WS-05] coverage reason and can never bind.
+//! See [`push_artifact_ref`]'s "one admitted non-candidate" and
+//! [`record_refusals`].
+//!
 //! # The per-format dispatch is the consumers' extension point
 //!
 //! [`capture_artifact_refs`] dispatches on the plugin name. S-070 adds the
@@ -45,7 +56,8 @@
 //! [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
 //! [NFR-RA-06]: ../../../../docs/specs/requirements/NFR-RA-06.md
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
 
 use tree_sitter::Node;
 
@@ -71,20 +83,28 @@ use crate::plugin::LanguagePlugin;
 /// Returns `true` when the reference was captured (a workspace-relative
 /// candidate), `false` when it was classified external and dropped.
 ///
-/// # The one admitted non-candidate ([CR-107])
+/// # The one admitted non-candidate: an invocation arm's recorded refusal
 ///
-/// A broker-arm reference with an **empty** target is a recorded
-/// `topic-not-literal` refusal, not a candidate: it is deliberately admitted here
-/// (an empty target is no external form, so the gate above passes it) and then
-/// refused by every consumer downstream — `resolve::topics::broker_refs`,
-/// `federation::bridge::consumer_portable_key`, `federation::broker::classify` and
-/// `resolve::binder`'s empty-name guard. So it reaches the [FR-WS-05] coverage
-/// payload as a reason and can never become an edge or a `Topic` node. It is the
-/// only sanctioned exception to "the ledger is a work list of genuine
-/// workspace-relative misses" ([ADR-26]), and it is named here because this is the
-/// function that enforces that rule.
+/// An invocation-arm reference with an **empty** target is a recorded refusal,
+/// not a candidate. Two arms write one — the broker arm's `topic-not-literal`
+/// ([CR-107], S-370) and the HTTP client-call arm's `base-url-runtime`
+/// ([CR-120], S-374) — both through [`record_refusals`], and both deliberately
+/// admitted here: an empty target is no external form, so the gate above passes
+/// it. Every consumer downstream then refuses it —
+/// `federation::bridge::consumer_portable_key` for every namespace,
+/// `resolve::topics::broker_refs`, `federation::broker::classify`,
+/// `resolve::binder`'s empty-name guard, and `route_key` on an empty
+/// `"METHOD /template"`. So it reaches the [FR-WS-05] coverage payload as a
+/// reason and can never become an edge, a `Topic`, or any other promoted node.
+///
+/// It is the only sanctioned exception to "the ledger is a work list of genuine
+/// workspace-relative misses" ([ADR-26]), and it is named here because this is
+/// the function that enforces that rule. It is stated as a **class**, not as a
+/// list of two arms, so a third arm recording refusals is covered by the same
+/// sentence rather than needing it re-derived.
 ///
 /// [CR-107]: ../../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+/// [CR-120]: ../../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 /// [FR-WS-05]: ../../../../docs/specs/requirements/FR-WS-05.md
 ///
 /// [FR-CG-07]: ../../../../docs/specs/requirements/FR-CG-07.md
@@ -156,7 +176,10 @@ pub(crate) struct InvocationSite {
 ///    no capture file yields no `sites`, so the loop emits nothing.
 /// 2. **Never fabricate** ([NFR-RA-05]) — a site the normalizer cannot reduce to
 ///    a static portable key (a runtime-composed path, a dynamic topic) is
-///    refused by returning `None`, contributing no reference and no ledger entry.
+///    refused by returning `None`, contributing no reference. Whether that
+///    refusal is also *recorded* is the arm's decision, taken outside this loop:
+///    see [`record_refusals`], which writes a keyless row that is inert to
+///    binding, so a recorded refusal never becomes a reference either.
 /// 3. **Externals never enter the ledger** ([FR-CG-07]) — a rendered target the
 ///    relation classifies external is dropped by [`push_artifact_ref`]'s gate.
 ///
@@ -193,6 +216,127 @@ where
         }
     }
     emitted
+}
+
+/// One captured invocation site whose keyed operand may not be keyable — a
+/// refusal **candidate**, pending the reconcile against what actually bound
+/// ([CR-107], [CR-120]).
+///
+/// The arm resolves the enclosing declaration and the reported line before
+/// pushing a candidate, so this carrier holds no tree-sitter node and the
+/// recorder needs no attribution closure: an operand with no attributable
+/// declaration is not a candidate at all, exactly as it was not a recorded
+/// refusal before.
+///
+/// [CR-107]: ../../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+/// [CR-120]: ../../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+pub(crate) struct RefusalCandidate {
+    /// The arm-and-role relation this refusal is recorded under. It is also the
+    /// discriminator the reconcile below cancels *within*: a bound operand of
+    /// one relation never cancels another relation's candidate.
+    pub(crate) relation: ArtifactRelation,
+    /// The byte range of the **site** this refusal is deduped by, and the range
+    /// an admitted operand must fall inside to cancel it. Each arm names its own
+    /// site node — the broker arm's `@broker.*.site`, the HTTP arm's captured
+    /// path operand.
+    pub(crate) site: Range<usize>,
+    /// The declaration the refusal is attributed to (the publishing/subscribing
+    /// method, the calling function).
+    pub(crate) source: LogosSymbol,
+    /// The 1-based source line the refusal is reported at.
+    pub(crate) line: u32,
+}
+
+/// Record one **keyless** ledger row per refused invocation site, and return how
+/// many were recorded ([FR-WS-05], [FR-WS-08], [NFR-CC-04], [CR-107], [CR-120]).
+///
+/// The arm-agnostic half of the refusal discipline, the way
+/// [`capture_invocation_refs`] is the arm-agnostic half of the *emission*
+/// discipline. Written once here because it was built once, for the broker arm
+/// (S-370): a second copy in the HTTP arm is precisely the hand-mirrored twin
+/// that diverges from its original — the failure mode a hand-mirrored mechanism
+/// in a co-edited file always has — so the HTTP arm (S-374) consumes this rather
+/// than restating it.
+///
+/// Two mechanisms, both inherited by every arm that supplies candidates:
+///
+/// 1. **A resolved operand cancels a candidate at the same site.** A candidate
+///    survives iff **no** resolved operand of the same `relation` lies within
+///    its site range. "Resolved" is the arm's own judgement that *this operand
+///    yielded the value the arm was looking for* — deliberately wider than "this
+///    operand bound something". The HTTP arm supplies the range of a static path
+///    literal that did **not** key (`path-not-composed`) as well as one that did,
+///    because withholding it would let an enclosing match's `base-url-runtime`
+///    candidate outlive the judgement and report a static literal as a
+///    runtime-composed path. A shipped `.scm` that enumerates only non-keyable operand
+///    shapes never creates a cancellable pair, so for those arms this is
+///    defence-in-depth against a **droppable** on-disk query ([FR-PL-04])
+///    pointing a slot at an operand another pattern admitted — but for an arm
+///    whose query captures *every* operand and lets the normalizer judge it (the
+///    HTTP arm), it is what keeps two patterns matching one call from reporting a
+///    refusal beside that call's own reference.
+/// 2. **Survivors dedup to one row per `(relation, declaration, line)`** — the
+///    "at most once per registration site" discipline
+///    [`crate::resolve::framework`] applies to `path-not-composed`. Deliberately
+///    coarser than the raw site, because a query may legitimately capture nested
+///    sites for one operand. Note this is not the only thing collapsing rows: the
+///    production caller re-runs `dedup_sort_refs`, which keys on
+///    `(source, target, form, kind, relation)` and ignores `line`, so two refused
+///    sites in one declaration reach the ledger as **one** row even on different
+///    lines. This dedup keeps the grain local and independent of that key.
+///
+/// The row's target is **empty**: no key is fabricated, not even the operand's
+/// source text. A keyless row is inert by contracts that already exist — the
+/// bridge's `consumer_portable_key` refuses it for every namespace, so it can
+/// never index a provider, bind an edge, or promote a node
+/// (`resolve::topics` refuses to promote a keyless topic; `resolve::binder`'s
+/// route resolution refuses an empty `"METHOD /template"` because `route_key`
+/// does) — and the [FR-WS-05] coverage tier reports it under its arm's own
+/// reason ([NFR-RA-05]).
+///
+/// [FR-WS-05]: ../../../../docs/specs/requirements/FR-WS-05.md
+/// [FR-WS-08]: ../../../../docs/specs/requirements/FR-WS-08.md
+/// [FR-PL-04]: ../../../../docs/specs/requirements/FR-PL-04.md
+/// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+/// [CR-107]: ../../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+/// [CR-120]: ../../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+pub(crate) fn record_refusals(
+    facts: &mut Facts,
+    form: RefForm,
+    candidates: Vec<RefusalCandidate>,
+    resolved: &[(ArtifactRelation, Range<usize>)],
+) -> usize {
+    let mut seen: HashSet<(ArtifactRelation, String, u32)> = HashSet::new();
+    let mut recorded = 0;
+    for candidate in candidates {
+        // Did the arm resolve an operand at this site? Then it is not a refusal.
+        if resolved.iter().any(|(relation, at)| {
+            *relation == candidate.relation
+                && at.start >= candidate.site.start
+                && at.end <= candidate.site.end
+        }) {
+            continue;
+        }
+        if !seen.insert((
+            candidate.relation,
+            candidate.source.as_str().to_string(),
+            candidate.line,
+        )) {
+            continue; // this site already recorded its one refusal
+        }
+        if push_artifact_ref(
+            facts,
+            &candidate.source,
+            "",
+            candidate.relation,
+            form,
+            candidate.line,
+        ) {
+            recorded += 1;
+        }
+    }
+    recorded
 }
 
 /// Capture every cross-artifact reference fact for one config/artifact file
@@ -1468,6 +1612,88 @@ mod tests {
         assert_eq!(r.relation.unwrap().as_str(), "grpc-call");
         assert_eq!(r.kind, ArtifactRelation::GrpcCall.edge_kind());
         assert_eq!(r.line, 12);
+    }
+
+    /// The **shared refusal recorder** ([`record_refusals`]), driven directly:
+    /// the mechanism S-370 built for the broker arm and S-374 reuses for the HTTP
+    /// arm, asserted once here so neither arm's fixtures are the only proof it
+    /// holds.
+    ///
+    /// Four properties, each with its own candidate in the one call:
+    ///
+    /// 1. a candidate with no admitted operand inside its site range records one
+    ///    keyless row;
+    /// 2. a candidate whose site *contains* an admitted operand of the **same**
+    ///    relation records nothing — the reconcile that stops a droppable query
+    ///    ([FR-PL-04]) reporting a refusal beside the very reference it produced;
+    /// 3. containment is per **relation**: an operand admitted under another
+    ///    arm's relation inside the same byte range cancels nothing, because the
+    ///    two are different sites that happen to overlap;
+    /// 4. survivors dedup on `(relation, declaration, line)`, so one site cannot
+    ///    record twice however many times a query captures it.
+    ///
+    /// The recorded row is keyless — an **empty** target — and carries the
+    /// relation's own `edge_kind`, so it is inert to binding wherever it lands.
+    ///
+    /// [FR-PL-04]: ../../../../docs/specs/requirements/FR-PL-04.md
+    #[test]
+    fn the_refusal_recorder_cancels_at_a_bound_site_and_dedups_per_declaration() {
+        let candidate = |relation: ArtifactRelation, site: std::ops::Range<usize>, source: &str, line: u32| {
+            RefusalCandidate {
+                relation,
+                site,
+                source: LogosSymbol::parse(source).unwrap(),
+                line,
+            }
+        };
+
+        let mut facts = empty_facts();
+        let n = record_refusals(
+            &mut facts,
+            RefForm::Path,
+            vec![
+                // (1) nothing bound inside 100..200 → recorded.
+                candidate(ArtifactRelation::HttpClientCall, 100..200, "local composed", 7),
+                // (4) the same site captured twice → still one row.
+                candidate(ArtifactRelation::HttpClientCall, 100..200, "local composed", 7),
+                // ... and a second call in the SAME declaration on a DIFFERENT
+                // line is its own row here; the ledger's own dedup collapses the
+                // two later, which is why this grain is local and asserted local.
+                candidate(ArtifactRelation::HttpClientCall, 300..340, "local composed", 9),
+                // (2) an admitted literal sits inside 400..500 → cancelled.
+                candidate(ArtifactRelation::HttpClientCall, 400..500, "local bound", 11),
+                // (3) the admitted operand inside 600..700 belongs to another
+                // arm's relation → this candidate is untouched by it.
+                candidate(ArtifactRelation::BrokerPublish, 600..700, "local emit", 13),
+            ],
+            &[
+                (ArtifactRelation::HttpClientCall, 440..470),
+                (ArtifactRelation::HttpClientCall, 640..660),
+            ],
+        );
+
+        assert_eq!(n, 3, "three survivors: {:?}", facts.refs);
+        let rows: Vec<(&str, &str, u32, Option<ArtifactRelation>)> = facts
+            .refs
+            .iter()
+            .map(|r| (r.source.as_str(), r.target.as_str(), r.line, r.relation))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("local composed", "", 7, Some(ArtifactRelation::HttpClientCall)),
+                ("local composed", "", 9, Some(ArtifactRelation::HttpClientCall)),
+                ("local emit", "", 13, Some(ArtifactRelation::BrokerPublish)),
+            ]
+        );
+        // A keyless row still carries its relation's edge kind and the caller's
+        // form — it is a well-formed ledger row that simply names no target.
+        assert_eq!(facts.refs[0].form, RefForm::Path);
+        assert_eq!(
+            facts.refs[0].kind,
+            ArtifactRelation::HttpClientCall.edge_kind()
+        );
+        assert!(facts.refs[0].alias.is_none());
     }
 
     // ── S-069: OpenAPI operation→route capture ───────────────────────────────

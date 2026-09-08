@@ -100,11 +100,15 @@ mod profiles;
 // not the config walk).
 pub(crate) mod refs;
 
-// The generic consumer-side invocation interpreter (S-251, FR-WS-07) and its
-// captured-site carrier are re-exported to the code-extraction path so a code
-// arm (S-252 HTTP client calls) funnels its per-language captures through the
-// same emission choke-point the config arms use.
-pub(crate) use refs::{capture_invocation_refs, InvocationSite};
+// The generic consumer-side invocation interpreter (S-251, FR-WS-07), its
+// captured-site carrier, and the arm-agnostic refusal recorder (S-370 broker,
+// S-374 HTTP) are re-exported to the code-extraction path so a code arm
+// (S-252 HTTP client calls, S-254 broker) funnels its per-language captures
+// through the same emission choke-point the config arms use — and records what
+// it declines through the same recorder.
+pub(crate) use refs::{
+    capture_invocation_refs, record_refusals, InvocationSite, RefusalCandidate,
+};
 
 /// The fixed maximum `ConfigSection` nesting depth ([BR-30], [FR-CG-02]). A
 /// `ConfigFile` is depth 0; sections are emitted at depth 1 and 2 only. The

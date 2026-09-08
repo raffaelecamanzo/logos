@@ -52,14 +52,42 @@ import java.net.http.HttpRequest;
 import java.net.URI;
 "#;
 
-/// Index `body` as a single Java file and return every `http-client-call`
-/// reference target the arm wrote to the ledger, sorted.
+/// Index `body` as a single Java file and return **every** `http-client-call`
+/// row the arm wrote to the ledger, sorted — refusals included, as the empty
+/// string that sorts first.
+///
+/// **Deliberately unfiltered (S-374).** A keyless refusal row is a real ledger
+/// row, and a reader that hid it would let the refusal path regress unnoticed —
+/// the discipline `extract::broker`'s own `targets` helper follows, and the one
+/// the C#/Go/Python/Ruby/Rust/TypeScript suites keep. A filtered reader here
+/// would silently retire this file's ~20 "nothing at all was captured"
+/// assertions: `targets.sort()` puts `""` first, so a spurious keyless row turns
+/// `["GET /users"]` into `["", "GET /users"]` and fails the test. That is the
+/// guard, and it is why the split lives in [`client_call_rows`] rather than
+/// here.
 fn client_calls(body: &str) -> Vec<String> {
     client_calls_raw(&format!("package com.example;\n{CLIENT_IMPORTS}\n{body}"))
 }
 
+/// [`client_calls`]'s two populations: the arm's `(references, refusal rows)`.
+///
+/// The only reader that filters, and it hands back the count it removed — so a
+/// test about a refusal pins both halves and neither can hide the other. One
+/// index run per call, so a test needing both figures pays for one; this suite
+/// indexes a whole engine per fixture and is already the slowest in the
+/// per-language set.
+fn client_call_rows(body: &str) -> (Vec<String>, usize) {
+    let targets = client_calls(body);
+    let refusals = targets.iter().filter(|t| t.is_empty()).count();
+    (
+        targets.into_iter().filter(|t| !t.is_empty()).collect(),
+        refusals,
+    )
+}
+
 /// As [`client_calls`], but the caller supplies the whole compilation unit —
 /// used by the negative case that must ship *without* the client imports.
+/// Unfiltered, for the reason given on [`client_calls`].
 fn client_calls_raw(source: &str) -> Vec<String> {
     let tmp = tempfile::tempdir().expect("tempdir");
     fs::create_dir_all(tmp.path().join("src")).expect("mkdir");
@@ -152,6 +180,15 @@ public class Calls {
 /// `java.net.http.HttpClient` — the JDK builder, whose path is wrapped in
 /// `URI.create(…)` rather than passed as a bare literal. Captured in **both**
 /// builder orders, since `HttpRequest.Builder` methods are order-free.
+///
+/// **This is also the arm's only production fixture for the two-pattern refusal
+/// cancellation (S-374).** Two shipped patterns match each of these calls — the
+/// fluent one seeing `URI.create(…)` as an expression, the unwrapping one seeing
+/// the literal — so the exact-equality assertions below are what prove the
+/// admitted literal's range cancels the wider match's candidate. `client_calls`
+/// is unfiltered, so a surviving refusal would read `["", "GET /items/{id}"]`
+/// and fail here. Its non-keying twin is
+/// [`a_wrapped_non_normalizing_literal_records_neither_a_reference_nor_a_refusal`].
 #[test]
 fn a_jdk_http_client_builder_yields_one_reference_in_either_order() {
     assert_eq!(
@@ -456,10 +493,15 @@ fn a_chained_receiver_and_a_token_less_wrapper_are_stated_ceilings() {
 /// is generic and already fixture-pinned in
 /// `resolve::http_client_call::classify_client_call`; what this asserts is that
 /// Java's query fills the interpreter's slots such that the refusal fires.
+///
+/// **And that the refusal is now recorded (S-374).** Six declining methods leave
+/// six keyless ledger rows — one per method, which is the ledger's own grain —
+/// so [FR-WS-08] AC2's "appears under a runtime-composition coverage reason" half
+/// is met on the language whose estate the criterion was measured over. The
+/// reference half is unchanged: still zero.
 #[test]
 fn a_runtime_composed_path_emits_no_reference() {
-    assert!(
-        client_calls(
+    let (references, refusals) = client_call_rows(
             r#"
 public class Calls {
     private RestClient restClient;
@@ -483,13 +525,19 @@ public class Calls {
         return restClient.get().uri(buildUserUrl(id)).retrieve().body(String.class);
     }
 }
-"#
-        )
-        .is_empty(),
+"#,
+    );
+    assert!(
+        references.is_empty(),
         "a bare variable, a concatenation, a relative literal, a `$` \
          placeholder literal, a builder lambda and a helper-method call are \
-         each \
-         base-url-runtime — no reference, no ledger entry, no approximate bind"
+         each base-url-runtime — no reference and no approximate bind: \
+         {references:?}"
+    );
+    assert_eq!(
+        refusals, 6,
+        "and each declining METHOD leaves exactly one keyless row — the ledger's \
+         grain is the declaration, so this is six, not one per call"
     );
 }
 
@@ -540,7 +588,49 @@ public class Calls {
 "#
         )
         .is_empty(),
-        "a catch-all template is honestly unbound, never approximately matched"
+        "a catch-all template is honestly unbound, never approximately matched — \
+         no reference AND, deliberately, no recorded refusal (that reason needs a \
+         non-keyless row, S-374)"
+    );
+}
+
+/// **The wrapped non-normalizing literal: two patterns, one call, and neither
+/// half may report the other's reason** (S-374, [NFR-CC-04]).
+///
+/// `.uri(URI.create("/files/**"))` is matched by *two* shipped patterns: the
+/// fluent verb-then-`uri` pattern, whose operand is the whole `URI.create(…)`
+/// expression (no static literal ⇒ `base-url-runtime`), and the `URI.create`
+/// unwrapping pattern, whose operand is the literal itself. When the literal
+/// keys, the second pattern's reference and the first pattern's cancellation are
+/// both covered by
+/// [`a_jdk_http_client_builder_yields_one_reference_in_either_order`].
+///
+/// This is the case where the literal does **not** key. The unwrapping pattern
+/// classifies it `path-not-composed`, which records nothing — so if that
+/// judgement did not also cancel the enclosing match, the wider pattern's
+/// candidate would survive and the site would be filed `base-url-runtime`: a
+/// static absolute literal reported as a runtime-composed path, which is exactly
+/// the classifier drift the arm's two-word vocabulary exists to prevent. Zero
+/// rows of either kind is the only correct outcome.
+#[test]
+fn a_wrapped_non_normalizing_literal_records_neither_a_reference_nor_a_refusal() {
+    let (references, refusals) = client_call_rows(
+        r#"
+public class Calls {
+    HttpRequest catchAll() {
+        return HttpRequest.newBuilder().GET().uri(URI.create("/files/**")).build();
+    }
+}
+"#,
+    );
+    assert!(
+        references.is_empty(),
+        "a catch-all template is never approximately matched: {references:?}"
+    );
+    assert_eq!(
+        refusals, 0,
+        "and the inner literal's `path-not-composed` judgement cancels the outer \
+         match's candidate — a static literal is not `base-url-runtime`"
     );
 }
 
@@ -602,19 +692,26 @@ fn receiver_less_and_class_qualified_verb_calls_are_never_captured() {
 /// `create` factory does not smuggle a path into the JDK-builder patterns.
 #[test]
 fn only_uri_create_unwraps_a_builder_path() {
-    assert!(
-        client_calls(
-            r#"
+    let (references, refusals) = client_call_rows(
+        r#"
 public class Calls {
     HttpRequest a() {
         return HttpRequest.newBuilder().GET().uri(MyFactory.create("/internal/{id}"));
     }
 }
-"#
-        )
-        .is_empty(),
-        "`MyFactory.create(…)` is not `URI.create(…)` — no path is unwrapped"
+"#,
     );
+    assert!(
+        references.is_empty(),
+        "`MyFactory.create(…)` is not `URI.create(…)` — no path is unwrapped: \
+         {references:?}"
+    );
+    // The `.uri(…)` link IS matched by pattern 1 (its argument is unconstrained),
+    // so the site exists and its operand is a non-literal method call: a
+    // `base-url-runtime` refusal, recorded (S-374). That is the honest outcome —
+    // the arm saw an outbound call and declined to guess its path — and it is
+    // asserted so a future change cannot turn the refusal into a silent drop.
+    assert_eq!(refusals, 1);
 }
 
 // ── 3. Stated coverage ceilings ([ADR-54]) ──────────────────────────────────
@@ -663,13 +760,19 @@ public class Calls {
 /// silent one.
 #[test]
 fn a_text_block_path_literal_is_a_stated_ceiling() {
-    assert!(
-        client_calls(
-            "\npublic class Calls {\n    private RestClient restClient;\n    String a() {\n        return restClient.get().uri(\"\"\"\n/users/{id}\"\"\").retrieve().body(String.class);\n    }\n}\n"
-        )
-        .is_empty(),
-        "a text-block literal is not recognised as a static string"
+    let (references, refusals) = client_call_rows(
+        "\npublic class Calls {\n    private RestClient restClient;\n    String a() {\n        return restClient.get().uri(\"\"\"\n/users/{id}\"\"\").retrieve().body(String.class);\n    }\n}\n"
     );
+    assert!(
+        references.is_empty(),
+        "a text-block literal is not recognised as a static string: {references:?}"
+    );
+    // Since S-374 the ceiling is *visible*: the site records one keyless row and
+    // is reported `base-url-runtime`. The doc comment above already called that
+    // "an honest refusal, but for the wrong stated reason" — the row makes the
+    // wrong-reason claim checkable rather than a note, because the site now
+    // appears in the coverage payload where a reader can see it.
+    assert_eq!(refusals, 1);
 }
 
 /// **Ceiling.** OpenFeign declares the path on an *annotated interface method*

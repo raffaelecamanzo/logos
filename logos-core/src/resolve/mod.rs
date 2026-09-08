@@ -351,6 +351,36 @@ fn is_affected(
 /// artifact wiring. The `BTreeMap` key order makes the surface deterministic
 /// across runs ([NFR-RA-06]).
 ///
+/// # An invocation arm's recorded refusals land in `unresolved`, deliberately
+///
+/// This function buckets on `is-bound` alone, and a keyless refusal row — the
+/// broker arm's since [CR-107], the HTTP client-call arm's since [CR-120] — is
+/// permanently unbound: no key, so nothing to bind to. Those rows therefore
+/// raise `unresolved` for their relation class here, and with it
+/// `ResolutionStats::refs_unresolved`, the `refs_resolved / refs_total` ratio
+/// `navigate::status` reports as `resolution_coverage`, and the `logos stats`
+/// per-relation breakdown.
+///
+/// That is the honest reading, not a leak: the sites were always there and were
+/// previously not counted at all, which is the sparsity-as-absence dishonesty
+/// [NFR-CC-04] forbids and [CR-120] corrects. What must not happen is the
+/// figures moving without the reason being available, so it is stated at the two
+/// places a reader meets the number — here and on
+/// [`RelationCoverage::unresolved`](crate::models::RelationCoverage::unresolved).
+/// Filtering them out is the alternative and is deliberately not taken: it would
+/// make this breakdown disagree with the ledger it is a breakdown *of*, and the
+/// reason each refusal carries is already reported by the [FR-WS-05] tier.
+///
+/// None of these figures is a gate input ([ADR-53], [NFR-CC-04]) — they are
+/// read-model and freshness-line output — so a rising refusal count cannot move
+/// `logos check` or the gated signal.
+///
+/// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+///
 /// [FR-CG-11]: ../../../docs/specs/requirements/FR-CG-11.md
 /// [FR-RS-04]: ../../../docs/specs/requirements/FR-RS-04.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md

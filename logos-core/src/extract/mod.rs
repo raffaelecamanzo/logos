@@ -87,6 +87,7 @@ use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeKind, RefForm};
 use crate::plugin::{LanguagePlugin, LanguageRegistry};
+use crate::resolve::http_client_call::ClientCallRefusal;
 
 use refs::{flatten_use_tree, import_segments, macro_call_refs, split_path_text};
 use symbol::{build_symbol, descriptor_for, path_segments};
@@ -745,6 +746,88 @@ fn extract_one(
 /// receivers, by that query's own receiver rule — which is what makes the case
 /// hold *within* a client file rather than only across files.
 ///
+/// # A declined call is recorded, not silent (S-374, [CR-120], [FR-WS-08] AC2)
+///
+/// [FR-WS-08] AC2 requires a refused path to emit no reference **and** appear
+/// under a runtime-composition coverage reason. The first half shipped with
+/// S-252; the second did not, because the normalizer's refusal reason was
+/// discarded by `render_client_call_target`'s `.ok()` and the shared interpreter
+/// then skipped the site — so a declined call left no reference, no ledger row
+/// and no coverage entry, and an estate whose client paths are all composed at
+/// runtime read exactly like one with no outbound calls at all. That is the
+/// sparsity-indistinguishable-from-absence dishonesty [NFR-CC-04] forbids, and
+/// it is a conformance failure rather than a gap.
+///
+/// This function now judges each captured call once and hands the two halves to
+/// the two arm-agnostic passes: the bound sites to
+/// [`capture_invocation_refs`](crate::extract::config::capture_invocation_refs),
+/// and the declined ones to
+/// [`record_refusals`](crate::extract::config::record_refusals) — the **same**
+/// recorder the broker arm has used since S-370, not a copy of it. A recorded
+/// refusal is a keyless row: its target is empty, so it promotes no node, keys
+/// no topic, creates no edge, and the [FR-WS-05] tier reports it under
+/// `base-url-runtime` ([`UnboundReason::BaseUrlRuntime`](crate::federation::UnboundReason::BaseUrlRuntime),
+/// which this path is the production producer of).
+///
+/// **The refusal site is the path OPERAND, not the whole call.** It is the
+/// tightest range available — the broker arm's site is deliberately *wider* than
+/// its operand so a sibling literal in the same annotation cancels the refusal,
+/// but this arm's query yields one operand per match and decides bind-vs-refuse
+/// from that operand alone, so a wider range would only reach further. Two
+/// patterns matching one call still cancel correctly, because the admitted
+/// literal's range lies inside the wider match's operand range — and the
+/// cancellation is keyed on *the arm resolved a literal here*, not on *the
+/// literal keyed*, so an inner `path-not-composed` literal cancels the outer
+/// refusal too. Withholding that range would report a static absolute literal
+/// as a runtime-composed path. The residual is
+/// a client call nested *inside* another call's path argument
+/// (`client.get(other.get("/x"))`): the inner literal would cancel the outer
+/// refusal. No such shape exists in the reference workspace and none is
+/// idiomatic; it is recorded here rather than guarded, because the guard would
+/// be an exact-range rule that loses the two-pattern cancellation above.
+///
+/// ## Which refusals this records, and which stay invisible
+///
+/// Stated explicitly, because a coverage denominator that silently covers a
+/// narrower population than its reason word suggests is the same dishonesty in a
+/// new place ([NFR-CC-04]):
+///
+/// - **Recorded** — a call the arm's query matched whose path is not a static
+///   absolute literal ([`ClientCallRefusal::BaseUrlRuntime`]): a bare variable,
+///   a base-URL join, an interpolated/`format!` string, a builder lambda, a
+///   helper-method return, a relative or absolute-URL literal. This is the
+///   population [FR-WS-08] AC2 names and the one the reference-workspace figure
+///   is measured over.
+/// - **Not recorded — refused at QUERY-MATCH time.** A call the arm's `.scm`
+///   never matched leaves no site for any pass to judge, so it emits no
+///   reference *and* surfaces no reason. Every stated capture ceiling is in this
+///   class: Java's verb-suffixed `RestTemplate` methods and `exchange`, OpenFeign
+///   interfaces, a receiver the S-375 receiver rule declines, a chained receiver,
+///   a language shipping no `invocations` query at all. These are invisible by
+///   construction and cannot be made visible by a refusal ledger — only by a
+///   query that matches them. The narrowing is deliberate: recording a refusal
+///   for a site the arm never recognised as a client call would manufacture a
+///   coverage denominator out of ordinary code, the hazard [CR-120] §7 names.
+/// - **Not recorded — [`ClientCallRefusal::PathNotComposed`].** A static absolute
+///   literal that does not positionally normalize (a catch-all/regex/mixed
+///   template) is still dropped without a row. A keyless row could not carry
+///   this reason: the coverage tier distinguishes the two HTTP refusals by
+///   whether the stored target is empty, so an empty row is `base-url-runtime`
+///   by construction and a `path-not-composed` row would need a **non**-keyless
+///   target — a different mechanism, with its own inertness proof and its own
+///   measurement, and outside this story's acceptance criteria. On the language
+///   the [CR-120] figure is measured over it costs nothing: S-355 recorded that
+///   **0 of the estate's Java client-call arguments is a string literal of any
+///   kind**, and this reason requires one. Workspace-wide the population is
+///   **not separately measured** — it is bounded above by the gated sites that
+///   produced no row (63 of 195), a gap dominated by the per-declaration dedup
+///   rather than by this reason (Go alone collapses 98 sites into 36 rows). The
+///   bound is stated rather than the value, because the value is not known.
+///
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+///
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 #[allow(clippy::too_many_arguments)]
@@ -770,7 +853,7 @@ fn capture_http_client_call_arm(
     if !is_http_client_file {
         return;
     }
-    let sites = collect_invocation_sites(
+    let calls = collect_invocation_sites(
         inv_query,
         root,
         source,
@@ -779,17 +862,85 @@ fn capture_http_client_call_arm(
         file_module,
         &plugin.semantics().invocation_methods,
     );
-    if sites.is_empty() {
+    if calls.is_empty() {
         return;
     }
+
+    // Partition the captured calls by the arm's own judgement, made ONCE here so
+    // the bound half and the refused half cannot disagree about a site — the
+    // reconcile below needs the operand range of everything that bound, and
+    // deriving that from anything other than the judgement itself is how the two
+    // would drift.
+    //
+    // The interpreter then re-renders the `Ok` sites through
+    // `render_client_call_target` (`classify_client_call(..).ok()`), so each bound
+    // site is classified twice. That is deliberate: the alternative is to inline a
+    // second copy of the emission loop here, and `capture_invocation_refs` exists
+    // precisely so every arm shares one. Passing only the `Ok` sites emits exactly
+    // what passing all of them would — the interpreter skips a `None` render — and
+    // the repeated work is three map lookups, two small string allocations and one
+    // `route_key`, per **bound** call.
+    //
+    // `judged_operands` holds the operand range of every call whose path the arm
+    // RESOLVED to a static literal — whether or not that literal went on to key.
+    // Both outcomes must cancel a wider match's refusal, and the distinction is
+    // load-bearing: a `path-not-composed` literal records nothing itself, but if
+    // its range were withheld here, the enclosing match's `base-url-runtime`
+    // candidate would survive and the site would be reported under the WRONG
+    // reason — a static absolute literal filed as a runtime-composed path, the
+    // classifier drift [NFR-CC-04] forbids. That shape is real: Java's and
+    // Kotlin's `.uri(URI.create("/files/**"))` and Ruby's `get(URI("/files/**"))`
+    // / `get(path: "/files/**")` are matched by two patterns each, the outer
+    // seeing an expression and the inner unwrapping the literal.
+    let mut bound_sites = Vec::with_capacity(calls.len());
+    let mut judged_operands: Vec<(ArtifactRelation, std::ops::Range<usize>)> =
+        Vec::with_capacity(calls.len());
+    let mut refusals: Vec<crate::extract::config::RefusalCandidate> =
+        Vec::with_capacity(calls.len());
+    for call in calls {
+        match crate::resolve::http_client_call::classify_client_call(&call.site.slots) {
+            Ok(_) => {
+                judged_operands.push((ArtifactRelation::HttpClientCall, call.operand));
+                bound_sites.push(call.site);
+            }
+            Err(ClientCallRefusal::BaseUrlRuntime) => {
+                refusals.push(crate::extract::config::RefusalCandidate {
+                    relation: ArtifactRelation::HttpClientCall,
+                    site: call.operand,
+                    source: call.site.source,
+                    line: call.site.line,
+                });
+            }
+            // A static absolute literal that does not positionally normalize
+            // records NOTHING, and that is a scoped decision rather than an
+            // oversight — see this function's doc comment. It still contributes
+            // its operand range, because the arm DID resolve a literal there and
+            // a wider match's refusal must not outlive that judgement.
+            Err(ClientCallRefusal::PathNotComposed) => {
+                judged_operands.push((ArtifactRelation::HttpClientCall, call.operand));
+            }
+        }
+    }
+
     crate::extract::config::capture_invocation_refs(
         facts,
         ArtifactRelation::HttpClientCall,
         RefForm::Path,
-        sites,
+        bound_sites,
         crate::resolve::http_client_call::render_client_call_target,
     );
-    // Re-canonicalize: the interpreter appended to `facts.refs`.
+    // The refused half, through the SAME recorder the broker arm uses (S-370) —
+    // one keyless row per declining declaration, reconciled against what the arm
+    // resolved and
+    // deduped per `(relation, declaration, line)`. The mechanism is documented
+    // once, on `record_refusals`.
+    crate::extract::config::record_refusals(
+        facts,
+        RefForm::Path,
+        refusals,
+        &judged_operands,
+    );
+    // Re-canonicalize: both passes appended to `facts.refs`.
     dedup_sort_refs(&mut facts.refs);
 }
 
@@ -1366,7 +1517,7 @@ fn collect_invocation_sites(
     symbols: &[Option<LogosSymbol>],
     file_module: Option<&LogosSymbol>,
     invocation_methods: &std::collections::BTreeMap<String, String>,
-) -> Vec<crate::extract::config::InvocationSite> {
+) -> Vec<CapturedCall> {
     use crate::resolve::http_client_call::{DYNAMIC_PATH_SLOT, METHOD_SLOT, PATH_SLOT};
 
     let id_to_idx: HashMap<usize, usize> = decls
@@ -1486,13 +1637,36 @@ fn collect_invocation_sites(
                 slots.insert(DYNAMIC_PATH_SLOT.to_string(), raw);
             }
         }
-        sites.push(crate::extract::config::InvocationSite {
-            source: source_symbol,
-            slots,
-            line,
+        sites.push(CapturedCall {
+            site: crate::extract::config::InvocationSite {
+                source: source_symbol,
+                slots,
+                line,
+            },
+            operand: arg_node.byte_range(),
         });
     }
     sites
+}
+
+/// One captured client call: the site the shared interpreter normalizes, plus
+/// the byte range of the **path operand** the arm's refusal reconcile keys on
+/// (S-374, [CR-120]).
+///
+/// The range is carried alongside the site rather than inside
+/// [`InvocationSite`](crate::extract::config::InvocationSite) deliberately: that
+/// carrier is the arm-agnostic contract every invocation arm fills, and only
+/// this arm derives its refusal site from the operand node. Widening the shared
+/// struct for one arm's bookkeeping would put a field there that the broker arm
+/// must fill with a value it never reads.
+struct CapturedCall {
+    /// The language-neutral slots the shared interpreter judges.
+    site: crate::extract::config::InvocationSite,
+    /// The `@invoke.http.arg` node's byte range — this arm's refusal **site**
+    /// grain, and the range an admitted path literal occupies when the call
+    /// binds. See [`capture_http_client_call_arm`] for why the operand rather
+    /// than the whole call is the grain.
+    operand: std::ops::Range<usize>,
 }
 
 /// Lift a captured name's parent past any C-family *declarator* wrapper to the

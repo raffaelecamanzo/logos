@@ -50,15 +50,39 @@ use logos_core::Engine;
 const CLIENT_IMPORT: &str = "use GuzzleHttp\\Client;\n";
 
 /// Index `body` as a single pure-PHP file (with the `<?php` tag and the client
-/// import prepended) and return every `http-client-call` reference target the
-/// arm wrote to the ledger, sorted.
+/// import prepended) and return **every** `http-client-call` row the arm wrote
+/// to the ledger, sorted — refusals included, as the empty string that sorts
+/// first.
+///
+/// **Deliberately unfiltered (S-374)**, the discipline every other per-language
+/// suite keeps: a keyless refusal row is a real ledger row, and a reader that
+/// hid it would silently retire this file's "nothing at all was captured"
+/// assertions — a spurious keyless row turns `["GET /probe"]` into
+/// `["", "GET /probe"]` and fails the test. The split lives in
+/// [`client_call_rows`].
 fn client_calls(body: &str) -> Vec<String> {
     client_calls_raw(&format!("<?php\n{CLIENT_IMPORT}{body}"))
+}
+
+/// [`client_calls`]'s two populations: the arm's `(references, refusal rows)`.
+///
+/// The only reader that filters, and it hands back the count it removed — so a
+/// test whose contract is about a refusal pins both halves and neither can hide
+/// the other. One index run per call, because this suite indexes a whole engine
+/// per fixture.
+fn client_call_rows(body: &str) -> (Vec<String>, usize) {
+    let targets = client_calls(body);
+    let refusals = targets.iter().filter(|t| t.is_empty()).count();
+    (
+        targets.into_iter().filter(|t| !t.is_empty()).collect(),
+        refusals,
+    )
 }
 
 /// As [`client_calls`], but the caller supplies the whole file body (including
 /// its own `<?php` tag(s)) — used by the negative case that must ship
 /// *without* the client import, and by the HTML-interleaved fixture.
+/// Unfiltered, for the reason given on [`client_calls`].
 fn client_calls_raw(source: &str) -> Vec<String> {
     let tmp = tempfile::tempdir().expect("tempdir");
     fs::create_dir_all(tmp.path().join("src")).expect("mkdir");
@@ -311,22 +335,27 @@ class Calls {
 /// fires.
 #[test]
 fn a_runtime_composed_path_emits_no_reference() {
-    assert!(
-        client_calls(
-            r#"
+    let (references, refusals) = client_call_rows(
+        r#"
 $client = new Client();
 $base = 'https://example.test';
 $client->get($base . '/users');
 $client->get("{$base}/users");
 $client->get("$base/users");
 $client->get($base);
-"#
-        )
-        .is_empty(),
-        "a concatenation, both PHP interpolation spellings, and a bare \
-         variable are each base-url-runtime — no reference, no ledger entry, \
-         no approximate bind"
+"#,
     );
+    assert!(
+        references.is_empty(),
+        "a concatenation, both PHP interpolation spellings, and a bare \
+         variable are each base-url-runtime — no reference and no approximate \
+         bind: {references:?}"
+    );
+    // One keyless row (S-374), not four: all four calls sit at PHP file scope, so
+    // they share one enclosing declaration — the file module — and the ledger's
+    // `(declaration, target, form, kind, relation)` identity collapses them. The
+    // row grain is the DECLARATION, and this fixture is where that is clearest.
+    assert_eq!(refusals, 1);
 }
 
 /// Shared negative case **3** — `path-not-composed`. A static, absolute

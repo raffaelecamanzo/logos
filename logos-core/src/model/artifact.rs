@@ -460,8 +460,15 @@ impl ArtifactRelation {
             // A client call's target is a `"METHOD /template"` route reference;
             // it carries no external form beyond the universal absolute-URL rule
             // (a call to an absolute URL is a different service, dropped above).
-            // The arm's normalizer has already refused any non-static path before
-            // this gate is reached.
+            // Since S-374 ([CR-120]) the arm also pushes a **keyless** row here
+            // for a path it refused, so a non-static path DOES reach this gate:
+            // an empty target is no absolute URL, so it passes deliberately and
+            // is then refused by every consumer downstream — see
+            // `extract::config::refs::push_artifact_ref`'s "one admitted
+            // non-candidate", which is the class this and the broker arm below
+            // share.
+            //
+            // [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
             | ArtifactRelation::HttpClientCall
             // A `package.Service/Method` FQN carries no external form beyond the
             // universal absolute-URL rule; the `grpc_key` normalizer already

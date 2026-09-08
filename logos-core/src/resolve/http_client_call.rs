@@ -15,9 +15,8 @@
 //! absolute, positionally-normalizable** template — the same `route_key`
 //! ([FR-CG-09]) shape the provider side reduces to, so a client call and a route
 //! meet on one key regardless of parameter-name/syntax drift. Everything else is
-//! **refused** — it contributes no reference and no ledger entry (the interpreter
-//! drops a `None` render), so a runtime-composed or non-normalizable call is
-//! *honestly unbound*, never approximately matched:
+//! **refused** — it contributes no reference, so a runtime-composed or
+//! non-normalizable call is *honestly unbound*, never approximately matched:
 //!
 //! - a **bare-variable / base-URL-composed / interpolated** path (the static path
 //!   literal is absent) → [`ClientCallRefusal::BaseUrlRuntime`];
@@ -32,6 +31,31 @@
 //! ([`UnboundReason`](crate::federation::UnboundReason)) in
 //! [`crate::federation::coverage`]; keeping the mapping there (not here) means
 //! this low-level resolver module carries no dependency on the federation layer.
+//!
+//! # A refusal is recorded, not silent (S-374, [CR-120])
+//!
+//! "No reference" is not "no trace". Refusing used to mean the site left nothing
+//! whatsoever — the caller discarded this classifier's reason with
+//! [`Result::ok`] and the shared interpreter skipped the site — so
+//! [FR-WS-08] AC2's "appears under a runtime-composition coverage reason" was
+//! unmet and an estate whose client paths are all composed at runtime read like
+//! one with no outbound calls at all. `extract::capture_http_client_call_arm`
+//! now keeps the reason: a [`BaseUrlRuntime`](ClientCallRefusal::BaseUrlRuntime)
+//! site leaves one **keyless** ledger row (empty target — no fabricated
+//! template, inert to binding and promotion) which the coverage tier reports as
+//! `base-url-runtime`. The reference-emitting contract below is unchanged:
+//! [`render_client_call_target`] still returns `None`, and a refused site still
+//! contributes no reference and no edge.
+//!
+//! A [`PathNotComposed`](ClientCallRefusal::PathNotComposed) site is still
+//! dropped without a row — the coverage tier tells the two HTTP refusals apart by
+//! whether the stored target is empty, so that reason needs a non-keyless row
+//! and a mechanism of its own. Which populations are recorded and which stay
+//! invisible is enumerated once, on
+//! `extract::capture_http_client_call_arm`; this module's job is only to name
+//! the reason.
+//!
+//! [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 //!
 //! [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 //! [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
@@ -70,11 +94,25 @@ pub(crate) const DYNAMIC_PATH_SLOT: &str = "path_dynamic";
 pub enum ClientCallRefusal {
     /// The request path is composed at runtime — a bare variable, a base-URL
     /// join, an interpolated/`format!` string, or a relative/absolute-URL literal
-    /// whose static route prefix is not present. Surfaces as `base-url-runtime`.
+    /// whose static route prefix is not present.
+    ///
+    /// Recorded as a keyless ledger row by the capture arm and surfaced as
+    /// `base-url-runtime` (S-374): this is the variant with a production
+    /// producer, and the reason a declined call site is now visible rather than
+    /// merely absent.
     BaseUrlRuntime,
     /// A static, absolute path literal is present but its template does not
     /// positionally normalize (a catch-all/regex/mixed segment). Surfaces as
     /// `path-not-composed` — never approximately matched.
+    ///
+    /// The variant **without** a producer reachable from an index run. The
+    /// capture arm drops such a site without a row (for the reason given in this
+    /// module's docs), and the coverage tier maps to it only from a *stored* HTTP
+    /// target that fails `route_key` — which the arm never stores, because
+    /// accepting the target is that same test. So it is reachable from this
+    /// classifier and from a row written by an older binary, not from anything
+    /// this one records. Stated rather than left to be inferred, on the sprint
+    /// that removed a sibling variant for exactly this.
     PathNotComposed,
 }
 
@@ -131,8 +169,13 @@ pub(crate) fn classify_client_call(
 /// The `render_target` normalizer the HTTP arm hands to
 /// [`capture_invocation_refs`](crate::extract::config::refs::capture_invocation_refs):
 /// `Some("METHOD /template")` for a static, normalizable call; `None` for any
-/// runtime-composed or non-normalizable one — contributing no reference and no
-/// ledger entry ([NFR-RA-05]).
+/// runtime-composed or non-normalizable one — contributing no reference
+/// ([NFR-RA-05]).
+///
+/// This is the arm's **reference** contract and it is unchanged by S-374; the
+/// arm's caller re-runs [`classify_client_call`] to keep the refusal *reason*
+/// this discards, which is what makes a declined site visible without making it
+/// bindable.
 ///
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 pub(crate) fn render_client_call_target(slots: &BTreeMap<String, String>) -> Option<String> {
@@ -168,7 +211,9 @@ mod tests {
 
     /// Acceptance (2) `base-url-runtime`: a runtime-composed path — a bare
     /// variable (no literal captured, dynamic-path slot set) — is refused, and the
-    /// normalizer returns `None` (no reference, no ledger entry).
+    /// normalizer returns `None`, so no reference. Since S-374 the capture arm
+    /// keeps the reason and records a keyless ledger row for such a site; that
+    /// half is asserted at the arm, not here (see this module's docs).
     #[test]
     fn a_bare_variable_path_is_base_url_runtime() {
         // The per-language dispatch could not extract a literal, so it set the
