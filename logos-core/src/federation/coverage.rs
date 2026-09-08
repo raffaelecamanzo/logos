@@ -3288,7 +3288,10 @@ mod tests {
             );
         }
 
-        for (rel, text) in readable_reason_surfaces() {
+        for (rel, text, enumerates_all) in readable_reason_surfaces() {
+            if !enumerates_all {
+                continue;
+            }
             for reason in ALL {
                 assert!(
                     text.contains(wire(reason)),
@@ -3312,32 +3315,81 @@ mod tests {
     /// tokens in had already grown.
     ///
     /// `docs/howto/commands.md` and the two `web/ui` files are tracked in this
-    /// repository and must be readable. `docs/specs/` is a symlink into the
-    /// separate docs repository, so its absence is tolerated (a vendored or
-    /// packaged checkout has no `docs/specs`) while its presence is checked — the
-    /// one thing never done is passing silently on a file that *is* readable.
-    fn readable_reason_surfaces() -> Vec<(&'static str, String)> {
+    /// repository and must be readable. The four `docs/specs` entries reach a
+    /// symlink into the separate docs repository, so their absence is tolerated
+    /// (a vendored or packaged checkout has no `docs/specs`) while their presence
+    /// is checked — the one thing never done is passing silently on a file that
+    /// *is* readable.
+    ///
+    /// **So the enforcement floor is the tracked trio, not all seven.** In CI and
+    /// in any fresh clone `docs/specs` does not exist, and those four entries are
+    /// skipped; the spec surfaces are enforced only on a developer checkout that
+    /// carries the `logos-docs` symlink. Stated because the negative direction
+    /// makes this load-bearing in a way the old positive-only guard never was: a
+    /// *stale* `logos-docs` checkout is present-but-wrong, so it fails the removal
+    /// proof for a reason outside this repository. That is the intended signal —
+    /// the two repositories disagree — but it means a branch touching this
+    /// vocabulary must land with its `logos-docs` commit, not after it.
+    fn readable_reason_surfaces() -> Vec<(&'static str, String, bool)> {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("logos-core sits under the repository root");
-        let surfaces = [
-            // (path, tracked in THIS repository)
-            ("docs/howto/commands.md", true),
-            ("docs/specs/frontend-design.md", false),
-            ("docs/specs/requirements/FR-WS-05.md", false),
-            ("web/ui/src/api/types.ts", true),
-            ("web/ui/src/views/workspace/coverageModel.ts", true),
-        ];
-        /// The **normative** part of a surface: everything before a `## Notes`
-        /// heading, or the whole file when there is none.
+        /// One surface the reason vocabulary is mirrored onto.
         ///
-        /// A requirement's Notes section is its revision history, and this
+        /// `enumerates_all` is the distinction between the two guards, and it is
+        /// not cosmetic. A surface that lists the *whole* vocabulary owes every
+        /// surviving reason an entry — that is the parity guard. A surface that
+        /// merely *names* a reason in passing owes nothing positive, but still must
+        /// not offer a reader a retired one — that is the removal proof. Collapsing
+        /// the two made the parity guard demand a full enumeration from
+        /// `FR-WS-10`, the broker-arm requirement, which has no business carrying
+        /// one.
+        struct Surface {
+            rel: &'static str,
+            /// Tracked in THIS repository, so a read failure is a guard defect.
+            tracked_here: bool,
+            /// Keeps revision history under a trailing `## Notes` heading.
+            has_notes_history: bool,
+            /// Enumerates the complete reason vocabulary (⇒ subject to the parity
+            /// guard, not only the removal proof).
+            enumerates_all: bool,
+        }
+        const fn s(
+            rel: &'static str,
+            tracked_here: bool,
+            has_notes_history: bool,
+            enumerates_all: bool,
+        ) -> Surface {
+            Surface { rel, tracked_here, has_notes_history, enumerates_all }
+        }
+        let surfaces = [
+            s("docs/howto/commands.md", true, false, true),
+            s("docs/specs/frontend-design.md", false, false, true),
+            s("docs/specs/requirements/FR-WS-05.md", false, true, true),
+            s("docs/specs/architecture/decisions/ADR-53.md", false, true, true),
+            // Names a reason in passing; does not enumerate the vocabulary.
+            s("docs/specs/requirements/FR-WS-10.md", false, true, false),
+            s("web/ui/src/api/types.ts", true, false, true),
+            s("web/ui/src/views/workspace/coverageModel.ts", true, false, true),
+        ];
+        /// The **normative** part of a surface: everything before its trailing
+        /// `## Notes` heading.
+        ///
+        /// A requirement's or ADR's Notes section is its revision history, and this
         /// repository's amendment convention requires a superseded value to be
         /// *shown as superseded* rather than deleted — so a Notes paragraph
         /// legitimately quotes a retired reason token by name. Checking the
-        /// normative body is what keeps the removal guard below from forbidding
-        /// the very record that explains the removal, without weakening it: the
-        /// enumeration a reader acts on is in the Statement, not the history.
+        /// normative body is what keeps the removal guard below from forbidding the
+        /// very record that explains the removal, without weakening it: the
+        /// enumeration a reader acts on is in the Statement or the Decision, not
+        /// the history.
+        ///
+        /// Applied **only** to the surfaces that declare the convention. Blanket
+        /// truncation would be a silent hole in the other four: nothing stops the
+        /// 96 KB operator manual or a `.ts` doc block growing a `## Notes` line,
+        /// and every enumeration after it would stop being checked by both guards
+        /// with no failure — the same closed-list blind spot the removal proof
+        /// exists to cover.
         fn normative(text: String) -> String {
             match text.find("\n## Notes") {
                 Some(at) => text[..at].to_string(),
@@ -3346,15 +3398,21 @@ mod tests {
         }
 
         let mut out = Vec::new();
-        for (rel, tracked_here) in surfaces {
+        for Surface { rel, tracked_here, has_notes_history, enumerates_all } in surfaces {
             match std::fs::read_to_string(repo.join(rel)) {
-                Ok(text) => out.push((rel, normative(text))),
-                // Only a `docs/specs` symlink that is genuinely not present may be
-                // skipped; a tracked surface failing to read is the guard silently
-                // covering nothing.
-                Err(_) => assert!(
-                    !tracked_here,
-                    "{rel} is tracked in this repository and must be readable"
+                Ok(text) => out.push((
+                    rel,
+                    if has_notes_history { normative(text) } else { text },
+                    enumerates_all,
+                )),
+                // Only a `docs/specs` file that is genuinely *not present* may be
+                // skipped. A tracked surface, or one that exists but cannot be read
+                // (a dangling symlink, a permission error, invalid UTF-8), is the
+                // guard silently covering nothing — which is the failure mode it is
+                // here to prevent, so it fails loudly instead.
+                Err(e) => assert!(
+                    !tracked_here && e.kind() == std::io::ErrorKind::NotFound,
+                    "{rel} must be readable to be guarded, but failed: {e}"
                 ),
             }
         }
@@ -3386,7 +3444,7 @@ mod tests {
     /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
     #[test]
     fn the_removed_schema_mismatch_reason_is_absent_from_every_surface() {
-        for (rel, text) in readable_reason_surfaces() {
+        for (rel, text, _) in readable_reason_surfaces() {
             assert!(
                 !text.contains("schema-mismatch"),
                 "{rel} still enumerates `schema-mismatch`, a reason S-378 removed \
