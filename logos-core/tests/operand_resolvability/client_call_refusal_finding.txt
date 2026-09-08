@@ -14,7 +14,7 @@ dedup-proof grain: it is what `workspace status` counts, and it cannot be moved
 by the dedup because it is the post-dedup count. Site counts are reported beside
 it for context and are NOT the criterion.
 
-  language      files  gated  ref/main  ref/test  ref-rows  sites*
+  language      files  gated  refuse/main  refuse/test  refs  sites*
   go              262     75        20        16         0      98
   java           2447     26        94         0         0      94
   php             161      0         0         0         0       0
@@ -109,6 +109,13 @@ THE PHP AND TSX ZEROS ARE HONEST ABSENCE, not a regression: 0 files pass the
 detector gate in either language on this estate, so neither arm is exercised
 here at all. Reading their 0 as "the arm records nothing" would be wrong — it
 records nothing because it is never reached.
+
+AND THE FOUR ABSENT ROWS ARE THE SAME KIND OF ABSENCE. Ten plugins ship an
+`invocations` query; the table lists six. `c-sharp`, `kotlin`, `ruby` and `rust`
+have no row because the walk scanned ZERO files of those languages on this
+estate — not because their arms recorded nothing. A reader who takes the table
+as the roster would conclude four arms are silent; they are unexercised, and
+each is fixture-pinned in its own suite instead.
 
 METHOD, and why no re-enrolment. The reference workspace is the only ground
 truth for four of this sprint's measured criteria and re-enrolling it is a

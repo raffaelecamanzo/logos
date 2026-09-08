@@ -1602,21 +1602,13 @@ fn measure_operand_resolvability_over_the_reference_workspace() {
 /// harness: the criterion is about what the arm records, and a mirror that
 /// over-counted would inflate the very number the CR is graded on.
 ///
-/// # What is asserted, and what is only reported
-///
 /// # Recorded finding (2026-09-08, `~/source/pec-services`, 84 members)
 ///
-/// ```text
-/// language      files  gated  ref/main  ref/test  ref-rows  sites*
-/// go              262     75        20        16         0      98
-/// java           2447     26        94         0         0      94
-/// php             161      0         0         0         0       0
-/// python           55      1         1         0         0       2
-/// tsx               5      0         0         0         0       0
-/// typescript      656     12         0         0         1       1
-///
-/// refusal rows: main 115 (in 37 files), test 16 (in 8 files) — total 131
-/// ```
+/// The per-language table is **not** copied here. It lives once, in
+/// `operand_resolvability/client_call_refusal_finding.txt`, which this file
+/// embeds with `include_str!` and this test prints — so it cannot be deleted or
+/// renamed without breaking compilation, and there is no second hand-maintained
+/// copy to rot out of step with it.
 ///
 /// **The criterion holds on the production population: 115 against ~111.** The
 /// whole-workspace figure an index run would print is **131**, because indexing
@@ -1632,6 +1624,8 @@ fn measure_operand_resolvability_over_the_reference_workspace() {
 /// `operand_resolvability/client_call_refusal_finding.txt` — the durable artifact
 /// beside `configuration_agreement_finding.txt`, kept in the same form for the
 /// same reason.
+///
+/// # What is asserted, and what is only reported
 ///
 /// Asserted: refusals exist at all — the prior count was zero, so a run that
 /// records none has not delivered the story. Reported without assertion: the
@@ -1661,7 +1655,7 @@ fn measure_recorded_client_call_refusals_over_the_reference_workspace() {
     println!("  grain: LEDGER ROW (one per declaration; `dedup_sort_refs` ignores line)\n");
     println!(
         "  {:<12} {:>6} {:>6} {:>9} {:>9} {:>7} {:>7}",
-        "language", "files", "gated", "ref/main", "ref/test", "ref-rows", "sites*"
+        "language", "files", "gated", "refuse/main", "refuse/test", "refs", "sites*"
     );
     let mut totals: BTreeMap<(Tree, RowKind), usize> = BTreeMap::new();
     let mut total_files: BTreeMap<Tree, usize> = BTreeMap::new();
