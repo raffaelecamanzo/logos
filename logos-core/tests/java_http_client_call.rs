@@ -208,24 +208,32 @@ public class Calls {
     );
 }
 
-/// **Stated over-capture ceiling** — the ledger gate is *file*-grained, so the
-/// negative case above holds only across files. Inside a file that already
-/// references a client package, a same-shaped collection call with a
-/// route-shaped key still captures.
+/// Shared negative case **1**, the *within-file* half — and the assertion
+/// [S-375](../../docs/planning/journal.md#s-375-the-client-call-detector-gate-is-receiver-grained-not-file-grained)
+/// **inverted**.
 ///
-/// Inherited verbatim from the Rust arm, whose `HTTP_METHODS` rustdoc already
-/// records it ("a genuine HTTP-client file that also does an incidental
-/// `/`-keyed collection `.get` is a documented accuracy ceiling") — no query
-/// can distinguish `perms.get("/admin/users")` from `client.get("/admin/users")`
-/// without receiver typing. Pinned here rather than left to prose so that
-/// narrowing it later is a deliberate change, and so a reader of the test above
-/// cannot mistake the file-level gate for a general guarantee.
+/// Until S-375 this test pinned the opposite outcome: the ledger gate was the
+/// only thing standing behind the plain receiver-method pattern, and the gate is
+/// *file*-grained, so a route-shaped collection key inside a genuine client file
+/// captured — recorded as an [ADR-54] over-capture ceiling ("no query can
+/// distinguish `perms.get(…)` from `client.get(…)` without receiver typing").
 ///
-/// This is the consumer-side twin of the provider-side false positives
-/// [S-350](../../docs/planning/journal.md) removed; whether to close it is a
-/// sprint-review decision, recorded in the S-341 implementation notes.
+/// [CR-120](../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md)
+/// found that reading non-conformant rather than deficient: [FR-WS-08] AC5
+/// already requires a same-shaped non-HTTP call to emit **nothing**, and it says
+/// nothing about which file the call sits in. The narrowing needs no receiver
+/// *typing* — a receiver **name** boundary rule is enough, which is what the
+/// Python and TypeScript arms have always shipped
+/// (`python_invocations.rs::a_route_shaped_dict_get_inside_a_client_file_is_still_refused`,
+/// `extract::tests::a_non_client_receiver_call_is_never_captured`). Java's query
+/// now carries the same rule, so the decision is made on the RECEIVER.
+///
+/// The positive control shares the fixture on purpose: without it the emptiness
+/// would also be produced by a closed ledger gate, and this test would stay
+/// green while proving nothing — the failure class `go_invocations.rs` and
+/// `c_sharp_invocations.rs` closed for their own arms.
 #[test]
-fn a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling() {
+fn a_route_shaped_collection_get_on_a_non_client_receiver_is_refused() {
     assert_eq!(
         client_calls(
             r#"
@@ -235,13 +243,91 @@ public class Calls {
     String notACall() {
         return perms.get("/admin/users");
     }
+    String probe() {
+        return restClient.get().uri("/probe").retrieve().body(String.class);
+    }
 }
 "#
         ),
-        ["GET /admin/users"],
-        "file-grained gate: a route-shaped collection key inside a client file \
-         is still captured — the documented ADR-54 accuracy ceiling"
+        ["GET /probe"],
+        "`perms` is not a client spelling, so the route-shaped collection key \
+         promotes nothing even though the file imports RestClient — and the \
+         probe proves the file WAS scanned"
     );
+}
+
+/// The receiver rule is a **boundary** rule, never a substring test, and this
+/// pins both of its edges — the accepted spellings that must keep capturing,
+/// and the rejected ones that must not start.
+///
+/// Structured after the TypeScript arm's equivalent
+/// (`extract::tests::a_non_client_receiver_call_is_never_captured`), whose
+/// `notaxiosCache` case is the reason that arm's rule is anchored: a substring
+/// test admitted a cache lookup and fabricated a cross-service call. Java's
+/// vocabulary is [FR-WS-08]'s normative Java row spelled as a field name, so the
+/// rule admits a segment that either **starts** with a type-derived lower-camel
+/// token (`restTemplate`, `webClient`) or **ends** with an upper-camel one
+/// (`usersRestTemplate`, `paymentsClient`) — plus the bare `client`.
+///
+/// The bare word is admitted **only whole**, which is the one place Java's rule
+/// is stricter than TypeScript's `[Aa]xios[A-Za-z0-9_$]*`: `axios` is a package
+/// name, so anything spelled `axios…` is an axios instance, whereas `client` is
+/// an ordinary English word and `clientRegistry` / `clientCache` are not HTTP
+/// clients. The type-derived tokens keep the prefix form because a
+/// `restTemplate…` field is one.
+///
+/// Each rejected spelling is asserted inside a file that passes the ledger gate,
+/// so nothing here is attributable to the gate ([NFR-RA-05]).
+#[test]
+fn the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row() {
+    for receiver in [
+        "restTemplate",
+        "restClient",
+        "webClient",
+        "httpClient",
+        "client",
+        "restTemplateV2",
+        "usersRestTemplate",
+        "paymentsWebClient",
+        "ordersClient",
+    ] {
+        assert_eq!(
+            client_calls(&format!(
+                "public class Calls {{ private RestTemplate {receiver}; \
+                 void drop() {{ {receiver}.delete(\"/carts/{{id}}\"); }} }}"
+            )),
+            ["DELETE /carts/{id}"],
+            "`{receiver}` is a client spelling and must keep capturing"
+        );
+    }
+
+    for receiver in [
+        // The CR-110 false-positive class, on the consumer side.
+        "perms",
+        "cache",
+        "formGroup",
+        "permissions",
+        // A substring test would admit these; a boundary rule does not.
+        "clientlessRegistry",
+        "myclient",
+        // The bare generic token is admitted only whole, so an ordinary
+        // `client`-prefixed collection stays out.
+        "clientRegistry",
+        "clientCache",
+    ] {
+        let calls = client_calls(&format!(
+            "public class Calls {{ private RestClient restClient; \
+             private java.util.Map<String, String> {receiver}; \
+             String notACall() {{ return {receiver}.get(\"/admin/users\"); }} \
+             String probe() {{ return restClient.get().uri(\"/probe\")\
+             .retrieve().body(String.class); }} }}"
+        ));
+        assert_eq!(
+            calls,
+            ["GET /probe"],
+            "`{receiver}` is not a client spelling: {calls:?}"
+        );
+    }
 }
 
 /// Shared negative case **2** — `base-url-runtime`. A bare-variable path and a

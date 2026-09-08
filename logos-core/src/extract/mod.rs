@@ -699,12 +699,27 @@ fn extract_one(
 /// records only which of *its own* entries sit in this position, and points
 /// here rather than restating the argument (see `plugins/typescript/plugin.toml`).
 ///
-/// The gate is **file-grained**, so it is a cross-file guarantee only: the same
-/// incidental call *inside* a genuine client file still captures. That residual
-/// is the documented ADR-54 accuracy ceiling (see `HTTP_METHODS`), pinned by
-/// `a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling` in
-/// `tests/java_http_client_call.rs`. Under-capture is safe; over-capture is not,
-/// so a language whose client wrapper is undetected simply stays unbound.
+/// This gate is **file-grained**, and that is all it can be: it reads the file's
+/// reference ledger, so it answers "is this file plausibly a client file?" and
+/// cannot answer [FR-WS-08] AC5's question about a single *call*. **The
+/// receiver-grained half is each language's own `invocations.scm`**, and a
+/// language shipping the broad `<receiver>.<method>(<arg>)` anchor owes a
+/// receiver rule in it — a receiver *name* boundary rule is enough; receiver
+/// typing is not required, which is what the retired ceiling below claimed.
+/// Python and TypeScript have scoped their receivers since S-343/S-344, and Java
+/// joins them in S-375 ([CR-120]), inverting the over-capture its own fixture
+/// used to pin.
+///
+/// Where a language has **not** scoped its receivers — Rust, Kotlin, Ruby and
+/// PHP still ship the broad anchor — the file gate is the only thing behind it,
+/// so the same incidental call *inside* a genuine client file still captures.
+/// That residual is the documented ADR-54 accuracy ceiling (see `HTTP_METHODS`),
+/// pinned per language by each arm's own
+/// `a_route_shaped_*_inside_a_client_file_is_a_stated_ceiling`. Under-capture is
+/// safe; over-capture is not, so a language whose client wrapper is undetected
+/// simply stays unbound.
+///
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 ///
 /// A descriptor declaring `invocations` with an empty detector set is refused at
 /// parse time ([`crate::plugin::PluginManifest::validate`]) — otherwise the
@@ -718,9 +733,11 @@ fn extract_one(
 /// language story's own fixtures only need to prove its query populates the
 /// `invoke.http.method` / `invoke.http.arg` capture names correctly
 /// ([`collect_invocation_sites`]) — never re-implement the classification.
-/// Case 1 (a same-shaped non-HTTP receiver call) is per-language, gated by
-/// this function's ledger check above against the descriptor's
-/// `http_client_detectors` rows.
+/// Case 1 (a same-shaped non-HTTP receiver call) is per-language, gated by this
+/// function's ledger check above against the descriptor's
+/// `http_client_detectors` rows **and**, for a language that scopes its
+/// receivers, by that query's own receiver rule — which is what makes the case
+/// hold *within* a client file rather than only across files.
 ///
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
@@ -1113,13 +1130,20 @@ fn collect_refs(
 /// This name filter is **necessary but not sufficient**: a collection/registry
 /// method that shares a verb name (`HashMap::get`) still passes it, and a
 /// `/`-prefixed string key (`map.get("/health")`) would normalize and fabricate a
-/// cross-service edge. Two further guards make the capture honest ([NFR-RA-05]):
-/// the file-level HTTP-client-crate gate in `extract_one` (only a file that uses
-/// a client crate is a candidate at all), and the arm's normalizer (which refuses
-/// any non-static / non-absolute / non-normalizable path). The residual ceiling —
-/// a genuine HTTP-client file that also does an incidental `/`-keyed collection
-/// `.get` — is a documented accuracy ceiling ([ADR-54]), reported unbound-or-not
-/// at worst, never silently guessed.
+/// cross-service edge. Three further guards make the capture honest
+/// ([NFR-RA-05]): the file-level HTTP-client-crate gate in `extract_one` (only a
+/// file that uses a client crate is a candidate at all), **the receiver rule in
+/// the language's own `invocations.scm`** where it ships one, and the arm's
+/// normalizer (which refuses any non-static / non-absolute / non-normalizable
+/// path).
+///
+/// The residual ceiling — a genuine HTTP-client file that also does an
+/// incidental `/`-keyed collection `.get` — survives only for the languages
+/// whose query does **not** scope its receiver (Rust, Kotlin, Ruby, PHP). There
+/// it is a documented accuracy ceiling ([ADR-54]), reported unbound-or-not at
+/// worst, never silently guessed. Python, TypeScript and (S-375) Java close it
+/// in query data; see the receiver-grained half of the rule on
+/// [`capture_http_client_call_arm`].
 ///
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
