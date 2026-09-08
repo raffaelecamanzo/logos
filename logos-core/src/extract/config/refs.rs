@@ -248,9 +248,15 @@ pub(crate) struct RefusalCandidate {
 ///
 /// Two mechanisms, both inherited by every arm that supplies candidates:
 ///
-/// 1. **A bound operand cancels a candidate at the same site.** A candidate
-///    survives iff **no** admitted operand of the same `relation` lies within
-///    its site range. A shipped `.scm` that enumerates only non-keyable operand
+/// 1. **A resolved operand cancels a candidate at the same site.** A candidate
+///    survives iff **no** resolved operand of the same `relation` lies within
+///    its site range. "Resolved" is the arm's own judgement that *this operand
+///    yielded the value the arm was looking for* — deliberately wider than "this
+///    operand bound something". The HTTP arm supplies the range of a static path
+///    literal that did **not** key (`path-not-composed`) as well as one that did,
+///    because withholding it would let an enclosing match's `base-url-runtime`
+///    candidate outlive the judgement and report a static literal as a
+///    runtime-composed path. A shipped `.scm` that enumerates only non-keyable operand
 ///    shapes never creates a cancellable pair, so for those arms this is
 ///    defence-in-depth against a **droppable** on-disk query ([FR-PL-04])
 ///    pointing a slot at an operand another pattern admitted — but for an arm
@@ -287,13 +293,13 @@ pub(crate) fn record_refusals(
     facts: &mut Facts,
     form: RefForm,
     candidates: Vec<RefusalCandidate>,
-    bound: &[(ArtifactRelation, Range<usize>)],
+    resolved: &[(ArtifactRelation, Range<usize>)],
 ) -> usize {
     let mut seen: HashSet<(ArtifactRelation, String, u32)> = HashSet::new();
     let mut recorded = 0;
     for candidate in candidates {
-        // Did anything at this site bind? Then it is not a refusal.
-        if bound.iter().any(|(relation, at)| {
+        // Did the arm resolve an operand at this site? Then it is not a refusal.
+        if resolved.iter().any(|(relation, at)| {
             *relation == candidate.relation
                 && at.start >= candidate.site.start
                 && at.end <= candidate.site.end

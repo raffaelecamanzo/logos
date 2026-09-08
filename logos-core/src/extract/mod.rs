@@ -775,7 +775,11 @@ fn extract_one(
 /// but this arm's query yields one operand per match and decides bind-vs-refuse
 /// from that operand alone, so a wider range would only reach further. Two
 /// patterns matching one call still cancel correctly, because the admitted
-/// literal's range lies inside the wider match's operand range. The residual is
+/// literal's range lies inside the wider match's operand range — and the
+/// cancellation is keyed on *the arm resolved a literal here*, not on *the
+/// literal keyed*, so an inner `path-not-composed` literal cancels the outer
+/// refusal too. Withholding that range would report a static absolute literal
+/// as a runtime-composed path. The residual is
 /// a client call nested *inside* another call's path argument
 /// (`client.get(other.get("/x"))`): the inner literal would cancel the outer
 /// refusal. No such shape exists in the reference workspace and none is
@@ -874,15 +878,29 @@ fn capture_http_client_call_arm(
     // second copy of the emission loop here, and `capture_invocation_refs` exists
     // precisely so every arm shares one. Passing only the `Ok` sites emits exactly
     // what passing all of them would — the interpreter skips a `None` render — and
-    // the repeated work is one map lookup plus one `route_key`, per captured call.
+    // the repeated work is three map lookups, two small string allocations and one
+    // `route_key`, per **bound** call.
+    //
+    // `judged_operands` holds the operand range of every call whose path the arm
+    // RESOLVED to a static literal — whether or not that literal went on to key.
+    // Both outcomes must cancel a wider match's refusal, and the distinction is
+    // load-bearing: a `path-not-composed` literal records nothing itself, but if
+    // its range were withheld here, the enclosing match's `base-url-runtime`
+    // candidate would survive and the site would be reported under the WRONG
+    // reason — a static absolute literal filed as a runtime-composed path, the
+    // classifier drift [NFR-CC-04] forbids. That shape is real: Java's and
+    // Kotlin's `.uri(URI.create("/files/**"))` and Ruby's `get(URI("/files/**"))`
+    // / `get(path: "/files/**")` are matched by two patterns each, the outer
+    // seeing an expression and the inner unwrapping the literal.
     let mut bound_sites = Vec::with_capacity(calls.len());
-    let mut bound_operands: Vec<(ArtifactRelation, std::ops::Range<usize>)> =
+    let mut judged_operands: Vec<(ArtifactRelation, std::ops::Range<usize>)> =
         Vec::with_capacity(calls.len());
-    let mut refusals: Vec<crate::extract::config::RefusalCandidate> = Vec::new();
+    let mut refusals: Vec<crate::extract::config::RefusalCandidate> =
+        Vec::with_capacity(calls.len());
     for call in calls {
         match crate::resolve::http_client_call::classify_client_call(&call.site.slots) {
             Ok(_) => {
-                bound_operands.push((ArtifactRelation::HttpClientCall, call.operand));
+                judged_operands.push((ArtifactRelation::HttpClientCall, call.operand));
                 bound_sites.push(call.site);
             }
             Err(ClientCallRefusal::BaseUrlRuntime) => {
@@ -895,8 +913,12 @@ fn capture_http_client_call_arm(
             }
             // A static absolute literal that does not positionally normalize
             // records NOTHING, and that is a scoped decision rather than an
-            // oversight — see this function's doc comment.
-            Err(ClientCallRefusal::PathNotComposed) => {}
+            // oversight — see this function's doc comment. It still contributes
+            // its operand range, because the arm DID resolve a literal there and
+            // a wider match's refusal must not outlive that judgement.
+            Err(ClientCallRefusal::PathNotComposed) => {
+                judged_operands.push((ArtifactRelation::HttpClientCall, call.operand));
+            }
         }
     }
 
@@ -915,7 +937,7 @@ fn capture_http_client_call_arm(
         facts,
         RefForm::Path,
         refusals,
-        &bound_operands,
+        &judged_operands,
     );
     // Re-canonicalize: both passes appended to `facts.refs`.
     dedup_sort_refs(&mut facts.refs);

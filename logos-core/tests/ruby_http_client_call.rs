@@ -356,8 +356,62 @@ end
     );
     assert!(
         client_call_targets(&facts).is_empty(),
-        "a catch-all template is honestly unbound, never approximately matched"
+        "a catch-all template is honestly unbound, never approximately matched — \
+         no reference AND, deliberately, no recorded refusal (that reason needs a \
+         non-keyless row, S-374)"
     );
+}
+
+/// **The wrapped non-normalizing literal: two patterns, one call, and neither
+/// half may report the other's reason** (S-374, [NFR-CC-04]).
+///
+/// Ruby's `URI(…)` unwrap and its `path:` keyword-pair pattern each overlap the
+/// plain receiver-method pattern on one call: the outer operand is the whole
+/// `URI(…)` call / `pair` node (no static literal ⇒ `base-url-runtime`), the
+/// inner operand is the literal. When the literal keys, the reference proves the
+/// cancellation. Here it does not key, so the inner pattern classifies it
+/// `path-not-composed` and records nothing — and that judgement must still
+/// cancel the outer candidate, or a static absolute literal is filed as a
+/// runtime-composed path.
+///
+/// Both wrapper shapes are asserted, because they are separate patterns and
+/// either could regress alone.
+#[test]
+fn a_wrapped_non_normalizing_literal_records_neither_a_reference_nor_a_refusal() {
+    for (label, body) in [
+        (
+            "Net::HTTP.get(URI(…))",
+            r#"require "net/http"
+
+def call
+  Net::HTTP.get(URI("/files/**"))
+end
+"#,
+        ),
+        (
+            "conn.get(path: …)",
+            r#"require "faraday"
+
+def call(conn)
+  conn.get(path: "/files/**")
+end
+"#,
+        ),
+    ] {
+        let facts = extract_ruby(body);
+        assert!(
+            client_call_targets(&facts).is_empty(),
+            "{label}: a catch-all template is never approximately matched: {:?}",
+            client_call_targets(&facts)
+        );
+        assert_eq!(
+            client_call_refusals(&facts),
+            0,
+            "{label}: the inner literal's `path-not-composed` judgement cancels \
+             the outer match's candidate — a static literal is not \
+             `base-url-runtime`"
+        );
+    }
 }
 
 // ── Provider registrations must never be read as outbound calls ────────────
