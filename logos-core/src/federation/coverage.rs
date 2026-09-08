@@ -972,6 +972,14 @@ where
                 symbol: provider.symbol,
             },
             CoverageState::Unbound {
+                // The target is passed for symmetry with the consumer loop, and
+                // reaches nothing new: this loop is fed only from the
+                // `BridgeRole::Provider` arm, and `BrokerSubscribe` is the one
+                // relation with that role — so `unkeyable_reason`'s `Http` branch
+                // (the only one that reads the target) is unreachable from here.
+                // A future `Http`-namespaced provider arm must revisit this,
+                // because `client_call_refusal`'s empty-target rule is stated for
+                // a *consumer* row.
                 reason: unkeyable_reason(provider.relation, &provider.target),
             },
             // A refusal has no provider to name — it never had a key to look one up
