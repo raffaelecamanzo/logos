@@ -50,33 +50,40 @@ use logos_core::Engine;
 const CLIENT_IMPORT: &str = "use GuzzleHttp\\Client;\n";
 
 /// Index `body` as a single pure-PHP file (with the `<?php` tag and the client
-/// import prepended) and return every `http-client-call` **reference** target
-/// the arm wrote to the ledger, sorted (keyless refusal rows excluded — see
-/// [`client_call_rows`]).
+/// import prepended) and return **every** `http-client-call` row the arm wrote
+/// to the ledger, sorted — refusals included, as the empty string that sorts
+/// first.
+///
+/// **Deliberately unfiltered (S-374)**, the discipline every other per-language
+/// suite keeps: a keyless refusal row is a real ledger row, and a reader that
+/// hid it would silently retire this file's "nothing at all was captured"
+/// assertions — a spurious keyless row turns `["GET /probe"]` into
+/// `["", "GET /probe"]` and fails the test. The split lives in
+/// [`client_call_rows`].
 fn client_calls(body: &str) -> Vec<String> {
-    client_call_rows(body).0
+    client_calls_raw(&format!("<?php\n{CLIENT_IMPORT}{body}"))
 }
 
 /// [`client_calls`]'s two populations: the arm's `(references, refusal rows)`.
 ///
-/// A declined call site records one keyless ledger row since S-374, and it is a
-/// recorded refusal rather than a reference — so [`client_calls`] reports only
-/// the keyed rows and a test whose contract is about a refusal asserts the count
-/// here. One index run per call, because this suite indexes a whole engine per
-/// fixture.
+/// The only reader that filters, and it hands back the count it removed — so a
+/// test whose contract is about a refusal pins both halves and neither can hide
+/// the other. One index run per call, because this suite indexes a whole engine
+/// per fixture.
 fn client_call_rows(body: &str) -> (Vec<String>, usize) {
-    client_call_rows_raw(&format!("<?php\n{CLIENT_IMPORT}{body}"))
+    let targets = client_calls(body);
+    let refusals = targets.iter().filter(|t| t.is_empty()).count();
+    (
+        targets.into_iter().filter(|t| !t.is_empty()).collect(),
+        refusals,
+    )
 }
 
 /// As [`client_calls`], but the caller supplies the whole file body (including
 /// its own `<?php` tag(s)) — used by the negative case that must ship
 /// *without* the client import, and by the HTML-interleaved fixture.
+/// Unfiltered, for the reason given on [`client_calls`].
 fn client_calls_raw(source: &str) -> Vec<String> {
-    client_call_rows_raw(source).0
-}
-
-/// As [`client_call_rows`], but the caller supplies the whole file.
-fn client_call_rows_raw(source: &str) -> (Vec<String>, usize) {
     let tmp = tempfile::tempdir().expect("tempdir");
     fs::create_dir_all(tmp.path().join("src")).expect("mkdir");
     fs::write(tmp.path().join("src/calls.php"), source).expect("write fixture");
@@ -96,9 +103,7 @@ fn client_call_rows_raw(source: &str) -> (Vec<String>, usize) {
         })
         .expect("read runs");
     targets.sort();
-    let refusals = targets.iter().filter(|t| t.is_empty()).count();
-    targets.retain(|t| !t.is_empty());
-    (targets, refusals)
+    targets
 }
 
 // ── 1. The required call-form matrix ([FR-WS-08]'s normative PHP row) ───────

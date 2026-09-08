@@ -79,32 +79,39 @@ fun probe(restClient: RestClient): String =
     restClient.get().uri("/probe").retrieve().body(String::class.java)
 "#;
 
-/// Index `body` as a single Kotlin file and return every `http-client-call`
-/// **reference** target the arm wrote to the ledger, sorted (keyless refusal
-/// rows excluded — see [`client_call_rows`]).
+/// Index `body` as a single Kotlin file and return **every** `http-client-call`
+/// row the arm wrote to the ledger, sorted — refusals included, as the empty
+/// string that sorts first.
+///
+/// **Deliberately unfiltered (S-374)**, the discipline every other per-language
+/// suite keeps: a keyless refusal row is a real ledger row, and a reader that
+/// hid it would silently retire this file's "nothing at all was captured"
+/// assertions — a spurious keyless row turns `["GET /probe"]` into
+/// `["", "GET /probe"]` and fails the test. The split lives in
+/// [`client_call_rows`].
 fn client_calls(body: &str) -> Vec<String> {
-    client_call_rows(body).0
+    client_calls_raw(&format!("package com.example\n{CLIENT_IMPORTS}\n{body}"))
 }
 
 /// [`client_calls`]'s two populations: the arm's `(references, refusal rows)`.
 ///
-/// A declined call site records one keyless ledger row since S-374, and it is a
-/// recorded refusal rather than a reference — so [`client_calls`] reports only
-/// the keyed rows and a test whose contract is about a refusal asserts the count
-/// here. One index run per call, because this suite indexes a whole engine per
-/// fixture.
+/// The only reader that filters, and it hands back the count it removed — so a
+/// test whose contract is about a refusal pins both halves and neither can hide
+/// the other. One index run per call, because this suite indexes a whole engine
+/// per fixture.
 fn client_call_rows(body: &str) -> (Vec<String>, usize) {
-    client_call_rows_raw(&format!("package com.example\n{CLIENT_IMPORTS}\n{body}"))
+    let targets = client_calls(body);
+    let refusals = targets.iter().filter(|t| t.is_empty()).count();
+    (
+        targets.into_iter().filter(|t| !t.is_empty()).collect(),
+        refusals,
+    )
 }
 
 /// As [`client_calls`], but the caller supplies the whole compilation unit —
 /// used by the negative case that must ship *without* the client imports.
+/// Unfiltered, for the reason given on [`client_calls`].
 fn client_calls_raw(source: &str) -> Vec<String> {
-    client_call_rows_raw(source).0
-}
-
-/// As [`client_call_rows`], but the caller supplies the whole file.
-fn client_call_rows_raw(source: &str) -> (Vec<String>, usize) {
     let tmp = tempfile::tempdir().expect("tempdir");
     fs::create_dir_all(tmp.path().join("src")).expect("mkdir");
     fs::write(tmp.path().join("src/Calls.kt"), source).expect("write fixture");
@@ -124,9 +131,7 @@ fn client_call_rows_raw(source: &str) -> (Vec<String>, usize) {
         })
         .expect("read runs");
     targets.sort();
-    let refusals = targets.iter().filter(|t| t.is_empty()).count();
-    targets.retain(|t| !t.is_empty());
-    (targets, refusals)
+    targets
 }
 
 // ── 1. The four-idiom matrix ([FR-WS-08]'s normative Kotlin row) ─────────────
@@ -574,7 +579,42 @@ class Calls(private val restClient: RestClient) {
 "#
         )
         .is_empty(),
-        "a catch-all template is honestly unbound, never approximately matched"
+        "a catch-all template is honestly unbound, never approximately matched — \
+         no reference AND, deliberately, no recorded refusal (that reason needs a \
+         non-keyless row, S-374)"
+    );
+}
+
+/// **The wrapped non-normalizing literal: two patterns, one call, and neither
+/// half may report the other's reason** (S-374, [NFR-CC-04]).
+///
+/// Kotlin inherits Java's `.uri(URI.create(…))` unwrap, so it inherits the same
+/// two-pattern overlap: the fluent verb-then-`uri` pattern's operand is the
+/// whole `URI.create(…)` expression (no static literal ⇒ `base-url-runtime`),
+/// the unwrapping pattern's operand is the literal. When the literal keys, the
+/// reference and the cancellation are pinned by
+/// [`a_jdk_http_client_builder_yields_one_reference_in_either_order`]; here it
+/// does not key, so the unwrapping pattern classifies it `path-not-composed` and
+/// records nothing — and that judgement must still cancel the enclosing match,
+/// or a static absolute literal is filed as a runtime-composed path.
+#[test]
+fn a_wrapped_non_normalizing_literal_records_neither_a_reference_nor_a_refusal() {
+    let (references, refusals) = client_call_rows(
+        r#"
+class Calls {
+    fun catchAll(): HttpRequest =
+        HttpRequest.newBuilder().GET().uri(URI.create("/files/**")).build()
+}
+"#,
+    );
+    assert!(
+        references.is_empty(),
+        "a catch-all template is never approximately matched: {references:?}"
+    );
+    assert_eq!(
+        refusals, 0,
+        "and the inner literal's `path-not-composed` judgement cancels the outer \
+         match's candidate — a static literal is not `base-url-runtime`"
     );
 }
 
