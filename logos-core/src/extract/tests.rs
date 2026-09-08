@@ -1392,23 +1392,26 @@ async fn twice(client: Client, a: String, b: String) {
         facts.refs
     );
 
-    let refusals = http_client_call_refusals(&facts);
+    // Asserted as an exact sorted set, not as a count plus a membership test: a
+    // count of four with an `all(|s| s.contains(a) || s.contains(b) || …)`
+    // membership test passes on four rows that all name `twice`, which is
+    // precisely the mis-attribution and the failed collapse this is about.
+    let mut refusals = http_client_call_refusals(&facts);
+    refusals.sort();
     assert_eq!(
-        refusals.len(),
-        4,
-        "three refusing functions plus `twice` collapsed to one row: {refusals:?}"
-    );
-    assert!(
-        refusals.iter().all(|s| s.contains("bare")
-            || s.contains("composed")
-            || s.contains("relative")
-            || s.contains("twice")),
-        "each refusal is attributed to its own calling function, never the file \
-         module: {refusals:?}"
-    );
-    assert!(
-        !refusals.iter().any(|s| s.contains("bound")),
-        "a site that bound records no refusal beside its reference: {refusals:?}"
+        refusals,
+        vec![
+            "logos cargo logos-core 0.1.0 src/`c.rs`/bare().".to_string(),
+            "logos cargo logos-core 0.1.0 src/`c.rs`/composed().".to_string(),
+            "logos cargo logos-core 0.1.0 src/`c.rs`/relative().".to_string(),
+            "logos cargo logos-core 0.1.0 src/`c.rs`/twice().".to_string(),
+        ],
+        "one row per declining declaration — three refusing functions plus \
+         `twice`, whose two calls collapse to one; each attributed to its own \
+         calling function and never to the file module, and `bound` absent \
+         because a site that bound records no refusal beside its reference: \
+         {:?}",
+        facts.refs
     );
 
     // The row's shape — this is the whole of its inertness.
