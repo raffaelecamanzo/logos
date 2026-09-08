@@ -265,6 +265,12 @@ mod tests {
     fn route_key_is_none_for_a_malformed_or_non_normalizing_name() {
         assert_eq!(route_key("not a route"), None); // path lacks a leading `/`
         assert_eq!(route_key("GET /files/{*rest}"), None); // non-normalizing
+        // A **keyless** row: the shape an invocation arm's recorded refusal
+        // carries (CR-107 broker, CR-120 HTTP client-call). Asserted here because
+        // it is what makes such a row inert — the intra-repo route binder and the
+        // cross-service bridge both refuse it through this one function.
+        assert_eq!(route_key(""), None);
+        assert_eq!(route_key("   "), None);
         assert_eq!(
             route_key("GET /users/{id}"),
             Some(("GET".to_string(), "/users/{}".to_string()))

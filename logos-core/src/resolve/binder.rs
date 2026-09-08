@@ -1533,6 +1533,21 @@ impl Ctx<'_> {
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
     fn resolve_route(&self, target: &str) -> Res {
+        // A **keyless** row names nothing and can bind to nothing — the same guard
+        // [`Ctx::resolve_artifact_name`] carries for the broker arm's refusals
+        // ([CR-107]), stated here because the HTTP client-call arm's refusals
+        // ([CR-120], S-374) arrive on this path instead: they are
+        // `(ArtifactBinding, Path)` rows, so `resolve_artifact` dispatches them
+        // here. `route_key` refuses an empty `"METHOD /template"` on its own, so
+        // this is explicit rather than load-bearing — and explicit is the point:
+        // the property is a never-fabricate invariant ([NFR-RA-05]), not an
+        // incidental consequence of a `split_once`.
+        //
+        // [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+        // [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+        if target.trim().is_empty() {
+            return Res::NotFound;
+        }
         let Some((method, template)) = route_key(target) else {
             // The operation's own template does not normalize (or the target is
             // malformed): never approximately matched.
