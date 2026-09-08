@@ -381,6 +381,67 @@ fn worktree_seed_carries_the_contract_even_when_the_primary_has_no_db() {
     assert!(report.rules_present, "the seeded worktree has a contract");
 }
 
+/// `Engine::start_with_phase_report` — the hand-mirrored, phase-timed twin of
+/// `Engine::start`'s cold path — must seed a DB-less worktree the same way
+/// `Engine::start` does: BOTH the graph store and the governance contract
+/// (CR-116 §9 item 5, S-369).
+///
+/// The twin exists to attribute the production cold path's cost, so it is only
+/// honest while it does the same work. S-369 made both paths resolve the
+/// primary checkout with **one** `git rev-parse --git-common-dir` instead of
+/// two, feeding one resolution to the graph seed and the contract seed alike —
+/// a change that has to land in both twins or the attribution over-reports
+/// `other` by exactly the saving production made. This is the side-effect
+/// guard for that, in the same spirit as
+/// `worktree_hooks.rs::a_phase_reported_engine_start_seeds_the_worktree_hooks_too`:
+/// if a future edit drops the shared resolution from one twin, the seed it
+/// feeds stops happening and this fails.
+#[test]
+fn a_phase_reported_engine_start_seeds_the_store_and_the_contract_too() {
+    let (tmp, main) = gitignored_repo_fixture();
+    write(&main, ".logos/rules.toml", LAYERED_RULES);
+
+    // Give the primary a real DB so the graph seed has something to copy —
+    // this exercises the arm where both seeds fire off one resolution.
+    {
+        let primary = Engine::start(&main).expect("primary engine starts");
+        assert!(primary.index().files_indexed >= 1, "primary index ran");
+    }
+    assert!(
+        main.join(".logos/logos.db").is_file(),
+        "the primary now has a DB to seed from"
+    );
+
+    let wt = add_worktree(&tmp, &main);
+    let (engine, phases) =
+        Engine::start_with_phase_report(&wt).expect("the phase-reported twin starts");
+
+    // The graph seed fired: the worktree sees main's code without indexing it.
+    assert!(
+        has_fn(&engine, "seeded_fn"),
+        "the twin seeded the worktree store from the primary checkout"
+    );
+    // The contract seed fired off the same primary resolution.
+    assert_eq!(
+        fs::read_to_string(wt.join(".logos/rules.toml")).unwrap(),
+        LAYERED_RULES,
+        "the twin seeded the governance contract too, byte-identically"
+    );
+    let report = engine
+        .check_rules(None, true)
+        .expect("worktree check_rules runs");
+    assert!(report.rules_present, "the seeded worktree has a contract");
+
+    // And the attribution it exists to produce is still well-formed: the six
+    // enumerated phases plus `other` is the whole measured total (NFR-PE-05
+    // bounds that total, not any subset of it).
+    assert_eq!(phases.enumerated_phases() + phases.other, phases.sum());
+    assert!(
+        phases.query_compilation > std::time::Duration::ZERO,
+        "a real registry load was timed, not a skipped one"
+    );
+}
+
 /// [FR-WT-06] AC2: a primary checkout with no contract seeds a worktree with
 /// no contract — the seed copies, it never fabricates.
 #[test]

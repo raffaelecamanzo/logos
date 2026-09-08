@@ -40,7 +40,8 @@ use anyhow::{bail, Context, Result};
 
 /// The primary checkout a DB-less linked worktree can seed from ([FR-WT-03]).
 ///
-/// Produced by [`seed_source`] only when all the preconditions hold: the root
+/// Produced by [`seed_source`] (or [`seed_source_from_primary`]) only when
+/// all the preconditions hold: the root
 /// is a *linked* worktree (not the primary checkout itself), the primary's
 /// `.logos/logos.db` exists, and the primary's HEAD is resolvable (the
 /// diff-reconcile base).
@@ -237,11 +238,39 @@ pub fn current_branch(root: &Path) -> Option<String> {
 /// repo's worktree, or `root` *is* the primary), the primary has no
 /// `.logos/logos.db`, or its HEAD cannot be resolved.
 ///
+/// Resolves the primary checkout itself, so it costs one `git rev-parse
+/// --git-common-dir` subprocess. A caller that has *already* resolved the
+/// primary — [`Engine::start`](crate::Engine::start)'s cold path, which needs
+/// it for [`seed_contract`] too — should call
+/// [`seed_source_from_primary`] with that value instead of paying for the
+/// identical query twice ([CR-116] §9 item 5).
+///
 /// [ADR-15]: ../../docs/specs/architecture/decisions/ADR-15.md
+/// [CR-116]: ../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
 /// [FR-WT-03]: ../../docs/specs/requirements/FR-WT-03.md
 pub fn seed_source(root: &Path) -> Option<SeedSource> {
-    let primary_root = primary_root(root)?;
+    seed_source_from_primary(primary_root(root)?)
+}
 
+/// [`seed_source`] for a caller that has already resolved
+/// [`primary_root`] — the rest of the chain (the primary's
+/// `.logos/logos.db`, its HEAD) with no second `--git-common-dir` subprocess
+/// ([FR-WT-03], [CR-116] §9 item 5, [S-369]).
+///
+/// Mirrors [`seed_contract`]'s shape, which takes the resolved primary as an
+/// argument for the same reason. `seed_source` is this function composed with
+/// `primary_root`, so the two can never disagree about what a seed *is* —
+/// only about who paid to find the primary
+/// (`seed_source_agrees_with_seed_source_from_primary` pins that).
+///
+/// Returns `None` on the same terms as [`seed_source`], minus the
+/// primary-resolution step the caller already performed: the primary has no
+/// `.logos/logos.db`, or its HEAD cannot be resolved.
+///
+/// [CR-116]: ../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+/// [FR-WT-03]: ../../docs/specs/requirements/FR-WT-03.md
+/// [S-369]: ../../docs/planning/journal.md#s-369-reconcile-the-cold-start-budget-with-what-it-actually-bounds
+pub fn seed_source_from_primary(primary_root: PathBuf) -> Option<SeedSource> {
     let db_path = primary_root.join(".logos").join("logos.db");
     if !db_path.is_file() {
         return None; // no seed → full index (ADR-15 fallback)
@@ -662,6 +691,34 @@ mod tests {
     fn seed_source_is_none_outside_git() {
         let tmp = TempDir::new().unwrap();
         assert!(seed_source(tmp.path()).is_none());
+    }
+
+    /// `seed_source` and `seed_source_from_primary` must never disagree about
+    /// what a seed *is* — only about who paid the `--git-common-dir`
+    /// subprocess to find the primary (CR-116 §9 item 5, S-369). `Engine::start`'s
+    /// cold path calls the second form with a primary it resolved once for
+    /// both the graph seed and the governance-contract seed, so a divergence
+    /// here would silently change worktree bootstrap on the production path.
+    #[test]
+    fn seed_source_agrees_with_seed_source_from_primary() {
+        let (tmp, main) = repo_fixture();
+        fs::create_dir_all(main.join(".logos")).unwrap();
+        fs::write(main.join(".logos/logos.db"), b"db").unwrap();
+        let wt = add_worktree(&tmp, &main);
+
+        let via_root = seed_source(&wt).expect("worktree + primary DB → a seed");
+        let primary = primary_root(&wt).expect("a linked worktree has a primary");
+        let via_primary =
+            seed_source_from_primary(primary).expect("the same seed from the resolved primary");
+        assert_eq!(via_root.primary_root, via_primary.primary_root);
+        assert_eq!(via_root.db_path, via_primary.db_path);
+        assert_eq!(via_root.head, via_primary.head);
+
+        // And the `None` arms agree too: the primary checkout is its own
+        // primary, so `primary_root` is `None` there and neither form yields a
+        // seed.
+        assert!(seed_source(&main).is_none());
+        assert!(primary_root(&main).is_none());
     }
 
     // ── seed_contract (FR-WT-06) ──────────────────────────────────────────

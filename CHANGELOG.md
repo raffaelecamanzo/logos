@@ -27,6 +27,45 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
   success, not a failure). A workspace-governance violation still never moves the
   exit code either; `workspace check` remains advisory.
 
+### Changed
+- **The NFR-PE-05 cold-start budget is re-derived 500 → 600 ms and now enumerates
+  all six phases (CR-116, S-368, S-369).** The requirement enumerated three
+  phases — embedded `plugin.toml` parse, `LanguageRegistry` construction, query
+  compilation — while both tests citing it measured something else, and neither
+  measured its enumeration. Per-phase instrumentation over eight fresh-process
+  cold starts settled it: the three enumerated phases came in at mean 440.1 /
+  **max 457.5 ms**, inside the old 500 ms budget in every sample, so **this was
+  never a performance breach**. The ~67 ms excess was store open, schema
+  migration, pool startup and incidental cold-path work the requirement never
+  claimed to bound.
+
+  A user waiting for a ready engine waits for the store too, so the requirement
+  now enumerates all six phases and bounds their **total** wall time — the whole
+  path to a ready engine — at **≤ 600 ms**, re-derived from the measured full
+  total (p90 528.4 / max 539.8 ms, so ~12% headroom) rather than from the old
+  target plus a margin. `LOGOS_PERF_TOLERANCE`'s default stays **1.0**; no cost
+  regressed, and no per-phase sub-budgets exist, so no subset of the six may be
+  gated as NFR-PE-05 conformance. The 200 ms `Runtime::open` guard, which
+  asserted over exactly the phases the old requirement *excluded*, keeps its band
+  but drops the citation and is renamed
+  `runtime_open_stays_within_its_store_and_pool_regression_band`.
+
+- **`Engine::start` runs one `git rev-parse --git-common-dir` on the DB-less
+  worktree path instead of two (CR-116 §9.5, S-369).** The graph-store seed and
+  the governance-contract seed each resolved the primary checkout with their own
+  identical subprocess. They now share one resolution, via the new
+  `workspace::seed_source_from_primary`. Waste removal on a budgeted cold path,
+  not budget-chasing: the saving is headroom, and the 600 ms figure above is
+  derived from the measurement *before* it. Measured effect on the phase that
+  absorbs it (`ColdStartPhases::other`), medians over 10 fresh-process samples
+  per run — medians because the documented cross-process ramp-up effect puts
+  the occasional 1 s outlier in the mean: **32.1 / 32.1 ms before** (2 runs) →
+  **24.2 / 22.5 / 24.4 / 23.5 ms after** (4 runs), a saving of ~8 ms, ~25% of
+  the phase. The **full** cold start is *not* measurably faster: query
+  compilation dominates it at ~440 ms and drifts ±25 ms between runs on the same
+  host, which swamps an 8 ms saving. That is the expected outcome — the point was
+  to stop paying twice for one answer.
+
 ### Added
 - **Named, caused, degraded-member reporting in `workspace status` (S-326,
   FR-WS-16).** Each member row gains an `open_state` — `opened` /
