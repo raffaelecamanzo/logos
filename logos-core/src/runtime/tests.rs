@@ -327,11 +327,20 @@ fn many_reads_run_concurrently_up_to_the_pool_size() {
 /// (`logos-core/tests/runtime_concurrency.rs`), which times the whole path.
 ///
 /// The 200 ms band survives on its own terms, as a *local* regression band:
-/// these phases measured ~24 ms combined across eight fresh-process samples
+/// these phases measured ~27 ms combined across eight fresh-process samples
 /// (store open 1.7 + schema migration 19.6 + pool startup 5.9 — S-368), so
-/// 200 ms is a ~8× ceiling that only a real change in store-open or pool cost
-/// can breach. It is not tolerance-banded because it is not a budget being
-/// held to a tight margin.
+/// 200 ms is a ~7× ceiling.
+///
+/// **A breach is not by itself a cost regression.** This guard is known to
+/// flake under load: S-368's full-suite run recorded it failing at **278 ms**
+/// with no store or pool change (sprint-impl-65, alongside its whole-path
+/// sibling failing at 791 ms in the same run) — the cross-process CPU-ramp-up
+/// effect that harness exists to expose. Re-run it in isolation before
+/// treating a breach as a regression, the standing convention for every
+/// wall-clock assertion here. It is deliberately not scaled by
+/// `LOGOS_PERF_TOLERANCE`: that helper is local to
+/// `tests/runtime_concurrency.rs`, and duplicating it into `src` to band a
+/// diagnostic band would spread the knob without adding signal.
 #[test]
 fn runtime_open_stays_within_its_store_and_pool_regression_band() {
     use std::time::Instant;
@@ -350,7 +359,9 @@ fn runtime_open_stays_within_its_store_and_pool_regression_band() {
     assert!(
         elapsed < Duration::from_millis(200),
         "Runtime::open took {elapsed:?}, over its 200 ms store-and-pool regression band \
-         (measured ~24 ms; this band is NOT the NFR-PE-05 cold-start budget — that is \
+         (measured ~27 ms). Re-run in isolation before calling it a regression — this \
+         guard is known to flake under full-suite load. NOTE: this band is NOT the \
+         NFR-PE-05 cold-start budget; that is \
          cold_start_to_ready_engine_is_within_pe05_budget)"
     );
 }
