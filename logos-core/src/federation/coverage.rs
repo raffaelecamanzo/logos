@@ -3277,16 +3277,58 @@ mod tests {
             );
         }
 
+        /// Is `token` present as a *reason token* rather than as an ordinary word?
+        ///
+        /// Bare substring matching made one arm of this guard unfalsifiable.
+        /// `ambiguous` is not only a reason: it is also the `CoverageState` tag, the
+        /// TypeScript `CoverageBucket` member, and an English word these surfaces
+        /// use freely ("bound/ambiguous/unbound", `ambiguous-candidate`). So
+        /// `contains("ambiguous")` could not fail, and dropping `Ambiguous` from a
+        /// surface's enumeration would have gone unnoticed — the one token of the
+        /// five with that problem.
+        ///
+        /// So the form required is an *enumeration* shape, not merely a delimited
+        /// one: a markdown backtick, a union arm `| "token"`, or a map key
+        /// `token:` / `"token":`. A plain `"token"` is deliberately **not**
+        /// enough — `coverageModel.ts` contains `ref.bucket === "ambiguous"`, a
+        /// bucket comparison, and accepting that left the arm exactly as
+        /// unfalsifiable as the bare substring it replaced.
+        ///
+        /// # `ambiguous` on the two `web/ui` surfaces is still not falsifiable
+        ///
+        /// Stated rather than left implied, because a guard that looks stronger
+        /// than it is, is the defect this story exists to remove. `ambiguous` is
+        /// the one wire word shared by two enums: `UnboundReason::Ambiguous` *and*
+        /// the 3-state `CoverageBucket`/`CoverageState` tag. So `types.ts` supplies
+        /// `| "ambiguous"` from `CoverageBucket` (`"bound" | "ambiguous" |
+        /// "unbound"`) and `coverageModel.ts` supplies `ambiguous:` from its
+        /// counter fields, whatever the reason union and the label map say. Deleting
+        /// the real reason entry from either file was tried and the guard still
+        /// passed. No textual check can separate the two meanings there; only
+        /// parsing the declarations could, which is more machinery than an
+        /// enumeration mirror is worth.
+        ///
+        /// The tightening still earns its place: the other four tokens are now
+        /// genuinely checked on all six surfaces (each fails when removed), and the
+        /// pure-prose loophole is closed on the markdown surfaces — where
+        /// `ambiguous` *is* falsifiable, since they write it in backticks.
+        fn enumerated(text: &str, token: &str) -> bool {
+            text.contains(&format!("`{token}`"))
+                || text.contains(&format!("| \"{token}\""))
+                || text.contains(&format!("\"{token}\":"))
+                || text.contains(&format!("\n  {token}:"))
+        }
+
         for (rel, text, enumerates_all) in readable_reason_surfaces() {
             if !enumerates_all {
                 continue;
             }
             for reason in ALL {
                 assert!(
-                    text.contains(wire(reason)),
+                    enumerated(&text, wire(reason)),
                     "{rel} enumerates the unbound reasons but does not mention \
-                     `{}` — a reason the payload can carry that this surface cannot \
-                     explain ([NFR-CC-04])",
+                     `{}` as a reason token — a reason the payload can carry that \
+                     this surface cannot explain ([NFR-CC-04])",
                     wire(reason)
                 );
             }
