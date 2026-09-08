@@ -828,7 +828,7 @@ Per-member freshness (each member's index/sync state) plus the **3-state
 cross-service coverage summary** — every cross-boundary reference classified
 `bound` / `ambiguous` / `unbound`, each unbound one carrying a reason
 (`no-provider-in-workspace`, `path-not-composed`, `base-url-runtime`,
-`ambiguous`, `schema-mismatch`, `topic-not-literal`). The coverage tier is
+`ambiguous`, `topic-not-literal`). The coverage tier is
 **advisory only** — it is
 bucketed separately (`no-provider-in-workspace` never depresses the bound-ratio)
 and never feeds any member's quality gate ([ADR-53](../specs/architecture/decisions/ADR-53.md)).

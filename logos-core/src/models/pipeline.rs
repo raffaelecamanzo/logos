@@ -73,9 +73,12 @@ pub struct FrameworkStats {
     /// class-/interface-level path prefix governed them but was not a
     /// resolvable literal (FR-FW-05, S-329). Promoting the method path alone
     /// would advertise a provider at an address the service does not serve, so
-    /// the registration is dropped instead and counted here — the honest
-    /// figure behind the `path-not-composed` coverage reason (FR-WS-05,
-    /// NFR-RA-05). Zero on every codebase whose prefixes are written literals.
+    /// the registration is dropped instead and counted here (NFR-RA-05). This
+    /// count **is** the reported grain FR-FW-05 asks for, and it is the only
+    /// one: a refused registration promotes no node, so the cross-service
+    /// coverage tier has no provider to label and never reports a
+    /// `path-not-composed` reason for it (S-378). Zero on every codebase whose
+    /// prefixes are written literals.
     pub routes_not_composed: u64,
     /// Wall-clock cost of the whole pass for this run (OQ-07 evidence).
     pub duration_ms: u64,

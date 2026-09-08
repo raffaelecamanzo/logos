@@ -32,7 +32,6 @@ export const REASON_LABEL: Record<UnboundReason, string> = {
   "path-not-composed": "Path could not be composed",
   "base-url-runtime": "Base URL resolved at runtime",
   ambiguous: "Two or more providers (ambiguous)",
-  "schema-mismatch": "Consumer / provider schema mismatch",
   "topic-not-literal": "Broker topic is not a static literal",
 };
 

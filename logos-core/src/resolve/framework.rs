@@ -158,20 +158,31 @@ struct PathOrigin {
 ///
 /// Crate-internal, like the `ClientCallRefusal` of
 /// [`http_client_call`](super::http_client_call) it mirrors: the classification
-/// stays in the resolver layer and the federation layer owns the *reported*
-/// vocabulary, so "why did this not bind" is one word wherever it is read. The
-/// mapping onto a federation coverage
-/// [`UnboundReason`](crate::federation::UnboundReason) lives in
-/// [`crate::federation::coverage`].
+/// stays in the resolver layer.
 ///
-/// That mapping aligns the vocabulary; it is not itself a report. A refused
-/// registration promotes no node, so nothing reaches the cross-service
-/// read-model to be labelled — surfacing the refusal there needs a
-/// refusal-carrying ledger trace this pass does not persist. What this pass
-/// does surface is the per-run count,
+/// **It has no mapping onto the federation coverage vocabulary, and that is
+/// structural.** One used to exist — an `impl From<RouteRefusal>` for
+/// [`UnboundReason`](crate::federation::UnboundReason) in
+/// [`crate::federation::coverage`] — with no runtime caller; S-378 removed it
+/// ([CR-120]). A refusal here is a **provider-side** event: a route
+/// registration that promoted no node. The coverage tier classifies
+/// **consumer-side** references, so a refused registration leaves it no row to
+/// label at all — a consumer naming that endpoint reads
+/// `no-provider-in-workspace`. That is what separates this from
+/// `ClientCallRefusal`, whose refusals are declined *call sites* and therefore
+/// do have a row.
+///
+/// What this pass reports is the per-run count,
 /// [`FrameworkStats::routes_not_composed`](crate::models::pipeline::FrameworkStats::routes_not_composed),
-/// which rides `IndexResult` into `logos index --json`.
+/// which rides `IndexResult` into `logos index --json` — and that count is
+/// exactly the grain [FR-FW-05] asks for. Its unresolvable-prefix criterion
+/// requires the registration be "counted in the run's `routes_not_composed`
+/// statistic"; [CR-102] deleted the earlier wording that asked the resulting
+/// *reference* to report `path-not-composed`, as unreachable under any
+/// capture-interpreter design.
 ///
+/// [CR-102]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,9 +194,9 @@ pub(crate) enum RouteRefusal {
     /// method path alone would advertise a provider at an address the service
     /// does not serve, which is the approximate match [NFR-RA-05] forbids (and
     /// which [`crate::resolve::route_template`] already refuses one layer
-    /// down). Surfaces as `path-not-composed` ([FR-WS-05]).
+    /// down). Reported as the run's `routes_not_composed` count — **not** as a
+    /// `path-not-composed` coverage reason, per the note on the enum above.
     ///
-    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     PathNotComposed,
 }
