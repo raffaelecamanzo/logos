@@ -257,11 +257,13 @@ pub fn seed_source(root: &Path) -> Option<SeedSource> {
 /// `.logos/logos.db`, its HEAD) with no second `--git-common-dir` subprocess
 /// ([FR-WT-03], [CR-116] §9 item 5, [S-369]).
 ///
-/// Mirrors [`seed_contract`]'s shape, which takes the resolved primary as an
-/// argument for the same reason. `seed_source` is this function composed with
-/// `primary_root`, so the two can never disagree about what a seed *is* —
-/// only about who paid to find the primary
-/// (`seed_source_agrees_with_seed_source_from_primary` pins that).
+/// Follows [`seed_contract`]'s precedent of taking the resolved primary as an
+/// argument, for the same reason — though it takes it **owned**, because the
+/// value moves into [`SeedSource::primary_root`] rather than being borrowed
+/// and dropped. `seed_source` is this function composed with `primary_root`,
+/// so the two can never disagree about what a seed *is* — only about who paid
+/// to find the primary (`seed_source_agrees_with_seed_source_from_primary`
+/// pins that).
 ///
 /// Returns `None` on the same terms as [`seed_source`], minus the
 /// primary-resolution step the caller already performed: the primary has no
