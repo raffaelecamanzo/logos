@@ -179,18 +179,12 @@ fn arm_relation(relation: crate::model::ArtifactRelation) -> String {
 // `a_registration_that_promoted_no_route_reads_no_provider_not_path_not_composed`
 // in this file's tests pins that classification.
 //
-// What the framework pass does report is the per-run count
-// `FrameworkStats::routes_not_composed`, which rides `IndexResult` into
-// `logos index --json`. That is precisely the grain FR-FW-05 asks for — its
-// unresolvable-prefix criterion requires the registration be "counted in the
-// run's `routes_not_composed` statistic", and it is
-// (`spring_non_literal_prefix_promotes_no_route_and_is_counted` in
-// `logos-core/tests/multilang.rs` reaches it from a real index run). The comment
-// removed here instead quoted that requirement as demanding "the resulting
-// reference reports `path-not-composed`" and declared it unmet; that phrase is
-// the pre-CR-102 wording, which CR-102 deleted as unreachable under any
-// capture-interpreter design. Reinstating this mapping with a caller would mean
-// re-implementing exactly the model CR-102 retired.
+// What the framework pass reports instead — the per-run
+// `FrameworkStats::routes_not_composed` count — and why the comment removed here
+// misquoted FR-FW-05 to claim otherwise, is recorded once, on the `RouteRefusal`
+// enum in `resolve/framework.rs`. That is where the statistic is produced, and
+// this file no longer imports the type; a second copy of the argument here is
+// how the two would drift.
 
 impl From<ClientCallRefusal> for UnboundReason {
     /// Map the HTTP client-call arm's refusal ([`ClientCallRefusal`], S-252) onto
@@ -2703,9 +2697,11 @@ mod tests {
     /// The grain [FR-FW-05] actually asks for — `FrameworkStats::routes_not_composed`
     /// — is pinned from a real index run by
     /// `spring_non_literal_prefix_promotes_no_route_and_is_counted` in
-    /// `logos-core/tests/multilang.rs` (and its Kotlin twin). It is deliberately
-    /// **not** re-asserted here: mirroring an existing assertion into a second file
-    /// is how the two copies later disagree.
+    /// `logos-core/tests/multilang.rs` (and its Kotlin twin). The consumer-side
+    /// mapping that survives is pinned by
+    /// `client_call_refusals_map_to_the_coverage_reasons` two functions above.
+    /// Neither is re-asserted here: mirroring an existing assertion into a second
+    /// place is how the two copies later disagree.
     ///
     /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
     /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
@@ -2731,13 +2727,6 @@ mod tests {
         );
         assert_eq!(cov.no_provider_in_workspace, 1);
         assert_eq!(cov.bound, 0);
-
-        // The consumer-side counterpart is untouched and still maps — the removal
-        // is about which *side* of an endpoint has a row, not about the word.
-        assert_eq!(
-            UnboundReason::from(ClientCallRefusal::PathNotComposed),
-            UnboundReason::PathNotComposed
-        );
     }
 
     // ── CR-109 / S-349: wildcard-method matching with exact-method precedence ──
