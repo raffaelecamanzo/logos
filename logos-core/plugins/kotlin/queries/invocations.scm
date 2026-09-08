@@ -438,13 +438,16 @@
 ;     there is nothing a zero-assertion would defend: it would pin the absence of
 ;     code that was never written, not a decision this file makes.
 ;
-; Two ceilings are OVER-captures rather than under-captures. Neither is
-; separable from a real client call without receiver typing, so both are pinned
-; as the behaviour they are, not wished away:
+; Two ceilings are OVER-captures rather than under-captures, and both are pinned
+; as the behaviour they are rather than wished away:
 ;
 ;   * The ledger gate is file-grained, so a route-shaped collection call inside a
 ;     genuine client file (`perms.get("/admin/users")`) still captures.
-;     Inherited from the Rust arm and from Java. Pinned by
+;     Inherited from the Rust arm. This one IS separable: Java carried the
+;     identical ceiling until S-375 (CR-120) closed it with a receiver-NAME
+;     boundary rule over its normative client row — no receiver typing needed —
+;     and that rule ports here, Kotlin's row being "as Java (API-compatible)".
+;     Until it is ported this is a backlog item, not a law. Pinned by
 ;     `a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling`.
 ;
 ;   * A route registration whose handler arrives on a LATER link, or not at all

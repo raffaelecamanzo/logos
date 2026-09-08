@@ -702,22 +702,28 @@ fn extract_one(
 /// This gate is **file-grained**, and that is all it can be: it reads the file's
 /// reference ledger, so it answers "is this file plausibly a client file?" and
 /// cannot answer [FR-WS-08] AC5's question about a single *call*. **The
-/// receiver-grained half is each language's own `invocations.scm`**, and a
+/// per-call half belongs to each language's own `invocations.scm`**, and a
 /// language shipping the broad `<receiver>.<method>(<arg>)` anchor owes a
-/// receiver rule in it — a receiver *name* boundary rule is enough; receiver
-/// typing is not required, which is what the retired ceiling below claimed.
-/// Python and TypeScript have scoped their receivers since S-343/S-344, and Java
-/// joins them in S-375 ([CR-120]), inverting the over-capture its own fixture
-/// used to pin.
+/// narrowing there. Two mechanisms exist, both pure descriptor/query data:
 ///
-/// Where a language has **not** scoped its receivers — Rust, Kotlin, Ruby and
-/// PHP still ship the broad anchor — the file gate is the only thing behind it,
-/// so the same incidental call *inside* a genuine client file still captures.
-/// That residual is the documented ADR-54 accuracy ceiling (see `HTTP_METHODS`),
-/// pinned per language by each arm's own
-/// `a_route_shaped_*_inside_a_client_file_is_a_stated_ceiling`. Under-capture is
-/// safe; over-capture is not, so a language whose client wrapper is undetected
-/// simply stays unbound.
+/// 1. A **receiver-name boundary rule** in the query. Receiver *typing* is not
+///    required — that impossibility claim is what S-375 ([CR-120]) retired when
+///    it closed Java's copy of this residual; a name rule suffices.
+/// 2. The `[invocation_methods]` table's **filter half**, which drops any method
+///    name absent from the table, so a bare-verb collection call is refused
+///    without any receiver rule at all.
+///
+/// Where an arm has neither, the file gate is the only thing behind it and the
+/// same incidental call *inside* a genuine client file still captures. That
+/// residual is the documented ADR-54 accuracy ceiling (see `HTTP_METHODS`).
+/// Under-capture is safe; over-capture is not, so a language whose client
+/// wrapper is undetected simply stays unbound.
+///
+/// **Which arm is in which state is deliberately not listed here.** A roster in
+/// this position goes stale on every arm story — the one this paragraph replaced
+/// omitted two languages and pointed at a per-language test name that three of
+/// the arms it named do not have. Each `invocations.scm` header states its own
+/// position and names its own pin; that is the single place to read it.
 ///
 /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 ///
@@ -1138,12 +1144,12 @@ fn collect_refs(
 /// path).
 ///
 /// The residual ceiling — a genuine HTTP-client file that also does an
-/// incidental `/`-keyed collection `.get` — survives only for the languages
-/// whose query does **not** scope its receiver (Rust, Kotlin, Ruby, PHP). There
-/// it is a documented accuracy ceiling ([ADR-54]), reported unbound-or-not at
-/// worst, never silently guessed. Python, TypeScript and (S-375) Java close it
-/// in query data; see the receiver-grained half of the rule on
-/// [`capture_http_client_call_arm`].
+/// incidental `/`-keyed collection `.get` — survives for any arm whose query
+/// narrows neither its receiver nor its verb vocabulary. There it is a
+/// documented accuracy ceiling ([ADR-54]), reported unbound-or-not at worst,
+/// never silently guessed. An arm that closes it does so in query or descriptor
+/// data and says so in its own header; see the per-call half of the rule on
+/// [`capture_http_client_call_arm`] for the two mechanisms.
 ///
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md

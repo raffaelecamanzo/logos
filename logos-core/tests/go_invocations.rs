@@ -356,8 +356,12 @@ func Authorize(p Perms) { p.Get("/admin/users") }
     // What it captures is the documented ADR-54 accuracy ceiling: the gate is
     // FILE-grained, so this same incidental call INSIDE a genuine client file
     // does capture. Under-capture is safe, over-capture is not, and the residual
-    // is stated rather than worked around — the Java arm pins the identical
-    // ceiling in `a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling`.
+    // is stated rather than worked around — the Kotlin and Ruby arms pin the
+    // identical ceiling in
+    // `a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling`.
+    // The Java arm carried it too until S-375 (CR-120) closed it with a
+    // receiver-NAME boundary rule in its own query; Go's anchor carries no such
+    // rule, so Go's residual stands.
     let gated = extract_go(&format!(
         "package authz\n\nimport \"net/http\"\n\nvar _ = http.StatusOK\n\n{BODY}"
     ));

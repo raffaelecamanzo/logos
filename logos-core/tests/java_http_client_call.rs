@@ -7,20 +7,27 @@
 //! one fixture per idiom in [FR-WS-08]'s normative Java row, so a query that
 //! compiles but captures nothing cannot pass ([CR-101]'s lesson).
 //!
-//! It pins three things a reader has to be able to trust:
+//! It pins four things a reader has to be able to trust:
 //!
 //! 1. **What is captured** — the four-idiom matrix, each rendering exactly one
 //!    `"METHOD /template"` reference keyed through the same `route_key` the
 //!    provider side reduces to ([FR-CG-09]).
 //! 2. **What is refused** — [FR-WS-08]'s shared negative-case fixture contract
 //!    (S-340), referenced rather than re-invented here.
-//! 3. **What is a stated ceiling** — the Java idioms the arm's capture
-//!    vocabulary provably cannot express, asserted as *zero* references so the
-//!    ceiling is pinned in a test rather than only claimed in prose ([ADR-54]).
+//! 3. **Which receivers the arm admits and refuses** — the receiver rule's
+//!    vocabulary, pinned on both edges and on both receiver spellings (S-375,
+//!    [CR-120]). This is the half that makes case 1 of the contract above hold
+//!    *within* a client file and not only across files.
+//! 4. **What is a stated ceiling** — the Java idioms the arm's capture
+//!    vocabulary cannot express, plus the two residuals the receiver rule leaves
+//!    behind, each asserted so the ceiling is pinned in a test rather than only
+//!    claimed in prose ([ADR-54]). A ceiling whose fixture must also prove the
+//!    file was scanned is asserted as its positive control alone, not as zero.
 //!
 //! Gated on the Java grammar so a build excluding it does not run it.
 //!
 //! [CR-101]: ../../docs/requests/CR-101-jvm-spring-route-extraction.md
+//! [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 //! [CR-108]: ../../docs/requests/CR-108-per-language-http-client-call-capture.md
 //! [FR-CG-09]: ../../docs/specs/requirements/FR-CG-09.md
 //! [FR-WS-08]: ../../docs/specs/requirements/FR-WS-08.md
@@ -179,32 +186,41 @@ public class Calls {
 
 // ── 2. The shared negative-case fixture contract (S-340, [FR-WS-08]) ─────────
 
-/// Shared negative case **1** — a same-shaped non-HTTP receiver call. Defined
-/// once in [FR-WS-08]'s "Shared negative-case fixture contract" section; this
-/// story only proves Java's half of it: the file carries **no** HTTP-client
-/// import, so the arm's ledger gate never scans it and `cache.get("k")` cannot
-/// fabricate anything.
+/// The arm's **file-level ledger gate**, isolated — the cross-file half of
+/// [FR-WS-08]'s shared negative-case contract.
+///
+/// The two halves are byte-identical but for the client `import`, so the empty
+/// result is attributable to the gate and to nothing else. The receiver here is
+/// `restTemplate`, a spelling the receiver rule **accepts**: that is the point.
+/// The fixture this test used to carry (`cache.get(…)`) is refused by the
+/// receiver rule too, so after S-375 it would have passed with the gate
+/// **deleted** — a vacuous assertion, and the gate's refuse direction would have
+/// been pinned by nothing. This is the same failure class `go_invocations.rs`
+/// and `c_sharp_invocations.rs` closed for their own arms, and the reason both
+/// carry a positive control in the same fixture.
+///
+/// The *within-file* half — a non-client receiver inside a genuine client file
+/// — is [`a_route_shaped_collection_get_on_a_non_client_receiver_is_refused`].
 #[test]
 fn a_non_client_file_is_never_scanned_for_client_calls() {
-    assert!(
-        client_calls_raw(
-            r#"package com.example;
-import java.util.Map;
-
+    const BODY: &str = r#"
 public class Calls {
-    private Map<String, String> cache;
-    String lookup() {
-        return cache.get("k");
-    }
-    String routeShapedKey() {
-        return cache.get("/admin/users");
+    private RestTemplate restTemplate;
+    void drop(String id) {
+        restTemplate.delete("/carts/{id}");
     }
 }
-"#
-        )
-        .is_empty(),
-        "no HTTP-client import ⇒ the file is never scanned, so neither the \
-         plain key nor the route-shaped one becomes a cross-service edge"
+"#;
+    assert!(
+        client_calls_raw(&format!("package com.example;\n{BODY}")).is_empty(),
+        "no HTTP-client import ⇒ the file is never scanned for client calls, \
+         even on a receiver the query would otherwise accept"
+    );
+    assert_eq!(
+        client_calls(BODY),
+        ["DELETE /carts/{id}"],
+        "the same source WITH the client imports captures — the ledger gate is \
+         the only difference between these two cases"
     );
 }
 
@@ -257,48 +273,68 @@ public class Calls {
 }
 
 /// The receiver rule is a **boundary** rule, never a substring test, and this
-/// pins both of its edges — the accepted spellings that must keep capturing,
-/// and the rejected ones that must not start.
+/// pins both of its edges — the accepted spellings that must keep capturing, and
+/// the rejected ones that must not start.
+///
+/// For the vocabulary and the reason each token is in or out, see the
+/// **receiver rule** section of `plugins/java/queries/invocations.scm`; that is
+/// the rule's canonical home and this test is only its pin. What this test adds,
+/// and the reason its fixtures are shaped the way they are:
+///
+/// - Every case runs on **both receiver spellings** — the bare identifier and
+///   the injected-field `this.<field>` form. The query expresses them as one
+///   node alternation binding one `@_recv`, so a regression in either branch
+///   fails here. When the guard was two copies of one regex, reverting a single
+///   copy re-admitted `this.perms.get("/admin/users")` with the whole suite
+///   still green.
+/// - Every rejected spelling sits inside a file that **passes** the ledger gate
+///   and carries a positive control, so nothing here is attributable to the gate
+///   ([NFR-RA-05]) — the discipline `go_invocations.rs` and
+///   `c_sharp_invocations.rs` closed for their own arms.
+/// - The rejected set deliberately includes the `…Client`-suffixed non-HTTP
+///   clients (`kafkaClient`, `redisClient`, `zkClient`, `cacheClient`). That is
+///   the axis the rule is weakest on, and the axis a well-meaning widening would
+///   reopen: admitting a bare `Client` suffix fabricates a cross-service
+///   `DELETE /config/orders` out of a ZooKeeper node delete.
 ///
 /// Structured after the TypeScript arm's equivalent
 /// (`extract::tests::a_non_client_receiver_call_is_never_captured`), whose
 /// `notaxiosCache` case is the reason that arm's rule is anchored: a substring
-/// test admitted a cache lookup and fabricated a cross-service call. Java's
-/// vocabulary is [FR-WS-08]'s normative Java row spelled as a field name, so the
-/// rule admits a segment that either **starts** with a type-derived lower-camel
-/// token (`restTemplate`, `webClient`) or **ends** with an upper-camel one
-/// (`usersRestTemplate`, `paymentsClient`) — plus the bare `client`.
-///
-/// The bare word is admitted **only whole**, which is the one place Java's rule
-/// is stricter than TypeScript's `[Aa]xios[A-Za-z0-9_$]*`: `axios` is a package
-/// name, so anything spelled `axios…` is an axios instance, whereas `client` is
-/// an ordinary English word and `clientRegistry` / `clientCache` are not HTTP
-/// clients. The type-derived tokens keep the prefix form because a
-/// `restTemplate…` field is one.
-///
-/// Each rejected spelling is asserted inside a file that passes the ledger gate,
-/// so nothing here is attributable to the gate ([NFR-RA-05]).
+/// test admitted a cache lookup and fabricated a cross-service call.
 #[test]
 fn the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row() {
     for receiver in [
+        // The type-derived prefix form, bare …
         "restTemplate",
         "restClient",
         "webClient",
         "httpClient",
-        "client",
+        // `RestTemplate`'s interface — injecting it is standard Spring practice.
+        "restOperations",
+        // … and with each half of its camel/digit boundary, plus the `_` field
+        // prefix the form tolerates.
         "restTemplateV2",
+        "webClient2",
+        "_restTemplate",
+        // The upper-camel suffix form — the estate's genuine spellings
+        // (`mailboxApiWebClient`, `pecServerWebClient`) are all of this shape.
         "usersRestTemplate",
         "paymentsWebClient",
-        "ordersClient",
+        "mailboxApiWebClient",
+        "usersRestOperations",
+        // The bare generic word, admitted only whole.
+        "client",
     ] {
-        assert_eq!(
-            client_calls(&format!(
-                "public class Calls {{ private RestTemplate {receiver}; \
-                 void drop() {{ {receiver}.delete(\"/carts/{{id}}\"); }} }}"
-            )),
-            ["DELETE /carts/{id}"],
-            "`{receiver}` is a client spelling and must keep capturing"
-        );
+        for recv in [receiver.to_string(), format!("this.{receiver}")] {
+            assert_eq!(
+                client_calls(&format!(
+                    "public class Calls {{ private RestTemplate {receiver}; \
+                     void drop() {{ {recv}.delete(\"/carts/{{id}}\"); }} }}"
+                )),
+                ["DELETE /carts/{id}"],
+                "`{recv}` is a client spelling and must keep capturing"
+            );
+        }
     }
 
     for receiver in [
@@ -310,23 +346,108 @@ fn the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row() {
         // A substring test would admit these; a boundary rule does not.
         "clientlessRegistry",
         "myclient",
+        // The prefix form requires a camel/digit boundary after the token —
+        // this is where Java's rule is stricter than TypeScript's
+        // `[Aa]xios[A-Za-z0-9_$]*`, which would admit it.
+        "restTemplatecache",
         // The bare generic token is admitted only whole, so an ordinary
         // `client`-prefixed collection stays out.
         "clientRegistry",
         "clientCache",
+        // A bare `Client` SUFFIX is not in the vocabulary: it would name every
+        // client protocol in existence. `zkClient.delete("/config/orders")` and
+        // `redisClient.get("/config/features")` each meet all four capture
+        // conditions in ordinary code, so admitting the suffix fabricates a
+        // cross-service edge out of a ZooKeeper delete or a cache read.
+        // `cacheClient` is the same object `clientCache` above already refuses.
+        "kafkaClient",
+        "redisClient",
+        "zkClient",
+        "cacheClient",
+        // The generically-named wrapper — a stated under-capture ceiling, and
+        // the price of refusing the four above.
+        "ordersClient",
+    ] {
+        for recv in [receiver.to_string(), format!("this.{receiver}")] {
+            let calls = client_calls(&format!(
+                "public class Calls {{ private RestClient restClient; \
+                 private java.util.Map<String, String> {receiver}; \
+                 String notACall() {{ return {recv}.get(\"/admin/users\"); }} \
+                 String probe() {{ return restClient.get().uri(\"/probe\")\
+                 .retrieve().body(String.class); }} }}"
+            ));
+            assert_eq!(
+                calls,
+                ["GET /probe"],
+                "`{recv}` is not a client spelling: {calls:?}"
+            );
+        }
+    }
+}
+
+/// **Stated over-capture ceiling** — the receiver rule reaches the plain
+/// receiver-method arm (patterns 4/4b) only. Patterns 1-3 constrain the `.uri`
+/// link and the `URI.create` receiver *type*, but place no constraint on the
+/// receiver of the verb link, so a non-client receiver still captures through
+/// the fluent arm.
+///
+/// Asserted as the capture it is, not as zero, so the residual is pinned rather
+/// than merely conceded in prose — and so closing it later is a deliberate
+/// change that fails this test. Closing it is a trade, not a mechanical edit:
+/// pattern 1's inner `object:` is legitimately a `method_invocation`
+/// (`WebClient.create(base).get().uri(…)`), so a receiver rule there buys this
+/// over-capture back as under-capture on the estate's dominant shape.
+///
+/// The shape is narrow — a non-client receiver with a no-argument
+/// HTTP-verb-named method chained into `.uri(<literal>)` — and the reference
+/// workspace's 94 Java sites contain none. It matters to
+/// [S-374](../../docs/planning/journal.md#s-374-the-http-client-call-arm-records-its-refusals),
+/// which writes one refusal row per site ([ADR-54], [NFR-RA-05]).
+#[test]
+fn the_fluent_arm_receiver_is_an_unguarded_over_capture_ceiling() {
+    assert_eq!(
+        client_calls(
+            r#"
+public class Calls {
+    private RestClient restClient;
+    private java.util.Map<String, String> perms;
+    Object notACall() {
+        return perms.get().uri("/admin/users").retrieve();
+    }
+}
+"#
+        ),
+        ["GET /admin/users"],
+        "the fluent arm's verb-link receiver is unguarded — a stated ADR-54 \
+         residual, narrower than the blanket file-grained one S-375 retired"
+    );
+}
+
+/// **Stated under-capture ceilings** of the receiver rule, asserted so the
+/// ceilings index in `plugins/java/queries/invocations.scm` names nothing it
+/// does not pin.
+///
+/// Each is asserted as *the positive control alone* rather than as zero: the
+/// fixture must also prove the file was scanned, so `["GET /probe"]` is the
+/// shape of a refusal here ([NFR-RA-05]).
+#[test]
+fn a_chained_receiver_and_a_token_less_wrapper_are_stated_ceilings() {
+    for (label, body) in [
+        (
+            "a chained receiver — the rule needs a name, and a call has none",
+            r#"String a() { return getClient().get("/p"); }"#,
+        ),
+        (
+            "a client wrapper whose field name carries no client token",
+            r#"private Object anyGateway; String a() { return anyGateway.get("/p"); }"#,
+        ),
     ] {
         let calls = client_calls(&format!(
-            "public class Calls {{ private RestClient restClient; \
-             private java.util.Map<String, String> {receiver}; \
-             String notACall() {{ return {receiver}.get(\"/admin/users\"); }} \
+            "public class Calls {{ private RestClient restClient; {body} \
              String probe() {{ return restClient.get().uri(\"/probe\")\
              .retrieve().body(String.class); }} }}"
         ));
-        assert_eq!(
-            calls,
-            ["GET /probe"],
-            "`{receiver}` is not a client spelling: {calls:?}"
-        );
+        assert_eq!(calls, ["GET /probe"], "{label}: {calls:?}");
     }
 }
 

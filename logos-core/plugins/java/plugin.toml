@@ -46,13 +46,15 @@ framework_detectors = ["org::springframework"]
 # package-prefix grain on purpose — `org::springframework` alone would admit
 # every Spring file and `java` alone every Java file (NFR-RA-05).
 #
-# This row is a file-level PRE-FILTER, not the arm's whole gate. It answers "is
-# this file plausibly a client file?", which cannot answer FR-WS-08 AC5's
-# question about a single CALL — so `queries/invocations.scm`'s plain
-# receiver-method patterns carry a receiver-name rule of their own (S-375,
-# CR-120), the same posture Python and TypeScript ship. See that file's
-# "receiver rule" section for the vocabulary and its test pins; widening this
-# row does not substitute for it, and narrowing it would not tighten it.
+# This row is a file-level PRE-FILTER, not the arm's whole gate:
+# `queries/invocations.scm`'s plain receiver-method patterns carry a
+# receiver-name rule of their own (S-375, CR-120). The general rule — why a
+# file-grained gate cannot answer FR-WS-08 AC5's per-CALL question, and what an
+# arm shipping the broad anchor therefore owes — is stated once on
+# `extract::capture_http_client_call_arm`; the vocabulary and its test pins are
+# in that query's own "receiver rule" section. The one fact local to this row:
+# widening it does not substitute for that rule, and narrowing it would not
+# tighten it.
 http_client_detectors = [
   # `RestClient` and `RestTemplate`.
   "org::springframework::web::client",

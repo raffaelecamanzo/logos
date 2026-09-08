@@ -419,8 +419,8 @@ fn a_route_shaped_get_outside_a_system_net_http_file_is_not_captured() {
     // nothing else.
     //
     // What it captures is the documented ADR-54 accuracy ceiling, and C#'s is
-    // NARROWER than Go's or Java's: those languages' residual is any `/`-keyed
-    // `.get(...)`, while here the receiver must expose a method that is itself an
+    // NARROWER than Go's: Go's residual is any `/`-keyed `.get(...)`, while here
+    // the receiver must expose a method that is itself an
     // `[invocation_methods]` row. `IDistributedCache.GetAsync(key)` is the real
     // instance of that, which is what this fixture spells.
     let gated = extract_cs(&format!("using System.Net.Http;\n\n{BODY}"));
@@ -435,8 +435,10 @@ fn a_route_shaped_get_outside_a_system_net_http_file_is_not_captured() {
 
 /// Inside a genuine `System.Net.Http` file, a same-shaped call whose method name
 /// is not an `[invocation_methods]` row is still never captured — including a
-/// BARE HTTP verb (`cache.Get("/health")`), which Go and Java can only record as
-/// a ceiling. The table's filter half is what closes it here.
+/// BARE HTTP verb (`cache.Get("/health")`), which Go can only record as a
+/// ceiling. The table's filter half is what closes it here — Java closes the
+/// same class a third way, with a receiver-name rule (S-375); the two mechanisms
+/// are complementary.
 #[test]
 fn a_bare_verb_method_call_inside_a_client_file_is_not_captured() {
     let facts = extract_cs(&client_file(

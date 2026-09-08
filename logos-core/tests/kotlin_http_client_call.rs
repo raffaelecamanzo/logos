@@ -466,11 +466,16 @@ class Calls {
 /// references a client package, a same-shaped collection call with a
 /// route-shaped key still captures.
 ///
-/// Inherited verbatim from the Rust and Java arms — no query can distinguish
-/// `perms.get("/admin/users")` from `client.get("/admin/users")` without
-/// receiver typing. Pinned here rather than left to prose so that narrowing it
-/// later is a deliberate change, and so a reader of the test above cannot
-/// mistake the file-level gate for a general guarantee.
+/// Inherited from the Rust arm. Java carried the identical ceiling on the same
+/// ported query until S-375 ([CR-120]) closed it with a receiver-NAME boundary
+/// rule — so the claim this docstring used to make, that no query can
+/// distinguish `perms.get("/admin/users")` from `client.get("/admin/users")`
+/// without receiver typing, is retired. The same rule ports here; until it does,
+/// this test pins the current behaviour so that narrowing it is a deliberate
+/// change, and so a reader of the test above cannot mistake the file-level gate
+/// for a general guarantee.
+///
+/// [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 #[test]
 fn a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling() {
     assert_eq!(
