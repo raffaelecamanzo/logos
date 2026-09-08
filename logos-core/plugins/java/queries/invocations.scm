@@ -93,9 +93,9 @@
 ; 4. The plain receiver-method idiom — the Rust arm's single pattern, ported:
 ;      restTemplate.delete("/carts/{id}")
 ;      restTemplate.put("/carts/{id}", body)
-;      this.anyClientWrapper.get("/health")
+;      this.usersRestTemplate.get("/health")
 ;
-;    A **receiver is required**, and its name must start lower-case. Java's
+;    A **receiver is required**, and it must be a CLIENT receiver. Java's
 ;    `method_invocation` makes `object:` optional, so an unconstrained pattern
 ;    also matches the receiver-less and class-qualified static-import idioms that
 ;    dominate Java routing and test DSLs — and those are not outbound calls at
@@ -109,39 +109,110 @@
 ;      stubFor(get("/api/users").willReturn(ok)) ; WireMock
 ;      rest("/api").get("/{id}")                 ; Apache Camel route DSL
 ;
-;    None is stopped by the other three guards: the file-level ledger gate is a
+;    None is stopped by the other guards: the file-level ledger gate is a
 ;    co-locator here (a client test stubs the downstream it calls; a WebFlux BFF
 ;    holds both a WebClient and functional routes), `is_http_method` is
 ;    case-insensitive so the DSL's `GET(...)` passes, and the literals are
-;    absolute and normalize cleanly. Requiring a lower-case-initial receiver —
-;    a variable or field, never a class — refuses all five (NFR-RA-05: fabricating
-;    an edge is far worse than missing one). The cost is a stated ceiling: a
-;    chained receiver (`getClient().get("/p")`) is not captured.
+;    absolute and normalize cleanly.
+;
+; ── The receiver rule (S-375, CR-120, FR-WS-08 AC5) ──────────────────────────
+;
+;    The guard used to be `^[a-z_$]` — "a variable or field, never a class" —
+;    which refuses all five DSL shapes above but admits EVERY lower-case
+;    receiver, so `perms.get("/admin/users")` and `cache.get("/health")` became
+;    route-shaped consumers. Only the file-grained ledger gate stood behind it,
+;    and a gate that asks about the FILE cannot answer a question about the
+;    CALL: FR-WS-08 AC5 requires a same-shaped non-HTTP call to emit nothing,
+;    and says nothing about which file it sits in. S-375 makes the decision on
+;    the RECEIVER.
+;
+;    The rule needs no receiver TYPING, which is what the ceiling this replaces
+;    claimed. It is a receiver-NAME boundary rule over FR-WS-08's normative Java
+;    row spelled as a field name — the posture the Python and TypeScript arms
+;    have shipped since S-343/S-344, and the reason those two state no
+;    file-grained ceiling at all:
+;
+;    The vocabulary is FR-WS-08's normative Java row — `RestClient`,
+;    `RestTemplate`, `WebClient`, `java.net.http.HttpClient` — plus
+;    `RestOperations`, the interface `RestTemplate` implements and is
+;    conventionally injected as (that is what makes the collaborator mockable,
+;    so `restOperations.delete("/p")` is an ordinary genuine call). A receiver
+;    is admitted when its name:
+;
+;      * STARTS with a type-derived lower-camel token — `restClient`,
+;        `restTemplate`, `restOperations`, `webClient`, `httpClient` — after an
+;        optional `_`/`$` field prefix, and optionally followed by a
+;        camel/digit-boundary suffix (`restTemplateV2`, `webClient2`,
+;        `_restTemplate`). A field spelled `restTemplate…` IS a RestTemplate.
+;        The boundary is what separates it from a substring test:
+;        `restTemplatecache` is refused.
+;      * ENDS with the upper-camel form of one: `usersRestTemplate`,
+;        `paymentsWebClient`, `mailboxApiWebClient`.
+;      * Is exactly `client`. The bare generic word is admitted only WHOLE —
+;        the place this rule is strictest relative to TypeScript's
+;        `[Aa]xios[A-Za-z0-9_$]*`. `axios` is a package name, so anything
+;        spelled `axios…` is an axios instance; `client` is an ordinary English
+;        word, and `clientRegistry` / `clientCache` are not HTTP clients.
+;
+;    A bare `Client` SUFFIX is deliberately NOT in the vocabulary, and this is
+;    the sharpest line in the rule. It would admit every client protocol in
+;    existence — and three of them meet all four capture conditions naturally:
+;    `zkClient.delete("/config/orders")` (ZooKeeper's real API is
+;    `delete(String path)` over absolute slash paths, and `delete` is an HTTP
+;    verb), `redisClient.get("/config/features")` (Lettuce/Jedis expose a bare
+;    `get(String key)`, and cache-aside puts the cache read in the SAME method as
+;    the HTTP call, so co-occurrence with the ledger gate is idiomatic rather
+;    than incidental), and `cacheClient.get(…)` — which is the same object this
+;    rule already refuses when spelled `clientCache`. Admitting the suffix would
+;    reopen exactly the CR-110 fabrication class on the consumer side
+;    (NFR-RA-05). The cost is that a generically-named wrapper
+;    (`ordersClient`) stays a stated ceiling; on the reference workspace it costs
+;    nothing measured — the genuine Java receivers there end in `WebClient`
+;    (`mailboxApiWebClient`, `pecServerWebClient`), which the suffix form admits.
+;    `webTestClient` is deliberately NOT admitted: `WebTestClient` is Spring's
+;    in-process test client, so it calls the service's OWN routes — a self-edge,
+;    not cross-service coupling — and it is not in FR-WS-08's normative row. Its
+;    fluent usage reaches pattern 1 regardless, which this rule does not gate.
+;
+;    It is a BOUNDARY rule, never a substring test — the distinction TypeScript's
+;    `notaxiosCache.get("/cache/key")` was written for, where a substring test
+;    fabricated a cross-service call out of a cache lookup (CR-110's class, on
+;    the consumer side). Pinned on both edges, and on both receiver spellings, by
+;    `the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row`.
+;
+;    The cost is three stated ceilings, all under-capture and therefore safe
+;    (NFR-RA-05: fabricating an edge is far worse than missing one) — see the
+;    ceilings index below, which names each one's pin.
+;
+;    ONE pattern, not two: the bare-identifier receiver and the injected-field
+;    receiver (`this.restTemplate.delete("/p")`, the ordinary Spring shape) are a
+;    node alternation binding ONE `@_recv`, so the rule has a single copy and the
+;    two spellings cannot drift apart. This is the repo's convention for exactly
+;    this shape — `plugins/kotlin/queries/invocations.scm` alternates
+;    `(identifier)` with a `this`-navigation the same way, and Python and
+;    TypeScript alternate whole receiver nodes under one `#match?`. The second
+;    branch captures the FIELD name, so the anchored rule above applies to it
+;    unchanged (`this.perms` is judged on `perms`).
 (method_invocation
-  object: (identifier) @_recv
+  object: [
+    (identifier) @_recv
+    (field_access
+      field: (identifier) @_recv)
+  ]
   name: (identifier) @invoke.http.method
   arguments: (argument_list
     .
     (_) @invoke.http.arg)
-  (#match? @_recv "^[a-z_$]"))
-
-; 4b. The same idiom through a field access — `this.restTemplate.delete("/p")`,
-;     the ordinary Spring injected-field shape, whose `object:` is a
-;     `field_access` rather than a bare identifier.
-(method_invocation
-  object: (field_access
-    field: (identifier) @_recv_field)
-  name: (identifier) @invoke.http.method
-  arguments: (argument_list
-    .
-    (_) @invoke.http.arg)
-  (#match? @_recv_field "^[a-z_$]"))
+  (#match? @_recv "^[_$]?(restClient|restTemplate|restOperations|webClient|httpClient)([A-Z0-9_$][A-Za-z0-9_$]*)?$|^[a-z_$][A-Za-z0-9_$]*(RestClient|RestTemplate|RestOperations|WebClient|HttpClient)$|^client$"))
 
 ; ── Stated coverage ceilings (ADR-54: recorded, never worked around) ─────────
 ;
-; NOT captured. Each one is asserted as **zero** in
-; logos-core/tests/java_http_client_call.rs §3 — the tests are the enforcement,
-; this list is only the index, so a ceiling cannot quietly become a lie:
+; NOT captured. Each one is asserted in
+; logos-core/tests/java_http_client_call.rs — as **zero** references, or, where
+; the fixture must also prove the file was scanned, as the positive control's
+; reference **alone**. The tests are the enforcement and this list is only the
+; index, so a ceiling cannot quietly become a lie; an entry here that names no
+; pin is that lie:
 ;
 ;   * `RestTemplate`'s verb-suffixed methods (`getForObject`, `getForEntity`,
 ;     `postForObject`, `postForEntity`, `postForLocation`, `patchForObject`,
@@ -152,7 +223,13 @@
 ;     `HttpRequest.newBuilder(URI.create("/p"))`, which has no verb link.
 ;   * A Java text block (`"""…"""`) path literal — statically present, but
 ;     `static_string_literal` does not recognise `multiline_string_fragment`.
-;   * A chained receiver (`getClient().get("/p")`), by pattern 4's receiver rule.
+;   * A chained receiver (`getClient().get("/p")`), and a client wrapper whose
+;     field name carries no client token (`anyGateway.get("/p")`, `ordersClient`)
+;     — all by pattern 4's receiver rule (S-375). Pinned by
+;     `a_chained_receiver_and_a_token_less_wrapper_are_stated_ceilings` and by
+;     the reject set of
+;     `the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row`, each as
+;     the positive control alone rather than as zero.
 ;   * OkHttp and Apache HttpClient — outside FR-WS-08's normative Java row.
 ;
 ; The first two share one root cause: the arm's `@invoke.http.method` slot needs
@@ -182,11 +259,32 @@
 ; pass-through. `exchange` is unreachable either way: its verb is in a SECOND
 ; argument no capture binds.
 ;
-; One ceiling is an OVER-capture, not an under-capture: the ledger gate is
-; file-grained, so a route-shaped collection call inside a genuine client file
-; (`perms.get("/admin/users")`) still captures. Inherited from the Rust arm and
-; likewise pinned by a test; no query can separate it from `client.get(…)`
-; without receiver typing.
+; The remaining OVER-capture, narrowed but not gone (S-375, CR-120). This query
+; used to carry a blanket one: the ledger gate is file-grained, so ANY
+; route-shaped collection call inside a genuine client file
+; (`perms.get("/admin/users")`) captured, "because no query can separate it from
+; `client.get(…)` without receiver typing". That impossibility claim is retired
+; — separating them needs a receiver NAME rule, not receiver typing, and pattern
+; 4 now carries one, so the test that pinned the blanket over-capture is
+; inverted (`a_route_shaped_collection_get_on_a_non_client_receiver_is_refused`).
+;
+; What survives is the FLUENT arm: patterns 1-3 constrain the `.uri` link and
+; the `URI.create` receiver type, but place NO constraint on the receiver of the
+; verb link, so `perms.get().uri("/admin/users")` in a gate-admitted file still
+; captures. Pinned as the stated residual by
+; `the_fluent_arm_receiver_is_an_unguarded_over_capture_ceiling`.
+;
+; It is left as a ceiling rather than closed, deliberately: pattern 1's inner
+; `object:` is legitimately a `method_invocation`
+; (`WebClient.create(base).get().uri(…)`) and patterns 2-3's is a class name, so
+; a receiver rule there would trade this over-capture for new UNDER-capture on
+; the estate's dominant real shape. That trade needs a decision, not a
+; mechanical edit. The shape it admits is narrow — a non-client receiver with a
+; no-argument HTTP-verb-named method chained into `.uri(<literal>)` — and no
+; such site exists in the reference workspace's 94 Java sites. It matters most
+; to S-374, which will write one refusal row per site: an unguarded receiver
+; there manufactures a coverage denominator out of ordinary code, the hazard
+; CR-120 §7 names.
 ;
 ; Like every capability query this file is droppable-on-disk: a copy at
 ; `.logos/plugins/java/queries/invocations.scm` shadows it without a rebuild

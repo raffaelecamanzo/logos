@@ -228,11 +228,12 @@ end
 /// **Stated over-capture ceiling** — the ledger gate is *file*-grained, so the
 /// negative case above holds only across files. Inside a file that already
 /// requires a client package, a same-shaped collection call with a
-/// route-shaped key still captures — the same residual every other language's
-/// arm documents (Java's
+/// route-shaped key still captures — the same residual the Rust, Go, Kotlin and
+/// PHP arms document (Kotlin's
 /// `a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling`,
 /// Go's `a_route_shaped_get_outside_a_net_http_file_is_not_captured`'s
-/// positive control).
+/// positive control). Python, TypeScript and — since S-375 — Java close it
+/// instead, with a receiver-name rule in their own queries.
 #[test]
 fn a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling() {
     let facts = extract_ruby(

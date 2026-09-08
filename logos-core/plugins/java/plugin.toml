@@ -36,12 +36,25 @@ test_convention = "java-annotations"
 # package prefix covers both.
 framework_detectors = ["org::springframework"]
 
-# Canonical reference prefixes gating outbound **HTTP client-call** capture
-# (S-341, CR-108, FR-WS-08): FR-WS-08's normative Java row is RestClient,
-# WebClient, RestTemplate and `java.net.http.HttpClient`. Named at package-prefix
-# grain on purpose — `org::springframework` alone would admit every Spring file
-# and `java` alone every Java file, which is exactly the over-capture this gate
-# exists to prevent (NFR-RA-05).
+# Canonical reference prefixes whose presence in a file's ledger makes the file
+# an outbound **HTTP client-call** candidate (S-341, CR-108, FR-WS-08) — the
+# consumer-side twin of `framework_detectors`. FR-WS-08's normative Java row is
+# RestClient, WebClient, RestTemplate and `java.net.http.HttpClient`. All three
+# rows are genuine import package prefixes, so the gate stays independent of the
+# calls this arm itself captures (see `extract::capture_http_client_call_arm` for
+# the general rule this row does NOT need the compensating scope for). Named at
+# package-prefix grain on purpose — `org::springframework` alone would admit
+# every Spring file and `java` alone every Java file (NFR-RA-05).
+#
+# This row is a file-level PRE-FILTER, not the arm's whole gate:
+# `queries/invocations.scm`'s plain receiver-method patterns carry a
+# receiver-name rule of their own (S-375, CR-120). The general rule — why a
+# file-grained gate cannot answer FR-WS-08 AC5's per-CALL question, and what an
+# arm shipping the broad anchor therefore owes — is stated once on
+# `extract::capture_http_client_call_arm`; the vocabulary and its test pins are
+# in that query's own "receiver rule" section. The one fact local to this row:
+# widening it does not substitute for that rule, and narrowing it would not
+# tighten it.
 http_client_detectors = [
   # `RestClient` and `RestTemplate`.
   "org::springframework::web::client",
@@ -60,8 +73,9 @@ frameworks = "queries/frameworks.scm"
 brokers = "queries/brokers.scm"
 # Outbound HTTP client-call arm (S-341, CR-108, FR-WS-08): RestClient/WebClient
 # fluent chains, the `java.net.http.HttpClient` builder, and the plain
-# receiver-method idiom. Anchors only — the HTTP-verb and static-literal
-# decisions stay in the generic dispatch and `resolve::http_client_call`.
+# receiver-method idiom — the last one scoped to a client receiver (S-375).
+# Anchors only — the HTTP-verb and static-literal decisions stay in the generic
+# dispatch and `resolve::http_client_call`.
 invocations = "queries/invocations.scm"
 # Captured `@fw.route.method` annotation name → HTTP method (S-015).
 # `@RequestMapping` declares no single verb.

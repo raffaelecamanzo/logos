@@ -264,13 +264,15 @@ def route_shaped(cache):
     assert_eq!(client_call_targets(&facts), Vec::<String>::new());
 }
 
-/// Unlike Java's/Rust's broad `<receiver>.<method>(<arg>)` anchor, Python's
-/// named-client anchor refuses `dict.get("k")` even **inside** a client file —
-/// there is no file-grained ceiling to state here, because the receiver name
-/// itself (`cache`) never matches the `session`/`client` boundary, independent
-/// of the ledger gate. This is stricter than the ADR-54 ceiling the Java arm
-/// accepts, and is a direct consequence of the registration-vs-client trap
-/// forcing a named anchor rather than a broad one.
+/// Unlike the Rust, Go, Kotlin, Ruby and PHP arms' broad
+/// `<receiver>.<method>(<arg>)` anchor, Python's named-client anchor refuses
+/// `dict.get("k")` even **inside** a client file — there is no file-grained
+/// ceiling to state here, because the receiver name itself (`cache`) never
+/// matches the `session`/`client` boundary, independent of the ledger gate. It
+/// is stricter than the ADR-54 ceiling those arms accept, and a direct
+/// consequence of the registration-vs-client trap forcing a named anchor rather
+/// than a broad one. Java adopted the same posture in S-375 (CR-120), citing
+/// this test as the precedent it followed.
 #[test]
 fn a_route_shaped_dict_get_inside_a_client_file_is_still_refused() {
     let facts = extract_py(
