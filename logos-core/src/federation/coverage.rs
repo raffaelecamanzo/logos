@@ -57,7 +57,7 @@ use super::registry::{EngineRegistry, MemberEngine};
 /// own variant above. So the variant was not deferred vocabulary awaiting its
 /// arm; it was vocabulary no decision in this repository ever anticipated, and
 /// a reason the payload can never carry is the advertised-but-empty capability
-/// [NFR-CC-04] forbids. Re-adding it is additive and needs no migration
+/// [NFR-CC-04] disfavours. Re-adding it is additive and needs no migration
 /// ([CR-120] §7), so the schema arm that one day wants it loses nothing.
 ///
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
@@ -75,8 +75,9 @@ pub enum UnboundReason {
     /// (e.g. a catch-all route) — never approximately matched ([NFR-RA-05]).
     PathNotComposed,
     /// The provider's address is resolved only at runtime (a dynamic base
-    /// URL) — [ADR-54]'s base-URL-composition accuracy ceiling. Produced by
-    /// the HTTP client-call arm's refusal ledger (S-374).
+    /// URL) — [ADR-54]'s base-URL-composition accuracy ceiling. Gains a
+    /// production producer once S-374 lands the HTTP client-call arm's refusal
+    /// ledger; **no production path constructs it today**.
     BaseUrlRuntime,
     /// Two or more providers expose the same key across the workspace — never
     /// fabricated ([NFR-RA-05]).
@@ -195,10 +196,26 @@ impl From<ClientCallRefusal> for UnboundReason {
     /// Map the HTTP client-call arm's refusal ([`ClientCallRefusal`], S-252) onto
     /// the shared coverage vocabulary — so a call the arm's normalizer refused
     /// (contributing no reference, [FR-WS-08]) surfaces under the *same* reason
-    /// bucket the read-model reports for the composable cases. This is the point
-    /// where "the normalizer returned `None`" becomes an advisory coverage reason.
+    /// bucket the read-model reports for the composable cases. This is where
+    /// "the normalizer returned `None`" *will* become an advisory coverage
+    /// reason.
+    ///
+    /// **Not yet a report: nothing calls this at runtime today.** The refusal
+    /// has to reach a ledger row before this tier can label it, and S-374
+    /// supplies exactly that — a keyless `unresolved_refs` row per declined
+    /// call site. Until it lands, [FR-WS-08]'s surfacing promise is unmet and
+    /// this impl is reachable only from its own tests.
+    ///
+    /// This qualifier used to live on the `From<RouteRefusal>` impl above,
+    /// which said "Like the [`ClientCallRefusal`] mapping below … nothing calls
+    /// this at runtime today" and so disclosed the fact for *both* mappings.
+    /// S-378 removed that impl, which would have left this one presenting an
+    /// unbuilt capability as fact — the honest-absence failure [NFR-CC-04]
+    /// disfavours — so the disclosure is restated here, where it now belongs
+    /// alone.
     ///
     /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     fn from(refusal: ClientCallRefusal) -> Self {
         match refusal {
             ClientCallRefusal::BaseUrlRuntime => UnboundReason::BaseUrlRuntime,
@@ -2633,8 +2650,10 @@ mod tests {
     /// Acceptance (2): the HTTP arm's refusals map onto the coverage vocabulary —
     /// a base-URL-composed call is `base-url-runtime`, a non-normalizable one is
     /// `path-not-composed`. This is the reason a call the normalizer refused (and
-    /// therefore left out of the ledger) is reported under, tying the arm's
-    /// `None` render to the coverage reason enum.
+    /// therefore left out of the ledger) *will be* reported under, tying the arm's
+    /// `None` render to the coverage reason enum — the mapping is pinned here, but
+    /// no production path reaches it until S-374 records the refusal (see the
+    /// impl's own note).
     #[test]
     fn client_call_refusals_map_to_the_coverage_reasons() {
         assert_eq!(
