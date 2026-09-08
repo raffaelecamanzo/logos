@@ -1970,6 +1970,40 @@ mod tests {
         assert!(consumer_portable_key(ArtifactRelation::HttpClientCall, "GET /files/{*rest}").is_none());
     }
 
+    /// **S-374 never-fabricate guard: a recorded client-call refusal is not a key.**
+    ///
+    /// The HTTP arm now writes one **keyless** ledger row per declined call site
+    /// ([CR-120]), and `compute_edges` reads the raw ledger — refusal rows
+    /// included — so this is the gate standing between "the refusal was recorded"
+    /// and "the refusal bound something". The broker arm needed the same guard in
+    /// its own `classify` ([CR-107]); the HTTP arm's lives here because its edges
+    /// go through [`consumer_portable_key`].
+    ///
+    /// Both ends are asserted, because either alone would leave a way in: the
+    /// consumer's empty target must not key, **and** an empty-named `Route` must
+    /// not classify as a provider — otherwise a member holding one would index a
+    /// provider at the same empty key every refusal carries, and every declined
+    /// call in the workspace would bind it at once.
+    ///
+    /// Trimmed, for the reason the broker guard is: an all-whitespace target is no
+    /// more of an identity than an absent one.
+    ///
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    #[test]
+    fn a_keyless_client_call_row_is_not_a_key_at_either_end() {
+        for keyless in ["", "   "] {
+            assert!(
+                consumer_portable_key(ArtifactRelation::HttpClientCall, keyless).is_none(),
+                "a recorded refusal must never key a consumer ({keyless:?})"
+            );
+            assert!(
+                classify(NodeKind::Route, keyless).is_none(),
+                "and no provider may be indexed at the empty key ({keyless:?})"
+            );
+        }
+    }
+
     // ── CR-109 / S-349: wildcard-method matching with exact-method precedence ──
     //
     // The cross-member half of the shared fixture matrix. The intra-repo binder

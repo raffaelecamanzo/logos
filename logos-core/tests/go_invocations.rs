@@ -38,7 +38,8 @@ use std::path::{Path, PathBuf};
 
 use logos_core::extract::{extract, Facts, FileInput, SymbolContext};
 use logos_core::federation::{
-    cross_service_coverage, ContractBridge, EngineRegistry, Federation, Member, RegistryMode,
+    cross_service_coverage, ContractBridge, CoverageState, EngineRegistry, Federation, Member,
+    RegistryMode, UnboundReason,
 };
 use logos_core::model::ArtifactRelation;
 use logos_core::plugin::LanguageRegistry;
@@ -66,6 +67,34 @@ fn client_call_targets(facts: &Facts) -> Vec<String> {
         .filter(|r| r.relation == Some(ArtifactRelation::HttpClientCall))
         .map(|r| r.target.clone())
         .collect()
+}
+
+/// The arm's captured **references** — every row that named a route.
+///
+/// Since S-374 a declined call site also writes a **keyless** row (an empty
+/// target), so `client_call_targets` alone no longer answers "did this emit a
+/// reference?". It is left unfiltered on purpose — a helper that hid the refusal
+/// would let the refusal path regress unnoticed — and the two populations are
+/// read through these two helpers instead.
+fn client_call_references(facts: &Facts) -> Vec<String> {
+    client_call_targets(facts)
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// The number of keyless refusal rows the arm recorded (S-374): one per declining
+/// declaration, reported as `base-url-runtime` by the [FR-WS-05] coverage tier.
+///
+/// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
+fn client_call_refusals(facts: &Facts) -> usize {
+    facts
+        .refs
+        .iter()
+        .filter(|r| {
+            r.relation == Some(ArtifactRelation::HttpClientCall) && r.target.is_empty()
+        })
+        .count()
 }
 
 // ── AC1: verb-as-method-name (`http.Get` / `http.Post`) ─────────────────────
@@ -279,15 +308,21 @@ func Fetch(c *http.Client, url string) {{
         );
         let facts = extract_go(&src);
         assert!(
-            client_call_targets(&facts).is_empty(),
+            client_call_references(&facts).is_empty(),
             "a runtime-composed path is base-url-runtime, got {:?} for {body:?}",
             client_call_targets(&facts)
+        );
+        assert_eq!(
+            client_call_refusals(&facts),
+            1,
+            "and the declined site is recorded, not swallowed: {body:?}"
         );
     }
 }
 
 /// A relative literal (`"users"`) has no absolute route prefix — its base URL is
-/// composed elsewhere — so it is likewise refused, not approximated.
+/// composed elsewhere — so it is likewise refused, not approximated, and (S-374)
+/// likewise recorded: `base-url-runtime` is one reason with two spellings.
 #[test]
 fn a_relative_path_literal_is_not_captured() {
     let facts = extract_go(
@@ -299,10 +334,11 @@ func ListUsers() { http.Get("users/{id}") }
 "#,
     );
     assert!(
-        client_call_targets(&facts).is_empty(),
+        client_call_references(&facts).is_empty(),
         "a relative literal has no workspace-composable prefix: {:?}",
         client_call_targets(&facts)
     );
+    assert_eq!(client_call_refusals(&facts), 1);
 }
 
 // ── Shared negative case 3: path-not-composed ───────────────────────────────
@@ -321,7 +357,9 @@ func ListUsers() { http.Get("/v{version}/users") }
     );
     assert!(
         client_call_targets(&facts).is_empty(),
-        "a mixed literal/parameter segment is path-not-composed: {:?}",
+        "a mixed literal/parameter segment is path-not-composed — no reference \
+         AND, deliberately, no recorded refusal (that reason needs a non-keyless \
+         row, S-374): {:?}",
         client_call_targets(&facts)
     );
 }
@@ -541,18 +579,42 @@ fn go_client_calls_bind_go_routes_in_another_member() {
     let coverage = cross_service_coverage(&registry);
     assert_eq!(coverage.bound, 2, "both static calls are bound");
     assert_eq!(coverage.ambiguous, 0);
-    // Pin the whole census, not just the bound bucket: a phantom third
-    // reference landing in `unbound` (or a real one silently reclassified into
+    // Pin the whole census, not just the bound bucket: a phantom reference
+    // landing in `unbound` (or a real one silently reclassified into
     // `no_provider_in_workspace`) would otherwise go unremarked while
     // `bound == 2` still held.
+    //
+    // **Three rows since S-374, not two.** The `fmt.Sprintf`-composed call still
+    // binds nothing — the `edges` assertions above are unchanged — but it is no
+    // longer *absent*: it arrives as the keyless refusal row the arm records,
+    // classified `base-url-runtime`.
     assert_eq!(
         coverage.references.len(),
-        2,
-        "exactly two client-call references reach the bridge — the \
-         fmt.Sprintf-composed call is refused before it becomes one: {:?}",
+        3,
+        "two bound references plus the fmt.Sprintf-composed call's recorded \
+         refusal: {:?}",
         coverage.references
     );
-    assert_eq!(coverage.unbound, 0, "neither reference is left unbound");
+    let refused: Vec<&str> = coverage
+        .references
+        .iter()
+        .filter(|r| {
+            r.state
+                == CoverageState::Unbound {
+                    reason: UnboundReason::BaseUrlRuntime,
+                }
+        })
+        .map(|r| r.from.symbol.as_str())
+        .collect();
+    assert_eq!(refused.len(), 1, "{:?}", coverage.references);
+    assert!(
+        refused[0].contains("GetOrderDynamic"),
+        "the refusal names the declining function: {refused:?}"
+    );
+    assert_eq!(
+        coverage.unbound, 1,
+        "the refusal is the only unbound row — neither static reference is"
+    );
     assert_eq!(
         coverage.no_provider_in_workspace, 0,
         "both routes exist in member `api`"

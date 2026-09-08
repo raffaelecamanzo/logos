@@ -1205,6 +1205,39 @@ fn http_client_call_targets(facts: &Facts) -> Vec<String> {
         .collect()
 }
 
+/// The arm's **reference** targets — every captured row that named a route
+/// (S-374).
+///
+/// [`http_client_call_targets`] is deliberately left unfiltered, the way
+/// `extract::broker`'s `targets` is: a keyless refusal row is a real ledger row
+/// and a helper that hid it would let the refusal path regress unnoticed. So
+/// tests about *references* read this, tests about *refusals* read
+/// [`http_client_call_refusals`], and the two are asserted side by side.
+fn http_client_call_references(facts: &Facts) -> Vec<String> {
+    http_client_call_targets(facts)
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// The declarations the arm recorded a **keyless refusal** for, in ledger order
+/// (S-374, [FR-WS-08] AC2).
+///
+/// A recorded refusal is an `HttpClientCall` row whose target is empty: no
+/// fabricated template, so it promotes no node, keys nothing and binds nothing,
+/// and the [FR-WS-05] tier reports it `base-url-runtime`.
+fn http_client_call_refusals(facts: &Facts) -> Vec<String> {
+    facts
+        .refs
+        .iter()
+        .filter(|r| {
+            r.relation == Some(crate::model::ArtifactRelation::HttpClientCall)
+                && r.target.is_empty()
+        })
+        .map(|r| r.source.as_str().to_string())
+        .collect()
+}
+
 /// A static, absolute client call is captured as a `"METHOD /template"` ref under
 /// the `HttpClientCall` relation — an artifact→code binding on the `Path` form,
 /// so it rides the same route binder the OpenAPI arm does. The `use reqwest`
@@ -1230,19 +1263,32 @@ async fn fetch(client: Client) { client.get("/users/{id}").await; }"#,
 }
 
 /// A runtime-composed path — a bare variable or a `format!` — is refused: the
-/// arm's normalizer returns `None`, so no reference and no ledger entry
-/// (base-url-runtime, never approximately matched).
+/// arm's normalizer returns `None`, so **no reference** (base-url-runtime, never
+/// approximately matched) and, since S-374, **one keyless refusal row** naming
+/// the calling declaration.
+///
+/// The two halves are asserted together on purpose. "Emits no reference" and
+/// "leaves no trace" used to be the same statement, and conflating them is what
+/// left [FR-WS-08] AC2's second half unmet for four sprints: the site vanished,
+/// so an estate whose paths are all composed at runtime was indistinguishable
+/// from one with no outbound calls at all ([NFR-CC-04]).
 #[test]
-fn a_runtime_composed_client_call_is_not_captured() {
+fn a_runtime_composed_client_call_is_refused_and_recorded() {
     let bare = extract_src(
         "src/c.rs",
         r#"use reqwest::Client;
 async fn f(client: Client, url: String) { client.get(url).await; }"#,
     );
     assert!(
-        http_client_call_targets(&bare).is_empty(),
+        http_client_call_references(&bare).is_empty(),
         "a bare-variable path is base-url-runtime: {:?}",
         http_client_call_targets(&bare)
+    );
+    assert_eq!(
+        http_client_call_refusals(&bare).len(),
+        1,
+        "the declined site leaves one keyless row: {:?}",
+        bare.refs
     );
 
     let composed = extract_src(
@@ -1251,14 +1297,23 @@ async fn f(client: Client, url: String) { client.get(url).await; }"#,
 async fn f(client: Client, base: String) { client.get(format!("{base}/users")).await; }"#,
     );
     assert!(
-        http_client_call_targets(&composed).is_empty(),
+        http_client_call_references(&composed).is_empty(),
         "a format!-composed path is base-url-runtime: {:?}",
         http_client_call_targets(&composed)
     );
+    assert_eq!(http_client_call_refusals(&composed).len(), 1);
 }
 
 /// A catch-all/non-normalizable absolute literal, and a relative (base-URL) one,
 /// are refused — path-not-composed / base-url-runtime, never approximated.
+///
+/// **This is also where the two refusals part company (S-374).** Both emit no
+/// reference, but only the base-url-runtime one is *recorded*: the coverage tier
+/// tells the two apart by whether the row's target is empty, so a keyless row
+/// means "no static path was present" by construction and a `path-not-composed`
+/// row would need a non-keyless target — a mechanism this story does not build,
+/// for the reasons stated on `capture_http_client_call_arm`. The asymmetry is
+/// pinned here rather than left to be inferred from an absence.
 #[test]
 fn a_non_composable_client_call_literal_is_not_captured() {
     let catch_all = extract_src(
@@ -1268,7 +1323,7 @@ async fn f(client: Client) { client.get("/files/{*rest}").await; }"#,
     );
     assert!(
         http_client_call_targets(&catch_all).is_empty(),
-        "a catch-all path is path-not-composed: {:?}",
+        "a catch-all path is path-not-composed — no reference AND, deliberately,          no recorded refusal: {:?}",
         http_client_call_targets(&catch_all)
     );
 
@@ -1278,10 +1333,106 @@ async fn f(client: Client) { client.get("/files/{*rest}").await; }"#,
 async fn f(client: Client) { client.get("users/{id}").await; }"#,
     );
     assert!(
-        http_client_call_targets(&relative).is_empty(),
+        http_client_call_references(&relative).is_empty(),
         "a relative path has no absolute route prefix: {:?}",
         http_client_call_targets(&relative)
     );
+    assert_eq!(
+        http_client_call_refusals(&relative).len(),
+        1,
+        "a relative literal is base-url-runtime, so it IS recorded: {:?}",
+        relative.refs
+    );
+}
+
+/// **S-374 acceptance: a declined call site leaves one keyless row, and the row
+/// is inert.** ([FR-WS-08] AC2, [CR-120].)
+///
+/// The arm's refusal grain, asserted end-to-end through `extract` rather than
+/// through the recorder: three refused shapes in three functions are three rows,
+/// two refused calls in ONE function are one row, and a function that bound a
+/// literal contributes a reference and no refusal beside it.
+///
+/// The two grains are both real and neither is a bug:
+///
+/// - the recorder dedups per `(relation, declaration, line)`, so one site never
+///   records twice;
+/// - `dedup_sort_refs` then keys on `(source, target, form, kind, relation)` and
+///   ignores `line`, so two refused sites in one declaration reach the ledger as
+///   **one** row.
+///
+/// That second collapse is why the reference-workspace figure is reconciled at a
+/// declaration grain and not a call grain: a method with four composed calls
+/// contributes one row, not four. Pinned here so the measurement's denominator
+/// is not mistaken for a site count.
+///
+/// Inertness is asserted on the row's own shape — an empty target on the `Path`
+/// form — because that is what makes it inert everywhere downstream: `route_key`
+/// refuses an empty `"METHOD /template"`, so the binder resolves nothing, the
+/// bridge keys nothing, and no promotion pass has a name to promote.
+#[test]
+fn a_refused_client_call_records_one_keyless_row_per_declaration() {
+    let facts = extract_src(
+        "src/c.rs",
+        r#"use reqwest::Client;
+async fn bound(client: Client) { client.get("/health").await; }
+async fn bare(client: Client, url: String) { client.get(url).await; }
+async fn composed(client: Client, base: String) { client.get(format!("{base}/x")).await; }
+async fn relative(client: Client) { client.get("users/{id}").await; }
+async fn twice(client: Client, a: String, b: String) {
+    client.get(a).await;
+    client.post(b).await;
+}"#,
+    );
+
+    assert_eq!(
+        http_client_call_references(&facts),
+        vec!["GET /health".to_string()],
+        "the one static absolute literal is the only reference: {:?}",
+        facts.refs
+    );
+
+    let refusals = http_client_call_refusals(&facts);
+    assert_eq!(
+        refusals.len(),
+        4,
+        "three refusing functions plus `twice` collapsed to one row: {refusals:?}"
+    );
+    assert!(
+        refusals.iter().all(|s| s.contains("bare")
+            || s.contains("composed")
+            || s.contains("relative")
+            || s.contains("twice")),
+        "each refusal is attributed to its own calling function, never the file \
+         module: {refusals:?}"
+    );
+    assert!(
+        !refusals.iter().any(|s| s.contains("bound")),
+        "a site that bound records no refusal beside its reference: {refusals:?}"
+    );
+
+    // The row's shape — this is the whole of its inertness.
+    let keyless: Vec<&crate::extract::RefFact> = facts
+        .refs
+        .iter()
+        .filter(|r| {
+            r.relation == Some(crate::model::ArtifactRelation::HttpClientCall)
+                && r.target.is_empty()
+        })
+        .collect();
+    for row in &keyless {
+        assert_eq!(row.form, crate::model::RefForm::Path);
+        assert_eq!(row.kind, EdgeKind::ArtifactBinding);
+        assert!(row.alias.is_none());
+        assert!(row.line > 0, "the row names the call's line: {row:?}");
+        // No fabricated template, not even the operand's source text — which is
+        // exactly why nothing downstream can promote or bind it.
+        assert!(row.target.is_empty());
+        assert!(
+            crate::resolve::route_template::route_key(&row.target).is_none(),
+            "an empty target never keys, so it never resolves a route"
+        );
+    }
 }
 
 /// Within a client file, a method call whose name is not an HTTP verb (a
@@ -1344,6 +1495,34 @@ fn ts_client_call_targets(source: &str) -> Vec<String> {
         ts, tsx,
         "the typescript and tsx queries must capture identically (they are one \
          language, ADR-09) — ts={ts:?} tsx={tsx:?}, source:\n{source}"
+    );
+    ts
+}
+
+/// [`ts_client_call_targets`] restricted to the arm's **references** — every row
+/// that named a route, excluding the keyless refusal rows S-374 records.
+///
+/// The ts/tsx parity assertion above covers both populations, so a query that
+/// refused in one dialect and captured in the other still fails there.
+#[cfg(feature = "lang-typescript")]
+fn ts_client_call_references(source: &str) -> Vec<String> {
+    ts_client_call_targets(source)
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// The number of keyless refusal rows the TypeScript/TSX arms record for
+/// `source` — asserted equal across the two dialects for the same reason the
+/// targets are (S-374).
+#[cfg(feature = "lang-typescript")]
+fn ts_client_call_refusals(source: &str) -> usize {
+    let ts = http_client_call_refusals(&extract_lang("ts", "src/client.ts", source)).len();
+    let tsx = http_client_call_refusals(&extract_lang("tsx", "src/client.tsx", source)).len();
+    assert_eq!(
+        ts, tsx,
+        "the typescript and tsx queries must REFUSE identically too — \
+         ts={ts} tsx={tsx}, source:\n{source}"
     );
     ts
 }
@@ -1494,6 +1673,12 @@ fn a_method_bearing_fetch_resolves_to_its_verb_and_never_also_to_get() {
 /// the interpolation makes the literal dynamic and the arm refuses it rather
 /// than guessing a target. Asserted on both the axios and the fetch anchor, so
 /// neither idiom can regress into approximate matching independently.
+///
+/// Since S-374 each of these sites also leaves **one keyless refusal row**, so
+/// the reason reaches the [FR-WS-05] tier instead of the site vanishing. That
+/// half is asserted here too: the reference contract and the refusal contract
+/// are one behaviour and testing only the first is how the second went
+/// unimplemented.
 #[test]
 #[cfg(feature = "lang-typescript")]
 fn a_template_literal_path_emits_no_reference() {
@@ -1508,8 +1693,13 @@ export async function listUsers() { return fetch(`${base}/users`); }"#,
 export async function listUsers(url: string) { return axios.get(url); }"#,
     ] {
         assert!(
-            ts_client_call_targets(source).is_empty(),
+            ts_client_call_references(source).is_empty(),
             "a runtime-composed path is base-url-runtime, never approximated: {source}"
+        );
+        assert_eq!(
+            ts_client_call_refusals(source),
+            1,
+            "the declined site is recorded, not swallowed: {source}"
         );
     }
 
@@ -1634,20 +1824,36 @@ class Api { load() { return this.fetch("/users"); } }"#,
 /// FR-WS-08 shared negative-case contract, case 3 (path-not-composed) and the
 /// relative-path refusal, reached through the TypeScript anchors: a static
 /// absolute literal that does not positionally normalize, and a literal with no
-/// absolute route prefix, each emit nothing. The classification itself is the
-/// shared interpreter's and is fixture-pinned there; this proves the TypeScript
-/// query feeds it the slots it expects.
+/// absolute route prefix, each emit **no reference**. The classification itself
+/// is the shared interpreter's and is fixture-pinned there; this proves the
+/// TypeScript query feeds it the slots it expects.
+///
+/// The two cases differ in what they *record* (S-374), and the pair is kept in
+/// one test so the difference is visible: the catch-all is `path-not-composed`
+/// and leaves nothing, the relative literal is `base-url-runtime` and leaves one
+/// keyless row. Same reference outcome, different coverage outcome.
 #[test]
 #[cfg(feature = "lang-typescript")]
 fn a_non_composable_typescript_path_literal_is_not_captured() {
-    for source in [
-        r#"import axios from "axios";
+    for (source, refusals) in [
+        (
+            r#"import axios from "axios";
 export async function raw() { return axios.get("/files/{*rest}"); }"#,
-        r#"export async function raw() { return fetch("users/{id}"); }"#,
+            0,
+        ),
+        (
+            r#"export async function raw() { return fetch("users/{id}"); }"#,
+            1,
+        ),
     ] {
         assert!(
-            ts_client_call_targets(source).is_empty(),
+            ts_client_call_references(source).is_empty(),
             "a non-normalizing or relative literal is refused: {source}"
+        );
+        assert_eq!(
+            ts_client_call_refusals(source),
+            refusals,
+            "only the base-url-runtime half is recorded: {source}"
         );
     }
 }
@@ -1700,6 +1906,9 @@ fn invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::Invo
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(plugin.language()).expect("set language");
     let tree = parser.parse(source, None).expect("parses");
+    // `collect_invocation_sites` also returns each call's path-operand byte range
+    // (the S-374 refusal-site grain); these fixtures assert on slots and lines,
+    // so the range is dropped here rather than threaded through every caller.
     collect_invocation_sites(
         query,
         tree.root_node(),
@@ -1714,6 +1923,9 @@ fn invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::Invo
         // below vacuous in the opposite direction.
         &plugin.semantics().invocation_methods,
     )
+    .into_iter()
+    .map(|call| call.site)
+    .collect()
 }
 
 /// [`invocation_sites`] for a TypeScript fixture (S-343's original spelling).
@@ -1932,6 +2144,9 @@ fn a_name_declared_verb_is_gated_and_outranked_by_a_source_read_one() {
             Some(&module),
             &std::collections::BTreeMap::new(),
         )
+        .into_iter()
+        .map(|call| call.site)
+        .collect()
     };
 
     // A capture name whose suffix is not an HTTP verb captures nothing — the

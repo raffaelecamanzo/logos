@@ -53,14 +53,35 @@ import java.net.URI;
 "#;
 
 /// Index `body` as a single Java file and return every `http-client-call`
-/// reference target the arm wrote to the ledger, sorted.
+/// **reference** target the arm wrote to the ledger, sorted.
+///
+/// Keyless rows are excluded (S-374): a declined call site now writes one, and it
+/// is a recorded refusal rather than a reference. Every test whose contract is
+/// about a *refusal* reads [`client_call_rows`] instead and asserts the count —
+/// so the two populations are both pinned and neither hides the other. Splitting
+/// them here rather than in each caller keeps the ~30 positive assertions in this
+/// file reading as they did, which is what they are about.
 fn client_calls(body: &str) -> Vec<String> {
-    client_calls_raw(&format!("package com.example;\n{CLIENT_IMPORTS}\n{body}"))
+    client_call_rows(body).0
+}
+
+/// [`client_calls`]'s two populations: the arm's `(references, refusal rows)`.
+///
+/// One index run per call, so a test needing both figures pays for one — this
+/// suite indexes a whole engine per fixture and is already the slowest in the
+/// per-language set.
+fn client_call_rows(body: &str) -> (Vec<String>, usize) {
+    client_call_rows_raw(&format!("package com.example;\n{CLIENT_IMPORTS}\n{body}"))
 }
 
 /// As [`client_calls`], but the caller supplies the whole compilation unit —
 /// used by the negative case that must ship *without* the client imports.
 fn client_calls_raw(source: &str) -> Vec<String> {
+    client_call_rows_raw(source).0
+}
+
+/// As [`client_call_rows`], but the caller supplies the whole compilation unit.
+fn client_call_rows_raw(source: &str) -> (Vec<String>, usize) {
     let tmp = tempfile::tempdir().expect("tempdir");
     fs::create_dir_all(tmp.path().join("src")).expect("mkdir");
     fs::write(tmp.path().join("src/Calls.java"), source).expect("write fixture");
@@ -80,7 +101,9 @@ fn client_calls_raw(source: &str) -> Vec<String> {
         })
         .expect("read runs");
     targets.sort();
-    targets
+    let refusals = targets.iter().filter(|t| t.is_empty()).count();
+    targets.retain(|t| !t.is_empty());
+    (targets, refusals)
 }
 
 // ── 1. The four-idiom matrix ([FR-WS-08]'s normative Java row) ───────────────
@@ -456,10 +479,15 @@ fn a_chained_receiver_and_a_token_less_wrapper_are_stated_ceilings() {
 /// is generic and already fixture-pinned in
 /// `resolve::http_client_call::classify_client_call`; what this asserts is that
 /// Java's query fills the interpreter's slots such that the refusal fires.
+///
+/// **And that the refusal is now recorded (S-374).** Six declining methods leave
+/// six keyless ledger rows — one per method, which is the ledger's own grain —
+/// so [FR-WS-08] AC2's "appears under a runtime-composition coverage reason" half
+/// is met on the language whose estate the criterion was measured over. The
+/// reference half is unchanged: still zero.
 #[test]
 fn a_runtime_composed_path_emits_no_reference() {
-    assert!(
-        client_calls(
+    let (references, refusals) = client_call_rows(
             r#"
 public class Calls {
     private RestClient restClient;
@@ -483,13 +511,19 @@ public class Calls {
         return restClient.get().uri(buildUserUrl(id)).retrieve().body(String.class);
     }
 }
-"#
-        )
-        .is_empty(),
+"#,
+    );
+    assert!(
+        references.is_empty(),
         "a bare variable, a concatenation, a relative literal, a `$` \
          placeholder literal, a builder lambda and a helper-method call are \
-         each \
-         base-url-runtime — no reference, no ledger entry, no approximate bind"
+         each base-url-runtime — no reference and no approximate bind: \
+         {references:?}"
+    );
+    assert_eq!(
+        refusals, 6,
+        "and each declining METHOD leaves exactly one keyless row — the ledger's \
+         grain is the declaration, so this is six, not one per call"
     );
 }
 
@@ -602,19 +636,26 @@ fn receiver_less_and_class_qualified_verb_calls_are_never_captured() {
 /// `create` factory does not smuggle a path into the JDK-builder patterns.
 #[test]
 fn only_uri_create_unwraps_a_builder_path() {
-    assert!(
-        client_calls(
-            r#"
+    let (references, refusals) = client_call_rows(
+        r#"
 public class Calls {
     HttpRequest a() {
         return HttpRequest.newBuilder().GET().uri(MyFactory.create("/internal/{id}"));
     }
 }
-"#
-        )
-        .is_empty(),
-        "`MyFactory.create(…)` is not `URI.create(…)` — no path is unwrapped"
+"#,
     );
+    assert!(
+        references.is_empty(),
+        "`MyFactory.create(…)` is not `URI.create(…)` — no path is unwrapped: \
+         {references:?}"
+    );
+    // The `.uri(…)` link IS matched by pattern 1 (its argument is unconstrained),
+    // so the site exists and its operand is a non-literal method call: a
+    // `base-url-runtime` refusal, recorded (S-374). That is the honest outcome —
+    // the arm saw an outbound call and declined to guess its path — and it is
+    // asserted so a future change cannot turn the refusal into a silent drop.
+    assert_eq!(refusals, 1);
 }
 
 // ── 3. Stated coverage ceilings ([ADR-54]) ──────────────────────────────────
@@ -663,13 +704,19 @@ public class Calls {
 /// silent one.
 #[test]
 fn a_text_block_path_literal_is_a_stated_ceiling() {
-    assert!(
-        client_calls(
-            "\npublic class Calls {\n    private RestClient restClient;\n    String a() {\n        return restClient.get().uri(\"\"\"\n/users/{id}\"\"\").retrieve().body(String.class);\n    }\n}\n"
-        )
-        .is_empty(),
-        "a text-block literal is not recognised as a static string"
+    let (references, refusals) = client_call_rows(
+        "\npublic class Calls {\n    private RestClient restClient;\n    String a() {\n        return restClient.get().uri(\"\"\"\n/users/{id}\"\"\").retrieve().body(String.class);\n    }\n}\n"
     );
+    assert!(
+        references.is_empty(),
+        "a text-block literal is not recognised as a static string: {references:?}"
+    );
+    // Since S-374 the ceiling is *visible*: the site records one keyless row and
+    // is reported `base-url-runtime`. The doc comment above already called that
+    // "an honest refusal, but for the wrong stated reason" — the row makes the
+    // wrong-reason claim checkable rather than a note, because the site now
+    // appears in the coverage payload where a reader can see it.
+    assert_eq!(refusals, 1);
 }
 
 /// **Ceiling.** OpenFeign declares the path on an *annotated interface method*

@@ -66,12 +66,14 @@
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 //! [`capture_invocation_refs`]: crate::extract::config::refs::capture_invocation_refs
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
-use crate::extract::config::refs::{capture_invocation_refs, push_artifact_ref, InvocationSite};
+use crate::extract::config::refs::{
+    capture_invocation_refs, record_refusals, InvocationSite, RefusalCandidate,
+};
 use crate::extract::refs::unquote;
 use crate::extract::Facts;
 use crate::model::{ArtifactRelation, LogosSymbol, RefForm};
@@ -81,6 +83,17 @@ use crate::model::{ArtifactRelation, LogosSymbol, RefForm};
 enum Side {
     Publish,
     Subscribe,
+}
+
+impl Side {
+    /// The ledger relation this side records under. One place, so the emission
+    /// pass and the refusal pass can never file one side under two relations.
+    fn relation(self) -> ArtifactRelation {
+        match self {
+            Side::Publish => ArtifactRelation::BrokerPublish,
+            Side::Subscribe => ArtifactRelation::BrokerSubscribe,
+        }
+    }
 }
 
 /// Run a grammar's `brokers` query over `root` and emit one broker reference per
@@ -119,8 +132,8 @@ where
     // contains, a literal another pattern admitted. Covered by
     // `a_site_that_bound_a_literal_records_no_refusal_even_when_a_slot_matched_it`,
     // which supplies such a query, because nothing in the shipped set reaches it.
-    let mut bound: Vec<(Side, Range<usize>)> = Vec::new();
-    let mut candidates: Vec<RefusalCandidate<'_>> = Vec::new();
+    let mut bound: Vec<(ArtifactRelation, Range<usize>)> = Vec::new();
+    let mut candidates: Vec<RefusalCandidate> = Vec::new();
 
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
@@ -157,12 +170,19 @@ where
             }
         }
 
+        // The operand's enclosing declaration is resolved here rather than in the
+        // recorder: an operand with no attributable declaration is not a
+        // candidate at all, which is exactly how it was treated when the
+        // attribution lived inside the recorder.
         if let (Some((slot_side, slot_node)), Some(site)) = (slot, site_node) {
-            candidates.push(RefusalCandidate {
-                side: slot_side,
-                site: site.byte_range(),
-                node: slot_node,
-            });
+            if let Some(source) = enclosing(slot_node) {
+                candidates.push(RefusalCandidate {
+                    relation: slot_side.relation(),
+                    site: site.byte_range(),
+                    source,
+                    line: slot_node.start_position().row as u32 + 1,
+                });
+            }
         }
 
         let (Some(side), Some(topic_node)) = (side, topic_node) else {
@@ -176,7 +196,7 @@ where
         // declaration is unknown still binds *nothing*, but it did parse as a
         // literal, so reporting its site `topic-not-literal` would be a wrong
         // reason ([NFR-CC-04]).
-        bound.push((side, topic_node.byte_range()));
+        bound.push((side.relation(), topic_node.byte_range()));
         // The site is attributed to its enclosing publishing/subscribing symbol.
         let Some(source_symbol) = enclosing(topic_node) else {
             continue;
@@ -219,95 +239,19 @@ where
         subscribes,
         broker_topic_key,
     );
-    emitted += record_refusals(candidates, &bound, &enclosing, facts);
+    // The refused half, recorded through the SHARED refusal recorder (S-370
+    // built it here; S-374 generalized it for the HTTP arm, so there is one copy
+    // rather than a hand-mirrored twin per arm). The mechanism — a bound operand
+    // of the same relation cancels a candidate at the same site, then survivors
+    // dedup to one row per `(relation, declaration, line)` — is documented once
+    // on `record_refusals` and deliberately not restated here. What is local to
+    // this arm is only WHICH nodes fill the carrier, and that is stated where the
+    // candidates are built above: the site is the `@broker.*.site` node the
+    // `.scm` declares (wider than the operand on purpose, so a sibling literal
+    // admitted inside the same site cancels the refusal), and the operand is the
+    // `@broker.*.topic.slot` node, which supplies the declaration and the line.
+    emitted += record_refusals(facts, RefForm::Method, candidates, &bound);
     emitted
-}
-
-/// One site whose topic operand was captured but may not be a literal — a
-/// `topic-not-literal` refusal *candidate*, pending the reconcile against what
-/// actually bound.
-struct RefusalCandidate<'t> {
-    side: Side,
-    /// The byte range of the `@broker.*.site` node: the grain a refusal is deduped
-    /// by, and the range an admitted literal must fall inside to cancel it.
-    site: Range<usize>,
-    /// The `@broker.*.topic.slot` node — the operand itself, which supplies the
-    /// enclosing declaration and the reported line.
-    node: Node<'t>,
-}
-
-/// Record one **keyless** broker-arm ledger row per refused site, and return how
-/// many were recorded ([FR-WS-05], [NFR-CC-04], [CR-107]).
-///
-/// A candidate survives iff **no** admitted topic literal of the same side lies
-/// within its site range. With the shipped Java query that condition is never
-/// false, because its slot patterns enumerate non-literal operand shapes only — so
-/// the array form (`topics = {"a","b"}`) and the multi-attribute form yield no
-/// candidate to cancel in the first place, and it is the query's enumeration, not
-/// this reconcile, that keeps them quiet. The reconcile is what stops a
-/// **droppable** query ([FR-PL-04]) from reporting a refusal at a site that bound.
-///
-/// A genuinely non-literal operand (`topics = TOPIC`, `Topics.ORDERS`,
-/// `PREFIX + "orders"`, `config.topic()`) reports once.
-///
-/// Survivors are then deduped to one row per `(side, enclosing declaration, line)`
-/// — the "at most once per registration site" discipline
-/// [`crate::resolve::framework`] applies to `path-not-composed`. The dedup is
-/// deliberately coarser than the raw site, because a `.scm` may legitimately
-/// capture nested sites for one operand (an attribute pair *and* its argument
-/// list). Note this is not the only thing collapsing rows: the production caller
-/// re-runs `dedup_sort_refs`, which keys on `(source, target, form, kind, relation)`
-/// and ignores `line`, so two refused sites in one declaration reach the ledger as
-/// one row even on different lines. This dedup keeps the grain local and
-/// independent of that key — it is asserted directly, through the interpreter, by
-/// `two_refused_topic_attributes_on_one_site_record_one_refusal`.
-///
-/// The row's target is **empty**: no topic key is fabricated, not even the
-/// operand's source text. A keyless broker row is inert by contracts that already
-/// exist — [`crate::resolve::topics`] refuses to promote one ("a keyless row is not
-/// a topic"), and the bridge's own key builders refuse it — so a refusal can never
-/// become a `Topic` node or a cross-service edge ([NFR-RA-05]).
-///
-/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
-/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-/// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
-fn record_refusals<F>(
-    candidates: Vec<RefusalCandidate<'_>>,
-    bound: &[(Side, Range<usize>)],
-    enclosing: &F,
-    facts: &mut Facts,
-) -> usize
-where
-    F: Fn(Node<'_>) -> Option<LogosSymbol>,
-{
-    let mut seen: HashSet<(Side, String, u32)> = HashSet::new();
-    let mut recorded = 0;
-    for candidate in candidates {
-        // Did anything at this site bind? Then it is not a refusal.
-        if bound.iter().any(|(side, at)| {
-            *side == candidate.side
-                && at.start >= candidate.site.start
-                && at.end <= candidate.site.end
-        }) {
-            continue;
-        }
-        let Some(symbol) = enclosing(candidate.node) else {
-            continue; // no enclosing declaration to attribute the refusal to
-        };
-        let line = candidate.node.start_position().row as u32 + 1;
-        if !seen.insert((candidate.side, symbol.as_str().to_string(), line)) {
-            continue; // this site already recorded its one refusal
-        }
-        let relation = match candidate.side {
-            Side::Publish => ArtifactRelation::BrokerPublish,
-            Side::Subscribe => ArtifactRelation::BrokerSubscribe,
-        };
-        if push_artifact_ref(facts, &symbol, "", relation, RefForm::Method, line) {
-            recorded += 1;
-        }
-    }
-    recorded
 }
 
 /// Normalize a captured broker site's slots into the portable topic key two

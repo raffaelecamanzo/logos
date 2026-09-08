@@ -1,0 +1,123 @@
+S-374, measured 2026-09-08 against ~/source/pec-services (84 members, read-only
+walk — NOT a re-enrolment). Produced by
+`measure_recorded_client_call_refusals_over_the_reference_workspace`; re-run it
+with LOGOS_REF_WORKSPACE set to reproduce the table below verbatim.
+
+  CR-120 CRA-01's "~111 additional base-url-runtime rows" HOLDS on the
+  PRODUCTION population (115). The WHOLE-WORKSPACE figure is 131, and the
+  two are different questions.
+
+GRAIN. The ledger ROW, i.e. one per (declaration, relation) after
+`dedup_sort_refs`, which keys on (source, target, form, kind, relation) and
+ignores `line`. Two composed calls in one method are ONE row. This is the only
+dedup-proof grain: it is what `workspace status` counts, and it cannot be moved
+by the dedup because it is the post-dedup count. Site counts are reported beside
+it for context and are NOT the criterion.
+
+  language      files  gated  ref/main  ref/test  ref-rows  sites*
+  go              262     75        20        16         0      98
+  java           2447     26        94         0         0      94
+  php             161      0         0         0         0       0
+  python           55      1         1         0         0       2
+  tsx               5      0         0         0         0       0
+  typescript      656     12         0         0         1       1
+
+  refusal rows: main 115 (in 37 files), test 16 (in 8 files) — total 131
+  references:   main 0,   test 1                             — total 1
+
+  * `sites` is the harness's mirrored, gate-admitted query-match count.
+
+PRIOR COUNT WAS ZERO. `UnboundReason::BaseUrlRuntime` had no production
+construction path before this story: its only occurrences were the
+`From<ClientCallRefusal>` impl (no runtime caller), wire-string mappings and
+tests. Every row above is new.
+
+WHICH FIGURE ANSWERS THE ACCEPTANCE CRITERION. CR-120 §6 says "approximately 111
+additional unbound rows with reason base-url-runtime". Its CRA-01 sources 111
+from `configuration_agreement_finding.txt`'s `client-call/main` row — a
+PRODUCTION-tree count. The production figure here is 115, so the criterion holds
+at 3.6% over. The workspace-wide figure a `workspace status --json` run would
+print is 131, because an index run does not split main from test. Both are
+stated; neither is the other.
+
+The agreement at 115 is not the same measurement arriving twice, and reading it
+that way would over-credit it. 111 was a SITE count over the harness's
+composed-operand corpus; 115 is a ROW count over what the shipped arm records.
+Two offsetting effects put them within four rows of each other:
+
+  * Java barely collapses — 94 sites, 94 rows. Spring's `.uri(…)` chains sit one
+    per method, so the declaration grain and the site grain coincide. The 94
+    also matches, exactly, the "94 Java sites" the S-375 receiver-grained gate
+    recorded in `plugins/java/queries/invocations.scm`, and all 94 refuse: the
+    Java reference count is 0.
+  * Go collapses hard — 98 sites, 36 rows (20 main + 16 test). Go's client calls
+    cluster several per function, and the harness's site count does not split
+    the trees.
+
+So the two numbers agree on the total while disagreeing on every component. Do
+not extrapolate either to another estate.
+
+WHAT IS NOT IN THESE COLUMNS, stated because a denominator that silently covers
+a narrower population than its reason word suggests is the same dishonesty in a
+new place (NFR-CC-04):
+
+  1. A call refused at QUERY-MATCH time. No site exists, so no reason can be
+     carried and the call is absent from the table rather than counted in it.
+     Every stated capture ceiling is in this class — Java's verb-suffixed
+     `RestTemplate` methods and `exchange`, OpenFeign interfaces, a separated
+     JDK builder chain, a text-block path, a receiver the S-375 rule declines, a
+     chained receiver, and any language shipping no `invocations` query. Closing
+     this needs a query that matches those shapes; a refusal ledger cannot.
+     This is S-375's open question, answered: the denominator covers the
+     INVOCATION-SITE population the arm's queries admit, not the population of
+     outbound calls in the source.
+  2. `ClientCallRefusal::PathNotComposed`. The coverage tier tells the two HTTP
+     refusals apart by whether the stored target is empty, so a keyless row is
+     `base-url-runtime` by construction and `path-not-composed` needs a
+     NON-keyless row — a different mechanism, with its own inertness proof, and
+     outside this story's acceptance criteria.
+
+     ON JAVA IT COSTS NOTHING, and that is the language the criterion is
+     measured over. `path-not-composed` requires a static literal, and S-355
+     recorded ZERO string literals of any kind across the estate's Java
+     client-call arguments — the `literal` column of the S-355 table in
+     `operand_resolvability.rs`'s module docs, java row. Java's 94 sites and 94
+     refusal rows with 0 references are consistent with that: every Java site is
+     base-url-runtime. (S-355 counted 98 Java sites where this run counts 94;
+     the delta is S-375's receiver rule, which is why the site figure had to be
+     re-measured against the new gate rather than carried over.)
+
+     WORKSPACE-WIDE IT IS NOT SEPARATELY MEASURED, and this is stated as a
+     bound rather than a value because a value is not known. 195 gated sites
+     produced 132 rows (131 refusals + 1 reference), so at most 63 sites
+     produced no row — and that gap is dominated by the per-declaration dedup,
+     not by this reason: Go alone collapses 98 sites into 36 rows, Java's 94
+     sites into 94 rows collapse nothing, and python contributes 1. Separating
+     the two would need `classify_client_call` (crate-private) or a second
+     mirror of `route_key` in this harness; a mirror is what the existing
+     cross-check exists to police, so the bound is reported instead.
+
+     Go's 51 static literals (S-355) are HTTP HEADER names read through
+     `header.Get(…)` — the documented file-grained gate ceiling, and relative,
+     hence base-url-runtime rather than path-not-composed. That is inference
+     from the recorded shapes, not a measurement, and is offered as the reason
+     the bound is expected to be loose.
+  3. The 26 gated Java files vs 2 447 scanned. The file-level detector gate is
+     not what this story changed; that ratio is S-375's and CR-108's subject.
+
+THE PHP AND TSX ZEROS ARE HONEST ABSENCE, not a regression: 0 files pass the
+detector gate in either language on this estate, so neither arm is exercised
+here at all. Reading their 0 as "the arm records nothing" would be wrong — it
+records nothing because it is never reached.
+
+METHOD, and why no re-enrolment. The reference workspace is the only ground
+truth for four of this sprint's measured criteria and re-enrolling it is a
+destructive 84-member operation (sprint-66 §7). This measurement therefore walks
+the corpus read-only through the production `extract::extract` pass and counts
+what it writes to `facts.refs` — the same rows an index run would persist — and
+touches no `.logos` store. The consequence is one caveat: the walk mirrors
+production admission (`ignore::WalkBuilder` with the same containment settings)
+but is not literally `admission_walk_builder`, so a real `workspace status
+--json` after a full re-index could differ by whatever that walk excludes and
+this one does not. Confirming 131 against a real re-index is a human-gated step
+at sprint review, not a session step.

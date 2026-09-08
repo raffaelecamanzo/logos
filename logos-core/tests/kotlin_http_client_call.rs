@@ -80,14 +80,31 @@ fun probe(restClient: RestClient): String =
 "#;
 
 /// Index `body` as a single Kotlin file and return every `http-client-call`
-/// reference target the arm wrote to the ledger, sorted.
+/// **reference** target the arm wrote to the ledger, sorted (keyless refusal
+/// rows excluded — see [`client_call_rows`]).
 fn client_calls(body: &str) -> Vec<String> {
-    client_calls_raw(&format!("package com.example\n{CLIENT_IMPORTS}\n{body}"))
+    client_call_rows(body).0
+}
+
+/// [`client_calls`]'s two populations: the arm's `(references, refusal rows)`.
+///
+/// A declined call site records one keyless ledger row since S-374, and it is a
+/// recorded refusal rather than a reference — so [`client_calls`] reports only
+/// the keyed rows and a test whose contract is about a refusal asserts the count
+/// here. One index run per call, because this suite indexes a whole engine per
+/// fixture.
+fn client_call_rows(body: &str) -> (Vec<String>, usize) {
+    client_call_rows_raw(&format!("package com.example\n{CLIENT_IMPORTS}\n{body}"))
 }
 
 /// As [`client_calls`], but the caller supplies the whole compilation unit —
 /// used by the negative case that must ship *without* the client imports.
 fn client_calls_raw(source: &str) -> Vec<String> {
+    client_call_rows_raw(source).0
+}
+
+/// As [`client_call_rows`], but the caller supplies the whole file.
+fn client_call_rows_raw(source: &str) -> (Vec<String>, usize) {
     let tmp = tempfile::tempdir().expect("tempdir");
     fs::create_dir_all(tmp.path().join("src")).expect("mkdir");
     fs::write(tmp.path().join("src/Calls.kt"), source).expect("write fixture");
@@ -107,7 +124,9 @@ fn client_calls_raw(source: &str) -> Vec<String> {
         })
         .expect("read runs");
     targets.sort();
-    targets
+    let refusals = targets.iter().filter(|t| t.is_empty()).count();
+    targets.retain(|t| !t.is_empty());
+    (targets, refusals)
 }
 
 // ── 1. The four-idiom matrix ([FR-WS-08]'s normative Kotlin row) ─────────────
@@ -409,9 +428,8 @@ class Calls(private val restClient: RestClient) {{
 /// guard it bound the runtime-composed template `/users/$id/roles`.
 #[test]
 fn a_string_template_path_emits_no_reference() {
-    assert!(
-        client_calls(
-            r#"
+    let (references, refusals) = client_call_rows(
+        r#"
 class Calls(private val restClient: RestClient, private val base: String) {
     fun bare(): String {
         return restClient.get().uri("$base/users").retrieve().body(String::class.java)
@@ -423,12 +441,18 @@ class Calls(private val restClient: RestClient, private val base: String) {
         return restClient.get().uri("/users/$id/roles").retrieve().body(String::class.java)
     }
 }
-"#
-        )
-        .is_empty(),
-        "a Kotlin string template composes its path at runtime — no reference, \
-         no ledger entry, no approximate bind"
+"#,
     );
+    assert!(
+        references.is_empty(),
+        "a Kotlin string template composes its path at runtime — no reference \
+         and no approximate bind: {references:?}"
+    );
+    // Since S-374 the refusal is also RECORDED, one keyless row per declining
+    // function — so the doc comment above no longer has to send a reader to a
+    // slot-level test to see that the reason is `base-url-runtime` rather than
+    // the site never existing: the row is the observable.
+    assert_eq!(refusals, 3);
 }
 
 // ── 3. The shared negative-case fixture contract (S-340, [FR-WS-08]) ─────────
@@ -502,9 +526,8 @@ class Calls(private val restClient: RestClient) {
 /// Kotlin's query fills the interpreter's slots such that the refusal fires.
 #[test]
 fn a_runtime_composed_path_emits_no_reference() {
-    assert!(
-        client_calls(
-            r#"
+    let (references, refusals) = client_call_rows(
+        r#"
 class Calls(private val restClient: RestClient, private val baseUrl: String) {
     fun bareVariable(path: String): String {
         return restClient.get().uri(path).retrieve().body(String::class.java)
@@ -522,12 +545,17 @@ class Calls(private val restClient: RestClient, private val baseUrl: String) {
         return restClient.get().uri(buildUserUrl(id)).retrieve().body(String::class.java)
     }
 }
-"#
-        )
-        .is_empty(),
+"#,
+    );
+    assert!(
+        references.is_empty(),
         "a bare variable, a concatenation, a relative literal, an escaped \
          Spring `${{…}}` placeholder literal and a helper-method call are each \
-         base-url-runtime — no reference, no ledger entry, no approximate bind"
+         base-url-runtime — no reference and no approximate bind: {references:?}"
+    );
+    assert_eq!(
+        refusals, 5,
+        "and each declining FUNCTION leaves one keyless row (S-374)"
     );
 }
 
@@ -734,19 +762,23 @@ class Calls(private val restTemplate: RestTemplate) {
 /// `create` factory does not smuggle a path into the JDK-builder patterns.
 #[test]
 fn only_uri_create_unwraps_a_builder_path() {
-    assert!(
-        client_calls(
-            r#"
+    let (references, refusals) = client_call_rows(
+        r#"
 class Calls {
     fun a(): HttpRequest {
         return HttpRequest.newBuilder().GET().uri(MyFactory.create("/internal/{id}"))
     }
 }
-"#
-        )
-        .is_empty(),
-        "`MyFactory.create(…)` is not `URI.create(…)` — no path is unwrapped"
+"#,
     );
+    assert!(
+        references.is_empty(),
+        "`MyFactory.create(…)` is not `URI.create(…)` — no path is unwrapped: \
+         {references:?}"
+    );
+    // The `.uri(…)` link is still matched, so the site exists with a non-literal
+    // operand: one recorded `base-url-runtime` refusal (S-374), not a silent drop.
+    assert_eq!(refusals, 1);
 }
 
 // ── 5. Stated coverage ceilings ([ADR-54]) ──────────────────────────────────

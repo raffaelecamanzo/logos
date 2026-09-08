@@ -897,7 +897,17 @@ a template literal, an f-string, a bare variable — emits **no** reference and 
 reported as `base-url-runtime`; a static path that will not normalize is reported
 as `path-not-composed`. Logos never guesses the composed value, so on a codebase
 whose call sites all build their URLs from configuration you should expect few or
-no captures, and that is the honest answer rather than a defect. Route
+no captures, and that is the honest answer rather than a defect.
+
+A `base-url-runtime` call site is **recorded, not dropped**: it leaves one keyless
+row per declaration, so `workspace status` counts it as an unbound reference under
+that reason instead of the site disappearing. That is why enabling this capability
+on such a codebase makes the unbound count *rise* — the sites were always there
+and were previously not counted. A recorded refusal names no target, so it can
+never become a cross-service edge or a promoted node. Two things it still cannot
+show you: a call your language's query never matched (each stated capture ceiling
+is listed in that language's `invocations.scm` header) and the `path-not-composed`
+half, which is reported only when a target was stored. Route
 *registrations* (`app.get("/x", handler)`, `Route::get(...)`, a FastAPI decorator)
 are excluded structurally in every language — capturing one would bind another
 member's real route and invent a cross-service edge.

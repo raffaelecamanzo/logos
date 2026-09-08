@@ -28,6 +28,43 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
   exit code either; `workspace check` remains advisory.
 
 ### Changed
+- **The HTTP client-call arm records the call sites it declines, so coverage
+  reports them instead of losing them (CR-120, S-374, FR-WS-08 AC2).** The arm's
+  normalizer returned a refusal reason and the caller discarded it with `.ok()`,
+  so a declined call site left **no reference, no ledger row and no coverage
+  entry** — an estate whose client paths are all composed at runtime read exactly
+  like one with no outbound calls at all. FR-WS-08's second acceptance criterion
+  already required such a path to "appear under a runtime-composition coverage
+  reason", so this was a conformance failure, not a gap.
+
+  A call whose path is not a static absolute literal now leaves one **keyless**
+  `unresolved_refs` row — empty target, so no template is fabricated — which
+  `workspace status` reports under `base-url-runtime`. That reason previously had
+  **no production producer** anywhere in the tree; it now has one, and
+  `impl From<ClientCallRefusal> for UnboundReason` is no longer dead. The row is
+  inert to binding by construction: it promotes no node, keys no topic, and
+  `route_key` refuses an empty `"METHOD /template"`, so it can never become an
+  edge. One row per **declaration** (the ledger's own identity ignores `line`),
+  stable across re-syncs. The recorder is the one the broker arm has used since
+  S-370, generalized rather than copied — the two arms now share
+  `extract::config::refs::record_refusals`.
+
+  **This makes the reported numbers worse, and that is the correction working.**
+  Measured read-only over the 84-member reference workspace: **115 production
+  rows** (94 Java, 20 Go, 1 Python) and 16 test-tree rows, **131 in total**,
+  against a prior count of zero. All 94 Java sites refuse; the workspace-wide
+  reference count stays 1. Full reconciliation, including why 115 agreeing with
+  CR-120's ~111 is two different measurements rather than one confirmed twice, in
+  `logos-core/tests/operand_resolvability/client_call_refusal_finding.txt`.
+
+  Two populations stay invisible and are stated rather than implied: a call the
+  language's `invocations` query never matched (every stated capture ceiling — a
+  verb-suffixed `RestTemplate` method, OpenFeign, a receiver the S-375 rule
+  declines) is refused before a call site exists, so it carries no reason and
+  only a query change can reach it; and `path-not-composed`, which needs a
+  non-keyless row and is out of this increment's scope — zero on Java by S-355's
+  recorded evidence, and bounded rather than measured workspace-wide.
+
 - **The NFR-PE-05 cold-start budget is re-derived 500 → 600 ms and now enumerates
   all six phases (CR-116, S-368, S-369).** The requirement enumerated three
   phases — embedded `plugin.toml` parse, `LanguageRegistry` construction, query

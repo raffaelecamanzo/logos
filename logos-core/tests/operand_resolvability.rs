@@ -145,6 +145,17 @@ use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 #[path = "operand_resolvability/configuration_agreement.rs"]
 mod configuration_agreement;
 
+/// S-374's recorded verdict, reproduced by
+/// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
+/// printed by it.
+///
+/// `include_str!` rather than a doc link, following
+/// [`configuration_agreement::RECORDED_FINDING`]: a file the build embeds cannot
+/// be deleted or renamed without breaking compilation, so the artifact and the
+/// run that produced it cannot drift apart silently.
+const RECORDED_REFUSAL_FINDING: &str =
+    include_str!("operand_resolvability/client_call_refusal_finding.txt");
+
 // ── The taxonomy ────────────────────────────────────────────────────────────
 
 /// The operand taxonomy [S-355]'s first acceptance criterion names (and
@@ -973,6 +984,33 @@ struct LangStats {
     files_gate_admitted: usize,
     emitted_today: usize,
     sites: Vec<Site>,
+    /// S-374: what the arm actually *records*, read from the production
+    /// `extract` pass rather than from this harness's mirrored site walk —
+    /// keyed by source tree, because a refusal in an IT test class is not the
+    /// coupling the acceptance criterion is written over.
+    ///
+    /// The grain is the **ledger row**, i.e. one per `(declaration, relation)`
+    /// after `dedup_sort_refs`, which is the grain `workspace status` counts and
+    /// therefore the only grain the ~111-row criterion can be checked at. Two
+    /// composed calls in one method are one row.
+    recorded: BTreeMap<(configuration_agreement::Tree, RowKind), usize>,
+    /// Files carrying at least one recorded refusal, per tree — the "how spread
+    /// out is it" figure a row count alone cannot give.
+    refusal_files: BTreeMap<configuration_agreement::Tree, usize>,
+}
+
+/// Which population one `http-client-call` ledger row belongs to (S-374).
+///
+/// The arm writes exactly two shapes and they are told apart by the target, the
+/// same way `federation::coverage::client_call_refusal` tells them apart: a
+/// keyless row is a recorded `base-url-runtime` refusal, a keyed row is a
+/// reference that named a route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RowKind {
+    /// A keyless row — the recorded refusal (`base-url-runtime`).
+    Refusal,
+    /// A keyed row — a `"METHOD /template"` reference.
+    Reference,
 }
 
 #[derive(Default)]
@@ -1036,8 +1074,32 @@ fn scan_file(rel: &str, source: &str, ctx: &ScanCtx<'_>, stats: &mut LangStats, 
     stats.emitted_today += facts
         .refs
         .iter()
-        .filter(|r| r.relation == Some(ArtifactRelation::HttpClientCall))
+        .filter(|r| {
+            r.relation == Some(ArtifactRelation::HttpClientCall) && !r.target.is_empty()
+        })
         .count();
+
+    // S-374: the arm's own recorded output, straight from the production pass.
+    // Read here (not from the mirrored site walk below) so the reported figure is
+    // what `workspace status` would count, not what this harness thinks it should.
+    let tree = configuration_agreement::Tree::of(rel);
+    let mut refusals_here = 0;
+    for r in facts
+        .refs
+        .iter()
+        .filter(|r| r.relation == Some(ArtifactRelation::HttpClientCall))
+    {
+        let kind = if r.target.trim().is_empty() {
+            refusals_here += 1;
+            RowKind::Refusal
+        } else {
+            RowKind::Reference
+        };
+        *stats.recorded.entry((tree, kind)).or_default() += 1;
+    }
+    if refusals_here > 0 {
+        *stats.refusal_files.entry(tree).or_default() += 1;
+    }
 
     let mut parser = Parser::new();
     if parser.set_language(plugin.language()).is_err() {
@@ -1512,6 +1574,150 @@ fn measure_operand_resolvability_over_the_reference_workspace() {
     );
 }
 
+
+/// **S-374 acceptance: the recorded-refusal figure, reconciled against the real
+/// `pec-services` estate at a dedup-proof grain, with the production/test split
+/// disclosed.** ([CR-120] §6, [FR-WS-08] AC2.)
+///
+/// [CR-120]'s criterion is "approximately **111 additional unbound rows** with
+/// reason `base-url-runtime`, against a prior count of zero". Its CRA-01 sources
+/// the 111 from `configuration_agreement_finding.txt`'s `client-call/main`
+/// denominator — which is **this harness's own corpus of composed operands**,
+/// not the population the shipped arm records. The two differ, and the whole
+/// point of measuring here is to say by how much and why, rather than to assert
+/// a number carried over from a different denominator.
+///
+/// # The grain, chosen so dedup cannot move it
+///
+/// The reported figure is the **ledger row**: one per `(declaration, relation)`
+/// after `dedup_sort_refs`, which keys on `(source, target, form, kind,
+/// relation)` and ignores `line`. Two composed calls in one method are one row,
+/// and `workspace status` counts rows — so the row count is the only grain the
+/// acceptance criterion can be checked at, and it is immune to the dedup by
+/// construction. `refusal_files` is reported beside it so a row count
+/// concentrated in a handful of classes cannot read as a broad one.
+///
+/// Every figure comes from the **production** `extract` pass, not from this
+/// file's mirrored site walk. That matters here more than anywhere else in the
+/// harness: the criterion is about what the arm records, and a mirror that
+/// over-counted would inflate the very number the CR is graded on.
+///
+/// # What is asserted, and what is only reported
+///
+/// # Recorded finding (2026-09-08, `~/source/pec-services`, 84 members)
+///
+/// ```text
+/// language      files  gated  ref/main  ref/test  ref-rows  sites*
+/// go              262     75        20        16         0      98
+/// java           2447     26        94         0         0      94
+/// php             161      0         0         0         0       0
+/// python           55      1         1         0         0       2
+/// tsx               5      0         0         0         0       0
+/// typescript      656     12         0         0         1       1
+///
+/// refusal rows: main 115 (in 37 files), test 16 (in 8 files) — total 131
+/// ```
+///
+/// **The criterion holds on the production population: 115 against ~111.** The
+/// whole-workspace figure an index run would print is **131**, because indexing
+/// does not split main from test; both are stated and neither is the other. The
+/// agreement at 115 is not one measurement arriving twice — 111 was a *site*
+/// count over the composed-operand corpus, 115 is a *row* count over what the arm
+/// records, and two offsetting effects put them within four rows: Java's 94 sites
+/// barely collapse (one `.uri(…)` chain per method, and all 94 refuse — the same
+/// 94 the S-375 receiver gate recorded), while Go's 98 collapse to 36.
+///
+/// The full reasoning, the three excluded populations, and why PHP's and TSX's
+/// zeros are honest absence rather than a regression are recorded in
+/// `operand_resolvability/client_call_refusal_finding.txt` — the durable artifact
+/// beside `configuration_agreement_finding.txt`, kept in the same form for the
+/// same reason.
+///
+/// Asserted: refusals exist at all — the prior count was zero, so a run that
+/// records none has not delivered the story. Reported without assertion: the
+/// counts themselves, because they are a property of the corpus rather than of
+/// the code, and pinning a corpus figure in an assertion is how a measurement
+/// becomes a thing to be made green. (Row *shape* — keyless, inert, one per
+/// declaration — is pinned by fixtures that run without a corpus, in
+/// `extract::tests` and `xservice_http_client_call`; nothing here rests on the
+/// corpus for that.)
+///
+/// [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [FR-WS-08]: ../../docs/specs/requirements/FR-WS-08.md
+#[test]
+fn measure_recorded_client_call_refusals_over_the_reference_workspace() {
+    use configuration_agreement::Tree;
+
+    let Some(root) = corpus_root() else {
+        eprintln!(
+            "SKIPPED: set LOGOS_REF_WORKSPACE=<path to the reference workspace> to run the \
+             S-374 recorded-refusal measurement."
+        );
+        return;
+    };
+    let m = measurement(&root);
+
+    println!("\nS-374 — recorded HTTP client-call refusals ({})", root.display());
+    println!("  grain: LEDGER ROW (one per declaration; `dedup_sort_refs` ignores line)\n");
+    println!(
+        "  {:<12} {:>6} {:>6} {:>9} {:>9} {:>7} {:>7}",
+        "language", "files", "gated", "ref/main", "ref/test", "ref-rows", "sites*"
+    );
+    let mut totals: BTreeMap<(Tree, RowKind), usize> = BTreeMap::new();
+    let mut total_files: BTreeMap<Tree, usize> = BTreeMap::new();
+    for (lang, stats) in &m.per_language {
+        let row = |tree: Tree, kind: RowKind| {
+            stats.recorded.get(&(tree, kind)).copied().unwrap_or(0)
+        };
+        for (key, count) in &stats.recorded {
+            *totals.entry(*key).or_default() += count;
+        }
+        for (tree, count) in &stats.refusal_files {
+            *total_files.entry(*tree).or_default() += count;
+        }
+        println!(
+            "  {:<12} {:>6} {:>6} {:>9} {:>9} {:>7} {:>7}",
+            lang,
+            stats.files_scanned,
+            stats.files_gate_admitted,
+            row(Tree::Main, RowKind::Refusal),
+            row(Tree::Test, RowKind::Refusal),
+            row(Tree::Main, RowKind::Reference) + row(Tree::Test, RowKind::Reference),
+            stats.sites.iter().filter(|s| s.gate_admitted).count(),
+        );
+    }
+    let refusals = |tree: Tree| totals.get(&(tree, RowKind::Refusal)).copied().unwrap_or(0);
+    let references = |tree: Tree| totals.get(&(tree, RowKind::Reference)).copied().unwrap_or(0);
+    let files = |tree: Tree| total_files.get(&tree).copied().unwrap_or(0);
+    println!(
+        "\n  TOTAL refusal rows: main {} (in {} files), test {} (in {} files)",
+        refusals(Tree::Main),
+        files(Tree::Main),
+        refusals(Tree::Test),
+        files(Tree::Test),
+    );
+    println!(
+        "  TOTAL references:   main {}, test {}",
+        references(Tree::Main),
+        references(Tree::Test),
+    );
+    println!(
+        "  * `sites` is THIS harness's mirrored, gate-admitted query-match count — \n             reported for context only. A site refused at QUERY-MATCH time (a stated\n             capture ceiling, a receiver the S-375 rule declines) is in neither column:\n             it leaves no site, so it can carry no reason. See\n             `extract::capture_http_client_call_arm` for the enumeration.\n"
+    );
+
+    println!("--- recorded finding ---\n{RECORDED_REFUSAL_FINDING}");
+
+    // The one thing that must hold whatever the corpus contains: the prior count
+    // was zero, so a run recording nothing has not delivered the story.
+    assert!(
+        refusals(Tree::Main) + refusals(Tree::Test) > 0,
+        "the arm recorded NO refusal anywhere over {} — before S-374 the count was \
+         zero and the whole story is that it no longer is. Either the corpus holds \
+         no composed client call (check the `sites` column) or the refusal path \
+         regressed.",
+        root.display(),
+    );
+}
 
 // ── Classifier fixtures ─────────────────────────────────────────────────────
 //

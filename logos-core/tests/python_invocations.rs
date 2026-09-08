@@ -49,6 +49,12 @@ fn extract_py(source: &str) -> Facts {
 }
 
 /// The `HttpClientCall` reference targets captured from a source, sorted.
+///
+/// Left unfiltered on purpose: since S-374 a declined call site also writes a
+/// **keyless** row (an empty target), and a helper that hid it would let the
+/// refusal path regress unnoticed. Tests about references read
+/// [`client_call_references`]; tests about refusals read
+/// [`client_call_refusals`].
 fn client_call_targets(facts: &Facts) -> Vec<String> {
     let mut targets: Vec<String> = facts
         .refs
@@ -58,6 +64,28 @@ fn client_call_targets(facts: &Facts) -> Vec<String> {
         .collect();
     targets.sort();
     targets
+}
+
+/// The arm's captured **references** — every row that named a route.
+fn client_call_references(facts: &Facts) -> Vec<String> {
+    client_call_targets(facts)
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// The number of keyless refusal rows the arm recorded (S-374): one per declining
+/// declaration, reported as `base-url-runtime` by the [FR-WS-05] coverage tier.
+///
+/// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
+fn client_call_refusals(facts: &Facts) -> usize {
+    facts
+        .refs
+        .iter()
+        .filter(|r| {
+            r.relation == Some(ArtifactRelation::HttpClientCall) && r.target.is_empty()
+        })
+        .count()
 }
 
 // ── AC1: module-level free-function form (`requests`/`httpx`) ───────────────
@@ -317,11 +345,18 @@ def dot_format_composed(user_id):
 "#,
     );
     assert_eq!(
-        client_call_targets(&facts),
+        client_call_references(&facts),
         Vec::<String>::new(),
         "a bare variable, an f-string, a `%`-formatted string and a \
          `.format()`-composed string are each base-url-runtime — no \
-         reference, no ledger entry, no approximate bind"
+         reference and no approximate bind"
+    );
+    assert_eq!(
+        client_call_refusals(&facts),
+        4,
+        "and each declining FUNCTION leaves one keyless row (S-374), so the \
+         reason reaches the coverage tier instead of the site vanishing: {:?}",
+        client_call_targets(&facts)
     );
 }
 
@@ -345,7 +380,13 @@ def call_headers(endpoint):
     return rh.json()
 "#,
     );
-    assert_eq!(client_call_targets(&facts), Vec::<String>::new());
+    assert_eq!(client_call_references(&facts), Vec::<String>::new());
+    // Both call sites sit in ONE function, so the ledger's `(declaration,
+    // target, form, kind, relation)` identity collapses them to a single keyless
+    // row (S-374). Pinned here because this fixture is the real-world shape the
+    // reference-workspace figure is reconciled at: the row count is a count of
+    // declining *declarations*, never of call sites.
+    assert_eq!(client_call_refusals(&facts), 1);
 }
 
 /// Shared negative case **3** — `path-not-composed`. A static, absolute

@@ -61,6 +61,34 @@ fn client_call_targets(facts: &Facts) -> Vec<String> {
         .collect()
 }
 
+/// The arm's captured **references** — every row that named a route.
+///
+/// Since S-374 a declined call site also writes a **keyless** row (an empty
+/// target), so `client_call_targets` alone no longer answers "did this emit a
+/// reference?". It is left unfiltered on purpose — a helper that hid the refusal
+/// would let the refusal path regress unnoticed — and the two populations are
+/// read through these two helpers instead.
+fn client_call_references(facts: &Facts) -> Vec<String> {
+    client_call_targets(facts)
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// The number of keyless refusal rows the arm recorded (S-374): one per declining
+/// declaration, reported as `base-url-runtime` by the [FR-WS-05] coverage tier.
+///
+/// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
+fn client_call_refusals(facts: &Facts) -> usize {
+    facts
+        .refs
+        .iter()
+        .filter(|r| {
+            r.relation == Some(ArtifactRelation::HttpClientCall) && r.target.is_empty()
+        })
+        .count()
+}
+
 // ── 1. The receiver-method idiom — parenthesised and parenthesis-free ──────
 
 /// `conn.get("/users")` — Faraday, parenthesised.
@@ -193,10 +221,16 @@ end
 "#,
     );
     assert!(
-        client_call_targets(&facts).is_empty(),
+        client_call_references(&facts).is_empty(),
         "the hash-rocket form is not unwrapped by pattern 3: {:?}",
         client_call_targets(&facts)
     );
+    // Since S-374 the ceiling is VISIBLE rather than merely stated: the site
+    // records one keyless row and is reported `base-url-runtime`. The doc comment
+    // above already said the classification "is not quite the real reason" — the
+    // row is what puts that claim where a reader of the coverage payload can see
+    // it, instead of only here.
+    assert_eq!(client_call_refusals(&facts), 1);
 }
 
 // ── 2. The shared negative-case fixture contract (S-340, [FR-WS-08]) ────────
@@ -274,10 +308,15 @@ end
         );
         let facts = extract_ruby(&src);
         assert!(
-            client_call_targets(&facts).is_empty(),
+            client_call_references(&facts).is_empty(),
             "a bare variable, an interpolated string, and a relative literal \
              are each base-url-runtime — got {:?} for {body:?}",
             client_call_targets(&facts)
+        );
+        assert_eq!(
+            client_call_refusals(&facts),
+            1,
+            "and the declined site is recorded, not swallowed: {body:?}"
         );
     }
 }
@@ -295,10 +334,11 @@ end
 "##,
     );
     assert!(
-        client_call_targets(&facts).is_empty(),
+        client_call_references(&facts).is_empty(),
         "an interpolated path is base-url-runtime, not approximately matched: {:?}",
         client_call_targets(&facts)
     );
+    assert_eq!(client_call_refusals(&facts), 1, "and it is recorded (S-374)");
 }
 
 /// Shared negative case **3** — `path-not-composed`. A static, absolute
@@ -407,11 +447,14 @@ end
 "#,
     );
     assert!(
-        client_call_targets(&facts).is_empty(),
+        client_call_references(&facts).is_empty(),
         "`URI.parse(...)` is not the bare `URI(...)` Kernel function — no path \
          is unwrapped: {:?}",
         client_call_targets(&facts)
     );
+    // The site still exists (the argument is captured, just not unwrapped), so it
+    // is one recorded `base-url-runtime` refusal (S-374) rather than a silent drop.
+    assert_eq!(client_call_refusals(&facts), 1);
 }
 
 /// **Ceiling.** An unrelated receiver-less constructor named something other
@@ -427,10 +470,11 @@ end
 "#,
     );
     assert!(
-        client_call_targets(&facts).is_empty(),
+        client_call_references(&facts).is_empty(),
         "`MyFactory(...)` is not `URI(...)` — no path is unwrapped: {:?}",
         client_call_targets(&facts)
     );
+    assert_eq!(client_call_refusals(&facts), 1);
 }
 
 /// **Ceiling.** `Net::HTTP::Get.new("/users")` — the `Net::HTTPGenericRequest`
