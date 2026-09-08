@@ -142,10 +142,14 @@ fn cold_start_to_ready_engine_is_within_pe05_budget() {
     //     pool startup + incidental work — real wait the requirement had never
     //     claimed. A user waiting for a ready engine waits for the store too,
     //     so the requirement was amended to bound the whole wait and the
-    //     budget re-derived from the MEASURED full total: 600 ms is ~12%
-    //     headroom over p90 528.4 and ~11% over max 539.8. This guard needed no
-    //     rescoping — it already measured exactly the amended enumeration; only
-    //     its literal moved.
+    //     budget re-derived from the MEASURED full total: 600 ms leaves 71.6 ms
+    //     over the p90 of 528.4 and 60.2 ms over the observed max of 539.8 —
+    //     11.9% and 10.0% of the budget respectively. (CR-116 §9 quotes "~11%
+    //     headroom"; that is the same margin stated as a fraction of the
+    //     measured figure rather than of the budget. Both denominators appear
+    //     in the record, so this comment names the one it uses.) This guard
+    //     needed no rescoping — it already measured exactly the amended
+    //     enumeration; only its literal moved.
     //
     // The bound is tolerance-banded via LOGOS_PERF_TOLERANCE so a loaded CI
     // host can widen it without editing the budget (a breach is re-run in

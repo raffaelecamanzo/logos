@@ -42,8 +42,8 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
   A user waiting for a ready engine waits for the store too, so the requirement
   now enumerates all six phases and bounds their **total** wall time — the whole
   path to a ready engine — at **≤ 600 ms**, re-derived from the measured full
-  total (p90 528.4 / max 539.8 ms, so ~12% headroom) rather than from the old
-  target plus a margin. `LOGOS_PERF_TOLERANCE`'s default stays **1.0**; no cost
+  total: p90 528.4 / max 539.8 ms, leaving 71.6 ms and 60.2 ms of margin (11.9%
+  and 10.0% of the budget), rather than from the old target plus a margin. `LOGOS_PERF_TOLERANCE`'s default stays **1.0**; no cost
   regressed, and no per-phase sub-budgets exist, so no subset of the six may be
   gated as NFR-PE-05 conformance. The 200 ms `Runtime::open` guard, which
   asserted over exactly the phases the old requirement *excluded*, keeps its band
