@@ -619,7 +619,8 @@ fn the_reference_workspace_reports_reconciled_publish_sites_when_one_is_configur
     //     `(source, target, form, kind, relation)`, ignoring `line`. Every refusal
     //     shares `target == ""`, so two refused header-form sites in ONE enclosing
     //     declaration reach the ledger as ONE row (documented at
-    //     `extract::broker::record_refusals`, and asserted directly by
+    //     `extract::config::refs::record_refusals`, the shared recorder S-374
+    //     promoted out of `extract::broker`, and asserted directly by
     //     `refusals_are_attributed_per_declaration_not_per_line`). The equality
     //     therefore holds only while no method carries two header-form publishes —
     //     true of this estate (its two multi-site files put them in separate test

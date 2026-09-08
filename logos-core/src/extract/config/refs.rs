@@ -1,5 +1,10 @@
 //! The cross-artifact reference-capture seam of the config extraction walk
-//! (S-068, CR-011, [ADR-26], [FR-CG-07]) and its Protobuf/GraphQL arms (S-070).
+//! (S-068, CR-011, [ADR-26], [FR-CG-07]) and its Protobuf/GraphQL arms (S-070),
+//! plus the arm-agnostic **invocation** seam the *code* arms share —
+//! [`capture_invocation_refs`] for what they emit (S-251) and
+//! [`record_refusals`] for what they decline (S-370 broker, S-374 HTTP). Those
+//! two have no config-walk caller; they live here because they are the same kind
+//! of thing as [`push_artifact_ref`], which both of them funnel through.
 //!
 //! Sprint 10 ([ADR-25]) shipped the config & artifact layer `Contains`-only: its
 //! typed anchors (`ProtoMessage`, `TfBlock`, `SqlObject`, `ApiOperation`,
@@ -25,6 +30,12 @@
 //! all** — no edge, and no ledger entry to retry — so the ledger stays an honest
 //! work list of genuine workspace-relative misses, never a noise archive of
 //! permanently-unbindable externals ([ADR-26]).
+//!
+//! There is exactly one sanctioned exception, and it is stated on the function
+//! that admits it: an invocation arm's **recorded refusal**, a keyless row that
+//! reports a declined site as an [FR-WS-05] coverage reason and can never bind.
+//! See [`push_artifact_ref`]'s "one admitted non-candidate" and
+//! [`record_refusals`].
 //!
 //! # The per-format dispatch is the consumers' extension point
 //!
@@ -243,8 +254,9 @@ pub(crate) struct RefusalCandidate {
 /// [`capture_invocation_refs`] is the arm-agnostic half of the *emission*
 /// discipline. Written once here because it was built once, for the broker arm
 /// (S-370): a second copy in the HTTP arm is precisely the hand-mirrored twin
-/// that diverges from its original — this file's own sprint risk register names
-/// that failure — so the HTTP arm (S-374) consumes this rather than restating it.
+/// that diverges from its original — the failure mode a hand-mirrored mechanism
+/// in a co-edited file always has — so the HTTP arm (S-374) consumes this rather
+/// than restating it.
 ///
 /// Two mechanisms, both inherited by every arm that supplies candidates:
 ///

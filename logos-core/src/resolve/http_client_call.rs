@@ -211,7 +211,9 @@ mod tests {
 
     /// Acceptance (2) `base-url-runtime`: a runtime-composed path — a bare
     /// variable (no literal captured, dynamic-path slot set) — is refused, and the
-    /// normalizer returns `None` (no reference, no ledger entry).
+    /// normalizer returns `None`, so no reference. Since S-374 the capture arm
+    /// keeps the reason and records a keyless ledger row for such a site; that
+    /// half is asserted at the arm, not here (see this module's docs).
     #[test]
     fn a_bare_variable_path_is_base_url_runtime() {
         // The per-language dispatch could not extract a literal, so it set the
