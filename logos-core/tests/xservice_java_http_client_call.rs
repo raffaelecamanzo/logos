@@ -50,8 +50,9 @@ public class UserGateway {
 "#;
 
 /// The consumer with a runtime-composed path — the base URL is joined at
-/// runtime, so the arm refuses it (`base-url-runtime`): no reference, no bind,
-/// even though a matching provider exists ([NFR-RA-05]).
+/// runtime, so the arm refuses it (`base-url-runtime`): no reference and no
+/// bind even though a matching provider exists ([NFR-RA-05]), but since S-374
+/// **one keyless ledger row** recording the refusal.
 const JAVA_CLIENT_COMPOSED: &str = r#"package com.example.web;
 
 import org.springframework.web.client.RestClient;
@@ -162,8 +163,18 @@ fn a_static_java_client_call_binds_a_spring_route_in_another_member() {
 
 /// A runtime-composed Java client call never binds, even against a provider that
 /// would otherwise match — no approximate edge is fabricated ([NFR-RA-05]).
+///
+/// **And it is reported rather than lost (S-374, [CR-120], [FR-WS-08] AC2.)**
+/// Java is the language CR-120's ~111-row criterion was measured over — 94 of
+/// the 115 production rows are Java — so the arm that carries the figure is the
+/// one that most needs the end-to-end proof, not just the fixture-level one:
+/// the refused call arrives at the [FR-WS-05] coverage tier as a single unbound
+/// row reading `base-url-runtime`, beside the empty edge set above.
+///
+/// [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
 #[test]
-fn a_runtime_composed_java_client_call_never_binds() {
+fn a_runtime_composed_java_client_call_records_a_keyless_refusal_and_never_binds() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
@@ -183,6 +194,24 @@ fn a_runtime_composed_java_client_call_never_binds() {
     assert!(
         edges.is_empty(),
         "a base-url-runtime call never binds — no approximate edge: {edges:?}"
+    );
+
+    // The refusal reaches the coverage tier as a row, not as an absence.
+    let coverage = cross_service_coverage(&registry);
+    assert_eq!(coverage.bound, 0);
+    assert_eq!(coverage.ambiguous, 0);
+    let reasons: Vec<String> = coverage
+        .references
+        .iter()
+        .map(|r| serde_json::to_value(r.state).unwrap().to_string())
+        .collect();
+    assert_eq!(
+        coverage.unbound, 1,
+        "the declined Java call is one unbound row, not an absence: {reasons:?}"
+    );
+    assert!(
+        reasons.iter().any(|r| r.contains("base-url-runtime")),
+        "and it carries the arm's own reason, not `path-not-composed`: {reasons:?}"
     );
 }
 
