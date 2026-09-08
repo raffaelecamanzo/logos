@@ -108,8 +108,8 @@ pub struct Engine {
 /// Per-phase cold-start attribution, produced by
 /// [`Engine::start_with_phase_report`] ([CR-116], [NFR-PE-05], [S-368]).
 ///
-/// [`Engine::start`] itself is untouched — this struct and the function that
-/// produces it exist to answer CR-116 §3.2: whether the phases [NFR-PE-05]
+/// [`Engine::start`] carries none of this timing — this struct and the function
+/// that produces it exist to answer CR-116 §3.2: whether the phases [NFR-PE-05]
 /// enumerated alone exceeded its then-500 ms budget, or whether the excess sat
 /// in phases it did not enumerate (store open, schema migration, pool
 /// startup). **It was the latter** — the three enumerated phases came in at
@@ -122,6 +122,7 @@ pub struct Engine {
 /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
 /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
 /// [S-368]: ../../../docs/planning/journal.md#s-368-attribute-the-cold-start-cost-across-its-phases
+/// [S-369]: ../../../docs/planning/journal.md#s-369-reconcile-the-cold-start-budget-with-what-it-actually-bounds
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ColdStartPhases {
     /// Parsing every grammar's embedded `plugin.toml`.
@@ -142,7 +143,8 @@ pub struct ColdStartPhases {
     /// Everything on the cold path that is not one of the six phases above:
     /// worktree-root resolution, `.logos/` directory creation, worktree-seed
     /// detection/copy, governance-contract seeding, linked-worktree git-hook
-    /// seeding (CR-106), and the post-construction seed-diff reconcile. Exists
+    /// seeding (CR-106), constructing the `Engine` value itself, and the
+    /// post-construction seed-diff reconcile. Exists
     /// so [`sum`](Self::sum) reconciles with the
     /// externally measured wall time rather than merely approximating it
     /// (CR-116 AC1).
@@ -521,17 +523,26 @@ impl Engine {
     ///
     /// Mirrors [`start_with_configs`](Self::start_with_configs) step for step,
     /// timing each phase with a plain `Instant` delta rather than routing
-    /// through it. `Engine::start` is byte-for-byte untouched, so this
-    /// diagnostic path's own overhead never lands on the measured production
-    /// cold start — the delta between this function's wall time and
-    /// `Engine::start`'s over the same root is the instrumentation's own cost
-    /// (CR-116 R2).
+    /// through it. `Engine::start` carries **no** instrumentation — every
+    /// `Instant` lives here — so this diagnostic path's own overhead never
+    /// lands on the measured production cold start, and the delta between this
+    /// function's wall time and `Engine::start`'s over the same root is the
+    /// instrumentation's own cost (CR-116 R2).
+    ///
+    /// This is a *mirror*, not a refactor: the production path is never routed
+    /// through this function. The price is that an edit to
+    /// [`start_with_configs`](Self::start_with_configs)'s call sequence must be
+    /// applied here too — S-338 (hook seeding) and S-369 (the shared
+    /// `--git-common-dir` resolution) both were, each with a side-effect guard
+    /// (`worktree_hooks.rs::a_phase_reported_engine_start_seeds_the_worktree_hooks_too`
+    /// and
+    /// `worktree.rs::a_phase_reported_engine_start_seeds_the_store_and_the_contract_too`).
     ///
     /// [`ColdStartPhases::other`] absorbs everything that is not one of the
     /// six phases [NFR-PE-05] enumerates — root resolution, directory
-    /// creation, worktree-seed detection/copy, linked-worktree git-hook
-    /// seeding (CR-106), and the
-    /// post-construction seed-diff reconcile — so
+    /// creation, worktree-seed detection/copy, governance-contract seeding
+    /// (FR-WT-06), linked-worktree git-hook seeding (CR-106), engine
+    /// construction, and the post-construction seed-diff reconcile — so
     /// [`ColdStartPhases::sum`] reconciles with the externally measured wall
     /// time to within the noise of the handful of `Instant::now()` calls
     /// themselves, not merely "within a stated margin" by approximation.
