@@ -5399,6 +5399,51 @@ mod tests {
         }
     }
 
+    /// **The alias fails loudly on the two shapes it must not silently accept**
+    /// ([CR-120] §7, [NFR-CC-04]).
+    ///
+    /// [`SpecConformanceReading`] is a **public** type, so both of these are part
+    /// of its contract rather than internal detail, and neither was asserted when
+    /// it shipped:
+    ///
+    /// 1. **Both spellings of one field in one payload** — the shape a transitional
+    ///    producer emits. serde rejects it as a duplicate field (its derived visitor
+    ///    checks per field *index*, which an alias shares with its canonical name),
+    ///    so the two never silently disagree and the payload never resolves to
+    ///    whichever key happened to come last. Asserted because "which one wins" is
+    ///    the first question a reader of an aliased field asks, and the answer —
+    ///    *neither, it is an error* — is the one that needs no follow-up.
+    /// 2. **Neither spelling present** — the field's own doc says its absence "means
+    ///    the payload is neither, and that must fail loudly". `default` is
+    ///    deliberately *not* on it, and this is what holds that decision in place: a
+    ///    `default` added later would turn an unrecognised payload into a silent
+    ///    `0 of 0 measured`, which is a fabricated degenerate reading rather than a
+    ///    rejected input.
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn the_alias_rejects_a_double_spelled_field_and_a_payload_of_neither_vintage() {
+        let both = serde_json::json!({
+            "bound_ratio_measured": 7,
+            "spec_conformance_measured": 9,
+            "spec_conformance_summary": "…",
+        });
+        let err = serde_json::from_value::<SpecConformanceReading>(both)
+            .expect_err("a payload spelling one field twice must be rejected, not resolved");
+        assert!(
+            err.to_string().contains("duplicate field"),
+            "…and rejected AS a duplicate, so the diagnostic names the real problem: {err}"
+        );
+
+        let neither = serde_json::json!({ "some_other_shape": true });
+        assert!(
+            serde_json::from_value::<SpecConformanceReading>(neither).is_err(),
+            "a payload carrying neither vintage's denominator must fail loudly — \
+             `spec_conformance_measured` carries no `default` for exactly this reason"
+        );
+    }
+
     /// **The headline counts EDGES, and the rate counts SITES** ([CR-120],
     /// [FR-WS-10]).
     ///

@@ -821,6 +821,102 @@ fn the_coverage_rider_publishes_every_ratios_denominator_and_the_excluded_count(
     );
 }
 
+/// **The rider copies every figure it claims to carry, at NON-ZERO values**
+/// ([CR-111], [CR-120], [BR-51]).
+///
+/// Written because every other assertion on the rider in this repository runs
+/// over the empty workspace: `an_empty_workspace_yields_an_honest_empty_view` and
+/// the never-bare test above both use `registry(&[])`, and the CLI's rider
+/// assertions are `0` / absent / `0` too. So `CoverageRider::new` could have
+/// hardcoded `resolved_cross_service_edges: 0, egress_resolution: None,
+/// egress_resolution_measured: 0` — or swapped two fields — and the whole suite
+/// would have stayed green. The rider's docs say each figure is "carried
+/// verbatim"; this is the test that makes that claim falsifiable.
+///
+/// It builds the summary by hand rather than through `cross_service_coverage`,
+/// deliberately: this file's `FakeEngine` serves no contract surface and no
+/// invocation ledger (see [`MemberContracts`] above), so a registry here can only
+/// ever produce the degenerate summary. Naming all sixteen fields also makes the
+/// copy explicit — a field added to `CrossServiceCoverage` without a decision
+/// about the rider fails to compile here.
+///
+/// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [CR-111]: ../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+/// [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+#[test]
+fn the_rider_carries_every_coverage_figure_verbatim_at_non_zero_values() {
+    use crate::federation::{ClassificationCounts, IntakeSplit};
+
+    // Sixteen distinct values, so a swap between any two fields is visible.
+    let cov = CrossServiceCoverage {
+        references: Vec::new(),
+        bound: 11,
+        ambiguous: 12,
+        unbound: 13,
+        no_provider_in_workspace: 14,
+        by_intake: IntakeSplit {
+            contract_surface: ClassificationCounts {
+                bound: 8,
+                ambiguous: 12,
+                unbound: 13,
+                no_provider_in_workspace: 14,
+            },
+            invocation: ClassificationCounts {
+                bound: 3,
+                ambiguous: 0,
+                unbound: 0,
+                no_provider_in_workspace: 0,
+            },
+        },
+        resolved_cross_service_edges: 7,
+        egress_resolution: Some(0.25),
+        egress_resolution_measured: 16,
+        resolved_edges_summary: "composed elsewhere".to_string(),
+        spec_conformance_ratio: Some(0.5),
+        spec_conformance_measured: 36,
+        spec_conformance_summary: "composed elsewhere".to_string(),
+        members_read: 4,
+        members_total: 5,
+        covers_all_members: false,
+    };
+
+    // `members_read` is deliberately NOT the summary's: the rider counts the
+    // REACHABILITY walk's reads, which can differ. Passed as 9 here so a copy from
+    // `cov.members_read` (4) would fail.
+    let rider = CoverageRider::new(&cov, 9, 5);
+
+    assert_eq!(rider.bound, 11);
+    assert_eq!(rider.ambiguous, 12);
+    assert_eq!(rider.unbound, 13);
+    assert_eq!(rider.no_provider_in_workspace, 14);
+    assert_eq!(
+        rider.resolved_cross_service_edges, 7,
+        "the headline is copied, not recomputed from `bound` and not hardcoded to 0"
+    );
+    assert_eq!(
+        rider.egress_resolution,
+        Some(0.25),
+        "a PRESENT rate reaches the rider — every other test here measures the absent one"
+    );
+    assert_eq!(rider.egress_resolution_measured, 16);
+    assert_eq!(rider.spec_conformance_ratio, Some(0.5));
+    assert_eq!(rider.spec_conformance_measured, 36);
+    assert_eq!(
+        (rider.members_read, rider.members_total),
+        (9, 5),
+        "the rider's member counts are the reachability walk's, NOT the coverage \
+         summary's — the one field it must not copy"
+    );
+
+    // And the whole set reaches the wire, since the rider is a JSON payload every
+    // reachability consumer reads.
+    let wire = serde_json::to_value(rider).unwrap();
+    assert_eq!(wire["resolved_cross_service_edges"], 7);
+    assert_eq!(wire["egress_resolution"], 0.25);
+    assert_eq!(wire["egress_resolution_measured"], 16);
+    assert_eq!(wire["spec_conformance_ratio"], 0.5);
+}
+
 /// The verdict's JSON wire spelling is part of the contract every surface reads.
 /// Asserted directly, because the promotion bucket is empty on the real path
 /// today, so no E2E would catch a rename regression on it.
