@@ -5425,15 +5425,15 @@ mod tests {
         set_member("web", vec![]);
         set_member("audit", vec![]);
         set_member("billing", vec![]);
-        set_consumers("api", vec![broker_publish("orders", "local emitOrder")]);
         for member in ["web", "audit", "billing"] {
             set_consumers(
                 member,
                 vec![broker_subscribe("orders", &format!("local on_{member}"))],
             );
         }
-        // A same-member subscriber: the bridge emits no edge for it, so it must not
-        // reach the count either.
+        // `api` publishes, and also subscribes to its own topic. The same-member
+        // subscriber is here deliberately: the bridge emits no edge for it, so it
+        // must not reach the count either.
         set_consumers(
             "api",
             vec![

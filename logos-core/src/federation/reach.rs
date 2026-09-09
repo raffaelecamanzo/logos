@@ -167,7 +167,15 @@ pub struct ReachabilitySurface {
 /// the rider rides on each claim rather than only on the envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct CoverageRider {
-    /// Cross-boundary references bound to exactly one cross-member provider.
+    /// Cross-boundary references bound to a provider in another member.
+    ///
+    /// **Not "exactly one"**, and the wording matters for the same reason S-377
+    /// corrected it on the field this one is carried verbatim from
+    /// ([`CrossServiceCoverage::bound`](super::coverage::CrossServiceCoverage::bound)):
+    /// under a fan-out discipline ([FR-WS-10]) one broker publish binds *every*
+    /// cross-member subscriber and is counted here once.
+    ///
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
     pub bound: u64,
     /// References with 2+ providers across the workspace (no edge, never
     /// fabricated).

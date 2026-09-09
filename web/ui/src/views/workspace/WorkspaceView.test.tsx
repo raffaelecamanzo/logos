@@ -658,10 +658,7 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
   /** An absent egress rate renders "not measured", never a bar — [CR-100]'s rule on
    *  the successor figure, and the state the honest-empty fixture is in. */
   it("renders an ABSENT egress resolution as 'not measured', with no bar", async () => {
-    const { egress_resolution: _omitted, ...noRate } = {
-      ...COVERAGE,
-      egress_resolution: 0,
-    };
+    const { egress_resolution: _omitted, ...noRate } = COVERAGE;
     stubApi({
       coverage: {
         ...noRate,
