@@ -109,7 +109,7 @@ describe("buildServiceMap (S-250, FR-UI-29)", () => {
         degraded_members: ["web"],
         covers_all_members: false,
       },
-      // `bound_ratio` OMITTED, as the server omits it when nothing was measured
+      // `spec_conformance_ratio` OMITTED, as the server omits it when nothing was measured
       // (S-326): a fixture carrying `1` here would model a payload the server can
       // no longer emit, and the `as unknown as` cast means `tsc` would not notice.
       coverage: {

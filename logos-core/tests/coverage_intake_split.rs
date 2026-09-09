@@ -190,7 +190,7 @@ fn measure_the_intake_split_over_the_reference_workspace_when_one_is_configured(
         cov.ambiguous,
         cov.unbound,
         cov.no_provider_in_workspace,
-        cov.bound_ratio_summary,
+        cov.spec_conformance_summary,
     );
 
     // (2) Every row carries its intake, so a reader can rebuild the split from

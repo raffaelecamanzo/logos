@@ -45,6 +45,25 @@
 //! [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 //! [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+//! # Extended by S-376: the same two contracts, for the resolved-edge headline
+//!
+//! S-376 retires `bound_ratio` and makes `resolved_cross_service_edges` /
+//! `egress_resolution` the headline, and [BR-51] requires the count and the rate
+//! to travel together on **every** surface — so this boundary owes exactly the
+//! two guarantees above for a second vocabulary.
+//!
+//! Those assertions live **here rather than in a file of their own**, and the
+//! reason is this crate's own recorded one: a second parity file would need its
+//! own copy of the two-population fixture below (an OpenAPI spec, a client with
+//! one static and one runtime-composed call, an axum route), and a fixture twin
+//! is the failure this crate already documents at `support/roster.rs` and that
+//! sprint 66's risk register names for `coverage.rs`. The two stories' assertions
+//! are about the *same payload from the same call*, so they share the fixture and
+//! are separated by section instead. The file's name predates S-376; its subject
+//! is the `workspace_status` coverage payload at this boundary.
+//!
+//! [BR-51]: ../../docs/specs/software-spec.md#327-workspace-federation
+//!
 //! [S-372]: ../../docs/planning/journal.md#s-372-coverage-rows-name-the-provider-they-bound-and-the-candidates-they-tied-between
 #![cfg(feature = "lang-all")]
 
@@ -225,4 +244,134 @@ fn the_workspace_status_tool_description_documents_the_intake_split() {
         !description.contains("All three fields are OPTIONAL"),
         "`intake` is no longer one of the CR-118 optional trio (S-377): {description}"
     );
+}
+
+// ── S-376 / CR-120 / BR-51: the headline is a resolved-edge count ────────────
+
+/// **The MCP payload publishes the resolved-edge headline with its rate, and no
+/// longer publishes the retired bound-ratio** ([CR-120] AC1/AC3, [BR-51]).
+///
+/// Over the same two-population fixture, because that is the shape where the
+/// pooled `bound` and the resolved-edge count genuinely differ: the OpenAPI
+/// operation binds AND the static client call binds, so `bound: 2` while only
+/// **one** of them is a resolved cross-service edge. An adapter that republished
+/// the pooled count under the new name would pass a single-population fixture and
+/// fail here, which is the whole reason the fixture is shared.
+///
+/// [BR-51]: ../../docs/specs/software-spec.md#327-workspace-federation
+/// [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+#[tokio::test]
+async fn workspace_status_mcp_publishes_the_resolved_edge_headline_with_its_rate() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let api = root.join("api");
+    let web = root.join("web");
+    write(&api, "api/openapi.yaml", OPENAPI_YAML);
+    write(&api, "src/client.rs", API_CLIENT);
+    write(&web, "src/main.rs", AXUM_MAIN);
+    index_member(&api);
+    index_member(&web);
+
+    let (client, server) =
+        boot(registry("shop", root, vec![member("api", &api), member("web", &web)])).await;
+    let status = workspace_status(&client).await;
+    let coverage = &status["coverage"];
+
+    // AC1 at this boundary: the retired key is gone under all three spellings.
+    for retired in ["bound_ratio", "bound_ratio_measured", "bound_ratio_summary"] {
+        assert!(
+            coverage.get(retired).is_none(),
+            "`{retired}` must be absent from the MCP payload (CR-120 AC1): {coverage}"
+        );
+    }
+
+    // The headline: one resolved edge, not the pooled `bound: 2`.
+    assert_eq!(coverage["bound"], 2, "{coverage}");
+    assert_eq!(
+        coverage["resolved_cross_service_edges"], 1,
+        "only the captured call site is a resolved cross-service edge — the OpenAPI \
+         operation's match is documentation conformance: {coverage}"
+    );
+    // …and its rate, over the invocation population's own denominator (the bound
+    // call plus the runtime-composed call's recorded refusal).
+    assert_eq!(coverage["egress_resolution"], 0.5, "{coverage}");
+    assert_eq!(coverage["egress_resolution_measured"], 2, "{coverage}");
+    assert_eq!(
+        coverage["resolved_edges_summary"],
+        "1 resolved cross-service edges; egress resolution 0.500 (1 of 2 egress sites resolved)",
+        "the count and the rate arrive as one composed line (BR-51): {coverage}"
+    );
+    // The renamed ratio is still published, still never bare.
+    assert_eq!(coverage["spec_conformance_measured"], 3, "{coverage}");
+    assert!(
+        coverage["spec_conformance_summary"].is_string(),
+        "the composed spec-conformance line rides too: {coverage}"
+    );
+
+    client.cancel().await.ok();
+    server.abort();
+}
+
+/// **The shipped tool description explains the headline it now carries** — the
+/// second half of the same duty, on the surface where the description *is* the
+/// documentation ([NFR-CC-04]).
+///
+/// The negative half matters as much as the positive one: a description that still
+/// told an agent to read `coverage.bound_ratio` would send it to a key the payload
+/// no longer has, and an agent has no requirement file to correct it with.
+#[test]
+fn the_workspace_status_tool_description_documents_the_resolved_edge_headline() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let tools = LogosMcp::federated(registry("shop", tmp.path(), Vec::new())).list_tools();
+    let description = tools
+        .iter()
+        .find(|t| t.name == "workspace_status")
+        .and_then(|t| t.description.clone())
+        .expect("the federated roster registers `workspace_status` with a description");
+
+    for token in [
+        // The headline and its rate — named together, because BR-51's duty is the
+        // pairing and a description that explained only one would licence exactly
+        // the reading the pairing exists to prevent.
+        "`coverage.resolved_cross_service_edges`",
+        "`coverage.egress_resolution`",
+        "`coverage.egress_resolution_measured`",
+        "`coverage.resolved_edges_summary`",
+        // The renamed ratio and its two disclosure fields.
+        "`coverage.spec_conformance_ratio`",
+        "`coverage.spec_conformance_measured`",
+        "`coverage.spec_conformance_summary`",
+    ] {
+        assert!(
+            description.contains(token),
+            "the `workspace_status` description must explain {token} — on this \
+             surface the description IS the documentation (NFR-CC-04)"
+        );
+    }
+
+    // And it must state the retirement rather than leave the old key described.
+    assert!(
+        description.contains("`bound_ratio` IS NO LONGER SENT"),
+        "the description must say the retired key is gone, so an agent does not \
+         keep reaching for it: {description}"
+    );
+
+    // The reachability rider's description owes the same pairing — it is the
+    // fourth rendering CR-111 found missing the denominator, and it now carries
+    // the successor headline too.
+    let reachability = tools
+        .iter()
+        .find(|t| t.name == "workspace_reachability")
+        .and_then(|t| t.description.clone())
+        .expect("the federated roster registers `workspace_reachability`");
+    for token in [
+        "`coverage.resolved_cross_service_edges`",
+        "`coverage.egress_resolution`",
+        "`coverage.spec_conformance_ratio`",
+    ] {
+        assert!(
+            reachability.contains(token),
+            "the `workspace_reachability` rider description must explain {token}"
+        );
+    }
 }

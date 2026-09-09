@@ -1,0 +1,76 @@
+{
+  "artifact": "S-376 / CR-120 post-change coverage baseline for the reference workspace",
+  "workspace": "~/source/pec-services (84 members, all read; covers_all_members: true)",
+  "measured_on": "2026-09-09",
+  "measured_by": "logos-core/tests/coverage_headline_baseline.rs, through the same discover -> EngineRegistry(Lazy) -> cross_service_coverage construction `logos workspace status` uses",
+  "reconciled_against": "logos-docs/ws-status-2026-09-08-v1.4.7.json — the pre-change capture sprint 66 §7 names for this purpose. All four classification counts and the composed ratio line reproduce from it exactly; only the payload's field names and the added headline differ.",
+  "read_only_proof": "252 store files (logos.db / telemetry.db / *.db-wal) across all 84 members hashed by mtime+size before and after the run: 0 changed, every WAL 0 bytes. Nothing was indexed, enrolled or wiped.",
+  "generation": {
+    "index_built_by": "logos 1.4.7",
+    "index_built_on": "2026-09-08",
+    "read_by": "sprint-66-I5-S1 (S-376) working tree",
+    "payload_shape": "post-CR-120 (S-376)",
+    "contains_s374_refusal_rows": false,
+    "why": "Refusal rows are written at INDEX time. This store was cold-indexed on 2026-09-08 with logos 1.4.7, before S-374 merged, so it holds none of S-374's ~115 HTTP client-call refusal rows. Re-enrolling the 84-member workspace is a human-gated step at sprint review (sprint 66 §7), so this baseline is deliberately a post-change PAYLOAD SHAPE over a pre-S-374 INDEX GENERATION. Quoting it as a post-S-374 measurement would attribute the later rise in the invocation unbound column to the wrong cause.",
+    "refresh_procedure": "At the sprint-review human gate, on a binary built from this sprint's merged main: (1) `logos init --workspace --yes` at ~/source/pec-services — this re-enrols the root and spawns the detached warm supervisor that indexes the 84 members (~43 s to return; a root `logos index` covers the ROOT ONLY, 3 files, and that is correct). (2) Wait for `.logos.workspace.warm.json` to report every member warm. (3) Re-run this harness with `LOGOS_REF_WORKSPACE=~/source/pec-services LOGOS_BASELINE_WRITE=1 cargo test -p logos-core --test coverage_headline_baseline -- --nocapture`, which rewrites the `measurement` block below. (4) Restate the `deltas` entries whose status is `pending-reindex` as `observed`, with the figures the run produced. (5) Commit the artifact and the finding beside it.",
+    "figures_the_refresh_would_change": "`unbound` and `by_intake.invocation.unbound` rise by ~115 production rows (S-374's measured figure; ~131 if the walk admits the test tree, which indexing does); `egress_resolution_measured` rises with them, 54 -> ~169; `spec_conformance_measured` rises 282 -> ~397 and `spec_conformance_ratio` falls 0.287 -> ~0.204. `resolved_cross_service_edges` and `egress_resolution` DO NOT MOVE: a recorded refusal never binds, so the numerator stays 0 and the rate stays 0.000. `bound`, `ambiguous` and `no_provider_in_workspace` do not move either."
+  },
+  "headline_reading": "ZERO cross-service edges in this estate are resolved from a captured call site, over 54 captured egress sites — while the retired bound_ratio read 0.287 on the same data and the pooled `bound` reads 81. All 81 are contract-surface matches (an OpenAPI operation matched to a controller route), and by_intake.invocation.bound is 0. That contrast is CR-120's entire case.",
+  "deltas": {
+    "S-374": {
+      "story": "The HTTP client-call arm records its refusals",
+      "status": "pending-reindex",
+      "effect": "Not observable in these figures, because the store predates the merge and refusal rows are written at index time. Expected direction: WORSE, and that is the correction working. Expected magnitude on the re-index: +115 production `invocation`/`unbound` rows with reason `base-url-runtime` (S-374's own measured figure over this estate; 131 workspace-wide including the test tree, which an index run does not separate), against a prior count of ZERO. `egress_resolution_measured` 54 -> ~169 and `spec_conformance_measured` 282 -> ~397; `spec_conformance_ratio` 0.287 -> ~0.204. `resolved_cross_service_edges` stays 0 and `egress_resolution` stays 0.000, because a refusal never binds.",
+      "evidence": "logos-core/tests/operand_resolvability/client_call_refusal_finding.txt"
+    },
+    "S-375": {
+      "story": "The client-call detector gate is receiver-grained, not file-grained",
+      "status": "observed",
+      "effect": "ZERO change to every figure here, and that zero is a measured result rather than an absence. The narrowing removed 4 Java sites, all verified false positives (three list-index accesses and a cookie-map put), none of which emitted a reference: the workspace-wide genuine `http-client-call` reference count is 1 before and 1 after. Its real effect is on S-374's denominator on the NEXT index: against a file-grained gate, refusal recording would have written 4 ledger rows for a list index and a cookie put, so the ~115 above would have been ~119 — the 'manufactures a coverage denominator out of ordinary code' hazard CR-120 §7 names, avoided.",
+      "evidence": "sprint-impl-66.md, S-375 reference-workspace measurement table (before/after 98 -> 94 Java sites, 1 -> 1 workspace emitted)"
+    },
+    "S-377": {
+      "story": "Coverage reports its intake on every row",
+      "status": "observed",
+      "effect": "Additive to the payload, and it moves NO count: `intake` became unconditional on all 929 rows (848 of which carried none) and the `by_intake` block was added, derived from the same tally the four headline counters are now derived from. It is what makes this baseline's decisive figure legible at all — `by_intake.invocation.bound: 0` beside a headline `bound: 81`. Measured payload cost on the reference workspace's shape: +2.9% compact bytes.",
+      "evidence": "logos-core/tests/coverage_intake_split/intake_split_finding.txt"
+    },
+    "S-376": {
+      "story": "Retire the bound-ratio; the headline is a resolved-edge count (this story)",
+      "status": "observed",
+      "effect": "Renames three summary fields and adds four; moves no classification count. `bound_ratio 0.287` is now `spec_conformance_ratio 0.287` with its composed line byte-identical, and the new headline reads `resolved_cross_service_edges: 0` with `egress_resolution: 0.000 (0 of 54 egress sites resolved)`. Measured payload cost on the reference workspace's shape: under 0.1% compact bytes, all of it on the summary object and none per-row.",
+      "evidence": "federation::coverage::tests::payload_growth_is_measured_against_the_reference_workspace_shape (S-376 rider)"
+    }
+  },
+  "measurement": {
+    "references": 929,
+    "bound": 81,
+    "ambiguous": 146,
+    "unbound": 55,
+    "no_provider_in_workspace": 647,
+    "by_intake": {
+      "contract_surface": {
+        "bound": 81,
+        "ambiguous": 146,
+        "unbound": 1,
+        "no_provider_in_workspace": 646
+      },
+      "invocation": {
+        "bound": 0,
+        "ambiguous": 0,
+        "unbound": 54,
+        "no_provider_in_workspace": 1
+      }
+    },
+    "resolved_cross_service_edges": 0,
+    "egress_resolution": 0.0,
+    "egress_resolution_measured": 54,
+    "resolved_edges_summary": "0 resolved cross-service edges; egress resolution 0.000 (0 of 54 egress sites resolved)",
+    "spec_conformance_ratio": 0.2872340425531915,
+    "spec_conformance_measured": 282,
+    "spec_conformance_summary": "0.287 (81 of 282 measured; 647 excluded as no-provider-in-workspace)",
+    "members_read": 84,
+    "members_total": 84,
+    "covers_all_members": true
+  }
+}

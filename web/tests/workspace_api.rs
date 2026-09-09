@@ -244,7 +244,7 @@ async fn workspace_status_reports_name_members_and_coverage() {
     names.sort_unstable();
     assert_eq!(names, ["api", "web"], "both members are repo-qualified: {body}");
     // The 3-state coverage summary is always present (advisory tier, S-247).
-    // Asserted on a field that is ALWAYS emitted: since S-326 `bound_ratio` is
+    // Asserted on a field that is ALWAYS emitted: since S-326 the ratio is
     // `skip_serializing_if`, so its presence means "the denominator was non-zero",
     // not "the summary is here" — two different claims that this assertion used to
     // conflate.
@@ -253,7 +253,7 @@ async fn workspace_status_reports_name_members_and_coverage() {
         "coverage summary present: {body}"
     );
     assert_eq!(
-        v["coverage"]["bound_ratio"], 1.0,
+        v["coverage"]["spec_conformance_ratio"], 1.0,
         "and this fixture DOES bind one reference, so the ratio is measured: {body}"
     );
     // CR-111 / FR-WS-05: the ratio never travels bare on the web serve surface
@@ -262,9 +262,9 @@ async fn workspace_status_reports_name_members_and_coverage() {
     // own small numbers: 1 of 1 measured, 0 excluded — the CR-111 pec-services
     // numbers, 6 of 7 / 899 excluded, are pinned verbatim at the core unit-test and
     // web-model/-view layers, where a 906-reference fixture is constructible).
-    assert_eq!(v["coverage"]["bound_ratio_measured"], 1, "{body}");
+    assert_eq!(v["coverage"]["spec_conformance_measured"], 1, "{body}");
     assert_eq!(
-        v["coverage"]["bound_ratio_summary"],
+        v["coverage"]["spec_conformance_summary"],
         "1.000 (1 of 1 measured; 0 excluded as no-provider-in-workspace)",
         "{body}"
     );
@@ -328,10 +328,10 @@ async fn workspace_status_reports_name_members_and_coverage() {
 
 /// CR-111 / S-327, over the web serve surface: a workspace whose only
 /// cross-boundary reference has no provider anywhere reports a zero denominator —
-/// `bound_ratio` absent — and the excluded count is STILL reported, never
-/// suppressed alongside the absent ratio.
+/// `spec_conformance_ratio` absent — and the excluded count is STILL reported,
+/// never suppressed alongside the absent ratio.
 #[tokio::test]
-async fn workspace_status_reports_the_excluded_count_when_the_bound_ratio_is_absent() {
+async fn workspace_status_reports_the_excluded_count_when_the_ratio_is_absent() {
     let tmp = workspace_with_openapi(ORPHAN_OPENAPI_YAML);
     let router = ws_router(&tmp);
     let resp = router.oneshot(get("/api/v1/workspace/status")).await.unwrap();
@@ -340,15 +340,77 @@ async fn workspace_status_reports_the_excluded_count_when_the_bound_ratio_is_abs
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
 
     assert!(
-        v["coverage"].get("bound_ratio").is_none(),
+        v["coverage"].get("spec_conformance_ratio").is_none(),
         "a zero denominator is absent, never a fabricated score: {body}"
     );
-    assert_eq!(v["coverage"]["bound_ratio_measured"], 0, "{body}");
+    assert_eq!(v["coverage"]["spec_conformance_measured"], 0, "{body}");
     assert_eq!(v["coverage"]["no_provider_in_workspace"], 1, "{body}");
     assert_eq!(
-        v["coverage"]["bound_ratio_summary"],
+        v["coverage"]["spec_conformance_summary"],
         "0 of 0 measured; 1 excluded as no-provider-in-workspace",
         "the excluded count is reported even though the ratio itself is absent: {body}"
+    );
+}
+
+/// **S-376/[CR-120]/[BR-51] over the web serve surface: the headline is a
+/// resolved-edge count, and it never travels without its rate** ([FR-WS-05]'s
+/// surface-parity rule).
+///
+/// Driven through the **real router** over the both-intakes fixture, following
+/// S-372's and S-377's precedent: the coverage dashboard reads this endpoint, and
+/// a projection introduced between the read-model and the response would pass
+/// every core test while leaving the board showing a retired figure.
+///
+/// The fixture is the one shape where the two populations disagree usefully — the
+/// OpenAPI operation binds AND the static client call binds — so `bound: 2` and
+/// `resolved_cross_service_edges: 1` are different numbers here, and an
+/// implementation that published the pooled count under the new name would fail.
+///
+/// [BR-51]: ../../docs/specs/software-spec.md#327-workspace-federation
+/// [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+#[tokio::test]
+async fn workspace_status_publishes_the_resolved_edge_headline_with_its_egress_rate() {
+    let tmp = workspace_with_both_intakes();
+    let router = ws_router(&tmp);
+    let resp = router.oneshot(get("/api/v1/workspace/status")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let coverage = &v["coverage"];
+
+    // AC1 on this surface: the retired key is gone under all three spellings.
+    for retired in ["bound_ratio", "bound_ratio_measured", "bound_ratio_summary"] {
+        assert!(
+            coverage.get(retired).is_none(),
+            "`{retired}` must be absent from the web payload (CR-120 AC1): {body}"
+        );
+    }
+
+    // The headline: ONE resolved edge (the static client call), not the pooled
+    // `bound: 2` — the OpenAPI operation's match is documentation conformance, not
+    // a resolved call.
+    assert_eq!(coverage["bound"], 2, "{body}");
+    assert_eq!(
+        coverage["resolved_cross_service_edges"], 1,
+        "only the captured call site is a resolved cross-service edge: {body}"
+    );
+    // …and the rate beside it, over the invocation population's own denominator
+    // (one bound call plus one recorded refusal, S-374).
+    assert_eq!(coverage["egress_resolution"], 0.5, "{body}");
+    assert_eq!(coverage["egress_resolution_measured"], 2, "{body}");
+    assert_eq!(
+        coverage["resolved_edges_summary"],
+        "1 resolved cross-service edges; egress resolution 0.500 (1 of 2 egress sites resolved)",
+        "the count and the rate arrive as one composed line, so a view cannot render \
+         one without the other (BR-51): {body}"
+    );
+    // The spec-conformance ratio is still published beside it, still never bare.
+    assert_eq!(coverage["spec_conformance_measured"], 3, "{body}");
+    assert!(
+        coverage["spec_conformance_summary"]
+            .as_str()
+            .is_some_and(|s| s.contains("of 3 measured")),
+        "{body}"
     );
 }
 

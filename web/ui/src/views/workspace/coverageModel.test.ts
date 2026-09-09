@@ -48,9 +48,16 @@ function coverage(references: ReferenceCoverage[], summary: Partial<CrossService
     unbound: 0,
     no_provider_in_workspace: 0,
     by_intake: { contract_surface: counts(), invocation: counts() },
-    bound_ratio: 1,
-    bound_ratio_measured: 0,
-    bound_ratio_summary: "",
+    spec_conformance_ratio: 1,
+    spec_conformance_measured: 0,
+    spec_conformance_summary: "",
+    // The CR-120 headline, in its degenerate shape by default: a count of 0 with
+    // `egress_resolution` OMITTED, exactly as the server sends it when no egress
+    // site was captured. Individual cases override it through `summary`.
+    resolved_cross_service_edges: 0,
+    egress_resolution_measured: 0,
+    resolved_edges_summary:
+      "0 resolved cross-service edges; egress resolution not measured (0 of 0 egress sites)",
     members_read: 2,
     members_total: 2,
     covers_all_members: true,
@@ -112,7 +119,7 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
           ...unbound("route", "no-provider-in-workspace", 3),
           ...unbound("grpc-call", "ambiguous", 1),
         ],
-        { bound: 1, ambiguous: 1, unbound: 1, no_provider_in_workspace: 3, bound_ratio: 0.5 },
+        { bound: 1, ambiguous: 1, unbound: 1, no_provider_in_workspace: 3, spec_conformance_ratio: 0.5 },
       ),
     );
     const sum = (f: (a: (typeof model.arms)[number]) => number) =>
@@ -126,21 +133,21 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
     expect(route).toMatchObject({ bound: 1, ambiguous: 0, unbound: 1, noProvider: 3, total: 5 });
   });
 
-  it("displays the server's bound_ratio VERBATIM — it never recomputes it", () => {
+  it("displays the server's spec_conformance_ratio VERBATIM — it never recomputes it", () => {
     // The server excludes `no-provider-in-workspace` from the denominator (ADR-53):
     // 1 bound, 1 unbound, 3 no-provider → 1/2 = 0.5, NOT 1/5. A view that recomputed
     // naively would report 20% and silently contradict the CLI.
     const model = buildCoverageDashboard(
       coverage(
         [...bound("route", 1), ...unbound("route", "path-not-composed", 1), ...unbound("route", "no-provider-in-workspace", 3)],
-        { bound: 1, unbound: 1, no_provider_in_workspace: 3, bound_ratio: 0.5 },
+        { bound: 1, unbound: 1, no_provider_in_workspace: 3, spec_conformance_ratio: 0.5 },
       ),
     );
-    expect(model.boundRatio).toBe(0.5);
+    expect(model.specConformanceRatio).toBe(0.5);
     expect(model.noProviderInWorkspace).toBe(3);
   });
 
-  // ── CR-111 / FR-WS-05: the bound-ratio never travels without its scale ─────
+  // ── CR-111 / FR-WS-05: the ratio never travels without its scale ──────────
 
   it("carries the server's explicit denominator and composed summary line VERBATIM", () => {
     // The exact CR-111 headline: bound: 6, ambiguous: 0, unbound: 1 (denominator 7),
@@ -154,47 +161,99 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
         bound: 6,
         unbound: 1,
         no_provider_in_workspace: 899,
-        bound_ratio: 6 / 7,
-        bound_ratio_measured: 7,
-        bound_ratio_summary: "0.857 (6 of 7 measured; 899 excluded as no-provider-in-workspace)",
+        spec_conformance_ratio: 6 / 7,
+        spec_conformance_measured: 7,
+        spec_conformance_summary: "0.857 (6 of 7 measured; 899 excluded as no-provider-in-workspace)",
       }),
     );
-    expect(model.boundRatioMeasured).toBe(7);
-    expect(model.boundRatioSummary).toBe(
+    expect(model.specConformanceMeasured).toBe(7);
+    expect(model.specConformanceSummary).toBe(
       "0.857 (6 of 7 measured; 899 excluded as no-provider-in-workspace)",
     );
   });
 
+  // ── S-376 / CR-120 / BR-51: the headline is a resolved-edge count ──────────
+
+  it("carries the resolved-edge headline and its egress rate VERBATIM", () => {
+    // The reference estate's shape in miniature: `bound: 1` (a declared endpoint
+    // matched to a controller) beside 0 resolved edges over 2 captured egress
+    // sites. The model must not conflate them — that conflation is CR-120's defect.
+    const model = buildCoverageDashboard(
+      coverage([...bound("route", 1), ...unbound("route", "base-url-runtime", 2, "invocation")], {
+        bound: 1,
+        unbound: 2,
+        by_intake: {
+          contract_surface: counts({ bound: 1 }),
+          invocation: counts({ unbound: 2 }),
+        },
+        resolved_cross_service_edges: 0,
+        egress_resolution: 0,
+        egress_resolution_measured: 2,
+        resolved_edges_summary:
+          "0 resolved cross-service edges; egress resolution 0.000 (0 of 2 egress sites resolved)",
+      }),
+    );
+    expect(model.resolvedCrossServiceEdges).toBe(0);
+    expect(model.egressResolution).toBe(0);
+    expect(model.egressResolutionMeasured).toBe(2);
+    expect(model.resolvedEdgesSummary).toBe(
+      "0 resolved cross-service edges; egress resolution 0.000 (0 of 2 egress sites resolved)",
+    );
+    // …and the pooled ratio still reads healthy over the same data, which is why
+    // the headline moved: 1 bound of 3 measured is 0.333, and none of it is a
+    // resolved call.
+    expect(model.bound).toBe(1);
+  });
+
+  it("carries an ABSENT egress resolution through as null, never as a number", () => {
+    // The CR-100 rule on the successor figure. `0` would claim every captured call
+    // failed to resolve and `1` that every one succeeded; the truth is that none
+    // was captured, so the rate has no denominator.
+    const { egress_resolution: _omitted, ...withoutRate } = coverage([...bound("route", 1)], {
+      bound: 1,
+      egress_resolution: 0,
+      egress_resolution_measured: 0,
+      resolved_edges_summary:
+        "0 resolved cross-service edges; egress resolution not measured (0 of 0 egress sites)",
+    });
+    const model = buildCoverageDashboard(withoutRate as CrossServiceCoverage);
+
+    expect(model.egressResolution).toBeNull();
+    expect(model.egressResolutionMeasured).toBe(0);
+    expect(model.resolvedCrossServiceEdges).toBe(0);
+    expect(model.resolvedEdgesSummary).toContain("not measured");
+  });
+
   it("flags the ratio as dominated-by-excluded when the excluded bucket outweighs the denominator", () => {
     const dominated = buildCoverageDashboard(
-      coverage([], { bound: 6, unbound: 1, no_provider_in_workspace: 899, bound_ratio_measured: 7 }),
+      coverage([], { bound: 6, unbound: 1, no_provider_in_workspace: 899, spec_conformance_measured: 7 }),
     );
     expect(dominated.ratioDominatedByExcluded).toBe(true);
 
     const healthy = buildCoverageDashboard(
-      coverage([], { bound: 9, ambiguous: 1, no_provider_in_workspace: 2, bound_ratio_measured: 10 }),
+      coverage([], { bound: 9, ambiguous: 1, no_provider_in_workspace: 2, spec_conformance_measured: 10 }),
     );
     expect(healthy.ratioDominatedByExcluded).toBe(false);
 
     // The boundary: excluded EQUALS measured. "Dominates" means outweighs, not
     // ties — pins the strict `>` comparison against an accidental `>=`.
     const tied = buildCoverageDashboard(
-      coverage([], { bound: 6, unbound: 1, no_provider_in_workspace: 7, bound_ratio_measured: 7 }),
+      coverage([], { bound: 6, unbound: 1, no_provider_in_workspace: 7, spec_conformance_measured: 7 }),
     );
     expect(tied.ratioDominatedByExcluded).toBe(false);
   });
 
   it("still exposes the denominator and excluded count when the ratio itself is absent (S-327)", () => {
-    const { bound_ratio: _omitted, ...withoutRatio } = coverage([], {
+    const { spec_conformance_ratio: _omitted, ...withoutRatio } = coverage([], {
       no_provider_in_workspace: 899,
-      bound_ratio_measured: 0,
-      bound_ratio_summary: "0 of 0 measured; 899 excluded as no-provider-in-workspace",
+      spec_conformance_measured: 0,
+      spec_conformance_summary: "0 of 0 measured; 899 excluded as no-provider-in-workspace",
     });
     const model = buildCoverageDashboard(withoutRatio as CrossServiceCoverage);
 
-    expect(model.boundRatio).toBeNull();
-    expect(model.boundRatioMeasured).toBe(0);
-    expect(model.boundRatioSummary).toBe("0 of 0 measured; 899 excluded as no-provider-in-workspace");
+    expect(model.specConformanceRatio).toBeNull();
+    expect(model.specConformanceMeasured).toBe(0);
+    expect(model.specConformanceSummary).toBe("0 of 0 measured; 899 excluded as no-provider-in-workspace");
     expect(model.ratioDominatedByExcluded).toBe(true);
   });
 
@@ -206,11 +265,11 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
 
   // ── S-326 / FR-WS-05 / NFR-CC-04: absence is not a score ──────────────────
 
-  it("carries an ABSENT bound_ratio through as null, never as a number", () => {
+  it("carries an ABSENT spec_conformance_ratio through as null, never as a number", () => {
     // The server omits the key when its denominator is 0. Defaulting it to 0 or 1
     // here would reinstate exactly the fabrication CR-100 filed: `bound: 0` beside
     // a perfect ratio, over a workspace that was three-quarters unopened.
-    const { bound_ratio: _omitted, ...withoutRatio } = coverage([
+    const { spec_conformance_ratio: _omitted, ...withoutRatio } = coverage([
       ...unbound("route", "no-provider-in-workspace", 3),
     ]);
     const model = buildCoverageDashboard({
@@ -218,7 +277,7 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
       no_provider_in_workspace: 3,
     } as CrossServiceCoverage);
 
-    expect(model.boundRatio).toBeNull();
+    expect(model.specConformanceRatio).toBeNull();
     expect(model.noProviderInWorkspace).toBe(3);
   });
 
@@ -226,7 +285,7 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
     const model = buildCoverageDashboard(
       coverage([...bound("route", 1)], {
         bound: 1,
-        bound_ratio: 1,
+        spec_conformance_ratio: 1,
         members_read: 9,
         members_total: 72,
         covers_all_members: false,
@@ -309,7 +368,7 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
         },
       },
     ];
-    const summary = { bound: 1, ambiguous: 1, bound_ratio: 0.5, bound_ratio_measured: 2 };
+    const summary = { bound: 1, ambiguous: 1, spec_conformance_ratio: 0.5, spec_conformance_measured: 2 };
 
     const older = buildCoverageDashboard(coverage(withoutFields, summary));
     const current = buildCoverageDashboard(coverage(withFields, summary));

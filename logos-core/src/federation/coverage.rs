@@ -26,14 +26,14 @@
 //! # `no-provider-in-workspace` is bucketed separately ([ADR-53])
 //! A reference whose key has no provider anywhere in the workspace is not a
 //! defect — the provider repo simply isn't a member of this workspace. It is
-//! reported in its own bucket, excluded from the `bound_ratio` denominator, so
-//! a sparse workspace reads as *measured*, not broken.
+//! reported in its own bucket, excluded from the `spec_conformance_ratio`
+//! denominator, so a sparse workspace reads as *measured*, not broken.
 //!
 //! [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 //! [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::model::{BridgeNamespace, BridgeRole, MatchDiscipline, NodeKind};
 use crate::resolve::http_client_call::ClientCallRefusal;
@@ -427,7 +427,7 @@ pub struct ProviderCandidates {
     /// prevent. It is *derived*, so it is also the only field here that can be
     /// wrong on its own; it is asserted verbatim at every arity it can render.
     ///
-    /// Kin to [`CrossServiceCoverage::bound_ratio_summary`] ([CR-111]) in shape,
+    /// Kin to [`CrossServiceCoverage::spec_conformance_summary`] ([CR-111]) in shape,
     /// though not in force: that line carries a denominator the payload otherwise
     /// hides, whereas this one restates siblings that are present.
     ///
@@ -708,8 +708,8 @@ impl ClassificationCounts {
             CoverageState::Unbound { reason } => match reason {
                 UnboundReason::Ambiguous => self.ambiguous += 1,
                 // `no-provider-in-workspace` is its own bucket, deliberately OUTSIDE
-                // the `bound_ratio` denominator: a reference to a service outside this
-                // workspace is not a *broken* binding ([ADR-53]).
+                // the `spec_conformance_ratio` denominator: a reference to a service
+                // outside this workspace is not a *broken* binding ([ADR-53]).
                 UnboundReason::NoProviderInWorkspace => self.no_provider_in_workspace += 1,
                 _ => self.unbound += 1,
             },
@@ -832,8 +832,8 @@ pub struct CrossServiceCoverage {
     /// no-provider-in-workspace (today: an uncomposable template).
     pub unbound: u64,
     /// References with no provider anywhere in the workspace — bucketed
-    /// separately so they never depress [`bound_ratio`](Self::bound_ratio)
-    /// ([ADR-53]).
+    /// separately so they never depress
+    /// [`spec_conformance_ratio`](Self::spec_conformance_ratio) ([ADR-53]).
     pub no_provider_in_workspace: u64,
     /// The same four counts **split by intake population** — `contract-surface`
     /// (a declared endpoint) apart from `invocation` (a captured call site)
@@ -853,8 +853,122 @@ pub struct CrossServiceCoverage {
     /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub by_intake: IntakeSplit,
+    /// **The workspace headline** ([FR-WS-05], [CR-120], [BR-51]): how many
+    /// cross-service edges the bridge actually resolved from a captured
+    /// **invocation** — a caller→callee HTTP client call, a producer→consumer
+    /// broker publish, a gRPC stub call.
+    ///
+    /// Deliberately **not** [`bound`](Self::bound). A `contract-surface` bound row
+    /// is an OpenAPI operation matched to a controller route — documentation
+    /// conformance, which [ADR-52] itself distinguishes from reachability — and
+    /// pooling it with resolved call sites is what let the retired bound-ratio
+    /// read `0.287` over a workspace with **zero** caller→callee edges ([CR-120]
+    /// §2). A count of resolved edges cannot improve while the capability it
+    /// describes stays constant, which is the property the ratio lacked: the
+    /// ratio moved *downward* as [CR-107] and [CR-117] made invisible losses
+    /// visible.
+    ///
+    /// # It counts edges, not sites — and here the two differ
+    ///
+    /// Under an exactly-one discipline one resolved reference is one edge. Under
+    /// **fan-out** ([FR-WS-10]) one broker publish binds *every* cross-member
+    /// subscriber and the bridge emits one edge per subscriber, so that single
+    /// reference contributes its whole bound set. So this figure is computed from
+    /// the rows' own named providers — [`to`](ReferenceCoverage::to) for a sole
+    /// provider, the bound set's pre-truncation
+    /// [`ProviderCandidates::total`] for a fan-out — which also means a reader can
+    /// reconcile it against [`references`](Self::references) rather than take it
+    /// on trust, exactly as [`by_intake`](Self::by_intake) can be.
+    ///
+    /// It is therefore **not** [`egress_resolution`](Self::egress_resolution)'s
+    /// numerator: that rate is over resolved *sites*. Publishing a count of sites
+    /// under the word "edges" would be the same name/meaning mismatch [CR-120]
+    /// exists to remove, so the two are computed separately and each says what it
+    /// counts. They coincide at every arity except fan-out.
+    ///
+    /// Never published without the rate beside it ([BR-51]) — the structural form
+    /// of that duty is
+    /// [`resolved_edges_summary`](Self::resolved_edges_summary).
+    ///
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    /// [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    pub resolved_cross_service_edges: u64,
+    /// The rate at which captured **egress sites resolve at all**:
+    /// `invocation.bound / (invocation.bound + invocation.ambiguous +
+    /// invocation.unbound)`, over [`by_intake`](Self::by_intake)'s invocation
+    /// population alone ([FR-WS-05], [CR-120]).
+    ///
+    /// *Egress* is that population: an outbound call site an invocation arm
+    /// captured. The contract-surface population is not egress — an OpenAPI
+    /// operation is a declaration, not a call — which is exactly why this rate
+    /// cannot be read off [`spec_conformance_ratio`](Self::spec_conformance_ratio).
+    ///
+    /// **Absent** (`null` in `--json`) when that denominator is zero, never a
+    /// perfect score: [CR-100]'s rule applied to the successor figure, which
+    /// [BR-51] states rather than leaving to be rediscovered. A workspace where no
+    /// egress site was captured has *no measurement*, and `1.0` there would say
+    /// every outbound call resolves.
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub egress_resolution: Option<f64>,
+    /// The denominator [`egress_resolution`](Self::egress_resolution) was computed
+    /// over — the invocation population's `bound + ambiguous + unbound`, stated
+    /// explicitly so a consumer never re-implements it. [CR-111]'s
+    /// denominator-disclosure duty, applied to the new figure from its first
+    /// release rather than after an incident.
+    ///
+    /// Present even when the rate is absent: `0` here *is* the fact that no egress
+    /// site was captured, which is what an absent rate means and what a reader
+    /// would otherwise have to guess ([NFR-CC-04]).
+    ///
+    /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub egress_resolution_measured: u64,
+    /// The resolved-edge count and its resolution rate **as one line** — the
+    /// structural form of [BR-51]: a surface that renders the headline renders the
+    /// rate, because there is one field and it carries both.
+    ///
+    /// e.g. `"0 resolved cross-service edges; egress resolution 0.000 (0 of 54
+    /// egress sites resolved)"`, or, with nothing captured, `"0 resolved
+    /// cross-service edges; egress resolution not measured (0 of 0 egress
+    /// sites)"`.
+    ///
+    /// Modelled on [`spec_conformance_summary`](Self::spec_conformance_summary)
+    /// ([CR-111] §4.4): one composed field that both the human and the `--json`
+    /// rendering serialize, so neither can regress while the other stays honest.
+    /// [BR-51] exists *because* the retired ratio acquired that duty only after an
+    /// incident; its successor carries it on release one.
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+    pub resolved_edges_summary: String,
     /// `bound / (bound + ambiguous + unbound)`, excluding
     /// `no_provider_in_workspace` from the denominator ([ADR-53]).
+    ///
+    /// **The retired `bound_ratio`'s formula, unchanged, under the name of what it
+    /// always measured** ([CR-120] §5.2, [FR-WS-05]). It is dominated by
+    /// `contract-surface` intake — on the 84-member reference estate all 81 of its
+    /// bound rows are declared-contract matches — so it reports how far this
+    /// workspace's *declarations* line up with its controllers, and it is **never**
+    /// a measure of cross-service coupling. That headline is
+    /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges), and
+    /// [`by_intake`](Self::by_intake) says exactly how this numerator divides.
+    ///
+    /// The formula stays over the **pooled** population rather than being re-based
+    /// onto contract-surface alone. [CR-120] §5.2 puts the change as "name change
+    /// only", and re-basing the denominator in the same increment would make every
+    /// recorded figure — the 2026-09-08 pre-change baseline included —
+    /// incomparable with its successor for two reasons at once, which is precisely
+    /// what makes a delta unattributable.
     ///
     /// **Absent** (`null` in `--json`) when that denominator is zero, never a
     /// perfect score ([FR-WS-05], [NFR-CC-04]). `0 / 0` is not full coverage; it
@@ -863,16 +977,25 @@ pub struct CrossServiceCoverage {
     /// `bound_ratio: 1.0` ([CR-100]). An `Option` rather than a sentinel so a
     /// consumer that ignores absence fails to compile instead of lying.
     ///
+    /// The old key is **not emitted**: an external reader of `--json` gets a
+    /// missing field and fails loudly rather than silently reading a figure that
+    /// no longer means what it did ([CR-120] §7). Its deprecated
+    /// **deserialization** alias, retained for one release, is
+    /// [`SpecConformanceReading`].
+    ///
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bound_ratio: Option<f64>,
-    /// The denominator [`bound_ratio`](Self::bound_ratio) was computed over —
-    /// `bound + ambiguous + unbound`, explicitly, so a `--json` consumer reads
-    /// the ratio's scale without re-implementing the sum itself ([CR-111]).
+    pub spec_conformance_ratio: Option<f64>,
+    /// The denominator
+    /// [`spec_conformance_ratio`](Self::spec_conformance_ratio) was computed
+    /// over — `bound + ambiguous + unbound`, explicitly, so a `--json` consumer
+    /// reads the ratio's scale without re-implementing the sum itself ([CR-111]).
     ///
-    /// Present even when `bound_ratio` is absent (a zero denominator serializes
+    /// Present even when the ratio is absent (a zero denominator serializes
     /// this as `0`): the ratio's own scale is exactly the fact a bare `0.857`
     /// hides, and [`no_provider_in_workspace`](Self::no_provider_in_workspace)
     /// beside it is the excluded count the ratio never carried before this
@@ -881,21 +1004,27 @@ pub struct CrossServiceCoverage {
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
     /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
-    pub bound_ratio_measured: u64,
-    /// The bound-ratio, never presented bare ([FR-WS-05], [CR-111]): the ratio's
-    /// own value (when present) followed by its denominator and the count
-    /// excluded as `no-provider-in-workspace` — e.g. `"0.857 (6 of 7 measured; 899
-    /// excluded as no-provider-in-workspace)"`, or, on an absent ratio, `"0 of 0
-    /// measured; 899 excluded as no-provider-in-workspace"` (S-327: the excluded
-    /// count is reported regardless of whether anything was measured).
+    pub spec_conformance_measured: u64,
+    /// The spec-conformance ratio, never presented bare ([FR-WS-05], [CR-111]):
+    /// the ratio's own value (when present) followed by its denominator and the
+    /// count excluded as `no-provider-in-workspace` — e.g. `"0.857 (6 of 7
+    /// measured; 899 excluded as no-provider-in-workspace)"`, or, on an absent
+    /// ratio, `"0 of 0 measured; 899 excluded as no-provider-in-workspace"`
+    /// (S-327: the excluded count is reported regardless of whether anything was
+    /// measured).
+    ///
+    /// The line's **wording is unchanged** across the rename — it names figures,
+    /// not fields — so a recorded pre-change capture and a post-change one compare
+    /// directly, which is what keeps the [CR-120] deltas attributable.
     ///
     /// Both `workspace status`'s human and `--json` renderings serialize this
     /// same field — one line, in both outputs, that can never regress on one
     /// surface while the other stays honest ([CR-111] §4.4).
     ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
-    pub bound_ratio_summary: String,
+    pub spec_conformance_summary: String,
     /// Members whose contract surface this summary actually read.
     pub members_read: u64,
     /// Members declared in the workspace — the roster this summary was computed
@@ -914,6 +1043,67 @@ pub struct CrossServiceCoverage {
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub covers_all_members: bool,
+}
+
+/// The spec-conformance figures read back out of a **serialized** coverage
+/// payload of either vintage — the home of `bound_ratio`'s deprecated
+/// deserialization alias, retained for one release ([CR-120] §7,
+/// [FR-WS-05]).
+///
+/// # Why the alias lives here and not on [`CrossServiceCoverage`]
+///
+/// It would be on the read-model itself if the read-model could derive
+/// `Deserialize`, and it cannot: [`ReferenceCoverage::bucket`] is a
+/// `&'static str` (a display token derived from the state, deliberately not an
+/// owned copy of it), so no borrowed-data deserializer can produce one. Changing
+/// that field's type to buy an alias would be a wire-shape change made for a
+/// compatibility shim, which is a worse trade than three fields read back
+/// explicitly.
+///
+/// # Why this is not a hand-mirrored twin of the read-model
+///
+/// Sprint 66's risk register names a hand-mirrored twin in this file as the
+/// recorded failure mode, so the distinction is stated rather than assumed. This
+/// type **produces no figure**: it computes nothing, classifies nothing, and its
+/// three fields are the exact three whose *spelling* changed. It is a reader, and
+/// the twin failure was a second producer that drifted from the first. It is also
+/// pinned against the real read-model rather than against a fixture — 
+/// `the_deprecated_bound_ratio_alias_reads_both_vintages` serializes an actual
+/// [`CrossServiceCoverage`] and asserts this type reads the same three values
+/// back — so drift fails a test rather than going unnoticed.
+///
+/// # What it is for
+///
+/// Comparing a recorded pre-change capture with a post-change one. The reference
+/// workspace's 2026-09-08 baseline is a pre-change payload spelling these three
+/// figures `bound_ratio*`; the [CR-120] deltas are stated against it, so reading
+/// both vintages through one type is what makes that comparison a single
+/// operation rather than a fork on vintage at every call site.
+///
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SpecConformanceReading {
+    /// [`CrossServiceCoverage::spec_conformance_ratio`], under either spelling.
+    ///
+    /// `default` as well as `alias`, because the key is **absent** from both
+    /// vintages on a zero denominator — the [CR-100] guarantee — and a reader
+    /// that treated absence as a parse failure would reject exactly the payloads
+    /// that guarantee produces.
+    ///
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    #[serde(default, alias = "bound_ratio")]
+    pub spec_conformance_ratio: Option<f64>,
+    /// [`CrossServiceCoverage::spec_conformance_measured`], under either
+    /// spelling. Not `default`: it is present in both vintages even at zero, so
+    /// its absence means the payload is neither, and that must fail loudly.
+    #[serde(alias = "bound_ratio_measured")]
+    pub spec_conformance_measured: u64,
+    /// [`CrossServiceCoverage::spec_conformance_summary`], under either
+    /// spelling. The composed line's wording did not change across the rename, so
+    /// two vintages' summaries compare directly.
+    #[serde(alias = "bound_ratio_summary")]
+    pub spec_conformance_summary: String,
 }
 
 /// Classify every cross-boundary reference over `registry`'s members
@@ -1216,8 +1406,9 @@ impl Tally {
     /// broker subscribe is a **provider**, and a provider is not a reference — it
     /// contributes no [`ReferenceCoverage`] row and so no numerator. A *refused*
     /// one now contributes an `unbound` row, which **is** inside this denominator.
-    /// So a member whose listeners are half captured reads `bound_ratio: 0.000`,
-    /// and one whose listeners are all captured reads no ratio at all.
+    /// So a member whose listeners are half captured reads
+    /// `spec_conformance_ratio: 0.000`, and one whose listeners are all captured
+    /// reads no ratio at all.
     ///
     /// The `path-not-composed` precedent this arm was asked to match is not exact:
     /// that reason sits on the *consumer* side, where its bound counterpart **is**
@@ -1234,7 +1425,7 @@ impl Tally {
     /// not hold: that reason means the coupling genuinely *leaves* the workspace, so
     /// there was never anything here to bind, whereas a capture refusal means the
     /// coupling is *inside* the workspace and this extractor could not resolve it.
-    /// Excluding it would make `bound_ratio` improve precisely because [CR-107] and
+    /// Excluding it would make the ratio improve precisely because [CR-107] and
     /// [CR-117] made previously-invisible losses visible — a measure that rewards
     /// better instrumentation by reading better is the wrong shape, and the opposite
     /// of what [NFR-CC-04] asks for. The count stays legible either way: the
@@ -1261,9 +1452,30 @@ impl Tally {
         // over the same numbers a reader can reconcile against `by_intake`.
         let total = self.by_intake.total();
         let denom = total.bound + total.ambiguous + total.unbound;
-        let bound_ratio = (denom > 0).then(|| total.bound as f64 / denom as f64);
-        let bound_ratio_summary =
-            summarize_bound_ratio(total.bound, denom, total.no_provider_in_workspace, bound_ratio);
+        let spec_conformance_ratio = (denom > 0).then(|| total.bound as f64 / denom as f64);
+        let spec_conformance_summary = summarize_spec_conformance(
+            total.bound,
+            denom,
+            total.no_provider_in_workspace,
+            spec_conformance_ratio,
+        );
+
+        // The successor headline ([CR-120], [BR-51]). Its two figures have
+        // different numerators on purpose — resolved *edges* against resolved
+        // *sites* — so each is computed from the thing it names, and they are
+        // composed into one line so neither can be rendered without the other.
+        let egress = self.by_intake.invocation;
+        let egress_denom = egress.bound + egress.ambiguous + egress.unbound;
+        let egress_resolution =
+            (egress_denom > 0).then(|| egress.bound as f64 / egress_denom as f64);
+        let resolved_cross_service_edges = resolved_edges(&self.references);
+        let resolved_edges_summary = summarize_resolved_edges(
+            resolved_cross_service_edges,
+            egress.bound,
+            egress_denom,
+            egress_resolution,
+        );
+
         CrossServiceCoverage {
             references: self.references,
             bound: total.bound,
@@ -1271,9 +1483,13 @@ impl Tally {
             unbound: total.unbound,
             no_provider_in_workspace: total.no_provider_in_workspace,
             by_intake: self.by_intake,
-            bound_ratio,
-            bound_ratio_measured: denom,
-            bound_ratio_summary,
+            resolved_cross_service_edges,
+            egress_resolution,
+            egress_resolution_measured: egress_denom,
+            resolved_edges_summary,
+            spec_conformance_ratio,
+            spec_conformance_measured: denom,
+            spec_conformance_summary,
             members_read: members_read as u64,
             members_total: members_total as u64,
             covers_all_members: members_read == members_total,
@@ -1281,23 +1497,110 @@ impl Tally {
     }
 }
 
-/// Compose the [`CrossServiceCoverage::bound_ratio_summary`] line: the ratio's
-/// own value — when present — followed by the denominator it was computed over
-/// and the count excluded as `no-provider-in-workspace`, so the ratio is never
-/// presented bare at any presentation site ([FR-WS-05], [CR-111]).
+/// Count the cross-service edges the bridge resolved from captured invocations —
+/// [`CrossServiceCoverage::resolved_cross_service_edges`] ([CR-120], [FR-WS-10]).
+///
+/// Read off the rows' own named providers rather than tallied beside them, for
+/// the reason the fan-out case makes concrete: a bound fan-out reference is **one
+/// row and many edges**, and the multiplicity lives in the row's bound set, not in
+/// a counter. Deriving it here means a reader can reconcile this figure against
+/// `references` with the same arithmetic — which is what stops a headline from
+/// being a number nobody can check, the whole subject of [CR-120].
+///
+/// [`ProviderCandidates::total`] is the **pre-truncation** count, so a fan-out
+/// wider than [`CANDIDATE_LIMIT`] contributes all of its edges and not the eight
+/// that happen to be listed ([NFR-CC-04]).
+///
+/// Contract-surface rows are excluded by construction: an OpenAPI operation
+/// matched to a controller route is documentation conformance, not a resolved
+/// call ([ADR-52], [CR-120] §2).
+///
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn resolved_edges(references: &[ReferenceCoverage]) -> u64 {
+    references
+        .iter()
+        .filter(|r| {
+            r.intake == BridgeIntake::Invocation && matches!(r.state, CoverageState::Bound)
+        })
+        .map(|r| match (&r.to, &r.candidates) {
+            // An exactly-one discipline: one provider, one edge.
+            (Some(_), _) => 1,
+            // Fan-out: the bridge emits one edge per cross-member subscriber, and
+            // the row names that whole set.
+            (None, Some(c)) => c.total,
+            // Structurally unreachable — a bound row always names what it bound
+            // to — and counted as one rather than dropped, because under-counting
+            // an edge that exists is the direction that flatters.
+            (None, None) => 1,
+        })
+        .sum()
+}
+
+/// Compose the [`CrossServiceCoverage::spec_conformance_summary`] line: the
+/// ratio's own value — when present — followed by the denominator it was computed
+/// over and the count excluded as `no-provider-in-workspace`, so the ratio is
+/// never presented bare at any presentation site ([FR-WS-05], [CR-111]).
 ///
 /// The excluded count is reported even when `ratio` is `None` (a zero
 /// denominator, [S-327]): "0 of 0 measured, N excluded" is the informative
 /// statement, and suppressing both leaves a reader with nothing.
 ///
-/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// **The wording is unchanged from the retired bound-ratio's line** ([CR-120]
+/// renamed the field, not the sentence). That is deliberate: the sentence names
+/// figures rather than fields, so a pre-change capture and a post-change one
+/// compare directly and each [CR-120] delta stays attributable to a cause rather
+/// than to a reformatting.
+///
 /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 /// [S-327]: ../../../docs/planning/journal.md#s-327-absent-bound-ratio-on-a-zero-denominator
-fn summarize_bound_ratio(bound: u64, denom: u64, excluded: u64, ratio: Option<f64>) -> String {
+fn summarize_spec_conformance(bound: u64, denom: u64, excluded: u64, ratio: Option<f64>) -> String {
     let measured = format!("{bound} of {denom} measured");
     match ratio {
         Some(r) => format!("{r:.3} ({measured}; {excluded} excluded as no-provider-in-workspace)"),
         None => format!("{measured}; {excluded} excluded as no-provider-in-workspace"),
+    }
+}
+
+/// Compose the [`CrossServiceCoverage::resolved_edges_summary`] line — the
+/// **structural** form of [BR-51]: the resolved-edge count and the egress
+/// resolution rate in one string, so a surface physically cannot render the count
+/// without the rate ([FR-WS-05], [CR-120]).
+///
+/// `resolved` is the edge count and `bound_sites` the rate's numerator; they
+/// differ only under fan-out, where one resolved site is several edges. Both are
+/// stated rather than one being derived from the other at a presentation site,
+/// because that derivation is exactly where a figure acquires a meaning it does
+/// not have.
+///
+/// An absent rate reads "not measured", never `0.000` and never `1.000` — [CR-100]'s
+/// rule, which [BR-51] restates for this figure: no egress site captured is *no
+/// measurement*, and both a zero and a full reading of it would be claims about
+/// outbound calls that nothing supports.
+///
+/// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+fn summarize_resolved_edges(
+    resolved: u64,
+    bound_sites: u64,
+    egress_denom: u64,
+    rate: Option<f64>,
+) -> String {
+    match rate {
+        Some(r) => format!(
+            "{resolved} resolved cross-service edges; egress resolution {r:.3} \
+             ({bound_sites} of {egress_denom} egress sites resolved)"
+        ),
+        None => format!(
+            "{resolved} resolved cross-service edges; egress resolution not measured \
+             ({bound_sites} of {egress_denom} egress sites)"
+        ),
     }
 }
 
@@ -1612,14 +1915,14 @@ mod tests {
         );
         assert_eq!(cov.bound, 0);
         assert_eq!(
-            cov.bound_ratio, None,
+            cov.spec_conformance_ratio, None,
             "0 bound of an empty denominator is NOT a perfect score — the exact \
              `bound: 0, bound_ratio: 1.0` CR-100 observed"
         );
 
         let value = serde_json::to_value(&cov).unwrap();
         assert!(
-            value.get("bound_ratio").is_none(),
+            value.get("spec_conformance_ratio").is_none(),
             "and it reaches the wire absent, not as a number: {value}"
         );
         assert_eq!(value["covers_all_members"], false);
@@ -1646,7 +1949,7 @@ mod tests {
             "the provider was in the member whose surface could not be read"
         );
         assert_eq!(cov.bound, 0);
-        assert_eq!(cov.bound_ratio, None);
+        assert_eq!(cov.spec_conformance_ratio, None);
     }
 
     /// **[CR-100]'s shape at its extreme**: no member opens at all, so the
@@ -1672,13 +1975,13 @@ mod tests {
         assert_eq!(cov.no_provider_in_workspace, 0, "no consumer was even read");
         assert!(cov.references.is_empty());
         assert_eq!(
-            cov.bound_ratio, None,
+            cov.spec_conformance_ratio, None,
             "a summary over zero members measures NOTHING — the 1.0 this replaces \
              is what made the observed partial workspace look healthy"
         );
 
         let value = serde_json::to_value(&cov).unwrap();
-        assert!(value.get("bound_ratio").is_none(), "{value}");
+        assert!(value.get("spec_conformance_ratio").is_none(), "{value}");
         assert_eq!(value["covers_all_members"], false);
     }
 
@@ -1692,7 +1995,7 @@ mod tests {
         assert_eq!(cov.members_read, 0);
         assert_eq!(cov.members_total, 0);
         assert!(cov.covers_all_members, "0 of 0 members is covered");
-        assert_eq!(cov.bound_ratio, None, "and nothing is measured");
+        assert_eq!(cov.spec_conformance_ratio, None, "and nothing is measured");
     }
 
     /// A consumer with exactly one cross-member provider classifies `Bound`.
@@ -1711,7 +2014,7 @@ mod tests {
         assert_eq!(cov.references.len(), 1);
         assert_eq!(cov.references[0].state, CoverageState::Bound);
         assert_eq!(cov.references[0].relation, "route");
-        assert_eq!(cov.bound_ratio, Some(1.0));
+        assert_eq!(cov.spec_conformance_ratio, Some(1.0));
     }
 
     /// A row built with no provider evidence at all — the shape every row had
@@ -2550,8 +2853,8 @@ mod tests {
             cov.references
         );
         assert_eq!(cov.no_provider_in_workspace, 1);
-        assert_eq!(cov.bound_ratio, Some(2.0 / 6.0));
-        assert_eq!(cov.bound_ratio_measured, 6);
+        assert_eq!(cov.spec_conformance_ratio, Some(2.0 / 6.0));
+        assert_eq!(cov.spec_conformance_measured, 6);
 
         // Each arm's contribution, so a count that moved between the arms cannot
         // hide inside a total that happens to reconcile.
@@ -2744,8 +3047,42 @@ mod tests {
         );
 
         let after = serde_json::to_string(&cov).unwrap().len();
-        // The same payload as it was before CR-118: strip [CR-118]'s three row keys
-        // AND S-377's summary block, changing nothing else.
+
+        /// Rewind [S-376]'s summary keys on a serialized copy: drop the four the
+        /// story adds and restore the three it renamed to their retired
+        /// spellings.
+        ///
+        /// The same discipline as the `by_intake` strip below and for the same
+        /// recorded reason — a baseline that claims to predate a change must not
+        /// carry any of it. Without this the pre-CR-118 figure would carry
+        /// S-376's key renames (+21 bytes) and its four new summary keys, and
+        /// **both** byte-exact reconstructions below would fail against figures
+        /// [S-372] recorded, which is exactly how this rewind was found.
+        ///
+        /// [S-376]: ../../../docs/planning/journal.md#s-376-retire-the-bound-ratio-the-headline-is-a-resolved-edge-count
+        fn rewind_s376(value: &mut serde_json::Value) {
+            let obj = value.as_object_mut().unwrap();
+            for added in [
+                "resolved_cross_service_edges",
+                "egress_resolution",
+                "egress_resolution_measured",
+                "resolved_edges_summary",
+            ] {
+                obj.remove(added);
+            }
+            for (now, retired) in [
+                ("spec_conformance_ratio", "bound_ratio"),
+                ("spec_conformance_measured", "bound_ratio_measured"),
+                ("spec_conformance_summary", "bound_ratio_summary"),
+            ] {
+                if let Some(v) = obj.remove(now) {
+                    obj.insert(retired.to_string(), v);
+                }
+            }
+        }
+
+        // The same payload as it was before CR-118: strip [CR-118]'s three row keys,
+        // S-377's summary block AND S-376's headline rename, changing nothing else.
         //
         // The `by_intake` removal is load-bearing, not tidiness. Without it this
         // baseline carries 185 bytes of S-377 (the block plus its comma) while
@@ -2755,6 +3092,7 @@ mod tests {
         // those 185 bytes. Stripped, `before` reproduces S-372's recorded 195 044
         // to the byte, which is what makes the two riders separable at all.
         let mut value = serde_json::to_value(&cov).unwrap();
+        rewind_s376(&mut value);
         value.as_object_mut().unwrap().remove("by_intake");
         for row in value["references"].as_array_mut().unwrap() {
             let row = row.as_object_mut().unwrap();
@@ -2816,6 +3154,7 @@ mod tests {
         // reconstructed exactly: `intake` on the bound rows only (where CR-118 put
         // it), and no `by_intake` block on the summary.
         let mut prior = serde_json::to_value(&cov).unwrap();
+        rewind_s376(&mut prior);
         prior.as_object_mut().unwrap().remove("by_intake");
         for row in prior["references"].as_array_mut().unwrap() {
             let row = row.as_object_mut().unwrap();
@@ -2852,11 +3191,37 @@ mod tests {
              {pre_s377} → {after} bytes (+{:.1}%)",
             universal_intake * 100.0
         );
+
+        // **S-376's own increment, separated from the two above.** Four summary
+        // keys and three renames, on the summary object only — nothing per-row —
+        // so on a payload dominated by 875 reference rows it must be a rounding
+        // error. That is the claim, and it is measured rather than asserted: a
+        // headline that cost a per-row key would be a different design decision,
+        // and this is where it would show up.
+        let mut pre_s376_value = serde_json::to_value(&cov).unwrap();
+        rewind_s376(&mut pre_s376_value);
+        let pre_s376 = serde_json::to_string(&pre_s376_value).unwrap().len();
+        let headline = (after - pre_s376) as f64 / pre_s376 as f64;
+        println!(
+            "S-376 increment on the same shape: {pre_s376} → {after} bytes (+{:.3}%) \
+             — four summary keys plus three renames, none of them per-row",
+            headline * 100.0
+        );
+        // Ranged in both directions, like its two siblings: a zero would mean the
+        // headline stopped being emitted at all, in the test named for measuring
+        // it, and an upper bound catches a per-row key added by mistake.
+        assert!(
+            (0.0001..0.01).contains(&headline),
+            "the S-376 headline is a summary-object rider, not a per-row cost: \
+             {pre_s376} → {after} bytes (+{:.3}%)",
+            headline * 100.0
+        );
     }
 
     /// No provider anywhere in the workspace classifies as its own bucket,
-    /// separate from `unbound`, and never enters the bound-ratio denominator
-    /// ([ADR-53] acceptance).
+    /// separate from `unbound`, and never enters the `spec_conformance_ratio`
+    /// denominator ([ADR-53] acceptance — the rule is unchanged by [CR-120]'s
+    /// rename, which is why this test is unchanged too).
     #[test]
     fn no_provider_in_workspace_is_bucketed_separately_and_excluded_from_ratio() {
         reset();
@@ -2876,7 +3241,7 @@ mod tests {
             }
         );
         assert_eq!(
-            cov.bound_ratio, None,
+            cov.spec_conformance_ratio, None,
             "the no-provider bucket is excluded from the denominator, which leaves it \
              EMPTY — and 0/0 is reported absent, never as the perfect score it used to \
              fabricate (FR-WS-05, NFR-CC-04)"
@@ -3083,9 +3448,11 @@ mod tests {
         assert_eq!(cov2.bound, 1);
     }
 
-    /// The bound-ratio is computed over bound+ambiguous+unbound only.
+    /// `spec_conformance_ratio` is computed over bound+ambiguous+unbound only —
+    /// the retired bound-ratio's formula, carried forward unchanged in meaning
+    /// ([CR-120] §5.2 "name change only").
     #[test]
-    fn bound_ratio_excludes_no_provider_but_includes_ambiguous_and_unbound() {
+    fn spec_conformance_ratio_excludes_no_provider_but_includes_ambiguous_and_unbound() {
         reset();
         set_member(
             "api",
@@ -3110,18 +3477,18 @@ mod tests {
         assert_eq!(cov.ambiguous, 1);
         assert_eq!(cov.unbound, 1);
         assert_eq!(cov.no_provider_in_workspace, 1);
-        assert_eq!(cov.bound_ratio, Some(1.0 / 3.0), "1 bound of 3 counted (bound+ambiguous+unbound)");
+        assert_eq!(cov.spec_conformance_ratio, Some(1.0 / 3.0), "1 bound of 3 counted (bound+ambiguous+unbound)");
         assert_eq!(
-            cov.bound_ratio_measured, 3,
+            cov.spec_conformance_measured, 3,
             "the explicit denominator field agrees with the ratio it was computed over (CR-111)"
         );
         assert_eq!(
-            cov.bound_ratio_summary, "0.333 (1 of 3 measured; 1 excluded as no-provider-in-workspace)",
+            cov.spec_conformance_summary, "0.333 (1 of 3 measured; 1 excluded as no-provider-in-workspace)",
             "the ratio is never presented without its denominator and excluded count (CR-111)"
         );
     }
 
-    // ── CR-111 / FR-WS-05: the bound-ratio never travels without its scale ────
+    // ── CR-111 / FR-WS-05: the ratio never travels without its scale ─────────
 
     /// The motivating near-degenerate case itself, at the `Tally` level (a full
     /// 906-reference fixture is impractical to construct here — this pins the
@@ -3140,7 +3507,7 @@ mod tests {
     ///
     /// [S-327]: ../../../docs/planning/journal.md#s-327-absent-bound-ratio-on-a-zero-denominator
     #[test]
-    fn bound_ratio_summary_states_the_pec_services_near_degenerate_case() {
+    fn spec_conformance_summary_states_the_pec_services_near_degenerate_case() {
         let tally = Tally {
             by_intake: IntakeSplit {
                 contract_surface: ClassificationCounts {
@@ -3155,11 +3522,11 @@ mod tests {
         };
         let cov = tally.finish(83, 83);
 
-        assert_eq!(cov.bound_ratio, Some(6.0 / 7.0));
-        assert_eq!(cov.bound_ratio_measured, 7);
+        assert_eq!(cov.spec_conformance_ratio, Some(6.0 / 7.0));
+        assert_eq!(cov.spec_conformance_measured, 7);
         assert_eq!(cov.no_provider_in_workspace, 899);
         assert_eq!(
-            cov.bound_ratio_summary,
+            cov.spec_conformance_summary,
             "0.857 (6 of 7 measured; 899 excluded as no-provider-in-workspace)",
             "the exact CR-111 headline: correct AND legible, describing 7 of 906 references"
         );
@@ -3171,7 +3538,7 @@ mod tests {
     ///
     /// [S-327]: ../../../docs/planning/journal.md#s-327-absent-bound-ratio-on-a-zero-denominator
     #[test]
-    fn bound_ratio_summary_reports_the_excluded_count_when_the_ratio_is_absent() {
+    fn spec_conformance_summary_reports_the_excluded_count_when_the_ratio_is_absent() {
         let tally = Tally {
             by_intake: IntakeSplit {
                 contract_surface: ClassificationCounts {
@@ -3186,10 +3553,10 @@ mod tests {
         };
         let cov = tally.finish(1, 1);
 
-        assert_eq!(cov.bound_ratio, None, "a zero denominator is absent, never a fabricated score");
-        assert_eq!(cov.bound_ratio_measured, 0);
+        assert_eq!(cov.spec_conformance_ratio, None, "a zero denominator is absent, never a fabricated score");
+        assert_eq!(cov.spec_conformance_measured, 0);
         assert_eq!(
-            cov.bound_ratio_summary, "0 of 0 measured; 899 excluded as no-provider-in-workspace",
+            cov.spec_conformance_summary, "0 of 0 measured; 899 excluded as no-provider-in-workspace",
             "the excluded count is STILL reported when the ratio itself is absent"
         );
     }
@@ -3298,7 +3665,7 @@ mod tests {
 
     /// A client call with no matching route anywhere is bucketed
     /// `no-provider-in-workspace` (outside the boundary, not a defect), excluded
-    /// from the bound-ratio denominator.
+    /// from the `spec_conformance_ratio` denominator.
     #[test]
     fn a_client_call_with_no_route_is_no_provider_in_workspace() {
         reset();
@@ -3310,7 +3677,7 @@ mod tests {
         assert_eq!(cov.no_provider_in_workspace, 1);
         assert_eq!(cov.bound, 0);
         assert_eq!(
-            cov.bound_ratio, None,
+            cov.spec_conformance_ratio, None,
             "the only reference is bucketed out of the denominator, so there is nothing \
              measured — absent, not 1.0 (NFR-CC-04)"
         );
@@ -3782,7 +4149,7 @@ mod tests {
         // The non-defect bucket does not drag the bound ratio down — it empties
         // the denominator entirely, and 0/0 is reported absent rather than as a
         // perfect score ([NFR-CC-04]).
-        assert_eq!(cov.bound_ratio, None);
+        assert_eq!(cov.spec_conformance_ratio, None);
     }
 
     /// **[CR-107] acceptance: a refused topic reaches the payload.** The
@@ -4247,6 +4614,127 @@ mod tests {
         }
     }
 
+    /// **Every headline field is documented on every surface that documents the
+    /// payload, and the count is never documented without its rate** (S-376,
+    /// [CR-120], [BR-51], [NFR-CC-04]).
+    ///
+    /// The third member of the family
+    /// [`every_unbound_reason_is_documented_on_every_surface_that_enumerates_them`]
+    /// and
+    /// [`every_intake_token_and_split_key_is_documented_on_every_payload_surface`]
+    /// belong to, and it exists for the recorded reason both of them do: a closed
+    /// list of hand-mirrored surfaces with nothing checking it rots, and
+    /// `docs/howto/commands.md` was missed for releases the last time a vocabulary
+    /// grew. S-376 renames three payload fields and adds four, across the operator
+    /// manual, the TypeScript wire type and the dashboard model — the same shape,
+    /// for a third vocabulary.
+    ///
+    /// # The [BR-51] half is the one that is not merely bookkeeping
+    ///
+    /// Naming both fields is not enough: a surface must state the **duty that
+    /// binds them**, by citing [BR-51]. That is deliberately a check on the rule
+    /// rather than on the pair, because a check on the pair would be unfalsifiable
+    /// here — the positive list above already requires both names, so "mentions
+    /// the count but not the rate" is a state no surface can reach. An arm that
+    /// cannot fail is the defect S-378 spent a story removing, so it is not
+    /// written.
+    ///
+    /// What the rule-citation arm catches is the case that actually happens: a
+    /// surface that lists the two fields as two independent figures, leaving a
+    /// reader free to quote the count alone. That is how a resolved-edge count
+    /// becomes read as a coverage percentage — the misreading [CR-120] was filed
+    /// about. It sits beside the payload-layer guard
+    /// [`the_resolved_edge_count_is_never_published_without_its_egress_rate`],
+    /// which stops the *server* emitting a bare count; neither implies the other.
+    ///
+    /// # A plain `contains` is enough here, and that is a property of the tokens
+    ///
+    /// Its siblings need an enumeration shape (a backtick, a union arm, a map key)
+    /// because `ambiguous` and `invocation` are also ordinary English words, so a
+    /// bare substring test could not fail. These tokens are unique snake_case
+    /// identifiers that occur nowhere in prose, so a plain `contains` is already
+    /// falsifiable — each was checked by deleting it from each surface. Requiring
+    /// a shape on top would only reject the honest mention `coverage.egress_resolution`
+    /// that the dashboard model actually makes.
+    ///
+    /// The retired `bound_ratio` is deliberately **not** asserted absent from these
+    /// surfaces: all three document the retirement in prose, and that is correct
+    /// documentation rather than rot. Its absence is asserted where it is a fact
+    /// about behaviour rather than about wording — on the emitted payload, at all
+    /// four renderings.
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn every_headline_field_is_documented_on_every_payload_surface() {
+        /// The fields S-376 introduces or renames, as the payload spells them.
+        /// Read off a real serialization below rather than trusted, so this guard
+        /// cannot check strings the payload never carries.
+        const HEADLINE: [&str; 7] = [
+            "resolved_cross_service_edges",
+            "egress_resolution",
+            "egress_resolution_measured",
+            "resolved_edges_summary",
+            "spec_conformance_ratio",
+            "spec_conformance_measured",
+            "spec_conformance_summary",
+        ];
+
+        // The keys really are what the payload emits. `egress_resolution` is
+        // absent on a zero denominator, so the fixture must be one where it is
+        // present — otherwise this guard would tolerate a key that never ships.
+        let cov = every_bucket_in_both_populations();
+        let wire = serde_json::to_value(&cov).unwrap();
+        for key in HEADLINE {
+            assert!(
+                wire.get(key).is_some(),
+                "`{key}` must be a key the payload actually carries, or this guard \
+                 checks a string nothing emits: {wire}"
+            );
+        }
+
+        /// The surfaces that document this payload's fields. The same tracked trio
+        /// the intake guard reads, and for the same reason: this vocabulary is not
+        /// mirrored into `docs/specs`, so there is no tolerated-absence case and a
+        /// read failure is a guard defect.
+        ///
+        /// `mcp/src/server.rs` is deliberately absent: its description is guarded
+        /// at the MCP boundary against the *shipped* tool
+        /// (`mcp/tests/workspace_status_intake_parity.rs`), which is stronger than
+        /// reading the source, and duplicating it here would create the second copy
+        /// this family of guards exists to prevent.
+        const SURFACES: [&str; 3] = [
+            "docs/howto/commands.md",
+            "web/ui/src/api/types.ts",
+            "web/ui/src/views/workspace/coverageModel.ts",
+        ];
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("logos-core sits under the repository root");
+
+        for rel in SURFACES {
+            let text = std::fs::read_to_string(repo.join(rel))
+                .unwrap_or_else(|e| panic!("{rel} must be readable to be guarded: {e}"));
+            for key in HEADLINE {
+                assert!(
+                    text.contains(key),
+                    "{rel} documents the coverage payload but never names `{key}` — \
+                     a field the payload carries that this surface cannot explain \
+                     ([NFR-CC-04])"
+                );
+            }
+            // [BR-51], at the documentation layer: the rule, not just the pair.
+            assert!(
+                text.contains("BR-51"),
+                "{rel} names the resolved-edge count and its egress rate but never \
+                 cites BR-51, the rule that binds them — a reader told they are two \
+                 fields, rather than a figure and the rate it must never be quoted \
+                 without, will quote the count alone"
+            );
+        }
+    }
+
     /// Every surface that enumerates the reason vocabulary, with its text — the
     /// **one** list, read by the positive guard above and by the removal proof
     /// below.
@@ -4495,7 +4983,7 @@ mod tests {
         assert_eq!(cov.references.len(), 1, "the subscribe is a provider, not a second reference");
         assert_eq!(cov.references[0].state, CoverageState::Bound);
         assert_eq!(cov.references[0].relation, "broker-topic");
-        assert_eq!(cov.bound_ratio, Some(1.0));
+        assert_eq!(cov.spec_conformance_ratio, Some(1.0));
     }
 
     /// A topic with **two** cross-member subscribers is `bound`, never `ambiguous`.
@@ -4573,6 +5061,314 @@ mod tests {
         assert_eq!(cov.bound, 0);
     }
 
+    // ── S-376 / CR-120: the headline is a resolved-edge count ────────────────
+
+    /// **The retired `bound_ratio` is gone from the wire and lives only as a
+    /// deserialization alias** ([CR-120] AC1, §7).
+    ///
+    /// Both halves, because either alone leaves the retirement half-done:
+    ///
+    /// 1. **Nothing emits the old keys.** An external reader of `--json` gets a
+    ///    missing field and fails loudly, which is the whole point of retiring a
+    ///    figure rather than quietly re-pointing it — a silently-renamed
+    ///    `bound_ratio` would go on being read as coupling.
+    /// 2. **A stored pre-change payload still reads back**, through
+    ///    [`SpecConformanceReading`]'s alias, and yields the *same three values*
+    ///    the post-change payload does. Asserted against a real serialized
+    ///    [`CrossServiceCoverage`] rather than a hand-written fixture, so the
+    ///    compatibility type cannot drift away from the read-model it reads.
+    ///
+    /// The pre-change vintage is built by rewinding the live payload's key names,
+    /// which is exactly the transformation the reference workspace's 2026-09-08
+    /// baseline is on the other side of.
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    #[test]
+    fn the_deprecated_bound_ratio_alias_reads_both_vintages() {
+        let cov = every_bucket_in_both_populations();
+        let post = serde_json::to_value(&cov).unwrap();
+
+        // (1) Retired on the emit side, under every one of its three spellings.
+        for retired in ["bound_ratio", "bound_ratio_measured", "bound_ratio_summary"] {
+            assert!(
+                post.get(retired).is_none(),
+                "`{retired}` must be absent from the emitted payload — an external \
+                 reader is meant to fail loudly, not read a renamed figure: {post}"
+            );
+        }
+        assert!(
+            post.get("spec_conformance_ratio").is_some()
+                && post.get("spec_conformance_measured").is_some()
+                && post.get("spec_conformance_summary").is_some(),
+            "and the successors ARE emitted, or this test would pass over a payload \
+             that simply lost the figures: {post}"
+        );
+
+        // The pre-CR-120 vintage of the very same payload.
+        let mut pre = post.clone();
+        {
+            let obj = pre.as_object_mut().unwrap();
+            for (now, retired) in [
+                ("spec_conformance_ratio", "bound_ratio"),
+                ("spec_conformance_measured", "bound_ratio_measured"),
+                ("spec_conformance_summary", "bound_ratio_summary"),
+            ] {
+                if let Some(v) = obj.remove(now) {
+                    obj.insert(retired.to_string(), v);
+                }
+            }
+        }
+
+        // (2) Both vintages read through one type, to the same three values.
+        let from_post: SpecConformanceReading = serde_json::from_value(post).unwrap();
+        let from_pre: SpecConformanceReading =
+            serde_json::from_value(pre).expect("the deprecated alias reads a pre-CR-120 payload");
+        assert_eq!(
+            from_pre, from_post,
+            "the alias must yield the same reading as the current spelling — that \
+             equality is what lets a pre-change baseline be compared with a \
+             post-change one in a single operation"
+        );
+        // …and the reading really is the read-model's, not a coincidence of two
+        // defaults: pinned against the struct fields themselves.
+        assert_eq!(from_post.spec_conformance_ratio, cov.spec_conformance_ratio);
+        assert_eq!(from_post.spec_conformance_measured, cov.spec_conformance_measured);
+        assert_eq!(from_post.spec_conformance_summary, cov.spec_conformance_summary);
+    }
+
+    /// **An absent ratio survives the alias too** — the [CR-100] guarantee, which
+    /// is the case a `Option<f64>` compatibility field is most likely to get wrong.
+    ///
+    /// A zero denominator omits the key in *both* vintages, so a reader without
+    /// `#[serde(default)]` would reject exactly the payloads that guarantee
+    /// produces. Asserted rather than left to the attribute, because the failure is
+    /// a parse error on the one shape [CR-100] exists to make representable.
+    ///
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    #[test]
+    fn the_alias_reads_an_absent_ratio_as_absent_rather_than_failing() {
+        reset();
+        set_member("api", vec![op("GET /orphans/{id}", "local op_orphan")]);
+        set_member("web", vec![]);
+        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        assert_eq!(cov.spec_conformance_ratio, None, "the fixture must be degenerate");
+
+        let post = serde_json::to_value(&cov).unwrap();
+        let pre = serde_json::json!({
+            "bound_ratio_measured": post["spec_conformance_measured"],
+            "bound_ratio_summary": post["spec_conformance_summary"],
+        });
+        for (label, value) in [("post-change", post), ("pre-change", pre)] {
+            let reading: SpecConformanceReading = serde_json::from_value(value)
+                .unwrap_or_else(|e| panic!("{label} payload with an absent ratio must parse: {e}"));
+            assert_eq!(reading.spec_conformance_ratio, None, "{label}");
+            assert_eq!(reading.spec_conformance_measured, 0, "{label}");
+            assert_eq!(
+                reading.spec_conformance_summary,
+                "0 of 0 measured; 1 excluded as no-provider-in-workspace",
+                "{label}: and the summary's wording is unchanged across the rename, \
+                 which is what makes two vintages comparable"
+            );
+        }
+    }
+
+    /// **The headline counts EDGES, and the rate counts SITES** ([CR-120],
+    /// [FR-WS-10]).
+    ///
+    /// The one shape where the two differ, made to differ: a broker publish that
+    /// binds **three** cross-member subscribers is *one* resolved egress site and
+    /// *three* cross-service edges — one per subscriber, which is exactly what the
+    /// bridge emits and what `xservice route-providers` reports.
+    ///
+    /// Written because publishing a count of sites under the word "edges" would be
+    /// the same name/meaning mismatch [CR-120] exists to remove. Without this
+    /// fixture both figures read `1` and either implementation would pass.
+    ///
+    /// The same-member subscriber is in the fixture deliberately: the bridge skips
+    /// it (an intra-repo fan-out is the per-repo graph's own fact), so counting the
+    /// row's bound *set* rather than the topic's subscriber count is what keeps
+    /// this figure equal to the bridge's edge count rather than above it.
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    #[test]
+    fn one_fan_out_publish_is_one_egress_site_and_several_resolved_edges() {
+        reset();
+        set_member("api", vec![]);
+        set_member("web", vec![]);
+        set_member("audit", vec![]);
+        set_member("billing", vec![]);
+        set_consumers("api", vec![broker_publish("orders", "local emitOrder")]);
+        for member in ["web", "audit", "billing"] {
+            set_consumers(
+                member,
+                vec![broker_subscribe("orders", &format!("local on_{member}"))],
+            );
+        }
+        // A same-member subscriber: the bridge emits no edge for it, so it must not
+        // reach the count either.
+        set_consumers(
+            "api",
+            vec![
+                broker_publish("orders", "local emitOrder"),
+                broker_subscribe("orders", "local onOrderLocally"),
+            ],
+        );
+
+        let cov = cross_service_coverage(&registry(&["api", "web", "audit", "billing"]));
+
+        assert_eq!(cov.by_intake.invocation.bound, 1, "one publish, one egress site");
+        assert_eq!(
+            cov.resolved_cross_service_edges, 3,
+            "…and three cross-member subscribers, so three edges: {:?}",
+            cov.references
+        );
+        assert_eq!(
+            cov.egress_resolution,
+            Some(1.0),
+            "the rate is over SITES: the one captured egress site resolved"
+        );
+        assert_eq!(cov.egress_resolution_measured, 1);
+        assert_eq!(
+            cov.resolved_edges_summary,
+            "3 resolved cross-service edges; egress resolution 1.000 (1 of 1 egress sites resolved)",
+            "and the composed line states both, so neither can be read as the other"
+        );
+
+        // The figure is reconcilable from the rows, which is what makes it
+        // checkable rather than merely reported ([CR-120]'s whole subject).
+        let from_rows: u64 = cov
+            .references
+            .iter()
+            .filter(|r| {
+                r.intake == BridgeIntake::Invocation && matches!(r.state, CoverageState::Bound)
+            })
+            .map(|r| r.candidates.as_ref().map_or(1, |c| c.total))
+            .sum();
+        assert_eq!(from_rows, cov.resolved_cross_service_edges);
+    }
+
+    /// **`egress_resolution` inherits [CR-100]'s absent-on-zero-denominator rule,
+    /// and [BR-51] states it** — a workspace that captured no egress site reports
+    /// the rate absent, never `1.0`, and still discloses the denominator.
+    ///
+    /// This is the near-exact shape [CR-100] observed, moved onto the successor
+    /// figure: a workspace whose contract surface binds perfectly and whose
+    /// invocation population is empty. The old ratio reads `1.000` here — correctly,
+    /// it is a spec-conformance figure — and a successor that inherited that
+    /// reading would say every outbound call in the workspace resolves, over a
+    /// workspace with no outbound call at all.
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    #[test]
+    fn egress_resolution_is_absent_when_no_egress_site_was_captured() {
+        reset();
+        set_member("api", vec![op("GET /users/{id}", "local op_users")]);
+        set_member("web", vec![route("GET /users/{id}", "local route_users")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "web"]));
+
+        assert_eq!(
+            cov.spec_conformance_ratio,
+            Some(1.0),
+            "the declarations do line up with the controllers — that reading is correct"
+        );
+        assert_eq!(
+            cov.egress_resolution, None,
+            "…and it says nothing about outbound calls: no egress site was captured, \
+             so the rate is NO MEASUREMENT, never a perfect score (CR-100, BR-51)"
+        );
+        assert_eq!(cov.resolved_cross_service_edges, 0);
+        assert_eq!(
+            cov.egress_resolution_measured, 0,
+            "the denominator rides regardless — `0` IS the finding a reader needs"
+        );
+        assert_eq!(
+            cov.resolved_edges_summary,
+            "0 resolved cross-service edges; egress resolution not measured \
+             (0 of 0 egress sites)",
+            "and the line says 'not measured', not '0.000' — a zero rate would claim \
+             that captured calls failed to resolve"
+        );
+
+        let wire = serde_json::to_value(&cov).unwrap();
+        assert!(
+            wire.get("egress_resolution").is_none(),
+            "absence reaches the wire as an omitted key, never as a number: {wire}"
+        );
+    }
+
+    /// **[BR-51] on the payload: the resolved-edge count never travels without its
+    /// rate.**
+    ///
+    /// The structural guard, asserted over every bucket-and-population shape this
+    /// module can produce: wherever `resolved_cross_service_edges` appears, the
+    /// denominator and the composed line appear with it, and the line names both
+    /// figures. A surface can then render the line and be correct by construction —
+    /// which is the point of composing it server-side rather than trusting four
+    /// renderings to remember the pairing, the way [CR-111] had to learn for the
+    /// figure this one replaces.
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+    #[test]
+    fn the_resolved_edge_count_is_never_published_without_its_egress_rate() {
+        for (label, cov) in [
+            ("mixed", every_bucket_in_both_populations()),
+            ("no egress captured", {
+                reset();
+                set_member("api", vec![op("GET /users/{id}", "local op_users")]);
+                set_member("web", vec![route("GET /users/{id}", "local route_users")]);
+                cross_service_coverage(&registry(&["api", "web"]))
+            }),
+            ("empty workspace", {
+                reset();
+                cross_service_coverage(&registry(&[]))
+            }),
+        ] {
+            let wire = serde_json::to_value(&cov).unwrap();
+            assert!(
+                wire.get("resolved_cross_service_edges").is_some(),
+                "{label}: the headline is unconditional — an absent count and a \
+                 count of zero are different claims: {wire}"
+            );
+            for companion in ["egress_resolution_measured", "resolved_edges_summary"] {
+                assert!(
+                    wire.get(companion).is_some(),
+                    "{label}: `{companion}` must ride beside the count (BR-51): {wire}"
+                );
+            }
+            let line = cov.resolved_edges_summary.as_str();
+            assert!(
+                line.starts_with(&format!(
+                    "{} resolved cross-service edges;",
+                    cov.resolved_cross_service_edges
+                )),
+                "{label}: the line must open with the count it summarises: {line:?}"
+            );
+            assert!(
+                line.contains("egress resolution"),
+                "{label}: …and carry the rate beside it: {line:?}"
+            );
+            assert!(
+                line.contains("egress sites"),
+                "{label}: …over a stated denominator: {line:?}"
+            );
+            match cov.egress_resolution {
+                Some(r) => assert!(
+                    line.contains(&format!("egress resolution {r:.3} ")),
+                    "{label}: a measured rate is stated as a figure: {line:?}"
+                ),
+                None => assert!(
+                    line.contains("egress resolution not measured"),
+                    "{label}: an absent rate is stated as absent, never as 0.000 \
+                     (CR-100): {line:?}"
+                ),
+            }
+        }
+    }
+
     // ── advisory isolation (ADR-53 / sprint-55 risk register) ─────────────
 
     /// The coverage tier must never leak into the gated `scan`/`gate`/
@@ -4603,7 +5399,13 @@ mod tests {
 
         for (label, json) in [("scan", &scan_json), ("gate", &gate_json), ("check_rules", &check_json)] {
             for token in [
+                // The retired key, still checked: the gated surfaces must not carry
+                // it under either spelling, and a leak of the OLD name would be
+                // a stale copy of this module rather than a live one.
                 "bound_ratio",
+                "spec_conformance_ratio",
+                "resolved_cross_service_edges",
+                "egress_resolution",
                 "no_provider_in_workspace",
                 "ambiguous",
                 "path-not-composed",

@@ -644,9 +644,26 @@ pub(crate) async fn workspace_roster(
 ///
 /// A consumer that renders any figure from this payload must read
 /// `degraded_rollup.covers_all_members` and `coverage.covers_all_members`: when
-/// either is `false` the figures cover fewer than all members. `bound_ratio` is
-/// **absent** when nothing was measured, so a bar rendering it must show "not
-/// measured" rather than an empty or full bar ([NFR-CC-04]).
+/// either is `false` the figures cover fewer than all members. Both
+/// `spec_conformance_ratio` and `egress_resolution` are **absent** when nothing
+/// was measured, so a bar rendering either must show "not measured" rather than
+/// an empty or full bar ([NFR-CC-04]).
+///
+/// # The headline is a resolved-edge count ([CR-120], [BR-51])
+/// `coverage.resolved_cross_service_edges` counts the edges resolved from a
+/// captured **invocation** — a caller→callee call, a producer→consumer publish —
+/// and is never rendered without `coverage.egress_resolution` beside it, the rate
+/// at which captured egress sites resolve at all. `resolved_edges_summary`
+/// carries both as one composed line for exactly that reason, and
+/// `egress_resolution_measured` is the rate's explicit denominator.
+///
+/// `bound_ratio` is **retired and no longer sent**. Its formula survives as
+/// `spec_conformance_ratio`, which reports how far this workspace's declarations
+/// line up with its controllers and is never a measure of cross-service coupling:
+/// on the reference estate it read `0.287` over a workspace with zero
+/// caller→callee edges ([CR-120] §2).
+///
+/// [BR-51]: ../../docs/specs/software-spec.md#327-workspace-federation
 ///
 /// # The coverage counts are two populations ([CR-120], [FR-WS-05])
 /// Every row of `coverage.references` carries `intake` — `contract-surface` for a

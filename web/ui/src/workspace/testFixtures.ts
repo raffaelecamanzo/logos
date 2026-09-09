@@ -22,7 +22,7 @@ export const ROSTER: WorkspaceRoster = {
 
 /** An empty coverage summary over a fully-read two-member workspace.
  *
- *  `bound_ratio` is **omitted**, exactly as the server omits it when nothing was
+ *  `spec_conformance_ratio` is **omitted**, exactly as the server omits it when nothing was
  *  measured (S-326, FR-WS-05) — a fixture carrying `1` here would let a view that
  *  cannot cope with absence pass its tests. */
 export const EMPTY_COVERAGE: CrossServiceCoverage = {
@@ -38,8 +38,15 @@ export const EMPTY_COVERAGE: CrossServiceCoverage = {
     contract_surface: { bound: 0, ambiguous: 0, unbound: 0, no_provider_in_workspace: 0 },
     invocation: { bound: 0, ambiguous: 0, unbound: 0, no_provider_in_workspace: 0 },
   },
-  bound_ratio_measured: 0,
-  bound_ratio_summary: "0 of 0 measured; 0 excluded as no-provider-in-workspace",
+  spec_conformance_measured: 0,
+  spec_conformance_summary: "0 of 0 measured; 0 excluded as no-provider-in-workspace",
+  // The CR-120 headline in its honest-empty shape: a count of 0 with the rate
+  // OMITTED (never 0 and never 1), exactly as the server sends it when no egress
+  // site was captured.
+  resolved_cross_service_edges: 0,
+  egress_resolution_measured: 0,
+  resolved_edges_summary:
+    "0 resolved cross-service edges; egress resolution not measured (0 of 0 egress sites)",
   members_read: 2,
   members_total: 2,
   covers_all_members: true,

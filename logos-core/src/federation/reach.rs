@@ -178,20 +178,75 @@ pub struct CoverageRider {
     /// References with no provider anywhere in the workspace — outside this
     /// workspace's boundary, not a defect ([ADR-53]).
     pub no_provider_in_workspace: u64,
-    /// `bound / (bound + ambiguous + unbound)` ([ADR-53]).
+    /// **How many cross-service edges the union view actually rests on** — the
+    /// count of edges resolved from a captured *invocation*, carried verbatim
+    /// from
+    /// [`CrossServiceCoverage::resolved_cross_service_edges`](super::coverage::CrossServiceCoverage::resolved_cross_service_edges)
+    /// ([CR-120], [BR-51]).
+    ///
+    /// This is the rider's own headline, and it is the figure a reachability
+    /// claim most needs: a promotion to `live-via-cross-service` rests on an edge
+    /// existing, and `0` here says none was resolved from any call site in the
+    /// workspace.
+    ///
+    /// It is **not** the whole basis of the view. Contract-surface edges (an
+    /// OpenAPI operation matched to a controller route) are extra live roots too,
+    /// and they are counted in [`bound`](Self::bound), not here. Both are
+    /// published for that reason: the pooled count says how many roots the view
+    /// had, this one says how many of them came from a resolved call.
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    pub resolved_cross_service_edges: u64,
+    /// The rate at which captured egress sites resolved at all, carried verbatim
+    /// from
+    /// [`CrossServiceCoverage::egress_resolution`](super::coverage::CrossServiceCoverage::egress_resolution),
+    /// absence included ([CR-120], [BR-51], [CR-100]).
+    ///
+    /// [BR-51] makes this inseparable from
+    /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges): a
+    /// count of resolved edges with no rate beside it cannot be told apart from a
+    /// workspace that captured nothing. On this rider the pairing is structural in
+    /// a different way from the summary line the CLI and web view render — the
+    /// rider is a `Copy` value repeated on every claim, so it carries the two
+    /// figures plus
+    /// [`egress_resolution_measured`](Self::egress_resolution_measured) rather
+    /// than a composed sentence repeated once per claim.
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub egress_resolution: Option<f64>,
+    /// The denominator
+    /// [`egress_resolution`](Self::egress_resolution) was computed over — the
+    /// captured egress sites. Present even when the rate is absent, where `0` *is*
+    /// the finding: nothing outbound was captured at all ([CR-111]'s
+    /// denominator-disclosure duty, [NFR-CC-04]).
+    pub egress_resolution_measured: u64,
+    /// `bound / (bound + ambiguous + unbound)` ([ADR-53]) — the **retired
+    /// bound-ratio's formula** under the name of what it measures, carried
+    /// verbatim from
+    /// [`CrossServiceCoverage::spec_conformance_ratio`](super::coverage::CrossServiceCoverage::spec_conformance_ratio),
+    /// absence included ([CR-120] §5.2).
     ///
     /// **Absent** when that denominator is zero — a rider that carried `1.0`
     /// there would tell a reader the union view rests on perfect coverage when
-    /// it rests on none at all ([FR-WS-05], [NFR-CC-04]). Carried verbatim from
-    /// [`CrossServiceCoverage::bound_ratio`], absence included.
+    /// it rests on none at all ([FR-WS-05], [NFR-CC-04]).
     ///
+    /// Dominated by contract-surface intake, so it is *not* a statement about
+    /// outbound coupling and never the rider's headline; that is
+    /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges).
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bound_ratio: Option<f64>,
-    /// The denominator [`bound_ratio`](Self::bound_ratio) was computed over
+    pub spec_conformance_ratio: Option<f64>,
+    /// The denominator
+    /// [`spec_conformance_ratio`](Self::spec_conformance_ratio) was computed over
     /// (`bound + ambiguous + unbound`), carried verbatim from
-    /// [`CrossServiceCoverage::bound_ratio_measured`](super::coverage::CrossServiceCoverage::bound_ratio_measured)
+    /// [`CrossServiceCoverage::spec_conformance_measured`](super::coverage::CrossServiceCoverage::spec_conformance_measured)
     /// ([CR-111], [FR-WS-05]).
     ///
     /// [CR-111] made the ratio's scale a duty rather than a courtesy: "excluding
@@ -205,42 +260,52 @@ pub struct CoverageRider {
     /// qualification present on one surface and absent on another is the very
     /// defect shape [CR-111] cites [CR-105] for. Added in the sprint-63 review.
     ///
-    /// `CrossServiceCoverage`'s composed `bound_ratio_summary` line is
-    /// deliberately **not** carried here. The rider is a `Copy` value attached to
-    /// every individual claim, so an identical sentence would be repeated once
-    /// per claim; the summary is a *rendering*, and the two surfaces that render
+    /// The composed `spec_conformance_summary` and `resolved_edges_summary` lines
+    /// are deliberately **not** carried here. The rider is a `Copy` value attached
+    /// to every individual claim, so an identical sentence would be repeated once
+    /// per claim; a summary is a *rendering*, and the two surfaces that render
     /// (the CLI and the web view) read it from the coverage summary itself. What
     /// the rider owes is the figures, and it now carries all of them.
     ///
-    /// # These four counts pool two intake populations (S-377, [CR-120])
+    /// # These four counts pool two intake populations, and S-376's answer to that
     ///
     /// Stated here because the rider is where a reader is least likely to look it
     /// up. Since S-377 the coverage summary reports the same four counts **split
     /// by intake** — `contract-surface` (a declared endpoint matched to a
     /// controller) apart from `invocation` (a captured call site) — in
     /// [`CrossServiceCoverage::by_intake`](super::coverage::CrossServiceCoverage::by_intake).
-    /// The figures on this rider are the **pooled** ones, and on the 84-member
-    /// reference estate the pool is 81 declared-contract matches and **0** resolved
-    /// call sites. So a reader who concludes anything about outbound coupling from
-    /// a rider figure alone will conclude it wrongly.
+    /// The four counts on this rider are still the **pooled** ones, and on the
+    /// 84-member reference estate that pool is 81 declared-contract matches and
+    /// **0** resolved call sites. So a reader who concludes anything about
+    /// outbound coupling from `bound` alone will conclude it wrongly.
     ///
-    /// The split is deliberately not copied onto the rider: it is eight more `u64`s
-    /// on a `Copy` value attached to every claim, for a decomposition that belongs
-    /// beside the summary a reader consults once. What the rider owes — and what
-    /// this paragraph is — is to say that its counts are pooled and where the
-    /// decomposition lives, rather than let a qualification present on one surface
-    /// be silently absent on this one. [S-376] reworks every rendering of these
-    /// figures, this one included; the split's placement here is that story's call
-    /// to revisit, not a gap left unexamined.
+    /// S-377 left the placement of the split on this rider to S-376. **Decided:
+    /// the eight-way split stays off the rider, and the three-figure headline
+    /// comes onto it.** The two halves of that are one judgement, not two:
     ///
+    /// - The split is a *decomposition* — eight more `u64`s on a `Copy` value
+    ///   repeated per claim, to answer a question a reader asks once, beside the
+    ///   summary. S-377's reasoning is unchanged and is kept.
+    /// - [`resolved_cross_service_edges`](Self::resolved_cross_service_edges),
+    ///   [`egress_resolution`](Self::egress_resolution) and its denominator are
+    ///   the *headline*, and [BR-51] makes the first two inseparable at every
+    ///   presentation site. This rider is a presentation site — [CR-111] settled
+    ///   that when it found the denominator missing here — so carrying the pooled
+    ///   ratio while omitting the headline would leave this surface saying only
+    ///   the thing [CR-120] retired. Three scalars is what that costs.
+    ///
+    /// The rider is also the surface with the sharpest claim on the new headline:
+    /// a `live-via-cross-service` promotion rests on an *edge*, and
+    /// `resolved_cross_service_edges: 0` says none came from a call site.
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
     /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
-    /// [S-376]: ../../../docs/planning/journal.md#s-376-retire-the-bound-ratio-the-headline-is-a-resolved-edge-count
     ///
     /// [CR-105]: ../../../docs/requests/CR-105-report-a-failed-member-open-once-per-answer.md
     /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     /// [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
-    pub bound_ratio_measured: u64,
+    pub spec_conformance_measured: u64,
     /// Members whose **reachability** surface was read successfully.
     ///
     /// Deliberately *not* [`CrossServiceCoverage::members_read`](super::coverage::CrossServiceCoverage::members_read),
@@ -269,8 +334,11 @@ impl CoverageRider {
             ambiguous: coverage.ambiguous,
             unbound: coverage.unbound,
             no_provider_in_workspace: coverage.no_provider_in_workspace,
-            bound_ratio: coverage.bound_ratio,
-            bound_ratio_measured: coverage.bound_ratio_measured,
+            resolved_cross_service_edges: coverage.resolved_cross_service_edges,
+            egress_resolution: coverage.egress_resolution,
+            egress_resolution_measured: coverage.egress_resolution_measured,
+            spec_conformance_ratio: coverage.spec_conformance_ratio,
+            spec_conformance_measured: coverage.spec_conformance_measured,
             members_read: members_read as u64,
             members_total: members_total as u64,
         }

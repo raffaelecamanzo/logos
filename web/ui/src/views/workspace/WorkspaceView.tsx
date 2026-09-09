@@ -528,8 +528,8 @@ const ARM_COLUMNS: Column<ArmCoverage>[] = [
  * unopened, the 9 survivors holding no cross-boundary reference — `references`
  * is empty AND `coversAllMembers` is false, and an unqualified "none found in
  * this workspace" is then a positive claim about all 72 made from 9. That would
- * simply move the fabrication from `bound_ratio: 1.0` to the empty state rather
- * than removing it.
+ * simply move the fabrication from the retired `bound_ratio: 1.0` to the empty
+ * state rather than removing it.
  *
  * It says what the marker knows and no more: `covers_all_members` is
  * `members_read == members_total` over the CONTRACT-surface walk, so it is also
@@ -589,7 +589,44 @@ function CoveragePanel({
 
   return (
     <div className={styles.panel}>
-      <Card title="Cross-boundary coverage">
+      {/* S-376/CR-120: the HEADLINE is the resolved-edge count, and it is drawn
+          first because it is the figure a reader takes away. `bound_ratio` used to
+          sit here and read 0.287 over an estate with zero caller→callee edges.
+
+          The count and the rate are rendered from the server's composed
+          `resolvedEdgesSummary` line, not assembled here from two fields: BR-51
+          says the count is never published without the rate beside it, and a view
+          that composed them itself would be a fourth place that could forget. */}
+      <Card title="Resolved cross-service edges">
+        <div className={styles.ratio}>
+          {dashboard.egressResolution === null ? (
+            <span className="mono">
+              egress resolution not measured — no outbound call site was captured in this
+              workspace, so the rate has no denominator
+            </span>
+          ) : (
+            <>
+              <ScoreBar
+                value={dashboard.egressResolution}
+                max={1}
+                tone="default"
+                label={pct(dashboard.egressResolution)}
+              />
+              <span className="mono">{pct(dashboard.egressResolution)} of egress sites resolve</span>
+            </>
+          )}
+        </div>
+        <p className="muted mono">{dashboard.resolvedEdgesSummary}</p>
+        <p className="muted">
+          Edges resolved from a captured <span className="mono">invocation</span> — a caller→callee
+          call, a producer→consumer publish. Not the same as <span className="mono">bound</span>{" "}
+          below, which also counts declared-contract matches, and not a count of sites: one fan-out
+          publish binds every cross-member subscriber and is several edges. Advisory: never a
+          quality-gate input.
+        </p>
+      </Card>
+
+      <Card title="Spec conformance (declared endpoints vs controllers)">
         {/* Advisory only — never a gate input (ADR-53). The ratio is the server's,
             displayed verbatim: `no-provider-in-workspace` is deliberately outside its
             denominator, so recomputing it here would contradict the CLI.
@@ -605,33 +642,34 @@ function CoveragePanel({
             the denominator. Saying "nothing to bind" would replace a fabricated
             number with a fabricated explanation. */}
         <div className={styles.ratio}>
-          {dashboard.boundRatio === null ? (
+          {dashboard.specConformanceRatio === null ? (
             <span className="mono">
-              bound ratio not measured — all {dashboard.noProviderInWorkspace} cross-boundary
+              spec conformance not measured — all {dashboard.noProviderInWorkspace} cross-boundary
               references have no provider in this workspace, so the ratio has no denominator
             </span>
           ) : (
             <>
               <ScoreBar
-                value={dashboard.boundRatio}
+                value={dashboard.specConformanceRatio}
                 max={1}
                 tone={dashboard.ratioDominatedByExcluded ? "muted" : "default"}
-                label={pct(dashboard.boundRatio)}
+                label={pct(dashboard.specConformanceRatio)}
               />
-              <span className="mono">{pct(dashboard.boundRatio)} bound</span>
+              <span className="mono">{pct(dashboard.specConformanceRatio)} bound</span>
             </>
           )}
         </div>
         {/* CR-111: the ratio is never presented without its denominator and excluded
             count — the server's own composed line, adjacent to the bar, verbatim
             (the same "displayed, never recomputed" discipline as the ratio itself). */}
-        <p className="muted mono">{dashboard.boundRatioSummary}</p>
+        <p className="muted mono">{dashboard.specConformanceSummary}</p>
         <CoverageShortfall dashboard={dashboard} degraded={degraded} />
         <p className="muted">
           {dashboard.bound} bound · {dashboard.ambiguous} ambiguous · {dashboard.unbound} unbound ·{" "}
           {dashboard.noProviderInWorkspace} with no provider in this workspace (reported apart, and
           excluded from the ratio — a call to a service outside this workspace is not a broken
-          binding). Advisory: this figure is never a quality-gate input.
+          binding). This ratio is dominated by declared-contract matches and is not a measure of
+          cross-service coupling. Advisory: this figure is never a quality-gate input.
         </p>
       </Card>
 

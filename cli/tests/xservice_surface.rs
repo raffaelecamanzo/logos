@@ -201,22 +201,50 @@ fn workspace_status_reports_freshness_and_three_state_coverage() {
     );
     assert_eq!(coverage["ambiguous"], 0);
     assert_eq!(
-        coverage["bound_ratio"], 1.0,
-        "no-provider references never depress the bound-ratio (ADR-53)"
+        coverage["spec_conformance_ratio"], 1.0,
+        "no-provider references never depress the spec-conformance ratio (ADR-53) — the \
+         retired bound-ratio's rule, carried forward by name only (CR-120 §5.2)"
     );
 
     // CR-111 / FR-WS-05: the ratio is never presented without its denominator and
     // excluded count — `--json` carries both as explicit additive fields, and every
     // pre-existing field above is unchanged.
     assert_eq!(
-        coverage["bound_ratio_measured"], 1,
+        coverage["spec_conformance_measured"], 1,
         "the explicit denominator (bound+ambiguous+unbound) a machine consumer need not re-derive"
     );
     assert_eq!(
-        coverage["bound_ratio_summary"], "1.000 (1 of 1 measured; 1 excluded as no-provider-in-workspace)",
-        "the bound-ratio never travels bare in `--json` — this e2e fixture's own numbers (1 of 1, \
+        coverage["spec_conformance_summary"], "1.000 (1 of 1 measured; 1 excluded as no-provider-in-workspace)",
+        "the ratio never travels bare in `--json` — this e2e fixture's own numbers (1 of 1, \
          1 excluded); the CR-111 pec-services numbers (6 of 7, 899 excluded) are pinned verbatim at \
          the core unit-test and web-model/-view layers, where a 906-reference fixture is constructible"
+    );
+
+    // S-376 / CR-120 / BR-51: the retired key is GONE from the real binary's
+    // `--json`, and the successor headline rides in its place — the count with the
+    // rate beside it, never one without the other. This fixture's OpenAPI operation
+    // is `contract-surface` intake and it captures no call site, so the honest
+    // reading is 0 edges with the rate ABSENT, over a workspace whose pooled
+    // `bound` is 1. That contrast is the whole reason the headline moved, and it is
+    // asserted on the shipped command rather than on a projection of it.
+    for retired in ["bound_ratio", "bound_ratio_measured", "bound_ratio_summary"] {
+        assert!(
+            coverage.get(retired).is_none(),
+            "`{retired}` must be absent from the shipped payload (CR-120 AC1): {coverage}"
+        );
+    }
+    assert_eq!(coverage["resolved_cross_service_edges"], 0);
+    assert!(
+        coverage.get("egress_resolution").is_none(),
+        "no egress site was captured, so the rate is absent — never a fabricated \
+         score (CR-100, BR-51): {coverage}"
+    );
+    assert_eq!(coverage["egress_resolution_measured"], 0);
+    assert_eq!(
+        coverage["resolved_edges_summary"],
+        "0 resolved cross-service edges; egress resolution not measured (0 of 0 egress sites)",
+        "the count and the rate travel as ONE composed line, so no rendering can \
+         show the count alone (BR-51)"
     );
 
     // The human rendering is the SAME read-model, pretty-printed (FR-CL-02) — one
@@ -229,22 +257,22 @@ fn workspace_status_reports_freshness_and_three_state_coverage() {
 }
 
 /// CR-111 / S-327: a workspace whose only cross-boundary reference has no
-/// provider anywhere reports a zero denominator — `bound_ratio` absent — and the
+/// provider anywhere reports a zero denominator — `spec_conformance_ratio` absent — and the
 /// excluded count is STILL reported, never suppressed alongside the absent ratio.
 #[test]
-fn workspace_status_reports_the_excluded_count_when_the_bound_ratio_is_absent() {
+fn workspace_status_reports_the_excluded_count_when_the_ratio_is_absent() {
     let tmp = workspace_with_openapi(ORPHAN_OPENAPI_YAML);
     let status = logos_json(tmp.path(), &["workspace", "status"]);
     let coverage = &status["coverage"];
 
     assert!(
-        coverage.get("bound_ratio").is_none(),
+        coverage.get("spec_conformance_ratio").is_none(),
         "a zero denominator is absent, never a fabricated score: {coverage}"
     );
-    assert_eq!(coverage["bound_ratio_measured"], 0);
+    assert_eq!(coverage["spec_conformance_measured"], 0);
     assert_eq!(coverage["no_provider_in_workspace"], 1);
     assert_eq!(
-        coverage["bound_ratio_summary"], "0 of 0 measured; 1 excluded as no-provider-in-workspace",
+        coverage["spec_conformance_summary"], "0 of 0 measured; 1 excluded as no-provider-in-workspace",
         "the excluded count is reported even though the ratio itself is absent"
     );
 }
@@ -1263,17 +1291,31 @@ fn workspace_reachability_is_labeled_advisory_and_riders_every_claim() {
     );
     assert_eq!(rider["ambiguous"], 0);
     assert_eq!(rider["unbound"], 0);
-    assert_eq!(rider["bound_ratio"], 1.0);
+    assert_eq!(rider["spec_conformance_ratio"], 1.0);
     // …and never bare (CR-111): this rider is the near-degenerate shape in
     // miniature — a perfect-looking 1.0 computed over ONE reference while
     // another was excluded — so the denominator rides beside it, as it does on
     // `workspace status`. Found by the sprint-63 review: CR-111's acceptance
     // criterion enumerates three renderings and this is a fourth.
     assert_eq!(
-        rider["bound_ratio_measured"], 1,
+        rider["spec_conformance_measured"], 1,
         "the reachability rider publishes the denominator its ratio was computed \
          over, not just the ratio"
     );
+    // S-376/BR-51: and the successor headline rides here too, on the surface with
+    // the sharpest claim on it — a `live-via-cross-service` promotion rests on an
+    // EDGE, and this workspace resolved none from a captured call site even though
+    // its pooled `bound` is 1. The retired key is gone from the rider as well.
+    assert!(
+        rider.get("bound_ratio").is_none(),
+        "the retired key is absent from the reachability rider too: {rider}"
+    );
+    assert_eq!(rider["resolved_cross_service_edges"], 0);
+    assert!(
+        rider.get("egress_resolution").is_none(),
+        "no egress site captured ⇒ the rate is absent, never fabricated: {rider}"
+    );
+    assert_eq!(rider["egress_resolution_measured"], 0);
     assert_eq!(rider["members_read"], 2);
     assert_eq!(rider["members_total"], 2);
     assert_eq!(view["skipped_members"].as_array().unwrap().len(), 0);

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -87,9 +87,19 @@ const COVERAGE: CrossServiceCoverage = {
     contract_surface: { bound: 1, ambiguous: 0, unbound: 0, no_provider_in_workspace: 2 },
     invocation: { bound: 0, ambiguous: 1, unbound: 1, no_provider_in_workspace: 0 },
   },
-  bound_ratio: 0.3333,
-  bound_ratio_measured: 3,
-  bound_ratio_summary: "0.333 (1 of 3 measured; 2 excluded as no-provider-in-workspace)",
+  spec_conformance_ratio: 0.3333,
+  spec_conformance_measured: 3,
+  spec_conformance_summary: "0.333 (1 of 3 measured; 2 excluded as no-provider-in-workspace)",
+  // The CR-120 headline over the same fixture: the two `invocation` references
+  // are the tied gRPC stub call and the uncomposed HTTP client call, so **no**
+  // edge resolved from a captured call site — 0 of 2 egress sites — while
+  // `bound: 1` above reads as a workspace that binds. That contrast is the whole
+  // reason the headline moved, so the fixture carries it.
+  resolved_cross_service_edges: 0,
+  egress_resolution: 0,
+  egress_resolution_measured: 2,
+  resolved_edges_summary:
+    "0 resolved cross-service edges; egress resolution 0.000 (0 of 2 egress sites resolved)",
   members_read: 2,
   members_total: 2,
   covers_all_members: true,
@@ -528,11 +538,28 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
 
   // ── S-326 / FR-WS-05 / FR-WS-16 / NFR-CC-04 ───────────────────────────────
 
-  it("renders an ABSENT bound ratio as 'not measured', with no bar", async () => {
-    // The server omits `bound_ratio` when nothing was measured. A bar is a
+  /** The score bar inside ONE named card, by class.
+   *
+   *  Scoped by card since S-376: the coverage panel draws **two** bars now — the
+   *  `egress_resolution` headline and the `spec_conformance_ratio` beneath it — so an
+   *  unscoped `querySelector("meter")` silently returns whichever the layout puts
+   *  first, and the muting assertion below would compare the wrong bar's tone. It
+   *  did exactly that when the headline card was added, which is why this helper
+   *  exists rather than an index. */
+  function scoreBarClassIn(container: HTMLElement, cardTitle: RegExp): string | undefined {
+    // `hidden: true` because the coverage board lives in a tabpanel that carries
+    // `hidden` until its tab is selected, and Testing Library's role queries skip
+    // hidden subtrees by default. The assertions here are about which card a bar
+    // belongs to, not about tab state, so the panel is queried where it is.
+    const heading = within(container).getByRole("heading", { name: cardTitle, hidden: true });
+    return heading.closest("section")?.querySelector("meter")?.className ?? undefined;
+  }
+
+  it("renders an ABSENT spec-conformance ratio as 'not measured', with no bar", async () => {
+    // The server omits `spec_conformance_ratio` when nothing was measured. A bar is a
     // quantity: a 0-width one reads "nothing bound" and a full one "everything
     // bound", and neither is true when there was nothing to bind (CR-100).
-    const { bound_ratio: _omitted, ...noRatio } = COVERAGE;
+    const { spec_conformance_ratio: _omitted, ...noRatio } = COVERAGE;
     stubApi({
       coverage: {
         ...noRatio,
@@ -541,13 +568,13 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
         ambiguous: 0,
         unbound: 0,
         no_provider_in_workspace: 2,
-        bound_ratio_measured: 0,
-        bound_ratio_summary: "0 of 0 measured; 2 excluded as no-provider-in-workspace",
+        spec_conformance_measured: 0,
+        spec_conformance_summary: "0 of 0 measured; 2 excluded as no-provider-in-workspace",
       } as typeof COVERAGE,
     });
     mount();
 
-    expect(await screen.findByText(/bound ratio not measured/i)).toBeInTheDocument();
+    expect(await screen.findByText(/spec conformance not measured/i)).toBeInTheDocument();
     expect(screen.queryByText(/0\.0% bound/)).toBeNull();
     expect(screen.queryByText(/100\.0% bound/)).toBeNull();
     // CR-111: the excluded count is STILL reported when the ratio itself is absent
@@ -557,7 +584,7 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     ).toBeInTheDocument();
   });
 
-  // ── CR-111 / FR-WS-05: the bound-ratio never travels without its scale ─────
+  // ── CR-111 / FR-WS-05: the ratio never travels without its scale ───────────
 
   it("presents the denominator and excluded count adjacent to the score bar", async () => {
     stubApi({ coverage: COVERAGE });
@@ -577,14 +604,14 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
       ambiguous: 0,
       unbound: 1,
       no_provider_in_workspace: 899,
-      bound_ratio: 6 / 7,
-      bound_ratio_measured: 7,
-      bound_ratio_summary: "0.857 (6 of 7 measured; 899 excluded as no-provider-in-workspace)",
+      spec_conformance_ratio: 6 / 7,
+      spec_conformance_measured: 7,
+      spec_conformance_summary: "0.857 (6 of 7 measured; 899 excluded as no-provider-in-workspace)",
     };
     stubApi({ coverage: dominated });
     const { container } = mount();
     await screen.findByText("0.857 (6 of 7 measured; 899 excluded as no-provider-in-workspace)");
-    const mutedClass = container.querySelector("meter")?.className;
+    const mutedClass = scoreBarClassIn(container, /^Spec conformance/);
     cleanup();
 
     // The complement: a healthy ratio (excluded well below the denominator) fills
@@ -592,11 +619,70 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     stubApi({ coverage: COVERAGE });
     const { container: healthyContainer } = mount();
     await screen.findByText("0.333 (1 of 3 measured; 2 excluded as no-provider-in-workspace)");
-    const defaultClass = healthyContainer.querySelector("meter")?.className;
+    const defaultClass = scoreBarClassIn(healthyContainer, /^Spec conformance/);
 
     expect(mutedClass).toBeTruthy();
     expect(defaultClass).toBeTruthy();
     expect(mutedClass).not.toBe(defaultClass);
+  });
+
+  // ── S-376 / CR-120 / BR-51: the headline is a resolved-edge count ──────────
+
+  /** **The resolved-edge count and the egress rate are rendered together**, and the
+   *  retired bound-ratio is nowhere on the surface ([BR-51], AC3/AC4).
+   *
+   *  Driven through the real view over the real model, not against a projection of
+   *  the fixture: the assertion is on rendered DOM text, which is what an operator
+   *  reads. The fixture's shape is the reference estate's in miniature — `bound: 1`
+   *  beside `0` resolved edges over 2 captured egress sites — so a surface that
+   *  renders only the pooled count would look healthy here, which is the misreading
+   *  the headline exists to prevent. */
+  it("renders the resolved-edge headline with its egress rate beside it", async () => {
+    stubApi({ coverage: COVERAGE });
+    const { container } = mount();
+
+    // The server's composed line, verbatim: the count and the rate in one string,
+    // so the view cannot render one without the other.
+    expect(
+      await screen.findByText(
+        "0 resolved cross-service edges; egress resolution 0.000 (0 of 2 egress sites resolved)",
+      ),
+    ).toBeInTheDocument();
+    // …with its own bar, distinct from the spec-conformance one below it.
+    expect(scoreBarClassIn(container, /^Resolved cross-service edges/)).toBeTruthy();
+    expect(screen.getByText(/0\.0% of egress sites resolve/)).toBeInTheDocument();
+    // And the retired vocabulary is absent from the whole rendered surface.
+    expect(container.textContent).not.toMatch(/bound[ -]ratio/i);
+  });
+
+  /** An absent egress rate renders "not measured", never a bar — [CR-100]'s rule on
+   *  the successor figure, and the state the honest-empty fixture is in. */
+  it("renders an ABSENT egress resolution as 'not measured', with no bar", async () => {
+    const { egress_resolution: _omitted, ...noRate } = {
+      ...COVERAGE,
+      egress_resolution: 0,
+    };
+    stubApi({
+      coverage: {
+        ...noRate,
+        resolved_cross_service_edges: 0,
+        egress_resolution_measured: 0,
+        resolved_edges_summary:
+          "0 resolved cross-service edges; egress resolution not measured (0 of 0 egress sites)",
+      } as typeof COVERAGE,
+    });
+    const { container } = mount();
+
+    expect(
+      await screen.findByText(
+        "0 resolved cross-service edges; egress resolution not measured (0 of 0 egress sites)",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/egress resolution not measured — no outbound call site was captured/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/of egress sites resolve/)).toBeNull();
+    expect(scoreBarClassIn(container, /^Resolved cross-service edges/)).toBeUndefined();
   });
 
   it("labels a partially-opened workspace as covering fewer than all members", async () => {
@@ -631,7 +717,7 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
    * to short-circuit before the shortfall rider, so the panel asserted "No
    * cross-boundary references found in this workspace" — a positive claim about
    * all 72 members made from 9, which moved the fabrication from
-   * `bound_ratio: 1.0` to the empty state rather than removing it. */
+   * `spec_conformance_ratio: 1.0` to the empty state rather than removing it. */
   it("does not claim an empty coverage set describes the whole workspace when it is partial", async () => {
     stubApi({
       coverage: {

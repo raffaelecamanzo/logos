@@ -729,7 +729,12 @@ fn edges_into_unknown_or_degraded_members_are_dropped_safely() {
 }
 
 /// A workspace with no members yields an honest empty view — no NaN and no
-/// fabricated perfect score in the bound-ratio, no panic.
+/// fabricated perfect score in either ratio, no panic.
+///
+/// Unchanged in meaning by [CR-120]'s rename, and extended to the successor rate
+/// for the same reason it was written: `egress_resolution` inherits the
+/// absent-on-zero-denominator guarantee, and a rate that inherited the rule in
+/// prose but not in code would fabricate here exactly as its predecessor did.
 #[test]
 fn an_empty_workspace_yields_an_honest_empty_view() {
     reset();
@@ -741,19 +746,35 @@ fn an_empty_workspace_yields_an_honest_empty_view() {
     assert_eq!(view.coverage.members_read, 0);
     assert_eq!(view.coverage.members_total, 0);
     assert_eq!(
-        view.coverage.bound_ratio, None,
+        view.coverage.spec_conformance_ratio, None,
         "nothing measured is reported ABSENT — never NaN, and never the 1.0 it used to \
          fabricate from no evidence (FR-WS-05, NFR-CC-04)"
     );
-    assert!(
-        serde_json::to_value(&view).unwrap()["coverage"]
-            .get("bound_ratio")
-            .is_none(),
-        "and the absence reaches the wire as an omitted key, not as a number"
+    assert_eq!(
+        view.coverage.egress_resolution, None,
+        "and the successor rate carries the same guarantee (BR-51, CR-100)"
+    );
+    assert_eq!(
+        view.coverage.resolved_cross_service_edges, 0,
+        "a count of resolved edges over no members is 0 — a count has no degenerate \
+         case, which is the property the ratio lacked (CR-120)"
+    );
+    let wire = serde_json::to_value(&view).unwrap();
+    for absent in ["bound_ratio", "spec_conformance_ratio", "egress_resolution"] {
+        assert!(
+            wire["coverage"].get(absent).is_none(),
+            "`{absent}` must not reach the wire here: the retired key is gone entirely \
+             and both live ratios are absent on a zero denominator, never a number"
+        );
+    }
+    assert_eq!(
+        wire["coverage"]["egress_resolution_measured"], 0,
+        "the denominator rides even when the rate is absent — `0` IS the finding \
+         (CR-111's duty, applied to the successor)"
     );
 }
 
-/// **The rider's bound-ratio is never bare either** ([CR-111], [FR-WS-05]).
+/// **The rider's ratios are never bare either** ([CR-111], [FR-WS-05], [BR-51]).
 ///
 /// [CR-111]'s acceptance criterion enumerates three renderings and this rider is
 /// a fourth, so nothing in that story's fixtures reaches here. Without this test
@@ -767,23 +788,36 @@ fn an_empty_workspace_yields_an_honest_empty_view() {
 /// [CR-111]: ../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
 /// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
 #[test]
-fn the_coverage_rider_publishes_the_bound_ratios_denominator_and_excluded_count() {
+fn the_coverage_rider_publishes_every_ratios_denominator_and_the_excluded_count() {
     reset();
     let view = app_wide_reachability(&registry(&[]), &[]);
 
     let wire = serde_json::to_value(&view).unwrap();
     let rider = &wire["coverage"];
-    for key in ["bound_ratio_measured", "no_provider_in_workspace"] {
+    for key in [
+        "spec_conformance_measured",
+        "no_provider_in_workspace",
+        // [CR-120]/[BR-51]: the successor headline acquires the same duty. The
+        // rate itself is absent on a zero denominator, so what must ALWAYS ride
+        // is the count and the denominator — otherwise `0 resolved edges` and
+        // `nothing was captured` are indistinguishable on this surface.
+        "resolved_cross_service_edges",
+        "egress_resolution_measured",
+    ] {
         assert!(
             rider.get(key).is_some(),
-            "the rider must publish `{key}` beside its bound-ratio — a ratio \
-             whose scale a reader has to re-derive is the bare figure CR-111 \
-             forbids: {rider}"
+            "the rider must publish `{key}` beside its figures — a ratio or a \
+             count whose scale a reader has to re-derive is the bare figure \
+             CR-111 forbids and BR-51 restates: {rider}"
         );
     }
     assert_eq!(
-        view.coverage.bound_ratio_measured, 0,
+        view.coverage.spec_conformance_measured, 0,
         "and it is the coverage summary's own denominator, carried verbatim"
+    );
+    assert_eq!(
+        view.coverage.egress_resolution_measured, 0,
+        "as is the egress denominator"
     );
 }
 
