@@ -284,12 +284,16 @@ fn no_invocations_query_contains_a_capture_less_pattern() {
 /// bridge/coverage plumbing and was recorded Done, but no `.scm` query file
 /// in the tree — under any plugin, under any capability — ever names a gRPC
 /// concept. This is not "gRPC's query is thin"; it is "gRPC's query does not
-/// exist". Grepping every `.scm` under `plugins/` for the vocabulary a gRPC
-/// capture would need to use (`grpc`, the wire relation `grpc-call`, or the
-/// normalizer's own slot names `package`/`service`/`method`) is a stronger,
-/// cheaper claim than "no plugin declares a `grpc` capability", since no such
+/// exist". The check below greps every `.scm` under `plugins/` for the single
+/// case-insensitive substring `grpc` — a superstring of the wire relation
+/// `grpc-call` too, so one grep covers both — which is a stronger, cheaper
+/// claim than "no plugin declares a `grpc` capability", since no such
 /// capability name exists to declare — the arm shares no per-namespace
-/// capability convention with the broker arm's `brokers`.
+/// capability convention with the broker arm's `brokers`. It does **not**
+/// check the normalizer's own slot names (`package`/`service`/`method`):
+/// those are common enough words that grepping for them would false-positive
+/// on unrelated captures, and a real gRPC query would still have to name
+/// gRPC itself somewhere (a comment, a capture tag) to be reviewable at all.
 ///
 /// A future gRPC capture landing (deliberately, with a validating workspace —
 /// [CR-121](../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md)
