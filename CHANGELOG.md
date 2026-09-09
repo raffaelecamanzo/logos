@@ -55,7 +55,8 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
   No existing field changed meaning or value, and the unbound-reason taxonomy is
   untouched. Payload cost, measured on the reference workspace's shape: **+7.2%**
-  (`intake` on the 794 non-bound rows plus the summary block).
+  — 311 202 → 333 619 bytes, `intake` on the 794 non-bound rows plus the summary
+  block.
 
 - **The HTTP client-call arm records the call sites it declines, so coverage
   reports them instead of losing them (CR-120, S-374, FR-WS-08 AC2).** The arm's
