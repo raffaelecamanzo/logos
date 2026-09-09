@@ -2598,10 +2598,17 @@ mod tests {
     ///
     /// Once `intake` rides every row this test measures two changes at once, and a
     /// growth figure that cannot be attributed to a cause is not a measurement. So
-    /// the pre-S-377 payload is reconstructed exactly — `intake` on the bound rows
-    /// only, no `by_intake` block — and the increment printed separately. The
-    /// reconstruction is self-checking: it reproduces **311 202 bytes**, the figure
-    /// [S-372] recorded for this same fixture, to the byte.
+    /// **both** baselines are reconstructed and **both** are pinned to the figures
+    /// [S-372] recorded for this same fixture, to the byte:
+    ///
+    /// - pre-CR-118 — no `to`/`intake`/`candidates` on any row, no `by_intake`
+    ///   block — is asserted at **195 044 bytes**;
+    /// - pre-S-377 — `intake` on the bound rows only, no `by_intake` — is asserted
+    ///   at **311 202 bytes**.
+    ///
+    /// Those two assertions are what make the riders separable rather than merely
+    /// printed side by side: a reconstruction that drifted would otherwise stay
+    /// inside the ratio bands below while the attribution quietly stopped holding.
     ///
     /// [S-372]: ../../../docs/planning/journal.md#s-372-coverage-rows-name-the-provider-they-bound-and-the-candidates-they-tied-between
     ///
@@ -2692,9 +2699,18 @@ mod tests {
         );
 
         let after = serde_json::to_string(&cov).unwrap().len();
-        // The same payload as it was before CR-118: strip exactly the three new
-        // optional keys from every row, changing nothing else.
+        // The same payload as it was before CR-118: strip [CR-118]'s three row keys
+        // AND S-377's summary block, changing nothing else.
+        //
+        // The `by_intake` removal is load-bearing, not tidiness. Without it this
+        // baseline carries 185 bytes of S-377 (the block plus its comma) while
+        // claiming to predate CR-118, so the CR-118 rider would be measured against
+        // a payload that already contains part of the change measured below it —
+        // and the S-372 comparison two paragraphs down would be off by exactly
+        // those 185 bytes. Stripped, `before` reproduces S-372's recorded 195 044
+        // to the byte, which is what makes the two riders separable at all.
         let mut value = serde_json::to_value(&cov).unwrap();
+        value.as_object_mut().unwrap().remove("by_intake");
         for row in value["references"].as_array_mut().unwrap() {
             let row = row.as_object_mut().unwrap();
             for field in ["to", "intake", "candidates"] {
@@ -2702,6 +2718,14 @@ mod tests {
             }
         }
         let before = serde_json::to_string(&value).unwrap().len();
+        // The pre-CR-118 baseline, checked against the figure [S-372] recorded for
+        // this same fixture — the other half of the attribution, and the reason the
+        // two riders below can be reported apart rather than as one number.
+        assert_eq!(
+            before, 195_044,
+            "the pre-CR-118 baseline must reproduce S-372's recorded 195 044 bytes \
+             to the byte; got {before}"
+        );
         let growth = (after - before) as f64 / before as f64;
         // The HUMAN rendering too, because `workspace status` has no formatter of
         // its own — `Output::print` pretty-prints this same read-model, so the
@@ -2719,13 +2743,12 @@ mod tests {
             growth * 100.0,
             pretty.len()
         );
-        // Measured at **+70.9%** on this shape (195 229 → 333 619 bytes), which
+        // Measured at **+71.0%** on this shape (195 044 → 333 619 bytes), which
         // projects the ~260 KB reference baseline to roughly 445 KB. With [CR-118]
-        // alone as the rider it is **+59.4%** on this tree (195 229 → 311 202);
-        // [S-372] recorded +59.6% against a then-195 044-byte baseline, so the
-        // 185-byte difference is in the stripped-down payload, not in the rider.
-        // S-377 accounts for the rest and is measured on its own below. Almost all
-        // of the total is the 146 four-way ties:
+        // alone as the rider it is **+59.6%** (195 044 → 311 202) — [S-372]'s
+        // recorded figure, reproduced to the byte at both ends. S-377 accounts for
+        // the rest and is measured on its own below. Almost all of the total is the
+        // 146 four-way ties:
         // naming what a reference tied between IS the payload, so the cost is the
         // feature, and the ceiling guards against a blow-up — a doubling, a
         // per-row string, an unbounded set — not against the intended rider.
