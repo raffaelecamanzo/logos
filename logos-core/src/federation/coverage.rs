@@ -1140,9 +1140,21 @@ where
     // provider, but they are captured sites and are reported — the broker arm's
     // recorded `topic-not-literal` refusals arrive here ([CR-107], [NFR-CC-04]).
     let mut unkeyable_providers: Vec<(String, super::bridge::InvocationRef)> = Vec::new();
-    // Ledger-provider endpoints already indexed, so one endpoint is filed once —
-    // the collapse `broker_edges` performs before its own fan-out ([NFR-RA-05]).
-    let mut ledger_providers: std::collections::HashSet<(PortableKey, String, String)> =
+    // Ledger endpoints already filed, so one endpoint is filed once — the collapse
+    // `broker_edges` performs before its own fan-out ([NFR-RA-05]).
+    //
+    // Keyed on `(key, is_provider, member, symbol)`, which is
+    // [`super::broker::broker_edges`]'s own dedup key **including the role**.
+    // Before S-376 this set covered the provider arm only, and the consumer arm
+    // went uncollapsed: a publish endpoint captured twice on one topic (two ledger
+    // rows differing in `form`) produced two bound rows where the bridge emits one
+    // edge per subscriber from *one* publish. That inflated the pooled `bound` —
+    // already wrong, but invisible — and S-376 promoted it into a published
+    // headline, where `resolved_cross_service_edges` would report 2xN against the
+    // bridge's N and break the reconcile-against-`references` contract that field
+    // states ([NFR-RA-05], [CR-118]). The comment below already claimed this tier
+    // applied "the SAME collapse"; it now does.
+    let mut ledger_endpoints: std::collections::HashSet<(PortableKey, bool, String, String)> =
         std::collections::HashSet::new();
 
     let surfaces = read_members(registry, "contract surface", |e| e.contract_surface());
@@ -1189,7 +1201,26 @@ where
     for (member, refs) in read_members(registry, "invocation references", |e| e.invocation_refs()) {
         for reference in refs {
             match reference.relation.bridge_role() {
-                Some(BridgeRole::Consumer) => inv_consumers.push((member.clone(), reference)),
+                Some(BridgeRole::Consumer) => {
+                    // The consumer half of the same collapse. A consumer row that
+                    // does not reduce to a portable key is still a captured site and
+                    // is reported (the tier classifies it below), so an unkeyable row
+                    // bypasses the dedup rather than being dropped here — dropping it
+                    // would lose the refusal the broker arm files.
+                    if let Some(key) =
+                        consumer_portable_key(reference.relation, &reference.target)
+                    {
+                        if !ledger_endpoints.insert((
+                            key,
+                            false,
+                            member.clone(),
+                            reference.symbol.as_str().to_string(),
+                        )) {
+                            continue; // a repeat of this exact endpoint on this key
+                        }
+                    }
+                    inv_consumers.push((member.clone(), reference));
+                }
                 Some(BridgeRole::Provider) => {
                     // A ledger-only provider (a broker subscribe) keys on exactly the
                     // string its consumer side keys on, so the two meet in this index
@@ -1220,8 +1251,9 @@ where
                     // bound providers (fan-out)" beside two bridge edges — a
                     // fabricated count ([NFR-RA-05]) and exactly the classifier drift
                     // this module exists to prevent.
-                    if !ledger_providers.insert((
+                    if !ledger_endpoints.insert((
                         key.clone(),
+                        true,
                         member.clone(),
                         reference.symbol.as_str().to_string(),
                     )) {
@@ -5059,6 +5091,99 @@ mod tests {
             cov.references
         );
         assert_eq!(cov.bound, 0);
+    }
+
+    /// **One endpoint captured twice is one site and one set of edges** — the
+    /// consumer half of the collapse [`super::broker::broker_edges`] performs
+    /// ([NFR-RA-05], [CR-118]).
+    ///
+    /// A ledger can hold two rows for one endpoint (they differ in `form`, which is
+    /// inside the ledger's identity but outside the endpoint's), and the provider
+    /// arm of this tier has collapsed them since [CR-107]. The consumer arm did
+    /// not. Before S-376 that inflated the pooled `bound` invisibly; S-376 promoted
+    /// the same rows into `resolved_cross_service_edges`, where the duplicate would
+    /// publish **twice the bridge's edge count** under a field whose own contract
+    /// says a reader can reconcile it against `references`.
+    ///
+    /// Asserted on the count, the split AND the edge total, because the three fail
+    /// differently: a missing collapse shows up as two rows, two bound sites and
+    /// double the edges, and pinning only the last would pass over a tier that
+    /// double-counted the sites and happened to halve the fan-out.
+    ///
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn a_publish_endpoint_captured_twice_is_one_site_and_one_set_of_edges() {
+        reset();
+        set_member("api", vec![]);
+        set_member("web", vec![]);
+        set_member("audit", vec![]);
+        // The SAME endpoint, filed twice — the shape a ledger holds when one site
+        // is captured under two `form`s.
+        set_consumers(
+            "api",
+            vec![
+                broker_publish("orders", "local emitOrder"),
+                broker_publish("orders", "local emitOrder"),
+            ],
+        );
+        for member in ["web", "audit"] {
+            set_consumers(
+                member,
+                vec![broker_subscribe("orders", &format!("local on_{member}"))],
+            );
+        }
+
+        let cov = cross_service_coverage(&registry(&["api", "web", "audit"]));
+
+        assert_eq!(
+            cov.references.len(),
+            1,
+            "one endpoint is one row however many times the ledger holds it: {:?}",
+            cov.references
+        );
+        assert_eq!(cov.by_intake.invocation.bound, 1, "…and one egress site");
+        assert_eq!(
+            cov.resolved_cross_service_edges, 2,
+            "…binding two cross-member subscribers: two edges, not four"
+        );
+        assert_eq!(cov.egress_resolution_measured, 1);
+    }
+
+    /// **A duplicated SUBSCRIBE endpoint still indexes one provider**, so the
+    /// provider arm's own collapse is unchanged by the consumer arm gaining one.
+    ///
+    /// The regression this pins is the role key: collapsing on `(key, member,
+    /// symbol)` without the role would make a publish and a subscribe on the same
+    /// topic from the same symbol collide, and the second would be dropped.
+    #[test]
+    fn the_collapse_is_per_role_so_a_publish_and_a_subscribe_never_collide() {
+        reset();
+        set_member("api", vec![]);
+        set_member("web", vec![]);
+        // One symbol that BOTH publishes and subscribes on the same topic — the
+        // shape a role-blind dedup key would silently collapse to one row.
+        set_consumers(
+            "api",
+            vec![
+                broker_publish("orders", "local relay"),
+                broker_subscribe("orders", "local relay"),
+            ],
+        );
+        set_consumers("web", vec![broker_subscribe("orders", "local on_web")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "web"]));
+
+        assert_eq!(
+            cov.by_intake.invocation.bound, 1,
+            "the publish is a consumer row and binds: {:?}",
+            cov.references
+        );
+        assert_eq!(
+            cov.resolved_cross_service_edges, 1,
+            "…to the one CROSS-member subscriber; api's own subscribe is intra-repo"
+        );
     }
 
     // ── S-376 / CR-120: the headline is a resolved-edge count ────────────────
