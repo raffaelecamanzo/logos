@@ -37,31 +37,19 @@
 //!
 //! # No production caller today — honestly, not provisionally ([S-379], [CR-120])
 //!
-//! This module has never been reached from a real index run. [S-253] shipped
-//! it, the `GrpcCall` relation, and the bridge/coverage plumbing, and recorded
-//! the story `Done`; [CR-120] names that the failure [CR-108] describes for a
-//! capability that reports success while contributing nothing, because no
-//! plugin's `invocations` query captures a gRPC stub call in any language —
-//! not "not yet in most languages", the per-language gap [CR-108] closed for
-//! HTTP, but zero languages. [S-379] reopened [S-253] to record this plainly
-//! rather than leave it to a dead-code lint.
-//!
-//! The functions below are kept, not deleted: `GrpcCall` is a real,
-//! [ADR-54]-designed arm with its provider half already shipping (proto
-//! service enrichment, `federation::bridge::surface_from`), unlike vocabulary
-//! no decision in this repository ever anticipated. What is missing is a
-//! validatable consumer capture — the reference workspace has zero gRPC
-//! callers, so shipping one now would be exactly the unvalidated-capability
-//! move [S-379] exists to avoid ([CR-121] §3.3). The capability-layer guard
-//! that keeps this absence declared, `every_invocation_arm_is_either_shipped_or_honestly_absent`,
-//! lives beside `ArtifactRelation::HONESTLY_ABSENT_INVOCATION_ARMS` in
-//! `crate::model::artifact`.
+//! This module has never been reached from a real index run: no plugin's
+//! `invocations` query captures a gRPC stub call in any language, so nothing
+//! outside this module's own tests and `extract::config::refs`'s test ever
+//! calls [`grpc_key`]/[`grpc_key_from_slots`]. [S-253] shipped this module
+//! regardless and was recorded `Done`; [S-379] reopened it and retained the
+//! functions rather than removing them. See `ArtifactRelation::GrpcCall`'s
+//! doc comment (`crate::model::artifact`) for the full reasoning — why this
+//! differs from vocabulary this repository actually removed, and where the
+//! capability-layer guard that keeps the absence declared lives.
 //!
 //! [S-253]: ../../../docs/planning/journal.md#s-253-grpc-stub-call-to-proto-service-arm-with-provider-enrichment
 //! [S-379]: ../../../docs/planning/journal.md#s-379-the-grpc-invocation-arm-is-marked-honestly-absent
-//! [CR-108]: ../../../docs/requests/CR-108-per-language-http-client-call-capture.md
 //! [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
-//! [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
 
 // `#![allow(dead_code)]` stays: every function here is reachable only from
 // this module's own tests and `extract::config::refs`'s arm-plumbing test —
