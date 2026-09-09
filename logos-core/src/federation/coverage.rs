@@ -1562,11 +1562,36 @@ fn resolved_edges(references: &[ReferenceCoverage]) -> u64 {
             (Some(_), _) => 1,
             // Fan-out: the bridge emits one edge per cross-member subscriber, and
             // the row names that whole set.
-            (None, Some(c)) => c.total,
-            // Structurally unreachable — a bound row always names what it bound
-            // to — and counted as one rather than dropped, because under-counting
-            // an edge that exists is the direction that flatters.
-            (None, None) => 1,
+            //
+            // **The disposition is read, not the bucket.** That is this module's own
+            // published rule ([`ProviderDisposition`], and the MCP tool description
+            // that repeats it), and it is the rule precisely because a set means
+            // opposite things under the two dispositions: `BoundTo` is "all of these
+            // are reached", `TiedBetween` is "none of them is". `tier` never pairs a
+            // tied set with a bound state and `ReferenceCoverage::new` debug-asserts
+            // it — but a `debug_assert` is compiled out of a release build, and this
+            // file is scheduled to receive more `record` call sites. A future one
+            // that got it wrong would add the whole tied set to the headline, which
+            // is the exact direction [CR-120] exists to prevent.
+            (None, Some(c)) if c.disposition == ProviderDisposition::BoundTo => c.total,
+            // A bound row that names nothing it bound to, or names only a set it did
+            // NOT bind: no evidence of an edge, so no edge. Both are structurally
+            // unreachable today — every `Bound` arm of `tier` yields `Sole` or
+            // `Several(BoundTo)` — and both count **zero** rather than one.
+            //
+            // Zero is the honest direction here, and the direction matters enough to
+            // state: for a headline whose whole purpose is to stop a coverage figure
+            // flattering the capability it describes ([CR-120] §2), asserting an edge
+            // from a row carrying no evidence of one is the flattering direction.
+            // Under-counting is the conservative side of a never-fabricate rule
+            // ([NFR-RA-05]); over-counting is not.
+            (None, _) => {
+                debug_assert!(
+                    false,
+                    "a bound row must name the provider or the bound set it reached"
+                );
+                0
+            }
         })
         .sum()
 }
@@ -1624,14 +1649,20 @@ fn summarize_resolved_edges(
     egress_denom: u64,
     rate: Option<f64>,
 ) -> String {
+    // Grammatical at arity 1, the idiom [`summarize_candidates`] already uses in
+    // this file and for the same reason: this line is rendered verbatim on four
+    // surfaces and in the operator manual, so "1 resolved cross-service edges"
+    // would be published prose, not an internal string.
+    let edges = if resolved == 1 { "edge" } else { "edges" };
+    let sites = if egress_denom == 1 { "site" } else { "sites" };
     match rate {
         Some(r) => format!(
-            "{resolved} resolved cross-service edges; egress resolution {r:.3} \
-             ({bound_sites} of {egress_denom} egress sites resolved)"
+            "{resolved} resolved cross-service {edges}; egress resolution {r:.3} \
+             ({bound_sites} of {egress_denom} egress {sites} resolved)"
         ),
         None => format!(
-            "{resolved} resolved cross-service edges; egress resolution not measured \
-             ({bound_sites} of {egress_denom} egress sites)"
+            "{resolved} resolved cross-service {edges}; egress resolution not measured \
+             ({bound_sites} of {egress_denom} egress {sites})"
         ),
     }
 }
@@ -5093,6 +5124,49 @@ mod tests {
         assert_eq!(cov.bound, 0);
     }
 
+    /// **A sole-provider invocation bind is one resolved edge** — the
+    /// exactly-one arm of [`resolved_edges`], and the dominant real-world shape.
+    ///
+    /// Written because the fan-out fixture beside it did not reach this branch:
+    /// `every_bucket_in_both_populations`'s only bound invocation row is the
+    /// fan-out publish, so changing `(Some(_), _) => 1` to `=> 0` left every
+    /// `logos-core` unit test green and failed only in two integration suites, one
+    /// of them behind a feature gate. The branch that produces most of this
+    /// headline is now pinned where the function lives.
+    ///
+    /// The contract-surface operation in the fixture is the other half of the
+    /// assertion: it binds the same route, so `bound` is 2 while the edge count is
+    /// 1 — an implementation that republished the pooled count under the new name
+    /// fails here rather than only at a surface.
+    #[test]
+    fn a_sole_provider_invocation_bind_is_one_resolved_edge() {
+        reset();
+        set_member("api", vec![op("GET /users/{id}", "local op_users")]);
+        set_member("web", vec![route("GET /users/{id}", "local route_users")]);
+        set_consumers("api", vec![http_call("GET /users/{id}", "local fetch_user")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "web"]));
+
+        assert_eq!(
+            (cov.by_intake.contract_surface.bound, cov.by_intake.invocation.bound),
+            (1, 1),
+            "both populations bind the same route: {:?}",
+            cov.references
+        );
+        assert_eq!(cov.bound, 2, "the pooled count adds them");
+        assert_eq!(
+            cov.resolved_cross_service_edges, 1,
+            "…but only the captured CALL SITE is a resolved cross-service edge; the \
+             OpenAPI operation's match is documentation conformance ([CR-120] §2)"
+        );
+        assert_eq!(cov.egress_resolution, Some(1.0));
+        assert_eq!(cov.egress_resolution_measured, 1);
+        assert_eq!(
+            cov.resolved_edges_summary,
+            "1 resolved cross-service edge; egress resolution 1.000 (1 of 1 egress site resolved)"
+        );
+    }
+
     /// **One endpoint captured twice is one site and one set of edges** — the
     /// consumer half of the collapse [`super::broker::broker_edges`] performs
     /// ([NFR-RA-05], [CR-118]).
@@ -5356,7 +5430,7 @@ mod tests {
         assert_eq!(cov.egress_resolution_measured, 1);
         assert_eq!(
             cov.resolved_edges_summary,
-            "3 resolved cross-service edges; egress resolution 1.000 (1 of 1 egress sites resolved)",
+            "3 resolved cross-service edges; egress resolution 1.000 (1 of 1 egress site resolved)",
             "and the composed line states both, so neither can be read as the other"
         );
 
@@ -5465,9 +5539,10 @@ mod tests {
                 );
             }
             let line = cov.resolved_edges_summary.as_str();
+            let noun = if cov.resolved_cross_service_edges == 1 { "edge" } else { "edges" };
             assert!(
                 line.starts_with(&format!(
-                    "{} resolved cross-service edges;",
+                    "{} resolved cross-service {noun};",
                     cov.resolved_cross_service_edges
                 )),
                 "{label}: the line must open with the count it summarises: {line:?}"
@@ -5477,7 +5552,7 @@ mod tests {
                 "{label}: …and carry the rate beside it: {line:?}"
             );
             assert!(
-                line.contains("egress sites"),
+                line.contains("egress site"),
                 "{label}: …over a stated denominator: {line:?}"
             );
             match cov.egress_resolution {

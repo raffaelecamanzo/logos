@@ -298,7 +298,7 @@ async fn workspace_status_mcp_publishes_the_resolved_edge_headline_with_its_rate
     assert_eq!(coverage["egress_resolution_measured"], 2, "{coverage}");
     assert_eq!(
         coverage["resolved_edges_summary"],
-        "1 resolved cross-service edges; egress resolution 0.500 (1 of 2 egress sites resolved)",
+        "1 resolved cross-service edge; egress resolution 0.500 (1 of 2 egress sites resolved)",
         "the count and the rate arrive as one composed line (BR-51): {coverage}"
     );
     // The renamed ratio is still published, still never bare.
