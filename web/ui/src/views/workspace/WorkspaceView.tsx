@@ -34,7 +34,6 @@ import type {
   ClassificationCounts,
   CrossServiceImpact,
   DegradedRollup,
-  IntakeSplit,
   ImpactEntry,
   ImpactResult,
   MemberTopics,
@@ -64,6 +63,8 @@ import {
   ARM_LABEL,
   armLabel,
   buildCoverageDashboard,
+  classificationTotal,
+  measuredInPopulation,
   reasonLabel,
   type ArmCoverage,
   type CoverageDashboard,
@@ -330,29 +331,36 @@ interface IntakePopulation {
   ambiguous: number;
   unbound: number;
   noProvider: number;
+  /** Every reference in the population. */
   total: number;
+  /** The references INSIDE the ratio's denominator — everything but
+   *  `no-provider-in-workspace` (ADR-53). What a resolution-failure claim must be
+   *  gated on: a population of nothing but calls that leave this workspace has
+   *  not failed to resolve. */
+  measured: number;
 }
 
-/** Project the server's split into the board's two rows.
+/** Project one intake population into its board row.
  *
- *  Every count is carried verbatim; only the row's `total` is summed here, and it
- *  is a per-row denominator rather than a figure that appears anywhere else — so
- *  this adds no second implementation of the headline arithmetic (the server
- *  derives its four counters from this same split). */
-function intakePopulations(split: IntakeSplit): IntakePopulation[] {
-  const row = (intake: BridgeIntake, label: string, c: ClassificationCounts): IntakePopulation => ({
+ *  Every count is carried verbatim, and the row's `total` comes from
+ *  {@link classificationTotal} rather than being summed again here — the model
+ *  owns that arithmetic, and a copy of it in this file would be a twin printing a
+ *  row total beside a sentence about that total from two implementations. */
+function intakeRow(
+  intake: BridgeIntake,
+  label: string,
+  counts: ClassificationCounts,
+): IntakePopulation {
+  return {
     intake,
     label,
-    bound: c.bound,
-    ambiguous: c.ambiguous,
-    unbound: c.unbound,
-    noProvider: c.no_provider_in_workspace,
-    total: c.bound + c.ambiguous + c.unbound + c.no_provider_in_workspace,
-  });
-  return [
-    row("contract-surface", "Declared endpoint (OpenAPI operation)", split.contract_surface),
-    row("invocation", "Captured call site (client call, publish/subscribe)", split.invocation),
-  ];
+    bound: counts.bound,
+    ambiguous: counts.ambiguous,
+    unbound: counts.unbound,
+    noProvider: counts.no_provider_in_workspace,
+    total: classificationTotal(counts),
+    measured: measuredInPopulation(counts),
+  };
 }
 
 const INTAKE_COLUMNS: Column<IntakePopulation>[] = [
@@ -401,34 +409,56 @@ const INTAKE_COLUMNS: Column<IntakePopulation>[] = [
 
 /** The coverage-by-intake board (S-377, CR-120).
  *
- *  Its own component so the two populations are computed once and the
- *  `invocation` row is addressed by name rather than by array position — the
- *  narrative below is *about* that row, and reading it out of `rows[1]` would tie
- *  a sentence to a sort order. */
+ *  Its own component so each population is built once and named — the narrative
+ *  below is *about* the `invocation` row, and recovering it from `rows[1]` (or
+ *  `find(...)!`) would tie a sentence to a sort order and put a non-null
+ *  assertion in a render path, which this codebase's wire-type docs tell views
+ *  not to do.
+ *
+ *  # Three states, because `invocation.bound === 0` means three different things
+ *  A zero over no captured call sites at all is **honest absence**. A zero over
+ *  call sites that every one of them left this workspace is **not a failure** —
+ *  `no-provider-in-workspace` is deliberately outside the ratio's denominator
+ *  (ADR-53) precisely because a call to a service we do not host is not a broken
+ *  binding. Only a zero over call sites that WERE measured is a finding. Saying
+ *  the wrong one of the three is the dishonesty NFR-CC-04 forbids, and the first
+ *  cut of this card said "nothing resolves" over the second — which is the state
+ *  the 84-member reference estate is actually in for its one HTTP client call. */
 function IntakeCard({ dashboard }: { dashboard: CoverageDashboard }) {
-  const populations = intakePopulations(dashboard.byIntake);
-  const captured = populations.find((p) => p.intake === "invocation")!;
+  const declared = intakeRow(
+    "contract-surface",
+    "Declared endpoint (OpenAPI operation)",
+    dashboard.byIntake.contract_surface,
+  );
+  const captured = intakeRow(
+    "invocation",
+    "Captured call site (client call, publish/subscribe)",
+    dashboard.byIntake.invocation,
+  );
   return (
     <Card title="Coverage by intake">
       <DataTable
         caption="Cross-service coverage by intake population"
         columns={INTAKE_COLUMNS}
-        rows={populations}
+        rows={[declared, captured]}
         rowKey={(p) => p.intake}
         pageSize={DEFAULT_TABLE_PAGE_SIZE}
       />
-      {/* The two zeros are different statements, and saying the wrong one is the
-          dishonesty NFR-CC-04 forbids: no captured call site at all is honest
-          absence, while call sites that ALL fail to resolve is a finding. Each is
-          said in its own words, and neither is left to be inferred from a 0. */}
-      {dashboard.hasInvocationReferences && captured.bound === 0 && (
+      {captured.measured > 0 && captured.bound === 0 && (
         <p className="muted">
-          No captured call site in this workspace resolves: every one of the {captured.total}{" "}
-          <span className="mono">invocation</span> references is ambiguous, unbound, or has no
-          provider here. The bound count above is entirely declared-contract matches.
+          No captured call site in this workspace resolves: every one of the {captured.measured}{" "}
+          <span className="mono">invocation</span> references that could bind here is ambiguous or
+          unbound. The bound count above is entirely declared-contract matches.
         </p>
       )}
-      {!dashboard.hasInvocationReferences && (
+      {captured.measured === 0 && captured.noProvider > 0 && (
+        <p className="muted">
+          Every captured <span className="mono">invocation</span> reference in this workspace ({captured.noProvider}) points
+          at a service outside it — reported apart, and not a broken binding. Nothing here failed to
+          resolve.
+        </p>
+      )}
+      {captured.total === 0 && (
         <p className="muted">
           No <span className="mono">invocation</span> references were captured in this workspace —
           honest absence, not a resolution failure. Its bound count says nothing about outbound call

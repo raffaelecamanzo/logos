@@ -166,9 +166,27 @@ export interface CoverageDashboard {
 
 /** Every reference in one intake population — the denominator that tells an
  *  `invocation.bound === 0` finding apart from an estate with no call sites at
- *  all (NFR-CC-04). */
-function total(counts: ClassificationCounts): number {
+ *  all (NFR-CC-04).
+ *
+ *  Exported because the coverage view needs the same sum for its per-population
+ *  **References** column, and a second copy of it there was the hand-mirrored
+ *  twin this module exists to prevent: the two would print a row total and a
+ *  sentence about that total, side by side in one card, from two implementations
+ *  free to diverge the moment `ClassificationCounts` gains a bucket. */
+export function classificationTotal(counts: ClassificationCounts): number {
   return counts.bound + counts.ambiguous + counts.unbound + counts.no_provider_in_workspace;
+}
+
+/** References in one population that are INSIDE the ratio's denominator — bound,
+ *  ambiguous or unbound, i.e. everything but `no-provider-in-workspace`
+ *  (ADR-53).
+ *
+ *  The distinction {@link classificationTotal} cannot make: a population made
+ *  entirely of calls to services outside this workspace is not a *broken*
+ *  binding, so "nothing here resolves" would be a fabricated finding over it. A
+ *  view that reports a resolution failure must gate on this, never on the total. */
+export function measuredInPopulation(counts: ClassificationCounts): number {
+  return counts.bound + counts.ambiguous + counts.unbound;
 }
 
 /** Group a coverage read-model into the per-arm, per-reason dashboard model. */
@@ -236,7 +254,7 @@ export function buildCoverageDashboard(coverage: CrossServiceCoverage): Coverage
     // would be a second implementation of the arithmetic the headline already
     // rests on, free to disagree with it inches away on the same screen.
     byIntake: coverage.by_intake,
-    hasInvocationReferences: total(coverage.by_intake.invocation) > 0,
+    hasInvocationReferences: classificationTotal(coverage.by_intake.invocation) > 0,
     isEmpty: coverage.references.length === 0,
     // No `??` fallbacks: these three are non-optional in `CrossServiceCoverage`
     // and the SPA ships inside the same binary that serves them, so there is no

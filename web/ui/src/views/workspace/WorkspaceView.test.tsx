@@ -276,6 +276,77 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
   // The other zero. `invocation.bound === 0` with no invocation references at all
   // is honest absence, and saying "nothing resolves" over it would be a fabricated
   // finding — the mirror image of the fabrication NFR-CC-04 usually guards.
+  // The mutation this closes: drop `captured.bound === 0` from the gate and the
+  // view prints "nothing resolves" over a workspace whose call sites DO resolve —
+  // a fabricated finding, and the whole suite stayed green without this fixture,
+  // because every other case here has `invocation.bound === 0`.
+  it("says NOTHING when the invocation population resolves — no fabricated finding", async () => {
+    const healthy: CrossServiceCoverage = {
+      ...COVERAGE,
+      references: COVERAGE.references.map((ref) =>
+        ref.intake === "invocation" ? { ...ref, bucket: "bound" as const, state: "bound" as const, reason: undefined } : ref,
+      ),
+      bound: 3,
+      ambiguous: 0,
+      unbound: 0,
+      by_intake: {
+        contract_surface: { bound: 1, ambiguous: 0, unbound: 0, no_provider_in_workspace: 2 },
+        invocation: { bound: 2, ambiguous: 0, unbound: 0, no_provider_in_workspace: 0 },
+      },
+    };
+    stubApi({ coverage: healthy, providers: [BINDING] });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
+
+    const captured = screen.getByRole("cell", { name: /invocation/ }).closest("tr")!;
+    expect([...captured.querySelectorAll("td")].map((c) => c.textContent).slice(1, 6)).toEqual([
+      "2",
+      "0",
+      "0",
+      "0",
+      "2",
+    ]);
+    expect(screen.queryByText(/No captured call site in this workspace resolves/)).toBeNull();
+    expect(screen.queryByText(/points\s+at a service outside it/)).toBeNull();
+    expect(screen.queryByText(/honest absence, not a resolution failure/)).toBeNull();
+  });
+
+  // ADR-53's separate bucket, at the view: a population made ENTIRELY of calls
+  // that leave this workspace has not failed to resolve, and calling it a failure
+  // is the mirror of the fabrication NFR-CC-04 usually guards. This is the state
+  // the 84-member reference estate is in for its one HTTP client call, so it is
+  // not a hypothetical shape.
+  it("calls an all-outside-the-workspace invocation population what it is, not a failure", async () => {
+    const outward: CrossServiceCoverage = {
+      ...COVERAGE,
+      references: COVERAGE.references.map((ref) =>
+        ref.intake === "invocation"
+          ? {
+              ...ref,
+              bucket: "unbound" as const,
+              state: "unbound" as const,
+              reason: "no-provider-in-workspace" as const,
+            }
+          : ref,
+      ),
+      bound: 1,
+      ambiguous: 0,
+      unbound: 0,
+      no_provider_in_workspace: 4,
+      by_intake: {
+        contract_surface: { bound: 1, ambiguous: 0, unbound: 0, no_provider_in_workspace: 2 },
+        invocation: { bound: 0, ambiguous: 0, unbound: 0, no_provider_in_workspace: 2 },
+      },
+    };
+    stubApi({ coverage: outward, providers: [BINDING] });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
+
+    expect(screen.getByText(/points\s+at a service outside it/)).toBeInTheDocument();
+    expect(screen.queryByText(/No captured call site in this workspace resolves/)).toBeNull();
+    expect(screen.queryByText(/honest absence, not a resolution failure/)).toBeNull();
+  });
+
   it("calls an absent invocation population absence, not a resolution failure", async () => {
     const declaredOnly: CrossServiceCoverage = {
       ...COVERAGE,
