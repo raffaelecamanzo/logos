@@ -2,11 +2,16 @@
 //!
 //! Extends the [bridge](super::bridge)'s binary bound/not-bound match outcome
 //! into a reason-annotated advisory tier: every cross-boundary reference — an
-//! `ApiOperation` HTTP consumer node and a `GrpcCall` stub-call ledger consumer
+//! `ApiOperation` HTTP consumer node, an outbound HTTP client-call site, a
+//! broker publish/subscribe, and a `GrpcCall` stub-call ledger consumer
 //! (S-253, [FR-WS-09]) — is classified **bound**, **ambiguous**, or **unbound**,
-//! and each non-bound reference carries a [`CoverageState`] naming *why*.
+//! and each non-bound reference carries a [`CoverageState`] naming *why*. The
+//! `GrpcCall` classifier below is real and tested; naming it here is not a
+//! claim that a `grpc-call` row can occur in production today — it cannot, no
+//! plugin captures one, [S-379] records why the arm is retained regardless.
 //!
 //! [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
+//! [S-379]: ../../../docs/planning/journal.md#s-379-the-grpc-invocation-arm-is-marked-honestly-absent
 //!
 //! # Advisory only ([ADR-53])
 //! This module is **never** called from `scan`, `gate`, or `check_rules`
@@ -153,18 +158,21 @@ pub enum UnboundReason {
 /// but that is the pre-[CR-107] behaviour for every arm, and giving gRPC its own
 /// reason is a change to the [FR-WS-05] reason set that no acceptance criterion
 /// here asks for. Stated rather than left for a reader to discover from the `_`
-/// arm.
+/// arm. [S-379] confirms this branch needs no change: the honest-absence gap it
+/// closes is the capability advertisement (a `GrpcCall` row that can never
+/// exist), not this reason mapping (which is already correct for a `GrpcCall`
+/// row *if* one ever did).
 ///
-/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md Every arm's normalizer
-/// refuses before the ledger, so a row reaching here is either a refusal the arm
-/// deliberately recorded (the broker arm's keyless row, [CR-107]; the HTTP arm's,
-/// [CR-120]) or a target that stopped normalizing — both honestly unbound,
-/// neither fabricated.
+/// Every arm's normalizer refuses before the ledger, so a row reaching here is
+/// either a refusal the arm deliberately recorded (the broker arm's keyless
+/// row, [CR-107]; the HTTP arm's, [CR-120]) or a target that stopped
+/// normalizing — both honestly unbound, neither fabricated.
 ///
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
-///
 /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
 /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+/// [S-379]: ../../../docs/planning/journal.md#s-379-the-grpc-invocation-arm-is-marked-honestly-absent
 fn unkeyable_reason(
     relation: crate::model::ArtifactRelation,
     target: &str,

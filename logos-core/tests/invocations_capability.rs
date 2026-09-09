@@ -271,3 +271,72 @@ fn no_invocations_query_contains_a_capture_less_pattern() {
         "expected the landed invocations arms to be compiled in, saw {checked}"
     );
 }
+
+// ── S-379 / FR-WS-07 / CR-120: the gRPC arm ships no capture anywhere ───────
+
+/// **No plugin query captures a gRPC stub call.** The concrete, filesystem-
+/// level evidence behind `ArtifactRelation::HONESTLY_ABSENT_INVOCATION_ARMS`
+/// naming `GrpcCall`: this is what makes that classification a checked fact
+/// rather than an assertion made by fiat.
+///
+/// [S-253](../../docs/planning/journal.md#s-253-grpc-stub-call-to-proto-service-arm-with-provider-enrichment)
+/// shipped the `grpc-call` relation, its `grpc_key` normalizer, and the
+/// bridge/coverage plumbing and was recorded Done, but no `.scm` query file
+/// in the tree — under any plugin, under any capability — ever names a gRPC
+/// concept. This is not "gRPC's query is thin"; it is "gRPC's query does not
+/// exist". The check below greps every `.scm` under `plugins/` for the single
+/// case-insensitive substring `grpc` — a superstring of the wire relation
+/// `grpc-call` too, so one grep covers both — which is a stronger, cheaper
+/// claim than "no plugin declares a `grpc` capability", since no such
+/// capability name exists to declare — the arm shares no per-namespace
+/// capability convention with the broker arm's `brokers`. It does **not**
+/// check the normalizer's own slot names (`package`/`service`/`method`):
+/// those are common enough words that grepping for them would false-positive
+/// on unrelated captures, and a real gRPC query would still have to name
+/// gRPC itself somewhere (a comment, a capture tag) to be reviewable at all.
+///
+/// A future gRPC capture landing (deliberately, with a validating workspace —
+/// [CR-121](../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md)
+/// §3.3) must edit this test in the same commit that moves `GrpcCall` from
+/// `HONESTLY_ABSENT_INVOCATION_ARMS` to `PRODUCTION_INVOCATION_ARMS` — a
+/// deliberate pairing, not a coincidence of two guards silently agreeing.
+#[test]
+fn no_plugin_query_captures_a_grpc_stub_call() {
+    let plugins_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins");
+
+    fn scm_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                scm_files(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("scm") {
+                out.push(path);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    scm_files(&plugins_dir, &mut files);
+    assert!(
+        files.len() >= 10,
+        "expected the landed query files (invocations + brokers, at least) to \
+         be on disk, saw {}",
+        files.len()
+    );
+
+    let mut offenders = Vec::new();
+    for path in &files {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        if text.to_ascii_lowercase().contains("grpc") {
+            offenders.push(path.display().to_string());
+        }
+    }
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "a plugin query mentions gRPC — {offenders:?} — which means the \
+         honest-absence classification in `ArtifactRelation` \
+         (HONESTLY_ABSENT_INVOCATION_ARMS naming GrpcCall) is now stale and \
+         must be updated alongside whatever capture landed"
+    );
+}

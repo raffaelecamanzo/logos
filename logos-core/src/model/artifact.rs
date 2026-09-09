@@ -228,7 +228,7 @@ pub enum ArtifactRelation {
     HttpClientCall,
     /// A generated-stub gRPC method call → the proto service method it invokes,
     /// rendered as a fully-qualified `package.Service/Method` reference (S-253,
-    /// [FR-WS-09]). The first pluggable cross-service **invocation arm**: it
+    /// [FR-WS-09]). The second pluggable cross-service **invocation arm**: it
     /// declares [`BridgeNamespace::Grpc`] + [`BridgeRole::Consumer`] via
     /// [`bridge_namespace`](ArtifactRelation::bridge_namespace)/[`bridge_role`](ArtifactRelation::bridge_role),
     /// so the federation bridge binds it to the exactly-one enriched
@@ -236,9 +236,34 @@ pub enum ArtifactRelation {
     /// target cannot be fully qualified emits no reference and surfaces as a
     /// coverage reason — never an approximate bind ([NFR-RA-05]).
     ///
+    /// **Honestly absent in production today** ([S-379], [CR-120]). The
+    /// provider half above is real, running production code: proto-service
+    /// enrichment (`federation::bridge::surface_from`) expands every indexed
+    /// `.proto` service into its per-method FQN regardless of this arm. The
+    /// consumer half is not: no plugin's `invocations` query captures a gRPC
+    /// stub call anywhere in the tree, and no `extract` code path drives
+    /// `resolve::grpc_key::grpc_key_from_slots` outside its own unit tests — so
+    /// no `grpc-call` reference can exist from a real index run. [S-253]
+    /// shipped this variant, the `resolve::grpc_key` normalizer, and the
+    /// bridge/coverage plumbing, and was recorded Done anyway — the
+    /// capability-reports-success-while-structurally-empty failure [CR-108]
+    /// names. The variant is **retained, not removed**: unlike the reason
+    /// vocabulary [S-378] retired (vocabulary no decision ever anticipated),
+    /// this arm is a real, named architectural decision ([ADR-54], [FR-WS-09]),
+    /// its provider half already ships, and a capture cannot be validated —
+    /// the reference estate has zero gRPC callers ([CR-121] §3.3 names it
+    /// out of scope). [`PRODUCTION_INVOCATION_ARMS`] is the guard that keeps
+    /// this absence declared rather than silently rediscovered.
+    ///
     /// [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
     /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    /// [S-253]: ../../../docs/planning/journal.md#s-253-grpc-stub-call-to-proto-service-arm-with-provider-enrichment
+    /// [S-378]: ../../../docs/planning/journal.md#s-378-the-unreachable-refusal-vocabulary-is-made-reachable-or-removed
+    /// [S-379]: ../../../docs/planning/journal.md#s-379-the-grpc-invocation-arm-is-marked-honestly-absent
+    /// [CR-108]: ../../../docs/requests/CR-108-per-language-http-client-call-capture.md
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
     GrpcCall,
     /// A message-broker **publish** site keyed by topic/queue name → every
     /// subscriber on the same topic across members (S-254, [FR-WS-10]). The
@@ -625,6 +650,66 @@ impl ArtifactRelation {
     }
 }
 
+/// Invocation arms with a **real production capture path** today — the
+/// positive half of the capability-layer honest-absence guard
+/// ([FR-WS-07], [NFR-CC-04], [CR-120]).
+///
+/// [`ArtifactRelation::is_invocation_arm`] answers "is this a pluggable
+/// invocation arm by declared descriptor", which is exactly the question
+/// [S-253] answered `Done` while contributing nothing: `GrpcCall` declares
+/// both descriptors, yet no plugin's `invocations` query and no `extract`
+/// code path ever constructs one outside a unit test. Whether an arm's
+/// descriptors are declared and whether it actually produces rows in
+/// production are two different facts, so they get two different rosters
+/// rather than one flag inferred from the other.
+///
+/// An arm belongs here iff some `extract` code path can construct an
+/// `InvocationRef` carrying it from a real index run: `HttpClientCall` via
+/// `extract::capture_http_client_call_arm`'s `"invocations"` query dispatch,
+/// `BrokerPublish`/`BrokerSubscribe` via `extract::broker`'s `"brokers"`
+/// query dispatch. This roster is enumerated, not derived, for the same
+/// reason [`ArtifactRelation::ALL`] is: completeness must be an assertion a
+/// missing entry can fail, never an inference nothing can fail.
+///
+/// See [`HONESTLY_ABSENT_INVOCATION_ARMS`] for the other half, and
+/// `every_invocation_arm_is_either_shipped_or_honestly_absent` for the
+/// guard that keeps the two partitioning [`ArtifactRelation::ALL`]'s
+/// invocation arms completely.
+///
+/// [S-253]: ../../../docs/planning/journal.md#s-253-grpc-stub-call-to-proto-service-arm-with-provider-enrichment
+/// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+// Consumed only by `every_invocation_arm_is_either_shipped_or_honestly_absent`
+// below — a compile-time-checked roster, not a runtime lookup table, so it has
+// no non-test caller. The same shape as `resolve::grpc_key`'s own
+// `#![allow(dead_code)]`: deliberate, and explained rather than silenced.
+#[allow(dead_code)]
+pub(crate) const PRODUCTION_INVOCATION_ARMS: &[ArtifactRelation] = &[
+    ArtifactRelation::HttpClientCall,
+    ArtifactRelation::BrokerPublish,
+    ArtifactRelation::BrokerSubscribe,
+];
+
+/// Invocation arms that declare their descriptors but ship **no** production
+/// capture, with the absence recorded deliberately rather than left for a
+/// reader to discover from a `Done` journal entry ([FR-WS-07], [CR-120]).
+///
+/// Membership here is not a TODO list — an arm stays here until a specific
+/// decision lands its capture (for `GrpcCall`, a language capture validated
+/// against a workspace with real gRPC callers; see the variant's own doc for
+/// why the reference estate cannot supply one today, [CR-121] §3.3). Moving
+/// an entry from here to [`PRODUCTION_INVOCATION_ARMS`] is the same
+/// deliberate, one-line act as adding a new arm to either roster in the
+/// first place — never automatic, never inferred.
+///
+/// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
+#[allow(dead_code)]
+pub(crate) const HONESTLY_ABSENT_INVOCATION_ARMS: &[ArtifactRelation] =
+    &[ArtifactRelation::GrpcCall];
+
 /// `true` if `target` is an absolute URL — a `scheme://` authority form. Cheap,
 /// allocation-free, and deterministic.
 fn is_absolute_url(target: &str) -> bool {
@@ -934,6 +1019,74 @@ mod tests {
         assert_eq!(
             BridgeNamespace::Grpc.match_discipline(),
             MatchDiscipline::ExactlyOne
+        );
+    }
+
+    /// **The capability-layer honest-absence guard** ([FR-WS-07], [NFR-CC-04],
+    /// [CR-120]): every invocation arm — every relation for which
+    /// [`ArtifactRelation::is_invocation_arm`] is `true` — is classified into
+    /// exactly one of [`PRODUCTION_INVOCATION_ARMS`] (a real capture ships) or
+    /// [`HONESTLY_ABSENT_INVOCATION_ARMS`] (declared, deliberately not shipped,
+    /// with a recorded reason on the variant). This generalises the fix for
+    /// [S-253] rather than special-casing gRPC: a *future* arm that declares
+    /// its descriptors before it ships a capture, or that ships a capture
+    /// without ever being added to the shipped roster, lands in **neither**
+    /// list and fails here — the exact silent gap that let `GrpcCall` be
+    /// recorded `Done` while contributing nothing.
+    ///
+    /// The two rosters must also be disjoint (an arm cannot be both shipped
+    /// and honestly absent) and must together cover every non-arm relation
+    /// too (in neither list, since neither roster is about them) — so the
+    /// partition check below is a genuine partition, not two independent
+    /// containment checks that could both silently miss a relation.
+    ///
+    /// [S-253]: ../../../docs/planning/journal.md#s-253-grpc-stub-call-to-proto-service-arm-with-provider-enrichment
+    /// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    #[test]
+    fn every_invocation_arm_is_either_shipped_or_honestly_absent() {
+        // Disjoint: no relation is claimed by both rosters.
+        for rel in PRODUCTION_INVOCATION_ARMS {
+            assert!(
+                !HONESTLY_ABSENT_INVOCATION_ARMS.contains(rel),
+                "{} cannot be both shipped and honestly absent",
+                rel.as_str()
+            );
+        }
+        // Neither roster names a relation that is not even an invocation arm —
+        // a non-arm relation has no capability advertisement to be honest or
+        // dishonest about.
+        for rel in PRODUCTION_INVOCATION_ARMS
+            .iter()
+            .chain(HONESTLY_ABSENT_INVOCATION_ARMS)
+        {
+            assert!(
+                rel.is_invocation_arm(),
+                "{} is listed in a capture-status roster but declares no \
+                 invocation-arm descriptors",
+                rel.as_str()
+            );
+        }
+        // Complete: every invocation arm is in exactly one roster.
+        let mut unclassified: Vec<&str> = ArtifactRelation::ALL
+            .into_iter()
+            .filter(|rel| {
+                rel.is_invocation_arm()
+                    && !PRODUCTION_INVOCATION_ARMS.contains(rel)
+                    && !HONESTLY_ABSENT_INVOCATION_ARMS.contains(rel)
+            })
+            .map(|rel| rel.as_str())
+            .collect();
+        unclassified.sort_unstable();
+        assert!(
+            unclassified.is_empty(),
+            "invocation arm(s) {unclassified:?} are advertised present \
+             (bridge_namespace + bridge_role both declared) with no \
+             production-capture classification either way — add each to \
+             PRODUCTION_INVOCATION_ARMS (it ships) or \
+             HONESTLY_ABSENT_INVOCATION_ARMS (it does not, with a reason on \
+             the variant) before it can be marked delivered"
         );
     }
 

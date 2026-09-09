@@ -668,7 +668,13 @@ impl PortableKey {
     /// The namespace carries no method facet — the verb is part of the key — so it
     /// is `None`.
     ///
+    /// Called from the provider side ([`classify`]) on every indexed
+    /// `.proto` service — that half is real. No consumer target ever reaches
+    /// here in production; see `ArtifactRelation::GrpcCall`'s doc for why the
+    /// arm is honestly absent rather than removed ([S-379]).
+    ///
     /// [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
+    /// [S-379]: ../../../docs/planning/journal.md#s-379-the-grpc-invocation-arm-is-marked-honestly-absent
     pub(super) fn grpc(key: String) -> PortableKey {
         PortableKey {
             bucket: BucketKey {
@@ -741,15 +747,20 @@ pub(super) fn classify(kind: NodeKind, name: &str) -> Option<(PortableKey, Role)
 ///   [NFR-RA-05]) — though the arm's normalizer has already refused those before
 ///   the ledger, so a stored HTTP target normalizes by construction.
 ///
-/// The gRPC and broker arms ([FR-WS-09], [FR-WS-10]) register their own namespace
-/// key here; until then their consumers contribute nothing (an arm lacking its
-/// key builder is inert, exactly like a language lacking its capture).
+/// The gRPC and broker arms ([FR-WS-09], [FR-WS-10]) register their own
+/// namespace key below — an arm lacking its key builder is inert here, exactly
+/// like a language lacking its capture. The gRPC branch is reachable code with
+/// no reachable *caller*: no `.scm` query anywhere produces a `GrpcCall` target
+/// for this function to key, so it runs only from this module's own tests
+/// until a language capture lands ([S-379], [CR-120]).
 ///
 /// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
 /// [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
 /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+/// [S-379]: ../../../docs/planning/journal.md#s-379-the-grpc-invocation-arm-is-marked-honestly-absent
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) -> Option<PortableKey> {
     match relation.bridge_namespace()? {
         BridgeNamespace::Http => {

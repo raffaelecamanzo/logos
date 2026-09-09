@@ -5,9 +5,10 @@
 //! denote the same RPC endpoint from two sides of a service boundary. They bind
 //! iff they reduce to the **same fully-qualified key** — the `route_key`
 //! ([`super::route_template`]) analogue for the [`Grpc`](crate::model::BridgeNamespace::Grpc)
-//! invocation namespace. This module is the one function the consumer capture
-//! runs through, so the qualification judgement is made in exactly one place
-//! ([ADR-54]).
+//! invocation namespace. This module is designed as the one place a consumer
+//! capture would run the qualification judgement through ([ADR-54]) — see
+//! "No production caller today" below for the fact that no capture drives it
+//! yet.
 //!
 //! # The key shape: `package.Service/Method`
 //!
@@ -23,21 +24,37 @@
 //! whose package, service, or method the capture could not pin to a literal
 //! identifier — a dynamically-selected method, a call on a client whose service
 //! could not be traced, a missing package — cannot be fully qualified, so
-//! [`grpc_key`] returns [`None`]. The caller ([`capture_invocation_refs`](crate::extract))
-//! treats a `None` as a non-candidate: the call emits no reference and stays an
-//! honest coverage miss rather than binding on a partial key. Approximate
-//! matching is exactly what never-fabricate forbids.
+//! [`grpc_key`] returns [`None`]. Wired through `capture_invocation_refs`
+//! ([`crate::extract::config`]) the way [`grpc_key_from_slots`] already
+//! demonstrates in its own unit test, a `None` is a non-candidate: the call
+//! emits no reference and stays an honest coverage miss rather than binding on
+//! a partial key. Approximate matching is exactly what never-fabricate
+//! forbids.
 //!
 //! [FR-WS-09]: ../../../docs/specs/requirements/FR-WS-09.md
 //! [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+//!
+//! # No production caller today — honestly, not provisionally ([S-379], [CR-120])
+//!
+//! This module has never been reached from a real index run: no plugin's
+//! `invocations` query captures a gRPC stub call in any language, so nothing
+//! outside this module's own tests and `extract::config::refs`'s test ever
+//! calls [`grpc_key`]/[`grpc_key_from_slots`]. [S-253] shipped this module
+//! regardless and was recorded `Done`; [S-379] reopened it and retained the
+//! functions rather than removing them. See `ArtifactRelation::GrpcCall`'s
+//! doc comment (`crate::model::artifact`) for the full reasoning — why this
+//! differs from vocabulary this repository actually removed, and where the
+//! capability-layer guard that keeps the absence declared lives.
+//!
+//! [S-253]: ../../../docs/planning/journal.md#s-253-grpc-stub-call-to-proto-service-arm-with-provider-enrichment
+//! [S-379]: ../../../docs/planning/journal.md#s-379-the-grpc-invocation-arm-is-marked-honestly-absent
+//! [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 
-// The normalizer is the reuse foundation the gRPC stub-call capture drives sites
-// through; its production caller is the per-language `.scm` code-path capture (a
-// coordinated cross-arm follow-up shared with the S-252 HTTP client-call arm — the
-// same `extract_one` invocation hook), so today it is exercised by the arm's unit
-// tests (here + `extract::config::refs`) rather than a production call site. This
-// mirrors the S-251 `capture_invocation_refs` scaffolding it is a normalizer for.
+// `#![allow(dead_code)]` stays: every function here is reachable only from
+// this module's own tests and `extract::config::refs`'s arm-plumbing test —
+// see the module doc above for why that is a recorded, deliberate state
+// rather than an oversight to silence.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
