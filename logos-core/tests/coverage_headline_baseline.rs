@@ -57,15 +57,26 @@
 //! `when_one_is_configured` for that reason.
 //!
 //! `corpus_root` is duplicated from `coverage_intake_split.rs` /
-//! `broker_topic_corpus.rs` / `operand_resolvability.rs` on that file's stated
-//! reasoning, which this file is the fourth instance of and therefore the one that
-//! has to answer it. The trade it names — nineteen lines with no judgement in them,
-//! against coupling four separately-recorded published figures to one file's
-//! edits — still holds, and holds a little harder here: this measurement's whole
-//! purpose is to be comparable with the 2026-09-08 and 2026-09-09 ones taken
-//! before it, and a shared reader is precisely the thing that could move all four
-//! at once. Revisit if a fifth arrives *and* the four existing figures are no
-//! longer load-bearing.
+//! `broker_topic_corpus.rs` / `operand_resolvability.rs`, and this file is the
+//! fourth copy — so it is the one that owes an honest reason rather than an
+//! inherited one.
+//!
+//! **The inherited reason does not survive examination, and is not repeated.**
+//! Those files argue that sharing would couple four separately-recorded published
+//! figures to one file's edits. It would not: `corpus_root` reads an environment
+//! variable, expands `~` and asserts the path is a directory. It performs no
+//! measurement, and each harness asserts its own figures against its own artifact,
+//! so a shared locator cannot move a recorded number — it can only change whether
+//! a corpus is *found*, and that failure is loud (a panic) or a printed skip.
+//!
+//! What is true is the plainer thing: four byte-identical copies can drift, and a
+//! fix applied to one (a `$HOME` fallback, symlink resolution) leaves three wrong
+//! with nothing to catch it. A `tests/common/mod.rs` is the idiomatic answer and
+//! costs almost nothing. It is **not** done here only because this story is a
+//! payload rename, and lifting a helper out of three unrelated measurement
+//! harnesses touches files it has no other business in — the kind of drive-by that
+//! makes a diff harder to review than the thing it fixes. Recorded as accepted
+//! debt with its real cost named, which is what the inherited rationale was not.
 //!
 //! [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 //! [CR-121]: ../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
