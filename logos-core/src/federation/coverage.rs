@@ -5598,13 +5598,23 @@ mod tests {
         let check_json = serde_json::to_string(&check).expect("check_rules serializes");
 
         for (label, json) in [("scan", &scan_json), ("gate", &gate_json), ("check_rules", &check_json)] {
+            // PREFIXES, not full field names. Before S-376 the single token
+            // `bound_ratio` covered all three of that family's spellings by
+            // substring; naming only `spec_conformance_ratio` would have left
+            // `spec_conformance_measured`, `spec_conformance_summary` and
+            // `resolved_edges_summary` uncovered — a guard that quietly lost reach
+            // in a rename, which is the failure this whole family of guards exists
+            // to catch. `resolved_` and `spec_conformance` are the prefixes that
+            // restore it, and `egress_resolution` already covers its `_measured`
+            // sibling.
             for token in [
                 // The retired key, still checked: the gated surfaces must not carry
                 // it under either spelling, and a leak of the OLD name would be
                 // a stale copy of this module rather than a live one.
                 "bound_ratio",
-                "spec_conformance_ratio",
+                "spec_conformance",
                 "resolved_cross_service_edges",
+                "resolved_edges_summary",
                 "egress_resolution",
                 "no_provider_in_workspace",
                 "ambiguous",
