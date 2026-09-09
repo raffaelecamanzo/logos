@@ -280,22 +280,40 @@ dropped dimension into an actionable to-do list.
 
 ## The non-gated evidence tiers
 
-Two surfaces sit **outside** the 0–10000 signal entirely and never feed it:
+Three surfaces sit **outside** the 0–10000 signal entirely and never feed it:
 
 - **Hotspots** (`logos hotspots`) — the git-history churn × complexity ranking.
-- **Coverage** (`logos coverage ingest` / `status`) — ingested LCOV/Cobertura
-  evidence and per-file freshness.
+- **Test coverage** (`logos coverage ingest` / `status`) — ingested
+  LCOV/Cobertura evidence and per-file freshness.
+- **Cross-service coverage** (`logos workspace status`) — the federated
+  bound / ambiguous / unbound classification, its unbound reasons, the intake
+  split, and the `resolved_cross_service_edges` headline
+  ([ADR-53](../specs/architecture/decisions/ADR-53.md),
+  [FR-WS-05](../specs/requirements/FR-WS-05.md)).
 
-Both are **advisory** and live in a separate store (`.logos/history.db`)
-that the quality `gate` never opens. This is enforced **structurally**, not by
-convention: the engine holds no `history.db` connection on the gate path, so the
-gate physically cannot read evidence data. The guarantee that follows is the
+**The two "coverage" tiers are unrelated**, and the shared word is the only
+thing they have in common: the test tier answers "how much of this repo does its
+own test suite execute?" from ingested LCOV, while the cross-service tier answers
+"do this workspace's calls resolve to a provider in it?" from the graph. They
+have separate stores, separate commands and separate requirements
+([FR-CV-01](../specs/requirements/FR-CV-01.md) vs
+[FR-WS-05](../specs/requirements/FR-WS-05.md)).
+
+All three are **advisory**. The first two live in a separate store
+(`.logos/history.db`) that the quality `gate` never opens; the third is
+federated read-model state the gate has no path to at all — it is reachable only
+through a workspace `EngineRegistry`, which the gate never constructs. In every
+case this is enforced **structurally**, not by convention: the engine holds no
+`history.db` connection on the gate path, so the gate physically cannot read
+evidence data, and a test asserts that none of the cross-service vocabulary
+reaches `scan`, `gate` or `check_rules`. The guarantee that follows is the
 property these tiers need to be safe to run in CI alongside the gate:
 
 > The `gate` / `session_end` signal is **byte-identical** before and after
-> `hotspots` or `coverage ingest` — and identical
-> again after `.logos/history.db` is deleted. Coverage state (fresh, stale,
-> absent) never enters the gated computation.
+> `hotspots`, `coverage ingest` or `workspace status` — and identical
+> again after `.logos/history.db` is deleted. Neither test-coverage state
+> (fresh, stale, absent) nor any cross-service coverage figure ever enters the
+> gated computation.
 
 The evidence tiers are still **deterministic**: `hotspots` anchors its window to
 the HEAD committer timestamp (never the wall clock), and re-running at the same

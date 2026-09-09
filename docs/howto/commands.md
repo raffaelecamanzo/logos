@@ -806,7 +806,12 @@ output is a single machine-clean line.
 just declared contracts, through a pluggable arm contract (each arm normalizes a
 call to a portable key and refuses anything non-static — zero approximate binds).
 The HTTP client-call arm is live in `route-providers` (above). The gRPC
-stub-call arm binds `package.Service/Method` FQNs at the ledger tier. The
+stub-call arm **ships no capture**: its key normalizer and bridge namespace
+exist and would bind `package.Service/Method` FQNs at the ledger tier, but no
+language's `invocations.scm` captures a stub call, so nothing reaches them and
+the arm binds nothing. It is reported as **honestly absent** rather than as an
+empty result ([FR-WS-09](../specs/requirements/FR-WS-09.md)) — do not read a
+zero gRPC figure as "no gRPC coupling here". The
 message-broker publish/subscribe arm is now **first-class**: a forward-only
 migration (schema version 17) admits `Topic` / `Producer` / `Consumer` nodes and
 `Publishes` / `Subscribes` edges, so a publish in one member binds every
@@ -855,8 +860,9 @@ logos workspace status            # human
 ```
 
 - **`resolved_cross_service_edges`** counts edges the bridge resolved from an
-  **invocation** — a caller→callee HTTP client call, a producer→consumer broker
-  publish, a gRPC stub call. It counts *edges*, not sites: under the broker
+  **invocation** — a caller→callee HTTP client call, or a producer→consumer
+  broker publish or subscribe. (A gRPC stub call would qualify; none is captured
+  today, so none can contribute.) It counts *edges*, not sites: under the broker
   fan-out one publish binds every cross-member subscriber and the bridge emits one
   edge per subscriber, so one row can contribute several. You can reconcile it
   against `coverage.references` yourself — sum `1` for a bound invocation row with
@@ -978,8 +984,9 @@ Four things worth knowing about these fields:
 
 `bound: 81` adds two different claims together. A **`contract-surface`** reference
 is a *declared* endpoint (an OpenAPI operation) matched to a controller; an
-**`invocation`** reference is a *captured call site* (an HTTP client call, a gRPC
-stub call, a broker publish or subscribe). Both are real coupling, but "our specs
+**`invocation`** reference is a *captured call site* (an HTTP client call, or a
+broker publish or subscribe — a gRPC stub call would qualify but no arm captures
+one). Both are real coupling, but "our specs
 line up with our controllers" and "our outbound calls resolve to a service in this
 workspace" are not the same statement, and summing them hides the weaker one.
 
