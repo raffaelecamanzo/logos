@@ -648,6 +648,23 @@ pub(crate) async fn workspace_roster(
 /// **absent** when nothing was measured, so a bar rendering it must show "not
 /// measured" rather than an empty or full bar ([NFR-CC-04]).
 ///
+/// # The coverage counts are two populations ([CR-120], [FR-WS-05])
+/// Every row of `coverage.references` carries `intake` — `contract-surface` for a
+/// declared endpoint, `invocation` for a captured call site — in **every** state,
+/// bound and non-bound alike, and `coverage.by_intake` reports the four
+/// classification counters split by it. The two populations sum to the four
+/// top-level counters, so the split can never report less than the headline.
+///
+/// A consumer that renders `bound` without the split renders two different things
+/// as one: on the 84-member reference workspace the split is 81 `contract-surface`
+/// and **0** `invocation` bound rows — no outbound call site in the estate
+/// resolves at all, a state a bare `bound: 81` reads as healthy. This surface
+/// carries the split because the CLI and MCP do; the parity is the requirement,
+/// not a convenience ([FR-WS-05]).
+///
+/// [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
+///
 /// [FR-WS-15]: ../../docs/specs/requirements/FR-WS-15.md
 /// [FR-WS-16]: ../../docs/specs/requirements/FR-WS-16.md
 /// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md

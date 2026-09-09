@@ -31,6 +31,13 @@ export const EMPTY_COVERAGE: CrossServiceCoverage = {
   ambiguous: 0,
   unbound: 0,
   no_provider_in_workspace: 0,
+  // Both populations empty, which is what the server sends over a workspace with
+  // no cross-boundary references at all (S-377) — an empty split, never an absent
+  // one, so a view that reads it needs no fallback.
+  by_intake: {
+    contract_surface: { bound: 0, ambiguous: 0, unbound: 0, no_provider_in_workspace: 0 },
+    invocation: { bound: 0, ambiguous: 0, unbound: 0, no_provider_in_workspace: 0 },
+  },
   bound_ratio_measured: 0,
   bound_ratio_summary: "0 of 0 measured; 0 excluded as no-provider-in-workspace",
   members_read: 2,

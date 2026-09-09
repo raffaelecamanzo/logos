@@ -559,17 +559,41 @@ pub struct ReferenceCoverage {
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<BridgeEndpoint>,
-    /// How this row's binding entered the overlay ([CR-083]).
+    /// The **intake population** this reference arrived through ([CR-083],
+    /// [CR-120]).
     ///
-    /// **Optional, and present only on a bound row**: an intake describes an
-    /// *edge*, and a row that bound nothing has none. Stamping one on an
-    /// ambiguous row would read as provenance for a binding that does not exist
-    /// ([NFR-RA-05]).
+    /// **Present on every row, in every state** — bound, ambiguous and unbound
+    /// alike — and deliberately not an `Option`, so no state *can* omit it and
+    /// no consumer has to carry an absence case ([FR-WS-05]). Every reference
+    /// reaches this tier through exactly one of two loops in
+    /// [`cross_service_coverage`] — a member's contract surface, or its
+    /// invocation ledger — so the value was always known for every row; only the
+    /// serialization was conditional.
+    ///
+    /// # This reverses [S-372]'s decision, and states what that cost
+    ///
+    /// S-372 emitted `intake` only on a bound row, on the ground that an intake
+    /// describes an *edge*. That made the field's **presence** a second, weaker
+    /// spelling of `bucket == "bound"`, and it is what hid the defect [CR-120]
+    /// was filed for: the reference workspace's 81-row `bound` count is entirely
+    /// `contract-surface` with **zero** `invocation` rows, and no reader — human
+    /// or machine — could discover that from a payload where the invocation
+    /// population's non-bound rows carried no intake at all ([NFR-CC-04]).
+    ///
+    /// Nothing is lost by the reversal. "Does this row have an edge" is
+    /// [`bucket`](Self::bucket) and [`state`](Self::state), which say it
+    /// outright, and [`to`](Self::to) / [`candidates`](Self::candidates) name
+    /// what it bound. `intake` answers a different question — *which population
+    /// is this reference drawn from* — and that question has an answer in every
+    /// state. The counts split by it are
+    /// [`by_intake`](CrossServiceCoverage::by_intake).
     ///
     /// [CR-083]: ../../../docs/requests/CR-083-reachability-invocation-edge-roots.md
-    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub intake: Option<BridgeIntake>,
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [S-372]: ../../../docs/planning/journal.md#s-372-coverage-rows-name-the-provider-they-bound-and-the-candidates-they-tied-between
+    pub intake: BridgeIntake,
     /// The providers this reference **tied between** (ambiguous) or **fanned out
     /// to** (a bound broker row) — bounded, with any truncation disclosed
     /// ([CR-118], [NFR-CC-04]).
@@ -611,10 +635,6 @@ impl ReferenceCoverage {
                 (None, Some(ProviderCandidates::new(disposition, endpoints)))
             }
         };
-        // An intake describes an edge; only a bound row has one. Computed here
-        // rather than inside the struct literal, where it read as a use of `state`
-        // after that field had moved — sound only because `CoverageState` is `Copy`.
-        let intake = matches!(state, CoverageState::Bound).then_some(provenance.intake);
         // The three row invariants, at the one place all three are decidable:
         // `to` only on a bound row, a `bound-to` set only on a bound row, and a
         // `tied-between` set never on one. `tier` is the sole producer today and
@@ -644,9 +664,130 @@ impl ReferenceCoverage {
             bucket: state.bucket(),
             state,
             to,
-            intake,
+            intake: provenance.intake,
             candidates,
         }
+    }
+}
+
+/// The four classification counts over **one** intake population ([FR-WS-05],
+/// [CR-120]).
+///
+/// The same four buckets [`CrossServiceCoverage`] reports workspace-wide, with
+/// the same meanings — this is a projection of that partition onto one
+/// population, never a second classifier. There is exactly one place a state
+/// becomes a count ([`ClassificationCounts::record`]), reached from exactly one
+/// place a row is filed ([`Tally::record`]), so a split figure and the headline
+/// beside it cannot disagree: the headline is *derived* from the split
+/// ([`IntakeSplit::total`]) rather than tallied a second time.
+///
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ClassificationCounts {
+    /// References bound to a provider in another member.
+    pub bound: u64,
+    /// References with 2+ providers across the workspace (no edge).
+    pub ambiguous: u64,
+    /// References unbound for a reason other than ambiguity or
+    /// no-provider-in-workspace.
+    pub unbound: u64,
+    /// References with no provider anywhere in the workspace — bucketed
+    /// separately, exactly as workspace-wide ([ADR-53]).
+    ///
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    pub no_provider_in_workspace: u64,
+}
+
+impl ClassificationCounts {
+    /// Count one classified reference. The single place a [`CoverageState`]
+    /// becomes a number in this module.
+    fn record(&mut self, state: &CoverageState) {
+        match state {
+            CoverageState::Bound => self.bound += 1,
+            CoverageState::Unbound { reason } => match reason {
+                UnboundReason::Ambiguous => self.ambiguous += 1,
+                // `no-provider-in-workspace` is its own bucket, deliberately OUTSIDE
+                // the `bound_ratio` denominator: a reference to a service outside this
+                // workspace is not a *broken* binding ([ADR-53]).
+                UnboundReason::NoProviderInWorkspace => self.no_provider_in_workspace += 1,
+                _ => self.unbound += 1,
+            },
+        }
+    }
+
+    /// Field-wise sum — how [`IntakeSplit::total`] recovers the workspace-wide
+    /// counts from the split.
+    fn plus(self, other: Self) -> Self {
+        Self {
+            bound: self.bound + other.bound,
+            ambiguous: self.ambiguous + other.ambiguous,
+            unbound: self.unbound + other.unbound,
+            no_provider_in_workspace: self.no_provider_in_workspace
+                + other.no_provider_in_workspace,
+        }
+    }
+}
+
+/// The classification counts **split by intake population** ([FR-WS-05],
+/// [CR-120]).
+///
+/// The headline `bound`/`ambiguous`/`unbound`/`no_provider_in_workspace` counts
+/// two populations as one: a `contract-surface` reference is a *declared*
+/// endpoint matched to a controller, an `invocation` reference is a captured
+/// *call site*. Reporting only their sum is how a workspace whose invocation
+/// half binds **nothing at all** presented as one binding 81 references
+/// ([CR-120] §3.1). Split here, so the two are separable without inference and
+/// without a consumer re-classifying [`CrossServiceCoverage::references`]
+/// itself ([NFR-CC-04]).
+///
+/// One field per [`BridgeIntake`] variant, and the mapping is exhaustive in both
+/// directions — [`population_mut`](Self::population_mut) matches on the enum and
+/// [`total`](Self::total) destructures the struct — so a third intake fails to
+/// compile until it is reported here.
+///
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct IntakeSplit {
+    /// References that arrived through a member's **contract surface** — an
+    /// OpenAPI operation, a declared endpoint.
+    pub contract_surface: ClassificationCounts,
+    /// References that arrived through a member's **invocation ledger** — a
+    /// captured HTTP client call, gRPC stub call, or broker publish/subscribe
+    /// ([FR-WS-08]–[FR-WS-10]), including the arms' recorded refusals
+    /// ([CR-107], [CR-120]).
+    ///
+    /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    pub invocation: ClassificationCounts,
+}
+
+impl IntakeSplit {
+    /// The population `intake` belongs to. Exhaustive on the enum on purpose: a
+    /// new [`BridgeIntake`] variant does not compile until it has a field here,
+    /// so no population can be silently folded into another's counts.
+    fn population_mut(&mut self, intake: BridgeIntake) -> &mut ClassificationCounts {
+        match intake {
+            BridgeIntake::ContractSurface => &mut self.contract_surface,
+            BridgeIntake::Invocation => &mut self.invocation,
+        }
+    }
+
+    /// Both populations summed — the workspace-wide counts.
+    ///
+    /// Destructured rather than field-accessed, which is the other half of the
+    /// exhaustiveness guard: a struct pattern must name every field, so a third
+    /// population cannot be added and then left out of the headline. That is the
+    /// failure this reconciliation exists to prevent — a split that reports less
+    /// than the sum it sits beside is worse than no split at all ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    fn total(&self) -> ClassificationCounts {
+        let Self { contract_surface, invocation } = self;
+        contract_surface.plus(*invocation)
     }
 }
 
@@ -672,6 +813,12 @@ pub struct CrossServiceCoverage {
     /// deterministic output ([NFR-RA-06]).
     pub references: Vec<ReferenceCoverage>,
     /// References bound to exactly one provider in another member.
+    ///
+    /// **Unchanged in meaning and in value** by [CR-120]'s split: it is now the
+    /// *sum* of [`by_intake`](Self::by_intake)'s two `bound` counts rather than a
+    /// counter of its own, which is the same arithmetic reached one step later.
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
     pub bound: u64,
     /// References with 2+ providers across the workspace (no edge).
     pub ambiguous: u64,
@@ -682,6 +829,24 @@ pub struct CrossServiceCoverage {
     /// separately so they never depress [`bound_ratio`](Self::bound_ratio)
     /// ([ADR-53]).
     pub no_provider_in_workspace: u64,
+    /// The same four counts **split by intake population** — `contract-surface`
+    /// (a declared endpoint) apart from `invocation` (a captured call site)
+    /// ([FR-WS-05], [CR-120]).
+    ///
+    /// The four counters above are the sum of these two, and are computed from
+    /// them ([`IntakeSplit::total`]), so the split can never report less than the
+    /// headline it sits beside. Reading `by_intake.invocation.bound` is the
+    /// question no earlier payload could answer: on the reference workspace it is
+    /// **0** against a headline `bound` of 81 ([CR-120] §3.1, [NFR-CC-04]).
+    ///
+    /// Every row carries the discriminator these counts group on
+    /// ([`ReferenceCoverage::intake`]), so the split is auditable from
+    /// [`references`](Self::references) rather than merely asserted.
+    ///
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub by_intake: IntakeSplit,
     /// `bound / (bound + ambiguous + unbound)`, excluding
     /// `no_provider_in_workspace` from the denominator ([ADR-53]).
     ///
@@ -1006,13 +1171,18 @@ where
 /// The running coverage tally — one `record` point, so a state and its counter can
 /// never drift apart (the `bound`/`ambiguous`/`unbound`/`no-provider` buckets were
 /// previously incremented by hand at eight separate call sites).
+///
+/// Since [CR-120] the tally holds **only** the intake-split counts: the
+/// workspace-wide four are derived from them in [`finish`](Tally::finish). One
+/// number cannot be maintained in two places without a way for the two to
+/// disagree, and the split is the finer of the two — so it is the one that is
+/// counted.
+///
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 #[derive(Default)]
 struct Tally {
     references: Vec<ReferenceCoverage>,
-    bound: u64,
-    ambiguous: u64,
-    unbound: u64,
-    no_provider_in_workspace: u64,
+    by_intake: IntakeSplit,
 }
 
 impl Tally {
@@ -1023,17 +1193,10 @@ impl Tally {
         state: CoverageState,
         provenance: RowProvenance,
     ) {
-        match &state {
-            CoverageState::Bound => self.bound += 1,
-            CoverageState::Unbound { reason } => match reason {
-                UnboundReason::Ambiguous => self.ambiguous += 1,
-                // `no-provider-in-workspace` is its own bucket, deliberately OUTSIDE
-                // the `bound_ratio` denominator: a reference to a service outside this
-                // workspace is not a *broken* binding ([ADR-53]).
-                UnboundReason::NoProviderInWorkspace => self.no_provider_in_workspace += 1,
-                _ => self.unbound += 1,
-            },
-        }
+        // The row's own intake selects the population, so the count and the
+        // discriminator the row publishes are read from one value — a split a
+        // consumer could not reproduce from `references` would be worse than none.
+        self.by_intake.population_mut(provenance.intake).record(&state);
         self.references
             .push(ReferenceCoverage::new(relation, from, state, provenance));
     }
@@ -1087,16 +1250,21 @@ impl Tally {
     /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
     fn finish(mut self, members_read: usize, members_total: usize) -> CrossServiceCoverage {
         self.references.sort_by(|a, b| a.from.cmp(&b.from));
-        let denom = self.bound + self.ambiguous + self.unbound;
-        let bound_ratio = (denom > 0).then(|| self.bound as f64 / denom as f64);
+        // The workspace-wide counts, derived from the split rather than tallied
+        // beside it ([CR-120]): the ratio and its denominator are then computed
+        // over the same numbers a reader can reconcile against `by_intake`.
+        let total = self.by_intake.total();
+        let denom = total.bound + total.ambiguous + total.unbound;
+        let bound_ratio = (denom > 0).then(|| total.bound as f64 / denom as f64);
         let bound_ratio_summary =
-            summarize_bound_ratio(self.bound, denom, self.no_provider_in_workspace, bound_ratio);
+            summarize_bound_ratio(total.bound, denom, total.no_provider_in_workspace, bound_ratio);
         CrossServiceCoverage {
             references: self.references,
-            bound: self.bound,
-            ambiguous: self.ambiguous,
-            unbound: self.unbound,
-            no_provider_in_workspace: self.no_provider_in_workspace,
+            bound: total.bound,
+            ambiguous: total.ambiguous,
+            unbound: total.unbound,
+            no_provider_in_workspace: total.no_provider_in_workspace,
+            by_intake: self.by_intake,
             bound_ratio,
             bound_ratio_measured: denom,
             bound_ratio_summary,
@@ -1626,7 +1794,7 @@ mod tests {
         assert_eq!(to.symbol, LogosSymbol::parse("local route_get").unwrap());
         assert_eq!(
             row.intake,
-            Some(BridgeIntake::ContractSurface),
+            BridgeIntake::ContractSurface,
             "an OpenAPI operation DECLARES an endpoint; the intake says so, exactly \
              as the bridge stamps it on the same binding (CR-083)"
         );
@@ -1669,7 +1837,7 @@ mod tests {
             "the coverage row and the bridge edge name the SAME provider"
         );
         assert_eq!(bound[0].from, edges[0].from);
-        assert_eq!(bound[0].intake, Some(edges[0].intake));
+        assert_eq!(bound[0].intake, edges[0].intake);
     }
 
     /// **[CR-118] CRA-02, confirmed.** An ambiguous row carries the providers it
@@ -1728,8 +1896,11 @@ mod tests {
             "nothing bound, so there is no `to` to name"
         );
         assert_eq!(
-            row.intake, None,
-            "an intake describes an edge; a tie has none"
+            row.intake,
+            BridgeIntake::ContractSurface,
+            "S-377/[CR-120]: the intake is the POPULATION this reference came from, \
+             not provenance for a binding — so a tie carries it too, and it is the \
+             contract surface these three aggregators' consumer arrived on"
         );
 
         let tied = row.candidates.as_ref().expect("the tie is named");
@@ -1776,9 +1947,12 @@ mod tests {
             "3 tied providers, all listed; none bound"
         );
         assert!(
-            value.get("to").is_none() && value.get("intake").is_none(),
-            "a tie names no `to` and carries no intake: {value}"
+            value.get("to").is_none(),
+            "a tie names no `to` — nothing bound: {value}"
         );
+        // Its `intake` IS carried, since S-377: the field names the population the
+        // reference came from, not provenance for a binding ([CR-120]).
+        assert_eq!(value["intake"], "contract-surface", "{value}");
     }
 
     /// The **fan-out** truncation branch — the fourth `summarize_candidates` string,
@@ -1907,7 +2081,7 @@ mod tests {
             "a fan-out binding has no single `to` — naming one would fabricate a \
              sole provider where the arm binds a set"
         );
-        assert_eq!(publish.intake, Some(BridgeIntake::Invocation));
+        assert_eq!(publish.intake, BridgeIntake::Invocation);
         let bound = publish.candidates.as_ref().expect("the bound set is named");
         assert_eq!(bound.disposition, ProviderDisposition::BoundTo);
         let members: Vec<&str> = bound.providers.iter().map(|p| p.member.as_str()).collect();
@@ -1985,17 +2159,297 @@ mod tests {
         let cov = cross_service_coverage(&registry(&["api", "web"]));
 
         let value = serde_json::to_value(&cov.references[0]).unwrap();
-        for field in ["to", "intake", "candidates"] {
+        for field in ["to", "candidates"] {
             assert!(
                 value.get(field).is_none(),
                 "`{field}` is absent, not null: {value}"
             );
         }
+        // `intake` was the third field in this list until S-377 made it
+        // unconditional: it is not a *provider* field, and a row with no provider
+        // to name still has a population it came from ([CR-120]).
+        assert_eq!(value["intake"], "contract-surface", "{value}");
         // And the pre-CR-118 fields are untouched, so a consumer that ignores the
         // new ones reads this row exactly as it read it before.
         assert_eq!(value["state"], "unbound");
         assert_eq!(value["bucket"], "unbound");
         assert_eq!(value["reason"], "no-provider-in-workspace");
+    }
+
+    // ── S-377 / CR-120: intake on every row, and the counts split by it ──────
+
+    /// **AC1 — `intake` is present on every row, in every state.**
+    ///
+    /// The field is no longer an `Option`, so the *type* forbids a missing value
+    /// and this test's job is the other half: that serde still emits it. A
+    /// re-introduced `skip_serializing_if`, a `#[serde(skip)]`, or a rename are
+    /// each a one-line change that the type system would wave through and that
+    /// would restore exactly the blind spot [CR-120] §3.1 describes.
+    ///
+    /// Asserted over the wire form of every row of a fixture carrying all three
+    /// display buckets, and the bucket census is asserted first so the loop can
+    /// never pass by iterating over a population that lost a state.
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    #[test]
+    fn every_row_reports_its_intake_in_every_state() {
+        let cov = every_bucket_in_both_populations();
+
+        // Guard the guard: all three display buckets must actually be present, or
+        // "every row carries it" would be a claim about a subset of the states.
+        let mut buckets: Vec<&str> = cov.references.iter().map(|r| r.bucket).collect();
+        buckets.sort_unstable();
+        buckets.dedup();
+        assert_eq!(
+            buckets,
+            ["ambiguous", "bound", "unbound"],
+            "the fixture must exercise all three states: {:?}",
+            cov.references
+        );
+
+        let mut seen: Vec<String> = Vec::new();
+        for row in &cov.references {
+            let value = serde_json::to_value(row).expect("a row serialises");
+            let intake = value
+                .get("intake")
+                .and_then(|i| i.as_str())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "every coverage row carries `intake` on the wire, in every \
+                         state — this {} row does not: {value}",
+                        row.bucket
+                    )
+                })
+                .to_string();
+            assert!(
+                intake == "contract-surface" || intake == "invocation",
+                "`intake` is one of the two documented tokens, not {intake}: {value}"
+            );
+            seen.push(intake);
+        }
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen,
+            ["contract-surface", "invocation"],
+            "and both populations appear, so the token assertion is not vacuous"
+        );
+    }
+
+    /// **AC2 — the classification counts are split by intake, and the split
+    /// reconciles with the headline it sits beside.**
+    ///
+    /// Three claims, because a split can be wrong in three different ways:
+    ///
+    /// 1. each population's four counts are the ones the fixture's rows imply;
+    /// 2. the two populations sum to the four headline counters — the headline is
+    ///    *derived* from the split ([`IntakeSplit::total`]), so this is the
+    ///    property that would break if a third population were added and left out
+    ///    of the sum;
+    /// 3. the split is **recomputable from `references`** by grouping on each
+    ///    row's own `intake` and `bucket`. That is what makes it auditable rather
+    ///    than merely asserted: a summary counter that disagreed with the rows it
+    ///    summarises is the failure mode [CR-111] and [CR-120] both describe, from
+    ///    opposite ends.
+    ///
+    /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    #[test]
+    fn the_classification_counts_split_by_intake_and_sum_to_the_headline() {
+        let cov = every_bucket_in_both_populations();
+
+        // (1) Per-population counts. The contract surface contributes one row to
+        // each of the four buckets; the invocation ledger binds its fan-out publish
+        // and refuses two topics.
+        assert_eq!(
+            cov.by_intake.contract_surface,
+            ClassificationCounts {
+                bound: 1,
+                ambiguous: 1,
+                unbound: 1,
+                no_provider_in_workspace: 1,
+            },
+            "{:?}",
+            cov.references
+        );
+        assert_eq!(
+            cov.by_intake.invocation,
+            ClassificationCounts {
+                bound: 1,
+                ambiguous: 0,
+                unbound: 2,
+                no_provider_in_workspace: 0,
+            },
+            "the fan-out publish binds; both broker refusals are unbound: {:?}",
+            cov.references
+        );
+
+        // (2) The headline is the sum — the same four numbers the pre-S-377 tally
+        // produced, so no existing field changed meaning or value.
+        assert_eq!(cov.bound, 2, "the HTTP route and the broker fan-out");
+        assert_eq!(cov.ambiguous, 1);
+        assert_eq!(cov.unbound, 3);
+        assert_eq!(cov.no_provider_in_workspace, 1);
+        let total = cov.by_intake.total();
+        assert_eq!(
+            (total.bound, total.ambiguous, total.unbound, total.no_provider_in_workspace),
+            (cov.bound, cov.ambiguous, cov.unbound, cov.no_provider_in_workspace),
+            "the split's two populations sum to the headline they sit beside"
+        );
+
+        // (3) Recomputed from the rows themselves, exactly as a `--json` consumer
+        // would: group on the row's published `intake` and its published bucket.
+        let mut recounted = IntakeSplit::default();
+        for row in &cov.references {
+            recounted.population_mut(row.intake).record(&row.state);
+        }
+        assert_eq!(
+            recounted, cov.by_intake,
+            "the split is reproducible from `references`, not merely reported"
+        );
+    }
+
+    /// **Every [`BridgeIntake`] variant has a population of its own** — the
+    /// table-driven half of the exhaustiveness guard, mirroring
+    /// `federation::reach::tests`' own intake table.
+    ///
+    /// The compiler already refuses a third variant twice over
+    /// ([`IntakeSplit::population_mut`] matches on the enum,
+    /// [`IntakeSplit::total`] destructures the struct). What that cannot catch is
+    /// **two variants sharing one field** — `population_mut` returning
+    /// `contract_surface` for both arms compiles, and would silently report an
+    /// invocation row as a declared one, which is the misreading the split exists
+    /// to end. So each variant is filed and read back separately.
+    #[test]
+    fn every_bridge_intake_variant_is_counted_under_its_own_population() {
+        // Every variant must appear here AND in `population_mut`'s match; the fixed
+        // length is what makes adding one to the enum a compile error here too.
+        const ALL: [BridgeIntake; 2] = [BridgeIntake::ContractSurface, BridgeIntake::Invocation];
+
+        for (i, intake) in ALL.into_iter().enumerate() {
+            let mut split = IntakeSplit::default();
+            // A distinct count per variant, so a shared field shows up as a sum
+            // rather than as an equal-looking value.
+            for _ in 0..=i {
+                split.population_mut(intake).record(&CoverageState::Bound);
+            }
+            let expected = (i + 1) as u64;
+            let filed = match intake {
+                BridgeIntake::ContractSurface => split.contract_surface,
+                BridgeIntake::Invocation => split.invocation,
+            };
+            assert_eq!(
+                filed.bound, expected,
+                "{intake:?} is counted under its own population"
+            );
+            assert_eq!(
+                split.total().bound, expected,
+                "{intake:?} reaches the derived total, and nothing else does"
+            );
+        }
+
+        // And the two never collide: filing one of each leaves 1 in both fields.
+        let mut split = IntakeSplit::default();
+        for intake in ALL {
+            split.population_mut(intake).record(&CoverageState::Bound);
+        }
+        assert_eq!(split.contract_surface.bound, 1);
+        assert_eq!(split.invocation.bound, 1);
+        assert_eq!(split.total().bound, 2);
+    }
+
+    /// The wire tokens the split's two keys are read under, pinned against the
+    /// [`BridgeIntake`] tokens the rows carry.
+    ///
+    /// A consumer joins `by_intake.invocation` to the rows whose `intake` is
+    /// `"invocation"`; if the field name and the row token ever spelt the
+    /// population differently the join would silently return nothing, and the
+    /// split would read as "no invocation references" over a workspace full of
+    /// them — the exact reading [CR-120] §3.1 was filed against.
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    #[test]
+    fn the_split_keys_are_spelt_the_way_the_rows_spell_their_intake() {
+        let split = serde_json::to_value(IntakeSplit::default()).unwrap();
+        for intake in [BridgeIntake::ContractSurface, BridgeIntake::Invocation] {
+            let token = serde_json::to_value(intake).unwrap();
+            let token = token.as_str().expect("an intake serialises as a string");
+            // The row token is kebab-case; the struct key is the same word in the
+            // snake_case a Rust field carries. One transformation, stated.
+            let key = token.replace('-', "_");
+            assert!(
+                split.get(&key).is_some(),
+                "the split reports a `{key}` population for rows whose intake is \
+                 `{token}`: {split}"
+            );
+        }
+        // Only those two, so a stray key cannot be read as a third population.
+        assert_eq!(
+            split.as_object().map(|o| o.len()),
+            Some(2),
+            "exactly one population per intake: {split}"
+        );
+    }
+
+    /// The one fixture that puts **every classification bucket in both intake
+    /// populations** — the shape several guards below need, built once.
+    ///
+    /// Shared rather than copied. Sprint 66's own risk register names a
+    /// hand-mirrored twin in this file as the recorded failure mode, and a second
+    /// copy of a fixture whose whole value is its bucket/population coverage is
+    /// exactly that shape: the copy that grew a fifth row would leave the other
+    /// guard silently measuring four.
+    ///
+    /// | | bound | ambiguous | unbound | no-provider |
+    /// |---|---|---|---|---|
+    /// | `contract-surface` | 1 | 1 | 1 | 1 |
+    /// | `invocation` | 1 | 0 | 2 | 0 |
+    ///
+    /// The rows also reach [`Tally::record`] down **three** different paths — the
+    /// HTTP rows through the contract-surface loop, the broker publishes through
+    /// the invocation-consumer loop, and the keyless broker subscribe through the
+    /// `unkeyable_providers` loop — so a row filed under the wrong population, like
+    /// one filed under the wrong bucket, is visible from here.
+    fn every_bucket_in_both_populations() -> CrossServiceCoverage {
+        reset();
+        set_member(
+            "api",
+            vec![
+                op("GET /users/{id}", "local op_bound"),    // → bound
+                op("GET /tied/{id}", "local op_tied"),      // → ambiguous
+                op("GET /orphans/{id}", "local op_orphan"), // → no-provider
+                op("nonsense", "local op_nonsense"),        // → path-not-composed
+            ],
+        );
+        set_member(
+            "web",
+            vec![
+                route("GET /users/{id}", "local route_users"),
+                route("GET /tied/{id}", "local route_tied_web"),
+            ],
+        );
+        set_member("admin", vec![route("GET /tied/{userId}", "local route_tied_admin")]);
+        // The broker arm, in the same pass as the four HTTP rows above.
+        set_consumers(
+            "api",
+            vec![
+                broker_publish("orders", "local emitOrder"), // → bound (fan-out)
+                broker_publish("", "local emitDynamic"),     // → topic-not-literal
+            ],
+        );
+        set_consumers(
+            "web",
+            vec![
+                // The subscriber that makes the publish above bind. A bound
+                // subscribe is a provider, so it contributes no row of its own.
+                broker_subscribe("orders", "local onOrder"),
+                // A refused subscribe — the provider-role refusal, which reaches
+                // the tally through `unkeyable_providers`, not the consumer loop.
+                broker_subscribe("", "local onByConstant"), // → topic-not-literal
+            ],
+        );
+
+        cross_service_coverage(&registry(&["api", "web", "admin"]))
     }
 
     /// **The [CR-118] invariant: no reference changes bucket.** Every bucket, in one
@@ -2041,45 +2495,7 @@ mod tests {
     /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
     #[test]
     fn naming_providers_moves_no_reference_between_buckets() {
-        reset();
-        set_member(
-            "api",
-            vec![
-                op("GET /users/{id}", "local op_bound"),    // → bound
-                op("GET /tied/{id}", "local op_tied"),      // → ambiguous
-                op("GET /orphans/{id}", "local op_orphan"), // → no-provider
-                op("nonsense", "local op_nonsense"),        // → path-not-composed
-            ],
-        );
-        set_member(
-            "web",
-            vec![
-                route("GET /users/{id}", "local route_users"),
-                route("GET /tied/{id}", "local route_tied_web"),
-            ],
-        );
-        set_member("admin", vec![route("GET /tied/{userId}", "local route_tied_admin")]);
-        // The broker arm, in the same pass as the four HTTP rows above.
-        set_consumers(
-            "api",
-            vec![
-                broker_publish("orders", "local emitOrder"), // → bound (fan-out)
-                broker_publish("", "local emitDynamic"),     // → topic-not-literal
-            ],
-        );
-        set_consumers(
-            "web",
-            vec![
-                // The subscriber that makes the publish above bind. A bound
-                // subscribe is a provider, so it contributes no row of its own.
-                broker_subscribe("orders", "local onOrder"),
-                // A refused subscribe — the provider-role refusal, which reaches
-                // the tally through `unkeyable_providers`, not the consumer loop.
-                broker_subscribe("", "local onByConstant"), // → topic-not-literal
-            ],
-        );
-
-        let cov = cross_service_coverage(&registry(&["api", "web", "admin"]));
+        let cov = every_bucket_in_both_populations();
 
         assert_eq!(cov.bound, 2, "the HTTP route and the broker fan-out");
         assert_eq!(cov.ambiguous, 1);
@@ -2178,6 +2594,17 @@ mod tests {
     /// absolute figure scales with symbol length, which is a property of the
     /// corpus, not of this change.
     ///
+    /// # Two riders, measured apart (S-377)
+    ///
+    /// Once `intake` rides every row this test measures two changes at once, and a
+    /// growth figure that cannot be attributed to a cause is not a measurement. So
+    /// the pre-S-377 payload is reconstructed exactly — `intake` on the bound rows
+    /// only, no `by_intake` block — and the increment printed separately. The
+    /// reconstruction is self-checking: it reproduces **311 202 bytes**, the figure
+    /// [S-372] recorded for this same fixture, to the byte.
+    ///
+    /// [S-372]: ../../../docs/planning/journal.md#s-372-coverage-rows-name-the-provider-they-bound-and-the-candidates-they-tied-between
+    ///
     /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     #[test]
@@ -2233,6 +2660,29 @@ mod tests {
         assert_eq!(cov.ambiguous, 146);
         assert_eq!(cov.no_provider_in_workspace, 648);
 
+        // **The reference workspace's intake split, reproduced** (S-377, [CR-120]
+        // CRA-02). Every one of these 875 references is a contract-surface
+        // consumer, because that is what the measured shape is: the workspace-wide
+        // `http-client-call` reference count there was 1 and that row was unbound.
+        // So the 81-row numerator is 81 `contract-surface` and **0** `invocation`
+        // — the fact no payload could express before this story, asserted here on
+        // the reproduced shape and measured live by
+        // `coverage_intake_split::measure_the_intake_split_over_the_reference_workspace`.
+        assert_eq!(
+            cov.by_intake.contract_surface,
+            ClassificationCounts {
+                bound: 81,
+                ambiguous: 146,
+                unbound: 0,
+                no_provider_in_workspace: 648,
+            }
+        );
+        assert_eq!(
+            cov.by_intake.invocation,
+            ClassificationCounts::default(),
+            "0 invocation rows of any kind — the half an 81-row `bound` count hid"
+        );
+
         let after = serde_json::to_string(&cov).unwrap().len();
         // The same payload as it was before CR-118: strip exactly the three new
         // optional keys from every row, changing nothing else.
@@ -2261,8 +2711,10 @@ mod tests {
             growth * 100.0,
             pretty.len()
         );
-        // Measured at ~+60% on this shape, which projects the ~260 KB reference
-        // baseline to roughly 415 KB. Almost all of it is the 146 four-way ties:
+        // Measured at **+70.9%** on this shape (195 229 → 333 619 bytes), which
+        // projects the ~260 KB reference baseline to roughly 445 KB. It was +59.6%
+        // when [CR-118] alone was the rider; S-377 accounts for the difference and
+        // is measured on its own below. Almost all of the total is the 146 four-way ties:
         // naming what a reference tied between IS the payload, so the cost is the
         // feature, and the ceiling guards against a blow-up — a doubling, a
         // per-row string, an unbounded set — not against the intended rider.
@@ -2277,6 +2729,38 @@ mod tests {
             "provider identity must stay a rider on the payload — present, and not a \
              rewrite of it: {before} → {after} bytes (+{:.1}%)",
             growth * 100.0
+        );
+
+        // **S-377's own increment, separated from CR-118's.** The figure above
+        // conflates the two once `intake` rides every row, and a growth number that
+        // cannot be attributed is not a measurement. So the pre-S-377 payload is
+        // reconstructed exactly: `intake` on the bound rows only (where CR-118 put
+        // it), and no `by_intake` block on the summary.
+        let mut prior = serde_json::to_value(&cov).unwrap();
+        prior.as_object_mut().unwrap().remove("by_intake");
+        for row in prior["references"].as_array_mut().unwrap() {
+            let row = row.as_object_mut().unwrap();
+            if row["bucket"] != "bound" {
+                row.remove("intake");
+            }
+        }
+        let pre_s377 = serde_json::to_string(&prior).unwrap().len();
+        let universal_intake = (after - pre_s377) as f64 / pre_s377 as f64;
+        println!(
+            "S-377 increment on the same shape: {pre_s377} → {after} bytes \
+             (+{:.1}%) — `intake` on the {} non-bound rows plus the `by_intake` block",
+            universal_intake * 100.0,
+            cov.references.len() - cov.bound as usize
+        );
+        // A one-line key on 794 rows: a few percent of a payload dominated by the
+        // 146 four-way candidate sets. Ranged in both directions for the same
+        // reason as above — a zero would mean the field stopped being emitted, in
+        // the test named for measuring it.
+        assert!(
+            (0.02..0.20).contains(&universal_intake),
+            "universal `intake` is a per-row key, not a payload rewrite: \
+             {pre_s377} → {after} bytes (+{:.1}%)",
+            universal_intake * 100.0
         );
     }
 
@@ -2558,14 +3042,25 @@ mod tests {
     /// past the [S-327] zero-denominator guard while misleading just as
     /// effectively — this is the exact shape that guard does not catch.
     ///
+    /// Filed under `contract_surface` because that is what the observed run was:
+    /// every bound row on that workspace arrived through a contract surface
+    /// ([CR-120] CRA-02). The headline the assertions read is *derived* from the
+    /// split ([`IntakeSplit::total`]), so this fixture also exercises that
+    /// derivation on the exact figures it was written for.
+    ///
     /// [S-327]: ../../../docs/planning/journal.md#s-327-absent-bound-ratio-on-a-zero-denominator
     #[test]
     fn bound_ratio_summary_states_the_pec_services_near_degenerate_case() {
         let tally = Tally {
-            bound: 6,
-            ambiguous: 0,
-            unbound: 1,
-            no_provider_in_workspace: 899,
+            by_intake: IntakeSplit {
+                contract_surface: ClassificationCounts {
+                    bound: 6,
+                    ambiguous: 0,
+                    unbound: 1,
+                    no_provider_in_workspace: 899,
+                },
+                invocation: ClassificationCounts::default(),
+            },
             references: Vec::new(),
         };
         let cov = tally.finish(83, 83);
@@ -2588,10 +3083,15 @@ mod tests {
     #[test]
     fn bound_ratio_summary_reports_the_excluded_count_when_the_ratio_is_absent() {
         let tally = Tally {
-            bound: 0,
-            ambiguous: 0,
-            unbound: 0,
-            no_provider_in_workspace: 899,
+            by_intake: IntakeSplit {
+                contract_surface: ClassificationCounts {
+                    bound: 0,
+                    ambiguous: 0,
+                    unbound: 0,
+                    no_provider_in_workspace: 899,
+                },
+                invocation: ClassificationCounts::default(),
+            },
             references: Vec::new(),
         };
         let cov = tally.finish(1, 1);
@@ -2852,7 +3352,10 @@ mod tests {
             .collect();
         assert_eq!(not_composed, vec!["local catch_all"]);
 
-        // The row shape of a refusal: nothing to point at, nothing to stamp.
+        // The row shape of a refusal: nothing to point at, but it DOES name the
+        // population it came from (S-377, [CR-120]) — a recorded refusal is an
+        // invocation-intake row, and reporting that is the whole reason the arm
+        // records it.
         let row = cov
             .references
             .iter()
@@ -2862,7 +3365,7 @@ mod tests {
         assert_eq!(row.from.member, "web");
         assert!(row.to.is_none(), "{row:?}");
         assert!(row.candidates.is_none(), "{row:?}");
-        assert!(row.intake.is_none(), "{row:?}");
+        assert_eq!(row.intake, BridgeIntake::Invocation, "{row:?}");
         assert_eq!(row.bucket, "unbound");
 
         // The control bound, so the refusals sit beside a real binding.
@@ -3062,7 +3565,7 @@ mod tests {
         assert_eq!(to.symbol, LogosSymbol::parse("local svc").unwrap());
         assert_eq!(
             cov.references[0].intake,
-            Some(BridgeIntake::Invocation),
+            BridgeIntake::Invocation,
             "a stub call is a captured call site, not a declared contract"
         );
         assert!(cov.references[0].candidates.is_none());
@@ -3237,12 +3740,14 @@ mod tests {
         assert_eq!(refused[0].relation, "broker-topic");
         assert_eq!(refused[0].from.member, "svc");
         assert_eq!(refused[0].from.symbol.as_str(), "local byConstant");
-        // It has no provider to name and no intake to stamp — it never had a key to
-        // look one up with, and it bound no edge ([CR-118]'s `Unnamed` shape, which
-        // is exactly what a `path-not-composed` row already carries).
+        // It has no provider to name — it never had a key to look one up with, and
+        // it bound no edge ([CR-118]'s `Unnamed` shape, which is exactly what a
+        // `path-not-composed` row already carries). Its INTAKE is nonetheless
+        // reported: the row is a captured broker site, and which population a
+        // refusal belongs to is the fact S-377 makes universal ([CR-120]).
         assert!(refused[0].to.is_none(), "{:?}", refused[0]);
         assert!(refused[0].candidates.is_none(), "{:?}", refused[0]);
-        assert!(refused[0].intake.is_none(), "{:?}", refused[0]);
+        assert_eq!(refused[0].intake, BridgeIntake::Invocation, "{:?}", refused[0]);
         assert_eq!(refused[0].bucket, "unbound");
         // The keyed subscribe indexed a provider and reported nothing itself (a
         // provider is not a reference), so the refusal is the only row.
@@ -3351,7 +3856,7 @@ mod tests {
             assert_eq!(reference.bucket, "unbound", "{reference:?}");
             assert!(reference.to.is_none(), "{reference:?}");
             assert!(reference.candidates.is_none(), "{reference:?}");
-            assert!(reference.intake.is_none(), "{reference:?}");
+            assert_eq!(reference.intake, BridgeIntake::Invocation, "{reference:?}");
         }
 
         // The keyed publish is untouched by the refusals beside it: it binds to the

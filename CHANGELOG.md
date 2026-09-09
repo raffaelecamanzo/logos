@@ -28,6 +28,35 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
   exit code either; `workspace check` remains advisory.
 
 ### Changed
+- **Cross-service coverage reports its `intake` on every row, and splits the
+  classification counts by it (CR-120, S-377, FR-WS-05).** The headline
+  `bound`/`ambiguous`/`unbound`/`no-provider` counters add two different claims
+  together: a `contract-surface` reference is a *declared* endpoint matched to a
+  controller, an `invocation` reference is a captured *call site*. On the
+  84-member reference workspace the split is **81 contract-surface and 0
+  invocation** bound rows — no outbound call site in the whole estate resolves —
+  and a bare `bound: 81` reads as a healthy workspace.
+
+  `intake` was previously serialized **only on a bound row**, so the invocation
+  population's non-bound rows carried no population marker at all and the split
+  was not recoverable from the payload. It is now present on **every** row, in
+  every state, and is no longer optional. Read `bucket`/`state` for "did this row
+  bind" — the presence of `intake` never meant that and now cannot be mistaken
+  for it.
+
+  New: `coverage.by_intake.contract_surface` and `coverage.by_intake.invocation`,
+  each carrying the same four counts. The two **sum to** the four top-level
+  counters, which the server now derives from the split — so a figure and its
+  decomposition cannot disagree. Present on all four surfaces:
+  `workspace status` human output and `--json`, the `workspace_status` MCP tool,
+  and the web coverage view, which gains a *Coverage by intake* board beside its
+  per-arm one (the arm axis cannot separate the two — an OpenAPI operation and an
+  HTTP client call are both the `route` arm).
+
+  No existing field changed meaning or value, and the unbound-reason taxonomy is
+  untouched. Payload cost, measured on the reference workspace's shape: **+7.2%**
+  (`intake` on the 794 non-bound rows plus the summary block).
+
 - **The HTTP client-call arm records the call sites it declines, so coverage
   reports them instead of losing them (CR-120, S-374, FR-WS-08 AC2).** The arm's
   normalizer returned a refusal reason and the caller discarded it with `.ok()`,

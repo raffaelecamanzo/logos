@@ -1,0 +1,99 @@
+S-377 / CR-120 — THE INTAKE SPLIT, MEASURED OVER THE REFERENCE WORKSPACE
+========================================================================
+
+Measured  2026-09-09
+Corpus    ~/source/pec-services — 84 members declared, 84 read, covers_all = true
+Harness   logos-core/tests/coverage_intake_split.rs
+          (LOGOS_REF_WORKSPACE=~/source/pec-services)
+Path      federation::discover -> EngineRegistry<Engine>(RegistryMode::Lazy)
+          -> federation::cross_service_coverage
+          i.e. exactly the construction `logos workspace status` uses, so this
+          figure is the figure the shipped command prints.
+Wall      47 s
+
+
+THE HEADLINE — CR-120 §6's CRITERION, MET
+-----------------------------------------
+
+  bound rows by intake:   81 contract-surface   /   0 invocation
+
+CR-120 CRA-02 recorded 81/0 on 2026-09-08 by reading the ledger and the
+reference count *around* the coverage tier, because no payload carried the
+split. This is the same figure measured *through* the tier, and it agrees.
+
+
+THE FULL SPLIT
+--------------
+
+  references            929
+
+                        bound  ambiguous  unbound  no-provider
+  contract-surface         81        146        1          646
+  invocation                0          0       54            1
+  headline                 81        146       55          647
+
+  bound_ratio_summary   0.287 (81 of 282 measured; 647 excluded as
+                        no-provider-in-workspace)
+
+The `bound_ratio` line reproduces CR-120 §2's recorded headline verbatim
+(`0.287 (81 of 282 measured)`), which is the independent check that this run
+measured the same corpus state the CR was filed against.
+
+
+WHAT THE INVOCATION COLUMN IS, EXACTLY
+--------------------------------------
+
+Its 55 rows are NOT the ~115 HTTP client-call refusals S-374 added. Read that
+carefully, because the two are easy to conflate and the difference is a fact
+about the corpus, not about the classifier:
+
+  54  broker `topic-not-literal` refusals  — the header-form publish sites
+      CR-117 / S-370 made visible. 875 + 54 = 929, which reconciles this run
+      against S-372's recorded 875-reference shape exactly.
+   1  `no-provider-in-workspace` — the single workspace-wide `http-client-call`
+      reference, the TypeScript e2e test spec CR-120 §2 names.
+
+S-374's HTTP refusal rows are absent because they are written at INDEX time and
+this store was cold-indexed on 2026-09-08 with 1.4.7 — before S-374 merged.
+Re-indexing the reference workspace is a human-gated sprint-review step in this
+sprint's risk register, so this harness deliberately does not do it. Expect the
+invocation `unbound` column to rise by roughly 115 production rows (131
+workspace-wide, main + test) on the first re-index that carries S-374; the
+`bound` column is not expected to move, because a refusal never binds.
+
+That is the number the split now makes legible and no earlier payload could:
+the invocation population's bound half is zero, and it is zero next to an
+81-row headline.
+
+
+IS THE FIGURE AUDITABLE?
+------------------------
+
+Yes, and the harness asserts it rather than claiming it. Two properties hold
+unconditionally, corpus or no corpus:
+
+  * the split recomputes from the rows' own `intake` — 227 contract-surface +
+    ... = the per-population totals above;
+  * the two populations sum to the four headline counters.
+
+Both are properties of the code, so they are hard assertions. The 81/0 pair is
+a property of THIS corpus at THIS commit: the harness asserts it but prints the
+measured value in the failure message, and its own message says to record a
+moved figure rather than bend the classifier to reproduce this one.
+
+
+READ-ONLY: VERIFIED, NOT ASSUMED
+--------------------------------
+
+After the run, across all 84 members:
+
+  * `logos.db`      — 0 modified
+  * `telemetry.db`  — 0 modified
+  * `logos.db-wal`  — 0 bytes
+  * `logos.db-shm`  — 84 touched (SQLite shared-memory, an artefact of opening
+                      a WAL-mode database; carries no graph data)
+  * `git status`    — the pre-existing untracked `.logos/` from the 2026-09-08
+                      enrolment, and nothing else. No tracked file changed in
+                      any member.
+
+Nothing was indexed and nothing was enrolled.

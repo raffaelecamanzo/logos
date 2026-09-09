@@ -111,8 +111,8 @@ pub use bridge::{
     MemberContracts,
 };
 pub use coverage::{
-    cross_service_coverage, CoverageState, CrossServiceCoverage, ProviderCandidates,
-    ProviderDisposition, ReferenceCoverage, UnboundReason,
+    cross_service_coverage, ClassificationCounts, CoverageState, CrossServiceCoverage, IntakeSplit,
+    ProviderCandidates, ProviderDisposition, ReferenceCoverage, UnboundReason,
 };
 pub use governance::{workspace_governance, WorkspaceGovernance, WorkspaceViolation};
 pub use manifest::{
