@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-core"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "anyhow",
  "futures",
@@ -349,7 +349,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chat-agent"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agent-core",
  "anyhow",
@@ -1536,7 +1536,7 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "logos"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "logos-core"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "anyhow",
  "arborium-dockerfile",
@@ -1623,7 +1623,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "mcp"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "anyhow",
  "logos-core",
@@ -3719,7 +3719,7 @@ dependencies = [
 
 [[package]]
 name = "web"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agent-core",
  "anyhow",
@@ -3791,7 +3791,7 @@ dependencies = [
 
 [[package]]
 name = "wiki-agent"
-version = "1.4.7"
+version = "1.4.8"
 dependencies = [
  "agent-core",
  "anyhow",
