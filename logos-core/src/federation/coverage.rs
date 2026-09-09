@@ -812,7 +812,13 @@ pub struct CrossServiceCoverage {
     /// Every classified cross-boundary reference, sorted by endpoint for
     /// deterministic output ([NFR-RA-06]).
     pub references: Vec<ReferenceCoverage>,
-    /// References bound to exactly one provider in another member.
+    /// References bound to a provider in another member.
+    ///
+    /// Not "exactly one", which this line said until S-377 put a projection of it
+    /// (`ClassificationCounts::bound`) in the same file to disagree with: under a
+    /// **fan-out** discipline one broker publish binds *every* cross-member
+    /// subscriber and is counted here once ([FR-WS-10]). The exactly-one rule is a
+    /// property of the `route`/`grpc-call` namespaces, not of this counter.
     ///
     /// **Unchanged in meaning and in value** by [CR-120]'s split: it is now the
     /// *sum* of [`by_intake`](Self::by_intake)'s two `bound` counts rather than a
@@ -2151,7 +2157,7 @@ mod tests {
     ///
     /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
     #[test]
-    fn a_row_with_no_provider_to_name_omits_every_new_field() {
+    fn a_row_with_no_provider_to_name_omits_every_provider_field() {
         reset();
         set_member("api", vec![op("GET /orphans/{id}", "local op_orphan")]);
         set_member("web", vec![]);
@@ -2165,9 +2171,11 @@ mod tests {
                 "`{field}` is absent, not null: {value}"
             );
         }
-        // `intake` was the third field in this list until S-377 made it
-        // unconditional: it is not a *provider* field, and a row with no provider
-        // to name still has a population it came from ([CR-120]).
+        // `intake` was the third field in this list — and in this test's own name —
+        // until S-377 made it unconditional: it is not a *provider* field, and a
+        // row with no provider to name still has a population it came from
+        // ([CR-120]). The name says `provider_field` now, so a later reader
+        // extending the loop does not re-add it.
         assert_eq!(value["intake"], "contract-surface", "{value}");
         // And the pre-CR-118 fields are untouched, so a consumer that ignores the
         // new ones reads this row exactly as it read it before.
@@ -2298,15 +2306,52 @@ mod tests {
         );
 
         // (3) Recomputed from the rows themselves, exactly as a `--json` consumer
-        // would: group on the row's published `intake` and its published bucket.
-        let mut recounted = IntakeSplit::default();
+        // would — and **without calling the two functions under audit**. Routing
+        // this through `population_mut` / `record`, as it first did, made the
+        // assertion tautological: swap both arms of `population_mut`, or point them
+        // at one field, and the recount swaps with the thing it is checking. So the
+        // grouping is hand-written here, over the row's PUBLISHED `intake` and
+        // `bucket` — the two strings a consumer actually reads.
+        let mut recounted: std::collections::BTreeMap<(&str, &str), u64> =
+            std::collections::BTreeMap::new();
         for row in &cov.references {
-            recounted.population_mut(row.intake).record(&row.state);
+            let population = match row.intake {
+                BridgeIntake::ContractSurface => "contract_surface",
+                BridgeIntake::Invocation => "invocation",
+            };
+            // `no-provider-in-workspace` arrives inside the `unbound` display
+            // bucket while its counter sits outside `unbound` ([ADR-53]) — the same
+            // split-back-out the web coverage model performs.
+            let bucket = match row.state {
+                CoverageState::Bound => "bound",
+                CoverageState::Unbound {
+                    reason: UnboundReason::Ambiguous,
+                } => "ambiguous",
+                CoverageState::Unbound {
+                    reason: UnboundReason::NoProviderInWorkspace,
+                } => "no_provider_in_workspace",
+                CoverageState::Unbound { .. } => "unbound",
+            };
+            *recounted.entry((population, bucket)).or_default() += 1;
         }
-        assert_eq!(
-            recounted, cov.by_intake,
-            "the split is reproducible from `references`, not merely reported"
-        );
+        for (population, counts) in [
+            ("contract_surface", cov.by_intake.contract_surface),
+            ("invocation", cov.by_intake.invocation),
+        ] {
+            for (bucket, reported) in [
+                ("bound", counts.bound),
+                ("ambiguous", counts.ambiguous),
+                ("unbound", counts.unbound),
+                ("no_provider_in_workspace", counts.no_provider_in_workspace),
+            ] {
+                assert_eq!(
+                    recounted.get(&(population, bucket)).copied().unwrap_or(0),
+                    reported,
+                    "{population}/{bucket}: the split must be reproducible from \
+                     `references`, not merely reported"
+                );
+            }
+        }
     }
 
     /// **Every [`BridgeIntake`] variant has a population of its own** — the
