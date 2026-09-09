@@ -298,13 +298,20 @@ fn a_bound_coverage_row_names_the_same_provider_route_providers_does() {
         .filter(|r| r["reason"] == "no-provider-in-workspace")
         .collect();
     assert_eq!(orphan.len(), 1);
-    for field in ["to", "intake", "candidates"] {
+    for field in ["to", "candidates"] {
         assert!(
             orphan[0].get(field).is_none(),
             "`{field}` is absent on a row with no provider to name: {}",
             orphan[0]
         );
     }
+    // `intake` was in that list until S-377 (CR-120): it is not a provider field,
+    // and a row with no provider to name still came from a population.
+    assert_eq!(
+        orphan[0]["intake"], "contract-surface",
+        "the population is reported on a non-bound row too: {}",
+        orphan[0]
+    );
 
     // The human rendering is the same read-model pretty-printed (FR-CL-02), so the
     // provider reaches the human surface too — asserted on the whole coverage
@@ -315,6 +322,166 @@ fn a_bound_coverage_row_names_the_same_provider_route_providers_does() {
     assert_eq!(
         human["coverage"], status["coverage"],
         "human and --json carry the identical coverage payload, provider included"
+    );
+}
+
+// ── S-377 / CR-120: `intake` on every row, and the counts split by it ────────
+
+/// A `reqwest` client in the `api` member, giving the fixture an **invocation**
+/// intake population beside its contract-surface one:
+///
+/// - `fetch_user` makes a static call `GET /users/{id}` — it binds `web`'s axum
+///   route, so it is an `invocation`-intake **bound** row;
+/// - `fetch_dynamic` composes its URL at runtime, which the arm refuses — since
+///   S-374 that leaves one keyless ledger row, so it is an `invocation`-intake
+///   **unbound** (`base-url-runtime`) row.
+///
+/// Two declarations, because the arm's refusal recorder dedups per declaration
+/// and a sibling literal inside the same site cancels a refusal.
+const API_CLIENT: &str = r#"
+use reqwest::Client;
+
+pub async fn fetch_user(client: Client) {
+    let _ = client.get("/users/{id}").await;
+}
+
+pub async fn fetch_dynamic(client: Client, url: String) {
+    let _ = client.get(url).await;
+}
+"#;
+
+/// The two-member workspace plus [`API_CLIENT`] — a workspace whose coverage
+/// carries **both** intake populations, which the plain [`workspace`] fixture
+/// (contract-surface only) cannot exercise.
+fn workspace_with_both_intakes() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let api = root.join("api");
+    let web = root.join("web");
+
+    init_repo(&api);
+    init_repo(&web);
+    write(&api, "api/openapi.yaml", OPENAPI_YAML);
+    write(&api, "src/client.rs", API_CLIENT);
+    write(&web, "src/main.rs", AXUM_MAIN);
+
+    assert!(logos(&api, &["index"]).status.success(), "index api");
+    assert!(logos(&web, &["index"]).status.success(), "index web");
+
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"web\"]\ndefault = \"api\"\n",
+    )
+    .unwrap();
+    tmp
+}
+
+/// **[CR-120] §3.1's headline gap, closed end-to-end on the CLI surface.**
+///
+/// Every coverage row carries `intake` in every state, and the four
+/// classification counters are reported split by it — through the **real**
+/// `logos workspace status` binary, in `--json` and in the human rendering
+/// alike, over a workspace that genuinely has both populations.
+///
+/// The split is checked three ways, because it can be wrong three ways: against
+/// the fixture's known shape, against the headline it must sum to, and against a
+/// recount of the rows' own `intake` — which is the check a reader of the same
+/// payload can repeat, and the reason AC1 and AC2 belong to one story.
+///
+/// [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+#[test]
+fn workspace_status_reports_intake_on_every_row_and_splits_the_counts_by_it() {
+    let tmp = workspace_with_both_intakes();
+    let status = logos_json(tmp.path(), &["workspace", "status"]);
+    let coverage = &status["coverage"];
+    let references = coverage["references"].as_array().expect("classified references");
+
+    // Guard the guard: both populations and more than one state must be present,
+    // or every assertion below is a claim about a subset.
+    let mut intakes: Vec<&str> = references.iter().map(|r| r["intake"].as_str().unwrap_or("")).collect();
+    intakes.sort_unstable();
+    intakes.dedup();
+    assert_eq!(
+        intakes,
+        ["contract-surface", "invocation"],
+        "the fixture must carry both intake populations: {references:?}"
+    );
+
+    // AC1: `intake` on EVERY row, whatever its state.
+    for row in references {
+        let intake = row["intake"].as_str().unwrap_or_else(|| {
+            panic!("every coverage row carries `intake`, in every state — this one does not: {row}")
+        });
+        assert!(
+            intake == "contract-surface" || intake == "invocation",
+            "one of the two documented tokens, not {intake}: {row}"
+        );
+    }
+
+    // AC2: the counts, split. The contract surface binds its GET and orphans its
+    // DELETE; the client binds its static call and refuses its composed one.
+    let split = &coverage["by_intake"];
+    assert_eq!(split["contract_surface"]["bound"], 1, "{coverage}");
+    assert_eq!(split["contract_surface"]["ambiguous"], 0, "{coverage}");
+    assert_eq!(split["contract_surface"]["unbound"], 0, "{coverage}");
+    assert_eq!(split["contract_surface"]["no_provider_in_workspace"], 1, "{coverage}");
+    assert_eq!(
+        split["invocation"]["bound"], 1,
+        "the static client call binds web's route — an INVOCATION-intake binding, \
+         which is exactly the population the reference workspace has none of: {coverage}"
+    );
+    assert_eq!(split["invocation"]["ambiguous"], 0, "{coverage}");
+    assert_eq!(
+        split["invocation"]["unbound"], 1,
+        "the runtime-composed call's recorded refusal (S-374): {coverage}"
+    );
+    assert_eq!(split["invocation"]["no_provider_in_workspace"], 0, "{coverage}");
+
+    // The split sums to the headline, so it can never report less than the four
+    // counters it sits beside.
+    for field in ["bound", "ambiguous", "unbound", "no_provider_in_workspace"] {
+        let summed = split["contract_surface"][field].as_u64().expect(field)
+            + split["invocation"][field].as_u64().expect(field);
+        assert_eq!(
+            Some(summed),
+            coverage[field].as_u64(),
+            "`{field}`: the split's two populations must sum to the headline: {coverage}"
+        );
+    }
+
+    // And it is recomputable from the rows, which is what makes it auditable.
+    let mut recounted = std::collections::BTreeMap::<(&str, &str), u64>::new();
+    for row in references {
+        let intake = row["intake"].as_str().unwrap();
+        let bucket = match (row["bucket"].as_str().unwrap(), row["reason"].as_str()) {
+            // `no-provider-in-workspace` arrives inside the `unbound` display
+            // bucket while its counter sits outside `unbound` (ADR-53) — the same
+            // split-back-out the web coverage model performs.
+            ("unbound", Some("no-provider-in-workspace")) => "no_provider_in_workspace",
+            (b, _) => b,
+        };
+        *recounted.entry((intake, bucket)).or_default() += 1;
+    }
+    for (population, key) in [("contract-surface", "contract_surface"), ("invocation", "invocation")] {
+        for field in ["bound", "ambiguous", "unbound", "no_provider_in_workspace"] {
+            assert_eq!(
+                recounted.get(&(population, field)).copied().unwrap_or(0),
+                split[key][field].as_u64().expect(field),
+                "{population}/{field} recounted from the rows disagrees with the \
+                 reported split: {coverage}"
+            );
+        }
+    }
+
+    // The human rendering is the same read-model pretty-printed (FR-CL-02), so the
+    // split reaches the human surface too — asserted on the whole coverage object
+    // so neither surface can gain the field without the other.
+    let human = logos(tmp.path(), &["workspace", "status"]);
+    let human: Value = serde_json::from_str(&String::from_utf8(human.stdout).unwrap())
+        .expect("the human rendering is the same read-model, pretty-printed");
+    assert_eq!(
+        human["coverage"], status["coverage"],
+        "human and --json carry the identical coverage payload, intake split included"
     );
 }
 

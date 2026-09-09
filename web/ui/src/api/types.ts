@@ -1059,11 +1059,15 @@ export interface ProviderCandidates {
  *  `reason` are the flattened `CoverageState`; `bucket` is the display bucket
  *  derived from them server-side, so the two can never disagree.
  *
- *  `to` / `intake` / `candidates` are the CR-118 provider-identity riders. All
- *  three are OPTIONAL and every one of them is genuinely absent on real rows —
- *  an older store predates them entirely, and even a current store omits them on
- *  a row with no provider to name. A view must render a row without them
- *  (CR-118 §4.5); it must never `!`-assert its way past one. */
+ *  `to` / `candidates` are the CR-118 provider-identity riders. Both are OPTIONAL
+ *  and genuinely absent on real rows — an older store predates them entirely, and
+ *  even a current store omits them on a row with no provider to name. A view must
+ *  render a row without them (CR-118 §4.5); it must never `!`-assert its way past
+ *  one.
+ *
+ *  `intake` was the third of that trio until S-377/CR-120 made it unconditional.
+ *  It is not a provider field: it names the POPULATION the reference came from,
+ *  which every row has whatever it bound. */
 export interface ReferenceCoverage {
   relation: string;
   from: BridgeEndpoint;
@@ -1075,15 +1079,45 @@ export interface ReferenceCoverage {
    *  Absent on every non-bound row, and on a fan-out bound row, which binds a
    *  SET and reports it in `candidates` instead (CR-118). */
   to?: BridgeEndpoint;
-  /** How this row's binding entered the overlay (CR-083). Present only on a
-   *  bound row: an intake describes an edge, and a row that bound nothing has
-   *  none. */
-  intake?: BridgeIntake;
+  /** The intake POPULATION this reference arrived through (CR-083, CR-120).
+   *
+   *  **Required, and present in every state** — bound, ambiguous and unbound
+   *  alike (S-377). Do NOT read its presence as "this row bound something": that
+   *  is `bucket` / `state`, and reading it off `intake` is what hid a bound count
+   *  whose invocation half was zero (CR-120 §3.1). The counts grouped by this
+   *  field are {@link CrossServiceCoverage.by_intake}. */
+  intake: BridgeIntake;
   /** The providers this reference tied between (ambiguous) or fanned out to (a
    *  bound broker row). On an ambiguous row this is what turns a bare
    *  `ambiguous` count into a diagnosis — four aggregator members on one
    *  template is the architecture, not a matcher defect (FR-CG-09 Notes). */
   candidates?: ProviderCandidates;
+}
+
+/** The four classification counts over one intake population (FR-WS-05, CR-120)
+ *  — the same four buckets, with the same meanings, as `CrossServiceCoverage`'s
+ *  top-level counters. `no_provider_in_workspace` is bucketed apart here too. */
+export interface ClassificationCounts {
+  bound: number;
+  ambiguous: number;
+  unbound: number;
+  no_provider_in_workspace: number;
+}
+
+/** The classification counts split by intake population (CR-120, FR-WS-05).
+ *
+ *  One field per `BridgeIntake`, and the two SUM to `CrossServiceCoverage`'s four
+ *  top-level counters — the server derives those from this, so a view can render
+ *  either and they cannot disagree.
+ *
+ *  Read it before drawing any conclusion from `bound`: that counter adds a
+ *  declared endpoint matched to a controller (`contract-surface`) to a resolved
+ *  outbound call site (`invocation`), and on the 84-member reference workspace the
+ *  split is 81 / **0** — no call site in the estate resolves at all, which a bare
+ *  `bound: 81` reads as healthy (CR-120 §3.1, NFR-CC-04). */
+export interface IntakeSplit {
+  contract_surface: ClassificationCounts;
+  invocation: ClassificationCounts;
 }
 
 /** The advisory 3-state cross-service coverage summary (FR-WS-05, ADR-53) — never
@@ -1096,6 +1130,10 @@ export interface CrossServiceCoverage {
   ambiguous: number;
   unbound: number;
   no_provider_in_workspace: number;
+  /** The four counts above, split by intake population (CR-120). Not optional:
+   *  the SPA ships inside the binary that serves it, so there is no version skew
+   *  to defend against. */
+  by_intake: IntakeSplit;
   /** `bound / (bound + ambiguous + unbound)`.
    *
    *  **Absent when that denominator is 0** (FR-WS-05, NFR-CC-04): `0/0` is not full

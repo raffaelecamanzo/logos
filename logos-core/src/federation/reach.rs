@@ -212,6 +212,30 @@ pub struct CoverageRider {
     /// (the CLI and the web view) read it from the coverage summary itself. What
     /// the rider owes is the figures, and it now carries all of them.
     ///
+    /// # These four counts pool two intake populations (S-377, [CR-120])
+    ///
+    /// Stated here because the rider is where a reader is least likely to look it
+    /// up. Since S-377 the coverage summary reports the same four counts **split
+    /// by intake** — `contract-surface` (a declared endpoint matched to a
+    /// controller) apart from `invocation` (a captured call site) — in
+    /// [`CrossServiceCoverage::by_intake`](super::coverage::CrossServiceCoverage::by_intake).
+    /// The figures on this rider are the **pooled** ones, and on the 84-member
+    /// reference estate the pool is 81 declared-contract matches and **0** resolved
+    /// call sites. So a reader who concludes anything about outbound coupling from
+    /// a rider figure alone will conclude it wrongly.
+    ///
+    /// The split is deliberately not copied onto the rider: it is eight more `u64`s
+    /// on a `Copy` value attached to every claim, for a decomposition that belongs
+    /// beside the summary a reader consults once. What the rider owes — and what
+    /// this paragraph is — is to say that its counts are pooled and where the
+    /// decomposition lives, rather than let a qualification present on one surface
+    /// be silently absent on this one. [S-376] reworks every rendering of these
+    /// figures, this one included; the split's placement here is that story's call
+    /// to revisit, not a gap left unexamined.
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [S-376]: ../../../docs/planning/journal.md#s-376-retire-the-bound-ratio-the-headline-is-a-resolved-edge-count
+    ///
     /// [CR-105]: ../../../docs/requests/CR-105-report-a-failed-member-open-once-per-answer.md
     /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md

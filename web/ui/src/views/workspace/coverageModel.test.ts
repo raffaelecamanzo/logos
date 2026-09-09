@@ -1,25 +1,43 @@
 import { describe, expect, it } from "vitest";
 
-import type { CrossServiceCoverage, ReferenceCoverage, UnboundReason } from "../../api/types.ts";
+import type {
+  BridgeIntake,
+  ClassificationCounts,
+  CrossServiceCoverage,
+  ReferenceCoverage,
+  UnboundReason,
+} from "../../api/types.ts";
 import { armLabel, buildCoverageDashboard, reasonLabel } from "./coverageModel.ts";
 
-function bound(relation: string, n = 1): ReferenceCoverage[] {
+function bound(relation: string, n = 1, intake: BridgeIntake = "contract-surface"): ReferenceCoverage[] {
   return Array.from({ length: n }, (_v, i) => ({
     relation,
     from: { member: "api", symbol: `c${i}` },
     bucket: "bound" as const,
     state: "bound" as const,
+    intake,
   }));
 }
 
-function unbound(relation: string, reason: UnboundReason, n = 1): ReferenceCoverage[] {
+function unbound(
+  relation: string,
+  reason: UnboundReason,
+  n = 1,
+  intake: BridgeIntake = "contract-surface",
+): ReferenceCoverage[] {
   return Array.from({ length: n }, (_v, i) => ({
     relation,
     from: { member: "api", symbol: `u-${reason}-${i}` },
     bucket: reason === "ambiguous" ? ("ambiguous" as const) : ("unbound" as const),
     state: "unbound" as const,
     reason,
+    intake,
   }));
+}
+
+/** Zero counts — the population a fixture does not exercise. */
+function counts(over: Partial<ClassificationCounts> = {}): ClassificationCounts {
+  return { bound: 0, ambiguous: 0, unbound: 0, no_provider_in_workspace: 0, ...over };
 }
 
 function coverage(references: ReferenceCoverage[], summary: Partial<CrossServiceCoverage> = {}): CrossServiceCoverage {
@@ -29,6 +47,7 @@ function coverage(references: ReferenceCoverage[], summary: Partial<CrossService
     ambiguous: 0,
     unbound: 0,
     no_provider_in_workspace: 0,
+    by_intake: { contract_surface: counts(), invocation: counts() },
     bound_ratio: 1,
     bound_ratio_measured: 0,
     bound_ratio_summary: "",
@@ -302,5 +321,63 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
     expect(older.arms[0].bound).toBe(1);
     expect(older.arms[0].ambiguous).toBe(1);
     expect(older.arms[0].total).toBe(2);
+  });
+
+  // ── S-377 / CR-120: the intake split ──────────────────────────────────────
+
+  it("carries the server's intake split VERBATIM, never regrouped from the rows", () => {
+    // Deliberately inconsistent with the rows below: the server DERIVES its
+    // headline from `by_intake`, so a model that regrouped the references here
+    // would be a second implementation of that arithmetic, free to disagree with
+    // the headline inches away on the same screen. The only way to catch that is
+    // to hand it a split the rows do not imply and require the split to win.
+    const split = {
+      contract_surface: counts({ bound: 7, no_provider_in_workspace: 1 }),
+      invocation: counts({ unbound: 3 }),
+    };
+    const model = buildCoverageDashboard(
+      coverage([...bound("route", 1, "invocation")], { by_intake: split }),
+    );
+    expect(model.byIntake).toEqual(split);
+  });
+
+  it("tells an unresolved invocation population apart from an absent one", () => {
+    // The reference workspace's shape: call sites exist and none of them binds.
+    const unresolved = buildCoverageDashboard(
+      coverage([...bound("route", 81), ...unbound("route", "base-url-runtime", 5, "invocation")], {
+        by_intake: {
+          contract_surface: counts({ bound: 81 }),
+          invocation: counts({ unbound: 5 }),
+        },
+      }),
+    );
+    expect(unresolved.hasInvocationReferences).toBe(true);
+    expect(unresolved.byIntake.invocation.bound).toBe(0);
+
+    // The same zero over an estate with no captured call site at all — honest
+    // absence. A view must not report the two the same way (NFR-CC-04), so the
+    // model has to distinguish them and a bare `invocation.bound === 0` cannot.
+    const absent = buildCoverageDashboard(
+      coverage([...bound("route", 81)], {
+        by_intake: { contract_surface: counts({ bound: 81 }), invocation: counts() },
+      }),
+    );
+    expect(absent.hasInvocationReferences).toBe(false);
+    expect(absent.byIntake.invocation.bound).toBe(0);
+  });
+
+  it("counts an invocation reference in EVERY bucket toward the population's presence", () => {
+    // Not just `bound`: a population whose every reference is ambiguous, unbound
+    // or no-provider is still present, and reporting it as absent would call a
+    // total resolution failure "no call sites here" — the worse of the two
+    // misreadings, because it makes the failure invisible.
+    for (const bucket of ["bound", "ambiguous", "unbound", "no_provider_in_workspace"] as const) {
+      const model = buildCoverageDashboard(
+        coverage([], {
+          by_intake: { contract_surface: counts(), invocation: counts({ [bucket]: 1 }) },
+        }),
+      );
+      expect(model.hasInvocationReferences, `an invocation row in ${bucket} counts`).toBe(true);
+    }
   });
 });

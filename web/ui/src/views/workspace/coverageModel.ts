@@ -24,7 +24,12 @@
  * it; `degraded_rollup.degraded_members` is the field that knows.
  */
 
-import type { CrossServiceCoverage, UnboundReason } from "../../api/types.ts";
+import type {
+  ClassificationCounts,
+  CrossServiceCoverage,
+  IntakeSplit,
+  UnboundReason,
+} from "../../api/types.ts";
 
 /** The human label for each unbound reason (the wire tokens are kebab-case). */
 export const REASON_LABEL: Record<UnboundReason, string> = {
@@ -127,6 +132,31 @@ export interface CoverageDashboard {
   ratioDominatedByExcluded: boolean;
   /** One row per relation arm, in arm-name order. */
   arms: ArmCoverage[];
+  /** The four counts above, split by intake population — carried VERBATIM from
+   *  the server's own `by_intake`, never regrouped here (CR-120, FR-WS-05).
+   *
+   *  This is the field that stops the board reading two populations as one: a
+   *  `contract-surface` reference is a *declared* endpoint matched to a
+   *  controller, an `invocation` reference is a captured *call site*, and the
+   *  reference workspace's headline `bound: 81` is 81 of the first and **0** of
+   *  the second. The per-arm rows above do not answer this — `route` carries both
+   *  populations, because an OpenAPI operation and an HTTP client call are the
+   *  same arm (CR-120 §3.1, NFR-CC-04).
+   *
+   *  Its two keys are `contract_surface` and `invocation` — snake-cased, because
+   *  they are struct fields server-side, while a row's own `intake` carries the
+   *  kebab-case token (`contract-surface` / `invocation`). Joining a row to its
+   *  population means translating one into the other, and a rename of either
+   *  without the other makes that join silently match nothing. */
+  byIntake: IntakeSplit;
+  /** Whether any `invocation`-intake reference exists at all.
+   *
+   *  The distinction a view must make before it says anything about the
+   *  invocation half: `invocation.bound === 0` over an estate with call sites is a
+   *  finding, and over one with none it is honest absence. Two different
+   *  statements from the same zero, which is exactly what NFR-CC-04 asks a
+   *  surface to keep apart. */
+  hasInvocationReferences: boolean;
   /** No cross-boundary reference exists at all — the honest awaiting-data state. */
   isEmpty: boolean;
   /** Whether every workspace member's contract surface contributed to the counts
@@ -138,6 +168,31 @@ export interface CoverageDashboard {
   /** Members that contributed, out of the roster — the shortfall, stated. */
   membersRead: number;
   membersTotal: number;
+}
+
+/** Every reference in one intake population — the denominator that tells an
+ *  `invocation.bound === 0` finding apart from an estate with no call sites at
+ *  all (NFR-CC-04).
+ *
+ *  Exported because the coverage view needs the same sum for its per-population
+ *  **References** column, and a second copy of it there was the hand-mirrored
+ *  twin this module exists to prevent: the two would print a row total and a
+ *  sentence about that total, side by side in one card, from two implementations
+ *  free to diverge the moment `ClassificationCounts` gains a bucket. */
+export function classificationTotal(counts: ClassificationCounts): number {
+  return counts.bound + counts.ambiguous + counts.unbound + counts.no_provider_in_workspace;
+}
+
+/** References in one population that are INSIDE the ratio's denominator — bound,
+ *  ambiguous or unbound, i.e. everything but `no-provider-in-workspace`
+ *  (ADR-53).
+ *
+ *  The distinction {@link classificationTotal} cannot make: a population made
+ *  entirely of calls to services outside this workspace is not a *broken*
+ *  binding, so "nothing here resolves" would be a fabricated finding over it. A
+ *  view that reports a resolution failure must gate on this, never on the total. */
+export function measuredInPopulation(counts: ClassificationCounts): number {
+  return counts.bound + counts.ambiguous + counts.unbound;
 }
 
 /** Group a coverage read-model into the per-arm, per-reason dashboard model. */
@@ -199,6 +254,13 @@ export function buildCoverageDashboard(coverage: CrossServiceCoverage): Coverage
     // (nothing to bind at all) is `isEmpty`, not a dominated ratio.
     ratioDominatedByExcluded: coverage.no_provider_in_workspace > coverage.bound_ratio_measured,
     arms: [...byArm.values()].sort((a, b) => a.relation.localeCompare(b.relation)),
+    // Verbatim, on the same "projects, never recomputes" discipline as
+    // `boundRatio` — and for a sharper reason here: the server DERIVES its four
+    // headline counters from this split, so a regrouping performed in the view
+    // would be a second implementation of the arithmetic the headline already
+    // rests on, free to disagree with it inches away on the same screen.
+    byIntake: coverage.by_intake,
+    hasInvocationReferences: classificationTotal(coverage.by_intake.invocation) > 0,
     isEmpty: coverage.references.length === 0,
     // No `??` fallbacks: these three are non-optional in `CrossServiceCoverage`
     // and the SPA ships inside the same binary that serves them, so there is no

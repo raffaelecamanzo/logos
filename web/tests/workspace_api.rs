@@ -309,6 +309,21 @@ async fn workspace_status_reports_name_members_and_coverage() {
     assert_eq!(v["coverage"]["members_read"], 2, "{body}");
     assert_eq!(v["coverage"]["members_total"], 2, "{body}");
     assert_eq!(v["coverage"]["covers_all_members"], true, "{body}");
+
+    // S-377/CR-120: the intake split rides the same read-model, so the coverage
+    // dashboard's data carries it without a second endpoint. Asserted here as well
+    // as in the both-populations test below, so the field cannot be lost from the
+    // surface's primary status assertion while a specialised test still passes.
+    // This fixture is contract-surface only — its one bound reference is an OpenAPI
+    // operation — and that is exactly the reference workspace's shape.
+    assert_eq!(v["coverage"]["by_intake"]["contract_surface"]["bound"], 1, "{body}");
+    assert_eq!(v["coverage"]["by_intake"]["invocation"]["bound"], 0, "{body}");
+    for row in v["coverage"]["references"].as_array().unwrap() {
+        assert_eq!(
+            row["intake"], "contract-surface",
+            "every row carries its intake on the web surface too: {row}"
+        );
+    }
 }
 
 /// CR-111 / S-327, over the web serve surface: a workspace whose only
@@ -335,6 +350,100 @@ async fn workspace_status_reports_the_excluded_count_when_the_bound_ratio_is_abs
         "0 of 0 measured; 1 excluded as no-provider-in-workspace",
         "the excluded count is reported even though the ratio itself is absent: {body}"
     );
+}
+
+/// A `reqwest` client in the `api` member — the **invocation** intake population
+/// this file's other fixtures do not have: `fetch_user` makes a static call that
+/// binds `web`'s route (bound), `fetch_dynamic` composes its URL at runtime and is
+/// refused, leaving one keyless ledger row (unbound, S-374).
+const API_CLIENT: &str = r#"
+use reqwest::Client;
+pub async fn fetch_user(client: Client) { let _ = client.get("/users/{id}").await; }
+pub async fn fetch_dynamic(client: Client, url: String) { let _ = client.get(url).await; }
+"#;
+
+/// [`workspace`] plus [`API_CLIENT`], so the coverage payload carries **both**
+/// intake populations — which the OpenAPI-only fixtures cannot exercise.
+fn workspace_with_both_intakes() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    init_repo(&root.join("api"), "api/openapi.yaml", OPENAPI_YAML);
+    init_repo(&root.join("web"), "src/main.rs", AXUM_MAIN);
+    write(&root.join("api"), "src/client.rs", API_CLIENT);
+    Engine::start(root.join("api")).expect("api engine").index();
+    Engine::start(root.join("web")).expect("web engine").index();
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"web\"]\ndefault = \"api\"\n",
+    )
+    .unwrap();
+    tmp
+}
+
+/// **S-377/[CR-120] over the web serve surface: `intake` on every row and the
+/// counts split by it** ([FR-WS-05]'s surface-parity rule).
+///
+/// The web surface serializes the identical `CrossServiceCoverage` the CLI and MCP
+/// do, so this is asserted through the **real router** rather than by reasoning
+/// from that fact: the coverage dashboard reads this endpoint, and a projection or
+/// a `skip` introduced anywhere between the read-model and the response would pass
+/// every core test while leaving the board blind — which is what the parity rule
+/// exists to catch.
+///
+/// [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+#[tokio::test]
+async fn workspace_status_reports_intake_on_every_row_and_splits_the_counts_by_it() {
+    let tmp = workspace_with_both_intakes();
+    let router = ws_router(&tmp);
+    let resp = router.oneshot(get("/api/v1/workspace/status")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let coverage = &v["coverage"];
+    let references = coverage["references"].as_array().expect("classified references");
+
+    // Guard the guard: both populations must actually reach this surface, or every
+    // assertion below is a claim about one of them.
+    let mut intakes: Vec<&str> =
+        references.iter().map(|r| r["intake"].as_str().unwrap_or("")).collect();
+    intakes.sort_unstable();
+    intakes.dedup();
+    assert_eq!(
+        intakes,
+        ["contract-surface", "invocation"],
+        "the fixture must serve both intake populations: {body}"
+    );
+
+    // Every row, in every state.
+    for row in references {
+        assert!(
+            row["intake"].is_string(),
+            "every coverage row carries `intake` on the web surface: {row}"
+        );
+    }
+
+    // The split itself: the OpenAPI operation binds, and so does the static client
+    // call — one binding per population, counted apart. That separation is the
+    // whole point: on the reference workspace the second number is 0.
+    let split = &coverage["by_intake"];
+    assert_eq!(split["contract_surface"]["bound"], 1, "{body}");
+    assert_eq!(split["invocation"]["bound"], 1, "{body}");
+    assert_eq!(
+        split["invocation"]["unbound"], 1,
+        "the runtime-composed call's recorded refusal (S-374): {body}"
+    );
+
+    // And it sums to the headline, so the split can never under-report the four
+    // counters the dashboard renders beside it.
+    for field in ["bound", "ambiguous", "unbound", "no_provider_in_workspace"] {
+        let summed = split["contract_surface"][field].as_u64().expect(field)
+            + split["invocation"][field].as_u64().expect(field);
+        assert_eq!(
+            Some(summed),
+            coverage[field].as_u64(),
+            "`{field}`: the split must sum to the headline: {body}"
+        );
+    }
 }
 
 /// **The degraded shape over the web surface ([FR-WS-16]).**

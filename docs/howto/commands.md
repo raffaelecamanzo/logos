@@ -887,6 +887,7 @@ next question is *bound to what?*, and *ambiguous between what?*. Every row in
 // an AMBIGUOUS row: the providers it tied between — none of them bound
 { "relation": "route", "from": { "member": "orders", "symbol": "…" },
   "bucket": "ambiguous", "state": "unbound", "reason": "ambiguous",
+  "intake": "contract-surface",
   "candidates": {
     "disposition": "tied-between",
     "providers": [ { "member": "deprecated-mailbox-core", "symbol": "…" },
@@ -900,12 +901,16 @@ A bound row's `to` is the **same** pair
 [`xservice route-providers`](#xservice-workspace-federation-queries) reports for that
 reference — the two surfaces are computed from one pass and cannot disagree.
 
-Three things worth knowing about these fields:
+Four things worth knowing about these fields:
 
-- **They are optional.** A row with no provider to name (`no-provider-in-workspace`,
-  `path-not-composed`, `topic-not-literal`) carries none of them — absent, never `null` or an empty
-  list. A store indexed before this existed has them nowhere; every consumer must
-  read a row without them.
+- **`to` and `candidates` are optional.** A row with no provider to name
+  (`no-provider-in-workspace`, `path-not-composed`, `topic-not-literal`) carries
+  neither — absent, never `null` or an empty list. A store indexed before they
+  existed has them nowhere; every consumer must read a row without them.
+- **`intake` is not optional.** It is on **every** row, in every state (see
+  [the intake split](#the-counts-are-two-populations-read-the-split) below). Do
+  not read its presence as "this row bound something" — that is `bucket` /
+  `state`.
 - **`candidates` is bounded and never silently trimmed.** At most 8 providers are
   listed; `total` is the count *before* truncation and `omitted` is the remainder,
   stated in a field and again in `summary`.
@@ -913,6 +918,49 @@ Three things worth knowing about these fields:
   `unbound` and no edge exists — `disposition` says which of the two a listed set
   is (`tied-between` = none bound; `bound-to` = all bound, the broker fan-out
   shape, where one publish reaches every cross-member subscriber).
+
+##### The counts are two populations: read the split
+
+`bound: 81` adds two different claims together. A **`contract-surface`** reference
+is a *declared* endpoint (an OpenAPI operation) matched to a controller; an
+**`invocation`** reference is a *captured call site* (an HTTP client call, a gRPC
+stub call, a broker publish or subscribe). Both are real coupling, but "our specs
+line up with our controllers" and "our outbound calls resolve to a service in this
+workspace" are not the same statement, and summing them hides the weaker one.
+
+Every row carries its `intake`, and the four counters are reported split by it:
+
+```jsonc
+// logos workspace status --json
+"coverage": {
+  "bound": 81, "ambiguous": 146, "unbound": 55, "no_provider_in_workspace": 647,
+  "by_intake": {
+    "contract_surface": { "bound": 81, "ambiguous": 146,
+                          "unbound": 1, "no_provider_in_workspace": 646 },
+    "invocation":       { "bound":  0, "ambiguous":   0,
+                          "unbound": 54, "no_provider_in_workspace": 1 }
+  }
+}
+```
+
+Those are the real figures from an 84-member Spring estate. `bound: 81` looks like
+a workspace that binds; `by_intake.invocation.bound: 0` says **no outbound call
+site in it resolves at all**. That is what the split is for.
+
+The two populations always **sum** to the four counters above them — the headline
+is computed from the split, so the two cannot disagree — and because every row
+publishes its own `intake`, you can reproduce the split from `coverage.references`
+rather than take it on trust.
+
+Two readings to keep apart. `invocation.bound: 0` with invocation references
+present is a **finding**: call sites exist and none of them binds. The same zero
+with *no* invocation references at all is **honest absence**: nothing was
+captured, and the number says nothing about your outbound calls either way. Sum
+an `invocation` row's four counts to tell which you are looking at.
+
+The same split rides the `workspace_status` MCP tool and the web coverage view,
+which shows it as its own board — the relation-arm board cannot separate the two,
+because an OpenAPI operation and an HTTP client call are both the `route` arm.
 
 ##### Reading a large `ambiguous` count
 

@@ -30,6 +30,8 @@ import {
   fetchWorkspaceStatus,
 } from "../../api/workspaceClient.ts";
 import type {
+  BridgeIntake,
+  ClassificationCounts,
   CrossServiceImpact,
   DegradedRollup,
   ImpactEntry,
@@ -61,6 +63,8 @@ import {
   ARM_LABEL,
   armLabel,
   buildCoverageDashboard,
+  classificationTotal,
+  measuredInPopulation,
   reasonLabel,
   type ArmCoverage,
   type CoverageDashboard,
@@ -317,6 +321,154 @@ function ServiceMap({
 
 // ── Cross-service coverage (frontend-design §4.17) ───────────────────────────
 
+/** One intake population's row on the coverage-by-intake board (S-377, CR-120). */
+interface IntakePopulation {
+  intake: BridgeIntake;
+  /** What the population IS, not just its wire token — a reader who does not know
+   *  the vocabulary cannot act on `contract-surface` alone. */
+  label: string;
+  bound: number;
+  ambiguous: number;
+  unbound: number;
+  noProvider: number;
+  /** Every reference in the population. */
+  total: number;
+  /** The references INSIDE the ratio's denominator — everything but
+   *  `no-provider-in-workspace` (ADR-53). What a resolution-failure claim must be
+   *  gated on: a population of nothing but calls that leave this workspace has
+   *  not failed to resolve. */
+  measured: number;
+}
+
+/** Project one intake population into its board row.
+ *
+ *  Every count is carried verbatim, and the row's `total` comes from
+ *  {@link classificationTotal} rather than being summed again here — the model
+ *  owns that arithmetic, and a copy of it in this file would be a twin printing a
+ *  row total beside a sentence about that total from two implementations. */
+function intakeRow(
+  intake: BridgeIntake,
+  label: string,
+  counts: ClassificationCounts,
+): IntakePopulation {
+  return {
+    intake,
+    label,
+    bound: counts.bound,
+    ambiguous: counts.ambiguous,
+    unbound: counts.unbound,
+    noProvider: counts.no_provider_in_workspace,
+    total: classificationTotal(counts),
+    measured: measuredInPopulation(counts),
+  };
+}
+
+const INTAKE_COLUMNS: Column<IntakePopulation>[] = [
+  {
+    key: "intake",
+    header: "Intake",
+    cell: (p) => (
+      <>
+        <span className="mono">{p.intake}</span>
+        <br />
+        <span className="muted">{p.label}</span>
+      </>
+    ),
+    sortValue: (p) => p.intake,
+  },
+  { key: "bound", header: "Bound", numeric: true, cell: (p) => p.bound, sortValue: (p) => p.bound },
+  {
+    key: "ambiguous",
+    header: "Ambiguous",
+    numeric: true,
+    cell: (p) => p.ambiguous,
+    sortValue: (p) => p.ambiguous,
+  },
+  {
+    key: "unbound",
+    header: "Unbound",
+    numeric: true,
+    cell: (p) => p.unbound,
+    sortValue: (p) => p.unbound,
+  },
+  {
+    key: "noProvider",
+    header: "No provider here",
+    numeric: true,
+    cell: (p) => p.noProvider,
+    sortValue: (p) => p.noProvider,
+  },
+  {
+    key: "total",
+    header: "References",
+    numeric: true,
+    cell: (p) => p.total,
+    sortValue: (p) => p.total,
+  },
+];
+
+/** The coverage-by-intake board (S-377, CR-120).
+ *
+ *  Its own component so each population is built once and named — the narrative
+ *  below is *about* the `invocation` row, and recovering it from `rows[1]` (or
+ *  `find(...)!`) would tie a sentence to a sort order and put a non-null
+ *  assertion in a render path, which this codebase's wire-type docs tell views
+ *  not to do.
+ *
+ *  # Three states, because `invocation.bound === 0` means three different things
+ *  A zero over no captured call sites at all is **honest absence**. A zero over
+ *  call sites that every one of them left this workspace is **not a failure** —
+ *  `no-provider-in-workspace` is deliberately outside the ratio's denominator
+ *  (ADR-53) precisely because a call to a service we do not host is not a broken
+ *  binding. Only a zero over call sites that WERE measured is a finding. Saying
+ *  the wrong one of the three is the dishonesty NFR-CC-04 forbids, and the first
+ *  cut of this card said "nothing resolves" over the second — which is the state
+ *  the 84-member reference estate is actually in for its one HTTP client call. */
+function IntakeCard({ dashboard }: { dashboard: CoverageDashboard }) {
+  const declared = intakeRow(
+    "contract-surface",
+    "Declared endpoint (OpenAPI operation)",
+    dashboard.byIntake.contract_surface,
+  );
+  const captured = intakeRow(
+    "invocation",
+    "Captured call site (client call, publish/subscribe)",
+    dashboard.byIntake.invocation,
+  );
+  return (
+    <Card title="Coverage by intake">
+      <DataTable
+        caption="Cross-service coverage by intake population"
+        columns={INTAKE_COLUMNS}
+        rows={[declared, captured]}
+        rowKey={(p) => p.intake}
+        pageSize={DEFAULT_TABLE_PAGE_SIZE}
+      />
+      {captured.measured > 0 && captured.bound === 0 && (
+        <p className="muted">
+          No captured call site in this workspace resolves: every one of the {captured.measured}{" "}
+          <span className="mono">invocation</span> references that could bind here is ambiguous or
+          unbound. The bound count above is entirely declared-contract matches.
+        </p>
+      )}
+      {captured.measured === 0 && captured.noProvider > 0 && (
+        <p className="muted">
+          Every captured <span className="mono">invocation</span> reference in this workspace ({captured.noProvider}) points
+          at a service outside it — reported apart, and not a broken binding. Nothing here failed to
+          resolve.
+        </p>
+      )}
+      {captured.total === 0 && (
+        <p className="muted">
+          No <span className="mono">invocation</span> references were captured in this workspace —
+          honest absence, not a resolution failure. Its bound count says nothing about outbound call
+          sites either way.
+        </p>
+      )}
+    </Card>
+  );
+}
+
 const ARM_COLUMNS: Column<ArmCoverage>[] = [
   {
     key: "relation",
@@ -482,6 +634,17 @@ function CoveragePanel({
           binding). Advisory: this figure is never a quality-gate input.
         </p>
       </Card>
+
+      {/* S-377/CR-120: the headline above counts TWO populations as one. A declared
+          endpoint matched to a controller and a resolved outbound call site are
+          different claims, and the reference workspace's `bound: 81` is 81 of the
+          first and 0 of the second — which a bare headline reads as healthy.
+
+          The arm board below does not answer this and cannot: `route` carries both
+          populations, because an OpenAPI operation and an HTTP client call are the
+          same arm. So the split is its own board, adjacent to the headline it
+          decomposes. Counts are the server's, displayed verbatim. */}
+      <IntakeCard dashboard={dashboard} />
 
       <Card title="Coverage by relation arm">
         <DataTable
