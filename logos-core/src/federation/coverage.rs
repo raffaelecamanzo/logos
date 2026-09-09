@@ -2660,14 +2660,20 @@ mod tests {
         assert_eq!(cov.ambiguous, 146);
         assert_eq!(cov.no_provider_in_workspace, 648);
 
-        // **The reference workspace's intake split, reproduced** (S-377, [CR-120]
-        // CRA-02). Every one of these 875 references is a contract-surface
-        // consumer, because that is what the measured shape is: the workspace-wide
-        // `http-client-call` reference count there was 1 and that row was unbound.
-        // So the 81-row numerator is 81 `contract-surface` and **0** `invocation`
-        // — the fact no payload could express before this story, asserted here on
-        // the reproduced shape and measured live by
-        // `coverage_intake_split::measure_the_intake_split_over_the_reference_workspace`.
+        // **The reference workspace's BOUND split, reproduced** (S-377, [CR-120]
+        // CRA-02): the 81-row numerator is 81 `contract-surface` and **0**
+        // `invocation` — the fact no payload could express before this story.
+        //
+        // The fixture reproduces that split, not the corpus's whole population,
+        // and the difference is stated so the numbers are not over-read. This
+        // shape carries no `invocation` rows at all; the live corpus carries 55,
+        // of which 0 bind — 54 broker `topic-not-literal` refusals plus the one
+        // workspace-wide `http-client-call` reference, which is bucketed
+        // `no-provider-in-workspace` rather than `unbound` (the term of art here
+        // excludes that bucket, so [CR-120] CRA-02's colloquial "unbound" would
+        // mislead in this file). The live figures are measured by
+        // `coverage_intake_split::measure_the_intake_split_over_the_reference_workspace_when_one_is_configured`
+        // and recorded in `tests/coverage_intake_split/intake_split_finding.txt`.
         assert_eq!(
             cov.by_intake.contract_surface,
             ClassificationCounts {
@@ -2680,7 +2686,9 @@ mod tests {
         assert_eq!(
             cov.by_intake.invocation,
             ClassificationCounts::default(),
-            "0 invocation rows of any kind — the half an 81-row `bound` count hid"
+            "this synthetic shape carries no invocation rows at all; what it \
+             reproduces is the corpus's 0 invocation BOUND rows — the half an \
+             81-row `bound` count hid"
         );
 
         let after = serde_json::to_string(&cov).unwrap().len();
@@ -2712,9 +2720,12 @@ mod tests {
             pretty.len()
         );
         // Measured at **+70.9%** on this shape (195 229 → 333 619 bytes), which
-        // projects the ~260 KB reference baseline to roughly 445 KB. It was +59.6%
-        // when [CR-118] alone was the rider; S-377 accounts for the difference and
-        // is measured on its own below. Almost all of the total is the 146 four-way ties:
+        // projects the ~260 KB reference baseline to roughly 445 KB. With [CR-118]
+        // alone as the rider it is **+59.4%** on this tree (195 229 → 311 202);
+        // [S-372] recorded +59.6% against a then-195 044-byte baseline, so the
+        // 185-byte difference is in the stripped-down payload, not in the rider.
+        // S-377 accounts for the rest and is measured on its own below. Almost all
+        // of the total is the 146 four-way ties:
         // naming what a reference tied between IS the payload, so the cost is the
         // feature, and the ceiling guards against a blow-up — a doubling, a
         // per-row string, an unbounded set — not against the intended rider.
@@ -2745,6 +2756,17 @@ mod tests {
             }
         }
         let pre_s377 = serde_json::to_string(&prior).unwrap().len();
+        // The reconstruction's own check, and the reason the S-377 figure below can
+        // be attributed at all: this fixture is deterministic, so reproducing
+        // [S-372]'s recorded byte count proves the payload was rewound to exactly
+        // the state that figure describes. Without it the ratio range below would
+        // pass over a reconstruction that had silently drifted — the doc would keep
+        // claiming a byte-exact match to a figure no longer reproduced.
+        assert_eq!(
+            pre_s377, 311_202,
+            "the pre-S-377 reconstruction must reproduce S-372's recorded 311 202 \
+             bytes to the byte; got {pre_s377}"
+        );
         let universal_intake = (after - pre_s377) as f64 / pre_s377 as f64;
         println!(
             "S-377 increment on the same shape: {pre_s377} → {after} bytes \
