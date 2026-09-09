@@ -35,9 +35,37 @@ THE FULL SPLIT
   bound_ratio_summary   0.287 (81 of 282 measured; 647 excluded as
                         no-provider-in-workspace)
 
-The `bound_ratio` line reproduces CR-120 §2's recorded headline verbatim
-(`0.287 (81 of 282 measured)`), which is the independent check that this run
-measured the same corpus state the CR was filed against.
+RECONCILED AGAINST THE SPRINT'S NAMED BASELINE
+----------------------------------------------
+
+Sprint 66 §7 names `logos-docs/ws-status-2026-09-08-v1.4.7.json` — a real
+`workspace status --json` capture taken before this sprint — as the
+reconciliation target. Every cell above is reproduced from it exactly:
+
+                        this run   baseline
+  references                 929        929
+  bound                       81         81
+  ambiguous                  146        146
+  unbound                     55         55
+  no_provider_in_workspace   647        647
+  bound_ratio_summary   identical ("0.287 (81 of 282 measured; 647 excluded
+                        as no-provider-in-workspace)")
+
+And the baseline settles the 81/0 pair from the pre-change artifact itself,
+which is stronger than any assertion this change could make about it: of its
+929 rows, **81 carry `intake` and all 81 read `contract-surface`** — while the
+other **848 carry no `intake` at all**. That is CR-120 §3.1's defect, visible
+in a shipped payload: the invocation population's rows were the ones with no
+population marker, so the fact that none of them bound was unreadable.
+
+Those 848 rows are what this story's AC1 changes. The baseline also has no
+`by_intake` key, which is AC2's.
+
+(CR-120 §2's prose headline `0.287 (81 of 282 measured)` agrees too. Note that
+S-372's recorded **875**-reference figure is that story's *synthetic fixture*
+shape, not a corpus measurement, and it is two rows stale against the real
+2026-09-08 capture — so "875 + 54 = 929" is arithmetic coincidence and is not
+used here as a reconciliation.)
 
 
 WHAT THE INVOCATION COLUMN IS, EXACTLY
@@ -48,10 +76,17 @@ carefully, because the two are easy to conflate and the difference is a fact
 about the corpus, not about the classifier:
 
   54  broker `topic-not-literal` refusals  — the header-form publish sites
-      CR-117 / S-370 made visible. 875 + 54 = 929, which reconciles this run
-      against S-372's recorded 875-reference shape exactly.
+      CR-117 / S-370 made visible.
    1  `no-provider-in-workspace` — the single workspace-wide `http-client-call`
-      reference, the TypeScript e2e test spec CR-120 §2 names.
+      reference, the TypeScript e2e test spec CR-120 §2 names. Note the bucket:
+      `no-provider-in-workspace`, not `unbound`. CR-120 CRA-02 calls it
+      "unbound" colloquially, but here `unbound` is a term of art that excludes
+      that bucket (ADR-53), so the two readings differ by one row.
+
+  A direct census of all 84 member stores agrees, cell for cell:
+  `http-client-call 1`, `broker-publish 54`, `broker-subscribe 16`,
+  `grpc-call 0`. The 16 subscribes key successfully, so they index providers and
+  file no reference rows of their own — which is why 54 + 1 = 55, not 71.
 
 S-374's HTTP refusal rows are absent because they are written at INDEX time and
 this store was cold-indexed on 2026-09-08 with 1.4.7 — before S-374 merged.

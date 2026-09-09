@@ -54,19 +54,22 @@
 //! ```
 //!
 //! **[CR-120] §6's criterion is met: 81 contract-surface / 0 invocation bound
-//! rows.** The `bound_ratio` line reproduces the CR's own recorded headline
-//! verbatim, which is the independent check that this run measured the corpus
-//! state the CR was filed against.
+//! rows.** Reconciled against the baseline sprint 66 §7 names for the purpose,
+//! `logos-docs/ws-status-2026-09-08-v1.4.7.json`: all five figures above are
+//! reproduced from it exactly, and it settles the 81/0 pair from the pre-change
+//! artifact rather than from anything this change asserts — of its 929 rows, 81
+//! carry `intake` and all 81 read `contract-surface`, while the other **848 carry
+//! no `intake` at all**. Those 848 rows are what AC1 changes, and their absence
+//! is [CR-120] §3.1's defect visible in a shipped payload.
 //!
 //! The invocation column's 55 rows are **not** S-374's ~115 HTTP client-call
 //! refusals: those are written at *index* time and this store was cold-indexed on
 //! 2026-09-08 with 1.4.7, before S-374 merged. They are the 54 broker
-//! `topic-not-literal` refusals (S-370/[CR-117] — and 875 + 54 = 929 reconciles
-//! this run against S-372's recorded 875-reference shape) plus the one
-//! workspace-wide `http-client-call` reference, the TypeScript e2e spec [CR-120]
-//! §2 names. Expect the invocation `unbound` column to rise by ~115 on the first
-//! re-index that carries S-374; `bound` is not expected to move, because a
-//! refusal never binds.
+//! `topic-not-literal` refusals (S-370/[CR-117]) plus the one workspace-wide
+//! `http-client-call` reference, which is bucketed `no-provider-in-workspace`
+//! rather than `unbound`. Expect the invocation `unbound` column to rise by ~115
+//! on the first re-index that carries S-374; `bound` is not expected to move,
+//! because a refusal never binds.
 //!
 //! The full record, including the verified read-only proof, is the durable
 //! artifact `coverage_intake_split/intake_split_finding.txt`.
