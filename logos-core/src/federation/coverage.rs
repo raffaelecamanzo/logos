@@ -4562,6 +4562,45 @@ mod tests {
         }
     }
 
+    /// The surfaces that document the coverage **payload's fields**, with their
+    /// text — the one list, read by both payload-vocabulary guards.
+    ///
+    /// Shared for the reason [`readable_reason_surfaces`] is shared, and it is the
+    /// same recorded reason: a second copy of a closed surface list is the rot
+    /// these guards exist to prevent. Two copies existed for one commit — the
+    /// intake guard's and the headline guard's, identical — and a fourth
+    /// documented surface added later would have been checked by whichever list
+    /// the author happened to edit, silently not by the other.
+    ///
+    /// This list is **not** [`readable_reason_surfaces`]'s. That one covers the
+    /// *reason vocabulary*, which is mirrored into four `docs/specs` files whose
+    /// absence is tolerated in a packaged checkout. The payload vocabulary is
+    /// mirrored onto exactly these three, all tracked in this repository, so a read
+    /// failure here is a guard defect rather than a missing symlink.
+    ///
+    /// `mcp/src/server.rs` is deliberately absent: its description is guarded at
+    /// the MCP boundary against the *shipped* tool (`LogosMcp::list_tools()`),
+    /// which is stronger than reading the source, and duplicating it here would
+    /// create the second copy this helper exists to prevent.
+    fn payload_surfaces() -> Vec<(&'static str, String)> {
+        const SURFACES: [&str; 3] = [
+            "docs/howto/commands.md",
+            "web/ui/src/api/types.ts",
+            "web/ui/src/views/workspace/coverageModel.ts",
+        ];
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("logos-core sits under the repository root");
+        SURFACES
+            .iter()
+            .map(|rel| {
+                let text = std::fs::read_to_string(repo.join(rel))
+                    .unwrap_or_else(|e| panic!("{rel} must be readable to be guarded: {e}"));
+                (*rel, text)
+            })
+            .collect()
+    }
+
     /// **Every intake token and every split key is explained on every surface that
     /// documents the payload** (S-377, [CR-120], [NFR-CC-04]).
     ///
@@ -4625,28 +4664,7 @@ mod tests {
             );
         }
 
-        /// The surfaces that document this payload's fields. Tracked in **this**
-        /// repository, all three — unlike the reason vocabulary, the intake
-        /// vocabulary is not mirrored into `docs/specs`, so there is no
-        /// tolerated-absence case and a read failure is a guard defect.
-        ///
-        /// `mcp/src/server.rs` is deliberately **not** here: its description is
-        /// guarded at the MCP boundary against the *shipped* tool
-        /// (`LogosMcp::list_tools()`), which is stronger than reading the source,
-        /// and duplicating it would create the second copy this guard exists to
-        /// prevent.
-        const SURFACES: [&str; 3] = [
-            "docs/howto/commands.md",
-            "web/ui/src/api/types.ts",
-            "web/ui/src/views/workspace/coverageModel.ts",
-        ];
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("logos-core sits under the repository root");
-
-        for rel in SURFACES {
-            let text = std::fs::read_to_string(repo.join(rel))
-                .unwrap_or_else(|e| panic!("{rel} must be readable to be guarded: {e}"));
+        for (rel, text) in payload_surfaces() {
             for intake in ALL {
                 let token = wire(intake);
                 // The row token, in an enumeration shape rather than as a bare
@@ -4710,15 +4728,23 @@ mod tests {
     /// [`the_resolved_edge_count_is_never_published_without_its_egress_rate`],
     /// which stops the *server* emitting a bare count; neither implies the other.
     ///
-    /// # A plain `contains` is enough here, and that is a property of the tokens
+    /// # Why a bare `contains` is not enough, for exactly one of the seven
     ///
     /// Its siblings need an enumeration shape (a backtick, a union arm, a map key)
     /// because `ambiguous` and `invocation` are also ordinary English words, so a
-    /// bare substring test could not fail. These tokens are unique snake_case
-    /// identifiers that occur nowhere in prose, so a plain `contains` is already
-    /// falsifiable — each was checked by deleting it from each surface. Requiring
-    /// a shape on top would only reject the honest mention `coverage.egress_resolution`
-    /// that the dashboard model actually makes.
+    /// bare substring test could not fail. These seven are unique snake_case
+    /// identifiers that occur nowhere in prose, so that hazard does not apply —
+    /// but a second one does, and it was found in review after this guard shipped:
+    /// **`egress_resolution` is a strict prefix of `egress_resolution_measured`**.
+    /// A surface documenting only the denominator satisfied a bare `contains` for
+    /// the rate, so that arm could not fail — in the guard written to enforce
+    /// [BR-51]'s pairing, which is the pairing of the count with *the rate*.
+    ///
+    /// [`names_field`] closes it with an identifier-boundary test rather than a
+    /// backtick shape, because the honest mention `coverage.egress_resolution` that
+    /// the dashboard model makes carries no backticks and should not be rejected.
+    /// Each of the seven was re-checked by deleting it from each surface **and** by
+    /// deleting only the rate while keeping its denominator.
     ///
     /// The retired `bound_ratio` is deliberately **not** asserted absent from these
     /// surfaces: all three document the retirement in prose, and that is correct
@@ -4757,31 +4783,33 @@ mod tests {
             );
         }
 
-        /// The surfaces that document this payload's fields. The same tracked trio
-        /// the intake guard reads, and for the same reason: this vocabulary is not
-        /// mirrored into `docs/specs`, so there is no tolerated-absence case and a
-        /// read failure is a guard defect.
+        /// Does `text` name `key` as a field in its own right?
         ///
-        /// `mcp/src/server.rs` is deliberately absent: its description is guarded
-        /// at the MCP boundary against the *shipped* tool
-        /// (`mcp/tests/workspace_status_intake_parity.rs`), which is stronger than
-        /// reading the source, and duplicating it here would create the second copy
-        /// this family of guards exists to prevent.
-        const SURFACES: [&str; 3] = [
-            "docs/howto/commands.md",
-            "web/ui/src/api/types.ts",
-            "web/ui/src/views/workspace/coverageModel.ts",
-        ];
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("logos-core sits under the repository root");
+        /// A bare `contains` is **not** enough for one of the seven, and the
+        /// exception is the whole reason this helper exists: `egress_resolution` is
+        /// a strict prefix of `egress_resolution_measured`, which every surface
+        /// documents. So the plain test could never fail for it — a surface that
+        /// dropped the *rate* and kept only its denominator would have passed, in
+        /// the guard whose stated purpose is BR-51's pairing. That is precisely the
+        /// unfalsifiable arm S-378 spent a story removing, reintroduced by a naming
+        /// coincidence rather than by carelessness.
+        ///
+        /// The test is therefore "the key, not immediately followed by another
+        /// identifier character" — which is exactly what distinguishes the rate
+        /// from its own denominator, and holds for the other six unchanged.
+        fn names_field(text: &str, key: &str) -> bool {
+            text.match_indices(key).any(|(at, _)| {
+                text[at + key.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+            })
+        }
 
-        for rel in SURFACES {
-            let text = std::fs::read_to_string(repo.join(rel))
-                .unwrap_or_else(|e| panic!("{rel} must be readable to be guarded: {e}"));
+        for (rel, text) in payload_surfaces() {
             for key in HEADLINE {
                 assert!(
-                    text.contains(key),
+                    names_field(&text, key),
                     "{rel} documents the coverage payload but never names `{key}` — \
                      a field the payload carries that this surface cannot explain \
                      ([NFR-CC-04])"
