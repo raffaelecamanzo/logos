@@ -69,17 +69,22 @@ the invocation population's bound half is zero, and it is zero next to an
 IS THE FIGURE AUDITABLE?
 ------------------------
 
-Yes, and the harness asserts it rather than claiming it. Two properties hold
-unconditionally, corpus or no corpus:
+Yes, and the harness asserts it rather than claiming it. Two properties are
+asserted on every run of this harness:
 
-  * the split recomputes from the rows' own `intake` — 227 contract-surface +
-    ... = the per-population totals above;
+  * the split recomputes from the rows' own `intake` — 874 contract-surface +
+    55 invocation = 929 references, matching the per-population totals above;
   * the two populations sum to the four headline counters.
 
-Both are properties of the code, so they are hard assertions. The 81/0 pair is
-a property of THIS corpus at THIS commit: the harness asserts it but prints the
-measured value in the failure message, and its own message says to record a
-moved figure rather than bend the classifier to reproduce this one.
+Both are properties of the code rather than of the corpus, so they hold for any
+workspace — but read that precisely: they are asserted only WHEN THIS HARNESS
+RUNS, which needs a corpus. Corpus-free, the same two properties are guarded by
+`federation::coverage::tests::the_classification_counts_split_by_intake_and_sum_to_the_headline`.
+
+The 81/0 pair is a property of THIS corpus at THIS commit, and it is asserted:
+a moved corpus FAILS this harness deliberately. The failure message prints the
+measured value and says to RECORD the new figure here — never to bend the
+classifier to reproduce this one.
 
 
 READ-ONLY: VERIFIED, NOT ASSUMED
