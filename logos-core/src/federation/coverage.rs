@@ -1072,6 +1072,17 @@ pub struct CrossServiceCoverage {
 /// [`CrossServiceCoverage`] and asserts this type reads the same three values
 /// back — so drift fails a test rather than going unnoticed.
 ///
+/// # Retention window — this type is scheduled for removal
+///
+/// [CR-120] §7 grants the aliases **one release**. That window closes with the
+/// release after the one that first ships them, and this whole type goes with
+/// them: it exists only to read the old spelling. The boundary is named in the
+/// CHANGELOG entry beside the retirement rather than left as "one release",
+/// because an unanchored deprecation becomes the permanent vocabulary [NFR-CC-04]
+/// disfavours — which is what S-378 had just finished removing from this module.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+///
 /// # What it is for
 ///
 /// Comparing a recorded pre-change capture with a post-change one. The reference

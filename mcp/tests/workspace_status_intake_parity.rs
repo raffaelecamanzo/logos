@@ -125,11 +125,16 @@ async fn workspace_status(client: &Client) -> Value {
     call(client, "workspace_status", Map::new()).await
 }
 
-/// **The MCP payload carries `intake` on every row and the split beside the
-/// headline** — over a workspace that genuinely has both populations, so neither
-/// half of the assertion can pass vacuously.
-#[tokio::test]
-async fn workspace_status_mcp_reports_intake_on_every_row_and_splits_the_counts() {
+/// Boot the two-population workspace and return its `workspace_status` payload,
+/// with the handles its lifetime depends on.
+///
+/// Shared by both stories' payload tests. The module docs above argue they belong
+/// in one file *because* they assert over the same payload from the same call —
+/// which was true of the intent and not of the code until this was extracted: the
+/// thirteen setup lines were duplicated verbatim, so "the same fixture" was a
+/// claim two copies were free to falsify. The `TempDir` is returned because
+/// dropping it deletes the member stores out from under the live server.
+async fn two_population_status() -> (tempfile::TempDir, Value, Client, tokio::task::JoinHandle<()>) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
     let api = root.join("api");
@@ -143,6 +148,15 @@ async fn workspace_status_mcp_reports_intake_on_every_row_and_splits_the_counts(
     let (client, server) =
         boot(registry("shop", root, vec![member("api", &api), member("web", &web)])).await;
     let status = workspace_status(&client).await;
+    (tmp, status, client, server)
+}
+
+/// **The MCP payload carries `intake` on every row and the split beside the
+/// headline** — over a workspace that genuinely has both populations, so neither
+/// half of the assertion can pass vacuously.
+#[tokio::test]
+async fn workspace_status_mcp_reports_intake_on_every_row_and_splits_the_counts() {
+    let (_tmp, status, client, server) = two_population_status().await;
     let coverage = &status["coverage"];
     let references = coverage["references"].as_array().expect("classified references");
 
@@ -262,19 +276,7 @@ fn the_workspace_status_tool_description_documents_the_intake_split() {
 /// [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 #[tokio::test]
 async fn workspace_status_mcp_publishes_the_resolved_edge_headline_with_its_rate() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path();
-    let api = root.join("api");
-    let web = root.join("web");
-    write(&api, "api/openapi.yaml", OPENAPI_YAML);
-    write(&api, "src/client.rs", API_CLIENT);
-    write(&web, "src/main.rs", AXUM_MAIN);
-    index_member(&api);
-    index_member(&web);
-
-    let (client, server) =
-        boot(registry("shop", root, vec![member("api", &api), member("web", &web)])).await;
-    let status = workspace_status(&client).await;
+    let (_tmp, status, client, server) = two_population_status().await;
     let coverage = &status["coverage"];
 
     // AC1 at this boundary: the retired key is gone under all three spellings.

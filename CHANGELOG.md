@@ -45,7 +45,10 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
   old key now gets a missing field and fails loudly rather than silently reading a
   figure that no longer means what it did. The three keys are accepted for one
   release as **deserialization aliases** (`logos_core::federation::SpecConformanceReading`),
-  so a stored pre-change capture still parses.
+  so a stored pre-change capture still parses. **That window closes with the
+  release after the one carrying this entry** — the aliases, and the type holding
+  them, are removed then. Anchored here rather than left as "one release", because
+  an unanchored deprecation becomes permanent vocabulary.
 
   What replaces them:
   - `resolved_cross_service_edges` — cross-service edges resolved from a captured
