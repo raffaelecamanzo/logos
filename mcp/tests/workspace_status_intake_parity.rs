@@ -24,9 +24,14 @@
 //! two-member workspace — never from a copy of either, following [S-372]'s parity
 //! precedent.
 //!
-//! The harness (registry construction, in-process rmcp client) mirrors
-//! `reachability_bound.rs`, which is the other federated MCP-boundary test in this
-//! crate.
+//! The harness (fixture writes, member indexing, registry construction,
+//! in-process rmcp client) is the shared `support/federated.rs`, extracted at this
+//! story's review from `reachability_bound.rs` — the other federated
+//! MCP-boundary test in this crate, and until now the only copy. This crate
+//! already records why a copied guard is the wrong answer (`support/roster.rs`),
+//! and a six-item harness twin has a worse failure mode than the one number that
+//! precedent is about: a copy that drifts in *how* it indexes passes for reasons
+//! the original does not share.
 //!
 //! Gated on `lang-all` (this crate's default), because the fixture needs **two**
 //! grammars: the Rust one for the client calls that make the invocation
@@ -43,17 +48,14 @@
 //! [S-372]: ../../docs/planning/journal.md#s-372-coverage-rows-name-the-provider-they-bound-and-the-candidates-they-tied-between
 #![cfg(feature = "lang-all")]
 
-use std::path::{Path, PathBuf};
-
-use logos_core::federation::{EngineRegistry, Federation, Member, RegistryMode};
-use logos_core::Engine;
 use mcp::LogosMcp;
-use rmcp::{
-    model::CallToolRequestParams,
-    service::{RoleClient, RunningService},
-    ServiceExt,
-};
-use serde_json::Value;
+use serde_json::{Map, Value};
+
+/// The federated MCP-boundary harness, shared with `reachability_bound.rs`.
+#[path = "support/federated.rs"]
+mod federated;
+
+use federated::{boot, call, index_member, member, registry, write, Client};
 
 /// The `api` member's OpenAPI spec — the **contract-surface** population: `get`
 /// matches `web`'s axum route across the `{user_id}`/`{id}` param drift (bound),
@@ -99,60 +101,9 @@ fn app() -> Router {
 }
 "#;
 
-fn write(root: &Path, rel: &str, contents: &str) {
-    let path = root.join(rel);
-    std::fs::create_dir_all(path.parent().expect("has parent")).expect("mkdir");
-    std::fs::write(path, contents).expect("write fixture");
-}
-
-/// Index a member into its own `.logos/logos.db`, then drop the engine so the
-/// store is closed before the registry re-opens it.
-fn index_member(root: &Path) {
-    let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
-}
-
-fn member(name: &str, root: &Path) -> Member {
-    Member { name: name.to_string(), root: root.to_path_buf() }
-}
-
-fn registry(root: &Path, members: Vec<Member>) -> EngineRegistry<Engine> {
-    let federation = Federation {
-        name: "shop".to_string(),
-        root: root.to_path_buf(),
-        members,
-        default: None,
-        links: Vec::new(),
-        governance: Default::default(),
-        warm_concurrency: None,
-    };
-    EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy)
-}
-
-type Client = RunningService<RoleClient, ()>;
-
-/// Boot a federated MCP server over `registry` and an in-process client.
-async fn boot(registry: EngineRegistry<Engine>) -> (Client, tokio::task::JoinHandle<()>) {
-    let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
-    let server = tokio::spawn(async move {
-        if let Ok(running) = LogosMcp::federated(registry).serve(server_io).await {
-            let _ = running.waiting().await;
-        }
-    });
-    let client = ().serve(client_io).await.expect("client initialize");
-    (client, server)
-}
-
 /// The `workspace_status` payload, as the tool actually returns it.
 async fn workspace_status(client: &Client) -> Value {
-    let result = client
-        .call_tool(CallToolRequestParams::new("workspace_status"))
-        .await
-        .expect("workspace_status call");
-    assert_ne!(result.is_error, Some(true), "workspace_status must succeed");
-    let text = result.content.first().unwrap().as_text().unwrap();
-    serde_json::from_str(&text.text).expect("valid JSON")
+    call(client, "workspace_status", Map::new()).await
 }
 
 /// **The MCP payload carries `intake` on every row and the split beside the
@@ -171,7 +122,7 @@ async fn workspace_status_mcp_reports_intake_on_every_row_and_splits_the_counts(
     index_member(&web);
 
     let (client, server) =
-        boot(registry(root, vec![member("api", &api), member("web", &web)])).await;
+        boot(registry("shop", root, vec![member("api", &api), member("web", &web)])).await;
     let status = workspace_status(&client).await;
     let coverage = &status["coverage"];
     let references = coverage["references"].as_array().expect("classified references");
@@ -242,7 +193,7 @@ async fn workspace_status_mcp_reports_intake_on_every_row_and_splits_the_counts(
 #[test]
 fn the_workspace_status_tool_description_documents_the_intake_split() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let tools = LogosMcp::federated(registry(tmp.path(), Vec::new())).list_tools();
+    let tools = LogosMcp::federated(registry("shop", tmp.path(), Vec::new())).list_tools();
     let description = tools
         .iter()
         .find(|t| t.name == "workspace_status")

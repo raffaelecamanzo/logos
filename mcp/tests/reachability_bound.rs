@@ -16,19 +16,21 @@
 //! Rust-only fixture (private, uncalled functions are per-repo dead) — no bridge
 //! edges are needed to exercise the dead-set suppression vs. `--all` distinction.
 //!
+//! The harness itself lives in `support/federated.rs`, shared with
+//! `workspace_status_intake_parity.rs`: it was local to this file until a second
+//! federated MCP-boundary test needed it, and a copy of six fixture items is the
+//! shape `support/roster.rs`'s own docs record as this crate's failure mode.
+//!
 //! [CR-084]: ../../docs/requests/CR-084-reachability-payload-filter.md
 
-use std::path::{Path, PathBuf};
-
-use logos_core::federation::{EngineRegistry, Federation, Member, RegistryMode};
-use logos_core::Engine;
-use mcp::LogosMcp;
-use rmcp::{
-    model::CallToolRequestParams,
-    service::{RoleClient, RunningService},
-    ServiceExt,
-};
 use serde_json::{Map, Value};
+
+/// The federated MCP-boundary harness, shared with
+/// `workspace_status_intake_parity.rs`.
+#[path = "support/federated.rs"]
+mod federated;
+
+use federated::{boot, index_member, member, registry, write, Client};
 
 /// `core` member: an exported (live) function and a private, uncalled one the
 /// annotation pass verdicts per-repo dead.
@@ -46,60 +48,8 @@ pub fn helper() -> i32 { 2 }
 fn unused() -> i32 { 7 }
 "#;
 
-fn write(root: &Path, rel: &str, contents: &str) {
-    let path = root.join(rel);
-    std::fs::create_dir_all(path.parent().expect("has parent")).expect("mkdir");
-    std::fs::write(path, contents).expect("write fixture");
-}
-
-/// Index a member into its own `.logos/logos.db`, then drop the engine so the
-/// store is closed before the registry re-opens it (mirrors the logos-core
-/// `xservice_reachability` integration harness).
-fn index_member(root: &Path) {
-    let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
-}
-
-fn member(name: &str, root: &Path) -> Member {
-    Member {
-        name: name.to_string(),
-        root: root.to_path_buf(),
-    }
-}
-
-fn registry(root: &Path, members: Vec<Member>) -> EngineRegistry<Engine> {
-    let federation = Federation {
-        name: "ws".to_string(),
-        root: root.to_path_buf(),
-        members,
-        default: None,
-        links: Vec::new(),
-        governance: Default::default(),
-        warm_concurrency: None,
-    };
-    EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy)
-}
-
-type Client = RunningService<RoleClient, ()>;
-
-/// Boot a federated MCP server over `registry` and an in-process client (mirrors
-/// the `hotspots_parity` harness, but on the federated backing so the
-/// `xservice_*`/`workspace_*` tools are registered).
-async fn boot(registry: EngineRegistry<Engine>) -> (Client, tokio::task::JoinHandle<()>) {
-    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-    let server = tokio::spawn(async move {
-        if let Ok(running) = LogosMcp::federated(registry).serve(server_io).await {
-            let _ = running.waiting().await;
-        }
-    });
-    let client = ().serve(client_io).await.expect("client initialize");
-    (client, server)
-}
-
 /// Call `workspace_reachability` with the given optional params and parse its JSON.
 async fn call(client: &Client, repo: Option<&str>, all: Option<bool>) -> Value {
-    let mut params = CallToolRequestParams::new("workspace_reachability");
     let mut args = Map::new();
     if let Some(r) = repo {
         args.insert("repo".into(), Value::from(r));
@@ -107,13 +57,7 @@ async fn call(client: &Client, repo: Option<&str>, all: Option<bool>) -> Value {
     if let Some(a) = all {
         args.insert("all".into(), Value::from(a));
     }
-    if !args.is_empty() {
-        params = params.with_arguments(args);
-    }
-    let result = client.call_tool(params).await.expect("workspace_reachability call");
-    assert_ne!(result.is_error, Some(true), "workspace_reachability must succeed");
-    let text = result.content.first().unwrap().as_text().unwrap();
-    serde_json::from_str(&text.text).expect("valid JSON")
+    federated::call(client, "workspace_reachability", args).await
 }
 
 /// S-294/CR-084 at the MCP boundary: an omitted `all` maps to the promotions-only
@@ -131,7 +75,8 @@ async fn workspace_reachability_mcp_default_is_promotions_only_and_all_returns_f
     index_member(&core);
     index_member(&util);
 
-    let (client, server) = boot(registry(root, vec![member("core", &core), member("util", &util)])).await;
+    let (client, server) =
+        boot(registry("ws", root, vec![member("core", &core), member("util", &util)])).await;
 
     // Default (`all` omitted): the adapter's `unwrap_or(false)` must yield the
     // promotions-only bound — dead suppressed to null, NOT the full set. This is
