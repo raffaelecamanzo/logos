@@ -901,7 +901,7 @@ A bound row's `to` is the **same** pair
 [`xservice route-providers`](#xservice-workspace-federation-queries) reports for that
 reference — the two surfaces are computed from one pass and cannot disagree.
 
-Three things worth knowing about these fields:
+Four things worth knowing about these fields:
 
 - **`to` and `candidates` are optional.** A row with no provider to name
   (`no-provider-in-workspace`, `path-not-composed`, `topic-not-literal`) carries
@@ -919,7 +919,7 @@ Three things worth knowing about these fields:
   is (`tied-between` = none bound; `bound-to` = all bound, the broker fan-out
   shape, where one publish reaches every cross-member subscriber).
 
-##### The counts are two populations — read the split
+##### The counts are two populations: read the split
 
 `bound: 81` adds two different claims together. A **`contract-surface`** reference
 is a *declared* endpoint (an OpenAPI operation) matched to a controller; an
