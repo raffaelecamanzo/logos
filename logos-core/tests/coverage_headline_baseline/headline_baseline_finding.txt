@@ -67,8 +67,8 @@ rename should look like from the outside.
 ---------------------------------------------------
 
 The store was cold-indexed on 2026-09-08 with logos 1.4.7, BEFORE S-374 merged.
-Refusal rows are written at INDEX time, so this store holds none of S-374's ~115
-HTTP client-call refusal rows.
+Refusal rows are written at INDEX time, so this store holds none of S-374's
+115-131 HTTP client-call refusal rows.
 
 So this artifact is a post-change PAYLOAD SHAPE over a pre-S-374 INDEX GENERATION,
 and it says so in its own `generation` block. Quoting it as a post-S-374
@@ -93,14 +93,21 @@ S-374 — the HTTP client-call arm records its refusals      STATUS: pending re-
 
   Not observable here: the store predates the merge and refusal rows are written at
   index time. Expected direction WORSE — and that is the correction working, not a
-  regression. Expected magnitude on the re-index: +115 production `invocation` /
-  `unbound` rows with reason `base-url-runtime`, against a prior count of ZERO
-  (S-374's own measured figure over this estate; 131 workspace-wide including the
-  test tree, which an index run does not separate from production).
+  regression.
 
-  On these figures: `unbound` 55 -> ~170, `by_intake.invocation.unbound` 54 -> ~169,
-  `egress_resolution_measured` 54 -> ~169, `spec_conformance_measured` 282 -> ~397,
-  `spec_conformance_ratio` 0.287 -> ~0.204.
+  Expected magnitude on the re-index, stated as a RANGE because S-374's two recorded
+  figures bound it from both ends: **+115 to +131** `invocation` / `unbound` rows with
+  reason `base-url-runtime`, against a prior count of ZERO. 115 is S-374's PRODUCTION
+  row count over this estate; 131 is the workspace-wide count including the test tree.
+  An index run does not separate main from test (client_call_refusal_finding.txt lines
+  25 and 40), so the refreshed figure should land at the UPPER end — the earlier draft
+  of this file derived its projections from 115 while saying in the same sentence that
+  indexing yields 131, and a projection a sprint review checks against has to pick one
+  and say which.
+
+  On these figures: `unbound` 55 -> 170-186, `by_intake.invocation.unbound` 54 -> 169-185,
+  `egress_resolution_measured` 54 -> 169-185, `spec_conformance_measured` 282 -> 397-413,
+  `spec_conformance_ratio` 0.287 -> 0.204-0.196.
 
   `resolved_cross_service_edges` stays 0 and `egress_resolution` stays 0.000: a
   recorded refusal never binds, so the numerator cannot move. `bound`, `ambiguous`
@@ -118,7 +125,8 @@ S-375 — the client-call detector gate is receiver-grained  STATUS: observed
 
   Its real effect lands on S-374's denominator at the NEXT index. Against a
   file-grained gate, refusal recording would have written 4 ledger rows for a list
-  index and a cookie put, so the ~115 above would have been ~119 — the "manufactures
+  index and a cookie put, so the range above would have been 4 rows wider at each
+  end — the "manufactures
   a coverage denominator out of ordinary code" hazard CR-120 §7 names, avoided by
   landing the narrowing before the recording.
 
@@ -174,5 +182,6 @@ At the sprint-review human gate, on a binary built from this sprint's merged mai
   6. Commit both files.
 
 The figures the refresh would change are exactly those enumerated under S-374 in
-section 4. If any OTHER figure moves, that is a finding in its own right and the
+section 4, and the run is expected to land at the UPPER end of each range because
+indexing does not separate the test tree from production. If any OTHER figure moves, that is a finding in its own right and the
 remedy is to record it — never to bend the classifier back to the numbers here.

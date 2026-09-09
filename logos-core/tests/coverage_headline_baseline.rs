@@ -220,6 +220,43 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
         );
     }
 
+    // **The recorded measurement is internally consistent.** Corpus-free, so it
+    // holds in CI — and it is the half a reader is most likely to break, because
+    // the `deltas` and `generation` blocks beside it are hand-written and the
+    // measurement is the one block that must never be. A hand-edited figure that
+    // no longer reconciles with its own siblings is a baseline that would send a
+    // sprint-review re-index chasing a delta that was never measured.
+    let num = |k: &str| m[k].as_u64().unwrap_or_else(|| panic!("`{k}` is a number: {m}"));
+    assert_eq!(
+        num("bound") + num("ambiguous") + num("unbound"),
+        num("spec_conformance_measured"),
+        "the three counted buckets are the spec-conformance denominator: {m}"
+    );
+    assert_eq!(
+        num("bound") + num("ambiguous") + num("unbound") + num("no_provider_in_workspace"),
+        m["references"].as_u64().expect("`references` is a count"),
+        "…and all four partition the reference total: {m}"
+    );
+    let inv = &m["by_intake"]["invocation"];
+    let inv_num = |k: &str| inv[k].as_u64().unwrap_or_else(|| panic!("invocation.{k}: {inv}"));
+    assert_eq!(
+        inv_num("bound") + inv_num("ambiguous") + inv_num("unbound"),
+        num("egress_resolution_measured"),
+        "the egress denominator is the INVOCATION population's three counted \
+         buckets — not the pooled ones, and not including no-provider: {m}"
+    );
+    let line = m["resolved_edges_summary"].as_str().expect("the composed line");
+    let edges = num("resolved_cross_service_edges");
+    let noun = if edges == 1 { "edge" } else { "edges" };
+    assert!(
+        line.starts_with(&format!("{edges} resolved cross-service {noun};")),
+        "the recorded line must open with the recorded count (BR-51): {line:?}"
+    );
+    assert!(
+        line.contains(&format!("of {} egress site", num("egress_resolution_measured"))),
+        "…and name the recorded denominator: {line:?}"
+    );
+
     // The pre-change capture this baseline is stated against, named by path so the
     // pair can be found together.
     assert!(
