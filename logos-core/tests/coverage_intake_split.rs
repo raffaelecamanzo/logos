@@ -31,11 +31,16 @@
 //! with `--nocapture`. The test name carries `when_one_is_configured` for exactly
 //! that reason.
 //!
-//! `corpus_root` is duplicated from `broker_topic_corpus.rs` / `operand_resolvability.rs`
-//! rather than shared: each integration test file is its own crate, and the
-//! alternative — a `#[path]`-included support module — would couple three
-//! independent measurements to one another's compilation. The same tradeoff those
-//! two files already record.
+//! `corpus_root` is duplicated from `broker_topic_corpus.rs` /
+//! `operand_resolvability.rs` rather than shared, and the reason is **editorial,
+//! not technical** — this file states the tradeoff those two leave implicit. A
+//! `#[path]`-included support module would work (`logos-core/tests` already uses
+//! that mechanism), and it would compile the module separately into each test
+//! binary, so there is no shared build unit to couple. What it would couple is
+//! three **published figures** to one file's edits: a change to the shared reader
+//! would silently alter the corpus three separate recorded measurements were taken
+//! over. Nineteen lines with no judgement in them is the cheaper side of that
+//! trade. Revisit if a fourth measurement arrives.
 //!
 //! # Recorded finding (2026-09-09, `~/source/pec-services`, 84 members)
 //!
@@ -117,12 +122,19 @@ fn corpus_root() -> Option<PathBuf> {
 /// 3. the two populations sum to the headline counters, so the split cannot
 ///    under-report what it sits beside.
 ///
-/// **The 81 is reported, not required.** If the corpus has moved the assertion
-/// prints the measured figure and the split beside it; the criterion's number is
-/// a recorded measurement of a specific workspace at a specific commit, and
-/// bending the classifier to reproduce it would be the failure this whole change
-/// request exists to correct. What *is* required unconditionally is (2) and (3),
-/// which are properties of the code rather than of the corpus.
+/// **The 81/0 pair is asserted, and a moved corpus fails this harness
+/// deliberately.** Its failure message prints the measured figure and the split
+/// beside it, because the criterion's number is a recorded measurement of a
+/// specific workspace at a specific commit: the remedy for a red run here is to
+/// **record the new figure** — in this doc, in the durable artifact, and in the
+/// story's notes — never to bend the classifier to reproduce the old one. That
+/// distinction is the whole of [CR-120]'s subject, so it is stated rather than
+/// left to a reader of a red test.
+///
+/// (2) and (3) are properties of the code rather than of the corpus, so they hold
+/// for any workspace — but they are asserted only *when this harness runs*, which
+/// needs a corpus. Corpus-free, the same two properties are guarded by
+/// `federation::coverage::tests::the_classification_counts_split_by_intake_and_sum_to_the_headline`.
 #[test]
 fn measure_the_intake_split_over_the_reference_workspace_when_one_is_configured() {
     let Some(root) = corpus_root() else {
