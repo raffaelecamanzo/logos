@@ -27,6 +27,55 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
   success, not a failure). A workspace-governance violation still never moves the
   exit code either; `workspace check` remains advisory.
 
+### Changed — BREAKING (payload)
+- **`bound_ratio` is retired from the coverage payload; the headline is
+  `resolved_cross_service_edges` with `egress_resolution` beside it (CR-120,
+  S-376, FR-WS-05, ADR-53, BR-51).** Re-measured on the 84-member reference
+  workspace the bound-ratio read `0.287 (81 of 282 measured)` over a workspace
+  whose caller→callee edge count was **zero**: every one of those 81 bound rows
+  was an OpenAPI operation matched to a controller route, not a resolved call. It
+  also moved *downward* (0.355 → 0.287) as broker instrumentation improved, which
+  is the wrong direction for a headline. CR-111 had already made the figure
+  legible; legibility was not the problem.
+
+  **`bound_ratio`, `bound_ratio_measured` and `bound_ratio_summary` are no longer
+  emitted** on any surface — `logos workspace status` human output and `--json`,
+  the `workspace_status` and `workspace_reachability` MCP tools, the
+  `/api/v1/workspace/status` endpoint and the web coverage view. A reader of the
+  old key now gets a missing field and fails loudly rather than silently reading a
+  figure that no longer means what it did. The three keys are accepted for one
+  release as **deserialization aliases** (`logos_core::federation::SpecConformanceReading`),
+  so a stored pre-change capture still parses. **That window closes with the
+  release after the one carrying this entry** — the aliases, and the type holding
+  them, are removed then. Anchored here rather than left as "one release", because
+  an unanchored deprecation becomes permanent vocabulary.
+
+  What replaces them:
+  - `resolved_cross_service_edges` — cross-service edges resolved from a captured
+    **invocation** (a caller→callee HTTP client call, a producer→consumer broker
+    publish, a gRPC stub call). It counts *edges*, not sites: under the broker
+    fan-out one publish binds every cross-member subscriber and the bridge emits
+    one edge per subscriber.
+  - `egress_resolution` — the rate at which captured egress *sites* resolve at
+    all, over the invocation population's own denominator, with
+    `egress_resolution_measured` beside it. **Absent** (`null`) when no egress
+    site was captured, never a fabricated `1.0`.
+  - `resolved_edges_summary` — both figures as one composed line, so no rendering
+    can show the count without the rate (BR-51).
+  - `spec_conformance_ratio` / `_measured` / `_summary` — the retired ratio's
+    formula, unchanged, under the name of what it always measured: how far this
+    workspace's *declarations* line up with its controllers. The composed line's
+    wording is byte-identical to the old one, so a pre-change capture and a
+    post-change one compare directly. CR-100's absent-on-zero-denominator
+    guarantee and CR-111's denominator-disclosure duty carry over intact.
+
+  Measured on the reference workspace 2026-09-09 and recorded as a durable
+  baseline in `logos-core/tests/coverage_headline_baseline/`: **0 resolved
+  cross-service edges, egress resolution 0.000 over 54 egress sites**, beside a
+  pooled `bound: 81`. That baseline is labelled with the index generation that
+  produced it (logos 1.4.7, pre-S-374) and carries the refresh procedure for the
+  re-index that will move it.
+
 ### Changed
 - **Cross-service coverage reports its `intake` on every row, and splits the
   classification counts by it (CR-120, S-377, FR-WS-05).** The headline

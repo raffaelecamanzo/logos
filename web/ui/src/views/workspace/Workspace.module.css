@@ -14,7 +14,9 @@
   gap: var(--space-4);
 }
 
-/* The bound-ratio verdict: the score bar beside its verbatim figure. */
+/* A coverage verdict row: the score bar beside its verbatim figure. Shared by
+   both verdict cards since S-376 — the resolved-edge headline and the
+   spec-conformance ratio below it. */
 .ratio {
   display: flex;
   align-items: center;

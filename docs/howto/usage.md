@@ -111,8 +111,9 @@ Overall resolution health is in `logos status` (`refs_resolved` /
 cross-artifact bindings is in `logos stats` (the `artifact_bindings` field, keyed
 by each relation's payload token), read live from the graph.
 
-> **Reading `resolution_coverage` — why ~50% is normal, not a defect.** The
-> bound-ratio is measured over *every* syntactic reference the extractor sees,
+> **Reading `resolution_coverage` — why ~50% is normal, not a defect.** This
+> per-repo ratio ([FR-RS-04](../specs/requirements/FR-RS-04.md)) is measured over
+> *every* syntactic reference the extractor sees,
 > and the denominator deliberately includes references that can never bind to a
 > workspace symbol — by design, never as a failure:
 >

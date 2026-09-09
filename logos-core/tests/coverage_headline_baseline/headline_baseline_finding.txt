@@ -1,0 +1,187 @@
+S-376 / CR-120 — THE POST-CHANGE COVERAGE BASELINE FOR THE REFERENCE WORKSPACE
+==============================================================================
+
+Durable record for CR-120's acceptance criterion "a post-change measured baseline
+of the reference workspace is recorded as a durable artifact before any successor
+work is planned". The machine-readable half is the JSON beside this file,
+`ws-coverage-2026-09-09-post-cr120.json`; this is the narrative half.
+
+CR-121 (S-380 onward) is blocked on this artifact existing, and every delta that
+programme reports is stated against it.
+
+
+1. WHAT WAS MEASURED, AND HOW
+-----------------------------
+
+Corpus     ~/source/pec-services — 84 members, all 84 read, covers_all_members true
+Date       2026-09-09
+Harness    logos-core/tests/coverage_headline_baseline.rs
+Path       discover() -> EngineRegistry<Engine>(RegistryMode::Lazy) -> cross_service_coverage()
+           i.e. the same construction `logos workspace status` uses, so the figures
+           recorded here are the figures the shipped command prints.
+
+READ-ONLY, verified rather than assumed. All 252 store files across the 84 members
+(logos.db / telemetry.db / *.db-wal) were hashed by mtime+size before and after both
+runs: 0 changed, every WAL 0 bytes. Nothing was indexed, enrolled or wiped.
+Re-enrolling this workspace is a human-gated step at sprint review (sprint 66 §7),
+and a harness that quietly re-indexed would make its own figure unattributable — a
+changed number could be the change or the re-index.
+
+
+2. THE MEASUREMENT
+------------------
+
+  references                     929
+
+                                 bound  ambiguous  unbound  no-provider
+  contract-surface                  81        146        1          646
+  invocation                         0          0       54            1
+  headline                          81        146       55          647
+
+  resolved_cross_service_edges       0
+  egress_resolution              0.000
+  egress_resolution_measured        54
+  resolved_edges_summary         "0 resolved cross-service edges; egress resolution
+                                  0.000 (0 of 54 egress sites resolved)"
+
+  spec_conformance_ratio         0.287
+  spec_conformance_measured        282
+  spec_conformance_summary       "0.287 (81 of 282 measured; 647 excluded as
+                                  no-provider-in-workspace)"
+
+ZERO cross-service edges in this estate are resolved from a captured call site,
+over 54 captured egress sites — while the retired `bound_ratio` read 0.287 on the
+same data and the pooled `bound` reads 81. All 81 of those are contract-surface
+matches: an OpenAPI operation matched to a controller route, i.e. documentation
+conformance. That contrast is CR-120's entire case, and it is now the first figure
+the command prints.
+
+Reconciled against `logos-docs/ws-status-2026-09-08-v1.4.7.json`, the pre-change
+capture sprint 66 §7 names for the purpose: all four classification counts, the
+reference total and the composed ratio line reproduce from it exactly. Only the
+field NAMES and the added headline differ, which is what a "name change only"
+rename should look like from the outside.
+
+
+3. WHAT THIS BASELINE IS NOT — the index generation
+---------------------------------------------------
+
+The store was cold-indexed on 2026-09-08 with logos 1.4.7, BEFORE S-374 merged.
+Refusal rows are written at INDEX time, so this store holds none of S-374's
+115-131 HTTP client-call refusal rows.
+
+So this artifact is a post-change PAYLOAD SHAPE over a pre-S-374 INDEX GENERATION,
+and it says so in its own `generation` block. Quoting it as a post-S-374
+measurement would attribute the later rise in the invocation unbound column to the
+wrong cause — which is precisely the failure mode CR-120 exists to remove.
+
+CR-120's acceptance criterion is therefore CONDITIONALLY MET by this artifact: the
+baseline is measured, durable, labelled and reconciled, and the one thing it cannot
+carry is a figure that only a re-index of the 84-member workspace can produce. That
+re-index is a human-gated sprint-review step, not a session step. Section 5 is the
+procedure that closes it in one operation.
+
+
+4. PER-STORY DELTA ATTRIBUTION
+------------------------------
+
+CR-120's Testing & Verification section requires the delta attributed to each of
+S-374, S-375 and S-377 separately. S-376's own is stated too, since it is the story
+that produced this file.
+
+S-374 — the HTTP client-call arm records its refusals      STATUS: pending re-index
+
+  Not observable here: the store predates the merge and refusal rows are written at
+  index time. Expected direction WORSE — and that is the correction working, not a
+  regression.
+
+  Expected magnitude on the re-index, stated as a RANGE because S-374's two recorded
+  figures bound it from both ends: **+115 to +131** `invocation` / `unbound` rows with
+  reason `base-url-runtime`, against a prior count of ZERO. 115 is S-374's PRODUCTION
+  row count over this estate; 131 is the workspace-wide count including the test tree.
+  An index run does not separate main from test (client_call_refusal_finding.txt lines
+  25 and 40), so the refreshed figure should land at the UPPER end — the earlier draft
+  of this file derived its projections from 115 while saying in the same sentence that
+  indexing yields 131, and a projection a sprint review checks against has to pick one
+  and say which.
+
+  On these figures: `unbound` 55 -> 170-186, `by_intake.invocation.unbound` 54 -> 169-185,
+  `egress_resolution_measured` 54 -> 169-185, `spec_conformance_measured` 282 -> 397-413,
+  `spec_conformance_ratio` 0.287 -> 0.204-0.196.
+
+  `resolved_cross_service_edges` stays 0 and `egress_resolution` stays 0.000: a
+  recorded refusal never binds, so the numerator cannot move. `bound`, `ambiguous`
+  and `no_provider_in_workspace` do not move either.
+
+  Evidence: logos-core/tests/operand_resolvability/client_call_refusal_finding.txt
+
+S-375 — the client-call detector gate is receiver-grained  STATUS: observed
+
+  ZERO change to every figure above, and that zero is a measured result rather than
+  an absence. The narrowing removed 4 Java sites — three list-index accesses and a
+  cookie-map put, each verified against the estate source — and none of them emitted
+  a reference: the workspace-wide genuine `http-client-call` reference count is 1
+  before and 1 after.
+
+  Its real effect lands on S-374's denominator at the NEXT index. Against a
+  file-grained gate, refusal recording would have written 4 ledger rows for a list
+  index and a cookie put, so the range above would have been 4 rows wider at each
+  end — the "manufactures
+  a coverage denominator out of ordinary code" hazard CR-120 §7 names, avoided by
+  landing the narrowing before the recording.
+
+  Evidence: sprint-impl-66.md, S-375's before/after table (98 -> 94 Java sites,
+  1 -> 1 workspace emitted).
+
+S-377 — coverage reports its intake on every row           STATUS: observed
+
+  Additive to the payload, and it moves NO count: `intake` became unconditional on
+  all 929 rows (848 of which carried none) and the `by_intake` block was added,
+  derived from the same tally the four headline counters are now derived from.
+
+  It is what makes this baseline's decisive figure legible at all —
+  `by_intake.invocation.bound: 0` beside a headline `bound: 81`. Measured payload
+  cost on the reference workspace's shape: +2.9% compact bytes.
+
+  Evidence: logos-core/tests/coverage_intake_split/intake_split_finding.txt
+
+S-376 — retire the bound-ratio (this story)                STATUS: observed
+
+  Renames three summary fields and adds four; moves no classification count.
+  `bound_ratio 0.287` is now `spec_conformance_ratio 0.287` with its composed line
+  byte-identical, and the new headline reads `resolved_cross_service_edges: 0` with
+  `egress_resolution: 0.000 (0 of 54 egress sites resolved)`. Measured payload cost
+  on the reference workspace's shape: under 0.1% compact bytes, all of it on the
+  summary object and none per-row.
+
+  Evidence: federation::coverage::tests::payload_growth_is_measured_against_the_
+  reference_workspace_shape, whose S-376 rider measures this story apart from
+  CR-118's and S-377's.
+
+
+5. THE REFRESH PROCEDURE (the human-gated re-index)
+---------------------------------------------------
+
+At the sprint-review human gate, on a binary built from this sprint's merged main:
+
+  1. `logos init --workspace --yes` at ~/source/pec-services. This re-enrols the
+     root and spawns the detached warm supervisor that indexes the 84 members
+     (~43 s to return). A root `logos index` covers the ROOT ONLY — 3 files — and
+     that is correct, not a failure.
+  2. Wait for `.logos.workspace.warm.json` to report every member warm.
+  3. Re-run this harness against the refreshed store:
+
+         LOGOS_REF_WORKSPACE=~/source/pec-services LOGOS_BASELINE_WRITE=1 \
+           cargo test -p logos-core --test coverage_headline_baseline -- --nocapture
+
+     which rewrites the `measurement` block of the JSON beside this file.
+  4. Update the `generation` block: `contains_s374_refusal_rows` becomes true and
+     `index_built_by` / `index_built_on` become the refreshed binary and date.
+  5. Restate the `deltas` entries whose status is `pending-reindex` as `observed`,
+     with the figures the run produced, and update section 4 of this file.
+  6. Commit both files.
+
+The figures the refresh would change are exactly those enumerated under S-374 in
+section 4, and the run is expected to land at the UPPER end of each range because
+indexing does not separate the test tree from production. If any OTHER figure moves, that is a finding in its own right and the
+remedy is to record it — never to bend the classifier back to the numbers here.

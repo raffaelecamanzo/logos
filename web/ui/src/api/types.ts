@@ -1121,9 +1121,16 @@ export interface IntakeSplit {
 }
 
 /** The advisory 3-state cross-service coverage summary (FR-WS-05, ADR-53) — never
- *  a gate input. `no_provider_in_workspace` is bucketed out of `bound_ratio`'s
- *  denominator: a reference to a service outside this workspace is not a *broken*
- *  binding, so it must not depress the ratio. */
+ *  a gate input. `no_provider_in_workspace` is bucketed out of
+ *  `spec_conformance_ratio`'s denominator: a reference to a service outside this
+ *  workspace is not a *broken* binding, so it must not depress the ratio.
+ *
+ *  **`bound_ratio` was retired by CR-120 and is no longer sent.** It pooled
+ *  declared-contract matches with resolved call sites in one numerator and read
+ *  `0.287` over a workspace with zero caller→callee edges. Its formula survives as
+ *  `spec_conformance_ratio`; the headline is now `resolved_cross_service_edges`
+ *  with `egress_resolution` beside it. A view still reading `bound_ratio` gets
+ *  `undefined` — loudly wrong rather than quietly stale, which is the point. */
 export interface CrossServiceCoverage {
   references: ReferenceCoverage[];
   bound: number;
@@ -1134,26 +1141,62 @@ export interface CrossServiceCoverage {
    *  the SPA ships inside the binary that serves it, so there is no version skew
    *  to defend against. */
   by_intake: IntakeSplit;
-  /** `bound / (bound + ambiguous + unbound)`.
+  /** **The headline** (CR-120, BR-51): cross-service edges the bridge resolved
+   *  from a captured `invocation` — a caller→callee HTTP client call, a
+   *  producer→consumer broker publish, a gRPC stub call.
+   *
+   *  Deliberately not `bound`, which also counts `contract_surface` matches
+   *  (documentation conformance, not coupling). It counts *edges*, not sites:
+   *  under the broker fan-out one publish binds every cross-member subscriber and
+   *  the bridge emits one edge per subscriber, so one reference can contribute
+   *  several — which is why it is not `egress_resolution`'s numerator.
+   *
+   *  Never render it without `egress_resolution` beside it (BR-51). The server
+   *  composes both into `resolved_edges_summary` for exactly that reason. */
+  resolved_cross_service_edges: number;
+  /** The rate at which captured **egress sites** resolve at all:
+   *  `by_intake.invocation.bound / (bound + ambiguous + unbound)` over the
+   *  invocation population alone.
+   *
+   *  **Absent when that denominator is 0** (BR-51, CR-100): a workspace that
+   *  captured no outbound call site has *no measurement*, and `1.0` there would
+   *  claim every outbound call resolves. Render absence as "not measured", never
+   *  as an empty or a full bar. */
+  egress_resolution?: number;
+  /** The denominator `egress_resolution` was computed over — the captured egress
+   *  sites, explicit rather than derived (CR-111's duty applied to the successor
+   *  figure). Present even when the rate is absent, where `0` *is* the finding:
+   *  nothing outbound was captured at all. */
+  egress_resolution_measured: number;
+  /** The resolved-edge count and its rate as one line, e.g. `"0 resolved
+   *  cross-service edges; egress resolution 0.000 (0 of 54 egress sites
+   *  resolved)"`. The structural form of BR-51: a view that renders this line
+   *  cannot render the count without the rate. */
+  resolved_edges_summary: string;
+  /** `bound / (bound + ambiguous + unbound)` — the retired `bound_ratio`'s
+   *  formula under the name of what it measures: how far this workspace's
+   *  *declarations* line up with its controllers. Dominated by `contract_surface`
+   *  intake, and never a measure of cross-service coupling (CR-120 §5.2).
    *
    *  **Absent when that denominator is 0** (FR-WS-05, NFR-CC-04): `0/0` is not full
    *  coverage, it is *no measurement*, and the server used to send `1.0` — which is
    *  how a workspace with 63 of 72 members unopened reported `bound: 0` alongside a
    *  perfect ratio (CR-100). A UI must render absence as "not measured", never as an
    *  empty or a full bar. */
-  bound_ratio?: number;
-  /** The denominator `bound_ratio` was computed over — `bound + ambiguous +
-   *  unbound`, explicit rather than derived, so a consumer of this wire shape
-   *  need not re-implement the sum (CR-111). Present even when `bound_ratio`
+  spec_conformance_ratio?: number;
+  /** The denominator `spec_conformance_ratio` was computed over — `bound +
+   *  ambiguous + unbound`, explicit rather than derived, so a consumer of this wire
+   *  shape need not re-implement the sum (CR-111). Present even when the ratio
    *  is absent (a zero denominator serializes this as `0`). */
-  bound_ratio_measured: number;
-  /** The bound-ratio never presented bare (FR-WS-05, CR-111): its own value —
-   *  when present — followed by its denominator and the count excluded as
+  spec_conformance_measured: number;
+  /** The spec-conformance ratio never presented bare (FR-WS-05, CR-111): its own
+   *  value — when present — followed by its denominator and the count excluded as
    *  `no-provider-in-workspace`, e.g. `"0.857 (6 of 7 measured; 899 excluded as
    *  no-provider-in-workspace)"`, or, on an absent ratio, `"0 of 0 measured; 899
    *  excluded as no-provider-in-workspace"` (S-327: the excluded count is
-   *  reported regardless of whether anything was measured). */
-  bound_ratio_summary: string;
+   *  reported regardless of whether anything was measured). The wording is
+   *  unchanged from the retired bound-ratio's line, so two vintages compare. */
+  spec_conformance_summary: string;
   /** Members whose contract surface this summary actually read. */
   members_read: number;
   /** Members in the workspace roster this summary was computed over. */

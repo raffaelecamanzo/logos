@@ -829,17 +829,69 @@ cross-service coverage summary** — every cross-boundary reference classified
 `bound` / `ambiguous` / `unbound`, each unbound one carrying a reason
 (`no-provider-in-workspace`, `path-not-composed`, `base-url-runtime`,
 `ambiguous`, `topic-not-literal`). The coverage tier is **advisory only** — it
-is bucketed separately (`no-provider-in-workspace` never depresses the
-bound-ratio) and never feeds any member's quality gate
+is bucketed separately (`no-provider-in-workspace` never depresses
+`spec_conformance_ratio`) and never feeds any member's quality gate
 ([ADR-53](../specs/architecture/decisions/ADR-53.md)).
 
-`coverage.bound_ratio` is **absent** (`null` under `--json`) when nothing was
-measured — when `bound + ambiguous + unbound` is zero. It is never reported as a
-perfect score: `0 / 0` is *no measurement*, not full coverage.
+##### The headline: `resolved_cross_service_edges` and `egress_resolution`
 
-##### The ratio never appears without its denominator
+The workspace headline is a **count of cross-service edges that actually
+resolved**, plus the **rate at which captured outbound call sites resolve at
+all**:
 
-A bound-ratio alone can be read as far more than it is. `no-provider-in-workspace`
+```bash
+logos workspace status            # human
+#   0 resolved cross-service edges; egress resolution 0.000 (0 of 54 egress sites resolved)
+```
+
+```jsonc
+// logos workspace status --json
+"coverage": {
+  "resolved_cross_service_edges": 0,    // edges resolved from a captured invocation
+  "egress_resolution": 0.0,             // absent (null) when no egress site was captured
+  "egress_resolution_measured": 54,     // the rate's denominator, explicit
+  "resolved_edges_summary": "0 resolved cross-service edges; egress resolution 0.000 (0 of 54 egress sites resolved)"
+}
+```
+
+- **`resolved_cross_service_edges`** counts edges the bridge resolved from an
+  **invocation** — a caller→callee HTTP client call, a producer→consumer broker
+  publish, a gRPC stub call. It counts *edges*, not sites: under the broker
+  fan-out one publish binds every cross-member subscriber and the bridge emits one
+  edge per subscriber, so one row can contribute several. You can reconcile it
+  against `coverage.references` yourself — sum `1` for a bound invocation row with
+  a `to`, and `candidates.total` for one with a bound-to set.
+- **`egress_resolution`** is `invocation.bound / (invocation.bound +
+  invocation.ambiguous + invocation.unbound)` — over *sites*, so it is **not**
+  the count above divided by anything. It is **absent** (`null` under `--json`)
+  when that denominator is zero, never a perfect score: no captured egress site is
+  *no measurement*, not full coverage.
+- **`resolved_edges_summary`** carries both in one line, which is the point —
+  a headline coverage figure is never published without the rate at which the
+  underlying sites resolved at all
+  ([BR-51](../specs/software-spec.md#327-workspace-federation)). Every rendering —
+  human, `--json`, MCP and the web coverage view — shows the pair.
+
+> **`bound_ratio` is retired.** Re-measured on an 84-member Spring estate it read
+> `0.287 (81 of 282 measured)` over a workspace whose caller→callee edge count was
+> **zero** — every one of those 81 bound rows was a declared OpenAPI operation
+> matched to a controller, not a resolved call. It also moved *downward*
+> (0.355 → 0.287) as broker instrumentation improved, which is the wrong direction
+> for a headline. The formula survives as `spec_conformance_ratio` below; the key
+> `bound_ratio` is **no longer emitted**, so a reader of it fails loudly rather
+> than silently reading a figure that no longer means what it did. It is accepted
+> as a deserialization **alias** for one release, so a stored pre-change capture
+> still parses.
+
+##### `spec_conformance_ratio`, and why it never appears without its denominator
+
+`spec_conformance_ratio` is `bound / (bound + ambiguous + unbound)` — the retired
+bound-ratio's formula, unchanged, under the name of what it actually measures:
+how far this workspace's **declarations** line up with its controllers. It is
+dominated by `contract-surface` intake and is **never** a measure of cross-service
+coupling.
+
+A ratio alone can be read as far more than it is. `no-provider-in-workspace`
 references are excluded from the denominator by design (they are the *correct*
 exclusion — nothing in this workspace claims to serve them), but a healthy-looking
 ratio computed over a handful of references, while hundreds sit excluded, misleads.
@@ -847,7 +899,7 @@ So every rendering carries the **denominator and the excluded count** beside it:
 
 ```bash
 logos workspace status            # human
-#   0.355 (81 of 228 measured; 647 excluded as no-provider-in-workspace)
+#   0.287 (81 of 282 measured; 647 excluded as no-provider-in-workspace)
 ```
 
 ```jsonc
@@ -855,21 +907,24 @@ logos workspace status            # human
 "coverage": {
   "bound": 81,
   "ambiguous": 146,
-  "unbound": 1,
-  "bound_ratio": 0.355,
-  "bound_ratio_measured": 228,          // the denominator, explicit
-  "no_provider_in_workspace": 647,      // the excluded bucket
-  "bound_ratio_summary": "0.355 (81 of 228 measured; 647 excluded as no-provider-in-workspace)"
+  "unbound": 55,
+  "no_provider_in_workspace": 647,          // the excluded bucket
+  "spec_conformance_ratio": 0.287,
+  "spec_conformance_measured": 282,         // the denominator, explicit
+  "spec_conformance_summary": "0.287 (81 of 282 measured; 647 excluded as no-provider-in-workspace)"
 }
 ```
 
-`bound_ratio_measured` and `no_provider_in_workspace` are explicit fields, so a
-machine consumer never re-implements the denominator rule. The same three figures
-ride the [`workspace reachability`](#workspace-reachability) coverage rider, and
-the web dashboard renders the score bar **muted** rather than as a confident fill
-when the excluded bucket dominates the denominator. When `bound_ratio` is absent
+Those are real figures from an 84-member Spring estate, measured 2026-09-09.
+
+`spec_conformance_measured` and `no_provider_in_workspace` are explicit fields, so
+a machine consumer never re-implements the denominator rule. The same figures ride
+the [`workspace reachability`](#workspace-reachability) coverage rider, and the web
+dashboard renders the score bar **muted** rather than as a confident fill when the
+excluded bucket dominates the denominator. When `spec_conformance_ratio` is absent
 on a zero denominator, the excluded count is **still** reported — "0 measured,
-N excluded" is the informative statement.
+N excluded" is the informative statement. The same absent-not-zero rule governs
+`egress_resolution`.
 
 ##### Each reference names the other end
 
@@ -1099,7 +1154,15 @@ The composition is **additive and monotone toward live** — a missing invocatio
 edge never marks anything dead, and a node whose per-repo verdict is `NULL`
 (not-computed) stays `NULL`. The view is **advisory**: it is never a gate input
 and never alters a member's own dead-code verdict, and every claim carries a
-**coverage rider** stating how much of the invocation graph bound. On a real
+**coverage rider** stating how much of the invocation graph bound. The rider
+carries the same headline `workspace status` reports —
+`resolved_cross_service_edges` with `egress_resolution` and
+`egress_resolution_measured` beside it, plus the pooled four counts and
+`spec_conformance_ratio` — because a promotion to `live-via-cross-service` rests
+on an edge existing, and `resolved_cross_service_edges: 0` says none was resolved
+from any captured call site. It deliberately does **not** carry `by_intake`: the
+split is a decomposition a reader consults once, beside the summary, not eight
+counters repeated on every claim. On a real
 workspace the promotion set may be legitimately empty (a language that captures a
 broker subscribe and one that computes dead-code reachability are, today, disjoint
 sets) — an honest empty is reported with its rider, never a fabricated claim.
