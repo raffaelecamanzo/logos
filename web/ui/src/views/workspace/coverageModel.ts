@@ -141,7 +141,13 @@ export interface CoverageDashboard {
    *  reference workspace's headline `bound: 81` is 81 of the first and **0** of
    *  the second. The per-arm rows above do not answer this — `route` carries both
    *  populations, because an OpenAPI operation and an HTTP client call are the
-   *  same arm (CR-120 §3.1, NFR-CC-04). */
+   *  same arm (CR-120 §3.1, NFR-CC-04).
+   *
+   *  Its two keys are `contract_surface` and `invocation` — snake-cased, because
+   *  they are struct fields server-side, while a row's own `intake` carries the
+   *  kebab-case token (`contract-surface` / `invocation`). Joining a row to its
+   *  population means translating one into the other, and a rename of either
+   *  without the other makes that join silently match nothing. */
   byIntake: IntakeSplit;
   /** Whether any `invocation`-intake reference exists at all.
    *

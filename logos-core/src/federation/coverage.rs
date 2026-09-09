@@ -4132,6 +4132,121 @@ mod tests {
         }
     }
 
+    /// **Every intake token and every split key is explained on every surface that
+    /// documents the payload** (S-377, [CR-120], [NFR-CC-04]).
+    ///
+    /// The sibling of
+    /// [`every_unbound_reason_is_documented_on_every_surface_that_enumerates_them`],
+    /// and it exists for the same recorded reason. That guard was written because
+    /// [CR-107] added one reason token and `docs/howto/commands.md` was missed for
+    /// releases — a closed list of surfaces, hand-mirrored, that nothing checked.
+    /// S-377 has just created the same shape for a *second* vocabulary: `intake`'s
+    /// two tokens and `by_intake`'s two keys are now hand-written into the operator
+    /// manual, the TypeScript wire type, the dashboard model and the MCP tool
+    /// description. Only the MCP one was guarded (by
+    /// `mcp/tests/workspace_status_intake_parity.rs`), which is exactly the
+    /// asymmetry that let the reason token rot.
+    ///
+    /// # What it checks, and the one thing it cannot
+    ///
+    /// Both directions of the join, because either alone leaves a way in: the row
+    /// token (`contract-surface`) and the split key (`contract_surface`) are the
+    /// same population spelt two ways, and a rename of one without the other makes
+    /// a consumer's join silently return nothing — reading as "no invocation
+    /// references" over a workspace full of them, which is [CR-120] §3.1's defect
+    /// restored by a typo.
+    ///
+    /// It cannot notice a token a surface still documents after the variant behind
+    /// it is *removed* — a closed list stops mentioning what it no longer contains.
+    /// [`BridgeIntake`] has never lost a variant, so there is no removal proof to
+    /// write yet; the pattern to copy when there is one is
+    /// [`the_removed_schema_mismatch_reason_is_absent_from_every_surface`].
+    ///
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn every_intake_token_and_split_key_is_documented_on_every_payload_surface() {
+        /// The wire token of one intake. Exhaustive on purpose: a new variant does
+        /// not compile until it is named here.
+        fn wire(intake: BridgeIntake) -> &'static str {
+            match intake {
+                BridgeIntake::ContractSurface => "contract-surface",
+                BridgeIntake::Invocation => "invocation",
+            }
+        }
+        /// Every variant. The fixed length is the second half of the guard: adding
+        /// one without extending this fails to compile.
+        const ALL: [BridgeIntake; 2] = [BridgeIntake::ContractSurface, BridgeIntake::Invocation];
+
+        // The tokens really are what serde emits, and the keys really are what the
+        // split serializes — otherwise this guard would check strings the payload
+        // never carries, which is how a green guard covers nothing.
+        let split = serde_json::to_value(IntakeSplit::default()).unwrap();
+        for intake in ALL {
+            assert_eq!(
+                serde_json::to_value(intake).unwrap(),
+                wire(intake),
+                "{intake:?} must serialise as its documented token"
+            );
+            assert!(
+                split.get(wire(intake).replace('-', "_")).is_some(),
+                "the split must carry a population key for {intake:?}: {split}"
+            );
+        }
+
+        /// The surfaces that document this payload's fields. Tracked in **this**
+        /// repository, all three — unlike the reason vocabulary, the intake
+        /// vocabulary is not mirrored into `docs/specs`, so there is no
+        /// tolerated-absence case and a read failure is a guard defect.
+        ///
+        /// `mcp/src/server.rs` is deliberately **not** here: its description is
+        /// guarded at the MCP boundary against the *shipped* tool
+        /// (`LogosMcp::list_tools()`), which is stronger than reading the source,
+        /// and duplicating it would create the second copy this guard exists to
+        /// prevent.
+        const SURFACES: [&str; 3] = [
+            "docs/howto/commands.md",
+            "web/ui/src/api/types.ts",
+            "web/ui/src/views/workspace/coverageModel.ts",
+        ];
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("logos-core sits under the repository root");
+
+        for rel in SURFACES {
+            let text = std::fs::read_to_string(repo.join(rel))
+                .unwrap_or_else(|e| panic!("{rel} must be readable to be guarded: {e}"));
+            for intake in ALL {
+                let token = wire(intake);
+                // The row token, in an enumeration shape rather than as a bare
+                // word: `invocation` is also an English word and the name of a
+                // whole subsystem here, so a plain `contains` could not fail.
+                assert!(
+                    text.contains(&format!("`{token}`")) || text.contains(&format!("| \"{token}\"")),
+                    "{rel} documents the coverage payload but does not name \
+                     `{token}` as an intake token — a value the payload carries \
+                     that this surface cannot explain ([NFR-CC-04])"
+                );
+                // And the split key it joins to.
+                let key = token.replace('-', "_");
+                assert!(
+                    text.contains(&format!("`{key}`"))
+                        || text.contains(&format!("{key}:"))
+                        || text.contains(&format!("\"{key}\":")),
+                    "{rel} names the `{token}` intake but not the `{key}` population \
+                     key the split reports it under — a consumer joining the two \
+                     would silently match nothing ([CR-120] §3.1)"
+                );
+            }
+            assert!(
+                text.contains("by_intake"),
+                "{rel} documents the coverage payload but never names `by_intake`, \
+                 the field the split is reported in"
+            );
+        }
+    }
+
     /// Every surface that enumerates the reason vocabulary, with its text — the
     /// **one** list, read by the positive guard above and by the removal proof
     /// below.
