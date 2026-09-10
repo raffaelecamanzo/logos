@@ -34,3 +34,9 @@ notes/
 
 # Cobertura coverage reports
 cobertura.xml
+
+# macOS Finder metadata. Ignored not merely for tidiness: scripts/gate.sh
+# derives its tree identity with `git add -A` (matching what the commit script
+# commits), so an untracked .DS_Store appearing mid-gate changes that identity
+# and invalidates the evidence the run just produced.
+.DS_Store

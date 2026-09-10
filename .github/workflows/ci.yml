@@ -74,6 +74,17 @@ jobs:
           npm ci
           npm run build
 
+      # The SPA's own unit tests. package.json has declared `test: vitest run`
+      # and 51 test files exist, but CI only ever ran `npm run build`
+      # (= tsc -b && vite build) — so typechecking happened incidentally as a
+      # side effect of building, and these 536 tests never ran here at all.
+      # Running them for the first time found one load-dependent flake
+      # (a synchronous assertion on a useEffect side-effect), fixed in the same
+      # change that adds this step.
+      - name: SPA unit tests (vitest)
+        working-directory: web/ui
+        run: npm run test
+
       - name: Cache cargo registry, git, bin, and target
         uses: actions/cache@v4
         with:

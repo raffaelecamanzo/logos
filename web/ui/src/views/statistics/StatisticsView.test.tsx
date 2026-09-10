@@ -126,7 +126,17 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     expect(screen.getAllByRole("img").length).toBeGreaterThanOrEqual(4);
 
     // The charts are applied with notMerge so a shrinking dataset leaves no stale marks.
-    expect(setOption).toHaveBeenCalledWith(expect.anything(), { notMerge: true });
+    //
+    // AWAITED, not asserted synchronously: setOption is called from a useEffect,
+    // which React flushes after the commit — so the role="img" node above is
+    // queryable strictly before the effect has necessarily run. A bare
+    // expect() here passes on an idle machine and fails under load, which is
+    // exactly how it behaved (green alone, red while a full cargo test run
+    // saturated the box). The re-query assertion below already used waitFor for
+    // this same spy; this is the same reason.
+    await waitFor(() =>
+      expect(setOption).toHaveBeenCalledWith(expect.anything(), { notMerge: true }),
+    );
 
     // The accessible data-table twins carry the same figures across all surfaces.
     expect(screen.getByText("context")).toBeInTheDocument(); // top-tools twin
