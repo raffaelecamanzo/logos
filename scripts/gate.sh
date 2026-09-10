@@ -345,10 +345,16 @@ sys.exit(0 if (d.get("tree_id") == sys.argv[2] and d.get("tier") == "full"
                and d.get("verdict") == "pass") else 1)' "$f" "$TREE_ID"
 }
 
-record() { # gate verdict
+record() { # gate verdict [display-note]
+    # The verdict is compared EXACTLY, and any human-readable qualifier goes in
+    # the third argument. Passing "pass (cached, same tree)" as the verdict made
+    # every cached gate count as a failure — gate.sh reported FAILED and exited 1
+    # while the evidence and the validator both correctly said pass. A false RED
+    # is the safe direction, but it would teach a reader to distrust the exit code,
+    # which is the one thing here that must stay trustworthy.
     GATES_RUN="$GATES_RUN $1"
     if [ "$2" != "pass" ]; then GATES_FAILED="$GATES_FAILED $1"; fi
-    printf '  %-14s %s\n' "$1" "$2"
+    printf '  %-14s %s%s\n' "$1" "$2" "${3:+ $3}"
 }
 
 # ------------------------------------------------------------------ test units
@@ -429,7 +435,7 @@ EOF
 gate_tests() { # gate_name use_agents pkg...
     local gate="$1" use_agents="$2"
     shift 2
-    if gate_done "$gate"; then record "$gate" "pass (cached, same tree)"; return; fi
+    if gate_done "$gate"; then record "$gate" pass "(cached, same tree)"; return; fi
     local pkg expected floor worst=pass ex=0
     reset_units
     echo "$gate:"
@@ -456,7 +462,7 @@ gate_tests() { # gate_name use_agents pkg...
 
 # ----------------------------------------------------------------------- clippy
 gate_clippy() {
-    if gate_done clippy; then record clippy "pass (cached, same tree)"; return; fi
+    if gate_done clippy; then record clippy pass "(cached, same tree)"; return; fi
     local log="$EVID/clippy.log" rc verdict
     reset_units
     # --jobs 4 is compile-only work: it does not hit the rayon-pool-per-test
@@ -474,7 +480,7 @@ gate_clippy() {
 
 # ------------------------------------------------------------------- cargo-deny
 gate_deny() {
-    if gate_done deny; then record deny "pass (cached, same tree)"; return; fi
+    if gate_done deny; then record deny pass "(cached, same tree)"; return; fi
     local log="$EVID/deny.log" rc verdict trunc=none
     reset_units
     if ! command -v cargo-deny >/dev/null 2>&1; then
@@ -500,7 +506,7 @@ gate_deny() {
 # vacuous pass this whole script exists to make impossible, so it is recorded
 # as a failure with truncation "no_binaries": nothing was evaluated.
 gate_arch() {
-    if gate_done arch; then record arch "pass (cached, same tree)"; return; fi
+    if gate_done arch; then record arch pass "(cached, same tree)"; return; fi
     local log="$EVID/arch.log" rc verdict trunc=none
     reset_units
     if ! command -v logos >/dev/null 2>&1; then
@@ -548,7 +554,7 @@ gate_ui() { # gate_name npm_script
     # reason; gate_ui did not, and only the ui path exercised it.
     local gate="$1" script="$2"
     local log="$EVID/$gate.log" rc verdict
-    if gate_done "$gate"; then record "$gate" "pass (cached, same tree)"; return; fi
+    if gate_done "$gate"; then record "$gate" pass "(cached, same tree)"; return; fi
     reset_units
     if ! command -v npm >/dev/null 2>&1; then
         echo "npm is not installed" >"$log"
