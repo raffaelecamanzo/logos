@@ -248,5 +248,5 @@ jobs:
       # either surface (UAT-MC-02, NFR-RA-01).
       - name: stdout-safety at trace level (CLI + serve --mcp)
         run: |
-          cargo test -p cli --test stdout_safety
+          cargo test -p logos --test stdout_safety
           cargo test -p mcp --test stdout_safety

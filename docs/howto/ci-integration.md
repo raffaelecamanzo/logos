@@ -44,6 +44,20 @@ Two workflows: a **PR/push** pipeline that freshens, enforces, and reports on
 every change, and a **release** pipeline that blesses. The bless job never
 appears in the PR path — that is the whole point.
 
+> **Prerequisite — the rules contract must be tracked in the repository.**
+> `logos index` creates `.logos/` with **no contract at all**; only `logos init`
+> writes `rules.toml`. Where `.logos/` is gitignored — the common case, since the
+> store is a build artifact — a CI checkout therefore has nothing to enforce and
+> `logos check` exits **4**, no rules contract loaded
+> ([FR-GV-22](../specs/requirements/FR-GV-22.md)). Commit the contract to a
+> tracked path first and point `--rules` at it:
+> `logos check --no-reconcile --rules ci/rules.toml`.
+>
+> Before exit 4 existed this state passed **vacuously**, so a pipeline wired from
+> this recipe could report success while evaluating nothing at all. That is the
+> failure the exit code was added to make visible; do not restore it by passing
+> `--allow-no-rules` here.
+
 ```yaml
 # .github/workflows/logos-quality.yml — runs on every PR and push to main
 name: logos-quality
@@ -79,7 +93,7 @@ jobs:
       # still recorded even when Enforce failed above.
       - name: Report
         if: always()
-        run: logos scan --no-reconcile --json | tee logos-signal.json
+        run: logos scan --no-reconcile --json > logos-signal.json
 
       - name: Upload signal
         if: always()
@@ -141,7 +155,8 @@ logos index                              # freshen
 logos check --no-reconcile               # enforce — exit 1 fails the pipeline
 
 logos scan --no-reconcile --json \
-  | tee logos-signal.json                # report — never blocks (own step, no `set -e` trip)
+  > logos-signal.json                  # report — never blocks; redirect, never a pipe,
+                                       # because `tee` would replace scan's exit status
 
 # Bless ONLY on the release branch / tag — guard it explicitly:
 if [ "${CI_RELEASE:-}" = "1" ]; then
