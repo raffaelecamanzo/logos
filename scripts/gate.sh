@@ -503,7 +503,13 @@ PY
 }
 
 gate_ui() { # gate_name npm_script
-    local gate="$1" script="$2" log="$EVID/$gate.log" rc verdict
+    # Two `local` statements, not one: bash expands every argument to `local`
+    # BEFORE the builtin assigns any of them, so a single
+    # `local gate="$1" log="$EVID/$gate.log"` reads $gate while it is still
+    # unbound — fatal under `set -u`. run_test_unit already split for this
+    # reason; gate_ui did not, and only the ui path exercised it.
+    local gate="$1" script="$2"
+    local log="$EVID/$gate.log" rc verdict
     reset_units
     if ! command -v npm >/dev/null 2>&1; then
         echo "npm is not installed" >"$log"
