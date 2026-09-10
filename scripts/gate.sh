@@ -43,6 +43,10 @@
 #                                 (skips the two timing suites; `full` does not)
 #   bash scripts/gate.sh full     # pre-handoff: every package, deny, agents, ui
 #
+# `full` RESUMES: a gate that already passed for this exact tree is not re-run,
+# so a run killed by memory pressure continues where it stopped when invoked
+# again. GATE_FORCE=yes redoes everything.
+#
 # Evidence is written to `git rev-parse --git-path gate-evidence`, i.e.
 # .git/gate-evidence/ in the main tree and .git/worktrees/<n>/gate-evidence/ in
 # a linked worktree. That location is deliberate: it is per-worktree by git's
@@ -317,6 +321,30 @@ fi
 GATES_RUN=""
 GATES_FAILED=""
 
+FORCE="${GATE_FORCE:-no}"
+
+# 0 when this gate already passed for the CURRENT tree at tier full.
+#
+# Resuming is sound because evidence is per-gate and keyed on tree_id, and
+# verify-evidence.sh already requires every gate's tree_id to agree with its
+# siblings AND with the tree as it stands. Completing the tier across several
+# invocations is therefore indistinguishable from completing it in one; and if
+# the tree changes in between, every cached gate is stale and gets redone —
+# which is exactly what the validator would demand anyway.
+gate_done() {
+    local f="$EVID/$1.json"
+    [ "$TIER" = "full" ] || return 1
+    [ "$FORCE" = "no" ] || return 1
+    [ -f "$f" ] || return 1
+    python3 -c 'import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if (d.get("tree_id") == sys.argv[2] and d.get("tier") == "full"
+               and d.get("verdict") == "pass") else 1)' "$f" "$TREE_ID"
+}
+
 record() { # gate verdict
     GATES_RUN="$GATES_RUN $1"
     if [ "$2" != "pass" ]; then GATES_FAILED="$GATES_FAILED $1"; fi
@@ -339,8 +367,14 @@ run_test_unit() { # gate pkg expected floor use_agents -> sets UNIT_VERDICT
     feat=()
     if [ "$use_agents" = "yes" ]; then feat=(--features agents); fi
 
+    # `--jobs 2` bounds the COMPILE, which is what exhausts memory here — not the
+    # test run. Measured on a 16 GiB machine with ~8 GB of swap already in use: an
+    # unbounded `cargo test` linking 82 logos-core test binaries, then relinking
+    # all of them for the `agents` feature set, was OOM-killed twice at exactly
+    # that transition. RAYON_NUM_THREADS/--test-threads bound the execution;
+    # neither touches the link step.
     CARGO_TERM_COLOR=never RAYON_NUM_THREADS=2 \
-        cargo test -p "$pkg" --no-fail-fast ${feat[@]+"${feat[@]}"} -- \
+        cargo test -p "$pkg" --jobs 2 --no-fail-fast ${feat[@]+"${feat[@]}"} -- \
         --test-threads=2 ${SKIPS[@]+"${SKIPS[@]}"} \
         >"$log" 2>&1
     rc=$?
@@ -395,6 +429,7 @@ EOF
 gate_tests() { # gate_name use_agents pkg...
     local gate="$1" use_agents="$2"
     shift 2
+    if gate_done "$gate"; then record "$gate" "pass (cached, same tree)"; return; fi
     local pkg expected floor worst=pass ex=0
     reset_units
     echo "$gate:"
@@ -414,13 +449,14 @@ gate_tests() { # gate_name use_agents pkg...
     done
     cat "$EVID/$gate"--*.log >"$EVID/$gate.log" 2>/dev/null
     write_evidence "$gate" \
-        "cargo test -p <pkg> --no-fail-fast$([ "$use_agents" = yes ] && echo ' --features agents') -- --test-threads=2 ${SKIPS[*]:-}" \
+        "cargo test -p <pkg> --jobs 2 --no-fail-fast$([ "$use_agents" = yes ] && echo ' --features agents') -- --test-threads=2 ${SKIPS[*]:-}" \
         "$ex" "$worst" none
     record "$gate" "$worst"
 }
 
 # ----------------------------------------------------------------------- clippy
 gate_clippy() {
+    if gate_done clippy; then record clippy "pass (cached, same tree)"; return; fi
     local log="$EVID/clippy.log" rc verdict
     reset_units
     # --jobs 4 is compile-only work: it does not hit the rayon-pool-per-test
@@ -438,6 +474,7 @@ gate_clippy() {
 
 # ------------------------------------------------------------------- cargo-deny
 gate_deny() {
+    if gate_done deny; then record deny "pass (cached, same tree)"; return; fi
     local log="$EVID/deny.log" rc verdict trunc=none
     reset_units
     if ! command -v cargo-deny >/dev/null 2>&1; then
@@ -463,6 +500,7 @@ gate_deny() {
 # vacuous pass this whole script exists to make impossible, so it is recorded
 # as a failure with truncation "no_binaries": nothing was evaluated.
 gate_arch() {
+    if gate_done arch; then record arch "pass (cached, same tree)"; return; fi
     local log="$EVID/arch.log" rc verdict trunc=none
     reset_units
     if ! command -v logos >/dev/null 2>&1; then
@@ -510,6 +548,7 @@ gate_ui() { # gate_name npm_script
     # reason; gate_ui did not, and only the ui path exercised it.
     local gate="$1" script="$2"
     local log="$EVID/$gate.log" rc verdict
+    if gate_done "$gate"; then record "$gate" "pass (cached, same tree)"; return; fi
     reset_units
     if ! command -v npm >/dev/null 2>&1; then
         echo "npm is not installed" >"$log"
