@@ -185,6 +185,35 @@ tokio     = { version = "1", default-features = false }
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# ── Dev profile: debug-info volume (a disk concern, not a correctness one) ───
+# macOS defaults the dev profile's `split-debuginfo` to "unpacked": rustc leaves
+# each codegen unit's DWARF in `target/debug/deps/*.rcgu.o` and the linker only
+# *references* those objects, so nothing ever reclaims them. Cargo has no target
+# GC on stable (`cargo clean --gc` is nightly-only), so every distinct feature
+# set × rustc version additionally leaves a permanent artifact generation.
+# Measured 2026-09-09, three months after the oldest surviving artifact:
+# 800,289 `.rcgu.o` files / 105 GB, inside a 290 GB `target/`.
+#
+# `debug = 2` — the dev default, never overridden here before — is what makes
+# each of those objects large. "line-tables-only" keeps the one thing this
+# workspace consumes, `panic` backtraces with file:line, and drops the type and
+# variable DWARF nothing here reads. Dependencies get none at all: the
+# tree-sitter grammars, tokio, hyper, rmcp and rig are never stepped through
+# locally, and they are the bulk of the graph.
+#
+# Deliberately NOT set: `split-debuginfo = "packed"`. It is the direct cure for
+# the stranded objects — dsymutil collects them into one replaceable .dSYM that
+# rustc can overwrite — but it taxes every link across 131 test targets. Revisit
+# only if the object count is still a problem once the two settings below land.
+[profile.dev]
+debug = "line-tables-only"
+
+# Non-workspace packages only. Cargo merges profile overrides per key with the
+# package-specific entry winning, so the `opt-level = 2` grammar overrides below
+# keep their opt-level and take `debug = 0` from here.
+[profile.dev.package."*"]
+debug = 0
+
 # The tree-sitter runtime and the grammar parse tables are generated C compiled
 # by `cc`, which inherits the active profile's opt-level — at `-O0` the
 # query-compile path is ~5-10× slower, and with the full S-015 grammar set
