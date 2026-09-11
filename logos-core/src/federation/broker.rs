@@ -327,8 +327,9 @@ mod tests {
     /// kind and no migration are added by this arm ([FR-WS-10]). The
     /// fully-migrated database's `PRAGMA user_version` reflects only later,
     /// separate migrations — the first-class-topic promotion this arm precedes
-    /// ([S-255], [FR-WS-11], migration 17) and CR-080's relation-aware ledger key
-    /// ([S-290], migration 18) — not the ledger-only binding under test here.
+    /// ([S-255], [FR-WS-11], migration 17), CR-080's relation-aware ledger key
+    /// ([S-290], migration 18) and CR-121's configuration-corpus tables (S-380,
+    /// migration 19) — not the ledger-only binding under test here.
     ///
     /// [S-255]: ../../../../docs/planning/journal.md#s-255-migration-17-first-class-broker-topic-node-and-edge-kinds
     /// [S-290]: ../../../../docs/planning/journal.md#s-290-relation-aware-reference-ledger-dedup-for-broker-relays-migration-18
@@ -337,10 +338,11 @@ mod tests {
         let store = SqliteGraphStore::open_in_memory().expect("in-memory store opens");
         assert_eq!(
             store.schema_version().expect("read PRAGMA user_version"),
-            18,
+            19,
             "no migration is added by the ledger-only arm itself — user_version reflects \
-             only the later, separate broker-kind widening (migration 17) and the \
-             relation-aware ledger key (migration 18)"
+             only the later, separate broker-kind widening (migration 17), the \
+             relation-aware ledger key (migration 18) and the configuration-corpus \
+             tables (migration 19)"
         );
     }
 }

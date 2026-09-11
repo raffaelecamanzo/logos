@@ -1542,6 +1542,7 @@ fn persist_file(
             w.delete_unresolved_refs_for_file(file_id)?;
             let counts = insert_facts(w, facts, file_id)?;
             insert_refs(w, facts, file_id)?;
+            w.replace_config_source(file_id, facts.config_source.as_ref())?;
             for cap in &captured {
                 let kind = EdgeKind::try_from(cap.kind)
                     .with_context(|| format!("captured edge has an unknown kind {}", cap.kind))?;
@@ -1572,6 +1573,10 @@ fn persist_file(
 
     let counts = insert_facts(w, facts, file_id)?;
     insert_refs(w, facts, file_id)?;
+    // The committed-configuration corpus (S-380, FR-WS-19): replace-wholesale,
+    // like the reference ledger above. `None` writes nothing, so a member with
+    // no configuration corpus is byte-for-byte unaffected.
+    w.replace_config_source(file_id, facts.config_source.as_ref())?;
     Ok(PersistCounts {
         nodes: counts.nodes,
         edges: counts.edges,

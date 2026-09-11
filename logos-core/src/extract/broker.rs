@@ -749,6 +749,7 @@ class OrderService {
             edges: Vec::new(),
             refs: Vec::new(),
             warnings: Vec::new(),
+            config_source: None,
         };
         capture_broker_invocations(
             &query,

@@ -1898,4 +1898,213 @@ mod tests {
         .collect::<Result<_, _>>()
         .unwrap()
     }
+
+    /// Migration 19 admits the member-local configuration-corpus tables on a
+    /// **populated** store and leaves every pre-existing fact verbatim (S-380,
+    /// [FR-WS-19] AC7, [FR-DB-01], AC3).
+    ///
+    /// The claim being tested is *byte-for-byte across the boundary*, so a row
+    /// count is not enough — the node, edge, shingle and full-text content is
+    /// snapshotted before the upgrade and diffed against the same projection
+    /// after it, and the FTS index is put through its own integrity check. Then
+    /// the new tables are exercised, because "additive" also means the additions
+    /// actually work: the profile is nullable, the pair-uniqueness dedups a
+    /// re-inserted pair while keeping a second value for the same key, and both
+    /// FKs cascade.
+    ///
+    /// [FR-DB-01]: ../../../../docs/specs/requirements/FR-DB-01.md
+    /// [FR-WS-19]: ../../../../docs/specs/requirements/FR-WS-19.md
+    #[test]
+    fn migration_19_adds_the_config_corpus_tables_preserving_the_graph_byte_for_byte() {
+        let mut conn = contract_conn();
+
+        // Stop at v18 and populate every table the acceptance criterion names:
+        // nodes (with their annotation columns), edges (with a payload), shingles,
+        // and FTS-indexed name + doc-body content.
+        apply_migrations_from(&mut conn, &MIGRATIONS[..18]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path) VALUES (1, 'a.rs'), (2, 'application-dev.yml');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local a'), (2, 'local b');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, exported,
+                                cyclomatic_complexity, is_test, body) VALUES
+                 (10, 1, 7,  'caller',   1, 1, 3,    0, NULL),
+                 (20, 2, 19, 'Overview', 2, 0, NULL, 0, 'the body prose');
+             INSERT INTO edges (source, target, kind, payload) VALUES (20, 10, 11, 'doc-ref');
+             INSERT INTO shingles (node_id, hash) VALUES (10, 111), (10, 222);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload) VALUES
+                 (1, 'local a', 'helper', 'h', 1, 2, 42, 1, NULL);",
+        )
+        .unwrap();
+
+        let graph_before = read_graph(&conn);
+        let ledger_before = read_ledger(&conn);
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..19]).unwrap();
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            19,
+            "PRAGMA user_version advances by exactly one (18 → 19)"
+        );
+
+        // The graph content — every node column, every edge column, every
+        // shingle — is identical, not merely the same size.
+        assert_eq!(
+            read_graph(&conn),
+            graph_before,
+            "nodes, edges and shingles are byte-for-byte unchanged across migration 19"
+        );
+        assert_eq!(
+            read_ledger(&conn),
+            ledger_before,
+            "the reference ledger is byte-for-byte unchanged across migration 19"
+        );
+
+        // The external-content FTS index was never disturbed: it passes its own
+        // integrity check and still finds the pre-migration name and body prose.
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent (nodes never touched by migration 19, NFR-RA-09)");
+        let (by_name, by_body): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM nodes_fts WHERE nodes_fts MATCH 'caller'), \
+                        (SELECT count(*) FROM nodes_fts WHERE nodes_fts MATCH 'prose')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (by_name, by_body),
+            (1, 1),
+            "FTS still finds the pre-migration name and body across migration 19"
+        );
+
+        // The new tables start empty — an upgrade indexes nothing by itself, so a
+        // member is unaffected until its next extract pass runs.
+        let (sources, values): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM config_sources), (SELECT count(*) FROM config_values)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((sources, values), (0, 0), "the upgrade itself ingests nothing");
+
+        // The unprofiled source is representable as NULL, and two sources can
+        // define the same key differently — disagreement is retained, not refused.
+        conn.execute_batch(
+            "INSERT INTO config_sources (id, file_id, profile) VALUES (1, 2, 'dev');
+             INSERT INTO config_sources (id, file_id, profile) VALUES (2, 1, NULL);
+             INSERT INTO config_values (source_id, key, value) VALUES
+                 (1, 'mailserver.api.urigetmailbox', '/dev/mailbox'),
+                 (2, 'mailserver.api.urigetmailbox', '/mailbox'),
+                 (1, 'a', 'one'),
+                 (1, 'a', 'two');",
+        )
+        .expect("a profiled and an unprofiled source coexist, and a key may disagree");
+        let unprofiled: i64 = conn
+            .query_row("SELECT count(*) FROM config_sources WHERE profile IS NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(unprofiled, 1, "NULL profile is the unprofiled source, countable as such");
+        let same_key: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM config_values WHERE key = 'a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(same_key, 2, "one source proving a key twice keeps BOTH values");
+
+        // The pair is the key: an identical (source, key, value) is rejected, so a
+        // re-extract cannot double-count, while the second value above survived.
+        assert!(
+            conn.execute(
+                "INSERT INTO config_values (source_id, key, value) VALUES (1, 'a', 'one')",
+                [],
+            )
+            .is_err(),
+            "an exact duplicate pair is deduped by UNIQUE(source_id, key, value)"
+        );
+        // A file is at most one source.
+        assert!(
+            conn.execute(
+                "INSERT INTO config_sources (file_id, profile) VALUES (2, 'prod')",
+                [],
+            )
+            .is_err(),
+            "a file maps to at most one configuration source"
+        );
+
+        // Both FKs cascade: deleting the file removes its source, which removes
+        // its values — so a removed file leaves no orphaned corpus rows.
+        conn.execute("DELETE FROM files WHERE id = 2", []).unwrap();
+        let (sources, values): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM config_sources), (SELECT count(*) FROM config_values)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (sources, values),
+            (1, 1),
+            "deleting a file cascades away its source and every value under it"
+        );
+        assert_eq!(
+            foreign_key_violations(&conn),
+            0,
+            "no FK violations after migration 19 and its cascade"
+        );
+    }
+
+    /// One node, edge and shingle projection for a verbatim cross-migration diff
+    /// — **every** column of each, so "unchanged" is content, not row counts.
+    type GraphSnapshot = (
+        Vec<(i64, i64, i64, String, Option<i64>, i64, Option<i64>, Option<String>)>,
+        Vec<(i64, i64, i64, i64, i64, Option<String>)>,
+        Vec<(i64, i64)>,
+    );
+
+    /// The full node/edge/shingle content, each ordered by id.
+    fn read_graph(conn: &Connection) -> GraphSnapshot {
+        let mut nodes = conn
+            .prepare(
+                "SELECT id, symbol_id, kind, name, file_id, exported, cyclomatic_complexity, body \
+                 FROM nodes ORDER BY id",
+            )
+            .unwrap();
+        let nodes = nodes
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut edges = conn
+            .prepare("SELECT id, source, target, kind, derived, payload FROM edges ORDER BY id")
+            .unwrap();
+        let edges = edges
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut shingles = conn
+            .prepare("SELECT node_id, hash FROM shingles ORDER BY node_id, hash")
+            .unwrap();
+        let shingles = shingles
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        (nodes, edges, shingles)
+    }
 }
