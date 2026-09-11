@@ -109,7 +109,26 @@ jobs:
 
       # Test gate — includes the no-network fitness function that asserts the
       # default dependency graph carries no socket/HTTP crate (NFR-SE-01).
+      #
+      # LOGOS_PERF_TOLERANCE widens the NFR-PE-05 cold-start band for THIS HOST
+      # only, using the knob `cold_start_to_ready_engine_is_within_pe05_budget`
+      # documents for exactly this case ("a loaded CI host can widen it without
+      # editing the budget"). It is not a budget change: the ≤ 600 ms figure was
+      # re-derived in S-369 from measurements on the reference machine (mean
+      # 506.9 / p90 528.4 ms, ~11% headroom) and still binds there, which is
+      # where a real regression is caught. A GitHub runner is far slower —
+      # measured 1 482 ms on run 34577622077 — so the ungated test failed here on
+      # every run since 2026-09-04, and because `golden-signal` and `cross-link`
+      # are `needs: ci`, they were skipped every time and `cargo deny check` had
+      # never once executed.
+      #
+      # 3.0 gives a 1.8 s band against that 1 482 ms, ~21% headroom. The cost is
+      # stated rather than hidden: at this tolerance CI only catches a >3x
+      # cold-start regression. That is weak — and it is strictly more than the
+      # nothing it caught while the whole job died here.
       - name: test (--workspace)
+        env:
+          LOGOS_PERF_TOLERANCE: "3"
         run: cargo test --workspace
 
       # Supply-chain gate — license allowlist + RustSec advisories (NFR-CR-01).
