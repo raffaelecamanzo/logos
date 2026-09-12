@@ -1437,12 +1437,6 @@ where
     // it under `path-not-composed` — a reason that means *the template would not
     // normalize*, which is exactly what is not yet known about it.
     for (member, consumer) in inv_consumers {
-        let from = BridgeEndpoint {
-            member: member.clone(),
-            symbol: consumer.symbol,
-        };
-        let relation = arm_relation(consumer.relation);
-
         // A configuration-bound target: resolve it, then classify every
         // composition its committed profiles prove.
         //
@@ -1455,24 +1449,21 @@ where
         // and resolving it here would silently revive the canonical-topic-identity
         // criterion [FR-WS-10] WITHDREW on measurement. The mechanism generalises
         // cleanly and the temptation is obvious, which is exactly why the guard is
-        // a namespace test and not a comment.
-        let config_bindable =
-            consumer.relation.bridge_namespace() == Some(BridgeNamespace::Http);
-        if let Some(keys) = config_bindable.then(|| placeholder_keys(&consumer.target)).flatten() {
+        // `config_bound_keys` — one predicate, shared with the corpus read, and
+        // not a comment.
+        if let Some(keys) = config_bound_keys(&consumer) {
             let empty = BTreeMap::new();
             let corpus = corpora.get(&member).unwrap_or(&empty);
-            record_config_bound(
-                &mut tally,
-                &providers,
-                &member,
-                from,
-                relation,
-                &consumer.target,
-                &keys,
-                corpus,
-            );
+            let from = BridgeEndpoint { member: member.clone(), symbol: consumer.symbol.clone() };
+            record_config_bound(&mut tally, &providers, from, &consumer, &keys, corpus);
             continue;
         }
+
+        let from = BridgeEndpoint {
+            member: member.clone(),
+            symbol: consumer.symbol,
+        };
+        let relation = arm_relation(consumer.relation);
 
         let Some(key) = consumer_portable_key(consumer.relation, &consumer.target) else {
             tally.record(
@@ -1552,6 +1543,31 @@ where
 /// key → every definition of it (S-382, [FR-WS-19]).
 type MemberCorpus = BTreeMap<String, Vec<ConfigDefinition>>;
 
+/// The configuration keys a reference names, or [`None`] if it names none —
+/// **the single predicate for "is this a configuration-bound reference?"**
+/// (S-382, [ADR-64]).
+///
+/// One helper, two callers, because the two used to ask the question separately
+/// and had already drifted: the classification loop tested the arm's namespace
+/// and [`member_corpora`] did not, so a member whose only placeholders were
+/// **broker topics** had its store opened to read a corpus that was then never
+/// consulted — defeating the [NFR-PE-10] economy `member_corpora`'s own doc
+/// claims, and doing it in the one place [ADR-64]'s broker carve-out was
+/// supposed to hold.
+///
+/// The arm test is on the **relation**, not on its namespace. The guard admits a
+/// site and the body then classifies it as an HTTP client call, so asking about
+/// the namespace and answering about the relation is one drift away from filing
+/// a second Http-namespace arm under this one's discipline.
+///
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+fn config_bound_keys(reference: &super::bridge::InvocationRef) -> Option<Vec<String>> {
+    (reference.relation == crate::model::ArtifactRelation::HttpClientCall)
+        .then(|| placeholder_keys(&reference.target))
+        .flatten()
+}
+
 impl ConfigLookup for MemberCorpus {
     /// `module` is ignored, and the reason is [ADR-64]'s rather than a
     /// simplification: this map IS one member's own store, so the member is the
@@ -1592,7 +1608,7 @@ where
 {
     let mut wanted: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (member, consumer) in consumers {
-        let Some(keys) = placeholder_keys(&consumer.target) else {
+        let Some(keys) = config_bound_keys(consumer) else {
             continue;
         };
         let entry = wanted.entry(member.clone()).or_default();
@@ -1627,7 +1643,7 @@ where
 ///
 /// The row is bound iff *some* composition its committed profiles prove names a
 /// provider; it carries `config-bound` provenance either way, so a reader can
-/// always name the key, the defining sources and the profile set behind it.
+/// always name the keys, the defining sources and the profile sets behind it.
 ///
 /// **One row per reference, not one per profile.** A call site is one site
 /// however many overlays its key has, and emitting a row per profile would
@@ -1635,27 +1651,49 @@ where
 /// deployment. Every profile-tagged value still reaches the consumer — inside the
 /// row's own provenance, which is where [ADR-64] decision point 3 puts it.
 ///
+/// # Three outcomes, and none of them is `no-provider-in-workspace`
+///
+/// A composition that reaches [`tier`] is classified by it, exactly as a literal
+/// is — including [`tier`]'s own `no-provider-in-workspace` answer, which it
+/// gives when the workspace provides nothing for a key that *did* compose. What
+/// this function must not do is reuse that word for its own failures, and the
+/// first version did:
+///
+/// - **Nothing keyed.** Every composition was proven but none reduces to a
+///   portable key — the estate's own dominant idiom, since
+///   `base-url: https://orders:8080` composes an absolute URL and `route_key`
+///   takes only a rooted path. That is the HTTP arm's own refusal, so it is
+///   reported under the arm's own word via [`unkeyable_reason`]. Filing it as
+///   `no-provider-in-workspace` moved the site **out of** the
+///   `spec_conformance_ratio` and `egress_resolution` denominators ([ADR-53]
+///   holds that bucket outside them), so a site that used to read `0 of 1 egress
+///   site` read `0 of 0` — S-382 would have *deleted* the population it exists
+///   to resolve rather than resolving it.
+/// - **Every composition is intra-repo.** [`tier`] returns `None` only for a sole
+///   same-member provider, which is not a cross-boundary reference at all; the
+///   literal path emits **no row** for it and so must this one.
+/// - **Some composition classified.** That classification stands, and a `Bound`
+///   one wins over a non-bound one wherever it sorts.
+///
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
 /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-#[allow(clippy::too_many_arguments)]
 fn record_config_bound(
     tally: &mut Tally,
     providers: &ProviderIndex,
-    member: &str,
     from: BridgeEndpoint,
-    relation: String,
-    target: &str,
+    consumer: &super::bridge::InvocationRef,
     keys: &[String],
     corpus: &MemberCorpus,
 ) {
-    let props = crate::extract::config::binding::PropertiesIndex::default();
-    let resolver = Resolver { corpus, props: &props, module: "" };
-    let resolved = match resolver.resolve_template(target) {
-        // `placeholder_keys` already said the target carries one, so `None` here
-        // is unreachable; it is mapped to the same refusal the empty corpus
-        // produces rather than unwrapped, because a panic in a read-model is
-        // never the right answer to a disagreement between two scans.
+    let relation = arm_relation(consumer.relation);
+    let resolver = Resolver { corpus, module: "" };
+    let resolved = match resolver.resolve_template(&consumer.target) {
+        // `config_bound_keys` already said the target carries a placeholder, so
+        // `None` here is unreachable; it is mapped to the same refusal the empty
+        // corpus produces rather than unwrapped, because a panic in a read-model
+        // is never the right answer to a disagreement between two scans.
         None => Err(ValueRefusal::MissingKey),
         Some(outcome) => outcome,
     };
@@ -1682,57 +1720,74 @@ fn record_config_bound(
         }
     };
 
+    // EVERY key the target names travels with the row, not just the first.
+    // `ResolvedTemplate::bound` holds one entry per placeholder, and a
+    // two-placeholder site has two keys, two source sets and two profile sets —
+    // dropping the tail would leave the second key's evidence nameable from no
+    // surface at all, which is the provenance [FR-WS-19] AC6 makes mandatory.
+    let provenance = |providers| RowProvenance {
+        providers,
+        intake: BridgeIntake::Invocation,
+        value: Provenance::ConfigBound { bound: resolved.bound.clone() },
+    };
+
     // Every committed composition is classified, and a **bound** one decides the
     // row wherever it sits in the order. Taking the first composition that merely
     // *classifies* would make a profile-divergent site bind or not bind by which
-    // overlay happened to sort first — the default-profile guess [ADR-64] refuses,
-    // wearing a different hat — and on the estate this targets the profiled
-    // overlays are the ones that vary hosts, so that ordering is arbitrary in
-    // exactly the cases that matter.
+    // overlay happened to sort first — the default-profile guess [ADR-64]
+    // refuses, wearing a different hat — and on the estate this targets the
+    // profiled overlays are the ones that vary hosts, so that ordering is
+    // arbitrary in exactly the cases that matter.
     //
     // Failing a bound one, the first classification stands, and "first" is
     // deterministic because `candidates` is ordered by the composed template
-    // ([NFR-RA-06]). A composition that keys nothing at all contributes nothing
-    // rather than a refusal: another overlay's may key, and a site is not
-    // unbindable because one of its profiles is.
+    // ([NFR-RA-06]).
+    let mut keyed = false;
     let mut classified = resolved.candidates.iter().filter_map(|candidate| {
-        let key = consumer_portable_key(
-            crate::model::ArtifactRelation::HttpClientCall,
-            &candidate.template,
-        )?;
-        tier(&key, member, providers)
+        let key = consumer_portable_key(consumer.relation, &candidate.template)?;
+        keyed = true;
+        tier(&key, &from.member, providers)
     });
     let first = classified.next();
-    let bound = match first {
+    let decided = match first {
         Some((CoverageState::Bound, evidence)) => Some((CoverageState::Bound, evidence)),
         first => classified
             .find(|(state, _)| matches!(state, CoverageState::Bound))
             .or(first),
     };
-    let provenance = |providers| RowProvenance {
-        providers,
-        intake: BridgeIntake::Invocation,
-        value: Provenance::ConfigBound(
-            // One key per placeholder; the row names the first, which is the one
-            // a single-placeholder site (every shape measured on the reference
-            // estate) has. A multi-placeholder site's remaining keys are named in
-            // the same object's `values`, so none is lost.
-            resolved.bound.first().cloned().unwrap_or_else(|| {
-                unreachable!("a resolved template proves at least one key")
-            }),
-        ),
-    };
-    match bound {
+    // `classified` is lazy, so `keyed` is only complete once it is exhausted —
+    // `decided` above stops at the first bound candidate. Draining the rest
+    // costs a `route_key` per remaining composition and is what makes the
+    // keyed/unkeyed distinction below true rather than approximately true.
+    classified.for_each(drop);
+
+    match decided {
         Some((state, evidence)) => tally.record(relation, from, state, provenance(evidence)),
-        // Admitted, and it names no provider in this workspace — the
-        // [ADR-53] bucket that is deliberately outside the conformance
-        // denominator, reached here for exactly the same reason it is reached
-        // by a literal: the provider repo is simply not a member.
+        // Some composition keyed, but every one of them resolved to a sole
+        // provider inside this member: an intra-repo fact the per-repo graph
+        // already owns, and not a cross-boundary reference. The literal path
+        // emits no row here either.
+        None if keyed => {}
+        // Nothing keyed at all: the arm's own refusal, under the arm's own word.
         None => tally.record(
             relation,
             from,
             CoverageState::Unbound {
-                reason: UnboundReason::NoProviderInWorkspace,
+                // Every composition failed to key, so any of them names the
+                // reason; the first is deterministic. Judged by the ARM's rule
+                // (`composed_refusal`), not by `unkeyable_reason`'s stored-target
+                // convention: that convention reads a non-empty target as
+                // `path-not-composed`, which is right for a row the arm stored
+                // and wrong for a template composed afterwards — an absolute-URL
+                // composition is `base-url-runtime`, the same word the arm gives
+                // an absolute-URL literal.
+                reason: resolved
+                    .candidates
+                    .first()
+                    .and_then(|c| {
+                        crate::resolve::http_client_call::composed_refusal(&c.template)
+                    })
+                    .map_or(UnboundReason::PathNotComposed, UnboundReason::from),
             },
             provenance(ProviderEvidence::Unnamed),
         ),
@@ -1900,6 +1955,24 @@ fn resolved_edges(references: &[ReferenceCoverage]) -> u64 {
         .filter(|r| {
             r.intake == BridgeIntake::Invocation && matches!(r.state, CoverageState::Bound)
         })
+        // **A configuration-bound row is bound here and has no bridge edge yet**
+        // (S-382). This headline counts *edges the bridge drew*, and
+        // `compute_edges` still keys a consumer on its RAW ledger target — a
+        // target carrying `${…}` placeholders reduces to no portable key there,
+        // so no `BridgeEdge` exists for it. The coverage tier resolves the
+        // placeholders and can legitimately answer "bound"; the service map has
+        // drawn nothing. Counting it would report a resolved cross-service edge
+        // that no surface can show and that no `live-via-cross-service`
+        // promotion rests on — the exact flattery [CR-120] retired the
+        // bound-ratio for.
+        //
+        // Excluded rather than un-bound: the ROW is correct (a provider was
+        // found for a committed value, which is what [FR-WS-19] asks), and it is
+        // the EDGE that does not exist. Making the two agree is the bridge's
+        // half of the mechanism and is not in this story; until it lands, this
+        // figure under-reports rather than over-reports, which is the direction
+        // this module takes everywhere else.
+        .filter(|r| !matches!(r.provenance, Provenance::ConfigBound { .. }))
         .map(|r| match (&r.to, &r.candidates) {
             // An exactly-one discipline: one provider, one edge.
             (Some(_), _) => 1,
@@ -3758,9 +3831,11 @@ mod tests {
         let row = &cov.references[0];
         assert_eq!(row.state, CoverageState::Bound, "the resolved template names the route");
         assert_eq!(row.intake, BridgeIntake::Invocation);
-        let Provenance::ConfigBound(bound) = &row.provenance else {
+        let Provenance::ConfigBound { bound } = &row.provenance else {
             panic!("an admitted value must never look like an observed literal: {row:?}");
         };
+        assert_eq!(bound.len(), 1, "one placeholder, one key");
+        let bound = &bound[0];
         assert_eq!(bound.key, "orders.base");
         assert_eq!(bound.source, crate::resolve::binding::KeySource::Placeholder);
         assert_eq!(bound.values.len(), 1);
@@ -3799,9 +3874,10 @@ mod tests {
         let cov = cross_service_coverage(&registry(&["orders", "web"]));
 
         assert_eq!(cov.references.len(), 1, "one call site is one row, however many overlays");
-        let Provenance::ConfigBound(bound) = &cov.references[0].provenance else {
+        let Provenance::ConfigBound { bound } = &cov.references[0].provenance else {
             panic!("expected config-bound provenance");
         };
+        let bound = &bound[0];
         assert!(bound.is_divergent());
         let seen: Vec<(&str, Vec<&str>, bool)> = bound
             .values
@@ -3980,17 +4056,156 @@ mod tests {
             .find(|r| r["provenance"] == "literal")
             .expect("the literal row");
 
-        assert_eq!(admitted["key"], "orders.base");
-        assert_eq!(admitted["source"], "placeholder");
-        assert_eq!(admitted["values"][0]["value"], "/orders");
-        assert_eq!(admitted["values"][0]["profiles"][0], "it");
-        assert_eq!(admitted["values"][0]["unprofiled"], false);
+        assert_eq!(admitted["bound"][0]["key"], "orders.base");
+        assert_eq!(admitted["bound"][0]["source"], "placeholder");
+        assert_eq!(admitted["bound"][0]["values"][0]["value"], "/orders");
+        assert_eq!(admitted["bound"][0]["values"][0]["profiles"][0], "it");
+        assert_eq!(admitted["bound"][0]["values"][0]["unprofiled"], false);
         // The literal carries no evidence keys, so a consumer switching on
         // `provenance` can never read a stale one off the wrong row.
-        assert!(observed.get("key").is_none());
-        assert!(observed.get("values").is_none());
+        assert!(observed.get("bound").is_none());
         // Both bound: the point is that the payload says HOW each one got there.
         assert_eq!(cov.bound, 2);
+    }
+
+    /// AC1 / [FR-WS-19] AC6. A **two-placeholder** target carries **both** keys'
+    /// evidence, not just the first. A row naming one of two keys leaves the
+    /// second key's defining source nameable from no surface at all.
+    ///
+    /// Review found this shipped broken: the row carried
+    /// `resolved.bound.first()` and a comment asserting the remaining keys were
+    /// "named in the same object's `values`", which the type makes impossible —
+    /// `ProfiledValue` has no key field. No test noticed, because every fixture
+    /// was single-placeholder.
+    ///
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    #[test]
+    fn a_multi_placeholder_row_carries_every_key_it_named() {
+        reset();
+        set_member("orders", vec![route("GET /orders/v2/{id}", "local get_order")]);
+        set_member("web", vec![]);
+        set_consumers(
+            "web",
+            vec![http_call("GET ${svc.base}${svc.version}/{id}", "local fetch_order")],
+        );
+        commit_config("web", "svc.base", &[("application.yml", None, "/orders")]);
+        commit_config("web", "svc.version", &[("application-it.yml", Some("it"), "/v2")]);
+
+        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+
+        let Provenance::ConfigBound { bound } = &cov.references[0].provenance else {
+            panic!("expected config-bound provenance: {:?}", cov.references[0]);
+        };
+        let named: Vec<(&str, &str)> = bound
+            .iter()
+            .map(|b| (b.key.as_str(), b.values[0].sources[0].as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            [("svc.base", "application.yml"), ("svc.version", "application-it.yml")],
+            "both keys and both defining sources reach the row, in target order"
+        );
+        // And on the wire, where a consumer actually reads them.
+        let json = serde_json::to_value(&cov).unwrap();
+        let keys: Vec<&str> = json["references"][0]["bound"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys, ["svc.base", "svc.version"]);
+    }
+
+    /// A composition that is proven but **keys nothing** is the HTTP arm's own
+    /// refusal, reported under the arm's own word — never
+    /// `no-provider-in-workspace`.
+    ///
+    /// This is the estate's dominant idiom: `base-url: https://orders:8080`
+    /// composes an absolute URL, and `route_key` takes only a rooted path. Review
+    /// found it filed as `no-provider-in-workspace`, the bucket [ADR-53] holds
+    /// **outside** the `spec_conformance_ratio` and `egress_resolution`
+    /// denominators — so S-382 was deleting the very population it exists to
+    /// resolve from the denominator instead of resolving it.
+    ///
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    #[test]
+    fn a_composition_that_keys_nothing_refuses_under_the_arms_own_word() {
+        reset();
+        set_member("orders", vec![route("GET /orders/{id}", "local get_order")]);
+        set_member("web", vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}", "local fetch_order")]);
+        // Composes `GET https://orders:8080` — absolute, so it never keys.
+        commit_config("web", "orders.base", &[("application.yml", None, "https://orders:8080")]);
+
+        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+
+        assert_eq!(
+            cov.references[0].state,
+            CoverageState::Unbound { reason: UnboundReason::BaseUrlRuntime },
+            "the arm's own refusal, not a claim about the workspace's providers"
+        );
+        assert_eq!(
+            cov.no_provider_in_workspace, 0,
+            "the site must STAY in the conformance denominator"
+        );
+        assert_eq!(cov.by_intake.invocation.unbound, 1);
+        // The evidence still travels: the reader can see which key composed the
+        // value that then failed to key.
+        assert!(matches!(cov.references[0].provenance, Provenance::ConfigBound { .. }));
+    }
+
+    /// A config-bound call whose every composition resolves **inside its own
+    /// member** emits no row at all — an intra-repo fact the per-repo graph
+    /// already owns, exactly as the literal path treats it.
+    ///
+    /// `tier` returns `None` only for a sole same-member provider. Review found
+    /// that `None` collapsed into the fallback and reported
+    /// `no-provider-in-workspace` — a row that is false on the wire, for a
+    /// provider that does exist.
+    #[test]
+    fn a_config_bound_call_that_resolves_intra_repo_emits_no_row() {
+        reset();
+        // The route lives in the SAME member that calls it.
+        set_member("web", vec![route("GET /orders/{id}", "local get_order")]);
+        set_member("orders", vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
+        commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
+
+        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+
+        assert!(
+            cov.references.is_empty(),
+            "an intra-repo reference is not cross-boundary: {:?}",
+            cov.references
+        );
+        assert_eq!(cov.no_provider_in_workspace, 0);
+    }
+
+    /// A config-bound row is **not** counted in `resolved_cross_service_edges`,
+    /// because the bridge draws no edge for it: `compute_edges` still keys a
+    /// consumer on its RAW ledger target, which carries the unresolved
+    /// placeholders and reduces to no portable key.
+    ///
+    /// The row is legitimately `bound`; the edge does not exist. Counting it
+    /// would publish a resolved cross-service edge no surface can show — the
+    /// flattery [CR-120] retired the bound-ratio for.
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    #[test]
+    fn a_config_bound_bind_does_not_inflate_the_resolved_edge_headline() {
+        reset();
+        set_member("orders", vec![route("GET /orders/{id}", "local get_order")]);
+        set_member("web", vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
+        commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
+
+        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+
+        assert_eq!(cov.references[0].state, CoverageState::Bound, "the ROW is bound");
+        assert_eq!(
+            cov.resolved_cross_service_edges, 0,
+            "and the EDGE does not exist, so the headline must not claim it"
+        );
     }
 
     /// [ADR-64]'s explicit carve-out: **this decision does not resolve broker

@@ -229,6 +229,35 @@ pub(crate) fn classify_client_call(
     Ok(ClientCallPath::Literal(candidate))
 }
 
+/// Why an **already-composed** `"METHOD /template"` does not bind, judged by the
+/// same rule [`classify_client_call`] applies to a captured site (S-382).
+///
+/// The configuration resolver composes a template *after* capture — substituting
+/// a committed value into a `${…}` placeholder — so the result must be judged
+/// again, and by this arm's rule rather than by the ledger convention
+/// `client_call_refusal` uses. That convention reads an **empty** stored target
+/// as `base-url-runtime` and any non-empty one as `path-not-composed`, which is
+/// correct for a *stored* row and wrong for a composed template: a key holding
+/// `https://orders:8080` composes a non-empty absolute URL whose route prefix is
+/// not present, which is `base-url-runtime` by this arm's own definition.
+///
+/// Implemented by feeding the composition back through [`classify_client_call`]
+/// rather than re-stating its two tests, so the composed and the captured paths
+/// can never disagree about the same string.
+///
+/// Returns [`None`] when the composition **does** bind — the caller then has a
+/// target, not a refusal.
+pub(crate) fn composed_refusal(target: &str) -> Option<ClientCallRefusal> {
+    let (method, path) = target.split_once(' ')?;
+    let slots: BTreeMap<String, String> = [
+        (METHOD_SLOT.to_string(), method.to_string()),
+        (PATH_SLOT.to_string(), path.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    classify_client_call(&slots).err()
+}
+
 /// The `render_target` normalizer the HTTP arm hands to
 /// [`capture_invocation_refs`](crate::extract::config::refs::capture_invocation_refs):
 /// `Some("METHOD /template")` for a static, normalizable call; `None` for any
