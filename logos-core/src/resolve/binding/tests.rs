@@ -40,11 +40,13 @@ impl ConfigLookup for Corpus {
     }
 }
 
-/// A resolver over `corpus` with no configuration-bound classes — the accessor
-/// half is S-381's and is exercised in its own module; every case here starts
-/// from a key that is already named.
-fn resolver<'a>(corpus: &'a Corpus, props: &'a PropertiesIndex) -> Resolver<'a> {
-    Resolver { corpus, props, module: "" }
+/// A resolver over `corpus`. Every case here starts from a key that is already
+/// named — finding *which* key an operand names is the language-shaped half that
+/// stayed in the measurement harness ([CR-121] §5.1).
+///
+/// [CR-121]: ../../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
+fn resolver(corpus: &Corpus) -> Resolver<'_> {
+    Resolver { corpus, module: "" }
 }
 
 // ── AC1: an admitted value carries its key, sources and profile set ─────────
@@ -58,8 +60,7 @@ fn a_committed_key_resolves_and_carries_its_key_sources_and_profiles() {
         "orders.api.base-path",
         &[def("svc/src/main/resources/application-docker.yml", Some("docker"), "/orders/v1")],
     );
-    let props = PropertiesIndex::default();
-    let bound = resolver(&corpus, &props)
+    let bound = resolver(&corpus)
         .resolve("orders.api.base-path", KeySource::Properties)
         .expect("a committed key admits");
 
@@ -83,8 +84,7 @@ fn a_committed_key_resolves_and_carries_its_key_sources_and_profiles() {
 fn a_relaxed_spelling_reaches_the_same_committed_value() {
     let corpus = Corpus::default()
         .with("mailserver.api.uri-get-archive", &[def("application.yml", None, "/archive")]);
-    let props = PropertiesIndex::default();
-    let r = resolver(&corpus, &props);
+    let r = resolver(&corpus);
     for spelling in ["mailserver.api.uri-get-archive", "mailserver.api.uriGetArchive"] {
         let bound = r.resolve(spelling, KeySource::Properties).expect("both spellings admit");
         assert_eq!(bound.values[0].value, "/archive", "{spelling} must reach the committed value");
@@ -97,11 +97,10 @@ fn a_relaxed_spelling_reaches_the_same_committed_value() {
 #[test]
 fn an_admitted_value_is_tagged_apart_from_an_observed_literal() {
     let corpus = Corpus::default().with("a.b", &[def("application.yml", None, "/x")]);
-    let props = PropertiesIndex::default();
-    let bound = resolver(&corpus, &props).resolve("a.b", KeySource::Placeholder).expect("admits");
+    let bound = resolver(&corpus).resolve("a.b", KeySource::Placeholder).expect("admits");
 
     let observed = Provenance::Literal;
-    let admitted = Provenance::ConfigBound(bound);
+    let admitted = Provenance::ConfigBound { bound: vec![bound] };
     assert_eq!(observed.label(), "literal");
     assert_eq!(admitted.label(), "config-bound");
     assert!(observed.config_bound().is_none());
@@ -113,12 +112,12 @@ fn an_admitted_value_is_tagged_apart_from_an_observed_literal() {
     assert_eq!(admitted_json["provenance"], "config-bound");
     // The evidence rides on the same object, not on a sibling a consumer must
     // know to fetch ([NFR-CC-04]).
-    assert_eq!(admitted_json["key"], "a.b");
-    assert_eq!(admitted_json["values"][0]["value"], "/x");
-    assert_eq!(admitted_json["values"][0]["unprofiled"], true);
+    assert_eq!(admitted_json["bound"][0]["key"], "a.b");
+    assert_eq!(admitted_json["bound"][0]["values"][0]["value"], "/x");
+    assert_eq!(admitted_json["bound"][0]["values"][0]["unprofiled"], true);
     // The literal carries no evidence keys at all, so a consumer switching on
     // `provenance` can never read a stale one.
-    assert!(observed_json.get("key").is_none());
+    assert!(observed_json.get("bound").is_none());
 }
 
 // ── AC2: overlay divergence is retained, not averaged and not refused ───────
@@ -136,9 +135,8 @@ fn overlay_disagreement_retains_every_value_with_its_profile() {
             def("application-it.yml", Some("it"), "/orders-it"),
         ],
     );
-    let props = PropertiesIndex::default();
     let bound =
-        resolver(&corpus, &props).resolve("orders.base", KeySource::Properties).expect("admits");
+        resolver(&corpus).resolve("orders.base", KeySource::Properties).expect("admits");
 
     assert!(bound.is_divergent());
     assert_eq!(bound.values.len(), 3, "every overlay's value reaches the consumer");
@@ -170,8 +168,7 @@ fn profiles_that_agree_collapse_to_one_value_naming_both() {
             def("application-it.yml", Some("it"), "/same"),
         ],
     );
-    let props = PropertiesIndex::default();
-    let bound = resolver(&corpus, &props).resolve("a.b", KeySource::Properties).expect("admits");
+    let bound = resolver(&corpus).resolve("a.b", KeySource::Properties).expect("admits");
     assert!(!bound.is_divergent());
     assert_eq!(bound.values[0].profiles, ["docker", "it"]);
     assert_eq!(bound.values[0].sources.len(), 2);
@@ -190,8 +187,7 @@ fn a_divergent_key_composes_one_template_per_overlay() {
             def("application-docker.yml", Some("docker"), "/orders-docker"),
         ],
     );
-    let props = PropertiesIndex::default();
-    let resolved = resolver(&corpus, &props)
+    let resolved = resolver(&corpus)
         .resolve_template("${orders.base}/{id}")
         .expect("the template carries a placeholder")
         .expect("it admits");
@@ -228,8 +224,7 @@ fn a_profile_silent_about_a_key_inherits_the_unprofiled_base() {
             ],
         )
         .with("svc.path", &[def("application.yml", None, "/v1")]);
-    let props = PropertiesIndex::default();
-    let resolved = resolver(&corpus, &props)
+    let resolved = resolver(&corpus)
         .resolve_template("${svc.host}${svc.path}/orders")
         .expect("placeholders")
         .expect("admits");
@@ -254,9 +249,8 @@ fn profiles_composing_the_same_template_are_one_candidate() {
             def("application-local.yml", Some("local"), "/x"),
         ],
     );
-    let props = PropertiesIndex::default();
     let resolved =
-        resolver(&corpus, &props).resolve_template("${a.b}/y").expect("ph").expect("admits");
+        resolver(&corpus).resolve_template("${a.b}/y").expect("ph").expect("admits");
     assert_eq!(resolved.candidates.len(), 1);
     assert_eq!(resolved.candidates[0].template, "/x/y");
     assert_eq!(resolved.candidates[0].profiles, ["it", "local"]);
@@ -276,8 +270,7 @@ fn profiles_composing_the_same_template_are_one_candidate() {
 #[test]
 fn an_uncommitted_environment_variable_is_refused_even_when_a_key_agrees() {
     let corpus = Corpus::default().with("BASE_URL", &[def("application.yml", None, "/proven")]);
-    let props = PropertiesIndex::default();
-    let r = resolver(&corpus, &props);
+    let r = resolver(&corpus);
     assert_eq!(r.resolve("BASE_URL", KeySource::Environment), Err(ValueRefusal::Uncommitted));
     // The near miss that proves the guard is the SOURCE and not the spelling:
     // the very same key, reached from a committed source, admits.
@@ -291,9 +284,8 @@ fn an_uncommitted_environment_variable_is_refused_even_when_a_key_agrees() {
 #[test]
 fn a_getenv_read_is_refused_as_uncommitted() {
     let corpus = Corpus::default();
-    let props = PropertiesIndex::default();
     assert_eq!(
-        resolver(&corpus, &props).resolve("ORDERS_HOST", KeySource::Environment),
+        resolver(&corpus).resolve("ORDERS_HOST", KeySource::Environment),
         Err(ValueRefusal::Uncommitted),
         "the repository commits no value, so nothing in the tree proves what it holds"
     );
@@ -322,9 +314,8 @@ fn a_config_server_or_secret_store_value_never_reaches_the_corpus() {
     }
     // So the key it would have supplied is committed nowhere the corpus admits.
     let corpus = Corpus::default();
-    let props = PropertiesIndex::default();
     assert_eq!(
-        resolver(&corpus, &props).resolve("orders.api.url", KeySource::Properties),
+        resolver(&corpus).resolve("orders.api.url", KeySource::Properties),
         Err(ValueRefusal::MissingKey),
     );
 }
@@ -336,9 +327,8 @@ fn a_config_server_or_secret_store_value_never_reaches_the_corpus() {
 fn a_value_that_is_itself_a_placeholder_proves_nothing() {
     let corpus = Corpus::default()
         .with("orders.url", &[def("application.yml", None, "${ORDERS_SERVICE_URL}")]);
-    let props = PropertiesIndex::default();
     assert_eq!(
-        resolver(&corpus, &props).resolve("orders.url", KeySource::Properties),
+        resolver(&corpus).resolve("orders.url", KeySource::Properties),
         Err(ValueRefusal::PlaceholderValue),
     );
     assert_eq!(Agreement::of(&corpus.definitions("orders.url", "")).label(), "placeholder value");
@@ -357,9 +347,8 @@ fn one_placeholder_source_refuses_the_key_even_beside_a_literal_one() {
             def("application-docker.yml", Some("docker"), "${ORDERS_URL}"),
         ],
     );
-    let props = PropertiesIndex::default();
     assert_eq!(
-        resolver(&corpus, &props).resolve("orders.url", KeySource::Properties),
+        resolver(&corpus).resolve("orders.url", KeySource::Properties),
         Err(ValueRefusal::PlaceholderValue),
     );
 }
@@ -371,9 +360,8 @@ fn one_placeholder_source_refuses_the_key_even_beside_a_literal_one() {
 #[test]
 fn a_key_no_committed_source_defines_is_missing_not_a_disagreement() {
     let corpus = Corpus::default().with("other.key", &[def("application.yml", None, "/x")]);
-    let props = PropertiesIndex::default();
     assert_eq!(
-        resolver(&corpus, &props).resolve("orders.base", KeySource::Properties),
+        resolver(&corpus).resolve("orders.base", KeySource::Properties),
         Err(ValueRefusal::MissingKey),
     );
     assert_eq!(Agreement::of(&[]).label(), "missing key");
@@ -383,7 +371,7 @@ fn a_key_no_committed_source_defines_is_missing_not_a_disagreement() {
         def("application-it.yml", Some("it"), "/b"),
     ]);
     assert_eq!(divergent.label(), "profile-divergent");
-    assert_eq!(divergent.values().len(), 2);
+    assert!(matches!(divergent, Agreement::Divergent(ref v) if v.len() == 2));
 }
 
 /// AC3. A template refuses as a whole when **any** of its placeholders refuses:
@@ -391,11 +379,99 @@ fn a_key_no_committed_source_defines_is_missing_not_a_disagreement() {
 #[test]
 fn a_template_refuses_when_any_placeholder_refuses() {
     let corpus = Corpus::default().with("a.b", &[def("application.yml", None, "/x")]);
-    let props = PropertiesIndex::default();
     assert_eq!(
-        resolver(&corpus, &props).resolve_template("${a.b}/${missing.key}"),
+        resolver(&corpus).resolve_template("${a.b}/${missing.key}"),
         Some(Err(ValueRefusal::MissingKey)),
     );
+}
+
+/// AC3. Two keys committed under **disjoint** profiles admit individually and
+/// compose **nothing**: no profile — and not the unprofiled base — proves a
+/// value for both at once, so there is no committed composition.
+///
+/// Review found this returning `Ok` with an EMPTY candidate set, which then
+/// travelled to the surfaces as `config-bound` provenance — an admitted value
+/// for a template that was never composed. Refusing is the whole premise.
+#[test]
+fn keys_under_disjoint_profiles_compose_nothing_and_refuse() {
+    let corpus = Corpus::default()
+        .with("svc.host", &[def("application-prod.yml", Some("prod"), "http://prod")])
+        .with("svc.path", &[def("application-dev.yml", Some("dev"), "/v1")]);
+    // Each key admits on its own — the refusal is a property of the COMPOSITION.
+    assert!(resolver(&corpus).resolve("svc.host", KeySource::Placeholder).is_ok());
+    assert!(resolver(&corpus).resolve("svc.path", KeySource::Placeholder).is_ok());
+    assert_eq!(
+        resolver(&corpus).resolve_template("${svc.host}${svc.path}/orders"),
+        Some(Err(ValueRefusal::MissingKey)),
+        "no profile proves the whole template, so nothing is admitted",
+    );
+}
+
+/// A composed template always carries at least one candidate — the invariant the
+/// field doc states, now true because the empty case refuses above.
+#[test]
+fn an_admitted_template_never_carries_an_empty_candidate_set() {
+    let corpus = Corpus::default()
+        .with("a.b", &[def("application-it.yml", Some("it"), "/x")])
+        .with("c.d", &[def("application-it.yml", Some("it"), "/y")]);
+    let resolved =
+        resolver(&corpus).resolve_template("${a.b}${c.d}").expect("ph").expect("admits");
+    assert!(!resolved.candidates.is_empty());
+    assert_eq!(resolved.candidates[0].template, "/x/y");
+}
+
+/// A nested placeholder yields **no** key rather than a fabricated one.
+///
+/// `${a${b}}` used to yield the key `a${b` — a string this scanner assembled
+/// rather than one the source wrote. It refused no value (nothing commits such a
+/// key), but the fabricated name reached the provenance and any key census
+/// verbatim.
+#[test]
+fn a_nested_placeholder_yields_no_key_rather_than_a_fabricated_one() {
+    assert_eq!(placeholder_keys("${a${b}}"), None);
+    assert_eq!(placeholder_keys("${${}}"), None);
+    // A complete placeholder before a nested one still counts, exactly as the
+    // unterminated case behaves.
+    assert_eq!(placeholder_keys("${a.b}/x/${c${d}}"), Some(vec!["a.b".to_string()]));
+}
+
+/// One profile proving very many values for many keys composes **nothing**
+/// rather than an arbitrary prefix of its own candidate set.
+///
+/// Truncating would make "every value is retained with its profile set"
+/// ([ADR-64] decision point 3) false without saying so, so the cap refuses.
+/// Eight keys at four values each is 65 536 compositions — measured, not
+/// hypothetical.
+///
+/// [ADR-64]: ../../../../docs/specs/architecture/decisions/ADR-64.md
+#[test]
+fn a_composition_product_past_the_cap_refuses_instead_of_truncating() {
+    let mut corpus = Corpus::default();
+    let mut template = String::new();
+    for k in 0..8 {
+        let key = format!("k{k}.v");
+        corpus = corpus.with(
+            &key,
+            &(0..4)
+                .map(|v| def("application.yml", None, &format!("/{k}-{v}")))
+                .collect::<Vec<_>>(),
+        );
+        template.push_str(&format!("${{{key}}}"));
+    }
+    assert_eq!(
+        resolver(&corpus).resolve_template(&template),
+        Some(Err(ValueRefusal::MissingKey)),
+        "past the cap the profile proves no composition at all",
+    );
+    // Well under the cap, the product is kept in full — the guard is a ceiling,
+    // not a ban, and an in-profile duplicate is still represented rather than
+    // resolved to one of its values.
+    let small = Corpus::default()
+        .with("a.b", &[def("application.yml", None, "/1"), def("b.yml", None, "/2")]);
+    let resolved = resolver(&small).resolve_template("${a.b}/x").expect("ph").expect("admits");
+    let composed: Vec<&str> = resolved.candidates.iter().map(|c| c.template.as_str()).collect();
+    assert_eq!(composed, ["/1/x", "/2/x"], "both committed values compose");
+    assert!(resolved.candidates.iter().all(|c| c.unprofiled && c.profiles.is_empty()));
 }
 
 /// Every refusal variant carries a distinct census word, so a report can never
@@ -447,9 +523,8 @@ fn an_inline_default_names_the_key_but_never_supplies_the_value() {
         Some(vec!["orders.base".to_string()])
     );
     let corpus = Corpus::default();
-    let props = PropertiesIndex::default();
     assert_eq!(
-        resolver(&corpus, &props).resolve_template("${orders.base:/fallback}/x"),
+        resolver(&corpus).resolve_template("${orders.base:/fallback}/x"),
         Some(Err(ValueRefusal::MissingKey)),
         "an undefined key with a committed default is still undefined",
     );
@@ -466,8 +541,7 @@ fn a_repeated_key_is_read_once_and_substituted_everywhere() {
     let corpus = Corpus::default()
         .with("a.b", &[def("application.yml", None, "P")])
         .with("c.d", &[def("application.yml", None, "Q")]);
-    let props = PropertiesIndex::default();
-    let resolved = resolver(&corpus, &props)
+    let resolved = resolver(&corpus)
         .resolve_template("${a.b}/x/${c.d}/y/${a.b}")
         .expect("ph")
         .expect("admits");
@@ -481,8 +555,7 @@ fn a_repeated_key_is_read_once_and_substituted_everywhere() {
 fn a_relaxed_placeholder_spelling_substitutes_against_the_canonical_key() {
     let corpus =
         Corpus::default().with("orders.base-path", &[def("application.yml", None, "/orders")]);
-    let props = PropertiesIndex::default();
-    let resolved = resolver(&corpus, &props)
+    let resolved = resolver(&corpus)
         .resolve_template("${orders.basePath}/{id}")
         .expect("ph")
         .expect("admits");
@@ -495,8 +568,7 @@ fn a_relaxed_placeholder_spelling_substitutes_against_the_canonical_key() {
 #[test]
 fn a_literal_template_is_not_a_resolution_at_all() {
     let corpus = Corpus::default();
-    let props = PropertiesIndex::default();
-    assert!(resolver(&corpus, &props).resolve_template("/users/{id}").is_none());
+    assert!(resolver(&corpus).resolve_template("/users/{id}").is_none());
 }
 
 /// An empty corpus admits nothing rather than admitting a guess — the honest
@@ -504,9 +576,8 @@ fn a_literal_template_is_not_a_resolution_at_all() {
 #[test]
 fn an_unreadable_corpus_admits_nothing() {
     let corpus = Corpus::default();
-    let props = PropertiesIndex::default();
     assert_eq!(
-        resolver(&corpus, &props).resolve("anything.at.all", KeySource::Properties),
+        resolver(&corpus).resolve("anything.at.all", KeySource::Properties),
         Err(ValueRefusal::MissingKey),
     );
 }

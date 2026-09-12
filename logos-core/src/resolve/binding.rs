@@ -87,12 +87,23 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use crate::extract::config::binding::PropertiesIndex;
 use crate::extract::config::corpus::canonical_key;
 use crate::graph_store::ConfigDefinition;
 
 /// The opening delimiter of a configuration placeholder (`${key}`).
 const PLACEHOLDER_OPEN: &str = "${";
+
+/// The most compositions one profile may prove for a template before it proves
+/// **none** ([`substitutions`]).
+///
+/// Not a truncation limit: past it the profile composes nothing at all, because
+/// admitting an arbitrary prefix would quietly falsify [ADR-64] decision point
+/// 3's "every value is retained". Sized far above the reference estate's worst
+/// case (one placeholder, one value) so that reaching it means the corpus is a
+/// shape this resolver was never measured on.
+///
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+const MAX_COMPOSITIONS: usize = 64;
 
 /// Separates a placeholder's key from its inline default (`${a.b:fallback}`).
 ///
@@ -117,7 +128,8 @@ const PLACEHOLDER_DEFAULT: char = ':';
 #[serde(rename_all = "kebab-case")]
 pub enum KeySource {
     /// A getter on a configuration-bound (`@ConfigurationProperties`) bean,
-    /// resolved through [`PropertiesIndex::bind`].
+    /// resolved through `PropertiesIndex::bind`
+    /// ([`crate::extract::config::binding`], S-381).
     Properties,
     /// An annotation naming the key at the use site (`@Value("${key}")`).
     ValueAnnotation,
@@ -236,15 +248,28 @@ pub enum ValueRefusal {
     /// At least one defining source's value is itself an unresolved `${…}`
     /// indirection: it proves the indirection, not the value.
     PlaceholderValue,
-    /// No committed source defines the key.
+    /// The committed sources prove no value for the operand.
     ///
-    /// Also the reason a config-server, Consul/etcd, secret-store or ConfigMap
-    /// value refuses: those files are not configuration sources under the
-    /// discovery gate, so nothing they hold ever reaches the corpus. Kept
-    /// **distinct from disagreement** so the two are never conflated in a count
-    /// ([ADR-64]).
+    /// **Three mechanisms reach it, and they are one reason on purpose.** No
+    /// committed source defines the key at all; or the only sources that would
+    /// are not configuration sources under the discovery gate (a config server,
+    /// Consul/etcd, a secret store, a Kubernetes ConfigMap), so nothing they
+    /// hold reaches the corpus; or — for a multi-key template — every key admits
+    /// individually but **no single profile proves a value for all of them at
+    /// once**, so no committed composition exists. In each case the repository
+    /// proves nothing for what the site reads, which is the distinction that
+    /// matters to a consumer.
+    ///
+    /// Splitting the third into its own variant was considered and rejected:
+    /// it occurs **zero** times on the reference estate, and a reason with no
+    /// real producer is the advertised-but-empty capability [NFR-CC-04]
+    /// disfavours — the test S-378 removed `schema-mismatch` for failing.
+    ///
+    /// Kept **distinct from disagreement** so the two are never conflated in a
+    /// count ([ADR-64]) — and disagreement is not a refusal at all.
     ///
     /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     MissingKey,
 }
 
@@ -258,7 +283,10 @@ impl ValueRefusal {
         }
     }
 
-    /// Every variant, so a census enumerates the residue rather than sampling it.
+    /// Every variant. Unlike [`Refusal::ALL`] this feeds no census — the
+    /// coverage tier converts to its own vocabulary and never enumerates this
+    /// enum — so its one job is to make the distinct-label guard in `tests.rs`
+    /// exhaustive: a fourth variant does not compile until it is listed here.
     pub const ALL: [Self; 3] = [Self::Uncommitted, Self::PlaceholderValue, Self::MissingKey];
 }
 
@@ -388,14 +416,6 @@ impl Agreement {
         }
     }
 
-    /// Every value this outcome admits, in order — empty for the two refusals.
-    pub fn values(&self) -> &[ProfiledValue] {
-        match self {
-            Self::Agreed(value) => std::slice::from_ref(value),
-            Self::Divergent(values) => values,
-            Self::Placeholder { .. } | Self::Missing => &[],
-        }
-    }
 }
 
 // ── Provenance ──────────────────────────────────────────────────────────────
@@ -456,8 +476,19 @@ pub enum Provenance {
     /// Written at the call site and read verbatim — the pre-S-382 case, and
     /// still the only one that needs no configuration at all.
     Literal,
-    /// Read from committed configuration, carrying its evidence.
-    ConfigBound(ConfigBound),
+    /// Read from committed configuration, carrying its evidence — **one entry
+    /// per configuration key the target names**, in the order the target names
+    /// them.
+    ///
+    /// A `Vec`, not a single [`ConfigBound`], and the difference is the whole
+    /// requirement rather than ergonomics: [FR-WS-19] AC6 asks that *every*
+    /// admitted value carry the key, the defining sources and the profile set,
+    /// and a two-placeholder target such as `${svc.host}${svc.path}/orders` is
+    /// two keys, two source sets and two profile sets. Carrying only the first
+    /// would leave the second key's evidence nameable from no surface at all.
+    ///
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    ConfigBound { bound: Vec<ConfigBound> },
     /// The target **names** configuration keys and the committed sources admit
     /// no value for them, so nothing was read at all — neither an observed
     /// literal nor an admitted value.
@@ -483,15 +514,15 @@ impl Provenance {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Literal => "literal",
-            Self::ConfigBound(_) => "config-bound",
+            Self::ConfigBound { .. } => "config-bound",
             Self::ConfigUnresolved { .. } => "config-unresolved",
         }
     }
 
-    /// The evidence, for the admitted case.
-    pub fn config_bound(&self) -> Option<&ConfigBound> {
+    /// The evidence, for the admitted case: one entry per key the target names.
+    pub fn config_bound(&self) -> Option<&[ConfigBound]> {
         match self {
-            Self::ConfigBound(bound) => Some(bound),
+            Self::ConfigBound { bound } => Some(bound),
             Self::Literal | Self::ConfigUnresolved { .. } => None,
         }
     }
@@ -539,27 +570,25 @@ pub trait ConfigLookup {
     fn definitions(&self, key: &str, module: &str) -> Vec<ConfigDefinition>;
 }
 
-impl<F> ConfigLookup for F
-where
-    F: Fn(&str, &str) -> Vec<ConfigDefinition>,
-{
-    fn definitions(&self, key: &str, module: &str) -> Vec<ConfigDefinition> {
-        self(key, module)
-    }
-}
-
 /// Everything configuration resolution needs besides the operand itself: the
-/// committed definitions, the configuration-bound class index, and the module
-/// scope both are read in (S-365, promoted).
+/// committed definitions and the module scope they are read in (S-365,
+/// promoted).
 ///
-/// A struct rather than three arguments because passing them separately pushed
-/// the harness's `judge` and both of its collectors past the argument limit.
+/// # It carries no properties index, and that is the promotion doing its job
+///
+/// The harness's `Resolver` also held a `&PropertiesIndex`, because its
+/// `resolve_key` walks a tree-sitter expression to find *which key* an operand
+/// names. That half is language-shaped and stayed in the harness ([CR-121] §5.1),
+/// so the shipped resolver never reads the field — and a promoted struct
+/// carrying a field its own methods never touch is baggage rather than a
+/// contract. It cost a throwaway `PropertiesIndex::default()` per resolved row
+/// until it was removed. The harness keeps its index beside this struct.
+///
+/// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
 #[derive(Clone, Copy)]
 pub struct Resolver<'a> {
     /// The committed configuration this resolution reads.
     pub corpus: &'a dyn ConfigLookup,
-    /// The configuration-bound classes an accessor resolves through (S-381).
-    pub props: &'a PropertiesIndex,
     /// The module root the use site sits in; `""` is the corpus root.
     pub module: &'a str,
 }
@@ -623,7 +652,21 @@ impl Resolver<'_> {
         for key in keys {
             bound.push(self.resolve(key, KeySource::Placeholder)?);
         }
-        Ok(ResolvedTemplate { candidates: profile_candidates(template, &bound), bound })
+        let candidates = profile_candidates(template, &bound);
+        // **No profile composes the whole template.** Every key admits on its
+        // own, but no single profile — and not the unprofiled base — proves a
+        // value for *all* of them at once, so there is no committed composition
+        // to admit. Reachable with two keys committed under disjoint profiles.
+        //
+        // Refused as [`ValueRefusal::MissingKey`] rather than returned as an
+        // empty `Ok`: an `Ok` carrying no composition would travel to the
+        // surfaces as `config-bound` provenance — an admitted value for a
+        // template that was never composed, which is precisely the over-read
+        // this module exists to refuse.
+        if candidates.is_empty() {
+            return Err(ValueRefusal::MissingKey);
+        }
+        Ok(ResolvedTemplate { candidates, bound })
     }
 }
 
@@ -648,8 +691,11 @@ pub struct ResolvedTemplate {
     /// One entry per distinct committed composition — more than one is an
     /// overlay divergence, and **every one** reaches the consumer.
     ///
-    /// Never empty: a template whose every key admits admits at least the
-    /// composition its defining profiles prove.
+    /// Non-empty whenever a [`ResolvedTemplate`] exists, because
+    /// [`Resolver::resolve_template`] refuses rather than returning an empty
+    /// set: a key can admit on its own and still compose nothing, when no single
+    /// profile proves every key of the template. That is the refusal, not an
+    /// empty success — see [`ValueRefusal::MissingKey`].
     pub candidates: Vec<ProfiledTemplate>,
     /// The provenance of each placeholder, in the order the template names them.
     pub bound: Vec<ConfigBound>,
@@ -657,17 +703,22 @@ pub struct ResolvedTemplate {
 
 /// Compose one candidate per profile that proves a distinct substitution.
 ///
-/// **Per profile, not per combination.** The profile is the dimension [ADR-64]
-/// names, and enumerating it is linear in the corpus; a cross-product over
-/// placeholders would be exponential in a template's placeholder count for no
-/// gain, because a deployment runs under one profile at a time.
+/// **Per profile, not per combination of profiles.** The profile is the dimension
+/// [ADR-64] names, and enumerating it is linear in the corpus: a deployment runs
+/// under one profile at a time, so profiles are never crossed with each other.
+///
+/// Within one profile the keys ARE crossed, because a key a multi-document file
+/// defines twice proves both values and dropping one would be a silent choice.
+/// That product is bounded by [`MAX_COMPOSITIONS`] — see [`substitutions`] — so
+/// the "linear in the corpus" claim above holds of the profile axis only, which
+/// is the axis the decision is about.
 ///
 /// A key with no value under profile `P` falls back to its **unprofiled** value,
 /// which is what an overlay means: the profiled file overrides the base file and
-/// is silent about everything else. A key that a profile and the base file both
-/// leave undefined cannot occur here — [`Resolver::resolve`] has already refused
-/// a key no source defines, so every key reaching this function has at least one
-/// value.
+/// is silent about everything else. A key that `P` and the base file **both**
+/// leave undefined composes nothing under `P` — [`Resolver::resolve`] proves each
+/// key has *some* value, never that it has one under *this* profile — and
+/// [`substitutions`] states that rule where it is enforced.
 ///
 /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
 fn profile_candidates(template: &str, bound: &[ConfigBound]) -> Vec<ProfiledTemplate> {
@@ -702,6 +753,21 @@ fn profile_candidates(template: &str, bound: &[ConfigBound]) -> Vec<ProfiledTemp
 /// one key twice) is represented rather than silently resolved to one of them.
 ///
 /// `profile` of [`None`] is the unprofiled base.
+///
+/// # The product is bounded, and the bound refuses rather than truncates
+///
+/// Crossing the keys of one profile is a product, not a sum: eight placeholders
+/// each proving four in-profile values is 65 536 compositions, which is a real
+/// (if exotic) allocation cliff rather than a theoretical one. Past
+/// [`MAX_COMPOSITIONS`] this profile composes **nothing**, so the site refuses
+/// instead of admitting an arbitrary prefix of its own candidate set — a
+/// truncated set would make "every value reaches the consumer" ([ADR-64]
+/// decision point 3) false without saying so.
+///
+/// The reference estate's worst case is **one** placeholder proving one value,
+/// so the cap is unreached there; it exists for the corpus that is not this one.
+///
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
 fn substitutions(
     template: &str,
     bound: &[ConfigBound],
@@ -713,6 +779,9 @@ fn substitutions(
         if values.is_empty() {
             // This profile proves nothing for this key and neither does the
             // base file, so it composes nothing at all under this profile.
+            return Vec::new();
+        }
+        if out.len().saturating_mul(values.len()) > MAX_COMPOSITIONS {
             return Vec::new();
         }
         out = out
@@ -799,7 +868,19 @@ fn next_placeholder(text: &str) -> Option<(&str, &str, &str)> {
     let open = text.find(PLACEHOLDER_OPEN)?;
     let body = &text[open + PLACEHOLDER_OPEN.len()..];
     let close = body.find('}')?;
-    Some((&text[..open], &body[..close], &body[close + 1..]))
+    let inner = &body[..close];
+    // A NESTED opener inside the braces means the first `}` closed the inner
+    // placeholder, not this one, so `inner` is a fragment rather than a key:
+    // `${a${b}}` would otherwise yield the key `a${b`, which is a key name
+    // assembled by this scanner rather than written by the source. It refuses no
+    // *value* (no such key is committed, so it was always going to be missing) —
+    // but the fabricated string reached `ConfigUnresolved { keys }` and any key
+    // census verbatim, and a census naming a key nobody wrote is the same
+    // over-read in a smaller place. Treated exactly like the unterminated case.
+    if inner.contains(PLACEHOLDER_OPEN) {
+        return None;
+    }
+    Some((&text[..open], inner, &body[close + 1..]))
 }
 
 /// A placeholder's key: everything before its inline default separator.
