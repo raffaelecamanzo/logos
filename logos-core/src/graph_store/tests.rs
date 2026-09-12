@@ -7,7 +7,6 @@
 //! `CHECK`-constraint tests need to exercise.
 
 use super::*;
-use crate::extract::config::corpus::{ConfigSourceFact, ConfigValueFact};
 use crate::model::{EdgeKind, LogosSymbol, NodeKind};
 
 /// A fresh in-memory store, migrated and ready.
@@ -2543,15 +2542,12 @@ fn replacing_a_configuration_source_with_none_clears_what_it_previously_proved()
         .write_batch(|w| w.insert_file("application.yml", Some("yaml"), Some("h1")))
         .unwrap();
 
-    let fact = ConfigSourceFact {
-        profile: Some("dev".to_string()),
-        values: vec![
-            ConfigValueFact { key: "a.b".to_string(), value: "one".to_string() },
-            ConfigValueFact { key: "a.c".to_string(), value: "two".to_string() },
-        ],
+    let fact = NewConfigSource {
+        profile: Some("dev"),
+        values: &[("a.b", "one"), ("a.c", "two")],
     };
     store
-        .write_batch(|w| w.replace_config_source(file_id, Some(&fact)))
+        .write_batch(|w| w.replace_config_source(file_id, Some(fact)))
         .unwrap();
     assert_eq!(config_row_counts(&store), (1, 2), "the source and both values are recorded");
 
@@ -2580,22 +2576,19 @@ fn re_ingesting_a_configuration_source_replaces_it_and_absorbs_a_duplicate_pair(
         .write_batch(|w| w.insert_file("application.yml", Some("yaml"), Some("h1")))
         .unwrap();
 
-    let first = ConfigSourceFact {
-        profile: None,
-        values: vec![ConfigValueFact { key: "a.b".to_string(), value: "one".to_string() }],
-    };
-    store.write_batch(|w| w.replace_config_source(file_id, Some(&first))).unwrap();
+    let first = NewConfigSource { profile: None, values: &[("a.b", "one")] };
+    store.write_batch(|w| w.replace_config_source(file_id, Some(first))).unwrap();
 
     // Re-ingest with a DIFFERENT value and a deliberately duplicated pair.
-    let second = ConfigSourceFact {
-        profile: Some("prod".to_string()),
-        values: vec![
-            ConfigValueFact { key: "a.b".to_string(), value: "two".to_string() },
-            ConfigValueFact { key: "a.b".to_string(), value: "two".to_string() },
-        ],
+    // The duplicate pair is deliberate: `ConfigSourceFact` cannot produce one
+    // (it is built from a `BTreeMap<_, BTreeSet<_>>`), and this row type can —
+    // which is the point of testing the clause at the store's own boundary.
+    let second = NewConfigSource {
+        profile: Some("prod"),
+        values: &[("a.b", "two"), ("a.b", "two")],
     };
     store
-        .write_batch(|w| w.replace_config_source(file_id, Some(&second)))
+        .write_batch(|w| w.replace_config_source(file_id, Some(second)))
         .expect("a duplicate pair is absorbed, not an error");
 
     assert_eq!(

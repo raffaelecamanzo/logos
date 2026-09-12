@@ -72,7 +72,9 @@ use rayon::prelude::*;
 
 use crate::config::{self, BindingPolicy, Config, ConfigGlobs, DocGlobs};
 use crate::extract::{extract_files, Facts, FileInput, SymbolContext};
-use crate::graph_store::{BatchWriter, NewNode, NewUnresolvedRef, CONFIG_FINGERPRINT_KEY};
+use crate::graph_store::{
+    BatchWriter, NewConfigSource, NewNode, NewUnresolvedRef, CONFIG_FINGERPRINT_KEY,
+};
 use crate::model::{EdgeKind, NodeId, RefForm};
 use crate::models::pipeline::{
     AnnotationStats, DispatchStats, FrameworkStats, IndexResult, PhaseDurations, ResolutionStats,
@@ -1542,7 +1544,7 @@ fn persist_file(
             w.delete_unresolved_refs_for_file(file_id)?;
             let counts = insert_facts(w, facts, file_id)?;
             insert_refs(w, facts, file_id)?;
-            w.replace_config_source(file_id, facts.config_source.as_ref())?;
+            persist_config_source(w, facts, file_id)?;
             for cap in &captured {
                 let kind = EdgeKind::try_from(cap.kind)
                     .with_context(|| format!("captured edge has an unknown kind {}", cap.kind))?;
@@ -1576,11 +1578,39 @@ fn persist_file(
     // The committed-configuration corpus (S-380, FR-WS-19): replace-wholesale,
     // like the reference ledger above. `None` writes nothing, so a member with
     // no configuration corpus is byte-for-byte unaffected.
-    w.replace_config_source(file_id, facts.config_source.as_ref())?;
+    persist_config_source(w, facts, file_id)?;
     Ok(PersistCounts {
         nodes: counts.nodes,
         edges: counts.edges,
     })
+}
+
+/// Adapt a file's extracted configuration facts to the store's row shape and
+/// write them (S-380, [FR-WS-19]).
+///
+/// This is the extraction → store adaptation, and it lives here because the
+/// pipeline is where those two components meet: `graph_store` depends on `model`
+/// alone, so it must not see a `ConfigSourceFact`. `None` still calls through,
+/// because the write is replace-wholesale — a file that stops being a
+/// configuration source must have its old rows cleared.
+///
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+fn persist_config_source(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<()> {
+    let Some(source) = facts.config_source.as_ref() else {
+        return w.replace_config_source(file_id, None);
+    };
+    let values: Vec<(&str, &str)> = source
+        .values
+        .iter()
+        .map(|v| (v.key.as_str(), v.value.as_str()))
+        .collect();
+    w.replace_config_source(
+        file_id,
+        Some(NewConfigSource {
+            profile: source.profile.as_deref(),
+            values: &values,
+        }),
+    )
 }
 
 /// Persist a file's extracted references into the `unresolved_refs` ledger

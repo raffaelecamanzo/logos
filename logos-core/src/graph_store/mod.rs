@@ -52,7 +52,6 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 
-use crate::extract::config::corpus::ConfigSourceFact;
 use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind, RefForm};
 use crate::models::navigation::LanguageCount;
 
@@ -981,6 +980,25 @@ pub struct NewViolation<'a> {
     pub severity: &'a str,
     /// Unix-seconds timestamp of the run.
     pub created_at: i64,
+}
+
+/// A file's committed-configuration contribution, as the store records it
+/// (S-380, [FR-WS-19]): the profile the source declares and its canonical
+/// key → value pairs.
+///
+/// The graph-store-local row shape, following `NewNode`/`NewUnresolvedRef`. The
+/// extraction engine produces a `ConfigSourceFact`; [`pipeline`](crate::pipeline)
+/// adapts it to this on the way in, so the store depends on `model` alone and
+/// the documented extraction → pipeline → store direction is preserved.
+///
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+#[derive(Debug, Clone, Copy)]
+pub struct NewConfigSource<'a> {
+    /// The `application-<profile>` profile, or `None` for the unprofiled source.
+    pub profile: Option<&'a str>,
+    /// Canonical key → value pairs. A key a multi-document source defines twice
+    /// appears once per distinct value.
+    pub values: &'a [(&'a str, &'a str)],
 }
 
 /// The fields needed to insert a reference-ledger row (S-011).
@@ -3253,7 +3271,7 @@ impl BatchWriter<'_> {
     pub fn replace_config_source(
         &self,
         file_id: i64,
-        source: Option<&ConfigSourceFact>,
+        source: Option<NewConfigSource<'_>>,
     ) -> Result<()> {
         self.conn
             .execute("DELETE FROM config_sources WHERE file_id = ?1", [file_id])
@@ -3272,8 +3290,8 @@ impl BatchWriter<'_> {
             "INSERT INTO config_values (source_id, key, value) VALUES (?1, ?2, ?3) \
              ON CONFLICT(source_id, key, value) DO NOTHING",
         )?;
-        for value in &source.values {
-            stmt.execute(rusqlite::params![source_id, value.key, value.value])
+        for (key, value) in source.values {
+            stmt.execute(rusqlite::params![source_id, key, value])
                 .context("inserting configuration value")?;
         }
         Ok(())
