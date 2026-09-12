@@ -1468,6 +1468,11 @@ mod configuration_envelope {
             .map(|v| v.key.len() + v.value.len())
             .sum();
 
+        // Bound once and referenced twice — the report line and the assertion
+        // must never be able to quote different ceilings. This is the same
+        // `let rss_budget = …` shape the NFR-PE-06 check at the head of this
+        // file already uses.
+        let rss_budget = (1024.0 * 1024.0 * 1024.0 * tolerance()) as u64;
         let mib = |b: u64| b / (1024 * 1024);
         eprintln!(
             "\n── S-391 per-member corpus lifetime over {MEMBERS} members ──\n  \
@@ -1479,7 +1484,7 @@ mod configuration_envelope {
             mib(dropping),
             mib(retaining),
             mib(peak),
-            mib((1024.0 * 1024.0 * 1024.0 * tolerance()) as u64),
+            mib(rss_budget),
         );
 
         assert!(
@@ -1492,7 +1497,7 @@ mod configuration_envelope {
             mib(dropping),
         );
         assert!(
-            peak <= (1024.0 * 1024.0 * 1024.0 * tolerance()) as u64,
+            peak <= rss_budget,
             "peak RSS {} MiB over an {MEMBERS}-member workspace exceeds the ≤1 GB ceiling \
              (NFR-PE-06)",
             mib(peak),
