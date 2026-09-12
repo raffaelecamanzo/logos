@@ -834,13 +834,14 @@ mod configuration_envelope {
     /// Write the synthetic member under `root`.
     ///
     /// `config_sources` selects the **only** difference between the two arms of
-    /// the phase-delta measurement: `true` names the files `application*.yml`
-    /// (configuration sources, which the corpus ingests) and `false` names them
-    /// `settings*.yml` (not configuration sources — same extension, same plugin,
-    /// same parse, same byte count, ingested by nothing). Everything else about
-    /// the two trees is identical, so their index-time difference is the
-    /// configuration phase and nothing else.
-    fn write_member(root: &Path, config_sources: bool, value_pad: usize) {
+    /// the phase-delta measurement, and that difference is the **filename**:
+    /// `true` names the files `application*.yml` (configuration sources, which
+    /// the corpus ingests) and `false` names them `settings*.yml` (the same
+    /// extension so the same plugin claims them, byte-identical contents so the
+    /// same parse and the same artifact extraction — and ingested by nothing).
+    /// Everything else about the two trees is identical, so their index-time
+    /// difference is the configuration phase and nothing else.
+    fn write_member(root: &Path, config_sources: bool) {
         // One module descriptor at the root: this is one member, so every source
         // and every class sits in the module `""`.
         write(root, "pom.xml", "<project><artifactId>member</artifactId></project>\n");
@@ -850,7 +851,11 @@ mod configuration_envelope {
             write(
                 root,
                 &format!("svc{dir}/src/main/resources/{stem}.yml"),
-                &unprofiled_body(dir, value_pad),
+                // Unpadded: the on-disk fixture commits realistic short values.
+                // Padding exists only for the in-memory 84-member memory guard,
+                // which reaches `unprofiled_body` through `ingest_member` and
+                // never writes a file.
+                &unprofiled_body(dir, 0),
             );
         }
         for (dir, profile) in profiled_slots() {
@@ -1069,11 +1074,11 @@ mod configuration_envelope {
     fn the_configuration_and_binding_phases_stay_inside_the_three_second_delta() {
         let bare_tmp = TempDir::new().expect("temp root");
         let bare = bare_tmp.path().canonicalize().expect("canonical temp root");
-        write_member(&bare, false, 0);
+        write_member(&bare, false);
 
         let full_tmp = TempDir::new().expect("temp root");
         let full = full_tmp.path().canonicalize().expect("canonical temp root");
-        write_member(&full, true, 0);
+        write_member(&full, true);
         let (corpus, _) = assert_census(&full);
 
         let bare_ms = index_wall_ms(&bare);
@@ -1144,7 +1149,7 @@ mod configuration_envelope {
     fn editing_one_key_re_resolves_only_that_key_within_the_pe03_budget() {
         let tmp = TempDir::new().expect("temp root");
         let root = tmp.path().canonicalize().expect("canonical temp root");
-        write_member(&root, true, 0);
+        write_member(&root, true);
         let (_, properties) = assert_census(&root);
 
         let engine = Engine::start(&root).expect("engine starts");
@@ -1265,7 +1270,7 @@ mod configuration_envelope {
     fn nothing_is_ingested_at_process_start() {
         let tmp = TempDir::new().expect("temp root");
         let root = tmp.path().canonicalize().expect("canonical temp root");
-        write_member(&root, true, 0);
+        write_member(&root, true);
 
         let engine = Engine::start(&root).expect("engine starts");
         assert!(engine.runtime().is_some(), "engine is ready to serve");
@@ -1303,11 +1308,11 @@ mod configuration_envelope {
     fn cold_start_is_unchanged_by_a_configuration_corpus_within_the_pe05_budget() {
         let full_tmp = TempDir::new().expect("temp root");
         let full = full_tmp.path().canonicalize().expect("canonical temp root");
-        write_member(&full, true, 0);
+        write_member(&full, true);
 
         let bare_tmp = TempDir::new().expect("temp root");
         let bare = bare_tmp.path().canonicalize().expect("canonical temp root");
-        write_member(&bare, false, 0);
+        write_member(&bare, false);
 
         let t = Instant::now();
         let engine = Engine::start(&full).expect("engine starts");
