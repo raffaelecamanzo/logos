@@ -459,8 +459,17 @@ impl PropertiesIndex {
     /// module that will ask for it — is recorded as a collision.
     pub fn seal(&mut self) {
         for (name, declarations) in &self.classes {
-            let distinct: BTreeSet<(&String, &BTreeSet<String>)> =
-                declarations.iter().map(|c| (&c.prefix, &c.properties)).collect();
+            // LANGUAGE is part of the identity, not just prefix and properties.
+            // Two declarations of one simple name that agree on the key but were
+            // captured by different plugins are still not interchangeable: `bind`
+            // reads each under its own language's convention, so handing a Java
+            // use site the Kotlin declaration would judge a Java accessor by
+            // Kotlin's rows — the narrow residue of the union this design
+            // replaced. They disagree about something, so they collide.
+            let distinct: BTreeSet<(&String, &BTreeSet<String>, &String)> = declarations
+                .iter()
+                .map(|c| (&c.prefix, &c.properties, &c.language))
+                .collect();
             if distinct.len() > 1 {
                 self.collisions.insert(name.clone());
             }
@@ -477,7 +486,11 @@ impl PropertiesIndex {
         // exists for, and picking the first is the guess it forbids.
         let mut own = declarations.iter().filter(|c| c.module == module);
         if let Some(first) = own.next() {
-            let ambiguous = own.any(|c| c.prefix != first.prefix || c.properties != first.properties);
+            let ambiguous = own.any(|c| {
+                c.prefix != first.prefix
+                    || c.properties != first.properties
+                    || c.language != first.language
+            });
             return (!ambiguous).then_some(first);
         }
         (!self.collisions.contains(simple_type)).then(|| declarations.first()).flatten()

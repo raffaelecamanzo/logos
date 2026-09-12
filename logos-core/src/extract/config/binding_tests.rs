@@ -408,6 +408,34 @@ fn a_colliding_simple_name_in_one_module_resolves_to_nothing() {
 }
 
 #[test]
+#[cfg(feature = "lang-kotlin")]
+fn one_name_declared_in_two_languages_resolves_to_nothing() {
+    // The narrow residue of the union defect, closed by making LANGUAGE part of
+    // a declaration's identity. These two agree on prefix and property set, so
+    // an identity of `(prefix, properties)` alone would call them
+    // interchangeable — and handing a Java use site the Kotlin declaration would
+    // judge a Java accessor under Kotlin's `""` row, which is the leak all over
+    // again, one scope smaller.
+    let mut index = PropertiesIndex::for_plugins(&[plugin("java"), plugin("kt")]);
+    index.absorb_source(
+        plugin("java"),
+        "m/C.java",
+        "m",
+        r#"@ConfigurationProperties(prefix = "api")
+           public class C { private String host; }"#,
+    );
+    index.absorb_source(
+        plugin("kt"),
+        "m/C.kt",
+        "m",
+        "@ConfigurationProperties(prefix = \"api\")\ndata class C(val host: String)",
+    );
+    index.seal();
+    assert!(index.collisions.contains("C"), "two languages, one simple name: a collision");
+    assert!(index.get("C", "m").is_none(), "…and it resolves to nothing, not to whichever came first");
+}
+
+#[test]
 fn identical_declarations_in_several_modules_are_not_a_collision() {
     const PROPS: &str = r#"@ConfigurationProperties(prefix = "api")
                            public class C { private String host; }"#;
