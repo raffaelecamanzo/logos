@@ -7,9 +7,9 @@
 //! harness (`logos-core/tests/operand_resolvability/configuration_agreement.rs`),
 //! where it had been validated against an 84-member Spring estate — 174 sources,
 //! 872 distinct keys, 5 profiles — and the 22 unit tests that covered exactly
-//! these symbols moved with it into `mod tests` below, unmodified. (The rest of
-//! that harness's roughly sixty tests cover the binding and resolution halves,
-//! which have not been promoted; they stayed.) The YAML flattener in particular is a
+//! these symbols moved with it into `mod tests` below, unmodified. (The harness
+//! had 74 tests; the other 52 cover the binding and resolution halves, which have
+//! not been promoted, and stayed.) The YAML flattener in particular is a
 //! **deliberate subset** whose every skip was learned from a real mis-read on
 //! that estate (see [`parse_yaml`]); it is not to be rewritten, and a rewrite
 //! that "simplifies" one of those skips reintroduces a fabricated key.
@@ -78,7 +78,6 @@ pub struct ConfigCorpus {
     /// walk so the class index needs no second traversal of the corpus.
     props_candidates: Vec<String>,
 }
-
 
 impl ConfigCorpus {
     /// Walk the corpus once: discover configuration sources, module roots, and
@@ -449,10 +448,22 @@ pub struct ConfigValueFact {
 /// the file is not a configuration source.
 ///
 /// `path` is project-relative; only its basename decides admission, by exactly
-/// the [`config_profile`] rule [`ConfigCorpus::discover`] uses — so the ingested
-/// population and the measured corpus are the same population, and the parser is
+/// the [`config_profile`] rule [`ConfigCorpus::discover`] uses, and the parser is
 /// chosen by extension the same way. `text` is the source the caller already
 /// holds: this function opens nothing.
+///
+/// # The ingested population is a SUBSET of the measured one
+///
+/// Applying the same rule does not make the two populations equal, because this
+/// function is only ever *reached* for a file the plugin registry claims. No
+/// descriptor claims `.properties` — a grammar for it does not exist — so
+/// `is_config_admitted` never admits one, and the `parse_properties` arm below is
+/// unreachable from the production pipeline. On the reference estate that is 31
+/// of the 174 discovered sources. [`ConfigCorpus::discover`] walks the filesystem
+/// itself and does read them, which is why the census and the tables count
+/// different populations and why the census is measured through `discover`.
+/// Closing the gap needs a `.properties` artifact plugin — registry work that no
+/// story in this sprint owns.
 pub fn source_facts(path: &str, text: &str) -> Option<ConfigSourceFact> {
     let name = path.rsplit('/').next().unwrap_or(path);
     let profile = config_profile(name)?;
@@ -783,11 +794,16 @@ mod tests {
     }
 
     #[test]
-    fn the_ingested_population_is_the_same_population_discover_admits() {
-        // The two entry points must not drift: whatever `config_profile` admits
-        // for the walk, `source_facts` admits for ingestion, and with the same
-        // profile. A drift here would make the AC5 census and the indexed tables
-        // disagree about the same estate.
+    fn config_profile_and_source_facts_agree_on_admission() {
+        // The two entry points must apply the same RULE: whatever `config_profile`
+        // admits for the walk, `source_facts` admits for ingestion, and with the
+        // same profile.
+        //
+        // This is a statement about the rule, not about the populations. The
+        // populations genuinely differ — `.properties` is admitted here and
+        // unreachable in production, for the routing reason `source_facts`'s own
+        // doc comment gives — so do not read a green run here as parity between
+        // the census and the store.
         for name in [
             "application.yml",
             "application.yaml",

@@ -1,7 +1,7 @@
 //! The committed-configuration corpus, end to end (S-380, [CR-121], [FR-WS-19]).
 //!
 //! The unit half of this mechanism moved into
-//! `logos_core::extract::config::corpus` with the ~30 tests it was validated by
+//! `logos_core::extract::config::corpus` with the 22 tests it was validated by
 //! — those prove the flattener. This file proves the two things a unit test
 //! cannot:
 //!
@@ -78,7 +78,11 @@ fn definitions(rt: &Runtime, key: &str) -> Vec<ConfigDefinition> {
 fn corpus_row_counts(root: &Path) -> (i64, i64) {
     let db = root.join(".logos").join("logos.db");
     assert!(db.is_file(), "the index wrote no store at {}", db.display());
-    let conn = rusqlite::Connection::open(&db).expect("open the member store read-only");
+    let conn = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open the member store read-only");
     conn.query_row(
         "SELECT (SELECT count(*) FROM config_sources), (SELECT count(*) FROM config_values)",
         [],
