@@ -119,11 +119,14 @@
 //! plugin's `queries/properties.scm` and `[properties]` descriptor table, which
 //! is where the prohibition above says a real arm's capture belongs.
 //!
-//! Sprint 67 added three more, named here because the sentence below makes
-//! naming them the guard: `identity`'s `APPLICATION_OVERLAY` (S-384), and
-//! `forwarding`'s `JAVA`, `CALL_QUERY` and `DECL_QUERY` (S-392) — a plugin
-//! name, a `method_invocation`/`method_reference` pattern and a
-//! `method_declaration` pattern, all Java tree shapes.
+//! Sprint 67 added four more, named here because the sentence below makes
+//! naming them the guard: `identity`'s `APPLICATION_OVERLAY` and
+//! `MAPPING_ANNOTATIONS` (S-384) — the second a table of Spring's six route
+//! annotation spellings, added at the Sprint 67 review, which the first pass at
+//! this paragraph missed — and `forwarding`'s `JAVA`, `CALL_QUERY` and
+//! `DECL_QUERY` (S-392): a plugin name, a
+//! `method_invocation`/`method_reference` pattern and a `method_declaration`
+//! pattern, all Java tree shapes.
 //!
 //! This list is **open, not closed**: anything of that kind added to this
 //! harness or its submodules is covered by the same carve-out and the same
