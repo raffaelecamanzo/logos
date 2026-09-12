@@ -212,28 +212,43 @@ pub struct CorpusLookup<'a>(pub &'a ConfigCorpus);
 
 impl ConfigLookup for CorpusLookup<'_> {
     fn definitions(&self, key: &str, module: &str) -> Vec<ConfigDefinition> {
-        let mut out = Vec::new();
-        for source in &self.0.sources {
-            if source.module != module {
-                continue;
-            }
-            let Some(values) = source.values.get(key) else {
-                continue;
-            };
-            for value in values {
-                out.push(ConfigDefinition {
-                    path: source.path.clone(),
-                    profile: source.profile.clone(),
-                    value: value.clone(),
-                });
-            }
-        }
-        // The store returns `(path, value)`-ordered rows, so the harness's corpus
-        // view must too — `Agreement` groups by value and the profile lists it
-        // produces would otherwise differ between the two seams.
-        out.sort_by(|a, b| (&a.path, &a.value).cmp(&(&b.path, &b.value)));
-        out
+        definitions_in(self.0, key, Some(module))
     }
+}
+
+/// Every committed definition of one **canonical** key in `corpus`, optionally
+/// narrowed to one module — the single `ConfigSource` → [`ConfigDefinition`]
+/// conversion this harness performs.
+///
+/// One function rather than two, because the module-scoped and workspace-wide
+/// readings differ only in that filter, and the sort below is load-bearing for
+/// both: the store returns `(path, value)`-ordered rows, [`Agreement`] groups by
+/// value, and the profile lists it produces would differ between the two seams
+/// if either ordering drifted. Two copies of that meant the warning guarded one
+/// of them.
+fn definitions_in(
+    corpus: &ConfigCorpus,
+    canonical: &str,
+    module: Option<&str>,
+) -> Vec<ConfigDefinition> {
+    let mut out = Vec::new();
+    for source in &corpus.sources {
+        if module.is_some_and(|m| source.module != m) {
+            continue;
+        }
+        let Some(values) = source.values.get(canonical) else {
+            continue;
+        };
+        for value in values {
+            out.push(ConfigDefinition {
+                path: source.path.clone(),
+                profile: source.profile.clone(),
+                value: value.clone(),
+            });
+        }
+    }
+    out.sort_by(|a, b| (&a.path, &a.value).cmp(&(&b.path, &b.value)));
+    out
 }
 
 /// The value S-365's rule admits: the one every committed source agrees on, and
@@ -279,21 +294,7 @@ pub fn census_detail(agreement: &Agreement) -> String {
 /// What the whole workspace's sources prove about `key`, ignoring module scope —
 /// the census reading [CR-115] §3.4's words take literally.
 pub fn workspace_agreement(corpus: &ConfigCorpus, key: &str) -> Agreement {
-    let canonical = canonical_key(key);
-    let mut defs = Vec::new();
-    for source in &corpus.sources {
-        if let Some(values) = source.values.get(&canonical) {
-            for value in values {
-                defs.push(ConfigDefinition {
-                    path: source.path.clone(),
-                    profile: source.profile.clone(),
-                    value: value.clone(),
-                });
-            }
-        }
-    }
-    defs.sort_by(|a, b| (&a.path, &a.value).cmp(&(&b.path, &b.value)));
-    Agreement::of(&defs)
+    Agreement::of(&definitions_in(corpus, &canonical_key(key), None))
 }
 
 // ── The configuration-binding index (S-381) ────────────────────────────────
@@ -314,6 +315,27 @@ pub fn workspace_agreement(corpus: &ConfigCorpus, key: &str) -> Agreement {
 // moved with their semantics intact — and the reference-workspace figures below
 // are the check on that claim.
 pub use logos_core::extract::config::binding::PropertiesIndex;
+
+/// The harness's resolution context: the promoted [`Resolver`] plus the
+/// configuration-bound class index it deliberately does **not** carry.
+///
+/// `Resolver` was promoted without a `props` field because the shipped resolver
+/// never reads one — finding *which key* an operand names is the tree-sitter,
+/// language-shaped half that stays here ([CR-121] §5.1). That half needs the
+/// index, so the harness pairs the two itself rather than making production
+/// carry a field only this file reads.
+#[derive(Clone, Copy)]
+pub struct Judge<'a> {
+    pub resolver: Resolver<'a>,
+    pub props: &'a PropertiesIndex,
+}
+
+impl Judge<'_> {
+    /// What the committed sources prove about `key`, in this judge's scope.
+    fn agreement(&self, key: &str) -> Agreement {
+        self.resolver.agreement(key)
+    }
+}
 
 /// The plugin whose accessor convention `resolve_getter` judges by. A literal
 /// here and nowhere in `logos-core`: this harness is deliberately
@@ -357,16 +379,16 @@ pub fn resolve_key(
     node: Node<'_>,
     src: &[u8],
     unit: &Unit<'_>,
-    resolver: Resolver<'_>,
+    judge_ctx: Judge<'_>,
 ) -> KeyOutcome {
-    resolve_key_at(node, src, unit, resolver, FOLD_DEPTH)
+    resolve_key_at(node, src, unit, judge_ctx, FOLD_DEPTH)
 }
 
 fn resolve_key_at(
     node: Node<'_>,
     src: &[u8],
     unit: &Unit<'_>,
-    resolver: Resolver<'_>,
+    judge_ctx: Judge<'_>,
     depth: usize,
 ) -> KeyOutcome {
     if let Some(key) = environment_key(node, src) {
@@ -374,7 +396,7 @@ fn resolve_key_at(
     }
     let kind = node.kind();
     if kind.contains("call") || kind.contains("invocation") {
-        return resolve_getter(node, src, unit, resolver);
+        return resolve_getter(node, src, unit, judge_ctx);
     }
     // A bare (or qualified) name: `@Value("${…}")` is the only one-hop form.
     if let Some(name) = operand_name(node, src) {
@@ -425,7 +447,7 @@ fn resolve_key_at(
             if value.id() == node.id() || depth == 0 {
                 continue;
             }
-            let outcome = resolve_key_at(value, src, unit, resolver, depth - 1);
+            let outcome = resolve_key_at(value, src, unit, judge_ctx, depth - 1);
             if let Some(key) = outcome.key() {
                 keys.insert(key.to_string());
                 resolved.get_or_insert(outcome);
@@ -526,7 +548,7 @@ fn resolve_getter(
     node: Node<'_>,
     src: &[u8],
     unit: &Unit<'_>,
-    resolver: Resolver<'_>,
+    judge_ctx: Judge<'_>,
 ) -> KeyOutcome {
     let Some(function) = node
         .child_by_field_name("name")
@@ -555,7 +577,7 @@ fn resolve_getter(
     // accessor, and `NotAGetter` would stop being reachable at all. Naming the
     // language here is the parent harness's stated carve-out, not a leak of one
     // into `logos-core`.
-    if !resolver.props.names_an_accessor(JAVA_PLUGIN, method) {
+    if !judge_ctx.props.names_an_accessor(JAVA_PLUGIN, method) {
         return KeyOutcome::Unresolved(Refusal::NotAGetter);
     }
     let Some(receiver_name) = operand_name(receiver, src) else {
@@ -564,10 +586,10 @@ fn resolve_getter(
     let Some(declared) = unit.declared_type(&receiver_name) else {
         return KeyOutcome::Unresolved(Refusal::ReceiverTypeUnknown);
     };
-    let Some(class) = resolver.props.get(declared, resolver.module) else {
+    let Some(class) = judge_ctx.props.get(declared, judge_ctx.resolver.module) else {
         return KeyOutcome::Unresolved(Refusal::NoPropertiesClass);
     };
-    match resolver.props.bind(class, method) {
+    match judge_ctx.props.bind(class, method) {
         Ok(binding) => KeyOutcome::Resolved {
             key: binding.key,
             source: KeySource::Properties,
@@ -666,7 +688,7 @@ pub fn judge(
     kinds: &[OperandKind],
     src: &[u8],
     unit: &Unit<'_>,
-    resolver: Resolver<'_>,
+    judge_ctx: Judge<'_>,
     route_required: bool,
 ) -> Judgement {
     // Resolution is attempted on every operand that does **not** fold — not
@@ -683,7 +705,7 @@ pub fn judge(
     // it is the denominator [CR-115]'s acceptance criterion names.
     let mut outcomes: Vec<Option<KeyOutcome>> = Vec::with_capacity(nodes.len());
     for (node, kind) in nodes.iter().zip(kinds) {
-        outcomes.push((!kind.is_foldable()).then(|| resolve_key(*node, src, unit, resolver)));
+        outcomes.push((!kind.is_foldable()).then(|| resolve_key(*node, src, unit, judge_ctx)));
     }
     // Already admitted: a single static literal needs nothing from this change.
     // Shares the parent's predicate rather than restating it — two spellings of
@@ -729,7 +751,7 @@ pub fn judge(
 
     let agreements: Vec<Option<Agreement>> = outcomes
         .iter()
-        .map(|o| o.as_ref().and_then(KeyOutcome::key).map(|k| resolver.agreement(k)))
+        .map(|o| o.as_ref().and_then(KeyOutcome::key).map(|k| judge_ctx.agreement(k)))
         .collect();
     if agreements.iter().flatten().any(|a| matches!(a, Agreement::Missing)) {
         return Judgement { outcomes, verdict: Verdict::MissingKey };
@@ -941,7 +963,7 @@ pub fn collect_header_publishes(
     src: &[u8],
     unit: &Unit<'_>,
     rel: &str,
-    resolver: Resolver<'_>,
+    judge_ctx: Judge<'_>,
 ) -> Vec<BrokerSite> {
     use tree_sitter::{QueryCursor, StreamingIterator};
     let names = query.capture_names();
@@ -974,7 +996,7 @@ pub fn collect_header_publishes(
         let kinds: Vec<OperandKind> =
             nodes.iter().map(|n| super::classify(*n, src, unit, FOLD_DEPTH)).collect();
         let literal_topic = static_literal(topic, src).is_some();
-        let judgement = judge(&nodes, &kinds, src, unit, resolver, false);
+        let judgement = judge(&nodes, &kinds, src, unit, judge_ctx, false);
         out.push(BrokerSite {
             file: rel.to_string(),
             line: method.start_position().row as u32 + 1,
@@ -1034,7 +1056,7 @@ pub fn collect_base_urls(
     src: &[u8],
     unit: &Unit<'_>,
     rel: &str,
-    resolver: Resolver<'_>,
+    judge_ctx: Judge<'_>,
 ) -> Vec<BaseUrlSite> {
     use tree_sitter::{QueryCursor, StreamingIterator};
     let names = query.capture_names();
@@ -1074,9 +1096,9 @@ pub fn collect_base_urls(
                 proven_at_the_call_site(value),
             ),
             None => {
-                let outcome = resolve_key(arg, src, unit, resolver);
+                let outcome = resolve_key(arg, src, unit, judge_ctx);
                 let agreement = match &outcome {
-                    KeyOutcome::Resolved { key, .. } => resolver.agreement(key),
+                    KeyOutcome::Resolved { key, .. } => judge_ctx.agreement(key),
                     KeyOutcome::Unresolved(_) => Agreement::Missing,
                 };
                 (outcome, agreement)
@@ -1700,10 +1722,12 @@ pub fn s382_reading(m: &super::Measurement) -> S382Reading {
                 // taken over, and the one ADR-64's "within reach of the reading
                 // module" names.
                 let module = m.config.module_of(&site.file).to_string();
-                let lookup = CorpusLookup(&m.config);
                 for key in site.key_outcomes.iter().flatten().filter_map(KeyOutcome::key) {
-                    let agreement =
-                        Agreement::of(&lookup.definitions(&canonical_key(key), &module));
+                    let agreement = Agreement::of(&definitions_in(
+                        &m.config,
+                        &canonical_key(key),
+                        Some(&module),
+                    ));
                     if let Agreement::Divergent(values) = agreement {
                         out.divergent_values += values.len();
                     }
@@ -1807,8 +1831,7 @@ fn describe_keys(outcomes: &[Option<KeyOutcome>], corpus: &ConfigCorpus, module:
                 out.push_str(&format!("\n      <unresolved: {}>", refusal.label()));
             }
             KeyOutcome::Resolved { key, declared_in, source } => {
-                let scoped =
-                    Agreement::of(&CorpusLookup(corpus).definitions(&canonical_key(key), module));
+                let scoped = Agreement::of(&definitions_in(corpus, &canonical_key(key), Some(module)));
                 let workspace = workspace_agreement(corpus, key);
                 out.push_str(&format!(
                     "\n      {key}  via {}  module: {}  workspace: {}{}",
@@ -1842,9 +1865,30 @@ fn describe_keys(outcomes: &[Option<KeyOutcome>], corpus: &ConfigCorpus, module:
 #[test]
 fn measure_configuration_agreement_over_the_reference_workspace() {
     let Some(root) = super::corpus_root() else {
+        // **A skip that reads as a pass is a false green, so it is named on
+        // stdout AND in the test name's own terms.** With `LOGOS_REF_WORKSPACE`
+        // unset this test reports `ok` — not `ignored` — and nothing in this
+        // repository sets the variable, so the S-382 AC5 assertions below
+        // (79 / 2 / 4 profile-labelled values) do not run in any default `cargo
+        // test`, nor in the gate. Review found exactly that: a mutation that
+        // zeroed every AC5 figure still exited 0.
+        //
+        // Printed rather than `panic!`-ed because the reference workspace is a
+        // developer-local checkout that CI does not have, and failing without
+        // it would make the suite unrunnable off this machine. What the skip
+        // must not do is stay invisible: the sprint's evidence has to say that
+        // AC5 was verified by an env-set run, and this line is what a reader
+        // greps for to check that claim.
+        println!(
+            "SKIPPED: LOGOS_REF_WORKSPACE is unset, so the S-365 measurement and the \
+             S-382 AC5 assertions did NOT run. This test reports `ok` having measured \
+             NOTHING. Run `LOGOS_REF_WORKSPACE=<path> cargo test -p logos-core \
+             --features lang-java --test operand_resolvability` to measure."
+        );
         eprintln!(
             "SKIPPED: set LOGOS_REF_WORKSPACE=<path to the reference workspace> to run the \
-             S-365 measurement (see this module's docs for the recorded finding)."
+             S-365 measurement and the S-382 AC5 assertions (see this module's docs for \
+             the recorded finding). This run measured nothing."
         );
         return;
     };
@@ -2072,9 +2116,11 @@ mod fixtures {
                 .iter()
                 .map(|n| super::super::classify(*n, src, &unit, FOLD_DEPTH))
                 .collect();
-            let resolver =
-                Resolver { corpus: &CorpusLookup(&self.corpus), props: &self.props, module: "" };
-            judge(&nodes, &kinds, src, &unit, resolver, route_required).verdict
+            let judge_ctx = Judge {
+                resolver: Resolver { corpus: &CorpusLookup(&self.corpus), module: "" },
+                props: &self.props,
+            };
+            judge(&nodes, &kinds, src, &unit, judge_ctx, route_required).verdict
         }
     }
 

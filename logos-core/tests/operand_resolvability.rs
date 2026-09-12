@@ -1065,11 +1065,13 @@ struct ScanCtx<'a> {
 }
 
 impl<'a> ScanCtx<'a> {
-    fn resolver(&'a self) -> configuration_agreement::Resolver<'a> {
-        configuration_agreement::Resolver {
-            corpus: &self.lookup,
+    fn resolver(&'a self) -> configuration_agreement::Judge<'a> {
+        configuration_agreement::Judge {
+            resolver: configuration_agreement::Resolver {
+                corpus: &self.lookup,
+                module: &self.module,
+            },
             props: self.properties,
-            module: &self.module,
         }
     }
 }

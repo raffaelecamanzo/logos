@@ -963,7 +963,7 @@ A bound row's `to` is the **same** pair
 [`xservice route-providers`](#xservice-workspace-federation-queries) reports for that
 reference — the two surfaces are computed from one pass and cannot disagree.
 
-Four things worth knowing about these fields:
+Five things worth knowing about these fields:
 
 - **`to` and `candidates` are optional.** A row with no provider to name
   (`no-provider-in-workspace`, `path-not-composed`, `topic-not-literal`,
@@ -981,6 +981,35 @@ Four things worth knowing about these fields:
   `unbound` and no edge exists — `disposition` says which of the two a listed set
   is (`tied-between` = none bound; `bound-to` = all bound, the broker fan-out
   shape, where one publish reaches every cross-member subscriber).
+- **`provenance` is not optional either, and it says where the target came
+  from.** Every row carries it, in every state. `"literal"` means the target is
+  written at the call site; `"config-bound"` means it was read from **committed
+  configuration**, and the row then also carries `bound` — one entry per
+  configuration key the target names, each with its defining files and the
+  profiles that prove it; `"config-unresolved"` means the target names keys the
+  committed sources do not admit, and carries `keys` and `refusal`. An admitted
+  value must never be indistinguishable from an observed one, so a consumer that
+  renders a target without reading this field is presenting configuration as
+  source text.
+
+```jsonc
+// A configuration-bound row: the target was read, not written.
+{ "relation": "route", "from": { "member": "web", "symbol": "…" },
+  "bucket": "bound", "state": "bound", "intake": "invocation",
+  "to": { "member": "orders", "symbol": "…" },
+  "provenance": "config-bound",
+  "bound": [ { "key": "orders.base", "source": "placeholder",
+               "values": [ { "value": "/orders",
+                             "profiles": [ "docker" ], "unprofiled": false,
+                             "sources": [ "src/main/resources/application-docker.yml" ] } ] } ] }
+```
+
+  Two or more entries in a `values` list is an **overlay divergence**: the
+  overlays commit different values and every one is retained with the profiles
+  that prove it, never averaged and never refused. Note that a `config-bound`
+  row is deliberately **excluded from `resolved_cross_service_edges`**: the
+  coverage tier resolves the placeholders, but the bridge still keys a consumer
+  on its raw ledger target, so no edge is drawn for it yet.
 
 ##### The counts are two populations: read the split
 
