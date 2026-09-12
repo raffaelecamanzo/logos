@@ -1,0 +1,311 @@
+S-392, measured 2026-09-12 against ~/source/pec-services (82 members with source,
+2447 Java files, read-only walk — NOT a re-enrolment). Produced by
+`measure_the_one_hop_forwarding_residue_over_the_reference_workspace`; re-run it
+with LOGOS_REF_WORKSPACE set to reproduce every figure below verbatim.
+
+  CR-121 CRA-05 IS FALSIFIED ON PRODUCTION SOURCE, UNDER BOTH READINGS
+  OF FR-WS-23 AC1.
+
+  Floor, declared 2026-09-12T12:33:41Z before any measurement code existed:
+  >= 7 of the 13 production publish sites resolve at one hop, within their own
+  build module. Measured: 0 under the criterion as written, 6 under the most
+  favourable reading available. S-393 and S-394 stay UNPLANNED; FR-WS-23 is
+  marked WITHDRAWN IN PLACE, never deleted, per its own GATED banner.
+
+
+AC1 — THE POPULATIONS, PRODUCTION AND TEST, NEVER SUMMED
+
+  population        main   test
+  publish sites       13     41
+  client sites*        4      0
+
+  arm             tree   candidates  resolved
+  broker-publish  main           13         0
+  broker-publish  test            3         2
+  client-call     main            4         1
+  client-call     test            0         0
+
+  * gate-admitted client-call sites carrying at least one bare-parameter
+    operand, after the CR-115 agreement rule has already refused them for no key.
+
+FIVE independent reconciliations against the record, all exact, which is why the
+zero above is a measurement and not a broken walk: 13 main / 41 test publish
+sites is S-365's `broker/main 13` and `broker/test 41`; 52 files carrying a
+publish site is the figure `plugins/java/queries/brokers.scm` records beside its
+54 sites; 2447 Java files is the S-355 and S-374 java row; 4 production
+client-call parameter operands is exactly the "plus 4 Java method parameters"
+S-365 recorded as part of its 30-site no-key residue; and 13 main + 3 test = 16
+broker candidates is exactly `brokers.scm`'s "19 pass an identifier (16 of them a
+method parameter)" — an independent cross-check of the bare-parameter
+classification itself, at the arm level this measurement never reads.
+
+The broker TEST arm's 3 candidates are 41 sites less the 38 whose topic is NOT a
+bare parameter — S-365's 38 IT-class admits, in their complement. (Not "the 38
+that carry a literal topic", which an earlier draft of this file said and which
+is false in the other direction: `brokers.scm` records that NONE of the 54
+header-form sites carries a literal topic. The 38 are sites whose topic RESOLVED
+to a configuration key.)
+
+
+AC2 — THE RESIDUE, AND THE TWO MECHANISMS THAT PRODUCE IT
+
+  broker-publish / main, 13 candidates — every reason, zeros included, because
+  AC2 names two quantities and a suppressed row hides one of them:
+      0  operand is a constructor/lambda parameter
+      0  method has no call site anywhere
+      0  every call site is outside the build module
+      7  an in-module call site passes a parameter (2+ hops)
+      6  an in-module call site's argument resolves to nothing
+      0  in-module call sites disagree
+
+  So of AC2's two named quantities, "two or more hops" is 7 and "reaches outside
+  its module" is 0: on this estate every wrapper's callers are inside its own
+  build module, and the bound that fails is the HOP count, not the module scope.
+
+  AGREEING CALL SITES, the other figure AC2 names: of 141 in-module call sites
+  observed, 0 agree under the criterion as written — zero by construction, since
+  no candidate resolved — and 19 agree across the six main-only resolutions.
+
+These are two different faults and only one of them is about the estate's Java.
+
+  (a) SEVEN sites need a SECOND HOP IN PRODUCTION SOURCE ITSELF. CRA-05 asserts
+      the topic is "syntactically present at the wrapper's call sites". For
+      these seven it is not: there are TWO wrapper layers. A thin
+      `XxxKafkaProducer.send(key, payload)` in src/main calls
+      `KafkaProducer.sendMessage(key, payload, topic)` forwarding ITS OWN
+      parameter, and the topic literal lives one level above that again.
+      Named, with the src/main call site that decides it:
+
+        archive-listener-adapter        ArchiveEventKafkaProducer.java:16
+        deprecated-mailbox-core/manager DelayedMessageKafkaProducer.java:23
+        pecserver-facade                PecServerOperationKafkaProducer.java:23
+        archive-manager                 DelayedMessageKafkaProducer.java:21
+        mailbox-manager                 DelayedMessageKafkaProducer.java:23
+        official-log-export-job-worker  OfficialLogOutcomeKafkaProducer.java:17
+        official-log-export-job-manager DelayedMessageKafkaProducer.java:19
+
+      7 of 13 is 54%. The floor fixed the maximum tolerable residue at 6 of 13
+      (46%), which is the "declared share" CR-121 §7's slope risk row requires.
+      This mechanism alone clears it, and it is not reachable by narrowing the
+      agreement rule, tightening the classifier, or resolving more keys — the
+      information is two call frames away and FR-WS-23 fixes the bound at one
+      "with no recursion and no fixpoint", in its acceptance criteria, on the
+      stated ground that logos-core ships no dataflow.
+
+  (b) SIX sites ARE exactly CRA-05's shape, and are refused only by TEST-TREE
+      call sites. Every one resolves under the main-only reading, and every one
+      resolves to a @ConfigurationProperties key:
+
+        archive-api                spring.kafka.topics.archiveCommands     2 sites
+        archive-api-logiclens-fork spring.kafka.topics.archiveCommands     2 sites
+        deprecated-mailbox-core/api spring.kafka.topics.mailboxCommands    4 sites
+        official-log-export-api    spring.kafka.topics.exportJobsRequests  1 site
+        mailbox-api                spring.kafka.topics.mailboxCommands     8 sites
+        archive-feeder             spring.kafka.topics.archiveEventsQueue  2 sites
+
+      What blocks them is FR-WS-23 AC1 read literally — "every call site of that
+      method within its build module". The build module contains the test tree,
+      and the test tree contains Mockito stubs:
+      `doNothing().when(kafkaProducer).sendMessage(any(), any(), any())`. A
+      `Mockito.any()` is a syntactic call site with an operand that resolves to
+      nothing, so under the criterion as written it refuses the whole method.
+      This is a defect in the criterion, not in the estate: a stub is not a
+      publish, and a rule that lets one veto a real coupling admits nothing on
+      any estate that mocks its producer.
+
+  SENSITIVITY, and why the falsification does not rest on which reading is
+  chosen. Headline (every in-module call site): 0 of 13. Main-only (agreement
+  taken over src/main call sites only): 6 of 13. The floor is 7. BOTH ARE BELOW
+  IT. A reader who thinks AC1 was written too literally, and a reader who thinks
+  it was written correctly, reach the same verdict — which is the property a
+  blocking gate needs and the reason both figures are reported rather than one
+  being chosen.
+
+  CONSEQUENCE FOR CR-121 §6. Its criterion reads "the 13 production publish
+  sites resolve, and Producer nodes rise from 0 to at least 13". The ceiling this
+  mechanism can reach, with AC1 narrowed to production call sites and every other
+  judgement resolved favourably, is 6. Not 13, and not 7.
+
+  The other arms, reported and carrying no floor:
+    broker/test     2 of 3 resolve; 1 refuses because its in-module call sites
+                    disagree. A test-tree yield is never summed with production's
+                    — averaging the two trees is how CR-117 looked validated at
+                    38 of 54 while being false on the population it was written
+                    over (Sprint 65).
+    client-call/main 1 of 4 resolves. 2 of the remaining 3 have no call site
+                    anywhere in the estate, and 1 needs a second hop. The client
+                    arm carries no floor: CR-121 attaches no promised figure to
+                    it, and its only nearby number — "roughly 8 sites" — is the
+                    overlay-union decision (§8), a different mechanism which
+                    CR-121 itself records as a correctness decision and not a
+                    coverage one.
+
+
+AC3 — CAN THE EXISTING `Calls` LEDGER ANSWER THE HOP? (CRA-06)
+
+  files run through `extract::extract`      2447
+  `Calls` rows recorded (denominator)      45625
+  rows naming a wanted method                773
+  distinct (caller declaration, method)      773
+  in-module call sites observed              141
+  call sites the dedup collapses away         17
+  call sites in files the ledger misses        0
+  method references to a wanted method         1
+  methods whose bare name is ambiguous         7
+  ledger fields carrying the operand           0
+
+  THE ANSWER IS HALF YES, AND THE HALF THAT IS NO IS THE HALF THE HOP NEEDS.
+
+  The DIRECTION is answerable. 773 rows name a wanted method, the file set they
+  point at covers every syntactic call site this walk found (the "call sites in
+  files the ledger misses" row is 0), and no new index is needed to ask "which
+  declarations call this method".
+
+  The OPERAND is not carried, and this is measured rather than read off
+  `RefFact`'s field list: not one of the 45625 rows carries a text equal to a
+  value the hop resolved. `RefFact` holds (source, target, alias, form, kind,
+  line, relation) and no argument, so every one of the 141 in-module call sites
+  had to be re-parsed from source to read its positional argument. CRA-06 asks
+  whether the lookup is answerable "without a new index"; the honest answer is
+  that the lookup is, and the READ is not.
+
+  Two further costs the ledger imposes on the rule as written:
+
+  1. DEDUP HIDES CALL SITES. The ledger keys on
+     (source, target, form, kind, relation) and ignores `line`, so two calls of
+     one wrapper inside one declaration are ONE row. 17 of the 141 in-module call
+     sites — 12% — are invisible to it. The 17 is exact, not an upper bound: a
+     call outside any method or constructor (a field initialiser, a static block)
+     has no enclosing declaration to collapse INTO, and is excluded from the
+     arithmetic rather than pooled under one file-scope key. FR-WS-23 AC1 requires EVERY call site to
+     agree; a rule implemented against the ledger alone would check a subset and
+     report agreement it had not established. On this estate that would have
+     turned at least one refusal into a false admit.
+
+  2. A METHOD REFERENCE IS NOT A LEDGER ROW. One `Foo::bar` reference to a wanted
+     method exists on the estate. It reaches the wrapper and supplies no
+     argument, so under FR-WS-23 AC1 it refuses the method; the ledger records a
+     `Calls` row for an invocation and not for a reference, so it is reported on
+     its own line rather than counted as a coverage gap. It changes no verdict
+     here — it is out of module for every candidate — but an implementation that
+     read only the ledger would not know the reference existed.
+
+  3. THE TARGET IS A BARE NAME. 773 rows name a wanted method but only 141 call
+     sites are in a candidate's own module, and 7 wanted names are declared by
+     two or more `method_declaration`s inside one build module. `sendMessage` is
+     not a distinctive name. Binding by name plus arity, as this measurement
+     does, is a heuristic; the ledger offers nothing stronger.
+
+     THE SEVEN WERE CHECKED BY HAND, because they are the only thing standing
+     between this heuristic and a compromised headline: every one is a base
+     `KafkaProducer.sendMessage/3` together with a subclass override of the same
+     signature, and every one of the 13 candidates' deciding blockers is either a
+     `super.sendMessage(...)` inside that same producer hierarchy — a genuine
+     call of the candidate method — or a Mockito stub on a mock of that class.
+     Under receiver-aware binding every verdict above is unchanged.
+
+
+AC4 — THE FLOOR, AND WHAT FOLLOWS
+
+  Declared 2026-09-12T12:33:41Z, before any measurement code existed, in
+  docs/planning/sprints/.pending/S-392-T1-floor.txt and reproduced byte-for-byte
+  as forwarding_floor.txt beside this file, because .pending/ is gitignored.
+  `the_floor_is_the_one_declared_before_the_run` parses the figure out of that
+  text and compares it to ONE_HOP_FLOOR, so the constant cannot be edited to
+  clear a future run without the declaration being edited too.
+
+  FALSIFIED: 0 (and 6 under the most favourable reading) against a floor of 7.
+  S-393 and S-394 stay UNPLANNED. FR-WS-23 is marked WITHDRAWN IN PLACE with its
+  criteria shown as superseded — the procedure FR-WS-10 and FR-WS-18 demonstrate
+  — and is never deleted.
+
+  WAS THE FLOOR BADLY CHOSEN? It is not revised after the run, and it stands
+  unchanged. But the question deserves an answer rather than a silence: no, and
+  the result does not turn on it. A floor of 6 would have been cleared by the
+  main-only reading and by nothing else; a floor of 1 would have been cleared by
+  it too. What decides this gate is not the threshold but mechanism (a): seven of
+  thirteen sites hold their topic two call frames away, and no choice of floor
+  between 7 and 13 changes that, nor does any reading of AC1.
+
+  NON-VACUITY. The run is not a walk that walked nothing: 82 members, 2447 Java
+  files, 52 files carrying a publish site, 13 production publish sites (the
+  enumerated population, not fewer), 45625 `Calls` rows, and every site the
+  authority recogniser found joined to an AST node (sites_without_a_node = 0).
+  Each is asserted, and each failure is VOID rather than FALSIFIED.
+
+  THE GENERALITY CAVEAT declared before the run — that a pass resting on one
+  wrapper method or one member licenses little — is moot here: nothing resolved.
+  It is reported anyway, by the run, because it was declared.
+
+
+AC5 — THE MEASURED COST OF THE HOP
+
+  enumerate the sites (what the arm does today)   8.9 s   over 2447 files
+  hop, whole estate                               5.5 s   over 2447 files
+  hop, ledger-targeted files only                 1.2 s   over  366 files
+  amortised per candidate (targeted)          60 283 us   over   20 candidates
+
+  The targeted figure is the one a perf reconciliation should use: 1.2 s is the
+  parse-and-resolve cost of opening the 366 files the `Calls` ledger names as
+  callers of a wanted method, on an 84-member estate, single-threaded, in a debug
+  build. It opens 15% of the files (366 of 2447) and costs 22% of the naive
+  pass's time, so the ledger's direction lookup pays for itself even though it
+  cannot supply the operand. Those are two different denominators and an earlier
+  draft of this file quoted the file ratio as though it were the time ratio.
+
+  FOUR caveats, stated because a figure without them is not usable:
+  * IO IS EXCLUDED. Sources are read before any timer starts, so these are
+    parse-and-resolve figures. CR-121 CRA-07 asserts the extract pass has already
+    read those files; if that holds, excluding IO is the right model, and if it
+    does not, add the estate's read cost.
+  * DEBUG BUILD, single-threaded. A release build and the existing rayon walk
+    both move this down; neither was measured, so neither is claimed.
+  * AMORTISED, NOT MARGINAL. The per-candidate figure divides a fixed 366-file
+    parse by 20 candidates; it falls as candidates rise and must not be
+    multiplied out to project a larger estate.
+  * AN UPPER BOUND, because the timed passes do work a real implementation would
+    not. They compile `CALL_QUERY` and `DECL_QUERY` afresh per file rather than
+    once, and they run the same-name ambiguity census inside the timer even
+    though it is measurement scaffolding. Both were left in rather than hoisted,
+    because hoisting them would change the figures this file records; the effect
+    is stated instead. The bias is against the change request, which is the safe
+    direction.
+
+
+METHOD, AND WHY NO RE-ENROLMENT. The reference workspace is ground truth for
+several of this sprint's measured criteria and re-enrolling it is a destructive
+84-member operation (sprint-66 §7). This measurement walks the corpus read-only
+through the production `extract::extract` pass and the production plugin queries,
+and touches no `.logos` store. Nothing under ~/source/pec-services was written.
+
+WHAT IS NOT MEASURED HERE, stated rather than left to be discovered:
+  * NON-JAVA ARMS. The header publish form is expressible only in Java's
+    grammar, and the parameter-slot navigation below reads Java node kinds. Go,
+    Python and TypeScript client-call sites are outside this measurement. On this
+    estate that costs nothing measurable — S-365 recorded the client arm's
+    parameter residue as 4 Java sites — but it is a scope, not a zero.
+  * MEMBER COUNT. 82, not the estate's 84 clones: a member appears here only if
+    it holds a file the plugin registry claims, and a nested Maven module
+    (deprecated-mailbox-core/manager) is counted under its parent directory. The
+    non-vacuity assertion is a floor, not an equality, for this reason.
+  * THREE SHAPES THE SLOT ARITHMETIC CANNOT READ, each now DETECTED rather than
+    silently dropped. A varargs `spread_parameter` and a single-identifier lambda
+    parameter yield no positional slot, and both used to return silently from
+    candidate construction, shrinking the denominator the floor is stated over.
+    They are now counted into `operands_without_a_slot` and asserted zero, so if
+    one ever appears the run is VOID rather than quietly short. An explicit
+    receiver parameter (`void m(Foo this, String topic)`) would have shifted
+    every later slot by one and is now filtered. The estate writes none of the
+    three — verified by grep for the first two and by all 13 candidates reporting
+    `sendMessage(3)` for the third — so no recorded figure moves.
+  * A VARARGS CALLEE would be reported as having no call site at all, because
+    call sites are matched on an exact argument count. No `send`/`sendMessage`
+    declaration on the estate is varargs, and the two client-arm candidates that
+    report "no call site anywhere" are `post(2)` and `delete(2)`, both with
+    explicit two-parameter signatures. Stated because the label would be
+    misleading on an estate that did write one.
+  * WHETHER A SECOND HOP WOULD SUCCEED. Mechanism (a) is reported as a refusal
+    with its site named; this run did not follow it. Whether two hops would
+    resolve those seven is a different measurement, and proposing it is a
+    different change request — one that would have to argue for the dataflow
+    slope FR-WS-23's own risk row exists to prevent.

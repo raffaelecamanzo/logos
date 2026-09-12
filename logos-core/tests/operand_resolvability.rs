@@ -119,6 +119,12 @@
 //! plugin's `queries/properties.scm` and `[properties]` descriptor table, which
 //! is where the prohibition above says a real arm's capture belongs.
 //!
+//! Sprint 67 added three more, named here because the sentence below makes
+//! naming them the guard: `identity`'s `APPLICATION_OVERLAY` (S-384), and
+//! `forwarding`'s `JAVA`, `CALL_QUERY` and `DECL_QUERY` (S-392) — a plugin
+//! name, a `method_invocation`/`method_reference` pattern and a
+//! `method_declaration` pattern, all Java tree shapes.
+//!
 //! This list is **open, not closed**: anything of that kind added to this
 //! harness or its submodules is covered by the same carve-out and the same
 //! prohibition. The fitness function cannot enforce it — it scans
@@ -161,6 +167,17 @@ mod configuration_agreement;
 /// estate a second time.
 #[path = "operand_resolvability/identity.rs"]
 mod identity;
+
+/// S-392's forwarding gate — its own module, so the one-hop walk does not
+/// co-edit the file the configuration arm owns. Reads
+/// `configuration_agreement`'s publish-site recogniser and key resolver as the
+/// authority on what a site is and what a bare parameter is; adds no predicate
+/// of its own.
+///
+/// `#[path]`-attached for the same reason its two siblings are: a plain
+/// `tests/forwarding.rs` would become a second cargo test target.
+#[path = "operand_resolvability/forwarding.rs"]
+mod forwarding;
 
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
@@ -853,6 +870,22 @@ fn collect_sites<'t>(
     sites
 }
 
+/// Whether this file passes the [FR-FW-04] ledger gate: its extracted refs name
+/// one of the plugin's HTTP-client detectors.
+///
+/// One spelling, because this predicate fixes the client-arm denominator in
+/// **two** published measurements — S-355's `gated` column and S-392's
+/// production client-site count — and two copies could quietly disagree about
+/// what the arm's corpus is. It was hand-copied into the `forwarding` submodule
+/// and is now called from both.
+///
+/// [FR-FW-04]: ../../docs/specs/requirements/FR-FW-04.md
+fn gate_admits(plugin: &dyn LanguagePlugin, facts: &extract::Facts) -> bool {
+    let detectors = &plugin.semantics().http_client_detectors;
+    !detectors.is_empty()
+        && facts.refs.iter().any(|r| detectors.iter().any(|d| matches_detector(&r.target, d)))
+}
+
 /// Mirrors `resolve::matches_detector` (crate-private): a canonical reference
 /// target equals a detector or extends it by whole `::` segments.
 fn matches_detector(target: &str, detector: &str) -> bool {
@@ -1084,12 +1117,7 @@ fn scan_file(rel: &str, source: &str, ctx: &ScanCtx<'_>, stats: &mut LangStats, 
     stats.files_scanned += 1;
 
     let facts = extract::extract(&FileInput::new(rel, source), plugin, ctx.symbols);
-    let detectors = &plugin.semantics().http_client_detectors;
-    let gate = !detectors.is_empty()
-        && facts
-            .refs
-            .iter()
-            .any(|r| detectors.iter().any(|d| matches_detector(&r.target, d)));
+    let gate = gate_admits(plugin, &facts);
     if gate {
         stats.files_gate_admitted += 1;
     }
