@@ -2070,6 +2070,17 @@ mod fixtures {
         // saying that 13 are IP literals and 5 are templated ports.
         assert_eq!(url_target_or_reason("https://192.168.154.41/x"), Err("IP literal, not a name"));
         assert_eq!(url_target_or_reason("http://{{ .Values.host }}"), Err("templated host"));
+        // The case that needs the probe on the WHOLE authority: the host AND
+        // the port are both placeholders. Testing after the port split
+        // attributed all of the estate's occurrences to "port is not a number",
+        // naming the wrong reason in the one bucket whose job is to say what
+        // "resolves to nothing" is made of.
+        assert_eq!(
+            url_target_or_reason("http://${JAEGER_AGENT_HOST}:${JAEGER_AGENT_PORT}/api/traces"),
+            Err("templated host"),
+        );
+        // …while a genuine non-numeric port still reports as one.
+        assert_eq!(url_target_or_reason("http://localhost:xxxx"), Err("port is not a number"));
         assert_eq!(url_target_or_reason("http://"), Err("empty authority"));
         // "not a URL" is the one refusal that is NOT a finding: it is every
         // ordinary configuration value, and counting it would drown the bucket.
@@ -2322,6 +2333,35 @@ metadata:
 
     fn set<'a>(members: &[&'a str]) -> BTreeSet<&'a str> {
         members.iter().copied().collect()
+    }
+
+    #[test]
+    fn mapping_registrations_separates_route_registrations_from_type_level_prefixes() {
+        // A type-level `@RequestMapping("/v1")` is a prefix `compose_prefixes`
+        // CONSUMES; it can never be a route, so counting it as an unread
+        // registration doubled the provider-side gap (50 of 144 instead of
+        // 25 of 119) — the number that sizes the follow-on CR.
+        let source = r#"
+@RestController
+@RequestMapping("/v1")
+class MailboxApiV1 {
+    @RequestMapping(value = "/users/{userId}", method = RequestMethod.GET)
+    ResponseEntity<X> get() { return null; }
+
+    @GetMapping("/users")
+    ResponseEntity<X> list() { return null; }
+
+    @PostMapping("/users")
+    ResponseEntity<X> create() { return null; }
+}
+"#;
+        // Two verb-specific + one method-bearing @RequestMapping = 3
+        // registrations; the bare class-level one is a prefix.
+        assert_eq!(mapping_registrations(source), (3, 1));
+
+        // A file of nothing but prefixes contributes no registrations at all.
+        assert_eq!(mapping_registrations("@RequestMapping(\"/v1\")\nclass A {}\n"), (0, 1));
+        assert_eq!(mapping_registrations("class A {}\n"), (0, 0));
     }
 
     #[test]
