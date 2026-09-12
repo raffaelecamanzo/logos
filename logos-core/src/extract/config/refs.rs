@@ -1393,6 +1393,7 @@ mod tests {
             edges: Vec::new(),
             refs: Vec::new(),
             warnings: Vec::new(),
+            config_source: None,
         }
     }
 
@@ -1824,6 +1825,7 @@ mod infra_tests {
             edges: Vec::new(),
             refs: Vec::new(),
             warnings: Vec::new(),
+            config_source: None,
         }
     }
 

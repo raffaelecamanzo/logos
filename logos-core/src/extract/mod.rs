@@ -261,6 +261,17 @@ pub struct Facts {
     pub refs: Vec<RefFact>,
     /// Non-fatal diagnostics (incompatible grammar, symbol-build failure, …).
     pub warnings: Vec<String>,
+    /// The committed-configuration facts this file proves (S-380, [FR-WS-19]):
+    /// its profile and its canonical key → value pairs, flattened at full
+    /// nesting depth from the source text this pass already read.
+    ///
+    /// `None` for every file that is not a configuration source — which is every
+    /// file in a member with no configuration corpus, so such a member writes no
+    /// corpus row and is byte-for-byte unaffected. Produced by
+    /// [`config::corpus::source_facts`] on the artifact-extraction path only.
+    ///
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    pub config_source: Option<config::corpus::ConfigSourceFact>,
 }
 
 /// One captured declaration, retained with its tree-sitter node for the metrics
@@ -363,6 +374,7 @@ fn extract_one(
         edges: Vec::new(),
         refs: Vec::new(),
         warnings: Vec::new(),
+        config_source: None,
     };
 
     // A grammar that fails to bind (ABI skew) is skipped-and-warned, never fatal.

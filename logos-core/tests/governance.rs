@@ -1439,11 +1439,11 @@ fn health_reports_store_integrity_and_counts() {
         health.structural_ok && health.structural_faults.is_empty(),
         "a clean graph is structurally sound (CR-052, NFR-RA-13)"
     );
-    // Migration 18 (S-290, CR-080) made the reference-ledger uniqueness key
-    // relation-aware, following migration 17's (S-255, CR-061) broker-kind
-    // widening. This assertion tracks the latest applied migration — the store
-    // reports 18 once fully migrated (`federation::broker` asserts the same).
-    assert_eq!(health.schema_version, 18, "migration 18 applied");
+    // Migration 19 (S-380, CR-121) added the member-local configuration-corpus
+    // tables, following migration 18's (S-290, CR-080) relation-aware ledger key.
+    // This assertion tracks the latest applied migration — the store reports 19
+    // once fully migrated (`federation::broker` asserts the same).
+    assert_eq!(health.schema_version, 19, "migration 19 applied");
     assert!(health.db_size_bytes > 0);
     assert!(health.db_path.ends_with("logos.db"));
     assert!(health.files >= 1 && health.nodes >= 2);

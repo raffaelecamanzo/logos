@@ -88,6 +88,13 @@ mod anchors;
 // stays extensible for future profiles, none claimed beyond OpenAPI.
 mod profiles;
 
+// The committed-configuration corpus (S-380, CR-121, FR-WS-19): the YAML/
+// properties flattener, the relaxed-binding canonical key, and the profile rule,
+// promoted verbatim out of the S-365 measurement harness. Public because the
+// harness that grew it still drives it, and because the resolution stories
+// (S-381, S-382) build on where it lands.
+pub mod corpus;
+
 // Cross-artifact reference capture (S-068, CR-011, FR-CG-07): the seam that lets
 // each format's walk capture references between artifacts and to code, bound by
 // the resolution pass into ArtifactRef/ArtifactBinding edges. The substrate ships
@@ -233,7 +240,23 @@ pub(super) fn extract_one_config(
         edges: Vec::new(),
         refs: Vec::new(),
         warnings: Vec::new(),
+        config_source: None,
     };
+
+    // The committed-configuration corpus (S-380, [CR-121], [FR-WS-19]): flatten
+    // this file to canonical key → value facts if — and only if — its basename
+    // names a configuration source. It reads `input.source`, the text this pass
+    // already holds, so ingestion opens no file of its own; and it yields `None`
+    // for every other artifact, so a member with no configuration corpus emits
+    // no corpus fact and writes no corpus row.
+    //
+    // Deliberately NOT part of the tree-sitter walk below, and deliberately
+    // ahead of it. The flattener is a line-oriented subset promoted verbatim
+    // from the measurement harness — reading the same values a second way
+    // through the grammar would be the rewrite AC2 forbids — and because it
+    // needs no parse tree, a source whose grammar fails to bind or whose YAML
+    // has a syntax error still proves the values its readable lines carry.
+    facts.config_source = corpus::source_facts(&input.path, &input.source);
 
     if parser.set_language(plugin.language()).is_err() {
         facts.warnings.push(format!(

@@ -67,6 +67,25 @@ use crate::models::navigation::LanguageCount;
 /// [FR-SY-07]: ../../../docs/specs/requirements/FR-SY-07.md
 pub const CONFIG_FINGERPRINT_KEY: &str = "config_fingerprint";
 
+/// One committed definition of a configuration key (S-380, [FR-WS-19]): the file
+/// that proves it, that file's profile, and the value.
+///
+/// The provenance half of a configuration-bound resolution — [FR-WS-19] requires
+/// an admitted value to carry the key, the defining sources *and* the profile
+/// set, so the defining file and profile travel with the value rather than being
+/// looked up again afterwards.
+///
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConfigDefinition {
+    /// Project-relative path of the configuration source.
+    pub path: String,
+    /// The profile that file declares, or `None` for the unprofiled source.
+    pub profile: Option<String>,
+    /// The committed literal.
+    pub value: String,
+}
+
 /// The `project_metadata` key under which the persisted monotonic graph
 /// revision is stored (CR-027, [ADR-32], [FR-SY-09]).
 ///
@@ -963,6 +982,25 @@ pub struct NewViolation<'a> {
     pub created_at: i64,
 }
 
+/// A file's committed-configuration contribution, as the store records it
+/// (S-380, [FR-WS-19]): the profile the source declares and its canonical
+/// key → value pairs.
+///
+/// The graph-store-local row shape, following `NewNode`/`NewUnresolvedRef`. The
+/// extraction engine produces a `ConfigSourceFact`; [`pipeline`](crate::pipeline)
+/// adapts it to this on the way in, so the store depends on `model` alone and
+/// the documented extraction → pipeline → store direction is preserved.
+///
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+#[derive(Debug, Clone, Copy)]
+pub struct NewConfigSource<'a> {
+    /// The `application-<profile>` profile, or `None` for the unprofiled source.
+    pub profile: Option<&'a str>,
+    /// Canonical key → value pairs. A key a multi-document source defines twice
+    /// appears once per distinct value.
+    pub values: &'a [(&'a str, &'a str)],
+}
+
 /// The fields needed to insert a reference-ledger row (S-011).
 ///
 /// Insertion is idempotent over `(source_symbol, target, form, kind)` — the
@@ -1049,6 +1087,24 @@ pub trait GraphStore {
     ///
     /// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
     fn node_names_for_path(&self, path: &str) -> Result<Vec<String>>;
+
+    /// Every committed definition of one canonical configuration key: the file
+    /// that proves it, the profile that file declares, and the value (S-380,
+    /// [CR-121], [FR-WS-19]).
+    ///
+    /// `key` is matched as stored — a canonical key
+    /// ([`canonical_key`](crate::extract::config::corpus::canonical_key)) — so a
+    /// caller holding a source spelling (`api.uri-get-mailbox`, `uriGetMailbox`)
+    /// must canonicalise it first; this is a lookup, not a binder.
+    ///
+    /// Ordered by `(path, value)` so the answer is stable across runs. Every
+    /// definition is returned, including two that disagree: disagreement is
+    /// represented for the caller to judge, never averaged and never refused
+    /// here ([FR-WS-19]).
+    ///
+    /// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    fn config_definitions(&self, key: &str) -> Result<Vec<ConfigDefinition>>;
 
     /// Every inbound edge of **any** kind: `(edge kind, source node)` pairs,
     /// ordered by `(kind, source id)`.
@@ -1865,6 +1921,28 @@ impl GraphStore for SqliteGraphStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting node names for path")?;
         Ok(names)
+    }
+
+    fn config_definitions(&self, key: &str) -> Result<Vec<ConfigDefinition>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT f.path, s.profile, v.value \
+             FROM config_values v \
+             JOIN config_sources s ON s.id = v.source_id \
+             JOIN files f ON f.id = s.file_id \
+             WHERE v.key = ?1 \
+             ORDER BY f.path, v.value",
+        )?;
+        let rows = stmt
+            .query_map([key], |row| {
+                Ok(ConfigDefinition {
+                    path: row.get(0)?,
+                    profile: row.get(1)?,
+                    value: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting configuration definitions for key")?;
+        Ok(rows)
     }
 
     fn neighbours_in(&self, id: NodeId) -> Result<Vec<(EdgeKind, NodeRow)>> {
@@ -3166,6 +3244,56 @@ impl BatchWriter<'_> {
                 ],
             )
             .context("inserting unresolved ref")?;
+        Ok(())
+    }
+
+    /// Replace a file's configuration-corpus contribution (S-380, [CR-121],
+    /// [FR-WS-19]): delete the source row it previously had, then record the
+    /// profile and canonical key → value pairs the fresh extract proved.
+    ///
+    /// The delete runs unconditionally, ahead of the `source` check, so a file
+    /// that *stops* being a configuration source (renamed away from
+    /// `application*.…`, or emptied) leaves no stale values behind — the same
+    /// replace-wholesale contract
+    /// [`delete_unresolved_refs_for_file`](Self::delete_unresolved_refs_for_file)
+    /// gives the reference ledger. On a file that never was one the delete
+    /// matches no row, so `None` is a no-op end to end: that is what keeps a
+    /// member with no configuration corpus byte-for-byte unaffected.
+    ///
+    /// Deleting the source cascades its values away (migration 19's FK), so the
+    /// two tables can never disagree about which file proved what.
+    ///
+    /// # Errors
+    /// Returns an error if a constraint fires or I/O fails.
+    ///
+    /// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    pub fn replace_config_source(
+        &self,
+        file_id: i64,
+        source: Option<NewConfigSource<'_>>,
+    ) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM config_sources WHERE file_id = ?1", [file_id])
+            .context("deleting the previous configuration source for file")?;
+        let Some(source) = source else {
+            return Ok(());
+        };
+        self.conn
+            .execute(
+                "INSERT INTO config_sources (file_id, profile) VALUES (?1, ?2)",
+                rusqlite::params![file_id, source.profile],
+            )
+            .context("inserting configuration source")?;
+        let source_id = self.conn.last_insert_rowid();
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO config_values (source_id, key, value) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(source_id, key, value) DO NOTHING",
+        )?;
+        for (key, value) in source.values {
+            stmt.execute(rusqlite::params![source_id, key, value])
+                .context("inserting configuration value")?;
+        }
         Ok(())
     }
 

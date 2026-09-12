@@ -51,6 +51,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (16, MIGRATION_16),
     (17, MIGRATION_17),
     (18, MIGRATION_18),
+    (19, MIGRATION_19),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -1888,12 +1889,74 @@ CREATE UNIQUE INDEX idx_unresolved_refs_identity
     ON unresolved_refs(source_symbol, target, form, kind, COALESCE(payload, ''));
 ";
 
+/// Migration 19 — the member-local **configuration corpus** tables (S-380,
+/// [CR-121], [FR-WS-19], [FR-CG-02], [FR-DB-01]).
+///
+/// Configuration keys already become `ConfigSection` nodes, but a node carries
+/// no value and the section walk stops at a fixed depth of 2 ([BR-30]), so on the
+/// reference estate `mailbox-aggregate` is indexed and `api.uri-get-mailbox` is
+/// not. These two tables make the **value** a fact, at full nesting depth, tagged
+/// with the profile of the file that proves it.
+///
+/// The shape mirrors the promoted corpus model
+/// ([`ConfigSourceFact`](crate::extract::config::corpus::ConfigSourceFact)) one
+/// for one: a source is a file plus its profile, and it proves a set of
+/// canonical key → value pairs. Splitting them is what makes the census
+/// downstream stories reconcile against — sources, profiled sources, distinct
+/// keys — a query rather than a scan.
+///
+/// **Purely additive**: it creates two new tables and their indexes and touches
+/// nothing else. No table is dropped, rebuilt or copied, so `nodes`, `edges`,
+/// `shingles` and the external-content `nodes_fts` index are byte-for-byte
+/// unaffected across the boundary — the same standalone-table shape migration 15
+/// used for `project_metadata`, and asserted on a populated store by
+/// `migration_19_adds_the_config_corpus_tables_preserving_the_graph_byte_for_byte`
+/// in [`super::migrate`].
+///
+/// [BR-30]: ../../../../docs/specs/software-spec.md
+/// [CR-121]: ../../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
+/// [FR-CG-02]: ../../../../docs/specs/requirements/FR-CG-02.md
+/// [FR-WS-19]: ../../../../docs/specs/requirements/FR-WS-19.md
+const MIGRATION_19: &str = "\
+-- config_sources: one row per committed configuration source (an
+-- `application*.{yml,yaml,properties}` file and its profile variants). `profile`
+-- is NULL for the unprofiled `application.<ext>` — the census counts unprofiled
+-- and profiled sources apart, so the distinction must be a value, not a sentinel.
+-- UNIQUE(file_id) because a file is at most one source; the FK cascades so
+-- removing a file removes its corpus contribution with it.
+CREATE TABLE config_sources (
+    id      INTEGER PRIMARY KEY,
+    file_id INTEGER NOT NULL UNIQUE REFERENCES files(id) ON DELETE CASCADE,
+    profile TEXT
+) STRICT;
+
+-- config_values: the canonical key -> value pairs one source proves. A source
+-- that defines one key twice (multi-document YAML) proves BOTH values, so the
+-- key alone is not unique within a source — the pair is. Disagreement is
+-- represented, never averaged and never refused (FR-WS-19).
+CREATE TABLE config_values (
+    id        INTEGER PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES config_sources(id) ON DELETE CASCADE,
+    key       TEXT NOT NULL,
+    value     TEXT NOT NULL,
+    UNIQUE (source_id, key, value)
+) STRICT;
+
+-- The one hot path: `key -> every source that defines it`, which is how an
+-- accessor resolves and how the agreement over a key is computed. The other two
+-- joins in that query are already covered (config_sources.id is its primary key,
+-- files.id is its own), and `profile` is deliberately NOT indexed: a member holds
+-- single-digit config sources, so an index there would cost a write for a scan
+-- that is already trivial.
+CREATE INDEX idx_config_values_key ON config_values(key);
+";
+
 #[cfg(test)]
 mod tests {
     use super::{
         MIGRATION_1, MIGRATION_10, MIGRATION_11, MIGRATION_12, MIGRATION_13, MIGRATION_14,
-        MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_18, MIGRATION_2, MIGRATION_3,
-        MIGRATION_4, MIGRATION_8,
+        MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_18, MIGRATION_19, MIGRATION_2,
+        MIGRATION_3, MIGRATION_4, MIGRATION_8,
     };
     use crate::model::{EdgeKind, NodeKind, RefForm};
 
@@ -2782,6 +2845,58 @@ mod tests {
         assert!(
             !MIGRATION_12.contains("DROP TABLE metric_snapshots"),
             "migration 12 must not rebuild metric_snapshots — the columns are additive (NFR-MA-06)"
+        );
+    }
+
+    /// Migration 19 is additive by construction: it creates the two new corpus
+    /// tables and nothing else. The runtime half — that a *populated* store's
+    /// nodes, edges, shingles and FTS content survive the boundary verbatim — is
+    /// `migration_19_adds_the_config_corpus_tables_preserving_the_graph_byte_for_byte`
+    /// in `super::migrate`. This half guards the SQL text, so a later edit that
+    /// reaches for a rebuild fails here before it can reach a database.
+    #[test]
+    fn migration_19_creates_only_the_config_corpus_tables() {
+        for table in ["config_sources", "config_values"] {
+            assert!(
+                MIGRATION_19.contains(&format!("CREATE TABLE {table} (")),
+                "migration 19 must create {table} (FR-WS-19, FR-DB-01)"
+            );
+        }
+        for forbidden in ["DROP TABLE", "ALTER TABLE", "DROP INDEX", "DROP TRIGGER"] {
+            assert!(
+                !MIGRATION_19.contains(forbidden),
+                "migration 19 must be purely additive — found `{forbidden}` (NFR-MA-06)"
+            );
+        }
+        // Purely additive also means it creates NOTHING but those two tables: a
+        // third `CREATE TABLE` here would be a table the losslessness test never
+        // saw and the corpus model does not name.
+        assert_eq!(
+            MIGRATION_19.matches("CREATE TABLE").count(),
+            2,
+            "migration 19 creates exactly the two corpus tables"
+        );
+        // The graph tables are not so much as mentioned, which is the whole
+        // argument for byte-for-byte preservation across the boundary.
+        for untouched in ["nodes", "edges", "shingles", "nodes_fts", "unresolved_refs"] {
+            assert!(
+                !MIGRATION_19.contains(untouched),
+                "migration 19 must not mention `{untouched}` (AC3: unchanged across the boundary)"
+            );
+        }
+        // STRICT, like every table since migration 1 — a typed column is what
+        // stops a value arriving as a blob and reading back as a different value.
+        assert_eq!(
+            MIGRATION_19.matches(") STRICT;").count(),
+            2,
+            "both corpus tables are STRICT (FR-DB-01)"
+        );
+        // An unprofiled source must be representable: `profile` carries no NOT
+        // NULL, because NULL is the unprofiled `application.<ext>` and the census
+        // counts it apart from the profiled files.
+        assert!(
+            MIGRATION_19.contains("profile TEXT\n"),
+            "config_sources.profile must be nullable — NULL is the unprofiled source"
         );
     }
 }

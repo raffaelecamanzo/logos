@@ -377,8 +377,8 @@ fn fresh_database_applies_all_migrations_and_records_them() {
     let store = mem();
     assert_eq!(
         store.schema_version().unwrap(),
-        18,
-        "v18 = migration 18 (S-290 CR-080 relation-aware ledger key)"
+        19,
+        "v19 = migration 19 (S-380 CR-121 member-local configuration-corpus tables)"
     );
 
     let recorded: i64 = store
@@ -386,7 +386,7 @@ fn fresh_database_applies_all_migrations_and_records_them() {
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        recorded, 18,
+        recorded, 19,
         "schema_versions records every applied migration"
     );
 }
@@ -397,16 +397,16 @@ fn reopening_an_up_to_date_database_is_idempotent() {
     let path = dir.path().join("logos.db");
     {
         let store = SqliteGraphStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 18);
+        assert_eq!(store.schema_version().unwrap(), 19);
     }
     // Reopen: migrations must NOT re-apply (no duplicate schema_versions rows).
     let store = SqliteGraphStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 18);
+    assert_eq!(store.schema_version().unwrap(), 19);
     let rows: i64 = store
         .conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(rows, 18, "migrations must not re-apply on reopen");
+    assert_eq!(rows, 19, "migrations must not re-apply on reopen");
 }
 
 // ── NFR-RA-07: an interrupted write batch rolls back atomically ──────────────
@@ -474,7 +474,7 @@ fn database_file_is_copyable_and_reopens_intact() {
     std::fs::copy(&original, &copy).unwrap();
 
     let reopened = SqliteGraphStore::open(&copy).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 18);
+    assert_eq!(reopened.schema_version().unwrap(), 19);
     let hits = reopened.search("portable", None, 10).unwrap();
     assert_eq!(hits.len(), 1, "all data must survive a plain file copy");
     assert_eq!(hits[0].name, "portable");
@@ -1040,11 +1040,11 @@ fn upgrading_a_v1_database_applies_migration_two_forward_only() {
     }
 
     // Opening through the store must upgrade v1 → latest without touching v1
-    // data (the runner applies v2..v18 forward-only).
+    // data (the runner applies v2..v19 forward-only).
     let store = SqliteGraphStore::open(&path).unwrap();
     assert_eq!(
         store.schema_version().unwrap(),
-        18,
+        19,
         "v1 store upgrades to the latest version"
     );
     assert!(
@@ -2518,4 +2518,104 @@ fn broker_subgraph_returns_only_the_promoted_broker_nodes_and_edges() {
     seed(&plain, 9, "main", NodeKind::Function);
     let (nodes, edges) = plain.broker_subgraph().unwrap();
     assert!(nodes.is_empty() && edges.is_empty());
+}
+
+// ── S-380 / FR-WS-19: the configuration-corpus write path ────────────────────
+
+/// `replace_config_source` is **replace-wholesale**, and the delete runs ahead
+/// of the `None` check — so a file that stops being a configuration source
+/// leaves nothing behind.
+///
+/// This is the guarantee `replace_config_source`'s doc comment states in prose.
+/// It was asserted nowhere until this test: moving the `DELETE` after the early
+/// return left every other test in the suite green, because the only path that
+/// reaches `None` for an already-ingested file is one no current caller takes.
+/// It becomes reachable the moment [S-381] widens or narrows the admission
+/// vocabulary against an existing store, which is when a silent regression costs
+/// most.
+///
+/// [S-381]: ../../../docs/planning/journal.md#s-381-property-binding-is-a-plugin-descriptor-not-java-code
+#[test]
+fn replacing_a_configuration_source_with_none_clears_what_it_previously_proved() {
+    let mut store = mem();
+    let file_id = store
+        .write_batch(|w| w.insert_file("application.yml", Some("yaml"), Some("h1")))
+        .unwrap();
+
+    let fact = NewConfigSource {
+        profile: Some("dev"),
+        values: &[("a.b", "one"), ("a.c", "two")],
+    };
+    store
+        .write_batch(|w| w.replace_config_source(file_id, Some(fact)))
+        .unwrap();
+    assert_eq!(config_row_counts(&store), (1, 2), "the source and both values are recorded");
+
+    // The transition this test exists for: the same file, now proving nothing.
+    store
+        .write_batch(|w| w.replace_config_source(file_id, None))
+        .unwrap();
+    assert_eq!(
+        config_row_counts(&store),
+        (0, 0),
+        "a file that stops being a configuration source leaves no stale rows",
+    );
+}
+
+/// A re-ingest replaces rather than accumulates, and the `ON CONFLICT` clause
+/// absorbs a duplicate pair instead of failing the write.
+///
+/// The duplicate case is unreachable from today's producer — `ConfigSourceFact`
+/// is built from a `BTreeMap<_, BTreeSet<_>>`, so its pairs are unique by
+/// construction — but the clause is what keeps that an implementation detail of
+/// the producer rather than a constraint on every future one.
+#[test]
+fn re_ingesting_a_configuration_source_replaces_it_and_absorbs_a_duplicate_pair() {
+    let mut store = mem();
+    let file_id = store
+        .write_batch(|w| w.insert_file("application.yml", Some("yaml"), Some("h1")))
+        .unwrap();
+
+    let first = NewConfigSource { profile: None, values: &[("a.b", "one")] };
+    store.write_batch(|w| w.replace_config_source(file_id, Some(first))).unwrap();
+
+    // Re-ingest with a DIFFERENT value and a deliberately duplicated pair.
+    // The duplicate pair is deliberate: `ConfigSourceFact` cannot produce one
+    // (it is built from a `BTreeMap<_, BTreeSet<_>>`), and this row type can —
+    // which is the point of testing the clause at the store's own boundary.
+    let second = NewConfigSource {
+        profile: Some("prod"),
+        values: &[("a.b", "two"), ("a.b", "two")],
+    };
+    store
+        .write_batch(|w| w.replace_config_source(file_id, Some(second)))
+        .expect("a duplicate pair is absorbed, not an error");
+
+    assert_eq!(
+        config_row_counts(&store),
+        (1, 1),
+        "one source, one value: the old value is gone and the duplicate collapsed",
+    );
+    let (profile, value): (Option<String>, String) = store
+        .conn
+        .query_row(
+            "SELECT s.profile, v.value FROM config_values v \
+             JOIN config_sources s ON s.id = v.source_id",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((profile.as_deref(), value.as_str()), (Some("prod"), "two"));
+}
+
+/// `(config_sources, config_values)` row counts, read straight off the store.
+fn config_row_counts(store: &SqliteGraphStore) -> (i64, i64) {
+    store
+        .conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM config_sources), (SELECT count(*) FROM config_values)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
 }
