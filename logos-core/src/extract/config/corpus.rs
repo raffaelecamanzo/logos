@@ -809,4 +809,72 @@ mod tests {
         let deep = source_facts("a/b/c/d/application-prod.properties", "k=v\n");
         assert_eq!(deep.map(|f| f.profile), Some(Some("prod".to_string())));
     }
+
+    // ── The discovery entry point (S-380) ───────────────────────────────────
+    //
+    // `discover`, `module_of`, `profiles` and `props_candidates` are production
+    // symbols whose only other coverage is the measurement harness, which skips
+    // unless `LOGOS_REF_WORKSPACE` names a private 84-repo estate. Without these
+    // two cases they are untested on CI and on any machine without that
+    // checkout, and read as green there. Both run in milliseconds over a
+    // tempdir and need no estate.
+
+    #[test]
+    fn discover_places_each_source_in_its_nearest_module_and_reads_its_profile() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("has parent")).expect("mkdir");
+            std::fs::write(path, body).expect("write");
+        };
+        // Two nested module roots: the longest path-segment prefix must win, which
+        // is the whole point of `module_of`.
+        write("a/pom.xml", "<project/>\n");
+        write("a/b/pom.xml", "<project/>\n");
+        write("a/b/src/main/resources/application-dev.yml", "server:\n  port: 8080\n");
+        write("a/src/main/resources/application.yml", "server:\n  port: 9090\n");
+
+        let corpus = ConfigCorpus::discover(root);
+        let placed: Vec<(&str, &str, Option<&str>)> = corpus
+            .sources
+            .iter()
+            .map(|s| (s.path.as_str(), s.module.as_str(), s.profile.as_deref()))
+            .collect();
+        assert_eq!(
+            placed,
+            vec![
+                ("a/b/src/main/resources/application-dev.yml", "a/b", Some("dev")),
+                ("a/src/main/resources/application.yml", "a", None),
+            ],
+            "each source belongs to the NEAREST module root, not the outermost",
+        );
+        assert_eq!(
+            corpus.profiles().into_iter().collect::<Vec<_>>(),
+            vec!["dev"],
+            "the census counts the profiles the corpus actually declares",
+        );
+        assert_eq!(corpus.module_of("a/b/anything.txt"), "a/b");
+        assert_eq!(corpus.module_of("elsewhere/x.txt"), "", "an unclaimed path sits at the root");
+    }
+
+    #[test]
+    fn discover_flags_only_the_java_files_that_mention_the_properties_annotation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("has parent")).expect("mkdir");
+            std::fs::write(path, body).expect("write");
+        };
+        write("src/Bound.java", "@ConfigurationProperties(prefix = \"a\")\nclass Bound {}\n");
+        write("src/Plain.java", "class Plain {}\n");
+
+        let corpus = ConfigCorpus::discover(root);
+        assert_eq!(
+            corpus.props_candidates(),
+            ["src/Bound.java"],
+            "only the file carrying the needle is stashed for the class index",
+        );
+    }
 }
