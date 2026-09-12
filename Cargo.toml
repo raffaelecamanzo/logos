@@ -56,7 +56,7 @@ members = [
 # package (cli) feeds cargo-dist, so renumbering the libraries changes no
 # artifact, tag, or download URL.
 [workspace.package]
-version = "1.4.8"
+version = "1.4.9"
 license = "Apache-2.0"
 repository = "https://github.com/raffaelecamanzo/logos"
 
