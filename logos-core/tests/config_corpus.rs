@@ -129,12 +129,36 @@ fn a_committed_configuration_value_reaches_the_store_with_its_profile_and_its_fi
     );
 
     let engine = index(root);
+    drop(engine);
+
+    // A third overlay, in a second module, added by a later index pass — so the
+    // "every overlay is retained" claim below is made over three sources across
+    // two modules rather than two in one.
+    //
+    // It does NOT pin the `ORDER BY f.path, v.value` in `config_definitions`, and
+    // nothing here does. That was attempted twice and neither attempt
+    // discriminated: the pipeline walks files in sorted path order on every full
+    // index, so config_values row ids track path order structurally, and deleting
+    // the `ORDER BY` leaves this test green (measured, three consecutive runs).
+    // Pinning it needs a store whose row order and path order genuinely diverge,
+    // which a full re-index cannot produce. Recorded rather than papered over.
+    write(
+        root,
+        "aaa/src/main/resources/application.yml",
+        "mailserver:\n  api:\n    uri-get-mailbox: /aaa/mailbox/{id}\n",
+    );
+    let engine = index(root);
     let rt = engine.runtime().expect("runtime present");
 
     let defs = definitions(rt, "mailserver.api.urigetmailbox");
     assert_eq!(
         defs,
         vec![
+            ConfigDefinition {
+                path: "aaa/src/main/resources/application.yml".to_string(),
+                profile: None,
+                value: "/aaa/mailbox/{id}".to_string(),
+            },
             ConfigDefinition {
                 path: "svc/src/main/resources/application-dev.yml".to_string(),
                 profile: Some("dev".to_string()),
@@ -146,11 +170,12 @@ fn a_committed_configuration_value_reaches_the_store_with_its_profile_and_its_fi
                 value: "/mailbox/{id}".to_string(),
             },
         ],
-        "the value, its defining file and its profile are all facts (FR-WS-19 AC1)",
+        "the value, its defining file and its profile are all facts, ordered by path \
+         (FR-WS-19 AC1)",
     );
-    // Both overlays are retained: disagreement is represented, never averaged
-    // and never refused at this layer (FR-WS-19 AC2).
-    assert_eq!(defs.len(), 2, "every overlay's value survives");
+    // Every overlay is retained: disagreement is represented, never averaged and
+    // never refused at this layer (FR-WS-19 AC2).
+    assert_eq!(defs.len(), 3, "every overlay's value survives");
 
     // The relaxed binding is what the key is stored under, so the source
     // spelling and the camelCase accessor spelling find the same row.
