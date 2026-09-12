@@ -41,11 +41,17 @@
 //! The [`configuration_envelope`] cases are **not** `#[ignore]`d: their fixture is
 //! ~250 small files, the whole module runs in a few seconds, and a guard built
 //! before the work it bounds (S-391) is worth nothing if the default run skips
-//! it. The two of them that assert a wall clock carry `pe03_budget` /
-//! `pe05_budget` in their names, which is how `scripts/gate.sh` skips exactly the
-//! timing-sensitive guards at its `fast` tier and runs them at `full` — the same
-//! treatment `cold_start_to_ready_engine_is_within_pe05_budget` and
-//! `single_file_sync_meets_the_pe03_budget` already get.
+//! it. **Three** of the six assert a wall clock, and only two of those carry
+//! `pe03_budget` / `pe05_budget` in their names — which is how `scripts/gate.sh`
+//! skips them at its `fast` tier and runs them at `full`, the same treatment
+//! `cold_start_to_ready_engine_is_within_pe05_budget` and
+//! `single_file_sync_meets_the_pe03_budget` already get. The discriminator is
+//! **tightness, not the presence of a clock**: those two are bounded at 250 ms
+//! and 600 ms against measurements that land at roughly a tenth and nine tenths
+//! of their budgets, so host load can genuinely redden them. The third — the
+//! config-and-binding delta — is bounded at 3 s against a measurement of a few
+//! tens of milliseconds, ~99% of its budget unused, so it is not load-sensitive
+//! and skipping it would cost coverage for nothing.
 //!
 //! Two env knobs keep the budgets honest without editing them:
 //! - `LOGOS_PERF_TOLERANCE` (f64 ≥ 1.0, default 1.0) widens every wall-clock band
