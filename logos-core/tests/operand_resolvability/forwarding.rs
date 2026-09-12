@@ -87,7 +87,7 @@ use logos_core::plugin::LanguageRegistry;
 
 use super::configuration_agreement::{
     collect_header_publishes, header_publish_query, judge, resolve_key, ConfigCorpus, KeyOutcome,
-    PropertiesIndex, Refusal, Resolver, Tree, Verdict,
+    CorpusLookup, Judge, PropertiesIndex, Refusal, Resolver, Tree, Verdict,
 };
 use super::{classify, folded_text, operand_name, operands, Unit, FOLD_DEPTH};
 
@@ -718,7 +718,7 @@ fn parameter_name(param: Node<'_>, src: &[u8]) -> Option<String> {
 ///
 /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 /// [FR-WS-23]: ../../../docs/specs/requirements/FR-WS-23.md
-fn arg_value(node: Node<'_>, src: &[u8], unit: &Unit<'_>, resolver: Resolver<'_>) -> ArgValue {
+fn arg_value(node: Node<'_>, src: &[u8], unit: &Unit<'_>, resolver: Judge<'_>) -> ArgValue {
     match resolve_key(node, src, unit, resolver) {
         KeyOutcome::Resolved { key, .. } => ArgValue::Key(key),
         KeyOutcome::Unresolved(Refusal::MethodParameter) => ArgValue::NeedsAnotherHop,
@@ -775,14 +775,24 @@ struct Source {
 /// harness gives for `ScanCtx`: the signature was already at its limit.
 struct Estate<'a> {
     registry: &'a LanguageRegistry,
-    config: &'a ConfigCorpus,
+    /// The `ConfigLookup` view of the discovered corpus. Held rather than built per call
+    /// because [`Resolver`] borrows it for `'a` — the same reason the parent
+    /// harness gives `ScanCtx` a `lookup` field (S-382).
+    lookup: CorpusLookup<'a>,
     properties: &'a PropertiesIndex,
     symbols: &'a SymbolContext,
 }
 
 impl<'a> Estate<'a> {
-    fn resolver(&'a self, module: &'a str) -> Resolver<'a> {
-        Resolver { corpus: self.config, props: self.properties, module }
+    /// S-382 split the old combined resolver into [`Resolver`] (corpus +
+    /// module) and [`Judge`] (resolver + properties). This returns the `Judge`,
+    /// which is what `resolve_key`, `judge` and `collect_header_publishes` all
+    /// take.
+    fn resolver(&'a self, module: &'a str) -> Judge<'a> {
+        Judge {
+            resolver: Resolver { corpus: &self.lookup, module },
+            props: self.properties,
+        }
     }
 }
 
@@ -830,7 +840,7 @@ struct Parsed<'t, 'r> {
     root: Node<'t>,
     src: &'t [u8],
     unit: Unit<'t>,
-    resolver: Resolver<'r>,
+    resolver: Judge<'r>,
 }
 
 /// Parse one Java file and record every publish and client-call site whose
@@ -1268,7 +1278,12 @@ fn measure_forwarding(root: &Path) -> Findings {
     let symbols = SymbolContext::default();
     let sources = read_sources(root, &registry, &config);
     let estate =
-        Estate { registry: &registry, config: &config, properties: &properties, symbols: &symbols };
+        Estate {
+            registry: &registry,
+            lookup: CorpusLookup(&config),
+            properties: &properties,
+            symbols: &symbols,
+        };
 
     let mut f = Findings::default();
     for s in &sources {
