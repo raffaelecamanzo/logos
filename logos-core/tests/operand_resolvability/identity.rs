@@ -1392,6 +1392,12 @@ fn findings(root: &Path) -> &'static Findings {
 
 /// Print the full census. Every acceptance criterion is a section, in order, so
 /// the printed output can be read against the story without a decoder.
+/// Print the full census. Every acceptance criterion is a section, in order,
+/// so the printed output can be read against the story without a decoder.
+///
+/// Split into one function per criterion — the shape `configuration_agreement`
+/// already uses for its own report — because the combined printer grew past
+/// the project's `max_fn_lines` rule as the acceptance criteria were covered.
 fn report(f: &Findings) {
     let c = &f.corpus;
     println!("\n=== S-384 · service-identity resolvability across the deploy corpus ===");
@@ -1402,6 +1408,17 @@ fn report(f: &Findings) {
         c.members_with_deploy.len(),
     );
 
+    report_ac1_self_identity(f);
+    report_ac2_target_references(f);
+    report_providers(f);
+    report_ac3_pairs(f);
+    report_ac4_overlays(f);
+}
+
+/// AC1 — how many members yield a self identity, at which tier, and how
+/// many labels collide at the same tier.
+fn report_ac1_self_identity(f: &Findings) {
+    let c = &f.corpus;
     // ── AC1 ────────────────────────────────────────────────────────────────
     println!(
         "raw kind:Service manifests: {} named, {} refused as ambiguous · {} deploy-shaped files \
@@ -1488,6 +1505,13 @@ fn report(f: &Findings) {
     }
     println!("  members with no decisive self identity at all: {none_count}");
 
+}
+
+/// AC2 — target host references: how many carry a via-key resolving to a
+/// call site, and how many resolve to a member, an external label, or nothing,
+/// with the unmatched labels enumerated for human adjudication.
+fn report_ac2_target_references(f: &Findings) {
+    let c = &f.corpus;
     // ── AC2 ────────────────────────────────────────────────────────────────
     println!("\n--- AC2 · target host references and their via-keys ---");
     let deploy_targets: Vec<&TargetRef> = c.targets.iter().filter(|t| t.is_deploy()).collect();
@@ -1597,6 +1621,11 @@ fn report(f: &Findings) {
         println!("    {flat:<40} {keys:?}");
     }
 
+}
+
+/// The provider side: what each member registers, and how much of it the
+/// framework arm can actually read.
+fn report_providers(f: &Findings) {
     // ── Providers ──────────────────────────────────────────────────────────
     let p = &f.providers;
     println!("\n--- providers (production source only) ---");
@@ -1626,6 +1655,11 @@ fn report(f: &Findings) {
         );
     }
 
+}
+
+/// AC3 — the figure the gate is read off: identity-resolved pairs split by
+/// whether path-only matching would already have bound them.
+fn report_ac3_pairs(f: &Findings) {
     // ── AC3 ────────────────────────────────────────────────────────────────
     println!("\n--- AC3 · identity-resolved pairs, split by what path-only would have done ---");
     println!(
@@ -1794,6 +1828,11 @@ fn report(f: &Findings) {
         println!("    {a} -> {b}");
     }
 
+}
+
+/// AC4 — how many pairs differ per overlay, the only place the profile-union
+/// decision pays.
+fn report_ac4_overlays(f: &Findings) {
     // ── AC4 ────────────────────────────────────────────────────────────────
     println!("\n--- AC4 · pairs per deploy overlay ---");
     let mut by_overlay: BTreeMap<(&str, &str), BTreeSet<Edge<'_>>> = BTreeMap::new();
