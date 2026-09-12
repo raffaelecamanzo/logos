@@ -1417,10 +1417,25 @@ mod configuration_envelope {
     ///   printed alongside, so the estate-scale footprint the padding stands in
     ///   for is on the record in the same report.
     /// - **`ru_maxrss` is process-wide.** Under `--test-threads` > 1 a sibling
-    ///   case's allocations land in whichever arm is running. That can only push
-    ///   the arms together, so it makes this test fail rather than pass — the
-    ///   safe direction — and a failure here should be re-run in isolation
-    ///   before it is read as a regression, exactly as the wall-clock guards are.
+    ///   case's allocations land in whichever arm happens to be running, and the
+    ///   two windows are **not** symmetric:
+    ///   - contamination during the **dropping** arm inflates `dropping` *and*
+    ///     raises the floor `retaining` is measured from, so it pushes the arms
+    ///     together and makes this test **fail** — the safe direction, and a
+    ///     failure here should be re-run in isolation before it is read as a
+    ///     regression, exactly as the wall-clock guards are;
+    ///   - contamination during the **retaining** arm inflates `retaining`
+    ///     alone, which pushes the arms apart and makes the sensitivity check
+    ///     *easier* to clear. That is the unsafe direction, and it is stated
+    ///     rather than glossed. What it can spoil is the instrument's **proof of
+    ///     its own sensitivity**, never the finding: `dropping` is measured
+    ///     before that window opens and is unaffected, so the accumulation this
+    ///     guard exists to catch still cannot pass unseen.
+    ///
+    ///   Neither window is a licence to read a green run as proof of
+    ///   sensitivity: only a run whose arms separate by far more than the
+    ///   `SENSITIVITY` floor — the ~146× observed on a quiet host, against a
+    ///   floor of 3× — establishes that.
     ///
     /// [NFR-PE-06]: ../../docs/specs/requirements/NFR-PE-06.md
     #[test]
