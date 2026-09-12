@@ -1053,7 +1053,10 @@ struct Measurement {
 struct ScanCtx<'a> {
     plugin: &'a dyn LanguagePlugin,
     symbols: &'a SymbolContext,
-    config: &'a configuration_agreement::ConfigCorpus,
+    /// The promoted [`ConfigLookup`](configuration_agreement::ConfigLookup) view
+    /// of the discovered corpus. Held rather than built per call because
+    /// [`Resolver`](configuration_agreement::Resolver) borrows it for `'a`.
+    lookup: configuration_agreement::CorpusLookup<'a>,
     properties: &'a configuration_agreement::PropertiesIndex,
     /// The module root the file belongs to — the scope [CR-115] §3.4's
     /// agreement is taken over (see the S-365 module docs for why the
@@ -1064,7 +1067,7 @@ struct ScanCtx<'a> {
 impl<'a> ScanCtx<'a> {
     fn resolver(&'a self) -> configuration_agreement::Resolver<'a> {
         configuration_agreement::Resolver {
-            corpus: self.config,
+            corpus: &self.lookup,
             props: self.properties,
             module: &self.module,
         }
@@ -1307,7 +1310,7 @@ fn measure(root: &Path) -> Measurement {
         let ctx = ScanCtx {
             plugin,
             symbols: &symbols,
-            config: &m.config,
+            lookup: configuration_agreement::CorpusLookup(&m.config),
             properties: &m.properties,
             module: m.config.module_of(&rel).to_string(),
         };

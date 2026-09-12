@@ -45,6 +45,7 @@ const COVERAGE: CrossServiceCoverage = {
       bucket: "bound",
       state: "bound",
       intake: "contract-surface",
+      provenance: "literal" as const,
     },
     {
       relation: "route",
@@ -53,6 +54,7 @@ const COVERAGE: CrossServiceCoverage = {
       state: "unbound",
       reason: "path-not-composed",
       intake: "invocation",
+      provenance: "literal" as const,
     },
     {
       relation: "route",
@@ -61,6 +63,7 @@ const COVERAGE: CrossServiceCoverage = {
       state: "unbound",
       reason: "no-provider-in-workspace",
       intake: "contract-surface",
+      provenance: "literal" as const,
     },
     {
       relation: "route",
@@ -69,6 +72,7 @@ const COVERAGE: CrossServiceCoverage = {
       state: "unbound",
       reason: "no-provider-in-workspace",
       intake: "contract-surface",
+      provenance: "literal" as const,
     },
     {
       relation: "grpc-call",
@@ -77,6 +81,7 @@ const COVERAGE: CrossServiceCoverage = {
       state: "unbound",
       reason: "ambiguous",
       intake: "invocation",
+      provenance: "literal" as const,
     },
   ],
   bound: 1,
@@ -363,6 +368,7 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
       references: COVERAGE.references.map((ref) => ({
         ...ref,
         intake: "contract-surface" as const,
+        provenance: "literal" as const,
       })),
       by_intake: {
         contract_surface: { bound: 1, ambiguous: 1, unbound: 1, no_provider_in_workspace: 2 },

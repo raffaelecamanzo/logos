@@ -38,6 +38,13 @@
 //! [UAT-RS-01]: ../../../docs/specs/requirements/UAT-RS-01.md
 
 mod binder;
+/// Configuration-bound operand resolution (S-382, CR-121, FR-WS-19, ADR-64): a
+/// placeholder, a value-annotation key or a configuration-bound accessor
+/// resolved against the **committed** configuration corpus, retaining every
+/// profile-tagged value where overlays disagree and carrying `config-bound`
+/// provenance — the key, the defining sources and the profile set — to every
+/// surface. The refusals are its boundary, not its residue. See its module docs.
+pub mod binding;
 /// The framework-dispatch live-rooting pass (CR-043, ADR-39): recognises
 /// framework-dispatched Rust methods (trait-impl dispatch, `#[tool]` tool
 /// dispatch) and live-roots them with a self-`RoutesTo` marker so the

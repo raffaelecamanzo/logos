@@ -7,7 +7,12 @@ import type {
   ReferenceCoverage,
   UnboundReason,
 } from "../../api/types.ts";
-import { armLabel, buildCoverageDashboard, reasonLabel } from "./coverageModel.ts";
+import {
+  armLabel,
+  buildCoverageDashboard,
+  provenanceLabel,
+  reasonLabel,
+} from "./coverageModel.ts";
 
 function bound(relation: string, n = 1, intake: BridgeIntake = "contract-surface"): ReferenceCoverage[] {
   return Array.from({ length: n }, (_v, i) => ({
@@ -16,6 +21,9 @@ function bound(relation: string, n = 1, intake: BridgeIntake = "contract-surface
     bucket: "bound" as const,
     state: "bound" as const,
     intake,
+    // S-382: every row states where its target came from. These fixtures are
+    // ordinary call-site literals.
+    provenance: "literal" as const,
   }));
 }
 
@@ -32,6 +40,7 @@ function unbound(
     state: "unbound" as const,
     reason,
     intake,
+    provenance: "literal" as const,
   }));
 }
 
@@ -438,5 +447,89 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
       );
       expect(model.hasInvocationReferences, `an invocation row in ${bucket} counts`).toBe(true);
     }
+  });
+});
+
+describe("provenanceLabel (S-382, ADR-64)", () => {
+  const row = (extra: object): ReferenceCoverage =>
+    ({
+      relation: "route",
+      from: { member: "web", symbol: "fetch_order" },
+      bucket: "bound",
+      state: "bound",
+      intake: "invocation",
+      ...extra,
+    }) as ReferenceCoverage;
+
+  it("tells an observed literal from an admitted configuration value", () => {
+    expect(provenanceLabel(row({ provenance: "literal" }))).toBe("Written at the call site");
+    expect(
+      provenanceLabel(
+        row({
+          provenance: "config-bound",
+          key: "orders.base",
+          source: "placeholder",
+          values: [
+            { value: "/orders", profiles: ["docker"], unprofiled: false, sources: ["a.yml"] },
+          ],
+        }),
+      ),
+    ).toBe("Read from `orders.base` (docker)");
+  });
+
+  it("says that EVERY overlay value is carried, never showing one as the value", () => {
+    // ADR-64 decision point 3: a divergent key is admitted with all of its
+    // values, so the dashboard must not render the first as though it were THE
+    // value. The count and the profile set are what make that visible.
+    const label = provenanceLabel(
+      row({
+        provenance: "config-bound",
+        key: "orders.base",
+        source: "properties",
+        values: [
+          { value: "/orders", profiles: [], unprofiled: true, sources: ["application.yml"] },
+          {
+            value: "/orders-it",
+            profiles: ["it"],
+            unprofiled: false,
+            sources: ["application-it.yml"],
+          },
+        ],
+      }),
+    );
+    expect(label).toBe("Read from `orders.base` — 2 values, one per overlay (it)");
+    expect(label).not.toContain("/orders-it");
+  });
+
+  it("names the keys a refused configuration reference proved only an indirection to", () => {
+    expect(
+      provenanceLabel(
+        row({
+          provenance: "config-unresolved",
+          keys: ["orders.base", "orders.version"],
+          refusal: "missing-key",
+        }),
+      ),
+    ).toBe(
+      "Names `orders.base`, `orders.version`, which the committed sources do not admit",
+    );
+  });
+
+  it("renders an unrecognised provenance verbatim rather than as an empty statement", () => {
+    // The wire payload is not runtime-validated and a later story may add a
+    // state. A target shown with NO statement of where it came from is the
+    // indistinguishability ADR-64 forbids, so the token stands in for the label.
+    expect(provenanceLabel(row({ provenance: "read-from-the-future" }))).toBe(
+      "read-from-the-future",
+    );
+  });
+
+  it("labels both configuration reasons, so neither count is shown bare", () => {
+    expect(reasonLabel("config-key-missing")).toBe(
+      "No committed source defines the configuration key",
+    );
+    expect(reasonLabel("config-placeholder-value")).toBe(
+      "The committed value is itself a placeholder",
+    );
   });
 });

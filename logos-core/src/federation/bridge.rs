@@ -292,6 +292,39 @@ pub trait MemberContracts {
         Ok(Vec::new())
     }
 
+    /// Read this member's **committed configuration definitions** for the
+    /// canonical keys a configuration-bound reference names (S-382, [FR-WS-19],
+    /// [ADR-64]).
+    ///
+    /// Every definition of each key is returned — including two that disagree.
+    /// Disagreement is represented for the caller to judge, never averaged and
+    /// never refused here ([ADR-64] decision point 3); a key no source defines is
+    /// simply absent from the map.
+    ///
+    /// Batched over the whole key set rather than asked one key at a time,
+    /// because the coverage tier classifies every member's references in one
+    /// pass and a per-key round trip would be one store read per call site.
+    ///
+    /// The default is **empty** — a member with no committed configuration, and
+    /// every lightweight test double, admits nothing. That is the honest answer
+    /// rather than a fabricated one: an empty map resolves as
+    /// `config-key-missing`, never as a guess.
+    ///
+    /// # Errors
+    /// Propagates a read failure so the caller can skip the member as degraded
+    /// rather than aborting the whole workspace ([ADR-53]).
+    ///
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+    fn config_definitions(
+        &self,
+        keys: &[String],
+    ) -> Result<std::collections::BTreeMap<String, Vec<crate::graph_store::ConfigDefinition>>> {
+        let _ = keys;
+        Ok(std::collections::BTreeMap::new())
+    }
+
     /// Read this member's **reachability surface** — every node with the per-repo
     /// tri-state dead-code verdict its own graph last computed, plus the
     /// `Calls`/`RoutesTo` adjacency the app-wide union view walks ([FR-WS-12],
@@ -365,6 +398,36 @@ impl MemberContracts for crate::Engine {
         // would be a whole-graph cost for an empty answer ([NFR-PE-10]).
         let (nodes, edges) = runtime.submit_read(|store| store.broker_subgraph())?;
         Ok(super::topics::topic_summaries_from(&nodes, &edges))
+    }
+
+    fn config_definitions(
+        &self,
+        keys: &[String],
+    ) -> Result<std::collections::BTreeMap<String, Vec<crate::graph_store::ConfigDefinition>>> {
+        if keys.is_empty() {
+            // No configuration-bound reference in this member: no read at all,
+            // not an empty one. The overwhelmingly common case, and the reason
+            // this surface costs nothing on an estate that configures nothing.
+            return Ok(std::collections::BTreeMap::new());
+        }
+        let runtime = self.runtime().context(
+            "reading a member's configuration definitions requires a long-lived engine \
+             (Engine::start) with a read-only pool",
+        )?;
+        let keys = keys.to_vec();
+        runtime.submit_read(move |store| {
+            let mut out = std::collections::BTreeMap::new();
+            for key in keys {
+                let defs = store.config_definitions(&key)?;
+                // A key no source defines is ABSENT rather than present-and-empty:
+                // the resolver reads an absent key as `missing`, and an empty vec
+                // would say the same thing twice.
+                if !defs.is_empty() {
+                    out.insert(key, defs);
+                }
+            }
+            Ok(out)
+        })
     }
 
     fn reachability_surface(&self) -> Result<super::reach::ReachabilitySurface> {

@@ -36,6 +36,7 @@ import type {
   ClassificationCounts,
   CrossServiceCoverage,
   IntakeSplit,
+  ReferenceCoverage,
   UnboundReason,
 } from "../../api/types.ts";
 
@@ -46,6 +47,8 @@ export const REASON_LABEL: Record<UnboundReason, string> = {
   "base-url-runtime": "Base URL resolved at runtime",
   ambiguous: "Two or more providers (ambiguous)",
   "topic-not-literal": "Broker topic is not a static literal",
+  "config-key-missing": "No committed source defines the configuration key",
+  "config-placeholder-value": "The committed value is itself a placeholder",
 };
 
 /** The human label for each relation arm. Unknown arms (a later M-milestone's) are
@@ -69,6 +72,39 @@ export function armLabel(relation: string): string {
  *  not runtime-validated, so this is reachable without a version skew being a bug. */
 export function reasonLabel(reason: string): string {
   return REASON_LABEL[reason as UnboundReason] ?? reason;
+}
+
+/** How one coverage row's target was obtained, in words (S-382, ADR-64,
+ *  NFR-CC-04).
+ *
+ *  ADR-64 requires an admitted value never to be indistinguishable from an
+ *  observed one, and this is where the dashboard honours that: a row read from
+ *  committed configuration says so, names the key it was read from, and — when
+ *  the overlays disagree — says that EVERY one of its values is carried, rather
+ *  than showing one of them as though it were the value.
+ *
+ *  A row whose `provenance` this build does not recognise renders as the bare
+ *  token rather than as an empty string, for the same reason {@link reasonLabel}
+ *  does: the wire payload is not runtime-validated, and a target shown with no
+ *  statement of where it came from is the indistinguishability ADR-64 forbids. */
+export function provenanceLabel(ref: ReferenceCoverage): string {
+  switch (ref.provenance) {
+    case "literal":
+      return "Written at the call site";
+    case "config-bound": {
+      const profiles = [
+        ...new Set(ref.values.flatMap((v) => v.profiles)),
+      ].sort();
+      const where = profiles.length > 0 ? ` (${profiles.join(", ")})` : "";
+      return ref.values.length > 1
+        ? `Read from \`${ref.key}\` — ${ref.values.length} values, one per overlay${where}`
+        : `Read from \`${ref.key}\`${where}`;
+    }
+    case "config-unresolved":
+      return `Names \`${ref.keys.join("`, `")}\`, which the committed sources do not admit`;
+    default:
+      return (ref as { provenance: string }).provenance;
+  }
 }
 
 /** One unbound reason and how many references carry it. */

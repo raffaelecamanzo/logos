@@ -911,6 +911,10 @@ fn capture_http_client_call_arm(
         Vec::with_capacity(calls.len());
     for call in calls {
         match crate::resolve::http_client_call::classify_client_call(&call.site.slots) {
+            // Both admissions take this arm. A config-bound path (S-382) is
+            // stored verbatim, placeholders and all, so the coverage tier
+            // resolves it against the bytes the repository commits; it creates
+            // no edge here, exactly as a literal that fails to key creates none.
             Ok(_) => {
                 judged_operands.push((ArtifactRelation::HttpClientCall, call.operand));
                 bound_sites.push(call.site);
