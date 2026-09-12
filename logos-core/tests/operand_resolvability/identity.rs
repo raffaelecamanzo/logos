@@ -42,8 +42,10 @@
 //! Only [FR-WS-22]'s headline population: **net-new** identity-resolved
 //! consumer→provider pairs. A pair that path-only matching would already have
 //! bound on its own is reported, but it is **not evidence for identity** and is
-//! excluded from the figure the floor is read against. The floor is recorded in
-//! `.pending/S-384-T1-floor.txt`, written before any of this code existed.
+//! excluded from the figure the floor is read against. The floor was declared
+//! in `.pending/S-384-T1-floor.txt` before any of this code existed, and is
+//! reproduced verbatim in `identity_floor.txt` beside this module because that
+//! pending directory is gitignored — see [`DECLARED_FLOOR`].
 //!
 //! # Read-only, and against the estate SOURCE
 //!
@@ -57,8 +59,17 @@
 //!
 //! Lives once, in `operand_resolvability/identity_finding.txt`, embedded with
 //! `include_str!` so it cannot be deleted or renamed without breaking
-//! compilation and there is no second hand-maintained copy to rot — the same
-//! discipline `client_call_refusal_finding.txt` follows.
+//! compilation — the same discipline `client_call_refusal_finding.txt` follows.
+//!
+//! **What that does and does not buy.** `include_str!` protects the file's
+//! existence, not its agreement with the run: the text is printed, never
+//! compared. Three of its figures are pinned as constants
+//! ([`RECORDED_NET_NEW`], [`RECORDED_ALREADY_BOUND`],
+//! [`RECORDED_NET_NEW_FALLTHROUGH`]) and the census floors in the gate keep the
+//! rest from reading zero while the text still claims a populated estate — but
+//! the remaining figures are a hand-maintained record, and an earlier version
+//! of this comment claimed "no second hand-maintained copy to rot", which
+//! overstated it.
 //!
 //! [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
 //! [FR-WS-20]: ../../../docs/specs/requirements/FR-WS-20.md
@@ -78,10 +89,25 @@ use logos_core::extract::{self, FileInput, SymbolContext};
 use logos_core::plugin::LanguageRegistry;
 use logos_core::resolve::route_template::normalize_template;
 
-use super::configuration_agreement::{parse_yaml, ConfigCorpus, Tree};
+use super::configuration_agreement::{config_profile, parse_yaml, ConfigCorpus, Tree};
 
 /// The recorded verdict, reproduced by the run and printed by it.
 pub const RECORDED_FINDING: &str = include_str!("identity_finding.txt");
+
+/// **The floor, as declared before the run** — a byte-for-byte copy of
+/// `docs/planning/sprints/.pending/S-384-T1-floor.txt`, written at
+/// 2026-09-12T07:33:21Z, before any of this module existed.
+///
+/// It is copied here because the pending directory is **gitignored**: the
+/// original is untracked and disappears when the sprint's coordination
+/// directory is cleared, which would leave a blocking gate's central evidence
+/// resting on a file mtime that no longer exists. `include_str!` makes the
+/// declaration part of the build, and
+/// [`the_floor_is_the_one_declared_before_the_run`] parses the figure out of
+/// this text and compares it to [`NET_NEW_FLOOR`] — so the constant cannot be
+/// edited to clear a future run without the declaration being edited too, in a
+/// file whose whole purpose is to say it must not be.
+pub const DECLARED_FLOOR: &str = include_str!("identity_floor.txt");
 
 /// The materiality floor, declared before the run in
 /// `docs/planning/sprints/.pending/S-384-T1-floor.txt` and reproduced here so
@@ -231,17 +257,27 @@ pub fn flat_key(key: &str) -> String {
 /// cannot reuse `ConfigCorpus::discover`'s `hidden(true)` setting, and says so
 /// here rather than silently measuring nothing.
 ///
-/// The [`DeployRole::Manifest`] arm is deliberately broad — any YAML that is
-/// not an `application*` source — because a raw Kubernetes `Service` manifest
-/// has no naming convention to match on. It is read for one key and discarded
-/// if that key is absent.
+/// The [`DeployRole::Manifest`] arm is deliberately broad — any YAML the
+/// configuration corpus does not own — because a raw Kubernetes `Service`
+/// manifest has no naming convention to match on. It is read for one key and
+/// discarded if that key is absent.
+///
+/// The exclusion calls `config_profile`, the promoted rule that defines what
+/// `ConfigCorpus` admits, rather than restating it as `starts_with("application")`.
+/// The two are not the same predicate: `applicationfoo.yaml` is not a
+/// configuration source, so the string test excluded a file nothing else reads
+/// and a `kind: Service` inside it would have been invisible.
 fn deploy_role(rel: &str) -> Option<DeployRole> {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     let lower = name.to_ascii_lowercase();
     if name == "Chart.yaml" {
         return Some(DeployRole::Chart);
     }
-    if lower.starts_with("values") && (lower.ends_with(".yaml") || lower.ends_with(".yml")) {
+    // `values` anywhere in the stem, not only at its start: `k3d-values.yaml`
+    // and `prod-values.yaml` are values files by every convention that matters,
+    // and `starts_with` silently routed them to the Manifest arm, which never
+    // collects host references.
+    if (lower.ends_with(".yaml") || lower.ends_with(".yml")) && lower.contains("values") {
         return Some(DeployRole::Values);
     }
     if lower.starts_with("docker-compose") && (lower.ends_with(".yaml") || lower.ends_with(".yml"))
@@ -254,7 +290,7 @@ fn deploy_role(rel: &str) -> Option<DeployRole> {
     // estate fact. `application*` is excluded because that is the OTHER
     // corpus — `ConfigCorpus` owns it, and admitting it here would double-count
     // every key it already proves.
-    if (lower.ends_with(".yaml") || lower.ends_with(".yml")) && !lower.starts_with("application") {
+    if (lower.ends_with(".yaml") || lower.ends_with(".yml")) && config_profile(name).is_none() {
         return Some(DeployRole::Manifest);
     }
     None
@@ -284,6 +320,20 @@ pub struct Corpus {
     pub deploy_files: usize,
     /// Members carrying at least one deploy file.
     pub members_with_deploy: BTreeSet<String>,
+    /// Every deploy overlay each member HAS, whether or not it produced an
+    /// edge — the denominator [FR-WS-22] AC4's split has to be taken over.
+    ///
+    /// An earlier version intersected over the overlays that happened to yield
+    /// a pair, so a member's overlays that define no base URL were silently
+    /// excluded and `mailbox-aggregator-api` read as having 3 overlays when it
+    /// has 6. That made "in every overlay" mean "in every overlay that already
+    /// had one" — and the finding drew "only one member has more than one
+    /// overlay" from it, which the estate contradicts.
+    ///
+    /// [FR-WS-22]: ../../../docs/specs/requirements/FR-WS-22.md
+    pub overlays: BTreeMap<String, BTreeSet<String>>,
+    /// Deploy-shaped files skipped because they sit in a documentation tree.
+    pub documentation_files: usize,
     /// Raw `kind: Service` manifests that yielded one unambiguous name.
     pub service_manifests: usize,
     /// Raw `kind: Service` manifests refused as ambiguous — a multi-document
@@ -300,15 +350,26 @@ pub struct Corpus {
     ///
     /// [FR-WS-22]: ../../../docs/specs/requirements/FR-WS-22.md
     pub unresolvable_hosts: BTreeMap<&'static str, (usize, String)>,
-    /// Spring keys whose separator-free forms collide, i.e. where [`flat_key`]
-    /// equates two keys `canonical_key` keeps apart. The honest cost of the
-    /// environment-variable join.
-    pub flat_collisions: BTreeMap<String, BTreeSet<String>>,
     /// Every canonical Spring key the application corpus defines, by flat form.
     pub spring_by_flat: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Corpus {
+    /// Spring keys whose separator-free forms collide, i.e. where [`flat_key`]
+    /// equates two keys `canonical_key` keeps apart — the honest cost of the
+    /// environment-variable join.
+    ///
+    /// A view over [`Corpus::spring_by_flat`] rather than a second map built
+    /// beside it: the earlier version cloned the whole 872-key index to keep a
+    /// filtered copy that is read once.
+    pub fn flat_collisions(&self) -> BTreeMap<&str, &BTreeSet<String>> {
+        self.spring_by_flat
+            .iter()
+            .filter(|(_, keys)| keys.len() > 1)
+            .map(|(flat, keys)| (flat.as_str(), keys))
+            .collect()
+    }
+
     /// Record a URL-shaped value whose host establishes nothing, keeping one
     /// example per reason so the bucket is evidence rather than a bare count
     /// ([NFR-CC-04]).
@@ -403,16 +464,31 @@ impl Corpus {
     }
 
     /// The tier a label resolves at, for the census.
+    ///
+    /// Stops at the first tier with **any** claimant, exactly as [`member_for`]
+    /// does, and yields `None` when that tier collides. An earlier version
+    /// `find`-ed the first tier with exactly one claimant, which silently falls
+    /// through a collided tier — so on a label like `archive-api` it would have
+    /// named tier 3 while `member_for` refused. The two could not disagree at
+    /// today's only call site, but a file whose purpose is to pin rules should
+    /// not carry two readings of the same one.
+    ///
+    /// [`member_for`]: Corpus::member_for
     pub fn tier_for(&self, label: &str) -> Option<Tier> {
-        Tier::ALL.into_iter().filter(|t| t.is_decisive()).find(|&tier| {
-            self.claims
+        for tier in Tier::ALL.into_iter().filter(|t| t.is_decisive()) {
+            let claimants: BTreeSet<&str> = self
+                .claims
                 .iter()
                 .filter(|c| c.tier == tier && c.label == label)
                 .map(|c| c.member.as_str())
-                .collect::<BTreeSet<_>>()
-                .len()
-                == 1
-        })
+                .collect();
+            match claimants.len() {
+                0 => continue,
+                1 => return Some(tier),
+                _ => return None,
+            }
+        }
+        None
     }
 }
 
@@ -472,12 +548,42 @@ fn top_level_child_keys(text: &str, parent: &str) -> Vec<String> {
 /// silent.
 ///
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-fn service_name(values: &BTreeMap<String, BTreeSet<String>>) -> Option<String> {
+fn service_name(values: &BTreeMap<String, BTreeSet<String>>) -> ServiceName {
     let one = |k: &str| values.get(k).filter(|v| v.len() == 1).and_then(|v| v.iter().next());
-    match (one("kind"), one("metadata.name")) {
-        (Some(kind), Some(name)) if kind == "Service" => Some(name.clone()),
-        _ => None,
+    // "is this a Service at all" is asked of the whole file, not of a unique
+    // `kind`: a multi-document file that contains a Service among other
+    // documents IS relevant, and is exactly the ambiguous case.
+    if !values.get("kind").is_some_and(|k| k.contains("Service")) {
+        return ServiceName::NotAService;
     }
+    match (one("kind"), one("metadata.name")) {
+        (Some(kind), Some(name)) if kind == "Service" => ServiceName::Named(name.clone()),
+        _ => ServiceName::Ambiguous,
+    }
+}
+
+/// What a raw manifest yielded. Three outcomes, not two: a file that is not a
+/// `Service` at all is **not a refusal** and must not be counted as one.
+///
+/// An earlier draft returned `Option` and counted every `None` as ambiguous.
+/// After the cheap reject was widened from `kind: Service` to `kind:` — itself a
+/// fix, because `canonical_value` unquotes and the exact-text probe was
+/// stricter than the rule — that made the "refused as ambiguous" census read
+/// 2,259 instead of 112: every ConfigMap and Deployment in the estate counted
+/// as a refused Service. A census that inflates when a reader is corrected is
+/// measuring the reader, not the estate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceName {
+    /// The manifest declares no `Service` document at all.
+    NotAService,
+    /// It declares one, but `kind` or `metadata.name` is not unique across the
+    /// file's documents, so which name is the Service's cannot be told
+    /// ([NFR-RA-05]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    Ambiguous,
+    /// Exactly one `Service` with exactly one name.
+    Named(String),
 }
 
 /// The first `<artifactId>` a POM declares **outside** its `<parent>` block —
@@ -492,10 +598,13 @@ fn pom_artifact_id(text: &str) -> Option<String> {
     let mut depth_in_parent = false;
     for line in text.lines() {
         let t = line.trim();
-        if t.starts_with("<parent>") {
-            depth_in_parent = true;
-        } else if t.starts_with("</parent>") {
+        // `contains`, not `starts_with`: a single-line `<parent>…</parent>`
+        // opens and closes on one line, and a `starts_with` close test latched
+        // the flag forever, so the module's own artifact id was never reached.
+        if t.contains("</parent>") {
             depth_in_parent = false;
+        } else if t.contains("<parent>") {
+            depth_in_parent = true;
         } else if !depth_in_parent {
             if let Some(rest) = t.strip_prefix("<artifactId>") {
                 if let Some(id) = rest.strip_suffix("</artifactId>") {
@@ -533,6 +642,13 @@ pub fn url_target_or_reason(
     let authority = authority.rsplit('@').next().unwrap_or(authority);
     if authority.is_empty() {
         return Err("empty authority");
+    }
+    // Tested on the WHOLE authority, before the port split. `${JAEGER_AGENT_HOST}:${JAEGER_AGENT_PORT}`
+    // is a templated host, and splitting first attributed all five of the
+    // estate's occurrences to "port is not a number" — naming the wrong reason
+    // in the one bucket whose job is to say what "resolves to nothing" is made of.
+    if authority.contains(['{', '}', '$', '(', ')', '*']) {
+        return Err("templated host");
     }
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
@@ -600,6 +716,10 @@ fn walk_deploy(root: &Path, corpus: &mut Corpus) {
             continue;
         }
 
+        if is_documentation(&rel) {
+            corpus.documentation_files += 1;
+            continue;
+        }
         let Some(role) = deploy_role(&rel) else { continue };
         let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
         corpus.deploy_files += 1;
@@ -614,15 +734,24 @@ fn walk_deploy(root: &Path, corpus: &mut Corpus) {
             DeployRole::Manifest => {
                 // Cheap reject before parsing: the overwhelming majority of the
                 // estate's 3,351 YAML files are not Service manifests.
-                if !text.contains("kind: Service") {
+                //
+                // Tests `kind:` and not `kind: Service`: `service_name` reads
+                // the value AFTER `canonical_value` has unquoted it, so
+                // `kind: "Service"` and `kind:  Service` satisfy the rule while
+                // failing an exact-text probe. A fast path stricter than the
+                // rule it accelerates silently narrows tier 1, which is the
+                // "gap in the reader reported as an estate fact" this whole
+                // harness exists to avoid.
+                if !text.contains("kind:") {
                     continue;
                 }
                 match service_name(&parse_yaml(&text)) {
-                    Some(name) => {
+                    ServiceName::Named(name) => {
                         corpus.service_manifests += 1;
                         corpus.claim(&member, Tier::Deploy, &name, &rel);
                     }
-                    None => corpus.service_manifests_ambiguous += 1,
+                    ServiceName::Ambiguous => corpus.service_manifests_ambiguous += 1,
+                    ServiceName::NotAService => {}
                 }
             }
             DeployRole::Chart | DeployRole::Values => {
@@ -639,6 +768,7 @@ fn walk_deploy(root: &Path, corpus: &mut Corpus) {
                 }
                 if role == DeployRole::Values {
                     let overlay = overlay_of(&rel, &member);
+                    corpus.overlays.entry(member.clone()).or_default().insert(overlay.clone());
                     for (key, vals) in &values {
                         for v in vals {
                             let (label, scheme, port) = match url_target_or_reason(v) {
@@ -668,6 +798,25 @@ fn walk_deploy(root: &Path, corpus: &mut Corpus) {
     }
 }
 
+/// Whether a path sits in a documentation, example or tutorial tree.
+///
+/// Those trees carry complete, valid-looking charts that describe **something
+/// else**: `hermodr-mirror/documentation/examples/sidecar/Chart.yaml` names
+/// `hermodr-sidecar-showcase` and the sibling values file references it, so the
+/// two matched each other and the result was reported as a decisive tier-1
+/// identity of a workspace member. Five of the "external" labels came from the
+/// same trees (`INSERT_HERE_YOUR_HOST_FQDN`, `mockidp`, `keycloak-http`, …).
+///
+/// `scan_providers` and `judge` already exclude test source for the same reason
+/// — a controller in `src/test` is not a service this estate deploys — and this
+/// is that rule applied to the deploy walk, which had no source-tree guard.
+fn is_documentation(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    ["documentation/", "examples/", "tutorial/", "tutorials/", "docs/"]
+        .iter()
+        .any(|d| lower.starts_with(d) || lower.contains(&format!("/{d}")))
+}
+
 /// The deploy overlay a values file belongs to: its directory, member-relative.
 /// `.helm/values.yaml` and `deploy-coll-bp/values.yaml` are two overlays of one
 /// member, and [FR-WS-22] AC4 requires every edge attributable to the overlay
@@ -694,6 +843,10 @@ pub struct Providers {
     pub files_gated: usize,
     pub routes_seen: usize,
     pub routes_normalized: usize,
+    /// The same index with `src/test` controllers admitted — the denominator of
+    /// the test-tree sensitivity, built from the same walk so it costs no second
+    /// pass over the estate.
+    pub with_test: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
     /// A **ceiling**, not an extraction: mapping annotations textually present
     /// in the ledger-gated production files, per member.
     ///
@@ -714,6 +867,10 @@ pub struct Providers {
     /// [CR-113]: ../../../docs/requests/CR-113-constant-folded-base-url-composition.md
     /// [CR-115]: ../../../docs/requests/CR-115-configuration-bound-base-url-resolution.md
     pub registrations_ceiling: BTreeMap<String, usize>,
+    /// Type-level `@RequestMapping` prefixes, counted apart from registrations:
+    /// `compose_prefixes` consumes them, so they can never be routes and must
+    /// not be subtracted from `routes_seen`.
+    pub class_level_prefixes: usize,
 }
 
 /// Mapping-annotation spellings counted for [`Providers::registrations_ceiling`].
@@ -725,6 +882,45 @@ const MAPPING_ANNOTATIONS: [&str; 6] = [
     "@PatchMapping",
     "@RequestMapping",
 ];
+
+/// Split a source file's mapping annotations into **route registrations** and
+/// **class-level prefixes**.
+///
+/// A bare `@RequestMapping("/v1")` on a type declares a prefix that
+/// `compose_prefixes` ([FR-FW-05]) *consumes*; by construction it can never
+/// appear as a route of its own. Counting it as an unread registration inflates
+/// the provider-side gap — on the reference estate by exactly 2×, 50 instead of
+/// 25, and that gap is the number that sizes the follow-on CR.
+///
+/// The discriminator is Spring's own: a method-level mapping names a `method`
+/// (or is one of the verb-specific spellings); a type-level prefix does not.
+/// Deliberately textual and deliberately a ceiling — it exists to bound the gap,
+/// never to extract a route.
+///
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+fn mapping_registrations(source: &str) -> (usize, usize) {
+    let mut registrations = 0;
+    let mut prefixes = 0;
+    for (i, _) in source.match_indices("@RequestMapping") {
+        // The annotation's own argument text: to its closing paren, or to the
+        // end of the line when it carries none.
+        let rest = &source[i..];
+        let head: String = rest.chars().take(400).collect();
+        let args = head.find(')').map_or_else(
+            || head.lines().next().unwrap_or_default().to_string(),
+            |end| head[..end].to_string(),
+        );
+        if args.contains("method") {
+            registrations += 1;
+        } else {
+            prefixes += 1;
+        }
+    }
+    for spelling in MAPPING_ANNOTATIONS.iter().filter(|a| **a != "@RequestMapping") {
+        registrations += source.matches(*spelling).count();
+    }
+    (registrations, prefixes)
+}
 
 impl Providers {
     /// The members registering a route at this normalized template, under any
@@ -741,11 +937,25 @@ impl Providers {
     ///
     /// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
     pub fn serving(&self, template: &str) -> BTreeSet<&str> {
-        self.by_member
+        Self::serving_in(&self.by_member, template)
+    }
+
+    /// The same question asked of an explicit index, so the production view and
+    /// the with-test view cannot answer it by two different rules.
+    pub fn serving_in<'a>(
+        index: &'a BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+        template: &str,
+    ) -> BTreeSet<&'a str> {
+        index
             .iter()
             .filter(|(_, routes)| routes.contains_key(template))
             .map(|(m, _)| m.as_str())
             .collect()
+    }
+
+    /// Routes in the with-test view, for the sensitivity line.
+    pub fn routes_with_test(&self) -> usize {
+        self.with_test.values().flat_map(BTreeMap::values).map(BTreeSet::len).sum()
     }
 }
 
@@ -753,9 +963,18 @@ impl Providers {
 ///
 /// The ledger gate is [FR-FW-04]'s, computed the way the parent module computes
 /// the client-call gate: the real `extract` pass, then the plugin's own
-/// `framework_detectors`. A file whose refs name no framework is not a
-/// candidate, so an annotation-shaped call in a plain library cannot contribute
-/// a route the promotion pass would never promote.
+/// `framework_detectors`, matched through the parent's `matches_detector` —
+/// **the same function**, not a third spelling of it. An earlier draft inlined
+/// `target.starts_with(detector)`, which has no `::` segment boundary and so
+/// admitted `axum_extra::…` for the detector `axum`; production
+/// (`resolve::matches_detector`) requires the remainder to be empty or to start
+/// with `::`, and that function's own doc says it exists so the rule "lands
+/// once instead of drifting between two copies". This is the third copy it
+/// warned about, now deleted.
+///
+/// A file whose refs name no framework is not a candidate, so an
+/// annotation-shaped call in a plain library cannot contribute a route the
+/// promotion pass would never promote.
 ///
 /// Test source is excluded: a controller in `src/test` is not a service this
 /// estate deploys, and [CR-117]'s gate is the precedent for keeping the two
@@ -780,9 +999,7 @@ fn scan_providers(root: &Path, members: &BTreeSet<String>) -> Providers {
         }
         let Ok(rel) = entry.path().strip_prefix(root) else { continue };
         let rel = rel.to_string_lossy().replace('\\', "/");
-        if Tree::of(&rel) == Tree::Test {
-            continue;
-        }
+        let tree = Tree::of(&rel);
         let Some(member) = rel.split('/').next().map(str::to_string) else { continue };
         if !members.contains(&member) {
             continue;
@@ -802,18 +1019,33 @@ fn scan_providers(root: &Path, members: &BTreeSet<String>) -> Providers {
         let gated = facts
             .refs
             .iter()
-            .any(|r| detectors.iter().any(|d| r.target == *d || r.target.starts_with(&**d)));
+            .any(|r| detectors.iter().any(|d| crate::matches_detector(&r.target, d)));
         if !gated {
             continue;
         }
-        out.files_gated += 1;
-        let ceiling: usize =
-            MAPPING_ANNOTATIONS.iter().map(|a| source.matches(a).count()).sum();
-        *out.registrations_ceiling.entry(member.clone()).or_default() += ceiling;
+        if tree == Tree::Main {
+            out.files_gated += 1;
+            let (registrations, prefixes) = mapping_registrations(&source);
+            *out.registrations_ceiling.entry(member.clone()).or_default() += registrations;
+            out.class_level_prefixes += prefixes;
+        }
 
         for route in logos_core::resolve::framework::routes_in_source(plugin, &source) {
-            out.routes_seen += 1;
             let Some(norm) = normalize_template(&route.path) else { continue };
+            // Both views are built from ONE walk. The production view is the
+            // headline; the with-test view exists so the test-tree sensitivity
+            // is a figure this run computes rather than a one-off experiment
+            // quoted in the finding text.
+            out.with_test
+                .entry(member.clone())
+                .or_default()
+                .entry(norm.clone())
+                .or_default()
+                .insert(route.method.clone());
+            if tree == Tree::Test {
+                continue;
+            }
+            out.routes_seen += 1;
             out.routes_normalized += 1;
             out.by_member
                 .entry(member.clone())
@@ -857,6 +1089,31 @@ impl PairClass {
     }
 }
 
+/// The whole gate, in three lines: what identity does to one consumer call site
+/// whose template resolves and whose target identity resolves to `provider`.
+///
+/// A free function rather than an expression inside [`judge`] because this is
+/// the decision the floor is read against, and inside `judge` it could only be
+/// exercised by the estate run — which **skips** wherever `LOGOS_REF_WORKSPACE`
+/// is unset, i.e. in every default `cargo test` run. Replacing the whole
+/// classifier with a constant left the suite green; the fixtures below now pin
+/// each branch unconditionally.
+fn classify(serving: &BTreeSet<&str>, provider: &str) -> PairClass {
+    if !serving.contains(provider) {
+        // Identity names a provider that registers no route at this template,
+        // so identity yields no edge here whatever path-only would have done.
+        PairClass::TargetServesNothing
+    } else if serving.len() == 1 {
+        // The identity target is the ONLY member serving this template, so the
+        // exactly-one rule reaches it on path alone. Not evidence for identity.
+        PairClass::AlreadyBoundByPath
+    } else {
+        // Two or more members serve it: path-only refuses as ambiguous and
+        // identity is what binds. This is the net-new population.
+        PairClass::NetNewAmbiguous
+    }
+}
+
 /// One judged consumer→provider candidate.
 #[derive(Debug, Clone)]
 pub struct Pair {
@@ -891,6 +1148,10 @@ pub struct Findings {
     /// against this set; deriving it from the matched pairs instead would make
     /// the answer true by construction.
     pub call_site_base_keys: BTreeSet<(String, String)>,
+    /// Consumer sites whose template resolved but does not positionally
+    /// normalize, so they can reach no provider. Enumerated rather than
+    /// dropped: this is a limit of the reader, not a fact about the estate.
+    pub templates_not_normalizable: BTreeSet<String>,
 }
 
 /// One cross-service REST edge at the grain [CR-121] §6 counts:
@@ -962,6 +1223,7 @@ struct Judged {
     sites_without_target: BTreeSet<String>,
     sites_considered: usize,
     call_site_base_keys: BTreeSet<(String, String)>,
+    templates_not_normalizable: BTreeSet<String>,
 }
 
 /// Judge every consumer call site the client-call arm resolved a template for.
@@ -971,6 +1233,7 @@ fn judge(root: &Path, corpus: &Corpus, providers: &Providers, mode: Resolution) 
     let mut sites_without_target = BTreeSet::new();
     let mut sites_considered = 0usize;
     let mut call_site_base_keys = BTreeSet::new();
+    let mut templates_not_normalizable = BTreeSet::new();
 
     for stats in m.per_language.values() {
         for site in stats.sites.iter().filter(|s| s.gate_admitted) {
@@ -978,9 +1241,21 @@ fn judge(root: &Path, corpus: &Corpus, providers: &Providers, mode: Resolution) 
                 continue;
             }
             let Some(template) = site.cr115.resolved() else { continue };
-            let Some(normalized) = normalize_template(template) else { continue };
             let Some(consumer) = site.file.split('/').next().map(str::to_string) else { continue };
             sites_considered += 1;
+            // Counted BEFORE the normalize attempt, and the refusal counted too.
+            // An earlier version dropped a non-normalizable template above
+            // `sites_considered`, so it appeared in no bucket at all: the
+            // estate's one such site reads
+            // `…/download-exported/{job-id}`, whose hyphenated placeholder
+            // `is_plain_param_name` refuses. The provider side has always
+            // reported `routes_seen` beside `routes_normalized` for exactly this
+            // reason; the consumer side now does too.
+            let Some(normalized) = normalize_template(template) else {
+                templates_not_normalizable
+                    .insert(format!("{}:{}  {}", site.file, site.line, template));
+                continue;
+            };
 
             // The base URL of a path key is its sibling under the same prefix:
             // "the same configuration that supplies the path also supplies the
@@ -991,9 +1266,9 @@ fn judge(root: &Path, corpus: &Corpus, providers: &Providers, mode: Resolution) 
                 let Some((prefix, _)) = key.rsplit_once('.') else { continue };
                 let base_flat = flat_key(&format!("{prefix}.base-url"));
                 call_site_base_keys.insert((consumer.clone(), base_flat.clone()));
-                for target in
-                    corpus.targets.iter().filter(|t| t.member == consumer && t.via_flat == base_flat)
-                {
+                for target in corpus.targets.iter().filter(|t| {
+                    t.is_deploy() && t.member == consumer && t.via_flat == base_flat
+                }) {
                     matched_deploy |= target.is_deploy();
                     let provider = match mode {
                         Resolution::Literal => corpus.member_for(&target.label),
@@ -1001,13 +1276,7 @@ fn judge(root: &Path, corpus: &Corpus, providers: &Providers, mode: Resolution) 
                     };
                     let Some(provider) = provider else { continue };
                     let serving = providers.serving(&normalized);
-                    let class = if !serving.contains(provider) {
-                        PairClass::TargetServesNothing
-                    } else if serving.len() == 1 {
-                        PairClass::AlreadyBoundByPath
-                    } else {
-                        PairClass::NetNewAmbiguous
-                    };
+                    let class = classify(&serving, provider);
                     pairs.push(Pair {
                         consumer: consumer.clone(),
                         provider: provider.to_string(),
@@ -1027,7 +1296,13 @@ fn judge(root: &Path, corpus: &Corpus, providers: &Providers, mode: Resolution) 
             }
         }
     }
-    Judged { pairs, sites_without_target, sites_considered, call_site_base_keys }
+    Judged {
+        pairs,
+        sites_without_target,
+        sites_considered,
+        call_site_base_keys,
+        templates_not_normalizable,
+    }
 }
 
 /// The measurement, computed once per test binary.
@@ -1035,6 +1310,13 @@ fn findings(root: &Path) -> &'static Findings {
     static ONCE: std::sync::OnceLock<Findings> = std::sync::OnceLock::new();
     ONCE.get_or_init(|| {
         let mut corpus = Corpus::default();
+        // A hand-rolled `.git` test rather than `federation::discover_candidates`,
+        // for the reason `config/discovery.rs` records where it accepts the same
+        // divergence: the production rule shells out per directory, and this walk
+        // would pay 84 `git` subprocesses on every run of a measurement that is
+        // already minutes long. The two rules agree on this estate — all 84
+        // members are plain clones — and `members.len() >= 80` in the gate is
+        // what would catch them diverging.
         for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
             if entry.path().is_dir() && entry.path().join(".git").exists() {
                 corpus.members.insert(entry.file_name().to_string_lossy().to_string());
@@ -1090,9 +1372,6 @@ fn findings(root: &Path) -> &'static Findings {
                 }
             }
         }
-        corpus.flat_collisions =
-            corpus.spring_by_flat.iter().filter(|(_, k)| k.len() > 1).map(|(f, k)| (f.clone(), k.clone())).collect();
-
         let providers = scan_providers(root, &corpus.members);
         let literal = judge(root, &corpus, &providers, Resolution::Literal);
         let fallthrough = judge(root, &corpus, &providers, Resolution::FallThrough);
@@ -1104,6 +1383,7 @@ fn findings(root: &Path) -> &'static Findings {
             sites_without_target: literal.sites_without_target,
             sites_considered: literal.sites_considered,
             call_site_base_keys: literal.call_site_base_keys,
+            templates_not_normalizable: literal.templates_not_normalizable,
         }
     })
 }
@@ -1124,8 +1404,14 @@ fn report(f: &Findings) {
 
     // ── AC1 ────────────────────────────────────────────────────────────────
     println!(
-        "raw kind:Service manifests: {} named, {} refused as ambiguous",
-        c.service_manifests, c.service_manifests_ambiguous,
+        "raw kind:Service manifests: {} named, {} refused as ambiguous · {} deploy-shaped files \
+         skipped as documentation/examples",
+        c.service_manifests, c.service_manifests_ambiguous, c.documentation_files,
+    );
+    println!(
+        "members with more than one deploy overlay: {} of {}",
+        c.overlays.values().filter(|o| o.len() > 1).count(),
+        c.members.len(),
     );
     println!("\n--- AC1 · self identity, per tier ---");
     println!("{:<14} {:>8} {:>8} {:>10}", "tier", "members", "labels", "collisions");
@@ -1163,9 +1449,9 @@ fn report(f: &Findings) {
         decided.len(),
         c.members.len(),
     );
-    println!("\n  per-member best decisive tier (first 12 and any member with none):");
+    println!("\n  per-member best decisive tier (all {} members):", c.members.len());
     let mut none_count = 0;
-    for (i, member) in c.members.iter().enumerate() {
+    for member in &c.members {
         let best = Tier::ALL
             .into_iter()
             .filter(|t| t.is_decisive())
@@ -1191,14 +1477,13 @@ fn report(f: &Findings) {
                     .collect();
                 println!("    {member:<44} NONE   (claims, all colliding: {collided:?})");
             }
-            Some(tier) if i < 12 => {
+            Some(tier) => {
                 println!(
                     "    {member:<44} {}   {}",
                     tier.label(),
                     evidence.unwrap_or_default(),
                 );
             }
-            Some(_) => {}
         }
     }
     println!("  members with no decisive self identity at all: {none_count}");
@@ -1230,11 +1515,23 @@ fn report(f: &Findings) {
             with_call_site += 1;
         }
     }
+    // Counted over deploy AND application sources, unlike the two lines above
+    // it, which are deploy-only. Stated rather than left to read as a fourth
+    // bucket of the same 124.
     let to_nothing: usize = c.unresolvable_hosts.values().map(|(n, _)| n).sum();
-    println!("  via-key resolves to a consumer call site: {with_call_site} of {}", deploy_targets.len());
+    println!(
+        "  via-key resolves to a consumer call site: {with_call_site} of {}  \
+         (call sites whose path template RESOLVED — a site whose template refused is not \
+          counted, so this understates the join rather than flattering it)",
+        deploy_targets.len(),
+    );
     println!("  host label resolves to a member:          {to_member}");
     println!("  host label resolves to an external label: {to_external}");
-    println!("  host establishes NOTHING:                 {to_nothing}  (URL-shaped, no usable host)");
+    println!(
+        "  host establishes NOTHING:                 {to_nothing}  (URL-shaped, no usable host — \
+         counted over deploy AND application sources, not just the {} above)",
+        deploy_targets.len(),
+    );
     for (reason, (count, example)) in &c.unresolvable_hosts {
         println!("      {count:>4}  {reason:<24} e.g. {example}");
     }
@@ -1291,11 +1588,12 @@ fn report(f: &Findings) {
             .map(|t| t.label.as_str())
             .collect::<BTreeSet<_>>(),
     );
+    let flat_collisions = c.flat_collisions();
     println!(
         "  Spring keys whose separator-free forms collide: {} (the cost of the env-var join)",
-        c.flat_collisions.len(),
+        flat_collisions.len(),
     );
-    for (flat, keys) in c.flat_collisions.iter().take(10) {
+    for (flat, keys) in flat_collisions.iter().take(10) {
         println!("    {flat:<40} {keys:?}");
     }
 
@@ -1308,8 +1606,10 @@ fn report(f: &Findings) {
     );
     let ceiling: usize = p.registrations_ceiling.values().sum();
     println!(
-        "mapping annotations textually present in those files: {ceiling} — so {} registrations \
-         yielded no readable route",
+        "route-producing mapping annotations in those files: {ceiling} (plus {} type-level \
+         @RequestMapping prefixes, which compose_prefixes consumes and which can never BE \
+         routes) — so {} registrations yielded no readable route",
+        p.class_level_prefixes,
         ceiling.saturating_sub(p.routes_seen),
     );
     println!(
@@ -1334,6 +1634,14 @@ fn report(f: &Findings) {
         f.pairs.iter().map(|p| p.consumer.as_str()).collect::<BTreeSet<_>>(),
     );
     println!(
+        "  of which the template does not positionally normalize (FR-CG-09), so they reach \
+         no provider: {}",
+        f.templates_not_normalizable.len(),
+    );
+    for site in &f.templates_not_normalizable {
+        println!("      {site}");
+    }
+    println!(
         "  of which NO DEPLOY file overrides their base-URL sibling key: {} \
          (application sources are excluded from this test: every consumer commits a localhost \
          default for its own key, so admitting them would answer yes for every site)",
@@ -1343,8 +1651,24 @@ fn report(f: &Findings) {
         [PairClass::NetNewAmbiguous, PairClass::AlreadyBoundByPath, PairClass::TargetServesNothing]
     {
         let edges = f.edges(class);
-        let sites = f.pairs.iter().filter(|x| x.class == class).count();
-        println!("  {:<34} edges {:>4}   sites {:>4}", class.label(), edges.len(), sites);
+        // Distinct call sites, not pairs: one site yields one pair PER matching
+        // overlay, so the raw pair count summed to 83 over 79 sites and was
+        // printed under a "sites" header.
+        let sites = f
+            .pairs
+            .iter()
+            .filter(|x| x.class == class)
+            .map(|x| x.site.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        let pairs = f.pairs.iter().filter(|x| x.class == class).count();
+        println!(
+            "  {:<34} edges {:>4}   sites {:>4}   pairs {:>4}",
+            class.label(),
+            edges.len(),
+            sites,
+            pairs,
+        );
     }
     println!("\n  every judged pair:");
     let mut seen = BTreeSet::new();
@@ -1376,11 +1700,70 @@ fn report(f: &Findings) {
         f.already_bound(),
         f.member_pairs().len(),
     );
+    // Disclosed because it changes how the headline should be read, and computed
+    // rather than asserted. A net-new edge is a tie, and the tie is sometimes
+    // one the CONSUMER creates against itself: an aggregator that re-registers
+    // the callee's template on its own controller is a second server of it, so
+    // path-only refuses and identity binds. Production does the same thing in
+    // the same order — `federation::bridge` applies the exactly-one rule over
+    // the bucket BEFORE testing whether the sole survivor is the consumer's own
+    // member — so this is fidelity, not a defect. But a reader sizing S-385+
+    // should know how much of the headline it is.
+    let self_ties = f
+        .pairs
+        .iter()
+        .filter(|p| p.class == PairClass::NetNewAmbiguous)
+        .filter(|p| {
+            f.providers.serving(&p.normalized).contains(p.consumer.as_str())
+        })
+        .map(|p| (p.consumer.as_str(), p.normalized.as_str(), p.provider.as_str()))
+        .collect::<BTreeSet<_>>()
+        .len();
+    println!(
+        "  DISCLOSURE · self-ties: {self_ties} of the {} net-new edges are ties the CONSUMER \
+         creates against itself by re-registering the callee's template on its own controller. \
+         Production binds these the same way (exactly-one over the bucket, then the same-member \
+         test), so this is fidelity — but it is {} of the headline.",
+        f.net_new(),
+        if f.net_new() == 0 { "none".to_string() } else { format!("{self_ties}/{}", f.net_new()) },
+    );
     println!(
         "  SENSITIVITY · same-tier collisions: net-new would be {} if a colliding tier fell \
          through to the next instead of resolving to nothing (FR-WS-20 AC2 as written is the \
          headline; this is the counterfactual)",
         f.net_new_fallthrough(),
+    );
+    // Computed, not quoted: reclassify every judged pair against the with-test
+    // provider index and report the split it produces.
+    let with_test_net_new = f
+        .pairs
+        .iter()
+        .filter(|p| {
+            let serving = Providers::serving_in(&f.providers.with_test, &p.normalized);
+            classify(&serving, &p.provider) == PairClass::NetNewAmbiguous
+        })
+        .map(|p| (p.consumer.as_str(), p.normalized.as_str(), p.provider.as_str()))
+        .collect::<BTreeSet<_>>()
+        .len();
+    let with_test_already = f
+        .pairs
+        .iter()
+        .filter(|p| {
+            let serving = Providers::serving_in(&f.providers.with_test, &p.normalized);
+            classify(&serving, &p.provider) == PairClass::AlreadyBoundByPath
+        })
+        .map(|p| (p.consumer.as_str(), p.normalized.as_str(), p.provider.as_str()))
+        .collect::<BTreeSet<_>>()
+        .len();
+    println!(
+        "  SENSITIVITY · test-tree providers: admitting src/test controllers moves routes \
+         {} -> {} and the split to net-new {} / already-bound {} (headline: {} / {})",
+        f.providers.routes_seen,
+        f.providers.routes_with_test(),
+        with_test_net_new,
+        with_test_already,
+        f.net_new(),
+        f.already_bound(),
     );
     println!(
         "  SENSITIVITY · method-agnostic matching: adding the consumer's HTTP verb to the \
@@ -1430,25 +1813,35 @@ fn report(f: &Findings) {
     let mut union_total = 0;
     let mut common_total = 0;
     let mut differing_members = 0;
+    let empty: BTreeSet<Edge<'_>> = BTreeSet::new();
+    let no_overlays: BTreeSet<String> = BTreeSet::new();
     for member in f.pairs.iter().map(|p| p.consumer.as_str()).collect::<BTreeSet<_>>() {
-        let overlays: Vec<&BTreeSet<Edge<'_>>> =
-            by_overlay.iter().filter(|((m, _), _)| *m == member).map(|(_, e)| e).collect();
-        if overlays.is_empty() {
+        // Every overlay the member HAS is a column, including those that define
+        // no base URL: an overlay declaring nothing is still an alternative the
+        // edge is absent from.
+        let declared = f.corpus.overlays.get(member).unwrap_or(&no_overlays);
+        if declared.is_empty() {
             continue;
         }
-        let union: BTreeSet<_> = overlays.iter().flat_map(|s| s.iter()).copied().collect();
-        let common: BTreeSet<_> = overlays
+        let per_overlay: Vec<&BTreeSet<Edge<'_>>> = declared
+            .iter()
+            .map(|o| by_overlay.get(&(member, o.as_str())).unwrap_or(&empty))
+            .collect();
+        let union: BTreeSet<_> = per_overlay.iter().flat_map(|s| s.iter()).copied().collect();
+        let common: BTreeSet<_> = per_overlay
             .iter()
             .skip(1)
-            .fold(overlays[0].clone(), |a, s| a.intersection(s).copied().collect());
+            .fold(per_overlay[0].clone(), |a, s| a.intersection(s).copied().collect());
         union_total += union.len();
         common_total += common.len();
         if union.len() != common.len() {
             differing_members += 1;
         }
         println!(
-            "  {member:<30} overlays {} · union {} · in every overlay {} · overlay-specific {}",
-            overlays.len(),
+            "  {member:<30} overlays {} ({} with an edge) · union {} · in every overlay {} · \
+             overlay-specific {}",
+            declared.len(),
+            per_overlay.iter().filter(|s| !s.is_empty()).count(),
             union.len(),
             common.len(),
             union.len() - common.len(),
@@ -1568,6 +1961,44 @@ fn measure_service_identity_resolvability_over_the_reference_workspace() {
          side of every pair has shrunk and the split is not comparable",
         f.providers.routes_seen,
     );
+
+    // AC1, AC2 and AC4 are reports rather than floors, but a report that
+    // silently reads ZERO attributes the falsification to nothing at all — and
+    // every one of these counters could be neutered with the verdict still
+    // green and the embedded finding still printing its populated figures
+    // beside them. Floors, not equalities: they can only grow with the estate.
+    let census: [(&str, usize, usize); 6] = [
+        ("deploy files", f.corpus.deploy_files, 100),
+        (
+            "kind:Service manifests (named + ambiguous)",
+            f.corpus.service_manifests + f.corpus.service_manifests_ambiguous,
+            300,
+        ),
+        (
+            "URL-shaped values establishing no host",
+            f.corpus.unresolvable_hosts.values().map(|(n, _)| n).sum(),
+            10,
+        ),
+        (
+            "mapping annotations in gated files",
+            f.providers.registrations_ceiling.values().sum(),
+            100,
+        ),
+        (
+            "target host references from deploy evidence",
+            f.corpus.targets.iter().filter(|t| t.is_deploy()).count(),
+            100,
+        ),
+        ("member->member couplings", f.member_pairs().len(), 8),
+    ];
+    for (what, measured, floor) in census {
+        assert!(
+            measured >= floor,
+            "the {what} census read {measured}, under its floor of {floor}. The verdict may \
+             still print, but a census at zero cannot attribute the falsification to the join \
+             that broke — which is the whole reason AC1, AC2 and AC4 are required.",
+        );
+    }
 }
 
 /// The other half of AC3's split, pinned for the reason the assertion gives.
@@ -1740,7 +2171,7 @@ kind: Service
 metadata:
   name: mailbox-api
 ";
-        assert_eq!(service_name(&parse_yaml(one)).as_deref(), Some("mailbox-api"));
+        assert_eq!(service_name(&parse_yaml(one)), ServiceName::Named("mailbox-api".into()));
 
         // A multi-document file: parse_yaml accumulates across documents, so
         // neither name can be attributed. Refuse rather than guess.
@@ -1763,7 +2194,7 @@ kind: Service
 metadata:
   name: z-mailbox-api
 ";
-        assert_eq!(service_name(&parse_yaml(two)), None);
+        assert_eq!(service_name(&parse_yaml(two)), ServiceName::Ambiguous);
 
         // And the mixed file, which the `kind` test refuses.
         let mixed = "\
@@ -1777,15 +2208,27 @@ kind: Service
 metadata:
   name: mailbox-api
 ";
-        assert_eq!(service_name(&parse_yaml(mixed)), None);
+        assert_eq!(service_name(&parse_yaml(mixed)), ServiceName::Ambiguous);
 
-        // Not a Service at all.
+        // Not a Service at all — NOT a refusal, and must not be counted as one.
         let other = "\
 kind: ConfigMap
 metadata:
   name: mailbox-api
 ";
-        assert_eq!(service_name(&parse_yaml(other)), None);
+        assert_eq!(service_name(&parse_yaml(other)), ServiceName::NotAService);
+
+        // Quoted and extra-spaced spellings reach the rule: `canonical_value`
+        // unquotes, so an exact-text probe for `kind: Service` would reject
+        // these while the rule accepts them.
+        for text in ["kind: \"Service\"\nmetadata:\n  name: mailbox-api\n",
+                     "kind:  Service\nmetadata:\n  name: mailbox-api\n"] {
+            assert_eq!(
+                service_name(&parse_yaml(text)),
+                ServiceName::Named("mailbox-api".into()),
+                "spelling {text:?}",
+            );
+        }
 
         // A Helm-templated name establishes nothing; `service_name` returns it
         // and `Corpus::claim` is what refuses it, so both halves are pinned.
@@ -1794,10 +2237,11 @@ kind: Service
 metadata:
   name: '{{ include \"archive-api.fullname\" . }}'
 ";
-        let name = service_name(&parse_yaml(templated));
-        assert!(name.is_some(), "the reader returns it: {name:?}");
+        let ServiceName::Named(name) = service_name(&parse_yaml(templated)) else {
+            panic!("the reader returns it; the claim guard is what refuses it")
+        };
         let mut c = Corpus::default();
-        c.claim("archive-api", Tier::Deploy, &name.expect("some"), "fixture");
+        c.claim("archive-api", Tier::Deploy, &name, "fixture");
         assert!(c.claims.is_empty(), "the claim guard refuses it: {:?}", c.claims);
     }
 
@@ -1876,16 +2320,103 @@ metadata:
         assert_eq!(overlay_of("m/values.yaml", "m"), "");
     }
 
+    fn set<'a>(members: &[&'a str]) -> BTreeSet<&'a str> {
+        members.iter().copied().collect()
+    }
+
+    #[test]
+    fn the_three_classifications_are_the_gate_and_each_is_pinned() {
+        // TargetServesNothing: identity names a provider that serves nothing here.
+        assert_eq!(classify(&set(&[]), "mailbox-api"), PairClass::TargetServesNothing);
+        assert_eq!(classify(&set(&["filters-api"]), "mailbox-api"), PairClass::TargetServesNothing);
+
+        // AlreadyBoundByPath: sole provider, and it IS the identity target, so
+        // path-only reaches it unaided. NOT evidence for identity.
+        assert_eq!(classify(&set(&["mailbox-api"]), "mailbox-api"), PairClass::AlreadyBoundByPath);
+
+        // NetNewAmbiguous: two or more serve it, so path-only ties and identity
+        // is what binds. This is the population the floor is read against.
+        assert_eq!(
+            classify(&set(&["mailbox-api", "archive-api"]), "mailbox-api"),
+            PairClass::NetNewAmbiguous,
+        );
+        // The boundary that decides the split: exactly the second provider.
+        assert_eq!(classify(&set(&["a"]), "a"), PairClass::AlreadyBoundByPath);
+        assert_eq!(classify(&set(&["a", "b"]), "a"), PairClass::NetNewAmbiguous);
+    }
+
+    fn pair(consumer: &str, provider: &str, template: &str, class: PairClass) -> Pair {
+        Pair {
+            consumer: consumer.into(),
+            provider: provider.into(),
+            overlay: ".helm".into(),
+            template: template.into(),
+            normalized: template.into(),
+            via_key: "k".into(),
+            label: provider.into(),
+            serving: 2,
+            class,
+            site: "f.java:1".into(),
+        }
+    }
+
+    #[test]
+    fn the_headline_accessors_count_the_right_class_at_the_right_grain() {
+        let pairs = vec![
+            // Two sites reading one key in one class: ONE edge, not two.
+            pair("agg", "mailbox-api", "/v1/m", PairClass::NetNewAmbiguous),
+            pair("agg", "mailbox-api", "/v1/m", PairClass::NetNewAmbiguous),
+            pair("agg", "mailbox-api", "/v1/n", PairClass::NetNewAmbiguous),
+            pair("agg", "filters-api", "/v1/f", PairClass::AlreadyBoundByPath),
+            pair("agg", "reporting-api", "/v1/r", PairClass::TargetServesNothing),
+        ];
+        let f = Findings {
+            corpus: Corpus::default(),
+            providers: Providers::default(),
+            pairs: pairs.clone(),
+            pairs_fallthrough: vec![pair("agg", "archive-api", "/v1/a", PairClass::NetNewAmbiguous)],
+            sites_without_target: BTreeSet::new(),
+            sites_considered: 5,
+            call_site_base_keys: BTreeSet::new(),
+            templates_not_normalizable: BTreeSet::new(),
+        };
+        // Deduplicated at (consumer, normalized, provider) — CR-121's edge grain.
+        assert_eq!(f.net_new(), 2, "two distinct templates, not three sites");
+        assert_eq!(f.already_bound(), 1);
+        assert_eq!(f.net_new_fallthrough(), 1, "read from the fall-through pass, not the literal one");
+        // TargetServesNothing produces no edge, so it is not a coupling.
+        assert_eq!(
+            f.member_pairs(),
+            [("agg", "mailbox-api"), ("agg", "filters-api")].into_iter().collect(),
+        );
+    }
+
     #[test]
     fn the_floor_is_the_one_declared_before_the_run() {
-        // The floor lives in .pending/S-384-T1-floor.txt, written before this
-        // file existed. If someone edits the constant to make a future run
-        // clear it, this states what it was.
+        // Reads the DECLARATION, not the constant. An earlier version asserted
+        // `NET_NEW_FLOOR == 16` — a compile-time comparison of a value with the
+        // literal written a few hundred lines above it, which no mutation can
+        // falsify and which says nothing about what was declared before the run.
+        let declared: usize = DECLARED_FLOOR
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(">= ")?.split_whitespace().next()?.parse().ok())
+            .expect("the declaration states its floor as a `>= NN ...` line");
+        assert_eq!(
+            declared, NET_NEW_FLOOR,
+            "NET_NEW_FLOOR is {NET_NEW_FLOOR} but the floor declared before the run was \
+             {declared}. The declaration is the record; change the constant only by \
+             re-deciding CR-121 section 8, never to make a run clear it.",
+        );
+        assert!(
+            DECLARED_FLOOR.contains("2026-09-12T07:33:21Z"),
+            "the declaration must carry the UTC timestamp that makes it a floor rather than \
+             a result",
+        );
         const {
-            assert!(NET_NEW_FLOOR == 16, "half of CR-121 section 6's hand-computed 31, rounded up");
             assert!(
                 RECORDED_NET_NEW < NET_NEW_FLOOR,
-                "the recorded finding is FALSIFIED; if that changes, re-decide CR-121 section 8",
+                "the recorded finding is FALSIFIED; if that changes, re-decide CR-121 \
+                 section 8 rather than relaxing this",
             );
         }
     }

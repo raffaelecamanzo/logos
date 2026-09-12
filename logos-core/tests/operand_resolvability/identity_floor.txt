@@ -1,0 +1,89 @@
+S-384 T1 — MATERIALITY FLOOR, DECLARED BEFORE THE RUN
+=====================================================
+
+Declared (UTC):  2026-09-12T07:33:21Z
+Declared by:     Dev Session 2.3 (sprint-67, branch sprint-67-I2-S3)
+Story:           S-384 — Measure service-identity resolvability across the deploy corpus
+Gate decides:    CR-121 CRA-02 and CRA-03. Below the floor the finding is recorded as
+                 FALSIFIED with its evidence and date, and S-385, S-386, S-387, S-388,
+                 S-389, S-390, S-395, S-396 stay UNPLANNED.
+
+Estate under measurement: ~/source/pec-services (LOGOS_REF_WORKSPACE), 84 members,
+read-only against the estate SOURCE. Nothing under that path is written.
+
+
+THE FLOOR
+---------
+
+    >= 16 NET-NEW identity-resolved consumer-to-provider pairs
+       on the pec-services estate.
+
+"Net-new" means, exactly: an identity-resolved consumer->provider pair that
+path-only matching (normalized positional template + HTTP method + the
+exactly-one-candidate rule of FR-CG-09) would NOT already have bound -- because
+path-only ties between two or more providers, or matches no provider at all.
+
+A pair that path-only matching would already have bound alone is NOT counted
+toward this floor. It is reported, but it is not evidence for identity.
+
+Measured net-new < 16  =>  FALSIFIED.
+Measured net-new >= 16 =>  the gate holds and the dependent stories may be planned.
+
+
+WHY 16 — DERIVED FROM CR-121'S OWN FIGURES
+------------------------------------------
+
+1. CR-121 section 6 states the product under test verbatim: "On the reference
+   workspace, resolved identity-based cross-service REST edges rise from 0 to at
+   least 31", with roughly 15 path-only candidates reported separately. 31 is the
+   hand-computed number this gate exists to test. CR-121 already separates the ~15
+   path-only candidates from the 31, so the 31 is intended to be identity's OWN
+   product -- the claim being tested is therefore net-new ~= 31.
+
+2. The floor is one half of that claim: 31 / 2 = 15.5, rounded up to 16.
+   Below half, the hand computation is wrong by more than a factor of two. That is
+   precisely the failure mode that killed CR-113 (CR-121 section 7 names it: "This
+   is exactly how CR-113 died"), and CR-121 section 7's own mitigation for this
+   risk is to stop after the configuration milestone and ship resolution at
+   candidate confidence only.
+
+3. 16 clears the single-member-coincidence threshold. FR-WS-20's Notes record that
+   ONE aggregator's deploy manifest names SEVEN callees explicitly. A result at or
+   below ~7 would be that one manifest and nothing else -- an estate coincidence,
+   not an estate-wide capability, and not a basis for eight stories that build an
+   entire identity + egress + tiering + surfaces milestone whose only product is
+   these edges. 16 requires the deploy-manifest -> via-key -> call-site join to
+   work well beyond that single aggregator.
+
+4. Symmetry with the band CR-121 sets for itself. CR-121 section 7 declares an
+   UPPER kill signal for the overlay-union decision at "more than three times the
+   hand-computed edge count". It declares no lower band. The symmetric lower band
+   would be 31/3 = 10.3; 16 is deliberately stricter than that, because the upper
+   band guards against noise whereas the lower band guards against the capability
+   not existing at all, and the latter costs eight stories.
+
+5. The floor is a count of PAIRS, not of members, labels or keys, because the pair
+   is what CR-121 promises and what the eight gated stories deliver. Reporting a
+   high self-identity yield (AC1) or a high via-key resolution rate (AC2) while
+   producing few net-new pairs does NOT clear this floor. Only AC3's net-new
+   figure is measured against it.
+
+
+WHAT IS *NOT* A FLOOR
+---------------------
+
+AC1 (self identity per member and tier, same-tier collisions), AC2 (via-key
+resolution: to a call site / to a member / to an external label / to nothing, with
+unmatched labels enumerated) and AC4 (pairs differing per overlay) are REPORTS.
+They are required for the finding to be adjudicable and they attribute a
+falsification to whichever join broke, but none of them can clear or fail this
+gate on its own. There is exactly one decisive number, so it cannot be cleared by
+substituting a more favourable statistic.
+
+
+COMMITMENT
+----------
+
+This floor is not revised after the run. If the measurement shows the floor was
+badly chosen, that is stated in the implementation notes with the reasoning, and
+THIS FILE STANDS UNCHANGED.

@@ -4160,14 +4160,16 @@ class MailboxApiV1 {
         let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
         let plugin = registry.for_extension("java").expect("java plugin");
         let mut parser = Parser::new();
-        let scanned: Vec<(String, String)> = scan_source(&mut parser, plugin, SPRING_CONTROLLER)
+        // Every projected field is compared, `line` included: a field the
+        // projection carries but no assertion reads can be silently zeroed.
+        let scanned: Vec<(String, String, u32)> = scan_source(&mut parser, plugin, SPRING_CONTROLLER)
             .routes
             .into_iter()
-            .map(|r| (r.method, r.path))
+            .map(|r| (r.method, r.path, r.start_line))
             .collect();
-        let projected: Vec<(String, String)> = routes_in_source(plugin, SPRING_CONTROLLER)
+        let projected: Vec<(String, String, u32)> = routes_in_source(plugin, SPRING_CONTROLLER)
             .into_iter()
-            .map(|r| (r.method, r.path))
+            .map(|r| (r.method, r.path, r.line))
             .collect();
         assert_eq!(projected, scanned);
         assert!(!projected.is_empty(), "the fixture must produce routes for this to mean anything");
@@ -4193,12 +4195,20 @@ class MailboxApiV1 {
     }
 
     #[test]
-    fn a_concatenated_path_is_not_captured_at_all() {
+    fn a_concatenated_path_is_dropped_without_costing_its_literal_sibling() {
         // The provider-side gap S-384 measured: `pecserver-facade` registers
         // `value = "/mailboxes/{" + EMAIL_ADDRESS_PARAMETER_NAME + "}/size"`.
         // The query captures a string literal, so this route is invisible
         // rather than refused — recorded here so the finding rests on a pinned
         // behaviour rather than on one reading of one estate file.
+        //
+        // The fixture carries a LITERAL sibling beside the concatenated one,
+        // and the assertion is an exact equality rather than a negative. That
+        // is the whole point: an earlier version asserted only
+        // `!paths.contains("size")` over a concat-only fixture, which produces
+        // an EMPTY vector — so the assertion was true by emptiness and survived
+        // `routes_in_source` being replaced with `Vec::new()`. A negative
+        // assertion needs a positive control or it pins nothing.
         let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
         let plugin = registry.for_extension("java").expect("java plugin");
         let source = r#"
@@ -4207,13 +4217,17 @@ class MailboxApiV1 {
 class Facade {
     @GetMapping(value = "/mailboxes/{" + EMAIL + "}/size")
     ResponseEntity<X> size() { return null; }
+
+    @GetMapping("/mailboxes/count")
+    ResponseEntity<X> count() { return null; }
 }
 "#;
         let paths: Vec<String> =
             routes_in_source(plugin, source).into_iter().map(|r| r.path).collect();
-        assert!(
-            !paths.iter().any(|p| p.contains("size")),
-            "a concatenated path must not be promoted: {paths:?}",
+        assert_eq!(
+            paths,
+            vec!["/v1/mailboxes/count".to_string()],
+            "the literal sibling must survive and the concatenated one must be absent",
         );
     }
 }
