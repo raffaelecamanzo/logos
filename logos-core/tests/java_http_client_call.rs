@@ -527,17 +527,32 @@ public class Calls {
 }
 "#,
     );
-    assert!(
-        references.is_empty(),
-        "a bare variable, a concatenation, a relative literal, a `$` \
-         placeholder literal, a builder lambda and a helper-method call are \
-         each base-url-runtime — no reference and no approximate bind: \
-         {references:?}"
+    // **S-382 moved one of these six, and the move is the story.** A `${…}`
+    // placeholder literal is no longer `base-url-runtime`: the value it names is
+    // committed, in a file the index already holds, so the arm stores the target
+    // verbatim and the coverage tier resolves it against the reading member's own
+    // configuration ([ADR-64]). `base-url-runtime` was true of the *call site* and
+    // false of the *repository*, which is the distinction ADR-64 draws.
+    //
+    // The other five are untouched, and that is the load-bearing half of this
+    // case: a bare variable, a concatenation, a relative literal, a builder lambda
+    // and a helper-method call each still refuse. S-382 widened what is
+    // **captured**, never what is believed — the stored config-bound target keys
+    // nothing until its key is proven, and a template the sources do not admit
+    // refuses under `config-key-missing`.
+    assert_eq!(
+        references,
+        vec!["GET ${users.service.url}/users".to_string()],
+        "only the `${{…}}` placeholder literal is admitted, stored VERBATIM so the \
+         resolution reads the bytes the source commits; a bare variable, a \
+         concatenation, a relative literal, a builder lambda and a helper-method \
+         call are each still base-url-runtime with no reference: {references:?}"
     );
     assert_eq!(
-        refusals, 6,
-        "and each declining METHOD leaves exactly one keyless row — the ledger's \
-         grain is the declaration, so this is six, not one per call"
+        refusals, 5,
+        "the five still-declining METHODs leave one keyless row each — the ledger's \
+         grain is the declaration, so this is five, not one per call. It was six \
+         before S-382 admitted the placeholder literal."
     );
 }
 
@@ -550,13 +565,22 @@ public class Calls {
 /// base-URL composition out of scope precisely because composing it would be
 /// fabrication).
 ///
-/// An absolute literal carrying a `${…}` segment takes the *other* refusal
-/// path — it is absolute, so it reaches the template normalizer and is refused
-/// as `path-not-composed` rather than `base-url-runtime`. Both refuse; the
-/// distinction matters only to the coverage vocabulary.
+/// An absolute literal carrying a `${…}` segment is **admitted as
+/// configuration-bound** since S-382, and its target is stored verbatim.
+///
+/// It used to take the other refusal path — absolute, so it reached the template
+/// normalizer and was refused as `path-not-composed`. [ADR-64] changed the
+/// reading rather than the normalizer: `${version}` names a committed
+/// configuration key, so the question "does this template normalize?" is not
+/// answerable until the substitution is made, and asking it first refuses
+/// exactly the shape the admission exists for. The template is re-tested with
+/// the same `route_key` after substitution, so nothing binds on a template that
+/// would not have bound as a literal.
+///
+/// [ADR-64]: ../../docs/specs/architecture/decisions/ADR-64.md
 #[test]
-fn an_interpolated_segment_in_an_absolute_path_is_also_refused() {
-    assert!(
+fn an_interpolated_segment_in_an_absolute_path_is_config_bound() {
+    assert_eq!(
         client_calls(
             r#"
 public class Calls {
@@ -566,9 +590,10 @@ public class Calls {
     }
 }
 "#
-        )
-        .is_empty(),
-        "an absolute literal whose segment is interpolated does not normalize"
+        ),
+        vec!["GET /api/${version}/users".to_string()],
+        "an absolute literal whose segment names a configuration key is stored \
+         verbatim for resolution, not refused as a template that will not normalize"
     );
 }
 

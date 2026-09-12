@@ -66,6 +66,7 @@
 
 use std::collections::BTreeMap;
 
+use super::binding::placeholder_keys;
 use super::route_template::route_key;
 
 /// The capture slot naming the request's HTTP method (`get`, `POST`, …). Filled
@@ -116,22 +117,75 @@ pub enum ClientCallRefusal {
     PathNotComposed,
 }
 
+/// What the arm resolved a captured call site's path to (S-382, [ADR-64]).
+///
+/// Two admissions, and the distinction is the whole of [ADR-64]'s
+/// committed-evidence line at this grain: a [`Literal`](ClientCallPath::Literal)
+/// is proven by the call site itself and binds today; a
+/// [`ConfigBound`](ClientCallPath::ConfigBound) is proven only once the committed
+/// configuration is read, so it is carried to resolution rather than bound here
+/// — and rather than refused, which is what it was before S-382.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClientCallPath {
+    /// A static, absolute, positionally-normalizable `"METHOD /template"` — the
+    /// pre-S-382 admission, unchanged.
+    Literal(String),
+    /// A `"METHOD /template"` whose template carries one or more `${…}`
+    /// placeholders naming configuration keys. **Not yet a target**: it keys
+    /// nothing until [`binding`](super::binding) resolves the placeholders
+    /// against the committed corpus, and it is stored verbatim so the
+    /// resolution reads the same bytes the source commits.
+    ///
+    /// Deliberately **not** required to be absolute. `${orders.base}/orders/{id}`
+    /// begins with its configuration prefix, and demanding a leading `/` here
+    /// would refuse exactly the shape this variant exists to admit; whether the
+    /// *resolved* composition names a route is decided after substitution, by
+    /// the same [`route_key`] test a literal passes.
+    ConfigBound(String),
+}
+
+impl ClientCallPath {
+    /// The stored ledger target — the raw string either admission contributes.
+    pub(crate) fn target(&self) -> &str {
+        match self {
+            Self::Literal(target) | Self::ConfigBound(target) => target,
+        }
+    }
+}
+
 /// Reduce a captured client-call site's `slots` to its `"METHOD /template"` bind
 /// target, or the [reason](ClientCallRefusal) it is honestly unbindable
-/// ([FR-WS-08], [ADR-54]).
+/// ([FR-WS-08], [ADR-54], [ADR-64]).
 ///
-/// The single judgement the arm makes. A returned target is the **raw**
-/// `"METHOD /template"` string (the method upper-cased, the template verbatim) —
-/// byte-identical in shape to a framework `Route` node's name — so the intra-repo
+/// The single judgement the arm makes. A returned
+/// [`Literal`](ClientCallPath::Literal) is the **raw** `"METHOD /template"`
+/// string (the method upper-cased, the template verbatim) — byte-identical in
+/// shape to a framework `Route` node's name — so the intra-repo
 /// `(ArtifactBinding, Path)` route binder and the cross-service bridge both key it
 /// through the shared [`route_key`] exactly as they key the provider. It never
 /// pre-normalizes the template, so the stored ledger target stays re-normalizable.
 ///
+/// # A configuration placeholder is no longer a refusal (S-382, [ADR-64])
+///
+/// A path literal carrying a `${…}` placeholder used to fall through to the
+/// absolute-path test and be refused as
+/// [`BaseUrlRuntime`](ClientCallRefusal::BaseUrlRuntime) — which was true of the
+/// *call site* and false of the *repository*: the value is committed, in a file
+/// the index already holds. It is now admitted as
+/// [`ConfigBound`](ClientCallPath::ConfigBound) and resolved downstream. The
+/// placeholder test runs **before** the absoluteness and normalization tests
+/// precisely because neither is answerable until the substitution is made.
+///
+/// **This widens what is captured, never what is believed.** A config-bound path
+/// creates no edge here, and the composition it resolves to must still pass the
+/// same [`route_key`] test a literal passes.
+///
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
 /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
 pub(crate) fn classify_client_call(
     slots: &BTreeMap<String, String>,
-) -> Result<String, ClientCallRefusal> {
+) -> Result<ClientCallPath, ClientCallRefusal> {
     // A method is mandatory; a site with none is not a well-formed HTTP call and
     // is refused rather than fabricating one (never-fabricate at the arm grain).
     let Some(method) = slots.get(METHOD_SLOT).map(|m| m.trim()).filter(|m| !m.is_empty()) else {
@@ -150,6 +204,16 @@ pub(crate) fn classify_client_call(
         return Err(ClientCallRefusal::BaseUrlRuntime);
     };
 
+    let candidate = format!("{} {path}", method.to_ascii_uppercase());
+
+    // A `${…}` placeholder names a configuration key, and the value it names is
+    // committed (S-382, ADR-64). Decided FIRST: neither the absoluteness test
+    // below nor `route_key` is answerable before the substitution is made, so
+    // running either first would refuse the shape this admission exists for.
+    if placeholder_keys(path).is_some() {
+        return Ok(ClientCallPath::ConfigBound(candidate));
+    }
+
     // A literal that is not an absolute path is a base-URL-relative fragment (or
     // an absolute URL, which contains no leading `/` before its scheme): the
     // route prefix is composed elsewhere, so the site is not workspace-composable.
@@ -157,13 +221,41 @@ pub(crate) fn classify_client_call(
         return Err(ClientCallRefusal::BaseUrlRuntime);
     }
 
-    let candidate = format!("{} {path}", method.to_ascii_uppercase());
     // The path literal is absolute, but its template must still positionally
     // normalize — a catch-all/regex/mixed template is never approximated.
     if route_key(&candidate).is_none() {
         return Err(ClientCallRefusal::PathNotComposed);
     }
-    Ok(candidate)
+    Ok(ClientCallPath::Literal(candidate))
+}
+
+/// Why an **already-composed** `"METHOD /template"` does not bind, judged by the
+/// same rule [`classify_client_call`] applies to a captured site (S-382).
+///
+/// The configuration resolver composes a template *after* capture — substituting
+/// a committed value into a `${…}` placeholder — so the result must be judged
+/// again, and by this arm's rule rather than by the ledger convention
+/// `client_call_refusal` uses. That convention reads an **empty** stored target
+/// as `base-url-runtime` and any non-empty one as `path-not-composed`, which is
+/// correct for a *stored* row and wrong for a composed template: a key holding
+/// `https://orders:8080` composes a non-empty absolute URL whose route prefix is
+/// not present, which is `base-url-runtime` by this arm's own definition.
+///
+/// Implemented by feeding the composition back through [`classify_client_call`]
+/// rather than re-stating its two tests, so the composed and the captured paths
+/// can never disagree about the same string.
+///
+/// Returns [`None`] when the composition **does** bind — the caller then has a
+/// target, not a refusal.
+pub(crate) fn composed_refusal(target: &str) -> Option<ClientCallRefusal> {
+    let (method, path) = target.split_once(' ')?;
+    let slots: BTreeMap<String, String> = [
+        (METHOD_SLOT.to_string(), method.to_string()),
+        (PATH_SLOT.to_string(), path.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    classify_client_call(&slots).err()
 }
 
 /// The `render_target` normalizer the HTTP arm hands to
@@ -179,7 +271,7 @@ pub(crate) fn classify_client_call(
 ///
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 pub(crate) fn render_client_call_target(slots: &BTreeMap<String, String>) -> Option<String> {
-    classify_client_call(slots).ok()
+    classify_client_call(slots).ok().map(|path| path.target().to_string())
 }
 
 #[cfg(test)]
@@ -199,7 +291,10 @@ mod tests {
     #[test]
     fn a_static_absolute_call_renders_its_method_template_target() {
         let s = slots(&[(METHOD_SLOT, "get"), (PATH_SLOT, "/users/{id}")]);
-        assert_eq!(classify_client_call(&s), Ok("GET /users/{id}".to_string()));
+        assert_eq!(
+            classify_client_call(&s),
+            Ok(ClientCallPath::Literal("GET /users/{id}".to_string()))
+        );
         assert_eq!(render_client_call_target(&s).as_deref(), Some("GET /users/{id}"));
         // The stored target re-normalizes cleanly (it was NOT pre-normalized), so
         // the intra-repo route binder and the bridge can key it via `route_key`.
@@ -277,6 +372,48 @@ mod tests {
         let lower = slots(&[(METHOD_SLOT, "post"), (PATH_SLOT, "/orders")]);
         let upper = slots(&[(METHOD_SLOT, "POST"), (PATH_SLOT, "/orders")]);
         assert_eq!(classify_client_call(&lower), classify_client_call(&upper));
-        assert_eq!(classify_client_call(&lower), Ok("POST /orders".to_string()));
+        assert_eq!(
+            classify_client_call(&lower),
+            Ok(ClientCallPath::Literal("POST /orders".to_string()))
+        );
+    }
+
+    /// S-382 / AC1. A path literal carrying a `${…}` placeholder is **admitted**
+    /// as config-bound rather than refused as `base-url-runtime`, and its target
+    /// is stored verbatim so the resolution reads the bytes the source commits.
+    ///
+    /// The three shapes that matter are the leading placeholder (the whole route
+    /// prefix is configured), the interior one (a configured path segment), and
+    /// the placeholder carrying an inline default.
+    #[test]
+    fn a_placeholder_bearing_path_is_config_bound_not_base_url_runtime() {
+        for (path, target) in [
+            ("${orders.base}/orders/{id}", "GET ${orders.base}/orders/{id}"),
+            ("/api/${orders.version}/orders", "GET /api/${orders.version}/orders"),
+            ("${orders.base:/orders}/{id}", "GET ${orders.base:/orders}/{id}"),
+        ] {
+            let s = slots(&[(METHOD_SLOT, "get"), (PATH_SLOT, path)]);
+            assert_eq!(
+                classify_client_call(&s),
+                Ok(ClientCallPath::ConfigBound(target.to_string())),
+                "{path} names a committed configuration key"
+            );
+            // It reaches the ledger, which is what makes it resolvable at all —
+            // before S-382 the arm emitted nothing for this shape.
+            assert_eq!(render_client_call_target(&s).as_deref(), Some(target));
+        }
+    }
+
+    /// S-382, the near miss that decides the whole change: a **route parameter**
+    /// is not a configuration placeholder. `/users/{id}` carries no `$`, so it
+    /// stays a literal and keeps binding exactly as it did.
+    #[test]
+    fn a_route_parameter_is_not_a_configuration_placeholder() {
+        let s = slots(&[(METHOD_SLOT, "get"), (PATH_SLOT, "/users/{id}/orders/{orderId}")]);
+        assert!(matches!(classify_client_call(&s), Ok(ClientCallPath::Literal(_))));
+        // And an unterminated `${` fabricates no key: it falls through to the
+        // absoluteness test and refuses, exactly as it did before S-382.
+        let broken = slots(&[(METHOD_SLOT, "get"), (PATH_SLOT, "${orders.base/id")]);
+        assert_eq!(classify_client_call(&broken), Err(ClientCallRefusal::BaseUrlRuntime));
     }
 }

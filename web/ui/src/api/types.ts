@@ -1022,11 +1022,88 @@ export type UnboundReason =
    *  identity exists to match on (CR-107). Note the reason grouping in
    *  `coverageModel` must keep treating this union as OPEN — the payload may
    *  carry a reason a later arm added and this build does not know. */
-  | "topic-not-literal";
+  | "topic-not-literal"
+  /** A configuration-bound reference names a key NO committed source defines, so
+   *  the repository proves no value for it (S-382, ADR-64). Distinct from overlay
+   *  DISAGREEMENT, which is not a refusal at all: a key its overlays define
+   *  differently binds under every one of its values, and every one of them is
+   *  carried in the row's `provenance`. This is also the reason a config-server,
+   *  Consul/etcd, secret-store or Kubernetes ConfigMap value refuses under —
+   *  those files are not configuration sources, so nothing they hold reaches the
+   *  corpus. */
+  | "config-key-missing"
+  /** A configuration-bound reference names a key whose committed value is itself
+   *  an unresolved `${…}` indirection: the sources prove the indirection, not the
+   *  value (S-382, ADR-64). */
+  | "config-placeholder-value";
 
 /** The 3-state display bucket of one reference (FR-WS-05). `ambiguous` is its own
  *  bucket, never folded into `unbound`. */
 export type CoverageBucket = "bound" | "ambiguous" | "unbound";
+
+/** One committed value of a configuration key, with the profiles and files that
+ *  prove it (S-382, FR-WS-19, ADR-64).
+ *
+ *  The unprofiled source is reported by `unprofiled` rather than by a fabricated
+ *  profile name, so an estate that genuinely declares a `default` profile stays
+ *  distinguishable from one that does not. */
+export interface ProfiledValue {
+  value: string;
+  /** The profiles whose sources prove this value, sorted. */
+  profiles: string[];
+  /** Whether the UNPROFILED source proves it — present even when `false`, so a
+   *  reader never infers it from an empty `profiles` (NFR-CC-04). */
+  unprofiled: boolean;
+  /** The project-relative files proving it — the "defining sources" half of the
+   *  provenance FR-WS-19 requires. */
+  sources: string[];
+}
+
+/** How an operand reached the configuration key it names (S-382). */
+export type ConfigKeySource =
+  | "properties"
+  | "value-annotation"
+  | "placeholder"
+  | "call-site"
+  | "environment";
+
+/** Why a named configuration key admitted no committed value (S-382, ADR-64).
+ *  Disagreement is deliberately absent: it is no longer a refusal. */
+export type ConfigValueRefusal =
+  | "uncommitted"
+  | "placeholder-value"
+  | "missing-key";
+
+/** Whether a reference's target was OBSERVED at the call site or ADMITTED from
+ *  committed configuration (S-382, ADR-64, NFR-CC-04, BR-52).
+ *
+ *  ADR-64 states one boundary as a condition on what is admitted rather than as a
+ *  refusal: *an admitted value must never be indistinguishable from an observed
+ *  one*. So this rides on EVERY row, and an ordinary call-site literal carries
+ *  `"literal"` rather than nothing — a view that renders a target without reading
+ *  it is presenting configuration as source text.
+ *
+ *  Three states, not two. `config-unresolved` is a reference that NAMES a key the
+ *  committed sources do not admit: it proved only an indirection, so filing it as
+ *  a literal would report unresolved text as observed evidence. */
+export type ValueProvenance =
+  | { provenance: "literal" }
+  | {
+      provenance: "config-bound";
+      /** The canonical key the value was read from. */
+      key: string;
+      source: ConfigKeySource;
+      /** One entry per distinct committed value. MORE THAN ONE is an overlay
+       *  divergence, retained rather than averaged (ADR-64) — a view must render
+       *  every one, never the first. */
+      values: ProfiledValue[];
+    }
+  | {
+      provenance: "config-unresolved";
+      /** The canonical keys the target names, in source order. */
+      keys: string[];
+      refusal: ConfigValueRefusal;
+    };
 
 /** What the providers listed on a coverage row ARE to that row (CR-118). Read
  *  this, never `bucket`, to decide whether a listed provider is actually reached:
@@ -1068,7 +1145,7 @@ export interface ProviderCandidates {
  *  `intake` was the third of that trio until S-377/CR-120 made it unconditional.
  *  It is not a provider field: it names the POPULATION the reference came from,
  *  which every row has whatever it bound. */
-export interface ReferenceCoverage {
+interface ReferenceCoverageRow {
   relation: string;
   from: BridgeEndpoint;
   bucket: CoverageBucket;
@@ -1093,6 +1170,18 @@ export interface ReferenceCoverage {
    *  template is the architecture, not a matcher defect (FR-CG-09 Notes). */
   candidates?: ProviderCandidates;
 }
+
+/** One cross-boundary reference's coverage classification, with its value
+ *  provenance flattened onto it (S-382).
+ *
+ *  An INTERSECTION rather than a `provenance?:` field, because the server
+ *  flattens {@link ValueProvenance} onto the row and the union is discriminated:
+ *  narrowing on `row.provenance` gives TypeScript the `key`/`values` (or
+ *  `keys`/`refusal`) fields, and a row without the discriminant does not
+ *  type-check — which is the point. ADR-64 requires an admitted value never to be
+ *  indistinguishable from an observed one, and an optional field would have made
+ *  it exactly that on the rows that omitted it. */
+export type ReferenceCoverage = ReferenceCoverageRow & ValueProvenance;
 
 /** The four classification counts over one intake population (FR-WS-05, CR-120)
  *  — the same four buckets, with the same meanings, as `CrossServiceCoverage`'s

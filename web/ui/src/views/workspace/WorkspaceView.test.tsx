@@ -45,6 +45,7 @@ const COVERAGE: CrossServiceCoverage = {
       bucket: "bound",
       state: "bound",
       intake: "contract-surface",
+      provenance: "literal" as const,
     },
     {
       relation: "route",
@@ -53,6 +54,14 @@ const COVERAGE: CrossServiceCoverage = {
       state: "unbound",
       reason: "path-not-composed",
       intake: "invocation",
+      // S-382: one config-bound row, so the rendered "Target read from" column
+      // is asserted against a real admitted value rather than only literals.
+      provenance: "config-bound" as const,
+      key: "orders.base",
+      source: "placeholder" as const,
+      values: [
+        { value: "/orders", profiles: ["docker"], unprofiled: false, sources: ["a.yml"] },
+      ],
     },
     {
       relation: "route",
@@ -61,6 +70,7 @@ const COVERAGE: CrossServiceCoverage = {
       state: "unbound",
       reason: "no-provider-in-workspace",
       intake: "contract-surface",
+      provenance: "literal" as const,
     },
     {
       relation: "route",
@@ -69,6 +79,7 @@ const COVERAGE: CrossServiceCoverage = {
       state: "unbound",
       reason: "no-provider-in-workspace",
       intake: "contract-surface",
+      provenance: "literal" as const,
     },
     {
       relation: "grpc-call",
@@ -77,6 +88,7 @@ const COVERAGE: CrossServiceCoverage = {
       state: "unbound",
       reason: "ambiguous",
       intake: "invocation",
+      provenance: "literal" as const,
     },
   ],
   bound: 1,
@@ -363,6 +375,7 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
       references: COVERAGE.references.map((ref) => ({
         ...ref,
         intake: "contract-surface" as const,
+        provenance: "literal" as const,
       })),
       by_intake: {
         contract_surface: { bound: 1, ambiguous: 1, unbound: 1, no_provider_in_workspace: 2 },
@@ -772,5 +785,20 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
 
     expect(await screen.findByText(/2 members could not be opened/i)).toBeInTheDocument();
     expect(screen.getByText(/filters-api, orders/)).toBeInTheDocument();
+  });
+
+  it("names where each arm's targets were read from, so an admitted value is not shown as an observed one", async () => {
+    // ADR-64 states its boundary as a condition on the SURFACES: "an admitted
+    // value must never be indistinguishable from an observed one". This asserts
+    // the rendered column, not the model — a label function with no caller
+    // satisfies the type checker and leaves a dashboard viewer unable to tell
+    // the two apart.
+    stubApi({ coverage: COVERAGE });
+    mount();
+    expect(await screen.findByText("Target read from")).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Read from `orders.base` \(docker\)/),
+    ).toBeInTheDocument();
+    expect(await screen.findAllByText("Written at the call site")).not.toHaveLength(0);
   });
 });
