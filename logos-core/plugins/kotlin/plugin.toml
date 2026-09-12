@@ -22,7 +22,7 @@ module_separator = "."
 # tree-sitter-kotlin-ng 1.1 is generated against ABI 14.
 abi_version = 14
 
-capabilities = ["symbols", "references", "frameworks", "invocations"]
+capabilities = ["symbols", "references", "frameworks", "invocations", "properties"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # Kotlin's anonymous control-flow/operator tokens: `when` replaces `switch`
@@ -96,6 +96,11 @@ frameworks = "queries/frameworks.scm"
 # and in Kotlin routinely written with a trailing lambda — from being read as an
 # outbound call; see the query header.
 invocations = "queries/invocations.scm"
+# Configuration-binding capture (S-381, CR-121, FR-WS-19): the annotated class,
+# its key prefix and the properties it declares — the second language on the
+# binding substrate, and the demonstration that adding one costs no
+# `logos-core` edit (S-381 AC2).
+properties = "queries/properties.scm"
 # Captured `@fw.route.method` annotation name → HTTP method (S-055), identical
 # to the Java Spring mapping. `@RequestMapping` declares no single verb.
 [framework_methods]
@@ -105,3 +110,26 @@ PutMapping = "PUT"
 DeleteMapping = "DELETE"
 PatchMapping = "PATCH"
 RequestMapping = "ANY"
+
+# The configuration-BINDING vocabulary (S-381, CR-121, FR-WS-19, FR-PL-02).
+# Kotlin's Spring binding is annotation-compatible with Java's, so the
+# vocabulary row is the same — what differs is everything structural, which is
+# why the second language needed a query file (see `queries/properties.scm`) and
+# nothing else.
+[properties]
+annotations = ["ConfigurationProperties"]
+# Kotlin reads a property BOTH ways, and both are rows here:
+#
+#   * `""` — direct property access, Kotlin's own convention: the accessor name
+#     already IS the property (`config.uriGetArchive`). This is the row Java
+#     cannot have, and the one that proves the accessor convention is descriptor
+#     data rather than a core assumption about bean getters.
+#   * `get` / `is` — the JVM-interop getters a Java call site sees on the same
+#     class (`config.getUriGetArchive()`).
+#
+# Every row is tried and the survivors are intersected with what the class
+# declares, so order decides nothing. Unlike Java's two rows, these three DO
+# overlap — a class declaring both `url` and `getUrl` makes `getUrl` match two
+# declared properties — and such a site binds NOTHING rather than picking one
+# (`BindingRefusal::AmbiguousProperty`, S-381 AC4).
+accessor_prefixes = ["", "get", "is"]

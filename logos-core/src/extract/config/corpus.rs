@@ -21,18 +21,20 @@
 //! [`config_profile`]'s `application-<profile>` stem. [NFR-MA-01] asks for no
 //! per-language branching in `logos-core`, so this is a real exception and is
 //! named as one. [CR-121] §5.1 sanctions the *content* ("a second language costs
-//! an extractor rather than architecture") and S-381 moves the
-//! `@ConfigurationProperties` **annotation** vocabulary to a descriptor — but
-//! S-381 does not cover these three, and no other story does. They are carried
+//! an extractor rather than architecture"), and S-381 has since moved the
+//! `@ConfigurationProperties` **annotation** vocabulary and the accessor
+//! convention out to the plugin descriptor (see [`binding`](super::binding)) —
+//! but it did not cover these three, and no other story does. They are carried
 //! deliberately, with this note as their record, until a story claims them.
 //!
 //! # What is here, and what is not
 //!
 //! This module owns the **corpus**: discovering configuration sources, reading
 //! their profile from the filename, and flattening each one to canonical
-//! key → value pairs. It owns no resolution — binding a `@ConfigurationProperties`
-//! accessor to a key, and judging what the corpus proves about that key, stay in
-//! the measurement harness until their own stories promote them (S-381, S-382).
+//! key → value pairs. It owns no resolution. Binding an accessor to a key is
+//! [`binding`](super::binding), promoted by S-381; judging what the corpus
+//! proves about that key stays in the measurement harness until S-382 promotes
+//! it.
 //!
 //! # Two entry points, one flattener
 //!
@@ -87,14 +89,15 @@ pub struct ConfigCorpus {
     pub sources: Vec<ConfigSource>,
     /// Module roots, longest-prefix-matched to place a file.
     modules: BTreeSet<String>,
-    /// Java files mentioning `ConfigurationProperties`, stashed by the same
-    /// walk so the class index needs no second traversal of the corpus.
-    props_candidates: Vec<String>,
+    /// Every file the walk admitted, stashed so the binding index needs no
+    /// second traversal of the corpus. Vocabulary-free on purpose — see
+    /// [`ConfigCorpus::files`].
+    files: Vec<String>,
 }
 
 impl ConfigCorpus {
     /// Walk the corpus once: discover configuration sources, module roots, and
-    /// the Java files that may declare a `@ConfigurationProperties` class.
+    /// the file roster the binding index selects its candidates from.
     ///
     /// The walker is configured exactly as the parent module's `measure` walk —
     /// `parents(false)`, `git_global(false)`, `ignore(false)` — so the two
@@ -119,17 +122,10 @@ impl ConfigCorpus {
             };
             let rel = rel.to_string_lossy().replace('\\', "/");
             let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+            corpus.files.push(rel.clone());
 
             if MODULE_DESCRIPTORS.contains(&name.as_str()) {
                 corpus.modules.insert(parent_dir(&rel).to_string());
-                continue;
-            }
-            if name.ends_with(".java") {
-                if let Ok(text) = std::fs::read_to_string(entry.path()) {
-                    if text.contains("ConfigurationProperties") {
-                        corpus.props_candidates.push(rel.clone());
-                    }
-                }
                 continue;
             }
             let Some(profile) = config_profile(&name) else {
@@ -165,17 +161,30 @@ impl ConfigCorpus {
             .map_or("", String::as_str)
     }
 
-    /// Files the discovery walk flagged as possibly declaring a
-    /// `@ConfigurationProperties` class, stashed by that same walk so the class
-    /// index needs no second traversal.
+    /// Every file the discovery walk admitted, in walk order, stashed by that
+    /// same walk so a later pass needs no second traversal.
     ///
-    /// The needle is a Java literal today because that is what the harness this
-    /// was promoted from measured; S-381 replaces it with a plugin-descriptor
-    /// vocabulary, at which point this accessor's contract widens rather than
-    /// changes. Read only by the measurement harness — production ingestion goes
-    /// through [`source_facts`] and never runs this walk.
-    pub fn props_candidates(&self) -> &[String] {
-        &self.props_candidates
+    /// **Vocabulary-free, and that is the point (S-381).** This roster used to
+    /// be "the Java files whose text mentions `ConfigurationProperties`" — a
+    /// Spring literal in `logos-core`, so a second language spelling its binding
+    /// annotation differently could not be added without editing core, which is
+    /// exactly what [FR-WS-19] and [NFR-MA-01] forbid. The selection now happens
+    /// where the vocabulary lives: [`PropertiesIndex::build`] keeps the files
+    /// whose extension its plugin claims and whose text mentions one of the
+    /// plugin descriptor's own annotations
+    /// ([`crate::plugin::PropertiesDescriptor::annotations`]).
+    ///
+    /// The file reads did not multiply, they moved: the walk no longer reads
+    /// every `.java` file to test a needle, and the index reads exactly that
+    /// same set once.
+    ///
+    /// Read only by the measurement harness and the binding index — production
+    /// ingestion goes through [`source_facts`] and never runs this walk.
+    ///
+    /// [PropertiesIndex::build]: crate::extract::config::binding::PropertiesIndex::build
+    /// [NFR-MA-01]: ../../../../docs/specs/requirements/NFR-MA-01.md
+    pub fn files(&self) -> &[String] {
+        &self.files
     }
 
     /// Profiles discovered across the corpus, for the census line.
