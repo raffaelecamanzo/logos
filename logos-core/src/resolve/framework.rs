@@ -533,6 +533,48 @@ fn scan_path(
     scan_source(parser, plugin, &source)
 }
 
+/// One route registration as the promotion pass reads it, projected for a
+/// caller that has source text but no graph — the reference-workspace
+/// measurement harness (S-384, [CR-121]).
+///
+/// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvidedRoute {
+    /// The composed, registered URL path — already through
+    /// [`compose_prefixes`], [`drop_non_path_routes`] and [`dedup_routes`], so
+    /// it is exactly the path that would reach a [`NodeKind::Route`] node.
+    pub path: String,
+    /// The upper-cased HTTP method (`GET`, …, `ANY`).
+    pub method: String,
+    /// 1-based first line of the registration site.
+    pub line: u32,
+}
+
+/// The route registrations one source file would promote, without a store.
+///
+/// [`run`] is the pass, and it needs an indexed graph: the ledger gate, the
+/// reconcile baseline and the handler binder all read the store. A measurement
+/// that only asks *"which paths does this member serve?"* needs none of that,
+/// but it does need the **same** composition, path and dedup rules — a second
+/// implementation of [`compose_prefixes`] would diverge from this one and make
+/// the measurement silently wrong. So this is a projection of [`scan_source`],
+/// never a parallel reading of the query.
+///
+/// The caller supplies the ledger gate ([FR-FW-04]) itself, because it has the
+/// refs and this function does not; without one, a file that merely mentions a
+/// framework-shaped annotation would contribute routes the pass never promotes.
+///
+/// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
+/// [`NodeKind::Route`]: crate::model::NodeKind::Route
+pub fn routes_in_source(plugin: &dyn LanguagePlugin, source: &str) -> Vec<ProvidedRoute> {
+    let mut parser = Parser::new();
+    scan_source(&mut parser, plugin, source)
+        .routes
+        .into_iter()
+        .map(|r| ProvidedRoute { path: r.path, method: r.method, line: r.start_line })
+        .collect()
+}
+
 /// Scan one file's source for framework anchors. Pure — no store, no disk —
 /// and therefore the unit-testable core of the pass.
 ///

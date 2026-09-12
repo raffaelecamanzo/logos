@@ -1,0 +1,199 @@
+S-384, measured 2026-09-12 against ~/source/pec-services (84 members, read-only
+against the estate SOURCE; the persisted 1.4.7 .logos stores were not read).
+
+  CR-121 CRA-02 IS FALSIFIED.  CRA-03 HOLDS.
+
+The two assumptions come apart, and that is the finding. The join CR-121 calls
+its "single largest unvalidated inference" WORKS: deploy manifests do name the
+callee, and the labels do match member names. What does not hold is the step
+after it — that resolvable keys concentrate in the expected EDGES.
+
+Materiality floor, declared 2026-09-12T07:33:21Z BEFORE this code was written:
+>= 16 net-new identity-resolved consumer->provider edges, one half of CR-121
+section 6's hand-computed "at least 31", rounded up. The declaration is
+reproduced verbatim in identity_floor.txt beside this file, and the gate parses
+its figure and compares it to NET_NEW_FLOOR, so the constant cannot be edited to
+clear a future run without editing the declaration too.
+
+  AC3 — THE FIGURE THE GATE IS READ OFF
+
+  consumer call sites with a resolved template (production)     79
+    of which the template does not positionally normalize        1
+    of which no DEPLOY file overrides their base-URL key         1
+
+                                             edges  sites  pairs
+    net-new: identity binds where path-only ties    12     16     30
+    already bound by path alone -- NOT evidence     10     15     27
+    identity target serves no such route            10     16     26
+    distinct member->member couplings               10
+
+  12 against a floor of 16, and against CR-121's own 31.  FALSIFIED.
+
+  AND THE 12 IS WEAKER THAN IT LOOKS. 11 of the 12 are ties the CONSUMER
+  creates against ITSELF: an aggregator re-registers the callee's template on
+  its own controller, so two members serve it, path-only refuses, and identity
+  binds. Production resolves these the same way and in the same order
+  (federation::bridge applies exactly-one over the bucket BEFORE testing whether
+  the sole survivor is the consumer's own member), so the harness is faithful --
+  but identity's genuine THIRD-PARTY contribution, where the tie is between two
+  other members, is ONE edge.
+
+Four sensitivities were measured rather than argued, and none rescues it:
+
+  - SAME-TIER COLLISIONS. FR-WS-20 AC2 resolves a colliding label to nothing.
+    One fork repository, archive-api-logiclens-fork, commits the original's
+    Helm chart name, so the label `archive-api` resolves to neither member and
+    two consumers lose every edge to it. Under a fall-through reading that
+    skipped the colliding tier, net-new would be 14 — still below the floor.
+    The falsification therefore does not rest on how AC2 is read.
+  - METHOD-AGNOSTIC MATCHING. The consumer's HTTP verb is not recoverable from
+    the composed-operand corpus, so path-only matching is compared on template
+    alone. Adding the verb can only SHRINK the candidate set, which can only
+    move pairs out of net-new. 12 is an upper bound, not a midpoint.
+  - TEST-TREE PROVIDERS. Computed by this run, from the same walk: admitting
+    src/test controllers moves routes from 94 to 105 and leaves the split
+    EXACTLY unchanged at 12 net-new / 10 already-bound. Unlike CR-117's gate,
+    this verdict is not an artefact of the main/test split.
+  - PROVIDER COVERAGE. 25 of the 119 route-producing mapping annotations in
+    ledger-gated production files yielded no readable route (21%). All 26
+    unresolved pair sites sit at a template NO member serves, so supplying the
+    missing provider makes them serving=1 -- already bound by path alone, never
+    net-new.
+
+WHY THE EDGES ARE NOT THERE, STATED SO IT IS NOT MIS-READ. The mechanism is
+sound and the estate really does commit the evidence. Of the 32 judged pairs,
+22 become edges -- 12 net-new and 10 already reachable by path alone -- and the
+other 10 point at a provider whose route is invisible. That gap has one named
+cause, the mirror image of the consumer-side problem CR-113 and CR-115 are
+about:
+
+  pecserver-facade registers
+    value = "/mailboxes/{" + EMAIL_ADDRESS_PARAMETER_NAME + "}/size"
+
+  The framework query captures a string-LITERAL path. A path built with `+` is
+  not refused -- it is never captured, so the route is invisible and the member
+  appears to serve nothing. CR-121 resolves composition on the CONSUMER side
+  and inherits an unresolved composition on the PROVIDER side.
+
+  AC1 — SELF IDENTITY, PER TIER
+
+  tier                members  labels  collisions
+  1 deploy                 35     351           1   Helm chart name, fullname-
+                                                    Override, kind:Service name
+  2 container              57      67          22   Compose service keys
+  3 directory              84      84           0
+  4 application             0       0           0   no spring.application.name
+  5 artifact                61      54          10   never decisive
+
+  Tier 1 reads all three sources FR-WS-20 names. 374 raw kind:Service manifests
+  yielded one unambiguous name and 32 were refused as ambiguous (a multi-
+  document file whose kind or metadata.name is not unique -- refused rather than
+  guessed, per NFR-RA-05). Every Helm-templated Service name is refused too:
+  `{{ include "archive-api.fullname" . }}` establishes nothing.
+
+  ALL 374 of those manifests belong to ONE member, gen2gen3_devops_utils, and
+  they name services of a DIFFERENT estate -- fibra, bpm, router, consent-
+  management. So 317 of tier 1's 351 labels are one tooling repository claiming
+  identities that are not its own, at the DECISIVE tier. None of them happens to
+  collide with a real member's label here, and the verdict is unchanged with
+  them admitted, so this cost nothing on this estate. It is recorded because it
+  is the tier-5 failure FR-WS-20 AC6 already anticipates -- "one member declares
+  another's name" -- occurring at tier 1, where the requirement has no
+  corresponding guard. A raw manifest under a member's tree is evidence about
+  whatever the manifest describes, not about the member that stores it.
+
+  514 deploy-shaped files were skipped as documentation/examples/tutorials.
+  They matter: hermodr-mirror/documentation/examples/sidecar/ carries a complete
+  chart naming `hermodr-sidecar-showcase` and a values file referencing it, so
+  before they were excluded the two matched each other and the result was
+  reported as a decisive tier-1 identity of a workspace member. Five of the
+  "external" labels came from the same trees.
+
+  82 of 84 members yield at least one decisive self identity. The two that do
+  not are archive-api (the fork collision above) and pecserver-mock, whose only
+  claim is a Compose service key that collides with e2e-tests'.
+
+  Tier 2 is near-useless on this estate and the figure says why: 22 of its 67
+  labels collide, because a Compose file names shared infrastructure -- kafka,
+  postgres, minio, jaeger, zookeeper, schema-registry -- not the member. One
+  tier-2 label resolved a target WRONGLY in principle: `s3`, from an AWS S3
+  endpoint, matches a Compose service in mailserver-api. It produced no edge
+  here, but it is a fabricated identity of exactly the kind FR-WS-20 AC4's
+  exact-label rule exists to prevent, and it comes from the tier, not the match.
+
+  FR-WS-20 also names a "Dockerfile image name" at tier 2, and this walk does
+  NOT read it. A plain Dockerfile commits only `FROM <base>`; the estate's 88
+  FROM lines name openjdk, maven, python and node, so reading them would put
+  `openjdk` into the decisive tier of 40 members at once. The tier-2 figure is
+  therefore a floor for its declared sources, not the whole of them.
+
+  Tier 4 yields nothing at all: no member sets spring.application.name. Tier 5
+  behaves exactly as FR-WS-20 AC6 predicts -- 7 members declare the artifact id
+  `api`, 6 declare `kafka-models`, and the fork declares the original's id.
+
+  AC2 — TARGET HOST REFERENCES AND THEIR VIA-KEYS
+
+  target host references                                        361
+    from deploy evidence (Helm values)                          118
+    from application config (localhost and infrastructure)      243
+
+  of the 118 deploy references:
+    via-key resolves to a consumer call site                     26
+    host label resolves to a member                              30
+    host label resolves to an external label                     88
+    distinct labels: 11 member / 28 external
+
+  and 18 URL-shaped values across the corpus (deploy AND application, a wider
+  population than the 118) establish NO host at all -- 13 IP literals, 4
+  templated hosts, 1 non-numeric port. They are counted rather than dropped,
+  because AC2's third bucket is "resolves to nothing" and dropping them would
+  have made the external count read as the whole residue.
+
+  CRA-03 HOLDS. Every one of the 11 matched labels resolved at tier 1 except the
+  spurious `s3`, and the first-DNS-label-exact rule did its job:
+  apicurio-registry-service and keycloak-http resolve to no member rather than
+  to a fabricated apicurio or keycloak, which is FR-WS-20 AC4 verbatim. The 28
+  unmatched labels are enumerated in the run output for human adjudication;
+  they are genuinely external (identity providers, RabbitMQ brokers, Poste
+  FQDNs, an Apicurio registry) apart from `archive-api`, which is external only
+  because of the fork collision.
+
+  Every external here is INFERRED. No workspace manifest declares one, so the
+  declared/inferred split FR-WS-20 AC5 requires has only its inferred side on
+  this estate -- the declared half has nothing to measure until S-386 builds it.
+
+  AC4 — PER OVERLAY
+
+  36 of the 84 members carry more than one deploy overlay. Taken over every
+  overlay a member HAS -- not only those that produced an edge --
+
+    archive-manager          4 overlays (0 with an edge)  union  0
+    funnel-aggregator-api    4 overlays (1 with an edge)  union  7   all overlay-specific
+    mailbox-aggregator-api   6 overlays (3 with an edge)  union 14   all overlay-specific
+    notification-adapter     4 overlays (1 with an edge)  union  1   all overlay-specific
+
+    workspace-wide: union 22 · in every overlay 0 · overlay-specific 22, in 3 members
+
+  EVERY edge is overlay-specific. Not one of the 22 is present in all of its
+  member's overlays, because most overlays define no base URL at all and inherit
+  it through Helm's -f merge. An earlier version of this measurement intersected
+  only over the overlays that happened to produce an edge and reported "union 22,
+  in every overlay 17, overlay-specific 5 in 1 member" -- and concluded "only one
+  member has more than one deploy overlay", which the estate contradicts 36 times.
+  The profile-union decision therefore pays across the whole resolved set here,
+  not at the margin; CR-121 section 7 sized the buy at "roughly 8 sites plus the
+  broker overlay".
+
+  WHAT THIS DOES NOT SAY
+
+  It does not say the mechanism is wrong. The deploy-manifest -> via-key ->
+  call-site join resolved 26 of 118 references to a call site and produced 22
+  identity-resolved edges over a workspace that has 0 today. It says the
+  NET-NEW yield -- the only figure that justifies eight stories whose product is
+  these edges -- is 12, that 11 of those 12 are self-ties, and that the largest
+  single reason for the shortfall is a provider-side composition gap CR-121 does
+  not address.
+
+  A follow-on CR that resolves composed route paths on the provider side would
+  change this measurement. Re-run before re-deciding: nothing here needs to be
+  re-derived by hand.
