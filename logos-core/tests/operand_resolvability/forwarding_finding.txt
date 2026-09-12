@@ -28,22 +28,43 @@ AC1 — THE POPULATIONS, PRODUCTION AND TEST, NEVER SUMMED
   * gate-admitted client-call sites carrying at least one bare-parameter
     operand, after the CR-115 agreement rule has already refused them for no key.
 
-Four independent reconciliations against the record, all exact, which is why the
+FIVE independent reconciliations against the record, all exact, which is why the
 zero above is a measurement and not a broken walk: 13 main / 41 test publish
 sites is S-365's `broker/main 13` and `broker/test 41`; 52 files carrying a
 publish site is the figure `plugins/java/queries/brokers.scm` records beside its
-54 sites; 2447 Java files is the S-355 and S-374 java row; and 4 production
+54 sites; 2447 Java files is the S-355 and S-374 java row; 4 production
 client-call parameter operands is exactly the "plus 4 Java method parameters"
-S-365 recorded as part of its 30-site no-key residue. The broker TEST arm's 3
-candidates are 41 sites less the 38 that carry a literal topic — S-365's 38
-IT-class admits, in their complement.
+S-365 recorded as part of its 30-site no-key residue; and 13 main + 3 test = 16
+broker candidates is exactly `brokers.scm`'s "19 pass an identifier (16 of them a
+method parameter)" — an independent cross-check of the bare-parameter
+classification itself, at the arm level this measurement never reads.
+
+The broker TEST arm's 3 candidates are 41 sites less the 38 whose topic is NOT a
+bare parameter — S-365's 38 IT-class admits, in their complement. (Not "the 38
+that carry a literal topic", which an earlier draft of this file said and which
+is false in the other direction: `brokers.scm` records that NONE of the 54
+header-form sites carries a literal topic. The 38 are sites whose topic RESOLVED
+to a configuration key.)
 
 
 AC2 — THE RESIDUE, AND THE TWO MECHANISMS THAT PRODUCE IT
 
-  broker-publish / main, 13 candidates:
+  broker-publish / main, 13 candidates — every reason, zeros included, because
+  AC2 names two quantities and a suppressed row hides one of them:
+      0  operand is a constructor/lambda parameter
+      0  method has no call site anywhere
+      0  every call site is outside the build module
       7  an in-module call site passes a parameter (2+ hops)
       6  an in-module call site's argument resolves to nothing
+      0  in-module call sites disagree
+
+  So of AC2's two named quantities, "two or more hops" is 7 and "reaches outside
+  its module" is 0: on this estate every wrapper's callers are inside its own
+  build module, and the bound that fails is the HOP count, not the module scope.
+
+  AGREEING CALL SITES, the other figure AC2 names: of 141 in-module call sites
+  observed, 0 agree under the criterion as written — zero by construction, since
+  no candidate resolved — and 19 agree across the six main-only resolutions.
 
 These are two different faults and only one of them is about the estate's Java.
 
@@ -129,6 +150,7 @@ AC3 — CAN THE EXISTING `Calls` LEDGER ANSWER THE HOP? (CRA-06)
   in-module call sites observed              141
   call sites the dedup collapses away         17
   call sites in files the ledger misses        0
+  method references to a wanted method         1
   methods whose bare name is ambiguous         7
   ledger fields carrying the operand           0
 
@@ -152,16 +174,35 @@ AC3 — CAN THE EXISTING `Calls` LEDGER ANSWER THE HOP? (CRA-06)
   1. DEDUP HIDES CALL SITES. The ledger keys on
      (source, target, form, kind, relation) and ignores `line`, so two calls of
      one wrapper inside one declaration are ONE row. 17 of the 141 in-module call
-     sites — 12% — are invisible to it. FR-WS-23 AC1 requires EVERY call site to
+     sites — 12% — are invisible to it. The 17 is exact, not an upper bound: a
+     call outside any method or constructor (a field initialiser, a static block)
+     has no enclosing declaration to collapse INTO, and is excluded from the
+     arithmetic rather than pooled under one file-scope key. FR-WS-23 AC1 requires EVERY call site to
      agree; a rule implemented against the ledger alone would check a subset and
      report agreement it had not established. On this estate that would have
      turned at least one refusal into a false admit.
 
-  2. THE TARGET IS A BARE NAME. 773 rows name a wanted method but only 141 call
+  2. A METHOD REFERENCE IS NOT A LEDGER ROW. One `Foo::bar` reference to a wanted
+     method exists on the estate. It reaches the wrapper and supplies no
+     argument, so under FR-WS-23 AC1 it refuses the method; the ledger records a
+     `Calls` row for an invocation and not for a reference, so it is reported on
+     its own line rather than counted as a coverage gap. It changes no verdict
+     here — it is out of module for every candidate — but an implementation that
+     read only the ledger would not know the reference existed.
+
+  3. THE TARGET IS A BARE NAME. 773 rows name a wanted method but only 141 call
      sites are in a candidate's own module, and 7 wanted names are declared by
      two or more `method_declaration`s inside one build module. `sendMessage` is
      not a distinctive name. Binding by name plus arity, as this measurement
      does, is a heuristic; the ledger offers nothing stronger.
+
+     THE SEVEN WERE CHECKED BY HAND, because they are the only thing standing
+     between this heuristic and a compromised headline: every one is a base
+     `KafkaProducer.sendMessage/3` together with a subclass override of the same
+     signature, and every one of the 13 candidates' deciding blockers is either a
+     `super.sendMessage(...)` inside that same producer hierarchy — a genuine
+     call of the candidate method — or a Mockito stub on a mock of that class.
+     Under receiver-aware binding every verdict above is unchanged.
 
 
 AC4 — THE FLOOR, AND WHAT FOLLOWS
@@ -200,17 +241,19 @@ AC4 — THE FLOOR, AND WHAT FOLLOWS
 AC5 — THE MEASURED COST OF THE HOP
 
   enumerate the sites (what the arm does today)   8.9 s   over 2447 files
-  hop, whole estate                               4.9 s   over 2447 files
-  hop, ledger-targeted files only               982 ms    over  366 files
-  amortised per candidate (targeted)          49 085 us   over   20 candidates
+  hop, whole estate                               5.5 s   over 2447 files
+  hop, ledger-targeted files only                 1.2 s   over  366 files
+  amortised per candidate (targeted)          60 283 us   over   20 candidates
 
-  The targeted figure is the one a perf reconciliation should use: 982 ms is the
+  The targeted figure is the one a perf reconciliation should use: 1.2 s is the
   parse-and-resolve cost of opening the 366 files the `Calls` ledger names as
   callers of a wanted method, on an 84-member estate, single-threaded, in a debug
-  build. It is 15% of the 2447-file naive pass, so the ledger's direction lookup
-  pays for itself even though it cannot supply the operand.
+  build. It opens 15% of the files (366 of 2447) and costs 22% of the naive
+  pass's time, so the ledger's direction lookup pays for itself even though it
+  cannot supply the operand. Those are two different denominators and an earlier
+  draft of this file quoted the file ratio as though it were the time ratio.
 
-  Three caveats, stated because a figure without them is not usable:
+  FOUR caveats, stated because a figure without them is not usable:
   * IO IS EXCLUDED. Sources are read before any timer starts, so these are
     parse-and-resolve figures. CR-121 CRA-07 asserts the extract pass has already
     read those files; if that holds, excluding IO is the right model, and if it
@@ -220,6 +263,13 @@ AC5 — THE MEASURED COST OF THE HOP
   * AMORTISED, NOT MARGINAL. The per-candidate figure divides a fixed 366-file
     parse by 20 candidates; it falls as candidates rise and must not be
     multiplied out to project a larger estate.
+  * AN UPPER BOUND, because the timed passes do work a real implementation would
+    not. They compile `CALL_QUERY` and `DECL_QUERY` afresh per file rather than
+    once, and they run the same-name ambiguity census inside the timer even
+    though it is measurement scaffolding. Both were left in rather than hoisted,
+    because hoisting them would change the figures this file records; the effect
+    is stated instead. The bias is against the change request, which is the safe
+    direction.
 
 
 METHOD, AND WHY NO RE-ENROLMENT. The reference workspace is ground truth for
@@ -238,6 +288,22 @@ WHAT IS NOT MEASURED HERE, stated rather than left to be discovered:
     it holds a file the plugin registry claims, and a nested Maven module
     (deprecated-mailbox-core/manager) is counted under its parent directory. The
     non-vacuity assertion is a floor, not an equality, for this reason.
+  * THREE SHAPES THE SLOT ARITHMETIC CANNOT READ, each now DETECTED rather than
+    silently dropped. A varargs `spread_parameter` and a single-identifier lambda
+    parameter yield no positional slot, and both used to return silently from
+    candidate construction, shrinking the denominator the floor is stated over.
+    They are now counted into `operands_without_a_slot` and asserted zero, so if
+    one ever appears the run is VOID rather than quietly short. An explicit
+    receiver parameter (`void m(Foo this, String topic)`) would have shifted
+    every later slot by one and is now filtered. The estate writes none of the
+    three — verified by grep for the first two and by all 13 candidates reporting
+    `sendMessage(3)` for the third — so no recorded figure moves.
+  * A VARARGS CALLEE would be reported as having no call site at all, because
+    call sites are matched on an exact argument count. No `send`/`sendMessage`
+    declaration on the estate is varargs, and the two client-arm candidates that
+    report "no call site anywhere" are `post(2)` and `delete(2)`, both with
+    explicit two-parameter signatures. Stated because the label would be
+    misleading on an estate that did write one.
   * WHETHER A SECOND HOP WOULD SUCCEED. Mechanism (a) is reported as a refusal
     with its site named; this run did not follow it. Whether two hops would
     resolve those seven is a different measurement, and proposing it is a

@@ -135,6 +135,10 @@ pub const PRODUCTION_PUBLISH_SITES: usize = 13;
 /// nowhere in `logos-core`, for the reason the parent module's carve-out gives.
 const JAVA: &str = "java";
 
+/// How many blocking call sites are listed per candidate before the evidence
+/// list is truncated. The cap is disclosed in the output when it bites.
+const BLOCKER_SAMPLE: usize = 4;
+
 // ── The recorded finding, pinned ────────────────────────────────────────────
 //
 // S-392 measured CRA-05 as FALSIFIED. These constants pin the figures so a
@@ -164,14 +168,21 @@ pub const RECORDED_REFUSED_BY_TEST_ONLY: usize = 6;
 
 /// What a positional argument at a call site resolves to, at **one** hop.
 ///
-/// The variants are ordered by how much they block: a single
-/// [`NeedsAnotherHop`](ArgValue::NeedsAnotherHop) among a method's call sites
-/// refuses the whole method, because [FR-WS-23] admits a topic only when *every*
-/// in-module call site supplies an agreeing, terminal operand.
+/// A single [`NeedsAnotherHop`](ArgValue::NeedsAnotherHop) among a method's call
+/// sites refuses the whole method, because [FR-WS-23] admits a topic only when
+/// *every* in-module call site supplies an agreeing, terminal operand. That
+/// precedence is applied by [`decide`] and mirrored by the blocker ranking in
+/// [`decide_every_candidate`]; it is **not** derived from the declaration order
+/// below, and this type deliberately derives no `Ord` — a second spelling of the
+/// precedence is a second thing to keep in step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArgValue {
-    /// A static string literal — the topic as written, `${…}` placeholders
-    /// included, under the same grammatical-shape rule `brokers.scm` applies.
+    /// A topic the source proves outright: a static string literal — `${…}`
+    /// placeholders included, under the same grammatical-shape rule
+    /// `brokers.scm` applies — **or a same-unit constant folded to one**
+    /// (`arg_value` step 3). For the folded case the topic is precisely *not*
+    /// "as written" at the call site, which is why this says "proves" rather
+    /// than "is".
     Literal(String),
     /// A configuration key: a `@ConfigurationProperties` accessor or a
     /// `@Value`-annotated name that [FR-WS-19] resolves against committed
@@ -333,9 +344,17 @@ struct Observation {
     /// The enclosing declaration, as `name@line`. The `Calls` ledger dedups on
     /// `(source declaration, target, form, kind, relation)`, so this is the
     /// grain at which a second call site disappears from it.
-    declaration: String,
+    declaration: Option<String>,
     /// The resolved value at each slot this measurement asked about.
     values: BTreeMap<usize, ArgValue>,
+    /// A `Foo::bar` method reference rather than an invocation.
+    ///
+    /// It counts toward the AGREEMENT — [FR-WS-23] AC1 says every call site —
+    /// but not toward the LEDGER figures. The `Calls` ledger records a row for
+    /// an invocation; a reference is a different construct, and folding the two
+    /// together would make "call sites in files the ledger misses" mean two
+    /// things at once and turn AC3's answer on the difference.
+    is_reference: bool,
 }
 
 /// What the existing `Calls` ledger can and cannot answer — [CR-121] CRA-06,
@@ -366,9 +385,16 @@ pub struct LedgerAnswer {
     /// `method_declaration`s inside the same build module — the ambiguity a
     /// name-grained ledger target cannot resolve.
     pub ambiguous_by_name: usize,
-    /// Call sites the whole-estate walk saw that a ledger-driven walk would
-    /// never have opened the file for — the ledger's own coverage gap.
+    /// **Invocation** call sites the whole-estate walk saw that a ledger-driven
+    /// walk would never have opened the file for — the ledger's own coverage
+    /// gap. Method references are excluded and counted separately: the ledger
+    /// records a `Calls` row for an invocation, so a reference missing from it
+    /// is not a gap in the ledger's coverage of what it models.
     pub call_sites_the_ledger_misses: usize,
+    /// `Foo::bar` references to a wanted method. They bind nothing and refuse
+    /// the method under [FR-WS-23] AC1; reported because a reader who sees the
+    /// row above at zero should know references were looked for and found.
+    pub method_references: usize,
     /// A sample of the target texts seen, so the reader can check the grain.
     pub sample_targets: BTreeSet<String>,
 }
@@ -430,6 +456,22 @@ pub struct Findings {
     /// A publish site `collect_header_publishes` recognised and this module's
     /// query did not reach. Asserted zero: it is the mirror's own policing.
     pub sites_without_a_node: usize,
+    /// An operand this module classified as a bare parameter but could not give
+    /// a positional slot — a varargs `spread_parameter`, whose name hangs off a
+    /// declarator the binding walk reads as the TYPE, or a single-identifier
+    /// lambda parameter, whose "parameter list" is one bare `identifier` with no
+    /// children. Both used to `return` silently from `push_candidate`, shrinking
+    /// the denominator the floor is stated over with nothing to show for it.
+    ///
+    /// **Defensive, and measured to be so**: on both shapes the parent's
+    /// `resolve_key` declines to call the operand a bare parameter one step
+    /// earlier, so neither reaches here (see
+    /// [`fixtures::a_lambda_parameter_topic_is_excluded_before_the_slot_arithmetic`]).
+    /// The counter is therefore a drift detector between the parent's classifier
+    /// and this module's slot arithmetic — if they ever disagree about what a
+    /// parameter is, the run is VOID rather than quietly short. Asserted zero,
+    /// exactly as `sites_without_a_node` is.
+    pub operands_without_a_slot: usize,
     pub candidates: Vec<Candidate>,
     /// Keyed by the candidate's index in [`Findings::candidates`].
     pub hops: BTreeMap<usize, Hop>,
@@ -446,7 +488,10 @@ pub struct Findings {
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub caller_sites: BTreeMap<usize, Vec<String>>,
     /// Per candidate index, the in-module call sites that BLOCK the hop and
-    /// what each one's argument resolved to. Without this a refusal reason
+    /// what each one's argument resolved to — **at most [`BLOCKER_SAMPLE`]**,
+    /// ranked by the precedence [`decide`] applies, with a trailing
+    /// "… and N more" line when the cap bites. An undisclosed truncation of an
+    /// evidence list is exactly the silence [NFR-CC-04] forbids. Without this a refusal reason
     /// names a class of fault but not the site that caused it, and the
     /// dominant cause on this estate — Mockito stubs in the test tree — would
     /// have been invisible in the figures.
@@ -494,6 +539,29 @@ impl Findings {
             .count()
     }
 
+    /// **[AC2]'s agreement figure**: how many in-module call sites actually
+    /// agreed — the sites that carried a resolved candidate, not the sites that
+    /// were read. Reported with [`LedgerAnswer::syntactic_call_sites`] as its
+    /// denominator, and under both readings, because under the criterion as
+    /// written it is zero by construction and a figure nobody writes down is a
+    /// figure nobody can check.
+    pub fn agreeing_call_sites(
+        &self,
+        arm: Arm,
+        tree: Tree,
+        hops: &BTreeMap<usize, Hop>,
+    ) -> usize {
+        self.candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.arm == arm && c.tree == tree)
+            .filter_map(|(i, _)| match hops.get(&i) {
+                Some(Hop::Resolved { call_sites, .. }) => Some(*call_sites),
+                _ => None,
+            })
+            .sum()
+    }
+
     pub fn candidates_in(&self, arm: Arm, tree: Tree) -> usize {
         self.candidates.iter().filter(|c| c.arm == arm && c.tree == tree).count()
     }
@@ -523,12 +591,26 @@ impl Findings {
 
 // ── Tree-sitter helpers: position, not judgement ────────────────────────────
 
-/// Every call site, with its argument list. The method name is filtered in
-/// Rust, as everywhere else in this harness.
+/// Every call site, with its argument list, **and every method reference**.
+/// The method name is filtered in Rust, as everywhere else in this harness.
+///
+/// The reference arm is the one place this measurement could have OVER-read.
+/// `list.forEach(producer::sendMessage)` reaches the wrapper and proves nothing
+/// about its topic, so under [FR-WS-23] AC1 — *every* call site in the module
+/// must agree — a module containing one must not report the wrapper resolved.
+/// A reference supplies no argument list, so it is recorded as needing another
+/// hop rather than being skipped. The estate writes none
+/// (`grep "::sendMessage"` → 0), so this changes no recorded figure; it closes
+/// the only direction in which a figure could have been inflated.
+///
+/// [FR-WS-23]: ../../../docs/specs/requirements/FR-WS-23.md
 const CALL_QUERY: &str = r"
-(method_invocation
-  name: (identifier) @call.name
-  arguments: (argument_list) @call.args)
+[
+  (method_invocation
+    name: (identifier) @call.name
+    arguments: (argument_list) @call.args)
+  (method_reference) @call.ref
+]
 ";
 
 /// Every method declaration, for the same-name ambiguity census.
@@ -551,9 +633,17 @@ const DECL_QUERY: &str = r"
 /// That is not a hypothetical — it was the first version here, and
 /// [`fixtures::a_comment_in_the_argument_list_does_not_shift_the_slot`] caught
 /// it by changing the ARITY, so the call site matched no wanted method at all.
+///
+/// `receiver_parameter` is dropped for the same reason and a different one:
+/// `formal_parameters` admits a leading explicit receiver (`void m(Foo this,
+/// String topic)`), which occupies a parameter slot but is supplied by **no**
+/// argument at any call site. Counting it shifts every later slot by one and
+/// the wrapper then matches no call site at all.
 fn slots<'t>(list: Node<'t>) -> Vec<Node<'t>> {
     let mut cursor = list.walk();
-    list.named_children(&mut cursor).filter(|n| !n.kind().ends_with("comment")).collect()
+    list.named_children(&mut cursor)
+        .filter(|n| !n.kind().ends_with("comment") && n.kind() != "receiver_parameter")
+        .collect()
 }
 
 /// The declaration that declares `name` as a parameter, innermost first.
@@ -642,7 +732,14 @@ fn arg_value(node: Node<'_>, src: &[u8], unit: &Unit<'_>, resolver: Resolver<'_>
 /// The enclosing method or constructor, as `name@line` — the grain the `Calls`
 /// ledger's `source` field holds, spelled from the tree because this harness
 /// must not depend on the symbol builder's naming to count a collapse.
-fn enclosing_declaration(node: Node<'_>, src: &[u8]) -> String {
+/// `None` for a call outside any method or constructor — a field initialiser or
+/// a static block. Those are **not** interchangeable with each other: the
+/// extract pass attributes each to the file-module symbol or to its own
+/// declaration, so folding them under one `"<file scope>"` key would report
+/// them as collapsing into a single ledger row when they do not. Excluding them
+/// keeps `collapsed_by_dedup` an exact count of the collapses this measurement
+/// can prove, rather than an upper bound presented as a figure.
+fn enclosing_declaration(node: Node<'_>, src: &[u8]) -> Option<String> {
     let mut current = node.parent();
     while let Some(scope) = current {
         if matches!(scope.kind(), "method_declaration" | "constructor_declaration") {
@@ -650,11 +747,11 @@ fn enclosing_declaration(node: Node<'_>, src: &[u8]) -> String {
                 .child_by_field_name("name")
                 .and_then(|n| n.utf8_text(src).ok())
                 .unwrap_or("<anonymous>");
-            return format!("{name}@{}", scope.start_position().row + 1);
+            return Some(format!("{name}@{}", scope.start_position().row + 1));
         }
         current = scope.parent();
     }
-    "<file scope>".to_string()
+    None
 }
 
 /// The estate member a project-relative path belongs to: its first segment.
@@ -843,13 +940,11 @@ fn client_candidates(
 ) {
     let Parsed { plugin, root, src, ref unit, resolver } = *scan;
     let Some(query) = plugin.query("invocations") else { return };
-    let detectors = &plugin.semantics().http_client_detectors;
-    let gated = !detectors.is_empty()
-        && facts
-            .refs
-            .iter()
-            .any(|r| detectors.iter().any(|d| super::matches_detector(&r.target, d)));
-    if !gated {
+    // The parent's spelling of the FR-FW-04 ledger gate, not a copy of it: this
+    // predicate fixes the client-arm denominator in two published measurements,
+    // and a hand-written twin that later diverges is the exact defect this
+    // module's reuse discipline exists to avoid.
+    if !super::gate_admits(plugin, facts) {
         return;
     }
     for (_, arg) in
@@ -897,9 +992,18 @@ fn push_candidate(
     line: u32,
     f: &mut Findings,
 ) {
-    let Some(name) = operand_name(operand, src) else { return };
-    let Some(scope) = declaring_scope(operand, &name, src) else { return };
-    let Some((slot, arity)) = parameter_slot(scope, &name, src) else { return };
+    let Some(name) = operand_name(operand, src) else {
+        f.operands_without_a_slot += 1;
+        return;
+    };
+    let Some(scope) = declaring_scope(operand, &name, src) else {
+        f.operands_without_a_slot += 1;
+        return;
+    };
+    let Some((slot, arity)) = parameter_slot(scope, &name, src) else {
+        f.operands_without_a_slot += 1;
+        return;
+    };
     let method = scope
         .child_by_field_name("name")
         .and_then(|n| n.utf8_text(src).ok())
@@ -961,12 +1065,18 @@ fn observe_calls(
     while let Some(m) = matches.next() {
         let mut name_node = None;
         let mut args_node = None;
+        let mut ref_node = None;
         for cap in m.captures {
             match captures[cap.index as usize] {
                 "call.name" => name_node = Some(cap.node),
                 "call.args" => args_node = Some(cap.node),
+                "call.ref" => ref_node = Some(cap.node),
                 _ => {}
             }
+        }
+        if let Some(reference) = ref_node {
+            observe_reference(reference, src, source, want, names, out);
+            continue;
         }
         let (Some(name_node), Some(args_node)) = (name_node, args_node) else { continue };
         let Ok(name) = name_node.utf8_text(src) else { continue };
@@ -988,6 +1098,43 @@ fn observe_calls(
             line: name_node.start_position().row as u32 + 1,
             declaration: enclosing_declaration(name_node, src),
             values,
+            is_reference: false,
+        });
+    }
+}
+
+/// A `Foo::bar` method reference naming a wanted method.
+///
+/// It reaches the wrapper and supplies no argument, so every wanted slot is
+/// recorded as needing another hop — which refuses the method under
+/// [FR-WS-23] AC1 rather than being silently absent from the agreement. The
+/// arity is unknown at a reference, so it is recorded against every wanted
+/// arity of that name; that is the conservative direction.
+///
+/// [FR-WS-23]: ../../../docs/specs/requirements/FR-WS-23.md
+fn observe_reference(
+    reference: Node<'_>,
+    src: &[u8],
+    source: &Source,
+    want: &BTreeMap<Callee, BTreeSet<usize>>,
+    names: &BTreeSet<String>,
+    out: &mut Vec<Observation>,
+) {
+    let Ok(text) = reference.utf8_text(src) else { return };
+    let Some(name) = text.rsplit("::").next().map(str::trim) else { return };
+    if !names.contains(name) {
+        return;
+    }
+    for (callee, wanted_slots) in want.iter().filter(|(c, _)| c.name == name) {
+        out.push(Observation {
+            callee: callee.clone(),
+            module: source.module.clone(),
+            tree: source.tree,
+            file: source.rel.clone(),
+            line: reference.start_position().row as u32 + 1,
+            declaration: enclosing_declaration(reference, src),
+            values: wanted_slots.iter().map(|s| (*s, ArgValue::NeedsAnotherHop)).collect(),
+            is_reference: true,
         });
     }
 }
@@ -1044,6 +1191,13 @@ fn decide(candidate: &Candidate, observed: &[&Observation], main_only: bool) -> 
     }
     let values: Vec<&ArgValue> =
         in_module.iter().filter_map(|o| o.values.get(&candidate.slot)).collect();
+    // Defensive, and unreachable by construction — stated so that a reader does
+    // NOT conclude `UnresolvableOperand` has two causes. `Callee` carries the
+    // arity `parameter_slot` read off the parameter list, every candidate slot
+    // is an index into that same list, and `observe_calls` matches only when
+    // the argument count equals the arity — so `arguments.get(slot)` is always
+    // `Some`. The one real cause is the branch below, which is what the finding
+    // attributes all six production instances to.
     if values.len() < in_module.len() {
         return Hop::Refused(Residue::UnresolvableOperand);
     }
@@ -1191,6 +1345,14 @@ fn decide_every_candidate(f: &mut Findings, observations: &[Observation]) {
                 .map(|o| format!("{}:{} [{}]", o.file, o.line, o.tree.label()))
                 .collect::<Vec<_>>(),
         );
+        // Computed before the blocker scan so a competing value can be labelled
+        // as such: the same in-module values `decide` reads.
+        let identities: BTreeSet<String> = observed
+            .iter()
+            .filter(|o| o.module == c.module)
+            .filter_map(|o| o.values.get(&c.slot)?.identity())
+            .collect();
+        let disagrees = identities.len() > 1;
         let mut blocking: Vec<(u8, String)> = observed
             .iter()
             .filter(|o| o.module == c.module)
@@ -1200,16 +1362,29 @@ fn decide_every_candidate(f: &mut Findings, observations: &[Observation]) {
                 // printed is the site that DECIDED the reason printed beside
                 // it. Sampling in walk order showed four test-tree refusals
                 // under a verdict of "2+ hops", which reads as a contradiction.
+                // FR-WS-23 AC2 requires a disagreement to emit PER-SITE
+                // LABELLED CANDIDATES, never an average. A resolved-but-
+                // competing value is therefore evidence too — without rank 2 a
+                // `Disagree` refusal printed its reason and its count and never
+                // said which site held which value, which is the one thing a
+                // reader needs to judge whether the rule is implementable.
                 let rank = match value {
                     ArgValue::NeedsAnotherHop => 0,
                     ArgValue::Unresolvable(_) => 1,
+                    _ if disagrees => 2,
                     _ => return None,
                 };
                 Some((rank, format!("{}:{} [{}] {}", o.file, o.line, o.tree.label(), value.label())))
             })
             .collect();
         blocking.sort();
-        blockers.insert(i, blocking.into_iter().map(|(_, s)| s).take(4).collect());
+        let total = blocking.len();
+        let mut evidence_lines: Vec<String> =
+            blocking.into_iter().map(|(_, s)| s).take(BLOCKER_SAMPLE).collect();
+        if total > BLOCKER_SAMPLE {
+            evidence_lines.push(format!("… and {} more", total - BLOCKER_SAMPLE));
+        }
+        blockers.insert(i, evidence_lines);
         let hop = decide(c, &observed, false);
         if hop.resolved() && c.arm == Arm::BrokerPublish && c.tree == Tree::Main {
             methods.insert(format!("{}/{}", c.module, c.callee.name));
@@ -1239,6 +1414,7 @@ fn answer_the_ledger_question(
         f.candidates.iter().map(|c| c.callee.name.as_str()).collect();
     let in_module: Vec<&Observation> = observations
         .iter()
+        .filter(|o| !o.is_reference)
         .filter(|o| f.candidates.iter().any(|c| c.callee == o.callee && c.module == o.module))
         .collect();
 
@@ -1246,9 +1422,10 @@ fn answer_the_ledger_question(
     // after the first inside one declaration is a site the agreement rule
     // cannot see.
     let mut per_declaration: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
-    for o in &in_module {
+    for o in in_module.iter().filter(|o| o.declaration.is_some()) {
+        let declaration = o.declaration.as_deref().unwrap_or_default();
         *per_declaration
-            .entry((o.file.as_str(), o.declaration.as_str(), o.callee.name.as_str()))
+            .entry((o.file.as_str(), declaration, o.callee.name.as_str()))
             .or_default() += 1;
     }
     let collapsed: usize = per_declaration.values().map(|n| n.saturating_sub(1)).sum();
@@ -1282,7 +1459,12 @@ fn answer_the_ledger_question(
             .filter(|v| ledger.all_targets.contains(*v))
             .count(),
         ambiguous_by_name: declarations.values().filter(|d| d.len() > 1).count(),
-        call_sites_the_ledger_misses: observations.len().saturating_sub(targeted.len()),
+        call_sites_the_ledger_misses: observations
+            .iter()
+            .filter(|o| !o.is_reference)
+            .count()
+            .saturating_sub(targeted.iter().filter(|o| !o.is_reference).count()),
+        method_references: observations.iter().filter(|o| o.is_reference).count(),
         sample_targets: ledger.targets.clone(),
     }
 }
@@ -1332,9 +1514,15 @@ fn report_residue(f: &Findings) {
                 continue;
             }
             println!("{} / {}:", arm.label(), tree.label());
+            // Every reason, zeros included, on the arm and tree carrying the
+            // floor. AC2 names TWO quantities — "two or more hops **or** reach
+            // outside their module" — and suppressing a zero row leaves a reader
+            // of the durable finding unable to separate them. Elsewhere the
+            // zero rows are noise, so they stay suppressed.
+            let decisive = arm == Arm::BrokerPublish && tree == Tree::Main;
             for reason in Residue::ALL {
                 let n = census.get(&reason).copied().unwrap_or_default();
-                if n > 0 {
+                if n > 0 || decisive {
                     println!("    {n:>4}  {}", reason.label());
                 }
             }
@@ -1345,6 +1533,15 @@ fn report_residue(f: &Findings) {
         f.beyond_the_bound(Arm::BrokerPublish, Tree::Main),
         f.candidates_in(Arm::BrokerPublish, Tree::Main),
     );
+    // AC2's other half, stated as a figure rather than left implicit in a
+    // suppressed census row.
+    println!(
+        "in-module call sites: {} observed; {} AGREE under the headline reading, {} across the \
+         main-only resolutions",
+        f.ledger.syntactic_call_sites,
+        f.agreeing_call_sites(Arm::BrokerPublish, Tree::Main, &f.hops),
+        f.agreeing_call_sites(Arm::BrokerPublish, Tree::Main, &f.hops_main_only),
+    );
     println!(
         "sensitivity — the same figure counting only `src/main` call sites toward agreement: \
          {} resolved (headline reading: {}); {} candidate(s) are refused SOLELY by test-tree \
@@ -1353,9 +1550,15 @@ fn report_residue(f: &Findings) {
         f.production_publish_resolved(),
         f.refused_only_by_test_call_sites(Arm::BrokerPublish, Tree::Main),
     );
-    println!("\nevery production publish candidate, one line each:");
+    println!(
+        "\nper-candidate detail. Every PRODUCTION candidate of both arms — the two \n\
+         populations AC1 names — plus any candidate anywhere whose call sites DISAGREE, \n\
+         because FR-WS-23 AC2 requires a disagreement to emit per-site labelled candidates \n\
+         and the estate's only disagreement is in the test tree:"
+    );
     for (i, c) in f.candidates.iter().enumerate() {
-        if c.arm != Arm::BrokerPublish || c.tree != Tree::Main {
+        let disagrees = f.hops.get(&i).and_then(Hop::residue) == Some(Residue::Disagree);
+        if c.tree != Tree::Main && !disagrees {
             continue;
         }
         let describe = |hop: Option<&Hop>| match hop {
@@ -1368,8 +1571,15 @@ fn report_residue(f: &Findings) {
         };
         let verdict = describe(f.hops.get(&i));
         println!(
-            "    {}:{}  {}({}) slot {} operand `{}`  => {verdict}",
-            c.file, c.line, c.callee.name, c.callee.arity, c.slot, c.operand,
+            "    [{}/{}] {}:{}  {}({}) slot {} operand `{}`  => {verdict}",
+            c.arm.label(),
+            c.tree.label(),
+            c.file,
+            c.line,
+            c.callee.name,
+            c.callee.arity,
+            c.slot,
+            c.operand,
         );
         if let Some(sites) = f.caller_sites.get(&i).filter(|s| !s.is_empty()) {
             println!("        {} in-module call site(s) read", sites.len());
@@ -1390,15 +1600,20 @@ fn report_residue(f: &Findings) {
 fn report_ledger(f: &Findings) {
     let l = &f.ledger;
     println!("\n--- AC3: can the existing `Calls` ledger answer the hop? (CRA-06) ---");
-    println!("    files run through `extract::extract`      {}", l.files_extracted);
-    println!("    `Calls` rows recorded (denominator)       {}", l.calls_rows);
-    println!("    rows naming a wanted method              {}", l.rows_naming_a_wanted_method);
-    println!("    distinct (caller declaration, method)    {}", l.caller_declarations);
-    println!("    in-module call sites observed            {}", l.syntactic_call_sites);
-    println!("    call sites the dedup collapses away      {}", l.collapsed_by_dedup);
-    println!("    call sites in files the ledger misses    {}", l.call_sites_the_ledger_misses);
-    println!("    methods whose bare name is ambiguous     {}", l.ambiguous_by_name);
-    println!("    ledger fields carrying the operand       {}", l.rows_carrying_the_operand);
+    // One width-specified format, as `report_populations` uses: the nine rows
+    // were hand-padded and two of them were a column off, so the table the run
+    // printed was not the table the finding reproduces.
+    let row = |label: &str, n: usize| println!("    {label:<40} {n:>8}");
+    row("files run through `extract::extract`", l.files_extracted);
+    row("`Calls` rows recorded (denominator)", l.calls_rows);
+    row("rows naming a wanted method", l.rows_naming_a_wanted_method);
+    row("distinct (caller declaration, method)", l.caller_declarations);
+    row("in-module call sites observed", l.syntactic_call_sites);
+    row("call sites the dedup collapses away", l.collapsed_by_dedup);
+    row("call sites in files the ledger misses", l.call_sites_the_ledger_misses);
+    row("method references to a wanted method", l.method_references);
+    row("methods whose bare name is ambiguous", l.ambiguous_by_name);
+    row("ledger fields carrying the operand", l.rows_carrying_the_operand);
     println!("    sample targets: {:?}", l.sample_targets);
     println!(
         "\n    VERDICT on CRA-06: the direction is {}; the operand is {}.",
@@ -1517,6 +1732,14 @@ fn assert_the_recorded_finding(f: &Findings, resolved: usize) {
         "the test-stub-blocked count moved from {RECORDED_REFUSED_BY_TEST_ONLY}",
     );
     const {
+        // The headline constant, which nothing used to constrain: it could be
+        // edited to any value and CI stayed green, because the gate body runs
+        // only under LOGOS_REF_WORKSPACE.
+        assert!(
+            RECORDED_RESOLVED < ONE_HOP_FLOOR,
+            "the recorded headline must itself be below the floor, or the finding is not a \
+             falsification at all",
+        );
         assert!(
             RECORDED_RESOLVED_MAIN_ONLY < ONE_HOP_FLOOR,
             "the favourable-reading counterfactual must itself be below the floor, or the              falsification rests on the reading of FR-WS-23 AC1 rather than on the              measurement",
@@ -1542,6 +1765,27 @@ fn assert_the_recorded_finding(f: &Findings, resolved: usize) {
         "the recorded finding measured 45625 `Calls` rows and 141 in-module call sites;          this run saw {} and {}. AC3's answer rests on both.",
         f.ledger.calls_rows,
         f.ledger.syntactic_call_sites,
+    );
+    // The denominator the VERDICT line prints and the floor is stated over. It
+    // was the only figure in that sentence nothing pinned, so a future estate
+    // could have printed "0 of 12" beside a finding that says 13 and stayed
+    // green. `assert_non_vacuous` floors the SITE count; this pins the
+    // CANDIDATE count, and the two differ by exactly the silent drops
+    // `operands_without_a_slot` now counts.
+    assert_eq!(
+        f.candidates_in(Arm::BrokerPublish, Tree::Main),
+        PRODUCTION_PUBLISH_SITES,
+        "the production publish population moved from {PRODUCTION_PUBLISH_SITES} candidates; \
+         the floor and every figure beside it are stated over that denominator",
+    );
+    // AC3's coverage half. The finding reasons from this being zero ("the file
+    // set they point at covers every syntactic call site"); it was printed and
+    // never asserted.
+    assert_eq!(
+        f.ledger.call_sites_the_ledger_misses, 0,
+        "the recorded finding rests on the `Calls` ledger naming every file that holds a \
+         call site; this run found {} it does not reach, which changes CRA-06's answer",
+        f.ledger.call_sites_the_ledger_misses,
     );
     assert!(
         !f.ledger.answers_the_operand() && f.ledger.answers_the_direction(),
@@ -1577,6 +1821,13 @@ fn assert_non_vacuous(f: &Findings, root: &Path) {
         "V3: found {production} production publish sites, fewer than the {PRODUCTION_PUBLISH_SITES} \
          FR-WS-10's withdrawal note and `brokers.scm` both enumerate. The harness is not \
          looking at the corpus the claim is about. VOID, not falsified.",
+    );
+    assert_eq!(
+        f.operands_without_a_slot, 0,
+        "{} operand(s) classified as a bare parameter could not be given a positional slot \
+         (varargs, or a single-identifier lambda parameter). Each is a candidate dropped \
+         from the denominator the floor is stated over. VOID, not falsified.",
+        f.operands_without_a_slot,
     );
     assert_eq!(
         f.sites_without_a_node, 0,
@@ -1695,6 +1946,11 @@ mod fixtures {
         ]);
         assert_eq!(f.publish_sites.get(&Tree::Main), Some(&1), "one production publish site");
         assert_eq!(f.sites_without_a_node, 0, "the site must join to an AST node");
+        assert_eq!(f.operands_without_a_slot, 0, "the operand must get a positional slot");
+        // The generality caveat `forwarding_floor.txt` promised IN ADVANCE. A
+        // promised report that no test can see disappear is the weakest kind.
+        assert_eq!(f.resolved_methods.len(), 1, "one wrapper method behind the resolution");
+        assert_eq!(f.resolved_members, BTreeSet::from(["svc".to_string()]));
         assert_eq!(
             production_hops(&f),
             vec![Hop::Resolved {
@@ -1719,7 +1975,16 @@ mod fixtures {
                 ),
             ),
         ]);
-        assert!(production_hops(&agree.1)[0].resolved(), "two agreeing sites resolve");
+        assert_eq!(
+            production_hops(&agree.1),
+            vec![Hop::Resolved {
+                value: ArgValue::Literal("orders".into()),
+                call_sites: 2,
+                caller_files: 1,
+            }],
+            "TWO agreeing sites — `call_sites` is the content of this half, so a bare \
+             `.resolved()` would pass identically if only one site had been observed",
+        );
 
         let disagree = estate(&[
             ("svc/pom.xml", POM.into()),
@@ -1888,6 +2153,20 @@ mod fixtures {
         assert_eq!(f.publish_sites.get(&Tree::Test), Some(&1));
         assert_eq!(f.production_publish_resolved(), 0, "the test tree's yield is not production's");
         assert_eq!(f.resolved_in(Arm::BrokerPublish, Tree::Test, &f.hops), 1);
+        // The census must PARTITION by arm and tree, not pool. Summing the two
+        // trees is exactly how CR-117 read as validated at 38 of 54 while being
+        // false on the population its criterion was written over, so the split
+        // is pinned here and not only reported.
+        assert_eq!(
+            f.residue(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(Residue::NoCallSites, 1)]),
+            "the production wrapper is uncalled; the test tree's caller is a different method",
+        );
+        assert_eq!(
+            f.residue(Arm::BrokerPublish, Tree::Test),
+            BTreeMap::new(),
+            "the test tree's own candidate resolved, so it contributes no residue",
+        );
     }
 
     #[test]
@@ -1942,6 +2221,11 @@ mod fixtures {
         ]);
         assert_eq!(f.production_publish_resolved(), 0, "headline: every in-module site must agree");
         assert_eq!(f.production_publish_resolved_main_only(), 1, "main-only: the test site is out");
+        // The function the gate reads RECORDED_REFUSED_BY_TEST_ONLY off. The two
+        // components above were pinned; the thing that combines them was not.
+        assert_eq!(f.refused_only_by_test_call_sites(Arm::BrokerPublish, Tree::Main), 1);
+        assert_eq!(f.agreeing_call_sites(Arm::BrokerPublish, Tree::Main, &f.hops), 0);
+        assert_eq!(f.agreeing_call_sites(Arm::BrokerPublish, Tree::Main, &f.hops_main_only), 1);
     }
 
     #[test]
@@ -2078,6 +2362,239 @@ mod fixtures {
     }
 
     #[test]
+    fn a_call_site_passing_a_config_accessor_resolves_to_its_key() {
+        // The `ArgValue::Key` branch — the one the six main-only resolutions on
+        // the estate are made of ("resolve to a @ConfigurationProperties key"),
+        // and which had no fixture: replacing it with `NeedsAnotherHop` left the
+        // whole suite green.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/resources/application.yml", "spring:\n  kafka:\n    topics:\n      archive-commands: archiveCommands\n".into()),
+            (
+                "svc/src/main/java/KafkaTopics.java",
+                "package p;\n\
+                 @ConfigurationProperties(prefix = \"spring.kafka.topics\")\n\
+                 public class KafkaTopics { private String archiveCommands; }\n"
+                    .to_string(),
+            ),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            (
+                "svc/src/main/java/Service.java",
+                caller(
+                    "Service",
+                    "  private final KafkaTopics kafkaTopics;\n\
+                     \x20 void go() { producer.sendMessage(body, kafkaTopics.getArchiveCommands()); }",
+                ),
+            ),
+        ]);
+        assert_eq!(
+            production_hops(&f),
+            vec![Hop::Resolved {
+                value: ArgValue::Key("spring.kafka.topics.archiveCommands".into()),
+                call_sites: 1,
+                caller_files: 1,
+            }],
+        );
+    }
+
+    #[test]
+    fn an_in_module_call_site_whose_argument_resolves_to_nothing_refuses() {
+        // `Residue::UnresolvableOperand` carries SIX of the thirteen production
+        // sites in the recorded finding — the Mockito-stub mechanism — and had
+        // no fixture at all. `any()` here is the same shape the estate writes:
+        // a call whose receiver the unit does not bind.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { producer.sendMessage(body, any()); }"),
+            ),
+        ]);
+        assert_eq!(production_hops(&f), vec![Hop::Refused(Residue::UnresolvableOperand)]);
+        assert_eq!(
+            f.beyond_the_bound(Arm::BrokerPublish, Tree::Main),
+            0,
+            "an unresolvable operand is NOT beyond the one-module bound — it is inside it \
+             and simply does not resolve; conflating the two would inflate AC2's headline",
+        );
+    }
+
+    #[test]
+    fn a_method_reference_is_a_call_site_that_proves_nothing() {
+        // The only direction in which this measurement could OVER-read: a
+        // `producer::sendMessage` reaches the wrapper and supplies no argument,
+        // so under FR-WS-23 AC1 the module's call sites do not all agree.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            (
+                "svc/src/main/java/Service.java",
+                caller(
+                    "Service",
+                    "  void a() { producer.sendMessage(body, \"orders\"); }\n\
+                     \x20 void b() { list.forEach(producer::sendMessage); }",
+                ),
+            ),
+        ]);
+        assert_eq!(
+            production_hops(&f),
+            vec![Hop::Refused(Residue::TwoOrMoreHops)],
+            "without the reference arm this reported RESOLVED from the one literal site",
+        );
+    }
+
+    #[test]
+    fn two_declarations_of_one_name_in_a_module_are_counted_as_ambiguous() {
+        // AC3's ambiguity census. The `Calls` ledger's target is a bare name, so
+        // two declarations sharing one are two things it cannot tell apart; the
+        // recorded finding quotes this figure as 7.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            (
+                "svc/src/main/java/Unrelated.java",
+                caller("Unrelated", "  void sendMessage(Object payload, String topic) { }"),
+            ),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { producer.sendMessage(body, \"orders\"); }"),
+            ),
+        ]);
+        assert_eq!(
+            f.ledger.ambiguous_by_name, 1,
+            "two `sendMessage` declarations in one build module",
+        );
+    }
+
+    #[test]
+    fn the_per_candidate_cost_divides_by_its_stated_denominator() {
+        // AC5's arithmetic, as a pure unit test: the durations are
+        // non-deterministic through `measure_forwarding`, so this is the one
+        // place testing a helper in isolation is the right shape.
+        let cost = Cost { hop_targeted: Duration::from_millis(1), ..Cost::default() };
+        assert_eq!(cost.per_candidate_us(4), 250);
+        assert_eq!(cost.per_candidate_us(0), 0, "no candidates is not a division by zero");
+    }
+
+    // ── The non-vacuity guards, which used to run only under the corpus ──────
+    //
+    // These are what separate VOID from FALSIFIED, and deleting all four left
+    // the suite green. Each builds a deliberately vacuous estate and asserts the
+    // guard panics with its own label.
+
+    #[test]
+    #[should_panic(expected = "V1")]
+    fn a_single_member_estate_is_void_not_falsified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pom.xml"), POM).expect("write");
+        let f = measure_forwarding(dir.path());
+        assert_non_vacuous(&f, dir.path());
+    }
+
+    #[test]
+    #[should_panic(expected = "V2")]
+    fn an_estate_with_no_publish_site_is_void_not_falsified() {
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Plain.java", caller("Plain", "  void go() { }")),
+            ("other/pom.xml", POM.into()),
+            // A second member the registry actually claims, so V1 is satisfied
+            // and V2 is the guard under test. Without it V1 fires first and the
+            // fixture proves a different guard than its name says.
+            ("other/src/main/java/Other.java", caller("Other", "  void go() { }")),
+        ]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_non_vacuous(&f, dir.path());
+    }
+
+    #[test]
+    #[should_panic(expected = "V3")]
+    fn fewer_than_the_enumerated_population_is_void_not_falsified() {
+        // One publish site is not thirteen. A harness looking at a corpus that
+        // is not the estate must not be able to report "0 of 1 => FALSIFIED".
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("other/pom.xml", POM.into()),
+            ("other/src/main/java/Other.java", caller("Other", "  void go() { }")),
+        ]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_non_vacuous(&f, dir.path());
+    }
+
+    #[test]
+    fn an_explicit_receiver_parameter_does_not_shift_the_slot() {
+        // `formal_parameters` admits a leading `Foo this`, which occupies a
+        // parameter slot but is supplied by no argument at any call site.
+        // Counting it shifted `topic` from slot 1 to slot 2 and the wrapper then
+        // matched no call site at all — a silent NoCallSites on a wrapper that
+        // is called.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            (
+                "svc/src/main/java/Producer.java",
+                producer("sendMessage", "Producer this, Object payload, String topic"),
+            ),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { producer.sendMessage(body, \"orders\"); }"),
+            ),
+        ]);
+        assert_eq!(
+            production_hops(&f),
+            vec![Hop::Resolved {
+                value: ArgValue::Literal("orders".into()),
+                call_sites: 1,
+                caller_files: 1,
+            }],
+        );
+    }
+
+    #[test]
+    fn a_lambda_parameter_topic_is_excluded_before_the_slot_arithmetic() {
+        // Where the lambda shape is actually filtered, asserted rather than
+        // assumed. A reasonable reading is that it reaches `push_candidate` and
+        // is dropped there for want of a positional slot — a lambda's
+        // "parameter list" is one bare identifier with no children. It does not:
+        // the parent's `resolve_key` declines to call it a bare parameter one
+        // step earlier, so it is excluded at the candidate gate and
+        // `operands_without_a_slot` stays zero.
+        //
+        // That makes the counter DEFENSIVE, and this fixture is what says so.
+        // It is reachable only if the parent's classifier and this module's slot
+        // arithmetic ever disagree about what a parameter is — which is exactly
+        // the drift worth failing the run over, and why the gate asserts it zero
+        // rather than ignoring it.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            (
+                "svc/src/main/java/Producer.java",
+                "package p;\n\
+                 import org.springframework.kafka.support.KafkaHeaders;\n\
+                 public class Producer {\n\
+                 \x20   public void publishAll(java.util.List<String> topics) {\n\
+                 \x20       topics.forEach(topic ->\n\
+                 \x20           MessageBuilder.withPayload(p).setHeader(KafkaHeaders.TOPIC, topic).build());\n\
+                 \x20   }\n\
+                 }\n"
+                    .to_string(),
+            ),
+        ]);
+        assert_eq!(f.publish_sites.get(&Tree::Main), Some(&1), "it IS a recognised publish site");
+        assert_eq!(
+            f.candidates_in(Arm::BrokerPublish, Tree::Main),
+            0,
+            "…and it is not a forwarding candidate",
+        );
+        assert_eq!(
+            f.operands_without_a_slot, 0,
+            "excluded by the classifier, not dropped by the slot arithmetic — so the two \
+             agree, which is the only thing this counter exists to check",
+        );
+    }
+
+    #[test]
     fn the_ledger_answers_the_direction_and_never_the_operand() {
         // CRA-06, on an estate small enough to read by hand. Two call sites in
         // ONE caller declaration is the shape that proves the dedup claim: the
@@ -2107,6 +2624,9 @@ mod fixtures {
             "no `Calls` field carries the argument text — the hop needs the source, and this \
              is measured rather than read off RefFact's field list",
         );
+        assert_eq!(f.ledger.syntactic_call_sites, 2, "two in-module call sites, both observed");
+        assert_eq!(f.ledger.ambiguous_by_name, 0, "one declaration of the name in this module");
+        assert_eq!(f.ledger.call_sites_the_ledger_misses, 0);
         assert_eq!(
             f.ledger.collapsed_by_dedup, 1,
             "two call sites in one declaration are one ledger row, so the agreement rule \
