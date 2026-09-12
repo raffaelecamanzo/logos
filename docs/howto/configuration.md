@@ -851,6 +851,7 @@ extraction, framework detection) are embedded in the binary but can be
 .logos/plugins/<language>/queries/frameworks.scm
 .logos/plugins/<language>/queries/invocations.scm
 .logos/plugins/<language>/queries/brokers.scm
+.logos/plugins/<language>/queries/properties.scm
 ```
 
 A file present at one of these paths replaces the embedded query for that

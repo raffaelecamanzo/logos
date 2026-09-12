@@ -348,7 +348,7 @@ fn only_the_basename_decides_admission_not_the_directory() {
 
 // ── The discovery entry point (S-380) ───────────────────────────────────
 //
-// `discover`, `module_of`, `profiles` and `props_candidates` are production
+// `discover`, `module_of`, `profiles` and `files` are production
 // symbols whose only other coverage is the measurement harness, which skips
 // unless `LOGOS_REF_WORKSPACE` names a private 84-repo estate. Without these
 // two cases they are untested on CI and on any machine without that
@@ -395,7 +395,12 @@ fn discover_places_each_source_in_its_nearest_module_and_reads_its_profile() {
 }
 
 #[test]
-fn discover_flags_only_the_java_files_that_mention_the_properties_annotation() {
+fn the_file_roster_carries_every_walked_file_and_no_binding_vocabulary() {
+    // S-381 moved the "which files might declare a bound class" decision out of
+    // this walk and into `PropertiesIndex::build`, where the plugin descriptor's
+    // own annotation vocabulary lives. The walk therefore keeps EVERY file it
+    // admitted — including the configuration sources and module descriptors it
+    // also reads for their own sake — and no Java literal appears here at all.
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
     let write = |rel: &str, body: &str| {
@@ -403,14 +408,25 @@ fn discover_flags_only_the_java_files_that_mention_the_properties_annotation() {
         std::fs::create_dir_all(path.parent().expect("has parent")).expect("mkdir");
         std::fs::write(path, body).expect("write");
     };
+    write("pom.xml", "<project/>\n");
     write("src/Bound.java", "@ConfigurationProperties(prefix = \"a\")\nclass Bound {}\n");
     write("src/Plain.java", "class Plain {}\n");
+    write("src/Bound.kt", "@ConfigurationProperties(\"a\")\nclass Bound\n");
+    write("src/main/resources/application.yml", "a:\n  b: 1\n");
 
     let corpus = ConfigCorpus::discover(root);
+    let mut roster = corpus.files().to_vec();
+    roster.sort();
     assert_eq!(
-        corpus.props_candidates(),
-        ["src/Bound.java"],
-        "only the file carrying the needle is stashed for the class index",
+        roster,
+        [
+            "pom.xml",
+            "src/Bound.java",
+            "src/Bound.kt",
+            "src/Plain.java",
+            "src/main/resources/application.yml",
+        ],
+        "the roster is the walk's own admission, not a vocabulary filter",
     );
 }
 

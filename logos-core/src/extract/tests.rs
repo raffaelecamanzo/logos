@@ -49,6 +49,7 @@ impl NoSymbolsPlugin {
                 artifact: false,
                 filenames: Vec::new(),
                 config: None,
+                properties: None,
             },
         }
     }

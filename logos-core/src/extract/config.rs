@@ -95,6 +95,14 @@ mod profiles;
 // (S-381, S-382) build on where it lands.
 pub mod corpus;
 
+// The generic configuration-BINDING interpreter (S-381, CR-121, FR-WS-19): a
+// properties class, its prefix and the accessor that reads one of its
+// properties, driven entirely by a plugin's `properties` query and its
+// `[properties]` descriptor table. The corpus module above owns the committed
+// *values*; this one owns how a use site NAMES one of them. Public for the same
+// two reasons: the measurement harness drives it, and S-382 resolves against it.
+pub mod binding;
+
 // Cross-artifact reference capture (S-068, CR-011, FR-CG-07): the seam that lets
 // each format's walk capture references between artifacts and to code, bound by
 // the resolution pass into ArtifactRef/ArtifactBinding edges. The substrate ships

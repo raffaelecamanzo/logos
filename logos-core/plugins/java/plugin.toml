@@ -13,7 +13,7 @@ module_separator = "."
 # tree-sitter-java 0.23 is generated against ABI 14.
 abi_version = 14
 
-capabilities = ["symbols", "references", "frameworks", "invocations", "brokers"]
+capabilities = ["symbols", "references", "frameworks", "invocations", "brokers", "properties"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "&&", "||", "?"]
@@ -77,6 +77,11 @@ brokers = "queries/brokers.scm"
 # Anchors only — the HTTP-verb and static-literal decisions stay in the generic
 # dispatch and `resolve::http_client_call`.
 invocations = "queries/invocations.scm"
+# Configuration-binding capture (S-381, CR-121, FR-WS-19): the
+# `@ConfigurationProperties` class, its key prefix and the properties it
+# declares. Anchors only — which annotation binds, and how a use site spells a
+# read, are the `[properties]` table below.
+properties = "queries/properties.scm"
 # Captured `@fw.route.method` annotation name → HTTP method (S-015).
 # `@RequestMapping` declares no single verb.
 [framework_methods]
@@ -86,3 +91,27 @@ PutMapping = "PUT"
 DeleteMapping = "DELETE"
 PatchMapping = "PATCH"
 RequestMapping = "ANY"
+
+# The configuration-BINDING vocabulary (S-381, CR-121, FR-WS-19, FR-PL-02) —
+# the descriptor half of the `properties` capability, paired with
+# `queries/properties.scm`. Together they are the whole per-language surface:
+# `logos-core`'s interpreter reads capture names and these rows and nothing
+# else, which is the claim S-381 AC2 turns on (NFR-MA-01).
+[properties]
+# The annotation that marks a class as configuration-bound, compared EXACTLY
+# against the `@props.annotation` capture's text. One row, because Spring Boot
+# spells this exactly one way. `@EnableConfigurationProperties` is deliberately
+# absent: it registers a bound class, it does not declare one, and it carries no
+# prefix — admitting it would key every registration site to the empty prefix.
+#
+# The vocabulary lives HERE rather than in the query's own `#eq?` so there is
+# exactly one copy of it; the query file's header states why.
+annotations = ["ConfigurationProperties"]
+# How a Java use site names one property: the bean-getter convention. Both
+# prefixes are tried and the survivors are intersected with what the class
+# declares, so table ORDER decides nothing — but neither of these two is a
+# prefix of the other, so at most one can ever strip a given name and the
+# ambiguity refusal is unreachable for Java. (It is reachable for a language
+# that also reads properties directly; Kotlin's descriptor is the worked
+# example.)
+accessor_prefixes = ["get", "is"]

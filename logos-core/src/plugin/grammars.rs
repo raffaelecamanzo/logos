@@ -450,6 +450,14 @@ fn java_entry() -> GrammarEntry {
                 label: "java/queries/brokers.scm",
                 source: include_str!("../../plugins/java/queries/brokers.scm"),
             },
+            // The configuration-binding arm (S-381, [CR-121], [FR-WS-19]): the
+            // `@ConfigurationProperties` class, its key prefix and the
+            // properties it declares.
+            EmbeddedQuery {
+                relative_path: "queries/properties.scm",
+                label: "java/queries/properties.scm",
+                source: include_str!("../../plugins/java/queries/properties.scm"),
+            },
         ],
     }
 }
@@ -522,6 +530,15 @@ fn kotlin_entry() -> GrammarEntry {
                 relative_path: "queries/invocations.scm",
                 label: "kotlin/queries/invocations.scm",
                 source: include_str!("../../plugins/kotlin/queries/invocations.scm"),
+            },
+            // The configuration-binding arm (S-381, [CR-121], [FR-WS-19]) — the
+            // second language on the binding substrate, and the demonstration
+            // that adding one costs a query file and a descriptor table rather
+            // than a `logos-core` edit ([NFR-MA-01]).
+            EmbeddedQuery {
+                relative_path: "queries/properties.scm",
+                label: "kotlin/queries/properties.scm",
+                source: include_str!("../../plugins/kotlin/queries/properties.scm"),
             },
         ],
     }

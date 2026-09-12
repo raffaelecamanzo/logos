@@ -92,17 +92,25 @@
 //!   [CR-117]'s *canonical topic identity* needs, because a publish in one
 //!   member must meet a subscribe in another.
 //!
-//! # These tables stay here
+//! # Which tables stay here, and which have left
 //!
-//! `HEADER_PUBLISH_QUERY`, `BASE_URL_METHODS`, [`names_topic_header`], the
-//! `@ConfigurationProperties` index and the relaxed-binding rules are
+//! `HEADER_PUBLISH_QUERY`, `BASE_URL_METHODS` and [`names_topic_header`] are
 //! Spring-API-coupled measurement tables. They fall under the parent harness's
 //! carve-out (see its module docs) and **must not be lifted into
 //! `logos-core/src/resolve/`**, which
 //! `resolve::framework::tests::jvm_parity::no_language_specific_composition_code_exists`
-//! forbids. The real arm's capture belongs in `plugins/<lang>/*.scm` as pure
-//! plugin data ([ADR-54]); a measurement is allowed to know what a framework
-//! looks like, a resolver is not.
+//! forbids. A measurement is allowed to know what a framework looks like, a
+//! resolver is not.
+//!
+//! The other two named here until Sprint 67 have **left, by the route that
+//! paragraph prescribes** rather than in spite of it: the relaxed-binding rules
+//! went to `extract::config::corpus` (S-380) and the `@ConfigurationProperties`
+//! index to `extract::config::binding` (S-381), and neither carried its Spring
+//! vocabulary with it. The vocabulary now lives in
+//! `plugins/<lang>/queries/properties.scm` and the descriptor's `[properties]`
+//! table as pure plugin data ([ADR-54]), which is exactly what "the real arm's
+//! capture belongs in the plugin" asked for — so this is a promotion under the
+//! rule, not an exception to it.
 //!
 //! [ADR-54]: ../../docs/specs/architecture/decisions/ADR-54.md
 //!
@@ -137,9 +145,8 @@
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
-use tree_sitter::{Node, Parser};
+use tree_sitter::Node;
 
 // The promoted corpus (S-380): the flattener, the canonical key and the profile
 // rule this harness grew, now production code under `extract::config::corpus`.
@@ -280,232 +287,24 @@ impl CorpusAgreement for ConfigCorpus {
     }
 }
 
-// ── `@ConfigurationProperties` class index ──────────────────────────────────
-
-/// One `@ConfigurationProperties` class: its prefix and the property names it
-/// declares (fields, or record components under constructor binding).
-#[derive(Debug, Clone)]
-pub struct PropertiesClass {
-    pub prefix: String,
-    /// Canonicalised property names, so a getter matches without re-deriving
-    /// the source spelling.
-    pub properties: BTreeSet<String>,
-    pub file: String,
-    /// The module root declaring it — the scope a use site prefers.
-    pub module: String,
-}
-
-/// Every `@ConfigurationProperties` class in the corpus, by **simple** type
-/// name — each name keeping *every* declaration of it.
-///
-/// Simple names, not fully-qualified ones: a field's declared type is written
-/// unqualified at the use site, and resolving imports would be a second
-/// resolver. The corpus makes that cheap reading unsafe on its own: 84 members
-/// declare `MailServerConfigurationApi` more than once, under one prefix but
-/// with **different property sets**, so a workspace-wide "first wins" index
-/// silently resolved `archive-manager`'s getter against `archive-api`'s class
-/// and reported eleven false `property not declared` refusals. So the lookup is
-/// **module-scoped first**: a use site prefers the class its own module
-/// declares, and only falls back to the workspace when the remaining
-/// declarations agree with each other. When they do not, the name is a
-/// [`PropertiesIndex::collisions`] entry and resolves to nothing rather than to
-/// a guess.
-#[derive(Debug, Default)]
-pub struct PropertiesIndex {
-    classes: BTreeMap<String, Vec<PropertiesClass>>,
-    pub collisions: BTreeSet<String>,
-    /// Classes annotated but carrying no readable prefix (`@ConfigurationProperties`
-    /// on a `@Bean` method, or a prefix that is not a string literal).
-    pub prefixless: usize,
-}
-
-impl PropertiesIndex {
-    /// Parse the Java files the corpus walk stashed and index their annotated
-    /// classes. Drives the real Java grammar, as every other pass here does.
-    pub fn build(root: &Path, corpus: &ConfigCorpus, language: &tree_sitter::Language) -> Self {
-        let mut index = Self::default();
-        let mut parser = Parser::new();
-        if parser.set_language(language).is_err() {
-            return index;
-        }
-        for rel in corpus.props_candidates() {
-            let Ok(source) = std::fs::read_to_string(root.join(rel)) else {
-                continue;
-            };
-            let Some(tree) = parser.parse(&source, None) else {
-                continue;
-            };
-            let module = corpus.module_of(rel).to_string();
-            index.absorb(rel, &module, tree.root_node(), source.as_bytes());
-        }
-        index.seal();
-        index
-    }
-
-    fn absorb(&mut self, rel: &str, module: &str, root: Node<'_>, src: &[u8]) {
-        let mut stack = vec![root];
-        while let Some(node) = stack.pop() {
-            let mut cursor = node.walk();
-            stack.extend(node.named_children(&mut cursor));
-            drop(cursor);
-            if !matches!(node.kind(), "class_declaration" | "record_declaration") {
-                continue;
-            }
-            let Some(modifiers) = child_of_kind(node, "modifiers") else {
-                continue;
-            };
-            let Some(annotation) = annotation_named(modifiers, "ConfigurationProperties", src)
-            else {
-                continue;
-            };
-            let Some(prefix) = annotation_prefix(annotation, src) else {
-                self.prefixless += 1;
-                continue;
-            };
-            let Some(name) = node.child_by_field_name("name").and_then(|n| n.utf8_text(src).ok())
-            else {
-                continue;
-            };
-            let class = PropertiesClass {
-                prefix,
-                properties: declared_properties(node, src),
-                file: rel.to_string(),
-                module: module.to_string(),
-            };
-            self.classes.entry(name.to_string()).or_default().push(class);
-        }
-    }
-
-    /// Seal the index: a simple name whose declarations disagree — outside the
-    /// module that will ask for it — is recorded as a collision.
-    pub fn seal(&mut self) {
-        for (name, declarations) in &self.classes {
-            let distinct: BTreeSet<(&String, &BTreeSet<String>)> =
-                declarations.iter().map(|c| (&c.prefix, &c.properties)).collect();
-            if distinct.len() > 1 {
-                self.collisions.insert(name.clone());
-            }
-        }
-    }
-
-    /// The class a use site in `module` sees: its own module's declaration
-    /// first, then the workspace's when every remaining declaration agrees.
-    pub fn get(&self, simple_type: &str, module: &str) -> Option<&PropertiesClass> {
-        let declarations = self.classes.get(simple_type)?;
-        // The own-module subset gets the same distinct-declaration test as the
-        // workspace one: two classes of the same simple name in different
-        // packages of ONE module is the same ambiguity the collision rule
-        // exists for, and picking the first is the guess it forbids.
-        let mut own = declarations.iter().filter(|c| c.module == module);
-        if let Some(first) = own.next() {
-            let ambiguous = own.any(|c| c.prefix != first.prefix || c.properties != first.properties);
-            return (!ambiguous).then_some(first);
-        }
-        (!self.collisions.contains(simple_type)).then(|| declarations.first()).flatten()
-    }
-
-    /// Distinct class names indexed.
-    pub fn len(&self) -> usize {
-        self.classes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.classes.is_empty()
-    }
-}
-
-fn child_of_kind<'t>(node: Node<'t>, kind: &str) -> Option<Node<'t>> {
-    let mut cursor = node.walk();
-    let found = node.named_children(&mut cursor).find(|c| c.kind() == kind);
-    found
-}
-
-/// The annotation node of the given simple name inside a `modifiers` node.
-fn annotation_named<'t>(modifiers: Node<'t>, name: &str, src: &[u8]) -> Option<Node<'t>> {
-    let mut cursor = modifiers.walk();
-    let found = modifiers.named_children(&mut cursor).find(|c| {
-        matches!(c.kind(), "annotation" | "marker_annotation")
-            && c.child_by_field_name("name")
-                .and_then(|n| n.utf8_text(src).ok())
-                .is_some_and(|n| n == name)
-    });
-    found
-}
-
-/// The `prefix` of a `@ConfigurationProperties` annotation, in either of the
-/// two forms the corpus uses: `(prefix = "x.y")` and the value form `("x.y")`.
-fn annotation_prefix(annotation: Node<'_>, src: &[u8]) -> Option<String> {
-    let args = annotation.child_by_field_name("arguments")?;
-    let mut cursor = args.walk();
-    for arg in args.named_children(&mut cursor) {
-        match arg.kind() {
-            "element_value_pair" => {
-                let key = arg.child_by_field_name("key")?.utf8_text(src).ok()?;
-                if key == "prefix" || key == "value" {
-                    let value = arg.child_by_field_name("value")?;
-                    return static_literal(value, src);
-                }
-            }
-            "string_literal" => return static_literal(arg, src),
-            _ => {}
-        }
-    }
-    None
-}
-
-/// The canonicalised property names a properties class declares: its fields,
-/// plus a record's components (Spring 3 constructor binding).
-fn declared_properties(class: Node<'_>, src: &[u8]) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let mut stack = vec![class];
-    while let Some(node) = stack.pop() {
-        // Do not descend into a nested type: its fields are that type's
-        // properties, reached through a nested accessor this measurement
-        // refuses rather than guesses at.
-        if node.id() != class.id()
-            && matches!(node.kind(), "class_declaration" | "record_declaration")
-        {
-            continue;
-        }
-        let mut cursor = node.walk();
-        stack.extend(node.named_children(&mut cursor));
-        drop(cursor);
-        match node.kind() {
-            "field_declaration" => {
-                let mut kids = node.walk();
-                for declarator in node.named_children(&mut kids) {
-                    if declarator.kind() != "variable_declarator" {
-                        continue;
-                    }
-                    if let Some(name) =
-                        declarator.child_by_field_name("name").and_then(|n| n.utf8_text(src).ok())
-                    {
-                        out.insert(canonical_key(name));
-                    }
-                }
-            }
-            // A record's own components (Spring 3 constructor binding) — NOT
-            // every parameter in the class body. Unrestricted, this registered
-            // a setter's or helper's parameter as a declared property, which
-            // loosens `PropertyNotDeclared` and, where a source happens to
-            // define `<prefix>.<paramName>`, admits a site outright.
-            "formal_parameter"
-                if class.kind() == "record_declaration"
-                    && node
-                        .parent()
-                        .is_some_and(|p| p.parent().is_some_and(|g| g.id() == class.id())) =>
-            {
-                if let Some(name) =
-                    node.child_by_field_name("name").and_then(|n| n.utf8_text(src).ok())
-                {
-                    out.insert(canonical_key(name));
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
+// ── The configuration-binding index (S-381) ────────────────────────────────
+//
+// PROMOTED. `PropertiesClass`, `PropertiesIndex` and the four Java-grammar
+// readers under them (`annotation_prefix`, `declared_properties`,
+// `annotation_named`, `child_of_kind`) lived here until S-381 and walked
+// tree-sitter Java nodes directly — `class_declaration`, `modifiers`,
+// `annotation`, `element_value_pair`, `field_declaration`, `formal_parameter`.
+// That is the Java-shaped substrate CR-121 §5.1 asks to be replaced, and it is
+// now `extract::config::binding`: a generic interpreter over a plugin's
+// `properties` query and its `[properties]` descriptor table, with the
+// vocabulary in `plugins/java/plugin.toml` and the tree shapes in
+// `plugins/java/queries/properties.scm`.
+//
+// The behaviour this harness measures is unchanged by construction — the
+// collision rule, the module-first lookup and the accessor name transformation
+// moved with their semantics intact — and the reference-workspace figures below
+// are the check on that claim.
+pub use logos_core::extract::config::binding::PropertiesIndex;
 
 // ── Key resolution ──────────────────────────────────────────────────────────
 
@@ -830,13 +629,14 @@ fn resolve_getter(
         return KeyOutcome::Unresolved(Refusal::NestedAccessor);
     }
     let method = function.utf8_text(src).unwrap_or_default().trim();
-    let Some(property) = method
-        .strip_prefix("get")
-        .or_else(|| method.strip_prefix("is"))
-        .filter(|p| !p.is_empty())
-    else {
+    // The accessor SHAPE question, asked before the receiver is resolved so the
+    // refusal order this census reports is unchanged: a member read that is not
+    // an accessor at all is `NotAGetter`, whatever its receiver turns out to be.
+    // The convention itself is the plugin descriptor's `[properties]
+    // accessor_prefixes`, never a `get`/`is` literal here (S-381).
+    if !resolver.props.names_an_accessor(method) {
         return KeyOutcome::Unresolved(Refusal::NotAGetter);
-    };
+    }
     let Some(receiver_name) = operand_name(receiver, src) else {
         return KeyOutcome::Unresolved(Refusal::ReceiverTypeUnknown);
     };
@@ -846,23 +646,22 @@ fn resolve_getter(
     let Some(class) = resolver.props.get(declared, resolver.module) else {
         return KeyOutcome::Unresolved(Refusal::NoPropertiesClass);
     };
-    let canonical = canonical_key(property);
-    if !class.properties.contains(&canonical) {
-        return KeyOutcome::Unresolved(Refusal::PropertyNotDeclared);
-    }
-    // Spring's property is the getter's suffix with its leading capital
-    // lowered — `getUriGetArchive` binds `uriGetArchive`, which relaxed binding
-    // then matches against `uri-get-archive`. The key is printed in that
-    // spelling so a census line names something a reader can find in the yml.
-    let mut chars = property.chars();
-    let spelled = chars
-        .next()
-        .map(|c| c.to_ascii_lowercase().to_string() + chars.as_str())
-        .unwrap_or_default();
-    KeyOutcome::Resolved {
-        key: format!("{}.{spelled}", class.prefix),
-        source: KeySource::Properties,
-        declared_in: Some(class.file.clone()),
+    match resolver.props.bind(class, method) {
+        Ok(binding) => KeyOutcome::Resolved {
+            key: binding.key,
+            source: KeySource::Properties,
+            declared_in: Some(binding.file),
+        },
+        // `NotAnAccessor` cannot arrive here — the shape test above already
+        // returned on it — and `AmbiguousProperty` is UNREACHABLE under Java's
+        // shipped `["get", "is"]` vocabulary, because neither prefix is a prefix
+        // of the other, so at most one can ever strip a given name. That is what
+        // lets both fold into this census's single "the class does not prove one
+        // property for this accessor" variant without the mapping ever being
+        // able to misreport: S-381 does not widen `Refusal`, which belongs to
+        // S-382. Pinned by
+        // `javas_vocabulary_cannot_produce_an_ambiguous_accessor`.
+        Err(_) => KeyOutcome::Unresolved(Refusal::PropertyNotDeclared),
     }
 }
 
@@ -2160,13 +1959,9 @@ mod fixtures {
                     values,
                 });
             }
-            let mut props = PropertiesIndex::default();
-            let language = java_language();
-            let mut parser = Parser::new();
-            parser.set_language(&language).expect("java language");
+            let mut props = PropertiesIndex::for_plugins(&[java_plugin()]);
             for (i, class) in classes.iter().enumerate() {
-                let tree = parser.parse(class, None).expect("parse");
-                props.absorb(&format!("Props{i}.java"), "", tree.root_node(), class.as_bytes());
+                props.absorb_source(java_plugin(), &format!("Props{i}.java"), "", class);
             }
             props.seal();
             Self { corpus, props }
@@ -2203,9 +1998,25 @@ mod fixtures {
         }
     }
 
+    /// The loaded registry, built once per test binary: every fixture below
+    /// needs the Java plugin's `properties` query and its `[properties]` table,
+    /// not just its grammar, and compiling the whole query set once beats
+    /// compiling it per fixture.
+    fn registry() -> &'static LanguageRegistry {
+        static ONCE: std::sync::OnceLock<LanguageRegistry> = std::sync::OnceLock::new();
+        ONCE.get_or_init(|| {
+            LanguageRegistry::load(std::env::temp_dir()).expect("registry loads")
+        })
+    }
+
+    /// The Java plugin — the descriptor + query pair the binding index reads its
+    /// whole vocabulary from (S-381).
+    fn java_plugin() -> &'static dyn logos_core::plugin::LanguagePlugin {
+        registry().for_path("Probe.java").expect("java plugin")
+    }
+
     fn java_language() -> tree_sitter::Language {
-        let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
-        registry.for_path("Probe.java").expect("java plugin").language().clone()
+        java_plugin().language().clone()
     }
 
     /// The argument of the single `probe(…)` call a fixture unit must contain.
@@ -2364,16 +2175,12 @@ mod fixtures {
         // class body, so a helper's parameter became a declared property —
         // loosening PropertyNotDeclared and, where a source defined the same
         // key, admitting the site outright.
-        let mut props = PropertiesIndex::default();
-        let language = java_language();
-        let mut parser = Parser::new();
-        parser.set_language(&language).expect("java language");
+        let mut props = PropertiesIndex::for_plugins(&[java_plugin()]);
         let body = r#"
             @ConfigurationProperties(prefix = "api")
             public class P { private String a; public void helper(String uriGetArchive) {} }
         "#;
-        let tree = parser.parse(body, None).expect("parse");
-        props.absorb("P.java", "", tree.root_node(), body.as_bytes());
+        props.absorb_source(java_plugin(), "P.java", "", body);
         props.seal();
         let class = props.get("P", "").expect("indexed");
         assert!(class.properties.contains(&canonical_key("a")));
@@ -2385,16 +2192,12 @@ mod fixtures {
 
     #[test]
     fn a_nested_types_fields_are_not_the_outer_classs_properties() {
-        let mut props = PropertiesIndex::default();
-        let language = java_language();
-        let mut parser = Parser::new();
-        parser.set_language(&language).expect("java language");
+        let mut props = PropertiesIndex::for_plugins(&[java_plugin()]);
         let body = r#"
             @ConfigurationProperties(prefix = "api")
             public class P { private String a; static class Inner { private String b; } }
         "#;
-        let tree = parser.parse(body, None).expect("parse");
-        props.absorb("P.java", "", tree.root_node(), body.as_bytes());
+        props.absorb_source(java_plugin(), "P.java", "", body);
         props.seal();
         let class = props.get("P", "").expect("indexed");
         assert!(class.properties.contains(&canonical_key("a")));
@@ -2405,16 +2208,12 @@ mod fixtures {
     fn two_same_named_classes_in_one_module_resolve_to_nothing_rather_than_a_guess() {
         // The own-module lookup used to return the first match without the
         // collision test — the same guess the workspace lookup forbids.
-        let mut props = PropertiesIndex::default();
-        let language = java_language();
-        let mut parser = Parser::new();
-        parser.set_language(&language).expect("java language");
+        let mut props = PropertiesIndex::for_plugins(&[java_plugin()]);
         for (file, prefix) in [("m/a/C.java", "one"), ("m/b/C.java", "two")] {
             let body = format!(
                 "@ConfigurationProperties(prefix = \"{prefix}\")\npublic class C {{ private String x; }}"
             );
-            let tree = parser.parse(&body, None).expect("parse");
-            props.absorb(file, "m", tree.root_node(), body.as_bytes());
+            props.absorb_source(java_plugin(), file, "m", &body);
         }
         props.seal();
         assert!(props.get("C", "m").is_none(), "one module, two different C — must not guess");
@@ -2807,10 +2606,7 @@ mod fixtures {
         // under one prefix with different property sets, and a workspace-wide
         // "first wins" index reported eleven false `property not declared`
         // refusals against the wrong member's class.
-        let mut props = PropertiesIndex::default();
-        let language = java_language();
-        let mut parser = Parser::new();
-        parser.set_language(&language).expect("java language");
+        let mut props = PropertiesIndex::for_plugins(&[java_plugin()]);
         let narrow = r#"
             @ConfigurationProperties(prefix = "mailserver.api")
             public class MailServerConfigurationApi { private String uriGetArchive; }
@@ -2823,8 +2619,7 @@ mod fixtures {
             }
         "#;
         for (module, body) in [("archive-api", narrow), ("archive-manager", wide)] {
-            let tree = parser.parse(body, None).expect("parse");
-            props.absorb(&format!("{module}/C.java"), module, tree.root_node(), body.as_bytes());
+            props.absorb_source(java_plugin(), &format!("{module}/C.java"), module, body);
         }
         props.seal();
 
@@ -2842,13 +2637,9 @@ mod fixtures {
 
     #[test]
     fn identical_declarations_in_several_modules_are_not_a_collision() {
-        let mut props = PropertiesIndex::default();
-        let language = java_language();
-        let mut parser = Parser::new();
-        parser.set_language(&language).expect("java language");
+        let mut props = PropertiesIndex::for_plugins(&[java_plugin()]);
         for module in ["a", "b"] {
-            let tree = parser.parse(PROPS, None).expect("parse");
-            props.absorb(&format!("{module}/C.java"), module, tree.root_node(), PROPS.as_bytes());
+            props.absorb_source(java_plugin(), &format!("{module}/C.java"), module, PROPS);
         }
         props.seal();
         assert!(props.collisions.is_empty());
@@ -2857,32 +2648,24 @@ mod fixtures {
 
     #[test]
     fn the_annotation_value_form_carries_a_prefix_too() {
-        let mut props = PropertiesIndex::default();
-        let language = java_language();
-        let mut parser = Parser::new();
-        parser.set_language(&language).expect("java language");
+        let mut props = PropertiesIndex::for_plugins(&[java_plugin()]);
         let body = r#"
             @ConfigurationProperties("spring.datasource.batch")
             public class Ds { private String url; }
         "#;
-        let tree = parser.parse(body, None).expect("parse");
-        props.absorb("C.java", "", tree.root_node(), body.as_bytes());
+        props.absorb_source(java_plugin(), "C.java", "", body);
         props.seal();
         assert_eq!(props.get("Ds", "").map(|c| c.prefix.as_str()), Some("spring.datasource.batch"));
     }
 
     #[test]
     fn a_record_declares_its_components_as_properties() {
-        let mut props = PropertiesIndex::default();
-        let language = java_language();
-        let mut parser = Parser::new();
-        parser.set_language(&language).expect("java language");
+        let mut props = PropertiesIndex::for_plugins(&[java_plugin()]);
         let body = r#"
             @ConfigurationProperties(prefix = "api")
             public record ApiProps(String baseUrl, String uriGet) {}
         "#;
-        let tree = parser.parse(body, None).expect("parse");
-        props.absorb("C.java", "", tree.root_node(), body.as_bytes());
+        props.absorb_source(java_plugin(), "C.java", "", body);
         props.seal();
         let class = props.get("ApiProps", "").expect("indexed");
         assert!(class.properties.contains(&canonical_key("baseUrl")));

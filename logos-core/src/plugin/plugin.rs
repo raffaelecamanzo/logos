@@ -16,7 +16,9 @@ use std::collections::BTreeMap;
 
 use tree_sitter::{Language, Query};
 
-use super::manifest::{ConfigDescriptor, ExportConvention, PluginManifest, TestConvention};
+use super::manifest::{
+    ConfigDescriptor, ExportConvention, PluginManifest, PropertiesDescriptor, TestConvention,
+};
 
 /// The declarative, on-disk-tunable semantics of a language ([NFR-MA-05]).
 ///
@@ -103,6 +105,13 @@ pub struct Semantics {
     ///
     /// [FR-CG-02]: ../../../docs/specs/requirements/FR-CG-02.md
     pub config: Option<ConfigDescriptor>,
+    /// The configuration-**binding** descriptor (S-381, [FR-WS-19]) driving the
+    /// generic properties-class interpreter in
+    /// [`crate::extract::config::binding`]; `None` for every language that binds
+    /// no configuration. See [`PropertiesDescriptor`].
+    ///
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    pub properties: Option<PropertiesDescriptor>,
 }
 
 /// A loaded language grammar — the unit the registry indexes by extension.
@@ -230,6 +239,7 @@ impl CompiledPlugin {
             artifact: manifest.artifact,
             filenames: manifest.filenames,
             config: manifest.config,
+            properties: manifest.properties,
         };
         Self {
             name: manifest.name,

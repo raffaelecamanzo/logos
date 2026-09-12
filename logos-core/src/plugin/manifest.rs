@@ -372,6 +372,17 @@ pub struct PluginManifest {
     /// [FR-CG-02]: ../../../docs/specs/requirements/FR-CG-02.md
     #[serde(default)]
     pub config: Option<ConfigDescriptor>,
+    /// The configuration-**binding** descriptor (S-381, [CR-121], [FR-WS-19]):
+    /// the annotation vocabulary that marks a properties class and the accessor
+    /// convention a use site reads it by, driving the generic interpreter in
+    /// [`crate::extract::config::binding`]. Meaningful only alongside the
+    /// `properties` capability and its query; absent for every language that
+    /// binds no configuration. See [`PropertiesDescriptor`].
+    ///
+    /// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    #[serde(default)]
+    pub properties: Option<PropertiesDescriptor>,
 }
 
 /// The `[config]` descriptor sub-table for an artifact-class plugin (S-062,
@@ -472,6 +483,65 @@ pub struct AnchorDescriptor {
     /// GraphQL `gql_type`. `None` for formats with no subtypes (Protobuf).
     #[serde(default)]
     pub payload: Option<String>,
+}
+
+/// The `[properties]` descriptor sub-table for a language that binds committed
+/// configuration into a class (S-381, [CR-121], [FR-WS-19], [FR-PL-02]).
+///
+/// Drives the **generic**, grammar-agnostic properties-class interpreter in
+/// [`crate::extract::config::binding`] declaratively — the same descriptor-data
+/// pattern as [`ConfigDescriptor`] and [`PluginManifest::framework_methods`]:
+/// the core walk reads only capture names, and each language supplies the
+/// vocabulary its own `properties.scm` captures against.
+///
+/// Two halves, and the split is what makes the substrate language-agnostic:
+///
+/// - [`annotations`](Self::annotations) names the **binding vocabulary** — the
+///   annotation the language spells to mark a class as configuration-bound. The
+///   query captures *every* annotation on a declaration and this table decides
+///   which ones count, so the vocabulary lives in exactly one place. A query
+///   that filtered with its own `#eq?` would be a second copy, free to drift
+///   from this one.
+/// - [`accessor_prefixes`](Self::accessor_prefixes) names the **accessor
+///   convention** — how a use site spells a read of one property.
+///
+/// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+/// [FR-PL-02]: ../../../docs/specs/requirements/FR-PL-02.md
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PropertiesDescriptor {
+    /// The annotation names that mark a class as configuration-bound, compared
+    /// **exactly** against the text of the query's `@props.annotation` capture,
+    /// e.g. `["ConfigurationProperties"]`. Never a prefix or substring test: an
+    /// annotation whose text does not equal a row here contributes nothing, so
+    /// a language widens its vocabulary by adding a row rather than by
+    /// loosening a match ([NFR-RA-05]).
+    ///
+    /// A fully-qualified spelling
+    /// (`@org.springframework.boot.context.properties.ConfigurationProperties`)
+    /// is a **stated ceiling**, not a silent miss: it is one more row away, and
+    /// the query's capture would carry the qualified text for it to match.
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    pub annotations: Vec<String>,
+    /// How a use site names one property of a bound class — each entry a prefix
+    /// stripped from the accessor's name to yield the property, e.g.
+    /// `["get", "is"]` for a Java bean getter.
+    ///
+    /// The **empty string is a real, deliberate entry**: it means *direct
+    /// property access*, where the accessor's name already **is** the property
+    /// (Kotlin's `config.uriGetArchive`, a Python attribute read). A language
+    /// whose use sites read a property both ways declares both, which is what
+    /// Kotlin does — its own property syntax plus the JVM-interop getters a
+    /// Java call site sees.
+    ///
+    /// Every entry is tried and the candidates are **intersected with what the
+    /// class declares**; two surviving candidates are an ambiguity and bind
+    /// nothing ([`crate::extract::config::binding::BindingRefusal::AmbiguousProperty`]),
+    /// rather than the first one winning by table order.
+    #[serde(default)]
+    pub accessor_prefixes: Vec<String>,
 }
 
 impl PluginManifest {
@@ -673,6 +743,67 @@ impl PluginManifest {
                  entry, or the arm can never capture (FR-WS-08, CR-108)"
                     .to_string(),
             );
+        }
+        // The same invariant on the binding arm, and for the same reason: the
+        // generic interpreter reads its vocabulary from `[properties]`, so a
+        // descriptor declaring the capability without one ships a query that
+        // matches and a filter that admits nothing — honest absence at the
+        // capability layer becoming invisible absence at the product layer
+        // (S-381, FR-WS-19).
+        if self.capabilities.iter().any(|c| c == "properties") {
+            let Some(properties) = &self.properties else {
+                return bail(
+                    "capability 'properties' requires a `[properties]` table naming the \
+                     binding vocabulary, or the arm can never bind (FR-WS-19, S-381)"
+                        .to_string(),
+                );
+            };
+            if properties.annotations.is_empty() {
+                return bail(
+                    "`[properties] annotations` must name at least one binding annotation \
+                     (FR-WS-19, S-381)"
+                        .to_string(),
+                );
+            }
+        }
+        if let Some(properties) = &self.properties {
+            // An annotation row is compared against captured text verbatim, so a
+            // stray space matches nothing and the arm degrades to silent
+            // no-capture — the failure mode the `http_client_detectors` guard
+            // above exists for, here on the binding arm.
+            if properties.annotations.iter().any(|a| a.trim().is_empty()) {
+                return bail("`[properties] annotations` entries must not be empty".to_string());
+            }
+            if properties.annotations.iter().any(|a| a != a.trim()) {
+                return bail(
+                    "`[properties] annotations` entries must not carry surrounding whitespace"
+                        .to_string(),
+                );
+            }
+            // `""` IS a legal accessor prefix — it spells direct property access
+            // — so the emptiness test that guards the annotation rows would be
+            // wrong here. Whitespace is still a typo rather than a convention.
+            if properties.accessor_prefixes.iter().any(|p| p != p.trim()) {
+                return bail(
+                    "`[properties] accessor_prefixes` entries must not carry surrounding \
+                     whitespace"
+                        .to_string(),
+                );
+            }
+            // A duplicated prefix would derive the same candidate twice. The
+            // interpreter dedups by canonical key so it cannot fabricate an
+            // ambiguity out of one, but a duplicate is a descriptor bug either
+            // way and reads as intent.
+            let mut seen = std::collections::BTreeSet::new();
+            if let Some(dup) = properties
+                .accessor_prefixes
+                .iter()
+                .find(|p| !seen.insert((*p).clone()))
+            {
+                return bail(format!(
+                    "`[properties] accessor_prefixes` carries the duplicate entry '{dup}'"
+                ));
+            }
         }
         Ok(())
     }
@@ -1319,6 +1450,85 @@ mod tests {
         "#;
         let err = PluginManifest::parse("x/plugin.toml", toml).unwrap_err();
         assert!(err.to_string().contains("http_client_detectors"), "got: {err}");
+    }
+
+    /// The binding arm's twin of the guard above (S-381, [FR-WS-19]): a
+    /// descriptor declaring `properties` with no vocabulary ships a query that
+    /// matches and a filter that admits nothing, which reads as an absent
+    /// mechanism rather than as a broken descriptor.
+    ///
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    #[test]
+    fn declaring_properties_without_a_vocabulary_is_rejected() {
+        let head = r#"
+            name = "x"
+            extensions = ["x"]
+            module_separator = "."
+            abi_version = 15
+            capabilities = ["properties"]
+            [queries]
+            properties = "queries/properties.scm"
+        "#;
+        let err = PluginManifest::parse("x/plugin.toml", head).unwrap_err();
+        assert!(err.to_string().contains("[properties]"), "got: {err}");
+
+        let empty = format!("{head}
+            [properties]
+            annotations = []
+");
+        let err = PluginManifest::parse("x/plugin.toml", &empty).unwrap_err();
+        assert!(err.to_string().contains("at least one binding annotation"), "got: {err}");
+    }
+
+    /// The whitespace and duplicate traps, and the one entry that must NOT be
+    /// caught by them: `""` is a legal accessor prefix — it spells direct
+    /// property access — so the emptiness rule that guards the annotation rows
+    /// would be wrong on this list (S-381).
+    #[test]
+    fn the_properties_table_rejects_typos_but_admits_the_empty_accessor_prefix() {
+        let with = |table: &str| {
+            format!(
+                r#"
+                name = "x"
+                extensions = ["x"]
+                module_separator = "."
+                abi_version = 15
+                capabilities = []
+                [queries]
+                {table}
+                "#
+            )
+        };
+        let cases = [
+            (r#"[properties]
+                annotations = [""]"#, "must not be empty"),
+            (r#"[properties]
+                annotations = [" ConfigurationProperties"]"#, "surrounding whitespace"),
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get "]"#, "surrounding whitespace"),
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get", "get"]"#, "duplicate entry"),
+        ];
+        for (table, needle) in cases {
+            let err = PluginManifest::parse("x/plugin.toml", &with(table)).unwrap_err();
+            assert!(err.to_string().contains(needle), "{table}\n  got: {err}");
+        }
+
+        let ok = PluginManifest::parse(
+            "x/plugin.toml",
+            &with(
+                r#"[properties]
+                   annotations = ["A"]
+                   accessor_prefixes = ["", "get"]"#,
+            ),
+        )
+        .expect("the empty prefix is direct property access, not a typo");
+        assert_eq!(
+            ok.properties.expect("[properties]").accessor_prefixes,
+            ["", "get"],
+        );
     }
 
     #[test]
