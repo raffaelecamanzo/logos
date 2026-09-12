@@ -125,6 +125,10 @@ pub struct PropertiesClass {
     pub file: String,
     /// The module root declaring it — the scope a use site prefers.
     pub module: String,
+    /// The plugin (language) that captured it, so
+    /// [`bind`](PropertiesIndex::bind) reads this declaration under its OWN
+    /// language's accessor convention rather than under a borrowed one.
+    pub language: String,
 }
 
 /// What an accessor resolved to: the key, and the evidence for it.
@@ -175,25 +179,48 @@ pub enum BindingRefusal {
 #[derive(Debug, Default)]
 pub struct PropertiesIndex {
     classes: BTreeMap<String, Vec<PropertiesClass>>,
-    /// The accessor conventions of every plugin this index is **declared over**
-    /// ([`for_plugins`](Self::for_plugins)) — not of the plugins that happened
-    /// to contribute a class. A corpus that declares no bound class at all still
-    /// knows what an accessor looks like, so a use site there refuses as
-    /// "no class for that type" rather than as "not an accessor", which is a
+    /// Language name → that language's accessor convention, for every plugin
+    /// this index has been declared over ([`for_plugins`](Self::for_plugins)) or
+    /// has absorbed a source through. A corpus that declares no bound class at
+    /// all still knows what an accessor looks like, so a use site there refuses
+    /// as "no class for that type" rather than as "not an accessor", which is a
     /// different fault and counted separately.
     ///
-    /// A **union**, not a per-class convention, and the direction is the safe
-    /// one: a mixed-language corpus judges every accessor under every convention
-    /// present, which can only *widen* the candidate set, and a widened set that
-    /// produces two survivors refuses as [`BindingRefusal::AmbiguousProperty`]
-    /// rather than picking one ([NFR-RA-05]).
-    ///
-    /// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
-    accessor_prefixes: BTreeSet<String>,
+    /// **Keyed by language, never unioned, and that distinction is load-bearing.**
+    /// An earlier form held one flat union of every declared convention, on the
+    /// reasoning that a union can only *widen* the candidate set and a widened
+    /// set with two survivors refuses rather than guesses. That reasoning holds
+    /// for [`bind`](Self::bind) and fails completely for
+    /// [`names_an_accessor`](Self::names_an_accessor): the empty prefix means
+    /// *every* name is already a property name, so one language declaring it
+    /// made the shape predicate vacuously true for **all** languages, and
+    /// [`BindingRefusal::NotAnAccessor`] became unreachable in any index built
+    /// over a registry carrying such a language — which is every default build,
+    /// whether or not the corpus holds one file of it. A whole refusal category
+    /// silently emptied into its neighbours. Judging each declaration under its
+    /// own language's convention is both correct and narrower.
+    conventions: BTreeMap<String, BTreeSet<String>>,
     /// Simple names whose declarations disagree; each resolves to nothing.
     pub collisions: BTreeSet<String>,
-    /// Classes carrying a binding annotation but no readable prefix — the
-    /// annotation on a factory method, or a prefix that is not a string literal.
+    /// Classes carrying a binding annotation this index could not key, counted
+    /// rather than dropped. Three causes reach it, and they are all *readings of
+    /// the prefix*, never an absent class:
+    ///
+    /// 1. a **marker** annotation — `@ConfigurationProperties` with no arguments;
+    /// 2. a prefix that is **not a static literal** — a constant reference or a
+    ///    concatenation, which the shared literal reader declines;
+    /// 3. **two distinct readable prefixes** on one declaration, which prove
+    ///    neither ([NFR-RA-05]). This one is a *refusal* folded into an absence
+    ///    counter; it is reachable (`@ConfigurationProperties(prefix = "a",
+    ///    value = "b")` is legal Java that Spring rejects only at runtime) and
+    ///    it is zero on the reference estate.
+    ///
+    /// The annotation on a `@Bean` **factory method** is deliberately NOT here:
+    /// no pattern matches such a declaration at all, so it is invisible rather
+    /// than counted — see the stated ceilings in each `properties.scm`. (The
+    /// walk this replaced carried the same doc, and it was wrong there too.)
+    ///
+    /// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
     pub prefixless: usize,
 }
 
@@ -213,10 +240,13 @@ impl PropertiesIndex {
         index
     }
 
-    /// Adopt one plugin's accessor convention without absorbing any source.
+    /// Adopt one plugin's accessor convention, under its own language name,
+    /// without absorbing any source.
     fn declare(&mut self, plugin: &dyn LanguagePlugin) {
         if let Some(descriptor) = plugin.semantics().properties.as_ref() {
-            self.accessor_prefixes
+            self.conventions
+                .entry(plugin.name().to_string())
+                .or_default()
                 .extend(descriptor.accessor_prefixes.iter().cloned());
         }
     }
@@ -407,6 +437,7 @@ impl PropertiesIndex {
                 properties: draft.properties,
                 file: rel.to_string(),
                 module: module.to_string(),
+                language: plugin.name().to_string(),
             });
         }
     }
@@ -439,25 +470,29 @@ impl PropertiesIndex {
         (!self.collisions.contains(simple_type)).then(|| declarations.first()).flatten()
     }
 
-    /// Whether any absorbed convention reads `accessor` as naming a property.
+    /// Whether `language`'s convention reads `accessor` as naming a property.
     ///
     /// The **shape** question, asked without a class — a use site whose member
     /// read is not an accessor at all is a different fault from one whose class
     /// declares no such property, and the two are counted separately. It says
     /// nothing about whether a class declares what the name yields; that is
     /// [`bind`](Self::bind)'s answer.
-    pub fn names_an_accessor(&self, accessor: &str) -> bool {
-        !self.candidates(accessor).is_empty()
+    ///
+    /// `language` is a plugin name ([`LanguagePlugin::name`]). A language this
+    /// index was never declared over recognises nothing, which is the honest
+    /// answer rather than a borrowed one.
+    pub fn names_an_accessor(&self, language: &str, accessor: &str) -> bool {
+        !self.candidates(language, accessor).is_empty()
     }
 
     /// Resolve `accessor` against `class`: **accessor → field → owning class →
     /// prefix → canonical key**, by name transformation alone — the chain
     /// [FR-WS-19]'s statement spells out.
     ///
-    /// Every absorbed convention is tried and the results are intersected with
-    /// what the class declares. Exactly one survivor binds; none is a refusal
-    /// naming which half failed; two or more resolve to **nothing**, because a
-    /// table order is not evidence ([FR-WS-19] AC3).
+    /// Every convention of the class's **own language** is tried and the results
+    /// are intersected with what the class declares. Exactly one survivor binds;
+    /// none is a refusal naming which half failed; two or more resolve to
+    /// **nothing**, because a table order is not evidence ([FR-WS-19] AC3).
     ///
     /// [FR-WS-19]: ../../../../docs/specs/requirements/FR-WS-19.md
     pub fn bind(
@@ -465,18 +500,13 @@ impl PropertiesIndex {
         class: &PropertiesClass,
         accessor: &str,
     ) -> Result<PropertyBinding, BindingRefusal> {
-        let candidates = self.candidates(accessor);
+        let candidates = self.candidates(&class.language, accessor);
         if candidates.is_empty() {
             return Err(BindingRefusal::NotAnAccessor);
         }
-        // Deduped by the CANONICAL key, so two conventions that happen to agree
-        // on a property (a descriptor listing both `get` and `Get`) are one
-        // candidate, not a fabricated ambiguity.
-        let declared: BTreeMap<String, String> = candidates
+        let mut declared = candidates
             .into_iter()
-            .filter(|(property, _)| class.properties.contains(property))
-            .collect();
-        let mut declared = declared.into_iter();
+            .filter(|(property, _)| class.properties.contains(property));
         match (declared.next(), declared.next()) {
             (Some((property, spelled)), None) => Ok(PropertyBinding {
                 key: format!("{}.{spelled}", class.prefix),
@@ -490,10 +520,19 @@ impl PropertiesIndex {
     }
 
     /// Every `(canonical property, source spelling)` an accessor name yields
-    /// under the absorbed conventions, before the class is consulted.
-    fn candidates(&self, accessor: &str) -> BTreeMap<String, String> {
+    /// under `language`'s convention, before the class is consulted.
+    ///
+    /// The result is keyed by the CANONICAL property, which is where the dedup
+    /// happens: two prefixes that agree on a property (a descriptor listing both
+    /// `get` and `get_`) are one candidate, not a fabricated ambiguity. Last
+    /// write wins over a `BTreeSet` walk, so the surviving spelling is
+    /// deterministic.
+    fn candidates(&self, language: &str, accessor: &str) -> BTreeMap<String, String> {
         let accessor = accessor.trim();
-        self.accessor_prefixes
+        let Some(prefixes) = self.conventions.get(language) else {
+            return BTreeMap::new();
+        };
+        prefixes
             .iter()
             .filter_map(|prefix| {
                 // The empty prefix is direct property access: the name already IS

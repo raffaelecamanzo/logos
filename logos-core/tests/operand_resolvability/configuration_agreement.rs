@@ -306,6 +306,12 @@ impl CorpusAgreement for ConfigCorpus {
 // are the check on that claim.
 pub use logos_core::extract::config::binding::PropertiesIndex;
 
+/// The plugin whose accessor convention `resolve_getter` judges by. A literal
+/// here and nowhere in `logos-core`: this harness is deliberately
+/// language-specific (see the parent module's carve-out), and the expression
+/// shapes it reads are Java's.
+const JAVA_PLUGIN: &str = "java";
+
 // ── Key resolution ──────────────────────────────────────────────────────────
 
 /// Everything key resolution needs besides the expression itself: the
@@ -634,7 +640,16 @@ fn resolve_getter(
     // an accessor at all is `NotAGetter`, whatever its receiver turns out to be.
     // The convention itself is the plugin descriptor's `[properties]
     // accessor_prefixes`, never a `get`/`is` literal here (S-381).
-    if !resolver.props.names_an_accessor(method) {
+    //
+    // Asked of JAVA specifically, not of every language the index was declared
+    // over. This function reads a Java bean-getter call shape and nothing else,
+    // so Java is the language whose convention decides it — and asking the index
+    // as a whole would be worse than imprecise: a language declaring the empty
+    // prefix (direct property access, which Kotlin does) makes EVERY name an
+    // accessor, and `NotAGetter` would stop being reachable at all. Naming the
+    // language here is the parent harness's stated carve-out, not a leak of one
+    // into `logos-core`.
+    if !resolver.props.names_an_accessor(JAVA_PLUGIN, method) {
         return KeyOutcome::Unresolved(Refusal::NotAGetter);
     }
     let Some(receiver_name) = operand_name(receiver, src) else {

@@ -267,8 +267,8 @@ fn an_index_over_zero_classes_still_knows_what_an_accessor_looks_like() {
     // from the refusal a reader can act on to the one they cannot.
     let index = PropertiesIndex::for_plugins(&[plugin("java")]);
     assert!(index.is_empty(), "nothing absorbed");
-    assert!(index.names_an_accessor("getHost"));
-    assert!(!index.names_an_accessor("compute"));
+    assert!(index.names_an_accessor("java", "getHost"));
+    assert!(!index.names_an_accessor("java", "compute"));
 }
 
 #[test]
@@ -296,8 +296,8 @@ fn the_three_failures_of_an_accessor_are_counted_apart() {
         Err(BindingRefusal::PropertyNotDeclared),
         "the convention applies, the class simply does not declare it",
     );
-    assert!(index.names_an_accessor("getPort"), "…which is a different question");
-    assert!(!index.names_an_accessor("compute"));
+    assert!(index.names_an_accessor("java", "getPort"), "…which is a different question");
+    assert!(!index.names_an_accessor("java", "compute"));
 }
 
 // ── AC4: two ambiguities, both resolving to nothing ─────────────────────────
@@ -472,11 +472,67 @@ fn one_index_spans_both_languages() {
     index.seal();
     assert_eq!(index.len(), 2);
     let j = index.get("J", "a").expect("java class");
+    let k = index.get("K", "b").expect("kotlin class");
     assert_eq!(index.bind(j, "getHost").expect("binds").key, "j.host");
+    assert_eq!(index.bind(k, "host").expect("binds").key, "k.host");
+    // Each declaration is judged under ITS OWN language's convention. Kotlin's
+    // direct-property-access row does not reach the Java class, and Java's
+    // bean-getter rows do not make a Kotlin property read refuse.
     assert_eq!(
-        index.bind(j, "host").expect("binds under the union").key,
-        "j.host",
-        "the union widens; it never picks between two survivors",
+        index.bind(j, "host"),
+        Err(BindingRefusal::NotAnAccessor),
+        "Kotlin's empty prefix must not leak into a Java declaration",
+    );
+    assert_eq!(index.bind(k, "getHost").expect("kotlin also exposes the getter").key, "k.host");
+}
+
+/// The regression guard for the defect this design replaced: a flat UNION of
+/// every declared convention made the shape predicate vacuously true, because
+/// one language's empty prefix ("the name already is the property") answers yes
+/// for every name in every language. `BindingRefusal::NotAnAccessor` — and with
+/// it the harness census's `not a getter` row — silently emptied into its
+/// neighbours in every index built over a default registry.
+///
+/// Asserted through `build`, the constructor the product actually uses, because
+/// that is the one the earlier guard could not see: it inspected the Java
+/// descriptor's own rows rather than the conventions the index judges by.
+#[test]
+#[cfg(feature = "lang-kotlin")]
+fn a_second_languages_convention_does_not_leak_into_anothers_shape_test() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    std::fs::write(root.join("pom.xml"), "<project/>\n").expect("write");
+    std::fs::write(
+        root.join("J.java"),
+        "@ConfigurationProperties(prefix = \"j\")\npublic class J { private String url; private String getUrl; }",
+    )
+    .expect("write");
+
+    let corpus = crate::extract::config::corpus::ConfigCorpus::discover(root);
+    let index = PropertiesIndex::build(root, &corpus, registry());
+    assert!(
+        registry().iter().any(|p| p.name() == "kotlin"),
+        "the guard is only meaningful while a linked plugin declares the empty prefix",
+    );
+
+    assert!(
+        !index.names_an_accessor("java", "compute"),
+        "a plain method call is not an accessor in Java, whatever other \
+         languages the registry loaded declare",
+    );
+    let class = index.get("J", "").expect("indexed");
+    assert_eq!(
+        index.bind(class, "compute"),
+        Err(BindingRefusal::NotAnAccessor),
+        "…and the refusal survives all the way through `bind`",
+    );
+    // The other half of the same leak: under the union, `getUrl` on a class
+    // declaring BOTH `url` and `getUrl` matched two candidates and refused as
+    // ambiguous — for a language whose own vocabulary cannot produce ambiguity.
+    assert_eq!(
+        index.bind(class, "getUrl").expect("binds").key,
+        "j.url",
+        "Java's two prefixes cannot both strip one name, so this is unambiguous",
     );
 }
 
