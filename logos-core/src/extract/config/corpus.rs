@@ -14,6 +14,18 @@
 //! that estate (see [`parse_yaml`]); it is not to be rewritten, and a rewrite
 //! that "simplifies" one of those skips reintroduces a fabricated key.
 //!
+//! # An accepted [NFR-MA-01] carve-out, recorded rather than implied
+//!
+//! Three constants below encode Spring/Java vocabulary in core rather than in a
+//! plugin descriptor: [`CONFIG_EXTENSIONS`], [`MODULE_DESCRIPTORS`], and
+//! [`config_profile`]'s `application-<profile>` stem. [NFR-MA-01] asks for no
+//! per-language branching in `logos-core`, so this is a real exception and is
+//! named as one. [CR-121] §5.1 sanctions the *content* ("a second language costs
+//! an extractor rather than architecture") and S-381 moves the
+//! `@ConfigurationProperties` **annotation** vocabulary to a descriptor — but
+//! S-381 does not cover these three, and no other story does. They are carried
+//! deliberately, with this note as their record, until a story claims them.
+//!
 //! # What is here, and what is not
 //!
 //! This module owns the **corpus**: discovering configuration sources, reading
@@ -36,6 +48,7 @@
 //!   configuration corpus byte-for-byte unaffected.
 //!
 //! [ADR-64]: ../../../../docs/specs/architecture/decisions/ADR-64.md
+//! [NFR-MA-01]: ../../../../docs/specs/requirements/NFR-MA-01.md
 //! [CR-121]: ../../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
 //! [FR-CG-02]: ../../../../docs/specs/requirements/FR-CG-02.md
 //! [FR-WS-19]: ../../../../docs/specs/requirements/FR-WS-19.md
@@ -451,6 +464,18 @@ pub struct ConfigValueFact {
 /// the [`config_profile`] rule [`ConfigCorpus::discover`] uses, and the parser is
 /// chosen by extension the same way. `text` is the source the caller already
 /// holds: this function opens nothing.
+///
+/// # The profile comes from the filename only
+///
+/// A Spring Boot >= 2.4 multi-document file can gate a document with
+/// `spring.config.activate.on-profile`. This reads no such gate: every value in
+/// the file carries the filename's profile, so a `prod`-gated override in an
+/// unprofiled `application.yml` arrives as a second untagged value of the key,
+/// indistinguishable from a genuine in-file duplicate. Reproduced end to end
+/// during review; **0 of the 172** reference-estate files use `on-profile` or a
+/// `---` separator, so it moves no published figure — but this flattener now runs
+/// on every indexed project, not only that estate. `a_profile_gated_document_is_not_yet_tagged_with_its_profile`
+/// in `mod tests` pins the current behaviour so the day it changes is visible.
 ///
 /// # The ingested population is a SUBSET of the measured one
 ///
@@ -891,6 +916,35 @@ mod tests {
             corpus.props_candidates(),
             ["src/Bound.java"],
             "only the file carrying the needle is stashed for the class index",
+        );
+    }
+
+    #[test]
+    fn a_profile_gated_document_is_not_yet_tagged_with_its_profile() {
+        // A KNOWN GAP, pinned rather than hidden: Spring Boot >= 2.4 gates a
+        // document with `spring.config.activate.on-profile`, and this flattener
+        // reads the profile from the filename only. Both values therefore arrive
+        // untagged. The day that changes, this test fails and says so — which is
+        // the point of writing it down as an assertion instead of a comment.
+        let facts = source_facts(
+            "application.yml",
+            "server:\n  url: https://dev.example.com\n\
+             ---\n\
+             spring:\n  config:\n    activate:\n      on-profile: prod\n\
+             server:\n  url: https://prod.example.com\n",
+        )
+        .expect("a source");
+        assert_eq!(facts.profile, None, "the filename is unprofiled, so the file is");
+        let urls: Vec<&str> = facts
+            .values
+            .iter()
+            .filter(|v| v.key == "server.url")
+            .map(|v| v.value.as_str())
+            .collect();
+        assert_eq!(
+            urls,
+            vec!["https://dev.example.com", "https://prod.example.com"],
+            "both documents' values survive — but neither carries `prod` (known gap)",
         );
     }
 }
