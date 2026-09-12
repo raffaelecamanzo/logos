@@ -519,6 +519,27 @@ const ARM_COLUMNS: Column<ArmCoverage>[] = [
       ),
     sortValue: (a) => a.reasons.length,
   },
+  {
+    key: "provenance",
+    // ADR-64 makes this a requirement ON THE SURFACES: "an admitted value must
+    // never be indistinguishable from an observed one". Without this column the
+    // dashboard shows a resolved template with no statement of whether the
+    // repository proved it or the call site wrote it.
+    header: "Target read from",
+    cell: (a) =>
+      a.provenance.length === 0 ? (
+        <span className="muted">—</span>
+      ) : (
+        <ul className={styles.reasons}>
+          {a.provenance.map((p) => (
+            <li key={p.label}>
+              {p.label} <Badge tone="muted">{p.count}</Badge>
+            </li>
+          ))}
+        </ul>
+      ),
+    sortValue: (a) => a.provenance.length,
+  },
 ];
 
 /* The coverage shortfall rider (FR-WS-16, NFR-CC-04).

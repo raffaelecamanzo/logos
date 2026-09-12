@@ -107,6 +107,17 @@ export function provenanceLabel(ref: ReferenceCoverage): string {
   }
 }
 
+/** One value provenance and how many of an arm's references carry it (S-382).
+ *
+ *  Keyed by the rendered {@link provenanceLabel} rather than by the raw
+ *  `provenance` token, because two `config-bound` rows reading different keys
+ *  are different statements and collapsing them to one count would hide exactly
+ *  what ADR-64 requires the surface to show. */
+export interface ProvenanceCount {
+  label: string;
+  count: number;
+}
+
 /** One unbound reason and how many references carry it. */
 export interface ReasonCount {
   reason: UnboundReason;
@@ -139,6 +150,15 @@ export interface ArmCoverage {
   noProvider: number;
   /** Every reason present on this arm's non-bound references, commonest first. */
   reasons: ReasonCount[];
+  /** Where this arm's reference targets came from, commonest first (S-382,
+   *  ADR-64).
+   *
+   *  This is the dashboard's half of *"an admitted value must never be
+   *  indistinguishable from an observed one"*. An arm whose targets are all
+   *  written at the call site reads one way; an arm resolving through committed
+   *  configuration reads another, and names the keys it read. Empty only when
+   *  the arm has no references at all. */
+  provenance: ProvenanceCount[];
   /** Every reference on this arm — the denominator the row's counts sum to. */
   total: number;
 }
@@ -259,6 +279,7 @@ export function measuredInPopulation(counts: ClassificationCounts): number {
 export function buildCoverageDashboard(coverage: CrossServiceCoverage): CoverageDashboard {
   const byArm = new Map<string, ArmCoverage>();
   const reasonsByArm = new Map<string, Map<UnboundReason, number>>();
+  const provenanceByArm = new Map<string, Map<string, number>>();
 
   for (const ref of coverage.references) {
     let arm = byArm.get(ref.relation);
@@ -270,10 +291,12 @@ export function buildCoverageDashboard(coverage: CrossServiceCoverage): Coverage
         unbound: 0,
         noProvider: 0,
         reasons: [],
+        provenance: [],
         total: 0,
       };
       byArm.set(ref.relation, arm);
       reasonsByArm.set(ref.relation, new Map());
+      provenanceByArm.set(ref.relation, new Map());
     }
     arm.total += 1;
     // The wire `bucket` is the server's own 3-state classification, read verbatim —
@@ -289,6 +312,14 @@ export function buildCoverageDashboard(coverage: CrossServiceCoverage): Coverage
       const reasons = reasonsByArm.get(ref.relation)!;
       reasons.set(ref.reason, (reasons.get(ref.reason) ?? 0) + 1);
     }
+
+    // EVERY row, not only the configuration-bound ones: an arm that reads
+    // nothing from configuration must say so, because "no config-bound rows
+    // here" and "this build does not render provenance" look identical
+    // otherwise (NFR-CC-04).
+    const provenances = provenanceByArm.get(ref.relation)!;
+    const label = provenanceLabel(ref);
+    provenances.set(label, (provenances.get(label) ?? 0) + 1);
   }
 
   for (const [relation, arm] of byArm) {
@@ -296,6 +327,10 @@ export function buildCoverageDashboard(coverage: CrossServiceCoverage): Coverage
       .map(([reason, count]) => ({ reason, count }))
       // Commonest reason first; ties broken by name so the order is deterministic.
       .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
+    arm.provenance = [...(provenanceByArm.get(relation) ?? new Map())]
+      .map(([label, count]) => ({ label, count }))
+      // Commonest first; ties broken by label so the order is deterministic.
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
   }
 
   return {

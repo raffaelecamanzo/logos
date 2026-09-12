@@ -533,3 +533,58 @@ describe("provenanceLabel (S-382, ADR-64)", () => {
     );
   });
 });
+
+describe("per-arm provenance breakdown (S-382, ADR-64)", () => {
+  it("counts every row's provenance, so an arm that reads no configuration says so", () => {
+    const model = buildCoverageDashboard(coverage(bound("route", 2)));
+    expect(model.arms[0].provenance).toEqual([
+      { label: "Written at the call site", count: 2 },
+    ]);
+  });
+
+  it("names the key an admitted row was read from, beside the literal rows", () => {
+    const literal = bound("route", 1);
+    const admitted: ReferenceCoverage[] = [
+      {
+        relation: "route",
+        from: { member: "web", symbol: "fetch" },
+        bucket: "bound",
+        state: "bound",
+        intake: "invocation",
+        provenance: "config-bound",
+        key: "orders.base",
+        source: "placeholder",
+        values: [
+          { value: "/orders", profiles: ["docker"], unprofiled: false, sources: ["a.yml"] },
+        ],
+      },
+    ];
+    const model = buildCoverageDashboard(coverage([...literal, ...admitted]));
+    expect(model.arms[0].provenance).toEqual([
+      { label: "Read from `orders.base` (docker)", count: 1 },
+      { label: "Written at the call site", count: 1 },
+    ]);
+  });
+
+  it("keeps two different keys apart rather than collapsing them to one count", () => {
+    // Two `config-bound` rows reading DIFFERENT keys are different statements.
+    // Counting them as one "config-bound: 2" would hide exactly what ADR-64
+    // requires the surface to show.
+    const rows: ReferenceCoverage[] = ["orders.base", "users.base"].map((key, i) => ({
+      relation: "route",
+      from: { member: "web", symbol: `fetch${i}` },
+      bucket: "bound",
+      state: "bound",
+      intake: "invocation",
+      provenance: "config-bound",
+      key,
+      source: "placeholder",
+      values: [{ value: "/x", profiles: [], unprofiled: true, sources: ["a.yml"] }],
+    }));
+    const model = buildCoverageDashboard(coverage(rows));
+    expect(model.arms[0].provenance.map((p) => p.label)).toEqual([
+      "Read from `orders.base`",
+      "Read from `users.base`",
+    ]);
+  });
+});
