@@ -254,6 +254,82 @@ fn strip_yaml_comment(rest: &str) -> &str {
     }
 }
 
+/// Whether `rest` opens a quoted scalar whose body carries an escape this module
+/// does not decode: any `\` inside a double-quoted scalar, or a doubled `''`
+/// inside a single-quoted one.
+///
+/// # Why refusing beats reading it
+///
+/// [`strip_yaml_comment`] ends a quoted scalar at the first inner quote, and
+/// nothing here decodes escapes. On a body carrying one, that is not an
+/// under-read but a **mis-read in the losing direction**: `"/api/\"alpha\"/v1"`
+/// and `"/api/\"beta\"/v2"` both truncate to `/api/\`, so two sources committing
+/// *different* values are recorded as committing the *same* one. That is a
+/// fabricated agreement — the thing [FR-WS-19] means when it says disagreement
+/// must be represented rather than averaged, and [NFR-RA-05] when it says never
+/// fabricate.
+///
+/// # It costs no coverage on the reference estate
+///
+/// Measured: exactly **one** committed scalar is refused across all 174 sources
+/// — `opentracing.spring.web.skip-pattern` in `mailbox-api`, whose regex carries
+/// a `\` — and that canonical key is defined by **26** files, 25 of them without
+/// an escape. So the key keeps its value from the other sources and the census
+/// is unchanged at 872 distinct keys. Refusing here removes a wrong value, not a
+/// key. (An earlier, cruder form of this guard tested the whole line for a
+/// backslash, over-refused, and did cost a key — which is why the scan below
+/// stops at the closing quote.)
+///
+/// So the key is emitted with **no value at all** rather than a wrong one, which
+/// the agreement rule then reports as `missing key`. Under-reading is the safe
+/// direction this module takes everywhere else (see [`parse_yaml`]); this makes
+/// the quoted-scalar case take it too.
+///
+/// Decoding the escapes properly would keep the key *and* be correct, and is the
+/// better answer whenever someone wants to write and test a YAML unescaper. This
+/// is deliberately the smaller, provable change: it recognises, and declines.
+///
+/// Returns `false` for an unquoted scalar and for a quoted one needing no
+/// decoding — the overwhelming majority, which keep their current behaviour
+/// byte-for-byte. An unterminated quote also returns `false`, preserving what
+/// [`strip_yaml_comment`] already does with it.
+///
+/// [FR-WS-19]: ../../../../docs/specs/requirements/FR-WS-19.md
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+fn quoted_scalar_carries_an_escape(rest: &str) -> bool {
+    let rest = rest.trim();
+    let mut chars = rest.chars();
+    let Some(quote) = chars.next() else {
+        return false;
+    };
+    match quote {
+        // Double-quoted: `\` introduces an escape, so the first one decides.
+        // Scanning stops at the closing quote so a `\` in a trailing comment —
+        // outside the scalar — never counts.
+        '"' => {
+            for c in chars {
+                match c {
+                    '\\' => return true,
+                    '"' => return false,
+                    _ => {}
+                }
+            }
+            false
+        }
+        // Single-quoted: the only escape YAML has here is a doubled `''`.
+        '\'' => {
+            let mut rest_chars = chars.peekable();
+            while let Some(c) = rest_chars.next() {
+                if c == '\'' {
+                    return rest_chars.peek() == Some(&'\'');
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 /// A configuration value as the sources prove it: trimmed, with one layer of
 /// matching quotes removed.
 ///
@@ -330,6 +406,15 @@ pub fn parse_yaml(text: &str) -> BTreeMap<String, BTreeSet<String>> {
         };
         while stack.last().is_some_and(|(i, _)| *i >= indent) {
             stack.pop();
+        }
+        // Before the comment strip, because the strip destroys the evidence: a
+        // single-quoted `'it''s fine'` ends up as `'it'`, and by then nothing can
+        // tell a doubled quote from a closing one. A quoted scalar carrying an
+        // escape this module does not decode is refused outright rather than
+        // recorded truncated — see [`quoted_scalar_carries_an_escape`] for why a
+        // truncated value is worse than an absent one.
+        if quoted_scalar_carries_an_escape(rest) {
+            continue;
         }
         // Before anything is decided about `rest`: a trailing comment must not
         // make a mapping header look like a scalar.

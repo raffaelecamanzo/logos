@@ -442,3 +442,85 @@ fn a_profile_gated_document_is_not_yet_tagged_with_its_profile() {
         "both documents' values survive — but neither carries `prod` (known gap)",
     );
 }
+
+// ── Quoted scalars carrying escapes (S-380 review finding #1) ───────────────
+
+#[test]
+fn a_quoted_value_carrying_an_escape_is_refused_rather_than_truncated() {
+    // Each of these previously registered a TRUNCATED or undecoded value. The
+    // key must now be absent, which the agreement rule reports as `missing key`.
+    for (label, src) in [
+        ("escaped double quote", "a: \"quote\\\"inside\"\n"),
+        ("doubled single quote", "a: 'it''s fine'\n"),
+        ("escaped backslash", "a: \"back\\\\slash\"\n"),
+        ("tab escape", "a: \"tab\\there\"\n"),
+    ] {
+        let flat = parse_yaml(src);
+        assert!(
+            !flat.contains_key("a"),
+            "{label}: a value this module cannot represent faithfully must be \
+             absent, not truncated; got {flat:?}",
+        );
+    }
+}
+
+#[test]
+fn two_sources_disagreeing_only_past_an_escape_no_longer_collapse_into_one_value() {
+    // The regression this guard exists for. Before it, both of these truncated
+    // to `/api/\` and the corpus reported two DIFFERENT committed values as one
+    // agreed value — a fabricated agreement (FR-WS-19, NFR-RA-05).
+    let a = parse_yaml("mail:\n  pattern: \"/api/\\\"alpha\\\"/v1\"\n");
+    let b = parse_yaml("mail:\n  pattern: \"/api/\\\"beta\\\"/v2\"\n");
+    assert_eq!(a.get("mail.pattern"), None);
+    assert_eq!(b.get("mail.pattern"), None);
+    assert_eq!(a, b, "both refuse; neither invents a value the other can match");
+}
+
+#[test]
+fn a_quoted_value_needing_no_decoding_is_untouched() {
+    // The guard must not over-refuse: these are the shapes the estate actually
+    // uses, and every one keeps the value it had before the guard existed.
+    for (src, key, want) in [
+        ("a: \"/x\"\n", "a", "/x"),
+        ("a: '/z'\n", "a", "/z"),
+        ("a: \"/x#anchor\"\n", "a", "/x#anchor"),
+        ("a: \"/x\" # why\n", "a", "/x"),
+        ("a: 'it is fine'\n", "a", "it is fine"),
+        ("a: /plain\n", "a", "/plain"),
+    ] {
+        let flat = parse_yaml(src);
+        assert_eq!(
+            flat.get(key).map(|v| v.iter().next().unwrap().as_str()),
+            Some(want),
+            "over-refused {src:?}",
+        );
+    }
+}
+
+#[test]
+fn a_backslash_outside_the_scalar_does_not_refuse_it() {
+    // The scan stops at the closing quote, so a `\` in the trailing comment is
+    // not the scalar's business. A near miss worth pinning: a whole-line
+    // `contains('\\')` check would wrongly drop this key.
+    let flat = parse_yaml("a: \"/x\" # a windows path C:\\tmp\n");
+    assert_eq!(flat.get("a").map(|v| v.iter().next().unwrap().as_str()), Some("/x"));
+}
+
+#[test]
+fn an_unterminated_quote_keeps_its_prior_behaviour() {
+    // Not a case the guard claims to improve — pinned so the change's blast
+    // radius is visible rather than assumed.
+    let flat = parse_yaml("a: \"unterminated\nb: /y\n");
+    assert_eq!(flat.get("b").map(|v| v.iter().next().unwrap().as_str()), Some("/y"));
+}
+
+#[test]
+fn a_properties_value_keeps_its_backslashes_because_the_rule_is_yaml_only() {
+    // `.properties` has no quoting rules, so the guard must not reach it: a
+    // backslash there is a literal the file genuinely commits.
+    let flat = parse_properties("a=C:\\\\tmp\nb=\"/y\"\n");
+    // Two literal backslashes: `.properties` has no escape rules here, so the
+    // value is exactly the bytes the file commits.
+    assert_eq!(flat.get("a").map(|v| v.iter().next().unwrap().as_str()), Some("C:\\\\tmp"));
+    assert_eq!(flat.get("b").map(|v| v.iter().next().unwrap().as_str()), Some("\"/y\""));
+}
