@@ -145,6 +145,17 @@ use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 #[path = "operand_resolvability/configuration_agreement.rs"]
 mod configuration_agreement;
 
+/// S-384's identity gate — its own module, so the deploy-corpus walk and the
+/// pair judgement do not co-edit the file the configuration arm owns. Reads
+/// this module's `measurement` and the promoted `ConfigCorpus`; adds no symbol
+/// to either.
+///
+/// `#[path]`-attached for the same reason `configuration_agreement` is: a plain
+/// `tests/identity.rs` would become a second cargo test target and walk the
+/// estate a second time.
+#[path = "operand_resolvability/identity.rs"]
+mod identity;
+
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
 /// printed by it.

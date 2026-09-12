@@ -77,7 +77,7 @@ pub(crate) fn route_key(name: &str) -> Option<(String, String)> {
 /// The leading/trailing/`//` slash structure is preserved (an empty segment
 /// stays empty), so `/users` and `/users/` are deliberately *distinct* shapes —
 /// the normalizer never silently equates templates whose skeletons differ.
-pub(crate) fn normalize_template(template: &str) -> Option<String> {
+pub fn normalize_template(template: &str) -> Option<String> {
     if !template.starts_with('/') {
         return None;
     }

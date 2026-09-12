@@ -48,11 +48,11 @@ pub mod dispatch;
 /// shared-state matches to `route`/`component` nodes against the resolved
 /// graph — ledger-gated, binder-proven, reconciled every run. See its module docs.
 pub mod framework;
+pub(crate) mod grpc_key;
 /// The shared positional route-template normalizer (S-069, CR-011): aligns the
 /// OpenAPI `ApiOperation` path templates with framework-extracted `route` node
 /// templates under one parameter-position-only comparison. See its module docs.
-pub(crate) mod grpc_key;
-pub(crate) mod route_template;
+pub mod route_template;
 /// The shared wildcard-method matching rule (S-349, CR-109, FR-CG-09): decides
 /// whether a provider registered under one HTTP method serves a consumer that
 /// declares another (`ANY` is the wildcard), and which of the providers sharing

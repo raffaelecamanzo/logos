@@ -4135,3 +4135,85 @@ mod jvm_parity {
         ),
     ];
 }
+
+/// [`routes_in_source`] must be a projection of [`scan_source`], not a second
+/// reading of the query — that is its whole justification for existing. These
+/// pin the two together on the shapes the reference-workspace measurement
+/// (S-384) depends on.
+mod measurement_seam {
+    use super::*;
+
+    const SPRING_CONTROLLER: &str = r#"
+@RestController
+@RequestMapping("/v1")
+class MailboxApiV1 {
+    @GetMapping("/users/{userId}/mailboxes/{mailboxId}")
+    ResponseEntity<X> get(String userId, String mailboxId) { return null; }
+
+    @PostMapping("/users/{userId}/mailboxes")
+    ResponseEntity<X> create(String userId) { return null; }
+}
+"#;
+
+    #[test]
+    fn the_projection_agrees_with_the_scan_it_projects() {
+        let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+        let plugin = registry.for_extension("java").expect("java plugin");
+        let mut parser = Parser::new();
+        let scanned: Vec<(String, String)> = scan_source(&mut parser, plugin, SPRING_CONTROLLER)
+            .routes
+            .into_iter()
+            .map(|r| (r.method, r.path))
+            .collect();
+        let projected: Vec<(String, String)> = routes_in_source(plugin, SPRING_CONTROLLER)
+            .into_iter()
+            .map(|r| (r.method, r.path))
+            .collect();
+        assert_eq!(projected, scanned);
+        assert!(!projected.is_empty(), "the fixture must produce routes for this to mean anything");
+    }
+
+    #[test]
+    fn the_projection_carries_the_class_level_prefix_composition() {
+        // FR-FW-05. A projection that bypassed `compose_prefixes` would report
+        // `/users/{userId}/mailboxes` and the measurement would match the wrong
+        // provider — or none.
+        let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+        let plugin = registry.for_extension("java").expect("java plugin");
+        let paths: Vec<String> =
+            routes_in_source(plugin, SPRING_CONTROLLER).into_iter().map(|r| r.path).collect();
+        assert!(
+            paths.contains(&"/v1/users/{userId}/mailboxes/{mailboxId}".to_string()),
+            "composed paths: {paths:?}",
+        );
+        assert!(
+            paths.contains(&"/v1/users/{userId}/mailboxes".to_string()),
+            "composed paths: {paths:?}",
+        );
+    }
+
+    #[test]
+    fn a_concatenated_path_is_not_captured_at_all() {
+        // The provider-side gap S-384 measured: `pecserver-facade` registers
+        // `value = "/mailboxes/{" + EMAIL_ADDRESS_PARAMETER_NAME + "}/size"`.
+        // The query captures a string literal, so this route is invisible
+        // rather than refused — recorded here so the finding rests on a pinned
+        // behaviour rather than on one reading of one estate file.
+        let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+        let plugin = registry.for_extension("java").expect("java plugin");
+        let source = r#"
+@RestController
+@RequestMapping("/v1")
+class Facade {
+    @GetMapping(value = "/mailboxes/{" + EMAIL + "}/size")
+    ResponseEntity<X> size() { return null; }
+}
+"#;
+        let paths: Vec<String> =
+            routes_in_source(plugin, source).into_iter().map(|r| r.path).collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("size")),
+            "a concatenated path must not be promoted: {paths:?}",
+        );
+    }
+}
