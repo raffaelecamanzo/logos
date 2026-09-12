@@ -1006,7 +1006,19 @@ Five things worth knowing about these fields:
 
   Two or more entries in a `values` list is an **overlay divergence**: the
   overlays commit different values and every one is retained with the profiles
-  that prove it, never averaged and never refused. Note that a `config-bound`
+  that prove it, never averaged and never refused.
+
+- **What this emits on a real estate today, stated plainly.** The row shape above
+  is implemented and tested, but the pipeline that would *populate* it is not yet
+  wired end to end. `@ConfigurationProperties` accessor expressions — which on the
+  reference estate are where **all 79** configuration-bound client-call sites live —
+  are currently recorded as `path_dynamic` with no key, because the accessor
+  capture hop is missing and the descriptor-driven properties index has no caller
+  outside tests. So on that estate the shipped pipeline emits **0** `config-bound`
+  rows today, even though the measurement harness proves 79 of them are resolvable.
+  Placeholder (`${...}`) targets are unaffected. Wiring the accessor hop is
+  corpus-level work no story currently owns. Do not read the documented shape as
+  current coverage. Note that a `config-bound`
   row is deliberately **excluded from `resolved_cross_service_edges`**: the
   coverage tier resolves the placeholders, but the bridge still keys a consumer
   on its raw ledger target, so no edge is drawn for it yet.
