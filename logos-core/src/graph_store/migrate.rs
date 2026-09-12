@@ -2055,56 +2055,51 @@ mod tests {
         );
     }
 
-    /// One node, edge and shingle projection for a verbatim cross-migration diff
-    /// — **every** column of each, so "unchanged" is content, not row counts.
-    type GraphSnapshot = (
-        Vec<(i64, i64, i64, String, Option<i64>, i64, Option<i64>, Option<String>)>,
-        Vec<(i64, i64, i64, i64, i64, Option<String>)>,
-        Vec<(i64, i64)>,
-    );
+    /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
+    /// so "unchanged" is content, not row counts.
+    ///
+    /// `SELECT *` with a generic row reader, deliberately, rather than a column
+    /// list. An enumerated projection is the thing that goes stale: the first
+    /// draft of this helper listed 8 of the 20 columns `nodes` carries at v18 and
+    /// its doc comment claimed "every column" — it silently ignored `is_test`,
+    /// which the fixture below explicitly populates. Reading whatever columns the
+    /// table has keeps the guard honest as migration 20 and beyond add more.
+    type GraphSnapshot = (Vec<Vec<String>>, Vec<Vec<String>>, Vec<Vec<String>>);
 
-    /// The full node/edge/shingle content, each ordered by id.
+    /// Read a whole table as text, every column, ordered by the given clause.
+    fn read_table(conn: &Connection, table: &str, order: &str) -> Vec<Vec<String>> {
+        let mut stmt = conn
+            .prepare(&format!("SELECT * FROM {table} ORDER BY {order}"))
+            .unwrap();
+        let columns = stmt.column_count();
+        stmt.query_map([], |r| {
+            (0..columns)
+                .map(|i| {
+                    // Render every storage class, so a NULL is distinguishable
+                    // from the string "NULL" and a blob from its text spelling.
+                    Ok(match r.get_ref(i)? {
+                        rusqlite::types::ValueRef::Null => "NULL".to_string(),
+                        rusqlite::types::ValueRef::Integer(v) => format!("i:{v}"),
+                        rusqlite::types::ValueRef::Real(v) => format!("r:{v}"),
+                        rusqlite::types::ValueRef::Text(v) => {
+                            format!("t:{}", String::from_utf8_lossy(v))
+                        }
+                        rusqlite::types::ValueRef::Blob(v) => format!("b:{v:?}"),
+                    })
+                })
+                .collect::<rusqlite::Result<Vec<String>>>()
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+    }
+
+    /// The full node/edge/shingle content, each ordered deterministically.
     fn read_graph(conn: &Connection) -> GraphSnapshot {
-        let mut nodes = conn
-            .prepare(
-                "SELECT id, symbol_id, kind, name, file_id, exported, cyclomatic_complexity, body \
-                 FROM nodes ORDER BY id",
-            )
-            .unwrap();
-        let nodes = nodes
-            .query_map([], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                ))
-            })
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let mut edges = conn
-            .prepare("SELECT id, source, target, kind, derived, payload FROM edges ORDER BY id")
-            .unwrap();
-        let edges = edges
-            .query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
-            })
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let mut shingles = conn
-            .prepare("SELECT node_id, hash FROM shingles ORDER BY node_id, hash")
-            .unwrap();
-        let shingles = shingles
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        (nodes, edges, shingles)
+        (
+            read_table(conn, "nodes", "id"),
+            read_table(conn, "edges", "id"),
+            read_table(conn, "shingles", "node_id, hash"),
+        )
     }
 }
