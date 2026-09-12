@@ -2184,6 +2184,13 @@ mod fixtures {
         );
     }
 
+    // Five index unit cases that lived here until S-381 are **not** missing —
+    // they moved to `extract::config::binding`'s own test file with the code
+    // they cover, the way S-380's 22 corpus cases did. What stays here is what
+    // exercises the HARNESS: this one (a class body, where the unit suite covers
+    // a record), the own-module preference across two modules, and everything
+    // that goes through `judge`/`resolve_getter`.
+
     #[test]
     fn a_method_parameter_of_a_class_is_not_a_declared_property() {
         // Was: the record-component arm fired for ANY formal_parameter in the
@@ -2203,35 +2210,6 @@ mod fixtures {
             !class.properties.contains(&canonical_key("uriGetArchive")),
             "a method parameter is not a bound property",
         );
-    }
-
-    #[test]
-    fn a_nested_types_fields_are_not_the_outer_classs_properties() {
-        let mut props = PropertiesIndex::for_plugins(&[java_plugin()]);
-        let body = r#"
-            @ConfigurationProperties(prefix = "api")
-            public class P { private String a; static class Inner { private String b; } }
-        "#;
-        props.absorb_source(java_plugin(), "P.java", "", body);
-        props.seal();
-        let class = props.get("P", "").expect("indexed");
-        assert!(class.properties.contains(&canonical_key("a")));
-        assert!(!class.properties.contains(&canonical_key("b")));
-    }
-
-    #[test]
-    fn two_same_named_classes_in_one_module_resolve_to_nothing_rather_than_a_guess() {
-        // The own-module lookup used to return the first match without the
-        // collision test — the same guess the workspace lookup forbids.
-        let mut props = PropertiesIndex::for_plugins(&[java_plugin()]);
-        for (file, prefix) in [("m/a/C.java", "one"), ("m/b/C.java", "two")] {
-            let body = format!(
-                "@ConfigurationProperties(prefix = \"{prefix}\")\npublic class C {{ private String x; }}"
-            );
-            props.absorb_source(java_plugin(), file, "m", &body);
-        }
-        props.seal();
-        assert!(props.get("C", "m").is_none(), "one module, two different C — must not guess");
     }
 
     #[test]
@@ -2648,43 +2626,6 @@ mod fixtures {
             props.get("MailServerConfigurationApi", "unrelated-member").is_none(),
             "a colliding name must resolve to nothing rather than to a guess",
         );
-    }
-
-    #[test]
-    fn identical_declarations_in_several_modules_are_not_a_collision() {
-        let mut props = PropertiesIndex::for_plugins(&[java_plugin()]);
-        for module in ["a", "b"] {
-            props.absorb_source(java_plugin(), &format!("{module}/C.java"), module, PROPS);
-        }
-        props.seal();
-        assert!(props.collisions.is_empty());
-        assert!(props.get("MailServerConfigurationApi", "c").is_some());
-    }
-
-    #[test]
-    fn the_annotation_value_form_carries_a_prefix_too() {
-        let mut props = PropertiesIndex::for_plugins(&[java_plugin()]);
-        let body = r#"
-            @ConfigurationProperties("spring.datasource.batch")
-            public class Ds { private String url; }
-        "#;
-        props.absorb_source(java_plugin(), "C.java", "", body);
-        props.seal();
-        assert_eq!(props.get("Ds", "").map(|c| c.prefix.as_str()), Some("spring.datasource.batch"));
-    }
-
-    #[test]
-    fn a_record_declares_its_components_as_properties() {
-        let mut props = PropertiesIndex::for_plugins(&[java_plugin()]);
-        let body = r#"
-            @ConfigurationProperties(prefix = "api")
-            public record ApiProps(String baseUrl, String uriGet) {}
-        "#;
-        props.absorb_source(java_plugin(), "C.java", "", body);
-        props.seal();
-        let class = props.get("ApiProps", "").expect("indexed");
-        assert!(class.properties.contains(&canonical_key("baseUrl")));
-        assert!(class.properties.contains(&canonical_key("uriGet")));
     }
 
     // ── the two arms are never averaged ─────────────────────────────────────

@@ -532,9 +532,16 @@ fn kotlin_entry() -> GrammarEntry {
                 source: include_str!("../../plugins/kotlin/queries/invocations.scm"),
             },
             // The configuration-binding arm (S-381, [CR-121], [FR-WS-19]) — the
-            // second language on the binding substrate, and the demonstration
-            // that adding one costs a query file and a descriptor table rather
-            // than a `logos-core` edit ([NFR-MA-01]).
+            // second language on the binding substrate. THIS ROW is the whole of
+            // what it cost `logos-core`: an asset registration, no interpreter,
+            // no dispatch, no per-language branch ([NFR-MA-01]). The row is
+            // mandatory, not incidental — a capability whose `[queries]` path has
+            // no embedded source is a hard startup error (see `registry`) — so
+            // "adding a language costs zero `logos-core` edits" would be false
+            // here, and [NFR-MA-01]'s own Notes retired that exact over-claim
+            // once already (S-364, over CR-108's AC7): the Measurable Target
+            // concedes a grammar-registry binding and never claimed zero-touch
+            // for registering a query against an existing grammar entry.
             EmbeddedQuery {
                 relative_path: "queries/properties.scm",
                 label: "kotlin/queries/properties.scm",

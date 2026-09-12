@@ -33,25 +33,33 @@
 ; one".
 ;
 ; ── Patterns ─────────────────────────────────────────────────────────────────
-
+;
+; Each rule is ONE pattern. A class and a record differ here only in the outer
+; node name, so they are a top-level alternation with the capture on the
+; bracket — `] @props.class` — rather than two near-identical copies that a
+; later fix could reach one of and not the other. That is the repo idiom for
+; exactly this shape: `brokers.scm` captures off an alternation the same way,
+; and `frameworks.scm` collapses class/interface/enum into one pattern.
+;
 ; 1. The annotated declaration itself, in every annotation form — with
 ;    arguments, or a bare marker. This is the pattern that makes a class VISIBLE;
 ;    patterns 2-3 only add its prefix, and 4-6 only add its properties.
 ;      @ConfigurationProperties(prefix = "mailserver.api")
 ;      public class MailServerConfigurationApi { … }
-(class_declaration
-  (modifiers [
-    (annotation name: (identifier) @props.annotation)
-    (marker_annotation name: (identifier) @props.annotation)
-  ])
-  name: (identifier) @props.class.name) @props.class
-
-(record_declaration
-  (modifiers [
-    (annotation name: (identifier) @props.annotation)
-    (marker_annotation name: (identifier) @props.annotation)
-  ])
-  name: (identifier) @props.class.name) @props.class
+[
+  (class_declaration
+    (modifiers [
+      (annotation name: (identifier) @props.annotation)
+      (marker_annotation name: (identifier) @props.annotation)
+    ])
+    name: (identifier) @props.class.name)
+  (record_declaration
+    (modifiers [
+      (annotation name: (identifier) @props.annotation)
+      (marker_annotation name: (identifier) @props.annotation)
+    ])
+    name: (identifier) @props.class.name)
+] @props.class
 
 ; 2. The NAMED prefix argument — `@ConfigurationProperties(prefix = "x.y")`, the
 ;    form the reference estate overwhelmingly uses. `value` is Spring's alias for
@@ -69,45 +77,46 @@
 ;    configuration prefix. The interpreter keeps a prefix only when its own match
 ;    binds an in-vocabulary annotation, so this capture is what makes the pattern
 ;    say which annotation it is reading.
-((class_declaration
-  (modifiers
-    (annotation
-      name: (identifier) @props.annotation
-      arguments: (annotation_argument_list
-        (element_value_pair
-          key: (identifier) @_key
-          value: (_) @props.prefix))))) @props.class
- (#any-of? @_key "prefix" "value"))
-
-((record_declaration
-  (modifiers
-    (annotation
-      name: (identifier) @props.annotation
-      arguments: (annotation_argument_list
-        (element_value_pair
-          key: (identifier) @_key
-          value: (_) @props.prefix))))) @props.class
+([
+  (class_declaration
+    (modifiers
+      (annotation
+        name: (identifier) @props.annotation
+        arguments: (annotation_argument_list
+          (element_value_pair
+            key: (identifier) @_key
+            value: (_) @props.prefix)))))
+  (record_declaration
+    (modifiers
+      (annotation
+        name: (identifier) @props.annotation
+        arguments: (annotation_argument_list
+          (element_value_pair
+            key: (identifier) @_key
+            value: (_) @props.prefix)))))
+] @props.class
  (#any-of? @_key "prefix" "value"))
 
 ; 3. The single-value form — `@ConfigurationProperties("x.y")`. Anchored to the
 ;    argument list's FIRST named child so it cannot also match a named
 ;    argument's value, which sits at the same depth; and binding the annotation
 ;    name for the same reason pattern 2 does.
-(class_declaration
-  (modifiers
-    (annotation
-      name: (identifier) @props.annotation
-      arguments: (annotation_argument_list
-        .
-        (string_literal) @props.prefix)))) @props.class
-
-(record_declaration
-  (modifiers
-    (annotation
-      name: (identifier) @props.annotation
-      arguments: (annotation_argument_list
-        .
-        (string_literal) @props.prefix)))) @props.class
+[
+  (class_declaration
+    (modifiers
+      (annotation
+        name: (identifier) @props.annotation
+        arguments: (annotation_argument_list
+          .
+          (string_literal) @props.prefix))))
+  (record_declaration
+    (modifiers
+      (annotation
+        name: (identifier) @props.annotation
+        arguments: (annotation_argument_list
+          .
+          (string_literal) @props.prefix))))
+] @props.class
 
 ; 4. Declared fields — the properties of a setter-bound class. A DIRECT child of
 ;    the class body, which is what keeps a nested type's fields out: they bind to
@@ -135,15 +144,6 @@
     (formal_parameter
       name: (identifier) @props.field))) @props.class
 
-; 6. A record's body fields (statics, and the compact-constructor form's
-;    assignments' targets). Carried for parity with pattern 4 so the two
-;    declaration forms declare properties by the same rule.
-(record_declaration
-  body: (class_body
-    (field_declaration
-      declarator: (variable_declarator
-        name: (identifier) @props.field)))) @props.class
-
 ; ── Stated coverage ceilings (ADR-54: recorded, never worked around) ─────────
 ;
 ; NOT captured:
@@ -163,6 +163,14 @@
 ;     concatenation. Pattern 2 captures the argument node whatever its shape, and
 ;     the interpreter's shared literal reader declines it, so the class is
 ;     counted under `PropertiesIndex::prefixless` rather than dropped silently.
+;   * A STATIC field in a record body. Java forbids instance fields there — a
+;     record's only instance fields are its implicit component fields, which are
+;     not written as `field_declaration` — so a pattern over that shape can match
+;     nothing but constants, and registering a constant as a bound property
+;     loosens `PropertyNotDeclared` exactly as pattern 5's own restriction
+;     forbids. One such pattern shipped in this file's first version "for parity
+;     with pattern 4" and was deleted at review; the parity it claimed does not
+;     exist, because for a class pattern 4 captures INSTANCE fields.
 ;   * A property reached through a NESTED properties type
 ;     (`config.getMail().getHost()`). Pattern 4's direct-child rule attributes
 ;     the nested type's fields to the nested type, and the resolution half

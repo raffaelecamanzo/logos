@@ -765,6 +765,21 @@ impl PluginManifest {
                         .to_string(),
                 );
             }
+            // The same invariant on the convention half. A descriptor naming a
+            // vocabulary but no accessor convention indexes its classes and then
+            // recognises no accessor at all, so every use site refuses as
+            // "not an accessor" — the capability reads present while nothing it
+            // captures can ever bind, one step further along than the two guards
+            // above. (`""` stays a legal ENTRY — it spells direct property
+            // access; only the empty LIST is the bug.)
+            if properties.accessor_prefixes.is_empty() {
+                return bail(
+                    "capability 'properties' requires at least one `[properties] \
+                     accessor_prefixes` entry, or no accessor can ever bind \
+                     (FR-WS-19, S-381)"
+                        .to_string(),
+                );
+            }
         }
         if let Some(properties) = &self.properties {
             // An annotation row is compared against captured text verbatim, so a
@@ -1470,7 +1485,11 @@ mod tests {
             properties = "queries/properties.scm"
         "#;
         let err = PluginManifest::parse("x/plugin.toml", head).unwrap_err();
-        assert!(err.to_string().contains("[properties]"), "got: {err}");
+        // Needle specific to THIS rule: every bail in the block mentions
+        // `[properties]`, so that substring alone cannot tell a missing table
+        // from an empty vocabulary — review proved it by swapping one rule's
+        // message for another's and watching the case stay green.
+        assert!(err.to_string().contains("requires a `[properties]` table"), "got: {err}");
 
         let empty = format!("{head}
             [properties]
@@ -1478,6 +1497,13 @@ mod tests {
 ");
         let err = PluginManifest::parse("x/plugin.toml", &empty).unwrap_err();
         assert!(err.to_string().contains("at least one binding annotation"), "got: {err}");
+
+        let no_convention = format!("{head}
+            [properties]
+            annotations = [\"A\"]
+");
+        let err = PluginManifest::parse("x/plugin.toml", &no_convention).unwrap_err();
+        assert!(err.to_string().contains("accessor_prefixes` entry"), "got: {err}");
     }
 
     /// The whitespace and duplicate traps, and the one entry that must NOT be

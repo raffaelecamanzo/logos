@@ -341,6 +341,15 @@ impl PropertiesIndex {
         // (S-340's shape). Grouping is what lets a language spell the class
         // header and its property list as separate patterns — no grammar binds a
         // declaration and all of its fields in a single match.
+        //
+        // `order` exists so emission follows FIRST-MATCH order, which is
+        // document order. It could be dropped — within one call every emitted
+        // class carries the same file and module, so two same-named declarations
+        // are either equal values or a sealed collision, and nothing observes
+        // which came first. It is kept because the alternative is iterating a
+        // `HashMap`, and trading a deterministic order for a
+        // randomly-seeded one to save a `Vec` is the wrong side of [NFR-RA-06]
+        // for a structure whose contents reach a published census.
         let mut order: Vec<usize> = Vec::new();
         let mut drafts: HashMap<usize, Draft> = HashMap::new();
         let mut cursor = QueryCursor::new();
@@ -406,6 +415,10 @@ impl PropertiesIndex {
         }
 
         for id in order {
+            // Infallible — every id in `order` was inserted into `drafts` in the
+            // same breath — but written as a refutable read rather than an
+            // `expect`, because a panic is never the right answer to a capture
+            // the query produced.
             let Some(draft) = drafts.remove(&id) else {
                 continue;
             };

@@ -1516,16 +1516,23 @@ fn report(m: &Measurement) -> usize {
 
 /// S-381 AC5: the descriptor-driven binding index over the reference workspace.
 ///
-/// # Why a FLOOR on one figure and an EQUALITY on the other
+/// # Why a FLOOR on one figure and an EQUALITY on the other two
 ///
-/// The two numbers are asserted differently on purpose. The class count is a
-/// floor, because the estate grows and a later commit that binds one more class
-/// is not a regression. The collision count is pinned exactly, because it is the
-/// **refusal** half: a collision that quietly stops being one is a class
+/// The three numbers are asserted differently on purpose. The class-name count
+/// is a floor, because the estate grows and a later commit that binds one more
+/// class is not a regression. The collision count is pinned exactly, because it
+/// is the **refusal** half: a collision that quietly stops being one is a class
 /// resolving to a guess, which is the failure [NFR-RA-05] is about and the
 /// failure this index exists to prevent. It cost eleven false refusals when it
 /// was wrong once already (see `PropertiesIndex`'s docs), so it is pinned in
 /// both directions.
+///
+/// `prefixless` is pinned exactly too, and it is pinned because a floor alone is
+/// not a guard: `len()` counts **distinct bound class names**, so a regression
+/// that binds five new ones while dropping five to `prefixless` nets zero and
+/// passes. That is not hypothetical — the prefix-scoping defect this story fixed
+/// did exactly that, moving `prefixless` 0 → 9 while the class count fell, and
+/// only a run that printed all three figures caught it.
 ///
 /// # What this measured when S-381 promoted the index
 ///
@@ -1565,11 +1572,19 @@ fn measure_configuration_binding_over_the_reference_workspace() {
 
     assert!(
         props.len() >= 69,
-        "expected at least 69 bound classes over {}, got {} — the descriptor \
-         vocabulary or the `properties` query has stopped matching what the \
-         Java-grammar walk this replaced matched",
+        "expected at least 69 distinct bound class NAMES over {}, got {} — the \
+         descriptor vocabulary or the `properties` query has stopped matching \
+         what the Java-grammar walk this replaced matched. (Names, not \
+         declarations: 13 of them are declared more than once.)",
         root.display(),
         props.len(),
+    );
+    assert_eq!(
+        props.prefixless, 0,
+        "every bound class on this estate carries a readable literal prefix; a \
+         non-zero count means a prefix reading regressed — an annotation's \
+         argument stopped being recognised, or a sibling annotation's argument \
+         started competing with it",
     );
     assert_eq!(
         props.collisions.len(),

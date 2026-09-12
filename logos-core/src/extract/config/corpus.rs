@@ -31,9 +31,10 @@
 //!
 //! This module owns the **corpus**: discovering configuration sources, reading
 //! their profile from the filename, and flattening each one to canonical
-//! key → value pairs. It owns no resolution — binding a `@ConfigurationProperties`
-//! accessor to a key, and judging what the corpus proves about that key, stay in
-//! the measurement harness until their own stories promote them (S-381, S-382).
+//! key → value pairs. It owns no resolution. Binding an accessor to a key is
+//! [`binding`](super::binding), promoted by S-381; judging what the corpus
+//! proves about that key stays in the measurement harness until S-382 promotes
+//! it.
 //!
 //! # Two entry points, one flattener
 //!

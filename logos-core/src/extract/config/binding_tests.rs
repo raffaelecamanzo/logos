@@ -208,6 +208,65 @@ fn a_non_literal_prefix_leaves_the_class_prefixless_rather_than_keyed() {
 }
 
 #[test]
+fn the_named_value_alias_is_a_prefix_and_a_sibling_named_argument_is_not() {
+    // `value` is Spring's alias for `prefix`, and pattern 2's `#any-of?` reads
+    // both. Mutation-proved uncovered at review in BOTH directions: narrowing
+    // the predicate to `"prefix"` alone and widening it to admit
+    // `ignoreUnknownFields` each left the suite green.
+    let index = index_one(
+        "java",
+        "P.java",
+        "",
+        r#"@ConfigurationProperties(value = "a.b", ignoreUnknownFields = false)
+           public class P { private String host; }"#,
+    );
+    let class = index.get("P", "").expect("indexed");
+    assert_eq!(class.prefix, "a.b", "the `value` key is the prefix");
+    assert_eq!(index.prefixless, 0, "…and no other named argument competed with it");
+}
+
+#[test]
+fn two_readable_prefixes_on_one_declaration_prove_neither() {
+    // `@ConfigurationProperties(prefix = "a", value = "b")` is legal Java —
+    // Spring rejects it only at runtime, through `@AliasFor` — so this refusal
+    // is reachable, not defensive. It is counted with the prefixless, which the
+    // `prefixless` field doc names as the third of its three causes.
+    let index = index_one(
+        "java",
+        "P.java",
+        "",
+        r#"@ConfigurationProperties(prefix = "a", value = "b")
+           public class P { private String host; }"#,
+    );
+    assert!(index.is_empty(), "neither prefix keys the class");
+    assert_eq!(index.prefixless, 1, "…and the class is COUNTED, not dropped");
+
+    // The same two keys agreeing is not a refusal: one distinct prefix survives.
+    let agreed = index_one(
+        "java",
+        "P.java",
+        "",
+        r#"@ConfigurationProperties(prefix = "a", value = "a")
+           public class P { private String host; }"#,
+    );
+    assert_eq!(agreed.get("P", "").expect("indexed").prefix, "a");
+    assert_eq!(agreed.prefixless, 0);
+}
+
+#[test]
+fn an_annotated_record_with_a_marker_annotation_is_prefixless_too() {
+    let index = index_one(
+        "java",
+        "R.java",
+        "",
+        "@ConfigurationProperties
+public record R(String host) {}",
+    );
+    assert!(index.is_empty());
+    assert_eq!(index.prefixless, 1, "the record arm of pattern 1 reaches the marker form");
+}
+
+#[test]
 fn a_marker_annotation_is_prefixless_rather_than_keyed_to_the_empty_prefix() {
     let index = index_one(
         "java",
@@ -272,6 +331,30 @@ fn an_index_over_zero_classes_still_knows_what_an_accessor_looks_like() {
 }
 
 #[test]
+fn absorbing_a_source_adopts_its_plugins_convention_without_a_prior_declaration() {
+    // `absorb_source` is the ingestion-shaped entry point S-382 will wire up, so
+    // it has to be total: feeding it a source without `for_plugins` first must
+    // still judge that source's accessors by its own language's convention.
+    // Review mutation-proved this branch uncovered — deleting the `declare` call
+    // inside `absorb_source` left the whole suite green.
+    let mut index = PropertiesIndex::default();
+    index.absorb_source(
+        plugin("java"),
+        "P.java",
+        "",
+        r#"@ConfigurationProperties(prefix = "api")
+           public class P { private String host; }"#,
+    );
+    index.seal();
+    let class = index.get("P", "").expect("indexed");
+    assert_eq!(
+        index.bind(class, "getHost").expect("binds").key,
+        "api.host",
+        "the convention arrived with the source, not from a prior declaration",
+    );
+}
+
+#[test]
 fn the_three_failures_of_an_accessor_are_counted_apart() {
     let index = index_one(
         "java",
@@ -317,6 +400,11 @@ fn a_colliding_simple_name_in_one_module_resolves_to_nothing() {
         "two declarations of one simple name inside ONE module prove neither",
     );
     assert!(index.collisions.contains("C"), "and the name is recorded as a collision");
+    assert!(
+        index.get("C", "elsewhere").is_none(),
+        "the workspace fallback refuses a collided name too — a use site outside \
+         the declaring module has even less to go on",
+    );
 }
 
 #[test]
@@ -429,6 +517,30 @@ fn kotlin_binds_through_the_same_interpreter_with_no_core_edit() {
 
 #[test]
 #[cfg(feature = "lang-kotlin")]
+fn the_kotlin_descriptor_names_the_same_vocabulary_and_a_wider_convention() {
+    let kotlin = plugin("kt");
+    assert!(kotlin.capabilities().iter().any(|c| c == PROPERTIES_CAPABILITY));
+    let descriptor = kotlin
+        .semantics()
+        .properties
+        .as_ref()
+        .expect("the [properties] descriptor section");
+    assert_eq!(
+        descriptor.annotations,
+        ["ConfigurationProperties"],
+        "Kotlin's Spring binding is annotation-compatible with Java's — what \
+         differs is everything structural, which is why it needed a query file",
+    );
+    assert_eq!(
+        descriptor.accessor_prefixes,
+        ["", "get", "is"],
+        "…and an accessor convention Java cannot express: `\"\"` is direct \
+         property access",
+    );
+}
+
+#[test]
+#[cfg(feature = "lang-kotlin")]
 fn a_kotlin_body_property_and_the_value_form_bind_too() {
     let index = index_one(
         "kt",
@@ -446,6 +558,12 @@ fn a_kotlin_body_property_and_the_value_form_bind_too() {
     assert_eq!(class.prefix, "other.api");
     assert_eq!(index.bind(class, "getBaseUrl").expect("binds").key, "other.api.baseUrl");
     assert_eq!(index.bind(class, "port").expect("binds").key, "other.api.port");
+    assert_eq!(
+        index.bind(class, "isEnabled"),
+        Err(BindingRefusal::PropertyNotDeclared),
+        "Kotlin's `is` row applies — the name strips to `enabled`, which this \
+         class does not declare; it is not refused as a non-accessor",
+    );
 }
 
 #[test]
@@ -566,6 +684,11 @@ fn build_indexes_every_binding_language_the_registry_loaded() {
         "src/U.JAVA",
         "@ConfigurationProperties(prefix = \"u\")\npublic class U { private String host; }",
     );
+    // Files whose plugin declares no binding vocabulary at all. They are in the
+    // roster — it now carries every walked file — so `build` must step over them
+    // rather than parse them. Review mutation-proved that branch unreached.
+    write("src/main/resources/application.yml", "a:\n  b: 1\n");
+    write("src/lib.rs", "// @ConfigurationProperties(prefix = \"r\")\npub struct R;\n");
 
     let corpus = crate::extract::config::corpus::ConfigCorpus::discover(root);
     let index = PropertiesIndex::build(root, &corpus, registry());
@@ -583,6 +706,11 @@ fn build_indexes_every_binding_language_the_registry_loaded() {
     );
     assert!(index.get("T", "").is_none(), "`.java.txt` is a text file, not Java");
     assert!(index.get("Plain", "").is_none(), "…and an unannotated class binds nothing");
+    assert!(
+        index.get("R", "").is_none(),
+        "a language declaring no `[properties]` vocabulary contributes nothing, \
+         even from a file whose text mentions the annotation",
+    );
     assert_eq!(index.len(), 3);
 }
 
@@ -592,6 +720,7 @@ fn build_indexes_every_binding_language_the_registry_loaded() {
 /// grammar. Measured: this is the complete intersection today, and it is empty —
 /// the interpreter names no node kind at all, because it reads only capture
 /// names. An entry added here is a decision someone has to write down.
+#[cfg(feature = "lang-kotlin")]
 const BINDING_KIND_ALLOWLIST: &[&str] = &[];
 
 /// The [NFR-MA-01] criterion proved structurally rather than by reading the
@@ -625,12 +754,20 @@ fn the_interpreter_names_no_jvm_grammar_node_kind() {
         "the derived kind set must really come from the JVM grammars",
     );
 
-    // CODE only. The module docs above deliberately name Java shapes — the
-    // whole point of the table there is to say what the query owns instead — and
-    // a guard that could not tell prose from code would force the explanation
-    // out of the file it explains.
-    let code = without_comments(include_str!("binding.rs"));
-    for literal in quoted_identifiers(&code) {
+    // RAW source, no comment stripping — the sibling guard's hard-won rule.
+    // `resolve::framework::tests::jvm_parity::resolver_sources` records that
+    // splitting each line at the first `//` was defeated twice in review:
+    // `"http://value_argument"` named a guarded kind and passed because the cut
+    // landed inside a string literal, and a hand-written scanner then mis-lexed
+    // Rust's `'"'` char literal and stopped seeing code at all. Both failures
+    // come from deciding what is a comment without knowing what is a string.
+    //
+    // Raw source needs no such decision, because this guard reads only
+    // DOUBLE-QUOTED identifiers and `binding.rs` writes every node kind it
+    // discusses in `backticks`. If a future comment does double-quote one, the
+    // guard flags it and the fix is to backtick it like its neighbours.
+    let code = include_str!("binding.rs");
+    for literal in quoted_identifiers(code) {
         if !jvm_kinds.contains(literal.as_str()) {
             continue;
         }
@@ -643,7 +780,16 @@ fn the_interpreter_names_no_jvm_grammar_node_kind() {
     }
     // A language-specific reading need not name a node kind at all — a
     // `plugin.name() == "java"` branch would do — so that is asserted directly.
-    for id in ["\"java\"", "\"kotlin\"", "\"kt\"", "\"scala\"", "ConfigurationProperties"] {
+    // Every needle is DOUBLE-QUOTED, because a double-quoted literal is the only
+    // way code can name one of these; a bare needle would trip on prose and is
+    // what forced the comment-stripping the paragraph above retired.
+    for id in [
+        "\"java\"",
+        "\"kotlin\"",
+        "\"kt\"",
+        "\"scala\"",
+        "\"ConfigurationProperties\"",
+    ] {
         assert!(
             !code.contains(id),
             "binding.rs names {id}; the interpreter must be driven by capture \
@@ -652,24 +798,11 @@ fn the_interpreter_names_no_jvm_grammar_node_kind() {
     }
 }
 
-/// `code` with every line comment removed, so the guard reads code rather than
-/// prose. Deliberately simple: a `//` inside a string literal would truncate the
-/// line, and the effect of that is to hide MORE from the guard, never less — the
-/// safe direction for a check that only ever fails on what it can see.
-fn without_comments(code: &str) -> String {
-    code.lines()
-        .map(|line| match line.find("//") {
-            Some(at) => &line[..at],
-            None => line,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Every `"identifier"` string literal in `code` — the same simple scan the
 /// sibling guard uses. Duplicated rather than shared: the two live in different
 /// modules of different subsystems, and a shared test helper between them would
 /// be a coupling neither wants.
+#[cfg(feature = "lang-kotlin")]
 fn quoted_identifiers(code: &str) -> Vec<String> {
     let bytes = code.as_bytes();
     let mut found = Vec::new();

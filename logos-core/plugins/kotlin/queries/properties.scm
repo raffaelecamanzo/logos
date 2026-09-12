@@ -1,9 +1,14 @@
 ; Kotlin configuration-binding capture (S-381, CR-121, capability =
 ; "properties", FR-WS-19, FR-PL-02).
 ;
-; The SECOND language on the binding substrate, and the reason it exists: adding
-; it cost this file, a `[properties]` table and two `grammars.rs` rows, and NOT
-; one line of `logos-core` (S-381 AC2). The capture contract is stated once, in
+; The SECOND language on the binding substrate, and the reason it exists. Adding
+; it cost this file, a `[properties]` table and one asset row in `grammars.rs` —
+; and NO interpreter, NO dispatch and NO per-language branch in `logos-core`
+; (S-381 AC2). The asset row is a `logos-core` edit and is named as one: the
+; registry refuses a capability whose `[queries]` path has no embedded source, so
+; it is mandatory rather than incidental, and NFR-MA-01's Measurable Target
+; concedes exactly that grammar-registry binding (its Notes retired the stronger
+; "zero logos-core files" reading in S-364). The capture contract is stated once, in
 ; `plugins/java/queries/properties.scm` and in
 ; `extract::config::binding`'s module docs — read either for what the five
 ; capture names mean. This header states only what is Kotlin about Kotlin.
