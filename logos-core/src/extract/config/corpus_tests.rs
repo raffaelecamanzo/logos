@@ -540,3 +540,52 @@ fn a_properties_value_keeps_its_backslashes_because_the_rule_is_yaml_only() {
     assert_eq!(flat.get("a").map(|v| v.iter().next().unwrap().as_str()), Some("C:\\\\tmp"));
     assert_eq!(flat.get("b").map(|v| v.iter().next().unwrap().as_str()), Some("\"/y\""));
 }
+
+#[test]
+fn an_escape_refused_source_is_invisible_to_the_other_sources() {
+    // The residue `quoted_scalar_carries_an_escape`'s doc records, made
+    // executable: the guard withholds the *value* a source could not be read
+    // for, and nothing carries the fact that a source was withheld. When other
+    // sources define the same key, they alone decide and the refusal leaves no
+    // trace — so a key whose committed sources genuinely DISAGREE can still be
+    // reported as agreed.
+    //
+    // This is the estate's real case, at its real shape: 26 files define
+    // `opentracing.spring.web.skip-pattern`, 25 of them agree, and the 26th
+    // commits a different pattern behind an escape this module does not decode.
+    let readable = parse_yaml("opentracing:\n  spring:\n    web:\n      skip-pattern: \".*.png\"\n");
+    let escaped =
+        parse_yaml("opentracing:\n  spring:\n    web:\n      skip-pattern: \".*\\\\.png\"\n");
+    let key = canonical_key("opentracing.spring.web.skip-pattern");
+    assert_eq!(
+        readable.get(&key).map(|v| v.iter().next().unwrap().as_str()),
+        Some(".*.png"),
+        "the readable source keeps its value",
+    );
+    assert_eq!(escaped.get(&key), None, "the escaped source contributes no pair at all");
+
+    // What a consumer that merges both sources therefore sees. `Agreement::of`
+    // is the production judge over exactly this input, and it has no channel
+    // for the withheld source.
+    let definitions: Vec<crate::graph_store::ConfigDefinition> = [
+        ("a/application.yml", ".*.png"),
+        ("b/application.yml", ".*.png"),
+        // the escaped source contributes nothing, so it is simply absent here
+    ]
+    .into_iter()
+    .map(|(path, value)| crate::graph_store::ConfigDefinition {
+        path: path.to_string(),
+        profile: None,
+        value: value.to_string(),
+    })
+    .collect();
+    assert_eq!(
+        crate::resolve::binding::Agreement::of(&definitions).label(),
+        "agreed",
+        "AGREED across a source set that silently lost its dissenting member. This is the open \
+         gap, not the intended end state: closing it needs a refusal channel the corpus tables \
+         and `Agreement` do not have. If this assertion starts failing because that channel was \
+         built, delete this test rather than relaxing it — and note the sibling asymmetry it \
+         exists to surface: a placeholder value refuses the WHOLE key even beside literal sources.",
+    );
+}

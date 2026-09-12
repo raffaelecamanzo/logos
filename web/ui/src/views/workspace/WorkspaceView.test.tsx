@@ -57,10 +57,14 @@ const COVERAGE: CrossServiceCoverage = {
       // S-382: one config-bound row, so the rendered "Target read from" column
       // is asserted against a real admitted value rather than only literals.
       provenance: "config-bound" as const,
-      key: "orders.base",
-      source: "placeholder" as const,
-      values: [
-        { value: "/orders", profiles: ["docker"], unprofiled: false, sources: ["a.yml"] },
+      bound: [
+        {
+          key: "orders.base",
+          source: "placeholder" as const,
+          values: [
+            { value: "/orders", profiles: ["docker"], unprofiled: false, sources: ["a.yml"] },
+          ],
+        },
       ],
     },
     {

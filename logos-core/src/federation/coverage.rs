@@ -690,8 +690,11 @@ pub struct ReferenceCoverage {
     ///
     /// Flattened, so the wire form is a `provenance` key beside the row's own
     /// fields — `{"provenance":"literal"}` or
-    /// `{"provenance":"config-bound","key":…,"source":…,"values":[…]}` — one key
-    /// a consumer switches on, never a nullable sibling it must infer from.
+    /// `{"provenance":"config-bound","bound":[{"key":…,"source":…,"values":[…]}]}`
+    /// — one key a consumer switches on, never a nullable sibling it must infer
+    /// from. The evidence is nested under `bound` (one entry per key), not
+    /// flattened onto the row; see [`Provenance`](crate::resolve::binding::Provenance)
+    /// and `the_dashboard_declaration_names_the_fields_this_crate_serializes`.
     ///
     /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
@@ -3587,7 +3590,14 @@ mod tests {
         fn rewind_s382(value: &mut serde_json::Value) {
             for row in value["references"].as_array_mut().unwrap() {
                 let row = row.as_object_mut().unwrap();
-                for field in ["provenance", "key", "source", "values", "keys", "refusal"] {
+                // `bound` carries `key`/`source`/`values` NESTED inside it since
+                // the review-fix that wrapped the config-bound provenance;
+                // `key`/`source`/`values` stay listed because a row written
+                // before that wrapping carried them at the top level, and this
+                // rewind has to strip whichever spelling it is handed.
+                for field in
+                    ["provenance", "bound", "key", "source", "values", "keys", "refusal"]
+                {
                     row.remove(field);
                 }
             }
@@ -4018,6 +4028,92 @@ mod tests {
         let json = serde_json::to_value(&cov).unwrap();
         for row in json["references"].as_array().unwrap() {
             assert_eq!(row["provenance"], "literal");
+        }
+    }
+
+    /// AC4's **second** adapter, pinned to the first. The dashboard's TypeScript
+    /// declaration of a `config-bound` row must name the fields this crate
+    /// actually serializes.
+    ///
+    /// Sprint 67 is what this test is for. `Provenance::ConfigBound` shipped as a
+    /// newtype — a flattened `{provenance, key, source, values}` — and a
+    /// review-fix inside the same story wrapped it as `{provenance, bound: [...]}`
+    /// so a multi-key target could not lose every key but the first. The Rust
+    /// assertions moved with it; the TypeScript union and `provenanceLabel` did
+    /// not, and `provenanceLabel` then read `ref.values.flatMap(…)` off a field
+    /// the payload no longer carried. Every SPA test stayed green, because every
+    /// SPA fixture is hand-built to whatever the declaration says — so the two
+    /// surfaces agreed with each other and neither agreed with the wire.
+    ///
+    /// Two hand-written mirrors of one shape with no coupling between them is the
+    /// twin this project already refuses elsewhere. This is the coupling: the
+    /// field names are read off `serde` rather than restated, so the check cannot
+    /// drift from the payload it checks.
+    ///
+    /// Text-scanned rather than type-checked because the two live in different
+    /// languages and different build systems; the failure mode it has to catch is
+    /// a *renamed or dropped field*, which a name scan sees. `types.ts` is tracked
+    /// in this repository, so a read failure is a guard defect, never a skip.
+    #[test]
+    fn the_dashboard_declaration_names_the_fields_this_crate_serializes() {
+        use crate::resolve::binding::{ConfigBound, KeySource, ProfiledValue};
+        let provenance = Provenance::ConfigBound {
+            bound: vec![ConfigBound {
+                key: "orders.base".into(),
+                source: KeySource::Placeholder,
+                values: vec![ProfiledValue {
+                    value: "/orders".into(),
+                    profiles: vec!["it".into()],
+                    unprofiled: false,
+                    sources: vec!["application-it.yml".into()],
+                }],
+            }],
+        };
+        let serde_json::Value::Object(map) = serde_json::to_value(&provenance).expect("serializes")
+        else {
+            panic!("an internally-tagged enum serializes to an object");
+        };
+        let emitted: Vec<&str> = map.keys().map(String::as_str).collect();
+        assert!(
+            emitted.contains(&"bound"),
+            "the wire form changed shape: this crate now emits {emitted:?}. Update this test AND              the TypeScript declaration together — that is the pairing it exists to force.",
+        );
+
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("logos-core sits under the repository root");
+        let rel = "web/ui/src/api/types.ts";
+        let types = std::fs::read_to_string(repo.join(rel))
+            .unwrap_or_else(|e| panic!("{rel} is tracked here and must be readable: {e}"));
+        let at = types
+            .find(r#"provenance: "config-bound";"#)
+            .unwrap_or_else(|| panic!("{rel} declares no `config-bound` provenance arm"));
+        let arm = &types[at..];
+        let arm = &arm[..arm.find("
+    }").unwrap_or(arm.len())];
+        // Declared fields only: a doc comment inside the arm may legitimately
+        // name a field the arm does not declare (the shape-history note does).
+        let declared: Vec<&str> = arm
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with('*') && !l.starts_with("/*") && !l.starts_with("//"))
+            .filter_map(|l| l.split_once(':').map(|(name, _)| name.trim()))
+            .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric()))
+            .collect();
+        for field in &emitted {
+            if *field == "provenance" {
+                continue; // the discriminant, declared as a literal type
+            }
+            assert!(
+                declared.contains(field),
+                "{rel}'s `config-bound` arm declares {declared:?} but this crate serializes                  `{field}`. A view reading the declared shape reads `undefined` off the real                  payload — which is a TypeError at render, not a wrong label.",
+            );
+        }
+        for field in &declared {
+            assert!(
+                emitted.contains(field),
+                "{rel}'s `config-bound` arm declares `{field}`, which this crate does not                  serialize (it emits {emitted:?}). A fixture built to the declaration is then a                  payload that cannot occur, and every SPA test over it proves nothing.",
+            );
         }
     }
 
@@ -5861,6 +5957,14 @@ mod tests {
             s("docs/specs/architecture/decisions/ADR-53.md", false, true, true),
             // Names a reason in passing; does not enumerate the vocabulary.
             s("docs/specs/requirements/FR-WS-10.md", false, true, false),
+            // Likewise in passing — ADR-64's refusal table names `base-url-runtime`,
+            // `topic-not-literal` and `path-not-composed` to say what the
+            // committed-evidence line does NOT admit. Added at the Sprint 67
+            // review: S-383 landed this decision into a roster that predates it,
+            // so the removal proof did not reach it and a retired token could
+            // have gone on being offered to a reader from here with nothing
+            // failing.
+            s("docs/specs/architecture/decisions/ADR-64.md", false, true, false),
             s("web/ui/src/api/types.ts", true, false, true),
             s("web/ui/src/views/workspace/coverageModel.ts", true, false, true),
         ];

@@ -340,3 +340,71 @@ fn no_plugin_query_captures_a_grpc_stub_call() {
          must be updated alongside whatever capture landed"
     );
 }
+
+// ── S-381 / FR-PL-02: the `properties` capability gets the same set equality
+// its named precedent already has. ───────────────────────────────────────────
+//
+// Added at the Sprint 67 review. S-381 shipped `properties` explicitly following
+// the `invocations` capability's shape (S-340) — one loop, one emission point, a
+// descriptor table beside the existing ones — but not its guard. `manifest.rs`
+// enforces declaration-side consistency at parse time (a capability without a
+// vocabulary, a query row without a file), so a DECLARATION with no file already
+// fails loudly. The direction with no guard is the other one: a plugin directory
+// that ships `queries/properties.scm` and forgets the capability row is dead
+// weight the interpreter never runs, and nothing notices — which is exactly what
+// `every_language_shipping_an_invocations_query_declares_and_loads_it` records
+// as its reason for being a derived set rather than a hand-written list.
+//
+// Deliberately NOT floored at a count. `invocations` can assert `>= 10` because
+// CR-108 put it on every arm; `properties` ships on two languages today (java,
+// and kotlin as S-381's AC2 demonstration) and a third arriving is a descriptor
+// plus a query file, not a core edit. A floor here would be a number to edit
+// rather than an invariant to hold.
+#[test]
+fn every_language_shipping_a_properties_query_declares_and_loads_it() {
+    let plugins_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins");
+
+    let mut shipped: Vec<String> = std::fs::read_dir(&plugins_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", plugins_dir.display()))
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|dir| dir.join("queries/properties.scm").is_file())
+        .map(|dir| dir.file_name().expect("plugin dir name").to_string_lossy().into_owned())
+        .collect();
+    shipped.sort();
+    assert!(
+        !shipped.is_empty(),
+        "no plugin ships queries/properties.scm — S-381's capability has vanished from the \
+         source tree, which this guard reads as its surface"
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+
+    for name in &shipped {
+        let plugin = reg
+            .iter()
+            .find(|p| p.name() == name.as_str())
+            .unwrap_or_else(|| panic!("{name} is compiled in by default"));
+        assert!(
+            has_capability(plugin, "properties"),
+            "{name} ships queries/properties.scm and must declare the `properties` \
+             capability in its plugin.toml, or the interpreter never runs it: {:?}",
+            plugin.capabilities()
+        );
+        assert!(
+            plugin.query("properties").is_some(),
+            "{name}'s declared properties query must actually load — a declared but \
+             unloadable query captures nothing and is indistinguishable at the product \
+             layer from a vocabulary that admits nothing (S-381)"
+        );
+    }
+
+    let mut declaring: Vec<&str> =
+        reg.iter().filter(|p| has_capability(*p, "properties")).map(|p| p.name()).collect();
+    declaring.sort_unstable();
+    assert_eq!(
+        declaring, shipped,
+        "the set of plugins DECLARING `properties` and the set SHIPPING a \
+         queries/properties.scm must be the same set"
+    );
+}

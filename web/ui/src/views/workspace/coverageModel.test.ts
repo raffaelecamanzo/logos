@@ -467,10 +467,14 @@ describe("provenanceLabel (S-382, ADR-64)", () => {
       provenanceLabel(
         row({
           provenance: "config-bound",
-          key: "orders.base",
-          source: "placeholder",
-          values: [
-            { value: "/orders", profiles: ["docker"], unprofiled: false, sources: ["a.yml"] },
+          bound: [
+            {
+              key: "orders.base",
+              source: "placeholder",
+              values: [
+                { value: "/orders", profiles: ["docker"], unprofiled: false, sources: ["a.yml"] },
+              ],
+            },
           ],
         }),
       ),
@@ -484,15 +488,19 @@ describe("provenanceLabel (S-382, ADR-64)", () => {
     const label = provenanceLabel(
       row({
         provenance: "config-bound",
-        key: "orders.base",
-        source: "properties",
-        values: [
-          { value: "/orders", profiles: [], unprofiled: true, sources: ["application.yml"] },
+        bound: [
           {
-            value: "/orders-it",
-            profiles: ["it"],
-            unprofiled: false,
-            sources: ["application-it.yml"],
+            key: "orders.base",
+            source: "properties",
+            values: [
+              { value: "/orders", profiles: [], unprofiled: true, sources: ["application.yml"] },
+              {
+                value: "/orders-it",
+                profiles: ["it"],
+                unprofiled: false,
+                sources: ["application-it.yml"],
+              },
+            ],
           },
         ],
       }),
@@ -552,10 +560,14 @@ describe("per-arm provenance breakdown (S-382, ADR-64)", () => {
         state: "bound",
         intake: "invocation",
         provenance: "config-bound",
-        key: "orders.base",
-        source: "placeholder",
-        values: [
-          { value: "/orders", profiles: ["docker"], unprofiled: false, sources: ["a.yml"] },
+        bound: [
+          {
+            key: "orders.base",
+            source: "placeholder",
+            values: [
+              { value: "/orders", profiles: ["docker"], unprofiled: false, sources: ["a.yml"] },
+            ],
+          },
         ],
       },
     ];
@@ -577,9 +589,13 @@ describe("per-arm provenance breakdown (S-382, ADR-64)", () => {
       state: "bound",
       intake: "invocation",
       provenance: "config-bound",
-      key,
-      source: "placeholder",
-      values: [{ value: "/x", profiles: [], unprofiled: true, sources: ["a.yml"] }],
+      bound: [
+        {
+          key,
+          source: "placeholder",
+          values: [{ value: "/x", profiles: [], unprofiled: true, sources: ["a.yml"] }],
+        },
+      ],
     }));
     const model = buildCoverageDashboard(coverage(rows));
     expect(model.arms[0].provenance.map((p) => p.label)).toEqual([

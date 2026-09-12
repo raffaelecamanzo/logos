@@ -289,10 +289,41 @@ fn strip_yaml_comment(rest: &str) -> &str {
 /// backslash, over-refused, and did cost a key — which is why the scan below
 /// stops at the closing quote.)
 ///
-/// So the key is emitted with **no value at all** rather than a wrong one, which
-/// the agreement rule then reports as `missing key`. Under-reading is the safe
-/// direction this module takes everywhere else (see [`parse_yaml`]); this makes
-/// the quoted-scalar case take it too.
+/// So the key is emitted with **no value at all** rather than a wrong one.
+/// Under-reading is the safe direction this module takes everywhere else (see
+/// [`parse_yaml`]); this makes the quoted-scalar case take it too.
+///
+/// # What the agreement rule then sees — and the residue it cannot see
+///
+/// `Agreement::of` judges the definitions it is given and has no channel for a
+/// source that was refused here, so the outcome depends on how many *other*
+/// sources define the key:
+///
+/// - the refused source was the key's **only** definer — the key has no
+///   definition at all and the rule reports `missing key`, which is the case
+///   this paragraph used to describe as if it were the only one;
+/// - **other sources define it** — they alone decide, and the refused source is
+///   invisible. That is this estate's actual case, not a hypothetical:
+///   `opentracing.spring.web.skip-pattern` is defined by 26 files, the 25
+///   escape-free ones agree, and the rule reports `agreed across 25 sources`.
+///   The 26th commits a genuinely *different* pattern (`.*\\.png` where the
+///   others write `.*.png`), so what is reported as agreement is agreement
+///   across a source set that silently lost its dissenting member.
+///
+/// The second bullet is a **known, open gap, not a settled direction**: it moves
+/// the fabricated agreement this guard was written against from the *value* up
+/// to the *agreement*, and closing it needs a refusal channel the corpus tables
+/// and `Agreement` do not have — a decision that crosses ADR-64's refusal
+/// enumeration and the provenance surfaces, so it is recorded rather than taken
+/// here. Pinned by `an_escape_refused_source_is_invisible_to_the_other_sources`
+/// so the behaviour is executable rather than inferred, and so that closing the
+/// gap has to fail a test rather than pass one silently.
+///
+/// Note the asymmetry with the sibling rule one layer up: a source whose value
+/// is itself a `${…}` placeholder — also a source that proves no value —
+/// refuses the **whole key** even beside literal sources
+/// (`Agreement::Placeholder`). The two answers to "one source of N proves
+/// nothing" differ, and that is what the decision above has to settle.
 ///
 /// Decoding the escapes properly would keep the key *and* be correct, and is the
 /// better answer whenever someone wants to write and test a YAML unescaper. This
