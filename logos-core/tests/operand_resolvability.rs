@@ -162,6 +162,17 @@ mod configuration_agreement;
 #[path = "operand_resolvability/identity.rs"]
 mod identity;
 
+/// S-392's forwarding gate — its own module, so the one-hop walk does not
+/// co-edit the file the configuration arm owns. Reads
+/// `configuration_agreement`'s publish-site recogniser and key resolver as the
+/// authority on what a site is and what a bare parameter is; adds no predicate
+/// of its own.
+///
+/// `#[path]`-attached for the same reason its two siblings are: a plain
+/// `tests/forwarding.rs` would become a second cargo test target.
+#[path = "operand_resolvability/forwarding.rs"]
+mod forwarding;
+
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
 /// printed by it.
