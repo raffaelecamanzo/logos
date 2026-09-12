@@ -463,9 +463,12 @@ impl ConfigBound {
 /// can render one and silently omit the other.
 ///
 /// Internally tagged, so the wire form of a literal is `{"provenance":"literal"}`
-/// and of an admitted value `{"provenance":"config-bound","key":…,"values":[…]}`
+/// and of an admitted value
+/// `{"provenance":"config-bound","bound":[{"key":…,"source":…,"values":[…]}]}`
 /// — one key a consumer switches on, never a nullable sibling field it must
-/// infer from.
+/// infer from. The evidence is nested under `bound`, one entry per key, and NOT
+/// flattened onto the row: it was flattened at this story's first commit, and
+/// the two readers written against that shape outlived it.
 ///
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md

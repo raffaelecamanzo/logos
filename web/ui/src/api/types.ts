@@ -1074,6 +1074,18 @@ export type ConfigValueRefusal =
   | "placeholder-value"
   | "missing-key";
 
+/** One configuration key an admitted target was read from, with the evidence
+ *  that admitted it (S-382, FR-WS-19 AC6, ADR-64). */
+export interface ConfigBoundKey {
+  /** The canonical key the value was read from. */
+  key: string;
+  source: ConfigKeySource;
+  /** One entry per distinct committed value. MORE THAN ONE is an overlay
+   *  divergence, retained rather than averaged (ADR-64) — a view must render
+   *  every one, never the first. */
+  values: ProfiledValue[];
+}
+
 /** Whether a reference's target was OBSERVED at the call site or ADMITTED from
  *  committed configuration (S-382, ADR-64, NFR-CC-04, BR-52).
  *
@@ -1090,13 +1102,18 @@ export type ValueProvenance =
   | { provenance: "literal" }
   | {
       provenance: "config-bound";
-      /** The canonical key the value was read from. */
-      key: string;
-      source: ConfigKeySource;
-      /** One entry per distinct committed value. MORE THAN ONE is an overlay
-       *  divergence, retained rather than averaged (ADR-64) — a view must render
-       *  every one, never the first. */
-      values: ProfiledValue[];
+      /** ONE ENTRY PER CONFIGURATION KEY the target names, in the order the
+       *  target names them — `${svc.host}${svc.path}/orders` is two keys, two
+       *  source sets and two profile sets, and FR-WS-19 AC6 asks that every one
+       *  of them carry its evidence.
+       *
+       *  This is NOT a flattened `{key, source, values}` on the row itself. It
+       *  was, at S-382's first commit; `408a2cd4` wrapped it so a multi-key
+       *  target could not lose every key but the first, and the Rust wire
+       *  assertion (`logos-core/src/federation/coverage.rs`, `admitted["bound"][0]["key"]`)
+       *  is the authority on the shape. This declaration is the only thing
+       *  standing between that payload and a view that reads it. */
+      bound: ConfigBoundKey[];
     }
   | {
       provenance: "config-unresolved";

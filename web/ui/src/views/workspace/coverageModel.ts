@@ -92,13 +92,24 @@ export function provenanceLabel(ref: ReferenceCoverage): string {
     case "literal":
       return "Written at the call site";
     case "config-bound": {
+      // `bound` is one entry PER KEY the target names, and each entry's `values`
+      // is one entry per distinct committed value of that key. Both are read:
+      // rendering only the first key would hide a second key's evidence, and
+      // rendering only the first value would show an overlay divergence as
+      // though the repository proved one value (ADR-64).
+      const keys = ref.bound ?? [];
       const profiles = [
-        ...new Set(ref.values.flatMap((v) => v.profiles)),
+        ...new Set(keys.flatMap((b) => b.values.flatMap((v) => v.profiles))),
       ].sort();
       const where = profiles.length > 0 ? ` (${profiles.join(", ")})` : "";
-      return ref.values.length > 1
-        ? `Read from \`${ref.key}\` — ${ref.values.length} values, one per overlay${where}`
-        : `Read from \`${ref.key}\`${where}`;
+      const names = keys.map((b) => `\`${b.key}\``).join(", ");
+      const values = keys.reduce((n, b) => n + b.values.length, 0);
+      if (keys.length === 0) {
+        return "Read from committed configuration";
+      }
+      return values > keys.length
+        ? `Read from ${names} — ${values} values, one per overlay${where}`
+        : `Read from ${names}${where}`;
     }
     case "config-unresolved":
       return `Names \`${ref.keys.join("`, `")}\`, which the committed sources do not admit`;
