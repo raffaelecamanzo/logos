@@ -484,6 +484,34 @@ fn every_refusal_variant_has_a_distinct_label() {
     let accessor_labels: BTreeMap<&str, Refusal> =
         Refusal::ALL.iter().map(|r| (r.label(), *r)).collect();
     assert_eq!(accessor_labels.len(), Refusal::ALL.len());
+
+    // Exhaustive matches, so a variant added without extending `ALL` fails to
+    // COMPILE rather than silently disappearing from every census that
+    // iterates `ALL`. Distinct labels alone cannot see a missing variant: the
+    // set stays consistent with itself while the population it enumerates
+    // shrinks. The measurement harness carried this guard for `Refusal` before
+    // S-382 promoted the enum here; the guard did not move with it, so a
+    // tenth variant would have compiled cleanly on this side.
+    for refusal in Refusal::ALL {
+        match refusal {
+            Refusal::NestedAccessor
+            | Refusal::MethodParameter
+            | Refusal::UnboundName
+            | Refusal::AmbiguousBinding
+            | Refusal::NotAGetter
+            | Refusal::ReceiverTypeUnknown
+            | Refusal::NoPropertiesClass
+            | Refusal::PropertyNotDeclared
+            | Refusal::UnrecognisedAccessor => {}
+        }
+    }
+    for refusal in ValueRefusal::ALL {
+        match refusal {
+            ValueRefusal::Uncommitted
+            | ValueRefusal::PlaceholderValue
+            | ValueRefusal::MissingKey => {}
+        }
+    }
 }
 
 // ── The placeholder scanner, probed with its near misses ────────────────────
