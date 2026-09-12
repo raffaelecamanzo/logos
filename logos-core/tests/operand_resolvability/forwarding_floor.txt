@@ -1,0 +1,168 @@
+S-392 T1 — MATERIALITY FLOOR, DECLARED BEFORE THE RUN
+=====================================================
+
+Declared (UTC):  2026-09-12T12:33:41Z
+Declared by:     Dev Session 3.2 (sprint-67, branch sprint-67-I3-S2)
+Story:           S-392 — Measure the one-hop parameter-forwarding residue
+Gate decides:    CR-121 CRA-05. Below the floor the finding is recorded as FALSIFIED
+                 with its evidence and date, and S-393 and S-394 stay UNPLANNED, and
+                 FR-WS-23 is marked WITHDRAWN IN PLACE (never deleted) per its own
+                 GATED banner.
+
+Estate under measurement: ~/source/pec-services (LOGOS_REF_WORKSPACE), 84 members,
+read-only against the estate SOURCE. Nothing under that path is written, indexed,
+re-enrolled or wiped.
+
+
+THE FLOOR
+---------
+
+    >= 7 of the 13 PRODUCTION (src/main) broker publish sites resolve their topic
+       operand by ONE HOP, WITHIN THE OPERAND'S OWN BUILD MODULE.
+
+"Resolve by one hop" means, exactly and conjunctively:
+
+  (a) the site's topic operand is a BARE PARAMETER of the enclosing method — not a
+      literal (a literal needs no hop and is outside this measurement), not a field,
+      not a composed expression;
+  (b) that method has at least one call site recorded in the Calls ledger;
+  (c) EVERY such call site lies in the SAME BUILD MODULE as the method;
+  (d) EVERY such call site supplies an operand in the matching positional slot, and
+      all of those operands AGREE (FR-WS-23 AC1/AC2 — disagreement emits per-site
+      candidates and NO edge, so a disagreeing site does NOT count toward this floor);
+  (e) the agreed operand is itself terminal at that one hop — a literal, or a
+      `${…}`/`@ConfigurationProperties` accessor that FR-WS-19 resolves against
+      committed configuration. An operand that is ITSELF a bare parameter of the
+      caller needs a SECOND hop and does NOT count.
+
+Measured one-hop-resolved < 7  =>  FALSIFIED.
+Measured one-hop-resolved >= 7 =>  the gate holds and S-393/S-394 may be planned.
+
+The floor of 7 fixes the maximum tolerable TWO-OR-MORE-HOP-AND-OTHER RESIDUE at
+6 of 13, i.e. 46%. That is the "declared share" CR-121 §7's slope risk row requires:
+above it, the broker milestone cuts to the listener side only and refuses producers
+with a named reason.
+
+
+WHY 7 — DERIVED FROM CR-121'S OWN FIGURES
+-----------------------------------------
+
+1. CR-121 §6 states the product under test verbatim: "On the reference workspace,
+   all 16 broker listener topics resolve to literals, **the 13 production publish
+   sites resolve, and `Producer` nodes rise from 0 to at least 13**". The claim
+   being tested is therefore 13 of 13 — a claim about an ALREADY-ENUMERATED
+   population, not an estimate over an open space.
+
+   That 13 is not this story's invention. S-365 measured it and it is on the record
+   in FR-WS-10's withdrawal note: "**0 of 13 `src/main` publish sites** would be
+   admitted by canonical identity, because every one passes its topic as a method
+   parameter". 54 publish sites were found; 41 are test-tree; the 38 that admitted
+   are all IT test classes. The production population is 13 and is the ONLY
+   population this floor is stated over.
+
+2. The floor is one half of that claim: 13 / 2 = 6.5, rounded up to 7. This is the
+   same rule S-384's identity floor applied to CR-121's other headline figure
+   (31 / 2 = 15.5 -> 16), declared 2026-09-12T07:33:21Z in this same sprint. Below
+   half, the hand computation behind CRA-05 is wrong by more than a factor of two —
+   the failure mode CR-121 §7 names as "exactly how CR-113 died".
+
+3. 7 is ALSO a strict majority of 13, and the two derivations converging is the
+   reason 7 is the right number rather than 6 or 8. FR-WS-23 fixes the bound at
+   "one level with no recursion and no fixpoint" IN ITS ACCEPTANCE CRITERIA, on the
+   stated ground that `logos-core` deliberately ships no dataflow. If fewer than
+   half the production sites resolve at one hop, then one hop is the EXCEPTION on
+   this estate, and FR-WS-23 would be writing a minority idiom into a Must while the
+   majority of the population needs precisely the dataflow slope that criterion
+   exists to prevent. That is not a coverage shortfall to be topped up later; it is
+   the requirement being aimed at the wrong shape.
+
+4. The floor is a count of PRODUCTION SITES RESOLVED, not of wrappers, call sites,
+   members or agreeing operands, because the site is what CR-121 promises to turn
+   into a `Producer` node and what the two gated stories deliver. A high call-site
+   agreement rate, a high wrapper-coverage rate, or a strong result on the no-key
+   HTTP client arm does NOT clear this floor. There is exactly ONE decisive number,
+   so the gate cannot be cleared by substituting a more favourable statistic.
+
+5. Why the floor is NOT stated on the 13 as an all-or-nothing 13 of 13. CR-121 §6
+   is a success criterion for the DELIVERED milestone, measured after S-393 and
+   S-394 ship. This gate decides whether those stories are worth planning at all,
+   and a 12-of-13 result would block a milestone that CR-121's own §7 mitigation
+   would happily ship at candidate confidence. Half is the decision threshold; 13
+   of 13 is the delivery target, and the two are deliberately different numbers.
+
+
+WHAT IS *NOT* A FLOOR — THE REPORTS
+-----------------------------------
+
+These are required for the finding to be adjudicable and for a falsification to be
+attributable to whichever join broke, but NONE of them can clear or fail this gate:
+
+  * AC1's TEST-TREE arm. Production and test are reported separately and never
+    averaged; Sprint 65 proved averaging them produces a figure with no referent —
+    it is how CR-117 looked validated overall and fell on production source alone.
+    A strong test-tree result cannot clear this floor. If the test-tree figure is
+    reported at all it is reported beside the production one, never summed with it.
+
+  * AC1's NO-KEY CLIENT-CALL arm. The 30 no-key production client-call sites
+    (of 111: 79 resolve, 2 disagree, 30 no-key — CR-115 CRA-01, 2026-09-07) are
+    measured under the same one-hop rule and REPORTED. They carry no floor because
+    CR-121 attaches no promised figure to them: its only nearby number, "roughly 8
+    sites", is the OVERLAY-UNION decision (§8), a different mechanism, and CR-121
+    records that as a correctness decision and not a coverage one.
+
+  * AC2's RESIDUE BREAKDOWN by reason (two-or-more hops / out-of-module / call sites
+    disagree / no call sites recorded / operand not a parameter). It is the
+    explanation of the headline, not a second headline.
+
+  * AC3's CRA-06 answer (is the caller->callee lookup answerable from the existing
+    Calls ledger, or does it need new storage). A NEGATIVE answer here does not
+    falsify CRA-05 — it makes S-393 more expensive, which is a planning input, not
+    a gate. It is reported as its own verdict with its own evidence.
+
+  * AC5's MEASURED COST of the hop. A figure for the perf reconciliation. A slow
+    hop is a budget conversation, not a falsification.
+
+
+NON-VACUITY PRECONDITIONS — "VOID" IS NOT "FALSIFIED"
+-----------------------------------------------------
+
+A zero produced by a walk that walked nothing reads identically to a zero produced
+by a walk that walked everything. The run is VOID — neither confirming nor
+falsifying, and the gate must be re-run — unless ALL of these hold, each asserted
+NON-ZERO by the harness:
+
+  V1. The walk admits a non-zero number of estate members (expected 84).
+  V2. The walk admits a non-zero number of production Java source files, and the
+      broker detector gates a non-zero number of them.
+  V3. The walk finds AT LEAST 13 production (src/main) publish sites. Finding
+      FEWER than the enumerated population means the harness is not looking at what
+      S-365 counted, and the result is VOID, not FALSIFIED.
+  V4. The Calls ledger yields a non-zero number of call rows over the production
+      tree as a whole.
+
+V4 is deliberately scoped to the tree, not to the wrapper methods. Zero call rows
+ACROSS THE WHOLE PRODUCTION TREE is a broken walk => VOID. Zero call rows FOR THE
+WRAPPER METHODS SPECIFICALLY, while the rest of the tree has them, is a real
+measured finding about CRA-06 and counts as residue under AC2 — it is reported,
+not voided.
+
+
+A CAVEAT DECLARED IN ADVANCE, NOT A FLOOR
+-----------------------------------------
+
+If the resolved sites all funnel through a SINGLE wrapper method, or sit in a
+SINGLE member, then the 13-of-13 claim rests on one syntactic data point repeated,
+and the generality of the inference is correspondingly weak. The harness therefore
+reports the number of DISTINCT wrapper methods and DISTINCT members behind the
+resolved count. This is stated here, before the run, so that it is read as a
+declared limit on what a PASS licenses — not as a second threshold invented
+afterwards to argue away an inconvenient result. It does not clear or fail the
+gate.
+
+
+COMMITMENT
+----------
+
+This floor is not revised after the run. If the measurement shows the floor was
+badly chosen, that is stated in the implementation notes with the reasoning, and
+THIS FILE STANDS UNCHANGED.
