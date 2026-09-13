@@ -3228,6 +3228,147 @@ fn a_self_qualified_accessor_reaches_the_ledger_as_the_same_reference() {
     );
 }
 
+/// **S-399 AC1, end to end.** The estate's second egress shape — the SAME
+/// qualified accessor, nested one lambda deep inside `.uri(builder ->
+/// builder.path(…).build(…))` — reaches the ledger as the reference the direct
+/// spelling reaches it as.
+///
+/// The caller source differs from the S-398 fixture in the lambda alone, and
+/// the direct spelling is run first as the control the nested runs are compared
+/// against — so a build in which BOTH spellings broke the same way fails on the
+/// control rather than passing silently. The control is itself anchored on the
+/// expected key, which is what makes the comparison mean something; an earlier
+/// draft of this comment claimed the expectation was never transcribed, which
+/// the line below it contradicts.
+///
+/// Asserted through `extract_files` for the reason
+/// [`an_accessor_operand_reaches_the_ledger_as_its_canonical_configuration_key`]
+/// records: the query-layer fixtures in `tests/java_http_client_call.rs` prove
+/// the pattern captures, and only the whole pipeline proves the captured
+/// operand still reaches `BindingView` and resolves.
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_lambda_nested_accessor_reaches_the_ledger_as_the_same_reference() {
+    let reg = registry();
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let direct = ACCESSOR_CALLER_SOURCE.replace("uri(api.get", "uri(this.api.get");
+    let nested = ACCESSOR_CALLER_SOURCE.replace(
+        "uri(api.getUriGetArchive())",
+        "uri(builder -> builder.path(this.api.getUriGetArchive()).build(1))",
+    );
+    assert_ne!(nested, ACCESSOR_CALLER_SOURCE, "the fixture really is nested");
+
+    let expected = {
+        let facts = extract_files(
+            &[
+                FileInput::new(ACCESSOR_PROPS_FILE, ACCESSOR_PROPS_SOURCE),
+                FileInput::new(ACCESSOR_CALLER_FILE, &direct),
+            ],
+            &reg,
+            &ctx,
+        );
+        client_call_targets(&facts, ACCESSOR_CALLER_FILE)
+    };
+    assert_eq!(
+        expected,
+        vec!["GET ${mailserver.api.urigetarchive}".to_string()],
+        "the direct spelling is the control, and it still binds",
+    );
+
+    let facts = extract_files(
+        &[
+            FileInput::new(ACCESSOR_PROPS_FILE, ACCESSOR_PROPS_SOURCE),
+            FileInput::new(ACCESSOR_CALLER_FILE, &nested),
+        ],
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        client_call_targets(&facts, ACCESSOR_CALLER_FILE),
+        expected,
+        "the accessor one lambda deep names the same canonical key, by the same \
+         path — and leaves no refusal row beside it, which the exact-equality \
+         comparison is what catches (an uncancelled candidate reads as an extra \
+         empty string)",
+    );
+
+    // The BARE-receiver spelling too. Pattern 5 binds the operand as `(_)`, so
+    // the qualified and unqualified accessors are structurally identical at the
+    // query layer — but which `DeclaredTypes` arm answers for them is not
+    // (S-398 split `get` from `field` precisely there), so both spellings are
+    // asserted rather than one standing for the other.
+    let bare = ACCESSOR_CALLER_SOURCE.replace(
+        "uri(api.getUriGetArchive())",
+        "uri(builder -> builder.path(api.getUriGetArchive()).build(1))",
+    );
+    assert_ne!(bare, nested, "the two spellings really do differ");
+    let facts = extract_files(
+        &[
+            FileInput::new(ACCESSOR_PROPS_FILE, ACCESSOR_PROPS_SOURCE),
+            FileInput::new(ACCESSOR_CALLER_FILE, &bare),
+        ],
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        client_call_targets(&facts, ACCESSOR_CALLER_FILE),
+        expected,
+        "an unqualified receiver inside the lambda reaches the same key through \
+         `DeclaredTypes::get`, as it does outside one",
+    );
+
+    // The negative control, on the SAME nested fixture: with the properties
+    // class removed the identical site records no key and stays the keyless
+    // refusal row. Without it the assertion above would also be produced by a
+    // lambda that resolved something else entirely.
+    let without = extract_files(&[FileInput::new(ACCESSOR_CALLER_FILE, &nested)], &reg, &ctx);
+    assert_eq!(
+        client_call_targets(&without, ACCESSOR_CALLER_FILE),
+        vec![String::new()],
+        "…and with no properties class the nested site binds nothing, so the \
+         hop is what resolved it",
+    );
+}
+
+/// **S-399 AC3, end to end on the estate's DOMINANT lambda.** The same nested
+/// accessor, in a lambda that also chains a `queryParam`, emits no reference —
+/// it is refused whole rather than bound on the `path(…)` half it could read
+/// ([NFR-RA-05]).
+///
+/// This is the criterion's real cost, and it is asserted on the shape that
+/// carries it: most of the reference workspace's `.uri(<lambda>)` sites chain
+/// at least one `queryParam` — the measured figure is stated once, in the
+/// composition rule in `plugins/java/queries/invocations.scm` — so this
+/// fixture, not the bare `path(…)` one above, is what most of the estate looks
+/// like.
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_lambda_that_chains_a_query_param_binds_nothing_even_with_the_class_present() {
+    let reg = registry();
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let chained = ACCESSOR_CALLER_SOURCE.replace(
+        "uri(api.getUriGetArchive())",
+        "uri(builder -> builder.path(this.api.getUriGetArchive()).queryParam(\"page\", 1).build(1))",
+    );
+    assert_ne!(chained, ACCESSOR_CALLER_SOURCE, "the fixture really is chained");
+
+    let facts = extract_files(
+        &[
+            FileInput::new(ACCESSOR_PROPS_FILE, ACCESSOR_PROPS_SOURCE),
+            FileInput::new(ACCESSOR_CALLER_FILE, &chained),
+        ],
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        client_call_targets(&facts, ACCESSOR_CALLER_FILE),
+        vec![String::new()],
+        "the properties class IS present and the accessor IS resolvable, so \
+         what refuses here is the composition alone — the keyless \
+         runtime-composed row, unchanged",
+    );
+}
+
 /// **S-398 AC3, at the surface the criterion speaks about.** A generic wrapper
 /// whose URI is a method **parameter** emits no `"METHOD /template"` reference,
 /// and that is a correct refusal rather than a miss.

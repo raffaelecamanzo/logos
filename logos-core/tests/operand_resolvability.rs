@@ -73,6 +73,13 @@
 //! and exactly **1** to a same-unit constant — `JSESSIONID_COOKIE_NAME`, a
 //! cookie name, not a path.
 //!
+//! S-399 moved 3 of those 9 lambdas out of `other`: the arm now reads the
+//! operand inside a lambda composing `path(<one operand>)` and an optional
+//! `build(…)`, so such a site classifies from that operand and the remaining 6
+//! — which chain a `queryParam` — stay `other`. The figure predates the change
+//! and the table is not re-run here; the conclusion above is untouched, since
+//! constant folding still admits nothing either way.
+//!
 //! Go's 6 same-unit constants are likewise not paths: they are HTTP **header
 //! names** (`Origin`, `AccessControlRequestMethod`, `HeaderXForwardedHost`)
 //! read through `header.Get(…)` inside a `net/http` file — the then-documented
@@ -838,6 +845,42 @@ fn is_http_method(name: &str) -> bool {
 /// has no attributable enclosing symbol; this does not. The omission can only
 /// *add* sites, so it biases in favour of CRA-01 like every other judgement
 /// call here (see the module docs).
+///
+/// # One site per call: an operand that CONTAINS another is dropped (S-399)
+///
+/// Several shipped `.scm` patterns match the **same** call, each binding
+/// `@invoke.http.arg` to a different node — Java's and Kotlin's
+/// `.uri(URI.create(<literal>))` (patterns 1 and 2-3) and, since S-399, Java's
+/// `.uri(<UriBuilder lambda>)` (patterns 1 and 5). Left alone, that is one call
+/// counted twice in every taxonomy column here, with one row classified from
+/// the wrapper and one from what it wraps.
+///
+/// Production does not count it twice, and the rule below is production's own,
+/// not a proxy for it: `extract::config::record_refusals` cancels a refusal
+/// candidate whenever a resolved operand of the same relation lies **inside**
+/// its byte range. Keying on containment is that test with "resolved" widened
+/// to "any other captured operand" — the harness does not run the resolution
+/// step, so it cannot ask which operand resolved, but the nesting it keys on is
+/// the same nesting.
+///
+/// **Containment, not the anchor node.** An earlier spelling grouped by the
+/// anchor the verb was read from and kept the narrowest operand in each group.
+/// It agrees with production on every nested pair, and diverges where two
+/// genuinely distinct calls share one anchor: `restTemplate.get("/a").uri("/b")`
+/// binds `@invoke.http.method` to the same `get` identifier from pattern 4 and
+/// from pattern 1, so the anchor rule discarded `"/a"` — an operand belonging
+/// to the *other* call, which production counts. No `RestClient`/`RestTemplate`/
+/// `WebClient`/`HttpClient` verb method takes an argument *and* returns
+/// something with `.uri(…)`, so it was latent rather than a live census error;
+/// it is spelled out because the two rules are indistinguishable on every
+/// fixture in this file.
+///
+/// The corpus this was measured on contains **zero** `URI.create(…)` sites in
+/// Java and Kotlin (counted 2026-09-13), so on `pec-services` the rule moves
+/// only the lambda shape: the 3 `.uri(builder -> builder.path(<accessor>)…)`
+/// sites pattern 5 admits are classified from the accessor rather than from the
+/// lambda. The module header's Sprint-64 table predates that and is not re-run
+/// here.
 fn collect_sites<'t>(
     query: &Query,
     root: Node<'t>,
@@ -890,7 +933,21 @@ fn collect_sites<'t>(
             .unwrap_or(arg_node);
         sites.push((anchor.start_position().row as u32 + 1, arg_node));
     }
+    // One row per call, by CONTAINMENT — production's own rule, not a proxy for
+    // it. A site is dropped when another site's operand lies inside its own,
+    // which is the `record_refusals` test spelled with `resolved` replaced by
+    // "any other captured operand": the harness does not run the resolution
+    // step, so it cannot ask which operand resolved, but the nesting it keys on
+    // is the same nesting.
+    let contains = |outer: &Node<'t>, inner: &Node<'t>| {
+        let (o, i) = (outer.byte_range(), inner.byte_range());
+        i.start >= o.start && i.end <= o.end && i != o
+    };
     sites
+        .iter()
+        .filter(|(_, arg)| !sites.iter().any(|(_, other)| contains(arg, other)))
+        .copied()
+        .collect()
 }
 
 /// Whether this file passes the [FR-FW-04] ledger gate: its extracted refs name
@@ -2194,12 +2251,74 @@ fn a_parameter_is_other_even_in_a_method_mentioning_properties() {
     assert_eq!(a.kinds, vec![OperandKind::Other]);
 }
 
-/// A `uriBuilder -> …` lambda is `Other` — 9 of the corpus's Java sites.
+/// Two genuinely distinct calls that share one verb anchor are **two** sites.
+///
+/// `restTemplate.get("/a").uri("/b")` binds `@invoke.http.method` to the same
+/// `get` identifier from pattern 4 and from pattern 1, so an anchor-keyed
+/// dedup would discard one call's operand entirely. Containment does not: the
+/// two operands do not nest. The fixture is not idiomatic Java — no shipped
+/// client's verb method both takes an argument and returns a `.uri(…)` builder
+/// — which is exactly why the rule needs a test rather than a corpus.
 #[cfg(feature = "lang-java")]
 #[test]
-fn a_uri_builder_lambda_is_other() {
-    let a = java("", "builder -> builder.path(\"/x\").build()");
-    assert_eq!(a.kinds, vec![OperandKind::Other]);
+fn two_calls_sharing_one_verb_anchor_stay_two_sites() {
+    let source = "package com.example;\n        import org.springframework.web.client.RestTemplate;\n        public class Calls {\n        \x20   private RestTemplate restTemplate;\n        \x20   void call() { restTemplate.get(\"/aaaa\").uri(\"/b\"); }\n        }\n";
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    let plugin = registry.for_path("Calls.java").expect("java plugin");
+    let query = plugin.query("invocations").expect("invocations query");
+    let mut parser = Parser::new();
+    parser.set_language(plugin.language()).expect("language");
+    let tree = parser.parse(source, None).expect("parse");
+    let mut operands: Vec<String> = collect_sites(
+        query,
+        tree.root_node(),
+        source.as_bytes(),
+        &plugin.semantics().invocation_methods,
+    )
+    .into_iter()
+    .map(|(_, arg)| arg.utf8_text(source.as_bytes()).unwrap_or_default().to_string())
+    .collect();
+    operands.sort();
+    assert_eq!(
+        operands,
+        vec!["\"/aaaa\"".to_string(), "\"/b\"".to_string()],
+        "neither call's operand contains the other, so both survive — an \
+         anchor-keyed dedup kept only the narrower one"
+    );
+}
+
+/// A `uriBuilder -> …` lambda — 9 of the corpus's Java sites — is classified
+/// from whatever the arm can actually read inside it, which S-399 changed.
+///
+/// Before S-399 the whole lambda was the captured operand and every one of the
+/// 9 was `Other`. Pattern 5 now binds the operand **inside** a lambda composing
+/// `path(<one operand>)` and an optional `build(…)`, so such a lambda is
+/// classified from that operand — while a lambda composing anything more stays
+/// captured whole and stays `Other`, which is the half that still covers 6 of
+/// the corpus's 9 (counted 2026-09-13).
+///
+/// Both rows are asserted, because the pair is the rule: the first alone would
+/// also pass if pattern 5 had swallowed every lambda.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_uri_builder_lambda_is_classified_from_what_the_arm_reads_inside_it() {
+    let admitted = java("", "builder -> builder.path(\"/x\").build()");
+    assert_eq!(
+        admitted.kinds,
+        vec![OperandKind::Literal],
+        "pattern 5 binds the `path(…)` operand, so the site is that literal"
+    );
+
+    let refused = java(
+        "",
+        "builder -> builder.path(\"/x\").queryParam(\"q\", q).build()",
+    );
+    assert_eq!(
+        refused.kinds,
+        vec![OperandKind::Other],
+        "a chained lambda is captured whole and stays unreadable — NFR-RA-05, \
+         never bound on its resolvable half"
+    );
 }
 
 /// A name the unit does not bind is `Other` — never guessed.

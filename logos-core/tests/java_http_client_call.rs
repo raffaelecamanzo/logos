@@ -11,7 +11,9 @@
 //!
 //! 1. **What is captured** — the four-idiom matrix, each rendering exactly one
 //!    `"METHOD /template"` reference keyed through the same `route_key` the
-//!    provider side reduces to ([FR-CG-09]).
+//!    provider side reduces to ([FR-CG-09]) — and, in section 4, the one shape
+//!    whose operand is nested inside a `UriBuilder` lambda (S-399), which
+//!    renders the reference its direct spelling does.
 //! 2. **What is refused** — [FR-WS-08]'s shared negative-case fixture contract
 //!    (S-340), referenced rather than re-invented here.
 //! 3. **Which receivers the arm admits and refuses** — the receiver rule's
@@ -423,10 +425,10 @@ fn the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row() {
 }
 
 /// **Stated over-capture ceiling** — the receiver rule reaches the plain
-/// receiver-method arm (patterns 4/4b) only. Patterns 1-3 constrain the `.uri`
-/// link and the `URI.create` receiver *type*, but place no constraint on the
-/// receiver of the verb link, so a non-client receiver still captures through
-/// the fluent arm.
+/// receiver-method arm (pattern 4) only. Patterns 1-3 and 5 constrain the
+/// `.uri` link — its name, and the `URI.create` receiver *type* or the lambda's
+/// composition — but place no constraint on the receiver of the verb link, so a
+/// non-client receiver still captures through the fluent arm.
 ///
 /// Asserted as the capture it is, not as zero, so the residual is pinned rather
 /// than merely conceded in prose — and so closing it later is a deliberate
@@ -435,28 +437,84 @@ fn the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row() {
 /// (`WebClient.create(base).get().uri(…)`), so a receiver rule there buys this
 /// over-capture back as under-capture on the estate's dominant shape.
 ///
+/// **S-399 widened the residual, so the second row was added with it.** Before
+/// pattern 5 a lambda-composed path on a non-client receiver emitted *nothing*
+/// — the lambda was unreadable, so the site refused. It now emits the same
+/// reference the literal form does. The prose in the `.scm` was amended to say
+/// "patterns 1-3 and 5"; a widened residual whose pin does not follow is the
+/// ceilings index naming something it does not pin, which that file calls a
+/// lie.
+///
 /// The shape is narrow — a non-client receiver with a no-argument
-/// HTTP-verb-named method chained into `.uri(<literal>)` — and the reference
+/// HTTP-verb-named method chained into `.uri(…)` — and the reference
 /// workspace's 94 Java sites contain none. It matters to
 /// [S-374](../../docs/planning/journal.md#s-374-the-http-client-call-arm-records-its-refusals),
 /// which writes one refusal row per site ([ADR-54], [NFR-RA-05]).
 #[test]
 fn the_fluent_arm_receiver_is_an_unguarded_over_capture_ceiling() {
-    assert_eq!(
-        client_calls(
+    for (label, call) in [
+        ("a literal", r#"perms.get().uri("/admin/users").retrieve()"#),
+        (
+            "a lambda-composed literal (S-399)",
+            r#"perms.get().uri(b -> b.path("/admin/users")).retrieve()"#,
+        ),
+    ] {
+        let calls = client_calls(&format!(
             r#"
-public class Calls {
+public class Calls {{
     private RestClient restClient;
     private java.util.Map<String, String> perms;
-    Object notACall() {
-        return perms.get().uri("/admin/users").retrieve();
+    Object notACall() {{
+        return {call};
+    }}
+}}
+"#
+        ));
+        assert_eq!(
+            calls,
+            ["GET /admin/users"],
+            "{label}: the fluent arm's verb-link receiver is unguarded — a \
+             stated ADR-54 residual, narrower than the blanket file-grained one \
+             S-375 retired"
+        );
     }
 }
-"#
-        ),
-        ["GET /admin/users"],
-        "the fluent arm's verb-link receiver is unguarded — a stated ADR-54 \
-         residual, narrower than the blanket file-grained one S-375 retired"
+
+/// **Stated over-capture residual, S-399's own.** Pattern 5 is the first shape
+/// that puts the captured operand inside a **binder**, and the accessor hop
+/// behind it is scope-blind: `DeclaredTypes::get` answers from the file's
+/// declarations "at any position", which a lambda parameter is not one of.
+///
+/// So a lambda whose parameter **shadows** a configuration-bound field, and
+/// which then reads an accessor off that parameter, binds the field's key —
+/// a key this source does not prove, since inside the lambda the name denotes
+/// the `UriBuilder` ([NFR-RA-05]).
+///
+/// **It is unreachable in Spring, and that is an accident of a third-party API
+/// rather than a guard.** `plugins/java/plugin.toml` declares
+/// `accessor_prefixes = ["get", "is"]`, and `UriBuilder` declares no `getX()`
+/// or `isX()` — so the fixture below does not compile as Java, which is why it
+/// costs nothing measured and why no site on the reference workspace reaches
+/// it. Widening `accessor_prefixes`, or giving another builder language this
+/// pattern, reopens it.
+///
+/// Recorded and pinned rather than worked around ([ADR-54]): closing it
+/// structurally would mean splitting the operand wildcard into member-call and
+/// non-member-call alternatives so the operand's receiver could be `#not-eq?`'d
+/// against the lambda parameter — four branches for a hazard the API blocks.
+/// Asserted as the capture it is, so re-deciding it later fails this test.
+#[test]
+fn a_lambda_parameter_shadowing_a_bound_field_is_a_stated_over_capture() {
+    let props = "package a;\n        @ConfigurationProperties(prefix = \"mailserver.api\")\n        public class MailServerConfigurationApi { private String uriGetArchive; }\n";
+    let caller = "public class Calls {\n        \x20   private RestClient restClient;\n        \x20   private final MailServerConfigurationApi api;\n        \x20   String a() { return restClient.get()\n        \x20     .uri(api -> api.path(api.getUriGetArchive()).build(1))\n        \x20     .retrieve().body(String.class); }\n        }\n";
+    let calls = client_calls_raw(&format!(
+        "package com.example;\n{CLIENT_IMPORTS}\n{props}\n{caller}"
+    ));
+    assert_eq!(
+        calls,
+        ["GET ${mailserver.api.urigetarchive}"],
+        "the lambda parameter shadows the field, and the scope-blind hop reads \
+         the field anyway — a recorded over-capture, not a behaviour to rely on"
     );
 }
 
@@ -488,17 +546,23 @@ fn a_chained_receiver_and_a_token_less_wrapper_are_stated_ceilings() {
     }
 }
 
-/// Shared negative case **2** — `base-url-runtime`. A bare-variable path and a
-/// base-URL-composed one each emit **no** reference. The classification itself
-/// is generic and already fixture-pinned in
+/// Shared negative case **2** — `base-url-runtime`. A bare-variable path, a
+/// base-URL-composed one and a helper-method call each emit **no** reference.
+/// The classification itself is generic and already fixture-pinned in
 /// `resolve::http_client_call::classify_client_call`; what this asserts is that
 /// Java's query fills the interpreter's slots such that the refusal fires.
 ///
-/// **And that the refusal is now recorded (S-374).** Six declining methods leave
-/// six keyless ledger rows — one per method, which is the ledger's own grain —
-/// so [FR-WS-08] AC2's "appears under a runtime-composition coverage reason" half
-/// is met on the language whose estate the criterion was measured over. The
-/// reference half is unchanged: still zero.
+/// **And that the refusal is recorded (S-374).** Each declining method leaves
+/// one keyless ledger row — the ledger's grain is the declaration — so
+/// [FR-WS-08] AC2's "appears under a runtime-composition coverage reason" half
+/// is met on the language whose estate the criterion was measured over.
+///
+/// **Six methods, and the split has moved twice.** All six refused when this
+/// was written; S-382 admitted the `${…}` placeholder literal and S-399 the
+/// lambda-composed one, so the fixture now carries **two** references beside
+/// **four** refusals. The in-body commentary below records which moved and why
+/// — the test is the negative case for the four that still decline, and the
+/// name is read with that scope.
 #[test]
 fn a_runtime_composed_path_emits_no_reference() {
     let (references, refusals) = client_call_rows(
@@ -534,25 +598,39 @@ public class Calls {
     // configuration ([ADR-64]). `base-url-runtime` was true of the *call site* and
     // false of the *repository*, which is the distinction ADR-64 draws.
     //
-    // The other five are untouched, and that is the load-bearing half of this
-    // case: a bare variable, a concatenation, a relative literal, a builder lambda
-    // and a helper-method call each still refuse. S-382 widened what is
+    // **S-399 then moved a second one, on the same rule.** The builder lambda's
+    // `path(…)` argument here is a static literal — a *resolvable* operand — and
+    // the arm now reads it, so the site emits the reference the direct
+    // `.uri("/users")` spelling emits. What the lambda composes is still what
+    // decides: this one composes `path(<literal>).build()` and nothing else, and
+    // its chaining siblings stay refused whole
+    // ([`a_uri_builder_lambda_that_chains_past_path_stays_refused_whole`]).
+    //
+    // The other four are untouched, and that is the load-bearing half of this
+    // case: a bare variable, a concatenation, a relative literal and a
+    // helper-method call each still refuse. Both stories widened what is
     // **captured**, never what is believed — the stored config-bound target keys
     // nothing until its key is proven, and a template the sources do not admit
     // refuses under `config-key-missing`.
     assert_eq!(
         references,
-        vec!["GET ${users.service.url}/users".to_string()],
-        "only the `${{…}}` placeholder literal is admitted, stored VERBATIM so the \
-         resolution reads the bytes the source commits; a bare variable, a \
-         concatenation, a relative literal, a builder lambda and a helper-method \
-         call are each still base-url-runtime with no reference: {references:?}"
+        vec![
+            "GET ${users.service.url}/users".to_string(),
+            "GET /users".to_string()
+        ],
+        "the `${{…}}` placeholder literal and the lambda-composed literal are \
+         admitted — the first stored VERBATIM so the resolution reads the bytes \
+         the source commits, the second read through the lambda as the direct \
+         spelling would be; a bare variable, a concatenation, a relative literal \
+         and a helper-method call are each still base-url-runtime with no \
+         reference: {references:?}"
     );
     assert_eq!(
-        refusals, 5,
-        "the five still-declining METHODs leave one keyless row each — the ledger's \
-         grain is the declaration, so this is five, not one per call. It was six \
-         before S-382 admitted the placeholder literal."
+        refusals, 4,
+        "the four still-declining METHODs leave one keyless row each — the ledger's \
+         grain is the declaration, so this is four, not one per call. It was six \
+         before S-382 admitted the placeholder literal and S-399 the lambda-composed \
+         one."
     );
 }
 
@@ -715,6 +793,12 @@ fn receiver_less_and_class_qualified_verb_calls_are_never_captured() {
 
 /// `URI.create(…)` is anchored on its **receiver type**, so an unrelated
 /// `create` factory does not smuggle a path into the JDK-builder patterns.
+///
+/// "Builder" here is the **JDK** `HttpRequest.newBuilder()` chain of patterns
+/// 2-3. Since S-399 a second wrapper is unwrapped by a different rule — a
+/// Spring `UriBuilder` lambda, by pattern 5 — and it is anchored on its own
+/// composition rather than on a receiver type; see
+/// [`the_uri_builder_composer_rule_is_probed_with_its_near_misses`].
 #[test]
 fn only_uri_create_unwraps_a_builder_path() {
     let (references, refusals) = client_call_rows(
@@ -853,4 +937,231 @@ public class Calls {
         .is_empty(),
         "refused whole, never partially — no verb-less or path-less half is emitted"
     );
+}
+
+// ── 4. The `UriBuilder` lambda (S-399, [FR-WS-19], [NFR-RA-05]) ──────────────
+
+/// **S-399 AC1.** A path composed inside a `UriBuilder` lambda resolves to the
+/// same reference the direct spelling would, with and without the `build(…)`
+/// terminal.
+///
+/// The `terminated` row is the estate's shape — Spring's
+/// `uri(Function<UriBuilder, URI>)` admits no other, so all 13 of the reference
+/// workspace's `.uri(<lambda>)` sites carry the terminal. The `bare` row pins
+/// the alternation's defensive branch; see the composition rule in
+/// `plugins/java/queries/invocations.scm` for why it is kept.
+///
+/// The direct form is asserted **in the same call**, from the same fixture
+/// text, rather than written out as a third expected literal — "the same
+/// reference the direct form would" is the criterion, so the two are compared
+/// rather than separately transcribed.
+#[test]
+fn a_uri_builder_lambda_yields_the_reference_the_direct_form_does() {
+    let direct = client_call_rows(
+        r#"
+public class Calls {
+    private WebClient webClient;
+    Object direct(String id) {
+        return webClient.get().uri("/users/{id}").retrieve();
+    }
+}
+"#,
+    );
+    let lambda = client_call_rows(
+        r#"
+public class Calls {
+    private WebClient webClient;
+    Object bare(String id) {
+        return webClient.get().uri(builder -> builder.path("/users/{id}")).retrieve();
+    }
+}
+"#,
+    );
+    let terminated = client_call_rows(
+        r#"
+public class Calls {
+    private WebClient webClient;
+    Object terminated(String id) {
+        return webClient.get().uri(builder -> builder.path("/users/{id}").build(id)).retrieve();
+    }
+}
+"#,
+    );
+
+    assert_eq!(
+        direct,
+        (vec!["GET /users/{id}".to_string()], 0),
+        "the control: the direct spelling binds and leaves no refusal row"
+    );
+    assert_eq!(
+        lambda, direct,
+        "`builder -> builder.path(<operand>)` emits the reference the direct \
+         `.uri(<operand>)` emits — and leaves no refusal row beside it, which is \
+         the wider pattern-1 match's candidate being cancelled by the inner \
+         match's resolved operand (S-374)"
+    );
+    assert_eq!(
+        terminated, direct,
+        "`.build(…)` is the builder's terminal, not a second segment: it \
+         expands the template variables the direct form passes as trailing \
+         `.uri(template, …)` arguments, which that form also ignores"
+    );
+}
+
+/// **S-399 AC2.** A lambda whose `path(…)` argument is **not** resolvable emits
+/// no reference and records its refusal — the row the site already recorded
+/// before the lambda was reached at all.
+///
+/// Asserted as the exact `(references, refusals)` pair, not as `is_empty`: an
+/// empty vector is also what a wholly suppressed arm produces, so the second
+/// half is what makes this "unchanged" rather than "silently dropped".
+///
+/// **What it does NOT pin, stated because an earlier draft of this comment
+/// claimed it.** Both matches do supply a refusal candidate here, and they do
+/// collapse — but this assertion cannot see that collapse happen. Deleting
+/// `record_refusals`' `(relation, declaration, line)` dedup outright leaves
+/// this test green, because the production caller re-runs `dedup_sort_refs`,
+/// which keys on `(source, target, form, kind, relation)` and ignores `line`:
+/// two keyless `""` rows from one declaration reach the ledger as one row
+/// either way. `refusals == 1` therefore cannot distinguish one candidate from
+/// two. That two candidates genuinely exist is established elsewhere — by
+/// `operand_resolvability`'s site walk, where reverting its dedup changes the
+/// count.
+#[test]
+fn a_uri_builder_lambda_with_an_unresolvable_path_records_its_refusal_unchanged() {
+    // Both shapes the criterion names — a bare variable AND a runtime-composed
+    // base. The second is the one the criterion spells that the first does not
+    // cover: a concatenation is not a static literal and not an accessor, so it
+    // must reach the same refusal by a different route through the dispatch.
+    for (label, path_arg) in [("a bare variable", "uri"), ("a composed base", "base + uri")] {
+        assert_eq!(
+            client_call_rows(&format!(
+                r#"
+public class Calls {{
+    private WebClient webClient;
+    private String base;
+    Object runtime(String uri) {{
+        return webClient.get().uri(builder -> builder.path({path_arg}).build()).retrieve();
+    }}
+}}
+"#
+            )),
+            (vec![], 1),
+            "{label} proves nothing, so the site stays the one keyless \
+             base-url-runtime row it was"
+        );
+    }
+}
+
+/// **S-399 AC3.** The composition is not approximated: a lambda that chains
+/// `path(…)` with anything else stays refused **whole**, rather than binding on
+/// its resolvable half ([NFR-RA-05]).
+///
+/// The `queryParam` row is first because it is the estate's dominant lambda
+/// shape — see the composition rule in
+/// `plugins/java/queries/invocations.scm`, which carries the measured figure —
+/// so the criterion's cost is paid on the common case, not on a contrived one.
+/// Each row's path argument is a **resolvable** literal, so what is being
+/// pinned is the chain and not the operand.
+#[test]
+fn a_uri_builder_lambda_that_chains_past_path_stays_refused_whole() {
+    for (label, body) in [
+        (
+            "queryParam",
+            r#"builder -> builder.path("/users").queryParam("q", q).build(id)"#,
+        ),
+        (
+            "queryParams",
+            r#"builder -> builder.path("/users").queryParams(params).build()"#,
+        ),
+        (
+            "a second path segment",
+            r#"builder -> builder.path("/users").path(segment).build()"#,
+        ),
+        (
+            "a call after the terminal",
+            r#"builder -> builder.path("/users").build().normalize()"#,
+        ),
+    ] {
+        let body = format!(
+            r#"
+public class Calls {{
+    private WebClient webClient;
+    Object chained(String q, String id, String segment, Object params) {{
+        return webClient.get().uri({body}).retrieve();
+    }}
+}}
+"#
+        );
+        assert_eq!(
+            client_call_rows(&body),
+            (vec![], 1),
+            "{label}: the lambda composes more than the one operand the arm can \
+             read, so it is refused whole — never bound on the literal half"
+        );
+    }
+}
+
+/// The composer rule's **near misses**, each one step from matching.
+///
+/// Every row is a lambda whose `path`-shaped call is *not* the one the pattern
+/// admits, and every row's operand is a resolvable literal — so a row that
+/// captured would emit a reference, and the assertion is the reference's
+/// absence rather than a refusal count that a suppressed arm would also produce.
+#[test]
+fn the_uri_builder_composer_rule_is_probed_with_its_near_misses() {
+    for (label, body) in [
+        (
+            "a composer whose name merely starts with `path`",
+            r#"builder -> builder.pathSegment("/users")"#,
+        ),
+        (
+            "a `path` call on something other than the lambda's own builder",
+            r#"builder -> helper.path("/users")"#,
+        ),
+        (
+            "a two-argument `path` call",
+            r#"builder -> builder.path("/users", "/more")"#,
+        ),
+        (
+            "a zero-argument `path` call",
+            r#"builder -> builder.path()"#,
+        ),
+        (
+            "a terminal that is not `build`",
+            r#"builder -> builder.path("/users").encode()"#,
+        ),
+        (
+            "a parenthesised lambda parameter",
+            r#"(builder) -> builder.path("/users")"#,
+        ),
+        (
+            "a typed lambda parameter",
+            r#"(UriBuilder builder) -> builder.path("/users")"#,
+        ),
+    ] {
+        let source = format!(
+            r#"
+public class Calls {{
+    private WebClient webClient;
+    private UriBuilder helper;
+    Object near() {{
+        return webClient.get().uri({body}).retrieve();
+    }}
+}}
+"#
+        );
+        let (refs, refusals) = client_call_rows(&source);
+        assert!(
+            refs.is_empty(),
+            "{label}: the pattern admits `path(<one operand>)` on the lambda's \
+             own parameter and nothing else — got {refs:?}"
+        );
+        assert_eq!(
+            refusals, 1,
+            "{label}: …and the site is still the keyless base-url-runtime row \
+             the outer fluent match records, which is what proves the file was \
+             scanned at all"
+        );
+    }
 }
