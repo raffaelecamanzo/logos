@@ -265,12 +265,10 @@ fn the_recorded_artifact_states_the_figures_this_file_pins() {
 
 /// [S-397] AC2's floor: that criterion asked for **at least** this many.
 ///
-/// **Historical, and deliberately not re-armed.** The figure below now exceeds it,
-/// and [S-398] AC5 asserts no floor of its own — a census figure is a statement
-/// about what is *derivable*, and [Sprint 68] recorded at length what happens when
-/// one is promoted to a prediction about the product. It is kept as a constant
-/// because the relation between the two is worth printing beside the measurement,
-/// not because anything gates on it.
+/// Historical. Nothing gates on it at runtime — the reasoning is at the removal
+/// site in the test body — and it is kept because the 81-against-79 relation is
+/// worth printing beside the measurement. Pinned to its own sentence in the
+/// artifact by [`the_recorded_artifact_states_the_figures_this_file_pins`].
 const CRITERION_FLOOR: usize = 79;
 
 /// What the shipped pipeline actually admits, re-measured 2026-09-13 over the
@@ -509,7 +507,8 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
          \x20 by bucket                           {:?}\n\
          \x20 S-397's historical floor            {:>5}   (exceeded; not a criterion here)\n\
          \x20 accessor denominator (S-382)        {:>5}   (108 before S-402)\n\
-         \x20 same payload, pre-hop index gen         0",
+         \x20 same payload, pre-hop index gen         0   (two generations back, \
+         before the accessor hop existed at all)",
         root.display(),
         a.members_read,
         a.members_total,
