@@ -323,8 +323,10 @@ pub struct CoverageRider {
     /// [`CrossServiceCoverage::by_intake`](super::coverage::CrossServiceCoverage::by_intake).
     /// The four counts on this rider are still the **pooled** ones, and on the
     /// 84-member reference estate that pool is 81 declared-contract matches and
-    /// **0** resolved call sites. So a reader who concludes anything about
-    /// outbound coupling from `bound` alone will conclude it wrongly.
+    /// 15 resolved call sites (2026-09-13). So a reader who concludes anything
+    /// about outbound coupling from `bound` alone will conclude it wrongly — it
+    /// read 81 and **0** for as long as no call site in the estate resolved, and
+    /// `bound` did not move when that changed.
     ///
     /// S-377 left the placement of the split on this rider to S-376. **Decided:
     /// the eight-way split stays off the rider, and the three-figure headline
@@ -341,9 +343,15 @@ pub struct CoverageRider {
     ///   ratio while omitting the headline would leave this surface saying only
     ///   the thing [CR-120] retired. Three scalars is what that costs.
     ///
-    /// The rider is also the surface with the sharpest claim on the new headline:
-    /// a `live-via-cross-service` promotion rests on an *edge*, and
-    /// `resolved_cross_service_edges: 0` says none came from a call site.
+    /// The rider is also the surface with the sharpest claim on the headline
+    /// family — a `live-via-cross-service` promotion rests on an *edge*. **Which
+    /// figure carries that claim changed in S-403 T1:** it is
+    /// [`bridge_invocation_edges`](Self::bridge_invocation_edges), not
+    /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges),
+    /// because the coverage tier resolves configuration placeholders the bridge
+    /// does not ([CR-127]). Both fields state which of the two they are.
+    ///
+    /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
     ///
     /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
     /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md

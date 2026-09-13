@@ -2079,7 +2079,7 @@ impl EgressHeadline {
     /// `debug_assert`-ed unreachable in [`edge_multiplicity`] and no `Bound` arm of
     /// [`tier`] can produce it.
     ///
-    /// The buckets are the ones [`Population::record`] uses, read from the same
+    /// The buckets are the ones [`ClassificationCounts::record`] uses, read from the same
     /// [`CoverageState`] the row publishes, so this walk and `by_intake` cannot
     /// describe the same rows differently ([`finish`](Tally::finish) asserts they
     /// do not).
@@ -6458,7 +6458,7 @@ mod tests {
     }
 
     /// **A sole-provider invocation bind is one resolved edge** — the
-    /// exactly-one arm of [`resolved_edges`], and the dominant real-world shape.
+    /// exactly-one arm of [`edge_multiplicity`], and the dominant real-world shape.
     ///
     /// Written because the fan-out fixture beside it did not reach this branch:
     /// `every_bucket_in_both_populations`'s only bound invocation row is the
