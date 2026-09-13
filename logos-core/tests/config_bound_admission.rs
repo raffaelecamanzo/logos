@@ -165,11 +165,23 @@ const RECORDED_ADMITTED: usize = 44;
 /// it.
 const ACCESSOR_DENOMINATOR: usize = 108;
 
-/// The three buckets the 44 admitted rows fall into, in the order
-/// [`admission`] tallies them — a `BTreeMap`, so alphabetical by bucket name
-/// rather than by count. `unbound` here is entirely `no-provider-in-workspace`.
-const RECORDED_BUCKETS: [(&str, usize); 3] =
-    [("ambiguous", 9), ("bound", 5), ("unbound", 30)];
+/// The three `(bucket, reason)` pairs the 44 admitted rows fall into, in the order
+/// [`admission`] tallies them — a `BTreeMap`, so ascending by the pair rather than
+/// by count.
+///
+/// **Keyed on the reason as well as the bucket, and that is what makes it a
+/// diagnosis.** `CoverageState::bucket` folds every non-ambiguous unbound reason —
+/// `no-provider-in-workspace`, `base-url-runtime`, `path-not-composed`,
+/// `config-key-missing` — into the single string `"unbound"`. Pinned on the bucket
+/// alone, this file's central claim (*the shortfall is capture, not resolution*)
+/// would have been prose only: a generation in which those 30 rows became
+/// `config-key-missing` refusals would have passed with an unchanged split. A bound
+/// row names no reason, so its slot is `None`.
+const RECORDED_BUCKETS: [(&str, Option<&str>, usize); 3] = [
+    ("ambiguous", Some("ambiguous"), 9),
+    ("bound", None, 5),
+    ("unbound", Some("no-provider-in-workspace"), 30),
+];
 
 /// The reference workspace, or `None` when none is configured — the same
 /// `LOGOS_REF_WORKSPACE` contract the S-355/S-365/S-374/S-377 measurements read.
@@ -213,6 +225,10 @@ struct Row {
     intake: String,
     relation: String,
     bucket: String,
+    /// The unbound reason, absent on a bound row. Read because `bucket` alone
+    /// cannot tell `no-provider-in-workspace` from `config-key-missing`, and the
+    /// difference between them is this task's whole diagnosis.
+    reason: Option<String>,
 }
 
 /// What [S-397] AC2 asks the payload for.
@@ -226,8 +242,8 @@ struct Admission {
     /// committed sources do not admit. Counted because zero of them is itself a
     /// finding — the shortfall is not keys going missing.
     config_unresolved: usize,
-    /// The `config-bound` rows split by display bucket.
-    by_bucket: Vec<(String, usize)>,
+    /// The `config-bound` rows split by display bucket **and unbound reason**.
+    by_bucket: Vec<(String, Option<String>, usize)>,
     /// Rows carrying no `provenance` key at all. Must be zero: the field is not
     /// optional ([FR-WS-19] AC6).
     missing_provenance: usize,
@@ -248,19 +264,21 @@ fn admission(payload: &serde_json::Value) -> Admission {
         covers_all: coverage["covers_all_members"].as_bool().expect("`covers_all_members` is a bool"),
         ..Admission::default()
     };
-    let mut buckets: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut buckets: std::collections::BTreeMap<(String, Option<String>), usize> =
+        std::collections::BTreeMap::new();
     for reference in references {
         let row = Row {
             provenance: reference["provenance"].as_str().map(str::to_string),
             intake: reference["intake"].as_str().unwrap_or_default().to_string(),
             relation: reference["relation"].as_str().unwrap_or_default().to_string(),
             bucket: reference["bucket"].as_str().unwrap_or_default().to_string(),
+            reason: reference["reason"].as_str().map(str::to_string),
         };
         match row.provenance.as_deref() {
             None => out.missing_provenance += 1,
             Some("config-bound") => {
                 out.config_bound += 1;
-                *buckets.entry(row.bucket.clone()).or_default() += 1;
+                *buckets.entry((row.bucket.clone(), row.reason.clone())).or_default() += 1;
                 // Every admitted row is a captured call site on the HTTP key.
                 // Asserted per row rather than in aggregate, so a payload that
                 // admitted a contract-surface row under this provenance names
@@ -276,7 +294,7 @@ fn admission(payload: &serde_json::Value) -> Admission {
             Some(_) => {}
         }
     }
-    out.by_bucket = buckets.into_iter().collect();
+    out.by_bucket = buckets.into_iter().map(|((b, r), n)| (b, r, n)).collect();
     out
 }
 
@@ -440,11 +458,18 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
     );
     assert_eq!(
         a.by_bucket,
-        RECORDED_BUCKETS.map(|(bucket, n)| (bucket.to_string(), n)).to_vec(),
-        "the admitted rows' bucket split moved. The headline can hold while the split \
-         moves, and the split is the more informative half: a `config-bound` row is \
-         excluded from `resolved_cross_service_edges` whatever its bucket, so `bound: 5` \
-         is what the estate's own topology yields and not a coverage claim.",
+        RECORDED_BUCKETS
+            .map(|(bucket, reason, n)| (bucket.to_string(), reason.map(str::to_string), n))
+            .to_vec(),
+        "the admitted rows' (bucket, reason) split moved. The headline can hold while the \
+         split moves, and the split is the more informative half — it is what carries \
+         this file's diagnosis rather than its prose. Two readings to keep apart: if the \
+         30 `no-provider-in-workspace` rows became `config-key-missing`, the estate's \
+         committed sources have stopped defining keys the accessors resolve and the \
+         shortfall is no longer capture-only; if `bound` moved, the estate's own topology \
+         changed. Note that a `config-bound` row is excluded from \
+         `resolved_cross_service_edges` whatever its bucket, so `bound: 5` is not a \
+         coverage claim.",
     );
     assert_eq!(
         a.config_unresolved, 0,
