@@ -827,6 +827,24 @@ fn from_sources_admits_the_same_population_as_build_over_the_same_files() {
 #[cfg(feature = "lang-kotlin")]
 const BINDING_KIND_ALLOWLIST: &[&str] = &[];
 
+/// The grammar **field** names the use-site half is allowed to read.
+///
+/// A second axis, and the one the node-kind scan above structurally cannot see:
+/// field names live in `field_name_for_id`, a different namespace from
+/// `node_kind_for_id`, so widening that scan to `accessor.rs` proved nothing
+/// about the only way that file can go language-specific. Review found exactly
+/// that — the widened guard passed on `accessor.rs` for the same reason it
+/// passes on `binding.rs`, which is not a reason at all.
+///
+/// These six are the structural roles every C-family grammar declares, and the
+/// module reads nothing else. A seventh — Ruby's `receiver`, Go's `operand`,
+/// Rust's `field` — would be one grammar's vocabulary hardcoded in core, which
+/// is what [NFR-MA-01] forbids and what belongs in the `[properties]` descriptor
+/// instead. Adding one here is therefore a decision someone has to write down.
+#[cfg(feature = "lang-kotlin")]
+const ACCESSOR_FIELD_ALLOWLIST: &[&str] =
+    &["name", "type", "object", "parameters", "body", "arguments"];
+
 /// The [NFR-MA-01] criterion proved structurally rather than by reading the
 /// diff: the interpreter names **no** JVM grammar node kind, so there is nowhere
 /// for a Java-shaped (or Kotlin-shaped) reading to hide in it.
@@ -874,6 +892,48 @@ fn the_interpreter_names_no_jvm_grammar_node_kind() {
     // was added by S-397 and is the one that reads a parse tree directly, so
     // leaving it outside this guard would leave the whole criterion resting on
     // the half that structurally cannot break it.
+    // The FIELD-name namespace, checked only against the file that reads a parse
+    // tree. `binding.rs` reads capture names and no fields at all, so it is not
+    // scanned here — a guard that cannot fire is what this whole test exists to
+    // avoid.
+    //
+    // Derived from EVERY loaded grammar, not just the JVM pair, and that is the
+    // difference between a guard and a decoration: the field names worth
+    // catching are precisely the ones the JVM grammars do NOT use. A first
+    // version derived them from java/kt alone, and a probe adding Ruby's
+    // `receiver` — one grammar's vocabulary, hardcoded in core, the exact breach
+    // — passed it unchanged.
+    let mut grammar_fields: BTreeSet<String> = BTreeSet::new();
+    for plugin in registry().iter() {
+        let language = plugin.language();
+        for id in 0..language.field_count() {
+            if let Some(field) = language.field_name_for_id(id as u16 + 1) {
+                grammar_fields.insert(field.to_string());
+            }
+        }
+    }
+    for expected in ["object", "declarator", "receiver", "operand"] {
+        assert!(
+            grammar_fields.contains(expected),
+            "the derived field set must really span every loaded grammar; \
+             {expected:?} is missing",
+        );
+    }
+    for literal in quoted_identifiers(include_str!("accessor.rs")) {
+        if !grammar_fields.contains(literal.as_str()) {
+            continue;
+        }
+        assert!(
+            ACCESSOR_FIELD_ALLOWLIST.contains(&literal.as_str()),
+            "accessor.rs reads the grammar field {literal:?}, which is not in \
+             ACCESSOR_FIELD_ALLOWLIST. A field name is one grammar's vocabulary; \
+             core may read only the structural roles every supported grammar \
+             shares. If this really is unavoidable, add it there with a reason — \
+             or put it in the `[properties]` descriptor, where the rest of the \
+             per-language vocabulary already lives.",
+        );
+    }
+
     for (file, code) in [
         ("binding.rs", include_str!("binding.rs")),
         ("accessor.rs", include_str!("accessor.rs")),

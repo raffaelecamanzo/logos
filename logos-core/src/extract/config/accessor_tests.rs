@@ -443,3 +443,59 @@ fn the_member_scope_is_the_empty_scope_the_coverage_tier_reads_with() {
     index.seal();
     assert!(index.get("MailServerConfigurationApi", "").is_some());
 }
+
+/// **The Kotlin use-site ceiling, pinned.** A Kotlin file's member call carries
+/// no `object`/`name` fields at all, so [`member_call`] never recognises it and
+/// a Kotlin use site resolves to nothing.
+///
+/// Asserted so the ceiling is a measured fact rather than an assumption: Kotlin
+/// is one of the two languages shipping the `properties` capability, and the
+/// declaring half works for it (`binding_tests`'
+/// `kotlin_binds_through_the_same_interpreter_with_no_core_edit`) while the
+/// reading half does not. The second assertion is the control — the *same*
+/// class, read from Java, does resolve — so this pins the grammar's spelling
+/// and not a broken fixture.
+#[test]
+#[cfg(feature = "lang-kotlin")]
+fn a_kotlin_use_site_is_not_reached_and_the_same_class_still_resolves_from_java() {
+    let kotlin = registry().for_extension("kt").expect("kotlin plugin");
+    let mut index = PropertiesIndex::for_plugins(&[java(), kotlin]);
+    index.absorb_source(
+        kotlin,
+        "K.kt",
+        MEMBER_SCOPE,
+        "@ConfigurationProperties(prefix = \"k\")\ndata class K(val host: String)",
+    );
+    index.seal();
+
+    let source = "class Caller(private val k: K) {\n\
+          fun go() { client.get(k.host) }\n\
+        }";
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(kotlin.language()).expect("set language");
+    let tree = parser.parse(source, None).expect("parses");
+    let src = source.as_bytes();
+    let view = BindingView {
+        index: &index,
+        types: DeclaredTypes::build(tree.root_node(), src),
+        language: kotlin.name(),
+        module: MEMBER_SCOPE,
+    };
+    assert_eq!(
+        view.placeholder_for(node_with_text(tree.root_node(), src, "k.host"), src),
+        None,
+        "Kotlin spells a member read positionally, with no `object`/`name` \
+         fields, so the use-site half does not reach it",
+    );
+
+    // The control: the very same declaration resolves from a Java use site, so
+    // the refusal above is the Kotlin GRAMMAR's spelling and not a dead index.
+    let java_site = "public class Caller {\n\
+          private final K k;\n\
+          void go() { client.get(k.getHost()); }\n\
+        }";
+    assert_eq!(
+        key_of(&index, java_site, "k.getHost()").as_deref(),
+        Some("${k.host}"),
+    );
+}

@@ -34,8 +34,7 @@
 //! | `name` | the name a node declares, and the accessor a call names |
 //! | `type` | the declared type of the node that carries it, or of its parent |
 //! | `object` | the receiver a member call reads through |
-//! | `function` | the callee of a call whose grammar field-names it that way |
-//! | `parameters` / `body` | a node that declares a **callable**, never a value binding — its `name` is skipped |
+//! | `parameters` / `body` / `arguments` | a node that **calls, or declares a callable** — never a value binding, so its `name` is skipped |
 //!
 //! The [NFR-MA-01] structural guard beside the declaration half
 //! (`binding_tests::the_interpreter_names_no_jvm_grammar_node_kind`) covers this
@@ -44,6 +43,24 @@
 //! `tree-sitter-kotlin-ng` declares it in `node-types.json`, but as a supertype
 //! rather than a parser node kind — and the guard's own comment records what to
 //! do if a grammar bump ever changes that.
+//!
+//! # Only a grammar that field-names its member calls is reached at all
+//!
+//! [`member_call`] needs an `object` field and a `name` field on the operand
+//! node. Java's `method_invocation` has both. **Kotlin's grammar has neither** —
+//! `plugins/kotlin/queries/invocations.scm` records that a receiver call is
+//! `(call_expression (navigation_expression …) (value_arguments))` with *no
+//! fields at all*, so every constraint it writes is positional. Kotlin is one of
+//! the two languages shipping the `properties` capability, and a Kotlin **use
+//! site** therefore resolves to nothing today; a Kotlin-declared **class** read
+//! from a Java file resolves normally, which is the case
+//! `binding_tests`/`accessor_tests` exercise.
+//!
+//! Recorded as the largest ceiling here rather than left to be discovered.
+//! Closing it means giving the `[properties]` descriptor the field names — or a
+//! positional reading — as data, which is the same change that would let a
+//! grammar spelling its receiver `receiver:` (Ruby) or `operand:` (Go)
+//! participate.
 //!
 //! # One shape still binds that should not, and no field separates it
 //!
@@ -90,9 +107,6 @@ const NAME_FIELD: &str = "name";
 const TYPE_FIELD: &str = "type";
 /// The grammar field naming a member call's receiver.
 const OBJECT_FIELD: &str = "object";
-/// The grammar field naming a call's callee, where the grammar spells it that
-/// way instead of `name`.
-const FUNCTION_FIELD: &str = "function";
 /// The fields that mark a node as **calling or declaring a callable** rather
 /// than declaring a value. Such a node carries a `name` and can reach a `type`
 /// — its own return type, or its parent's — and binding the two would register
@@ -157,9 +171,6 @@ impl DeclaredTypes {
             let Some(name) = name_node.utf8_text(src).ok().map(str::trim) else {
                 continue;
             };
-            if name.is_empty() {
-                continue;
-            }
             let declared = node
                 .child_by_field_name(TYPE_FIELD)
                 .or_else(|| node.parent()?.child_by_field_name(TYPE_FIELD))
@@ -226,14 +237,21 @@ fn simple_identifier(text: &str) -> Option<&str> {
 /// The `(receiver, callee-name)` of a member call, or [`None`] for any other
 /// operand shape — a bare call with no receiver, a plain name, a literal.
 ///
+/// A `function` fallback for the callee was written here and is deleted: across
+/// all 26 vendored grammars **no node type declares both an `object` field and a
+/// `function` field**, so it could never contribute an answer — the same
+/// standard that removed this function's first receiver guard. A grammar that
+/// spells a member call positionally (Kotlin does) is not reached by this
+/// function at all; see the module docs' ceiling.
+///
 /// It makes no judgement about the receiver beyond its existence;
 /// [`simple_identifier`] is where a receiver this module cannot answer for —
 /// qualified, or itself a call — is refused.
 fn member_call<'t>(node: Node<'t>) -> Option<(Node<'t>, Node<'t>)> {
-    let callee = node
-        .child_by_field_name(NAME_FIELD)
-        .or_else(|| node.child_by_field_name(FUNCTION_FIELD))?;
-    Some((node.child_by_field_name(OBJECT_FIELD)?, callee))
+    Some((
+        node.child_by_field_name(OBJECT_FIELD)?,
+        node.child_by_field_name(NAME_FIELD)?,
+    ))
 }
 
 /// Everything the invocation arm needs to read one operand as a configuration
