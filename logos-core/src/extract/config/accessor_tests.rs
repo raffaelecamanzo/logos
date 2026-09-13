@@ -555,3 +555,187 @@ fn a_bound_class_with_no_committed_source_refuses_by_naming_the_missing_key() {
         "…and that key is unproved, so the site refuses rather than binding",
     );
 }
+
+// ── The qualified receiver (S-398) ──────────────────────────────────────────
+
+/// **S-398 AC1.** The shape the reference estate actually writes — the accessor
+/// behind a field qualifier — resolves to the same canonical key the unqualified
+/// spelling does, by the same path.
+///
+/// The unqualified control shares the fixture and differs in the qualifier
+/// alone, so what this pins is the *qualifier* and not a second fixture that
+/// happens to resolve.
+#[test]
+fn a_self_qualified_receiver_resolves_the_same_key_the_bare_one_does() {
+    let index = index(&[("Props.java", PROPS)]);
+    let use_site = "public class Caller {\n\
+          private final MailServerConfigurationApi api;\n\
+          void go() { client.get(this.api.getUriGetArchive()); }\n\
+        }";
+    assert_eq!(
+        key_of(&index, use_site, "this.api.getUriGetArchive()").as_deref(),
+        Some("${mailserver.api.urigetarchive}"),
+        "`this.api` names a field of the enclosing class, whose declared type \
+         this file states",
+    );
+    assert_eq!(
+        key_of(
+            &index,
+            &use_site.replace("this.api.", "api."),
+            "api.getUriGetArchive()"
+        )
+        .as_deref(),
+        Some("${mailserver.api.urigetarchive}"),
+        "…and the unqualified control, which differs in the qualifier alone",
+    );
+}
+
+/// **The admission is gated on the receiver's DECLARED TYPE, never on the call
+/// shape** ([FR-WS-19], [NFR-RA-05]).
+///
+/// Each case below is the *same* `this.<field>.<accessor>()` shape as the
+/// admitted one and each resolves to nothing, so the shape alone proves
+/// nothing: what admits a site is the type the file declares for the field and
+/// what that class declares in turn.
+#[test]
+fn a_self_qualified_receiver_of_the_wrong_type_still_resolves_to_nothing() {
+    let index = index(&[("Props.java", PROPS)]);
+
+    for (field, operand, why) in [
+        (
+            "private final SomethingElse api;",
+            "this.api.getUriGetArchive()",
+            "the field's declared type is not a bound class",
+        ),
+        (
+            "private final MailServerConfigurationApi api;",
+            "this.api.getMissing()",
+            "an accessor naming a property the bound class does not declare",
+        ),
+        (
+            "private final MailServerConfigurationApi api;",
+            "this.api.compute()",
+            "not an accessor under Java's `get`/`is` convention",
+        ),
+        (
+            "private final MailServerConfigurationApi other;",
+            "this.api.getUriGetArchive()",
+            "a field the file never declares, reached through the qualifier",
+        ),
+    ] {
+        let use_site =
+            format!("public class Caller {{\n  {field}\n  void go() {{ client.get({operand}); }}\n}}");
+        assert_eq!(key_of(&index, &use_site, operand), None, "{operand}: {why}");
+    }
+}
+
+/// **The near misses, one character from the admitted spelling.** The qualifier
+/// is recognised as a whole token followed by a separator, never as a prefix of
+/// the receiver's text — without the separator requirement `thisApi` strips to
+/// `Api`, and without the whole-token requirement any receiver ending in a
+/// declared field name would reduce to it.
+#[test]
+fn the_self_qualifier_is_a_whole_token_followed_by_a_separator() {
+    let index = index(&[("Props.java", PROPS)]);
+
+    for (field, operand, why) in [
+        (
+            "private final MailServerConfigurationApi Api;",
+            "thisApi.getUriGetArchive()",
+            "no separator: `thisApi` is one identifier naming a receiver this \
+             file declares no type for, not the qualifier plus `Api`",
+        ),
+        (
+            "private final MailServerConfigurationApi api;",
+            "notthis.api.getUriGetArchive()",
+            "the qualifier is not a SUFFIX of the receiver's head segment",
+        ),
+        (
+            "private final MailServerConfigurationApi api;",
+            "this.holder.api.getUriGetArchive()",
+            "two segments behind the qualifier is not a field of this class, \
+             and the reduction would resolve against a different object",
+        ),
+        (
+            "private final MailServerConfigurationApi api;",
+            "this.getNested().getUriGetArchive()",
+            "a CALL behind the qualifier is not a field, so the \
+             nested-properties ceiling holds through the qualifier too",
+        ),
+    ] {
+        let use_site =
+            format!("public class Caller {{\n  {field}\n  void go() {{ client.get({operand}); }}\n}}");
+        assert_eq!(key_of(&index, &use_site, operand), None, "{operand}: {why}");
+    }
+
+    // …and the control: `thisApi`'s refusal above is about the SEPARATOR and not
+    // about `Api` being unresolvable, because the qualified spelling of the very
+    // same field does resolve.
+    let use_site = "public class Caller {\n\
+          private final MailServerConfigurationApi Api;\n\
+          void go() { client.get(this.Api.getUriGetArchive()); }\n\
+        }";
+    assert_eq!(
+        key_of(&index, use_site, "this.Api.getUriGetArchive()").as_deref(),
+        Some("${mailserver.api.urigetarchive}"),
+    );
+}
+
+/// **A generic wrapper whose URI is a method PARAMETER emits nothing, and that
+/// is a correct refusal rather than a miss** (S-398 AC3).
+///
+/// `get(String uri, Object... args)` is the idiom that would make a
+/// call-shape-gated admission fabricate: the wrapper sits in a class that *does*
+/// inject a bound properties class, and it *does* forward to a client — but the
+/// path it forwards is a value its own caller supplies, which no committed
+/// source defines. Pinned at this unit because a widening that reached for the
+/// call shape rather than for the receiver's declared type would admit it.
+#[test]
+fn a_wrapper_whose_uri_is_a_method_parameter_resolves_to_nothing() {
+    let index = index(&[("Props.java", PROPS)]);
+    let use_site = "public class Caller {\n\
+          private final MailServerConfigurationApi api;\n\
+          String get(String uri, Object... args) { return client.get(uri); }\n\
+        }";
+    assert_eq!(
+        key_of(&index, use_site, "uri"),
+        None,
+        "the operand is a method parameter — a value the CALLER supplies, which \
+         no committed configuration source defines",
+    );
+}
+
+/// Where the wrapper above is refused, stated rather than assumed: at
+/// [`member_call`], the FIRST hop, two hops before anything the qualifier
+/// touches.
+///
+/// Worth pinning separately because the sibling assertion is insensitive to
+/// which hop produced its [`None`] — and because the fixture's `uri` is spelled
+/// by two nodes (the parameter's declarator and the argument), so `node_with_text`
+/// may return either. Both are bare identifiers carrying no `object` field, so
+/// the refusal holds for either, and this test says so instead of depending on a
+/// walk order.
+#[test]
+fn a_bare_identifier_operand_is_refused_before_any_receiver_is_read() {
+    let use_site = "public class Caller {\n\
+          private final MailServerConfigurationApi api;\n\
+          String get(String uri, Object... args) { return client.get(uri); }\n\
+        }";
+    let tree = parse(use_site);
+    let src = use_site.as_bytes();
+    let mut seen = 0;
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+        drop(cursor);
+        if node.utf8_text(src).is_ok_and(|t| t == "uri") {
+            seen += 1;
+            assert!(
+                member_call(node).is_none(),
+                "a bare identifier names no member call, so no receiver is read",
+            );
+        }
+    }
+    assert_eq!(seen, 2, "the fixture spells `uri` at the declarator AND the argument");
+}

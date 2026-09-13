@@ -542,6 +542,38 @@ pub struct PropertiesDescriptor {
     /// rather than the first one winning by table order.
     #[serde(default)]
     pub accessor_prefixes: Vec<String>,
+    /// How a use site spells a reference to the **enclosing instance**, when it
+    /// qualifies a field read with one — `["this"]` for Java (S-398,
+    /// [FR-WS-19]).
+    ///
+    /// The third row of the use-site vocabulary, beside
+    /// [`accessor_prefixes`](Self::accessor_prefixes), and here for the same
+    /// reason: it is one language's spelling, and
+    /// [`crate::extract::config::accessor`] may not name one. The [NFR-MA-01]
+    /// structural guard beside the interpreter enforces that literally — it
+    /// scans every double-quoted identifier in that file against both the JVM
+    /// node-kind set and the all-grammar field-name set, and `this` is a named
+    /// Java node kind. So a hardcoded qualifier fails the build; this row is
+    /// where it goes instead.
+    ///
+    /// **Empty by default, and that default is the refusal.** A language that
+    /// declares no row admits no qualified receiver at all, which is exactly
+    /// what every language did before this row existed ([NFR-RA-05]). A
+    /// language joins by adding a row, never by loosening a match.
+    ///
+    /// What an entry buys is narrow and bounded: a receiver spelled
+    /// `<entry><separator><name>` is read as naming the field `<name>` of the
+    /// enclosing class. It is **not** a general relaxation of the
+    /// qualified-receiver refusal — a `holder.api` receiver stays refused,
+    /// because reducing it would resolve against a same-named local, which is a
+    /// different object. A self reference cannot: it names a field of the
+    /// enclosing class and nothing else.
+    ///
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[serde(default)]
+    pub self_references: Vec<String>,
 }
 
 impl PluginManifest {
@@ -817,6 +849,36 @@ impl PluginManifest {
             {
                 return bail(format!(
                     "`[properties] accessor_prefixes` carries the duplicate entry '{dup}'"
+                ));
+            }
+            // Unlike `accessor_prefixes`, the EMPTY LIST is legal here — it is
+            // the default, and it means "this language admits no qualified
+            // receiver". An empty ENTRY is not: it would strip nothing and
+            // leave any separator-led receiver reading as a field of the
+            // enclosing class, which is the fabrication [NFR-RA-05] forbids.
+            if properties.self_references.iter().any(|s| s.trim().is_empty()) {
+                return bail(
+                    "`[properties] self_references` entries must not be empty (S-398)".to_string(),
+                );
+            }
+            // A self reference is compared against captured receiver text
+            // verbatim, so a stray space matches nothing and the qualifier
+            // degrades to a silent refusal — the same failure mode the
+            // `annotations` and `accessor_prefixes` guards above exist for.
+            if properties.self_references.iter().any(|s| s != s.trim()) {
+                return bail(
+                    "`[properties] self_references` entries must not carry surrounding whitespace"
+                        .to_string(),
+                );
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            if let Some(dup) = properties
+                .self_references
+                .iter()
+                .find(|s| !seen.insert((*s).clone()))
+            {
+                return bail(format!(
+                    "`[properties] self_references` carries the duplicate entry '{dup}'"
                 ));
             }
         }
@@ -1536,6 +1598,22 @@ mod tests {
             (r#"[properties]
                 annotations = ["A"]
                 accessor_prefixes = ["get", "get"]"#, "duplicate entry"),
+            // The S-398 row. The empty ENTRY is a typo here even though the
+            // empty LIST is this row's default — the two are not the same
+            // claim, and the `accessor_prefixes` rule above is the reason the
+            // distinction has to be asserted rather than assumed.
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get"]
+                self_references = [""]"#, "self_references` entries must not be empty"),
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get"]
+                self_references = ["this "]"#, "surrounding whitespace"),
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get"]
+                self_references = ["this", "this"]"#, "duplicate entry"),
         ];
         for (table, needle) in cases {
             let err = PluginManifest::parse("x/plugin.toml", &with(table)).unwrap_err();
@@ -1551,9 +1629,15 @@ mod tests {
             ),
         )
         .expect("the empty prefix is direct property access, not a typo");
-        assert_eq!(
-            ok.properties.expect("[properties]").accessor_prefixes,
-            ["", "get"],
+        let ok = ok.properties.expect("[properties]");
+        assert_eq!(ok.accessor_prefixes, ["", "get"]);
+        // …and an ABSENT `self_references` is the legal default, not a rejected
+        // table: a language that admits no qualified receiver declares no row
+        // (S-398). Asserted on the same admitted descriptor, so the default and
+        // the typo rules above are proved not to overlap.
+        assert!(
+            ok.self_references.is_empty(),
+            "an absent `self_references` defaults to the empty vocabulary",
         );
     }
 

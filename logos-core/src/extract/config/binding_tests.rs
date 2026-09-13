@@ -64,6 +64,14 @@ fn the_java_descriptor_names_its_vocabulary_and_its_accessor_convention() {
         ["get", "is"],
         "…and so is the accessor convention",
     );
+    assert_eq!(
+        descriptor.self_references,
+        ["this"],
+        "…and so is how a Java use site qualifies a read of an injected field \
+         (S-398). `this` is a named Java NODE KIND, so this row is not merely a \
+         tidier home for the spelling — it is the only legal one, and \
+         `the_interpreter_names_no_jvm_grammar_node_kind` is what enforces that",
+    );
 }
 
 #[test]
@@ -564,6 +572,18 @@ fn the_kotlin_descriptor_names_the_same_vocabulary_and_a_wider_convention() {
         ["", "get", "is"],
         "…and an accessor convention Java cannot express: `\"\"` is direct \
          property access",
+    );
+    // Kotlin declares NO self reference, and the absence is deliberate rather
+    // than an oversight: a Kotlin use site is not reached at all (its grammar
+    // field-names neither the receiver nor the callee of a member call — the
+    // ceiling `extract::config::accessor`'s module docs record and
+    // `accessor_tests`'
+    // `a_kotlin_use_site_is_not_reached_and_the_same_class_still_resolves_from_java`
+    // pins), so a row here would be data no test could falsify. Asserted so
+    // that closing the Kotlin ceiling has to face this line (S-398).
+    assert!(
+        descriptor.self_references.is_empty(),
+        "Kotlin's use-site half is unreachable, so it declares no qualifier",
     );
 }
 

@@ -3176,6 +3176,104 @@ fn without_the_properties_class_the_same_accessor_records_no_key() {
     );
 }
 
+/// **S-398 AC1, end to end.** The shape the reference estate actually writes —
+/// the accessor behind a field qualifier — reaches the ledger as the same
+/// `"METHOD /template"` reference the unqualified spelling does.
+///
+/// Asserted through `extract_files` rather than through the unit, for the reason
+/// [`an_accessor_operand_reaches_the_ledger_as_its_canonical_configuration_key`]
+/// records: the defect S-397 closed was a substrate with no production caller,
+/// and a unit test of the operand predicate would have passed on a binary where
+/// the qualified receiver never reached the arm at all.
+///
+/// The caller source differs from [`ACCESSOR_CALLER_SOURCE`] in the qualifier
+/// alone, so what this pins is the qualifier.
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_self_qualified_accessor_reaches_the_ledger_as_the_same_reference() {
+    let reg = registry();
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let qualified = ACCESSOR_CALLER_SOURCE.replace("uri(api.get", "uri(this.api.get");
+    assert_ne!(qualified, ACCESSOR_CALLER_SOURCE, "the fixture really is qualified");
+
+    let facts = extract_files(
+        &[
+            FileInput::new(ACCESSOR_PROPS_FILE, ACCESSOR_PROPS_SOURCE),
+            FileInput::new(ACCESSOR_CALLER_FILE, &qualified),
+        ],
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        client_call_targets(&facts, ACCESSOR_CALLER_FILE),
+        vec!["GET ${mailserver.api.urigetarchive}".to_string()],
+        "`this.api.getUriGetArchive()` names the same canonical key the bare \
+         spelling does, by the same path",
+    );
+
+    // The negative control, on the SAME qualified fixture: with the properties
+    // class removed the identical site records no key and stays the keyless
+    // refusal row. Without it the assertion above would also be produced by a
+    // qualifier that resolved something else entirely.
+    let without = extract_files(
+        &[FileInput::new(ACCESSOR_CALLER_FILE, &qualified)],
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        client_call_targets(&without, ACCESSOR_CALLER_FILE),
+        vec![String::new()],
+        "…and with no properties class the qualified site binds nothing, so the \
+         hop is what resolved it",
+    );
+}
+
+/// **S-398 AC3, at the surface the criterion speaks about.** A generic wrapper
+/// whose URI is a method **parameter** emits no `"METHOD /template"` reference,
+/// and that is a correct refusal rather than a miss.
+///
+/// The fixture is the shape that would make a call-shape-gated admission
+/// fabricate: the class injects a bound properties class, forwards to a genuine
+/// client receiver inside a file the ledger gate admits, and the only thing
+/// wrong with it is that the path is a value its own **caller** supplies, which
+/// no committed source defines.
+///
+/// What it emits instead is the keyless refusal row the arm has always recorded
+/// — asserted as that exact row rather than as `is_empty`, because an empty
+/// vector would also be produced by the whole arm being suppressed, which is the
+/// failure [`without_the_properties_class_the_same_accessor_records_no_key`]
+/// records having been demonstrated by a mutation.
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_wrapper_whose_uri_is_a_method_parameter_emits_no_reference() {
+    let reg = registry();
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let wrapper = "package a;\n\
+        import org.springframework.web.client.RestClient;\n\
+        public class ArchiveClient {\n\
+        \x20   private RestClient restClient;\n\
+        \x20   private final MailServerConfigurationApi api;\n\
+        \x20   String get(String uri, Object... args) {\n\
+        \x20     return restClient.get().uri(uri).retrieve().body(String.class);\n\
+        \x20   }\n\
+        }\n";
+    let facts = extract_files(
+        &[
+            FileInput::new(ACCESSOR_PROPS_FILE, ACCESSOR_PROPS_SOURCE),
+            FileInput::new(ACCESSOR_CALLER_FILE, wrapper),
+        ],
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        client_call_targets(&facts, ACCESSOR_CALLER_FILE),
+        vec![String::new()],
+        "the path is a method parameter, so the site stays the keyless \
+         runtime-composed row — no target is guessed from the bound class the \
+         same file happens to inject",
+    );
+}
+
 /// **The hop changes the client-call row and nothing else**: extract the
 /// identical caller file in a member that declares the properties class and in
 /// one that does not, and every other fact is equal.
