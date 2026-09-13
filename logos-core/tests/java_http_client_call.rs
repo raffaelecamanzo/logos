@@ -546,17 +546,23 @@ fn a_chained_receiver_and_a_token_less_wrapper_are_stated_ceilings() {
     }
 }
 
-/// Shared negative case **2** — `base-url-runtime`. A bare-variable path and a
-/// base-URL-composed one each emit **no** reference. The classification itself
-/// is generic and already fixture-pinned in
+/// Shared negative case **2** — `base-url-runtime`. A bare-variable path, a
+/// base-URL-composed one and a helper-method call each emit **no** reference.
+/// The classification itself is generic and already fixture-pinned in
 /// `resolve::http_client_call::classify_client_call`; what this asserts is that
 /// Java's query fills the interpreter's slots such that the refusal fires.
 ///
-/// **And that the refusal is now recorded (S-374).** Six declining methods leave
-/// six keyless ledger rows — one per method, which is the ledger's own grain —
-/// so [FR-WS-08] AC2's "appears under a runtime-composition coverage reason" half
-/// is met on the language whose estate the criterion was measured over. The
-/// reference half is unchanged: still zero.
+/// **And that the refusal is recorded (S-374).** Each declining method leaves
+/// one keyless ledger row — the ledger's grain is the declaration — so
+/// [FR-WS-08] AC2's "appears under a runtime-composition coverage reason" half
+/// is met on the language whose estate the criterion was measured over.
+///
+/// **Six methods, and the split has moved twice.** All six refused when this
+/// was written; S-382 admitted the `${…}` placeholder literal and S-399 the
+/// lambda-composed one, so the fixture now carries **two** references beside
+/// **four** refusals. The in-body commentary below records which moved and why
+/// — the test is the negative case for the four that still decline, and the
+/// name is read with that scope.
 #[test]
 fn a_runtime_composed_path_emits_no_reference() {
     let (references, refusals) = client_call_rows(
@@ -1004,10 +1010,21 @@ public class Calls {
 /// no reference and records its refusal — the row the site already recorded
 /// before the lambda was reached at all.
 ///
-/// Asserted as the exact `(references, refusals)` pair, not as `is_empty`: the
-/// second half is what makes this "unchanged" rather than "suppressed", and the
-/// inner match supplies a refusal candidate of its own that must collapse into
-/// the outer one rather than double-count.
+/// Asserted as the exact `(references, refusals)` pair, not as `is_empty`: an
+/// empty vector is also what a wholly suppressed arm produces, so the second
+/// half is what makes this "unchanged" rather than "silently dropped".
+///
+/// **What it does NOT pin, stated because an earlier draft of this comment
+/// claimed it.** Both matches do supply a refusal candidate here, and they do
+/// collapse — but this assertion cannot see that collapse happen. Deleting
+/// `record_refusals`' `(relation, declaration, line)` dedup outright leaves
+/// this test green, because the production caller re-runs `dedup_sort_refs`,
+/// which keys on `(source, target, form, kind, relation)` and ignores `line`:
+/// two keyless `""` rows from one declaration reach the ledger as one row
+/// either way. `refusals == 1` therefore cannot distinguish one candidate from
+/// two. That two candidates genuinely exist is established elsewhere — by
+/// `operand_resolvability`'s site walk, where reverting its dedup changes the
+/// count.
 #[test]
 fn a_uri_builder_lambda_with_an_unresolvable_path_records_its_refusal_unchanged() {
     assert_eq!(
