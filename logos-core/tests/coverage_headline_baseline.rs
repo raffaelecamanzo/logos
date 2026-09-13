@@ -23,8 +23,8 @@
 //! cold-indexed on 2026-09-08 with logos 1.4.7, **before** [S-374] merged, so the
 //! artifact was a post-change payload shape over a pre-[S-374] index generation.
 //! **That caveat is discharged.** [S-397] T2 re-indexed all 84 members on
-//! 2026-09-13 from a binary carrying [S-374] and [S-397] T1, as the measurement
-//! step its own acceptance criterion required, and the figures below are that
+//! 2026-09-13, and S-403 T1 re-indexed them again the same day from a binary
+//! carrying sprint-69 Iteration 1, so the figures below are that second
 //! generation. The `generation` block still labels which binary indexed the store,
 //! and its claim is now cross-checked against the measurement rather than merely
 //! stated.
@@ -32,21 +32,35 @@
 //! # Recorded finding (2026-09-13, `~/source/pec-services`, 84 members)
 //!
 //! ```text
-//! resolved_cross_service_edges   0
-//! egress_resolution              0.032 (5 of 155 egress sites resolved)
-//! spec_conformance_ratio         0.225 (86 of 383 measured; 677 excluded)
+//! resolved_cross_service_edges   15
+//! egress_resolution              0.128 (15 of 117 egress sites resolved)
+//! spec_conformance_ratio         0.278 (96 of 345 measured; 689 excluded)
 //! ```
 //!
-//! **Still zero**, and that is the finding [CR-120] is about: not one
-//! cross-service edge in the estate is resolved from a captured call site, over
-//! 155 captured egress sites — while the retired `bound_ratio` reads `0.225` on
-//! the same data and the pooled `bound` reads 86. The egress *rate* moved off
-//! 0.000 for the first time, to 0.032, because [S-397] T1's accessor hop admitted
-//! 44 configuration-bound rows of which 5 bind a provider; a `config-bound` row is
-//! excluded from `resolved_cross_service_edges` by construction, so the edge count
-//! is unmoved. The previous generation of this finding read `0.000 (0 of 54)` and
-//! `0.287 (81 of 282)` over 929 references; every cell that moved is in the
-//! invocation column, and the contract-surface column is byte-identical.
+//! **The headline is non-zero for the first time**, and none of that is a
+//! resolution gain: the estate resolved 15 egress sites on the reading *before*
+//! this story too, and the headline printed `0` beside them in the same sentence
+//! — the edge count carried a `config-bound` exclusion the rate's numerator did
+//! not ([CR-127]). S-403 T1 removes that asymmetry and moves no other cell.
+//!
+//! The two figures beside it did move, and neither is this story's: **S-402 T1**
+//! narrowed the Go client-call gate and the egress denominator fell `155 -> 117`
+//! (26 captured non-calls in one member), and **S-398 T1** reached the accessor
+//! behind a field qualifier and the bound egress count rose `5 -> 15`. The
+//! generation before those two read `0 (5 of 155)` and `0.225 (86 of 383)` over
+//! 1060 references; the one before that read `0.000 (0 of 54)` and `0.287 (81 of
+//! 282)` over 929. Every cell that has ever moved here is in the invocation
+//! column; the contract-surface column is byte-identical across all three.
+//!
+//! **What the 15 is not.** It is not the count of edges the *bridge* drew. The
+//! coverage tier composes a target from committed configuration and the bridge
+//! keys a consumer on its raw ledger target, so all 15 are `config-bound` rows for
+//! which no `BridgeEdge` exists: `logos xservice route-providers` over the same
+//! store returns 81 edges, every one `contract-surface` intake. That quantity is
+//! published under its own name, `coverage.bridge_invocation_edges`, on the
+//! `workspace reachability` rider whose claims rest on it ([CR-127] §3.2).
+//!
+//! [CR-127]: ../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
 //!
 //! The full record — the per-story delta attribution, the read-only proof and the
 //! human-gated refresh procedure — is the durable artifact
@@ -186,10 +200,14 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
     // It is labelled — and the label is the load-bearing part.
     let gen = &a["generation"];
     assert!(
-        gen["index_built_by"].as_str().is_some_and(|s| s.starts_with("logos 1.4.9 + S-397 T1")),
+        gen["index_built_by"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("logos 1.4.10 + sprint-69 Iteration 1 merged")),
         "the artifact must name the binary that INDEXED the store, not the one that \
-         read it. The store was re-indexed on 2026-09-13 by a binary carrying S-397 T1's \
-         accessor hop (S-397 T2's measurement step); before that it read `logos 1.4.7`: {gen}"
+         read it. The store was re-indexed on 2026-09-13 a second time, by a binary \
+         carrying sprint-69 Iteration 1 (S-398 T1's qualified-receiver hop and S-402 \
+         T1's receiver-grained Go gate); before that it read `logos 1.4.9 + S-397 T1`, \
+         and before that `logos 1.4.7`: {gen}"
     );
     assert_eq!(gen["payload_shape"], "post-CR-120 (S-376)", "{gen}");
     assert_eq!(
@@ -229,7 +247,7 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
     // here or PENDING the re-index. An entry that claimed neither would be the kind
     // of unattributable figure this artifact exists to prevent.
     let deltas = a["deltas"].as_object().expect("per-story delta attribution");
-    for story in ["S-374", "S-375", "S-377"] {
+    for story in ["S-374", "S-375", "S-377", "S-398", "S-402", "S-403"] {
         let d = deltas.get(story).unwrap_or_else(|| panic!("no delta recorded for {story}"));
         let status = d["status"].as_str().unwrap_or_default();
         assert!(

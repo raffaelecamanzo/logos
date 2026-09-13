@@ -214,6 +214,48 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
     expect(model.bound).toBe(1);
   });
 
+  /** **A NON-ZERO headline reaches the model verbatim** — the shape the reference
+   *  estate produces since S-403, and the one every fixture in this file lacked
+   *  while the server could only ever send `0` beside a non-zero resolved-site
+   *  count (CR-127).
+   *
+   *  The figures are the estate's own (2026-09-13): 15 resolved edges over 15 of
+   *  117 egress sites. The assertion that matters is that the model does not
+   *  RECOMPOSE the line — `resolvedEdgesSummary` is the server's string, and a
+   *  view that rebuilt it from the two numbers would drift from the CLI and MCP
+   *  renderings of the same payload, which is the three-surface agreement
+   *  FR-WS-05 requires. */
+  it("carries a non-zero resolved-edge headline and the server's line verbatim", () => {
+    const model = buildCoverageDashboard(
+      coverage([...bound("route", 15), ...unbound("route", "base-url-runtime", 79, "invocation")], {
+        bound: 15,
+        unbound: 79,
+        by_intake: {
+          contract_surface: counts({}),
+          invocation: counts({ bound: 15, ambiguous: 23, unbound: 79 }),
+        },
+        resolved_cross_service_edges: 15,
+        egress_resolution: 15 / 117,
+        egress_resolution_measured: 117,
+        resolved_edges_summary:
+          "15 resolved cross-service edges; egress resolution 0.128 (15 of 117 egress sites resolved)",
+      }),
+    );
+
+    expect(model.resolvedCrossServiceEdges).toBe(15);
+    expect(model.egressResolutionMeasured).toBe(117);
+    expect(model.resolvedEdgesSummary).toBe(
+      "15 resolved cross-service edges; egress resolution 0.128 (15 of 117 egress sites resolved)",
+    );
+    // The line the model carries names the same count the model carries — the
+    // self-agreement CR-127 makes structural server-side, asserted here so the
+    // SPA cannot be the surface that breaks it.
+    expect(model.resolvedEdgesSummary.startsWith(`${model.resolvedCrossServiceEdges} resolved`)).toBe(
+      true,
+    );
+    expect(model.resolvedEdgesSummary).toContain(`of ${model.egressResolutionMeasured} egress sites`);
+  });
+
   it("carries an ABSENT egress resolution through as null, never as a number", () => {
     // The CR-100 rule on the successor figure. `0` would claim every captured call
     // failed to resolve and `1` that every one succeeded; the truth is that none

@@ -1233,7 +1233,7 @@ export interface IntakeSplit {
  *
  *  **`bound_ratio` was retired by CR-120 and is no longer sent.** It pooled
  *  declared-contract matches with resolved call sites in one numerator and read
- *  `0.287` over a workspace with zero caller→callee edges. Its formula survives as
+ *  `0.287` over a workspace whose caller→callee edge count was zero. Its formula survives as
  *  `spec_conformance_ratio`; the headline is now `resolved_cross_service_edges`
  *  with `egress_resolution` beside it. A view still reading `bound_ratio` gets
  *  `undefined` — loudly wrong rather than quietly stale, which is the point. */
@@ -1247,8 +1247,8 @@ export interface CrossServiceCoverage {
    *  the SPA ships inside the binary that serves it, so there is no version skew
    *  to defend against. */
   by_intake: IntakeSplit;
-  /** **The headline** (CR-120, BR-51): cross-service edges the bridge resolved
-   *  from a captured `invocation` — a caller→callee HTTP client call, a
+  /** **The headline** (CR-120, BR-51, CR-127): cross-service edges resolved from
+   *  a captured `invocation` — a caller→callee HTTP client call, a
    *  producer→consumer broker publish, a gRPC stub call.
    *
    *  Deliberately not `bound`, which also counts `contract_surface` matches
@@ -1257,8 +1257,18 @@ export interface CrossServiceCoverage {
    *  the bridge emits one edge per subscriber, so one reference can contribute
    *  several — which is why it is not `egress_resolution`'s numerator.
    *
-   *  Never render it without `egress_resolution` beside it (BR-51). The server
-   *  composes both into `resolved_edges_summary` for exactly that reason. */
+   *  Never render it without `egress_resolution` beside it (BR-51), and never
+   *  re-derive either from the other: render `resolved_edges_summary`, which the
+   *  server composes from ONE walk of ONE population. Until S-403 the two halves
+   *  were filtered differently and the line contradicted itself — the reference
+   *  estate published `"0 resolved cross-service edges; egress resolution 0.032 (5
+   *  of 155 egress sites resolved)"` (CR-127).
+   *
+   *  It is **not** the count of edges the bridge drew. A row whose target was
+   *  composed from committed configuration resolves here and seeds no
+   *  cross-service reachability root, because the bridge keys on the raw target.
+   *  That second quantity is `bridge_invocation_edges` on the reachability
+   *  rider — a different payload, under a name that says which it is. */
   resolved_cross_service_edges: number;
   /** The rate at which captured **egress sites** resolve at all:
    *  `by_intake.invocation.bound / (bound + ambiguous + unbound)` over the
@@ -1274,10 +1284,12 @@ export interface CrossServiceCoverage {
    *  figure). Present even when the rate is absent, where `0` *is* the finding:
    *  nothing outbound was captured at all. */
   egress_resolution_measured: number;
-  /** The resolved-edge count and its rate as one line, e.g. `"0 resolved
-   *  cross-service edges; egress resolution 0.000 (0 of 54 egress sites
+  /** The resolved-edge count and its rate as one line, e.g. `"15 resolved
+   *  cross-service edges; egress resolution 0.128 (15 of 117 egress sites
    *  resolved)"`. The structural form of BR-51: a view that renders this line
-   *  cannot render the count without the rate. */
+   *  cannot render the count without the rate — and since S-403 both halves are
+   *  counted over one population by one walk, so the line cannot disagree with
+   *  itself either (CR-127). */
   resolved_edges_summary: string;
   /** `bound / (bound + ambiguous + unbound)` — the retired `bound_ratio`'s
    *  formula under the name of what it measures: how far this workspace's

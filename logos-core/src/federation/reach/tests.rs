@@ -880,10 +880,20 @@ fn the_rider_carries_every_coverage_figure_verbatim_at_non_zero_values() {
         covers_all_members: false,
     };
 
+    // Two invocation edges and one contract-surface edge: the seeded-edge figure
+    // counts the intake the union view roots on, not the slice length, and it is
+    // deliberately unequal to every other number in this fixture so a copy from
+    // one of them would fail.
+    let edges = [
+        edge_with_intake("api", "local a", BridgeIntake::Invocation),
+        edge_with_intake("api", "local b", BridgeIntake::Invocation),
+        edge_with_intake("api", "local c", BridgeIntake::ContractSurface),
+    ];
+
     // `members_read` is deliberately NOT the summary's: the rider counts the
     // REACHABILITY walk's reads, which can differ. Passed as 9 here so a copy from
     // `cov.members_read` (4) would fail.
-    let rider = CoverageRider::new(&cov, 9, 5);
+    let rider = CoverageRider::new(&cov, &edges, 9, 5);
 
     assert_eq!(rider.bound, 11);
     assert_eq!(rider.ambiguous, 12);
@@ -892,6 +902,12 @@ fn the_rider_carries_every_coverage_figure_verbatim_at_non_zero_values() {
     assert_eq!(
         rider.resolved_cross_service_edges, 7,
         "the headline is copied, not recomputed from `bound` and not hardcoded to 0"
+    );
+    assert_eq!(
+        rider.bridge_invocation_edges, 2,
+        "…and the SEEDED count is read from the edge slice, not from the headline \
+         (7) and not from the slice length (3) — the two are different questions \
+         (CR-127)"
     );
     assert_eq!(
         rider.egress_resolution,

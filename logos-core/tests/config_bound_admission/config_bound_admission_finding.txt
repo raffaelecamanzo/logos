@@ -52,11 +52,20 @@ THE FIGURE WITH ITS DENOMINATORS
               ambiguous                  9
               no-provider-in-workspace  30
 
-  `bound: 5` is not a coverage claim. A `config-bound` row is deliberately
-  excluded from `resolved_cross_service_edges` (the bridge still keys a
-  consumer on its raw ledger target), so the estate's resolved-edge count is
-  still 0; the 5 is what this estate's own topology yields for the resolved
-  templates.
+  `bound: 5` is not a coverage claim. It is what this estate's own topology
+  yields for the resolved templates.
+
+  [SUPERSEDED 2026-09-13 by S-403 T1 / CR-127 — the clause that stood here said
+  a `config-bound` row is excluded from `resolved_cross_service_edges` so the
+  estate's resolved-edge count "is still 0". That exclusion existed to make the
+  headline stand in for a DIFFERENT quantity — the edges the BRIDGE drew — under
+  a name FR-WS-05 defines as resolution, and it sat on only one half of BR-51's
+  composed sentence. It is removed: a bound `config-bound` row now reaches the
+  headline. The bridge fact is unchanged and still true — it keys a consumer on
+  its raw ledger target, so no `BridgeEdge` is drawn for such a row — and is now
+  published in its own right as `coverage.bridge_invocation_edges` on the
+  `workspace reachability` rider. The measurement above is NOT restated: it is
+  the 2026-09-13 pre-Iteration-1 reading and is left as recorded.]
 
   Rows carrying `config-unresolved` provenance: 0. No admitted accessor names a
   key the committed sources fail to define — so the shortfall is CAPTURE, not

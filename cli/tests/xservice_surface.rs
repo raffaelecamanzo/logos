@@ -1303,14 +1303,25 @@ fn workspace_reachability_is_labeled_advisory_and_riders_every_claim() {
          over, not just the ratio"
     );
     // S-376/BR-51: and the successor headline rides here too, on the surface with
-    // the sharpest claim on it — a `live-via-cross-service` promotion rests on an
-    // EDGE, and this workspace resolved none from a captured call site even though
-    // its pooled `bound` is 1. The retired key is gone from the rider as well.
+    // the sharpest claim on it — this workspace resolved no edge from a captured
+    // call site even though its pooled `bound` is 1. The retired key is gone from
+    // the rider as well.
     assert!(
         rider.get("bound_ratio").is_none(),
         "the retired key is absent from the reachability rider too: {rider}"
     );
     assert_eq!(rider["resolved_cross_service_edges"], 0);
+    // S-403/CR-127: and beside it, the figure a `live-via-cross-service` promotion
+    // ACTUALLY rests on — the invocation edges the bridge drew. The two are
+    // different questions and this rider publishes both under names that say
+    // which: here they agree at 0, because the one bound reference is
+    // contract-surface intake and a declaration is not a reachability root
+    // (CR-083).
+    assert_eq!(
+        rider["bridge_invocation_edges"], 0,
+        "the rider names the seeded-edge count separately from the resolved-edge \
+         headline (CR-127): {rider}"
+    );
     assert!(
         rider.get("egress_resolution").is_none(),
         "no egress site captured ⇒ the rate is absent, never fabricated: {rider}"

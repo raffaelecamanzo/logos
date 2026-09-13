@@ -492,10 +492,11 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
          30 `no-provider-in-workspace` rows became `config-key-missing`, the estate's \
          committed sources have stopped defining keys the accessors resolve and the \
          shortfall is no longer capture-only; if `bound` moved, the estate's own topology \
-         changed. Note that a `config-bound` row is excluded from \
-         `resolved_cross_service_edges` whatever its bucket, so `bound: 5` is not a \
-         coverage claim. The split is restated in docs/howto/commands.md; re-record it \
-         there in the same change.",
+         changed. Note that a `config-bound` row REACHES `resolved_cross_service_edges` \
+         when it binds — S-403 T1 removed the exclusion that made the headline a proxy \
+         for the bridge's own edge count (CR-127) — so a move in `bound` moves the \
+         published headline with it. The split is restated in docs/howto/commands.md; \
+         re-record it there in the same change.",
     );
     assert_eq!(
         a.config_unresolved, 0,

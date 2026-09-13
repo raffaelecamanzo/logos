@@ -914,20 +914,20 @@ all**:
 
 ```bash
 logos workspace status            # human
-#   0 resolved cross-service edges; egress resolution 0.032 (5 of 155 egress sites resolved)
+#   15 resolved cross-service edges; egress resolution 0.128 (15 of 117 egress sites resolved)
 ```
 
 ```jsonc
 // logos workspace status --json
 "coverage": {
-  "resolved_cross_service_edges": 0,    // edges resolved from a captured invocation
-  "egress_resolution": 0.032,           // absent (null) when no egress site was captured
-  "egress_resolution_measured": 155,    // the rate's denominator, explicit
-  "resolved_edges_summary": "0 resolved cross-service edges; egress resolution 0.032 (5 of 155 egress sites resolved)"
+  "resolved_cross_service_edges": 15,   // edges resolved from a captured invocation
+  "egress_resolution": 0.128,           // absent (null) when no egress site was captured
+  "egress_resolution_measured": 117,    // the rate's denominator, explicit
+  "resolved_edges_summary": "15 resolved cross-service edges; egress resolution 0.128 (15 of 117 egress sites resolved)"
 }
 ```
 
-- **`resolved_cross_service_edges`** counts edges the bridge resolved from an
+- **`resolved_cross_service_edges`** counts edges resolved from an
   **invocation** — a caller→callee HTTP client call, or a producer→consumer
   broker publish or subscribe. (A gRPC stub call would qualify; none is captured
   today, so none can contribute.) It counts *edges*, not sites: under the broker
@@ -935,6 +935,12 @@ logos workspace status            # human
   edge per subscriber, so one row can contribute several. You can reconcile it
   against `coverage.references` yourself — sum `1` for a bound invocation row with
   a `to`, and `candidates.total` for one with a bound-to set.
+- **Both halves of the line are counted over one population by one walk.** Until
+  logos 1.4.11 they were not: the edge count carried an extra `config-bound`
+  exclusion that the rate's numerator did not, and this estate published
+  *"0 resolved cross-service edges; egress resolution 0.032 (5 of 155 egress sites
+  resolved)"* — one sentence stating two different populations. Read
+  `resolved_edges_summary`; never rebuild it from the two numbers.
 - **`egress_resolution`** is `invocation.bound / (invocation.bound +
   invocation.ambiguous + invocation.unbound)` — over *sites*, so it is **not**
   the count above divided by anything. It is **absent** (`null` under `--json`)
@@ -1115,11 +1121,20 @@ Five things worth knowing about these fields:
   apart. Nothing is mislabelled as *admitted* by that: the provenance, the key,
   the defining sources and the profile set are all correct.
 
-  Note finally that a `config-bound` row is deliberately **excluded from
-  `resolved_cross_service_edges`**: the coverage tier resolves the placeholders,
-  but the bridge still keys a consumer on its raw ledger target, so no edge is
-  drawn for it yet. On the reference estate that count is still 0 while
-  `egress_resolution` reads `0.032 (5 of 155 egress sites resolved)`.
+  Note finally what a `config-bound` row **does and does not** reach. It is
+  counted in `resolved_cross_service_edges`, because it resolved: the coverage
+  tier composed its target from committed configuration and found exactly one
+  provider in another member. It draws **no bridge edge**, because the bridge
+  still keys a consumer on its *raw* ledger target and a `${…}` placeholder
+  reduces to no portable key there — so it appears in no `xservice
+  route-providers` answer and seeds no cross-service reachability root. On the
+  reference estate every one of the 15 resolved edges is of this kind:
+  `resolved_cross_service_edges` reads **15** and `logos xservice route-providers`
+  returns **81** edges, all of them `contract-surface` intake and none
+  `invocation`. The second figure is published in its own right — as
+  `coverage.bridge_invocation_edges` on `logos workspace reachability`, the
+  surface whose `live-via-cross-service` promotions rest on it. Read that one, not
+  the headline, when the question is what the union view was seeded from.
 
 ##### The counts are two populations: read the split
 
@@ -1335,9 +1350,19 @@ and never alters a member's own dead-code verdict, and every claim carries a
 carries the same headline `workspace status` reports —
 `resolved_cross_service_edges` with `egress_resolution` and
 `egress_resolution_measured` beside it, plus the pooled four counts and
-`spec_conformance_ratio` — because a promotion to `live-via-cross-service` rests
-on an edge existing, and `resolved_cross_service_edges: 0` says none was resolved
-from any captured call site. It deliberately does **not** carry `by_intake`: the
+`spec_conformance_ratio`.
+
+It also carries one figure `workspace status` does not:
+**`bridge_invocation_edges`**, the number of invocation edges the bridge actually
+drew — which is what a `live-via-cross-service` promotion rests on, and it is
+**not** the headline. The coverage tier composes a call target from committed
+configuration and the bridge does not, so a `config-bound` row resolves in the
+headline and seeds no root. On the reference estate the rider reads
+`resolved_cross_service_edges: 15` beside `bridge_invocation_edges: 0`: fifteen
+outbound call sites resolve, and the union view was seeded from none of them.
+Read the second when the question is what the view could reach.
+
+The rider deliberately does **not** carry `by_intake`: the
 split is a decomposition a reader consults once, beside the summary, not eight
 counters repeated on every claim. On a real
 workspace the promotion set may be legitimately empty (a language that captures a

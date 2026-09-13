@@ -649,13 +649,28 @@ pub(crate) async fn workspace_roster(
 /// was measured, so a bar rendering either must show "not measured" rather than
 /// an empty or full bar ([NFR-CC-04]).
 ///
-/// # The headline is a resolved-edge count ([CR-120], [BR-51])
+/// # The headline is a resolved-edge count ([CR-120], [BR-51], [CR-127])
 /// `coverage.resolved_cross_service_edges` counts the edges resolved from a
 /// captured **invocation** — a caller→callee call, a producer→consumer publish —
 /// and is never rendered without `coverage.egress_resolution` beside it, the rate
 /// at which captured egress sites resolve at all. `resolved_edges_summary`
 /// carries both as one composed line for exactly that reason, and
-/// `egress_resolution_measured` is the rate's explicit denominator.
+/// `egress_resolution_measured` is the rate's explicit denominator. **Render the
+/// composed line; never re-derive either half from the other.** Until S-403 T1 the
+/// two halves were counted over differently-filtered populations and the line
+/// contradicted itself in one sentence — *"0 resolved cross-service edges; egress
+/// resolution 0.032 (5 of 155 egress sites resolved)"* ([CR-127] §3.1). They are
+/// now one walk of one population, and this surface's job is to publish them, not
+/// to reconstruct them.
+///
+/// A resolved edge is not necessarily an edge the **bridge drew**: the coverage
+/// tier composes a target from committed configuration and the bridge does not, so
+/// a `config-bound` row resolves here and seeds no cross-service reachability root.
+/// That second quantity is published under its own name — `coverage.bridge_invocation_edges`
+/// on the `workspace/reachability` rider — and is deliberately NOT folded into this
+/// count ([CR-127] §3.2).
+///
+/// [CR-127]: ../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
 ///
 /// `bound_ratio` is **retired and no longer sent**. Its formula survives as
 /// `spec_conformance_ratio`, which reports how far this workspace's declarations
@@ -674,8 +689,9 @@ pub(crate) async fn workspace_roster(
 ///
 /// A consumer that renders `bound` without the split renders two different things
 /// as one: on the 84-member reference workspace the split is 81 `contract-surface`
-/// and **0** `invocation` bound rows — no outbound call site in the estate
-/// resolves at all, a state a bare `bound: 81` reads as healthy. This surface
+/// and **15** `invocation` bound rows (2026-09-13, sprint-69 Iteration 1 merged),
+/// so a bare `bound: 96` says nothing about whether any outbound call site
+/// resolves — and it read `81` and **0** for as long as none did. This surface
 /// carries the split because the CLI and MCP do; the parity is the requirement,
 /// not a convenience ([FR-WS-05]).
 ///
