@@ -514,6 +514,43 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     expect(await screen.findByText(/no cross-service impact/i)).toBeInTheDocument();
   });
 
+  // ── CR-125 / BR-53: an unresolved egress must not read as an absence ────────
+
+  it("renders an empty answer over a NON-ZERO residue as unresolved, naming the count", async () => {
+    stubApi({
+      impact: {
+        ...IMPACT_DEGRADED,
+        unresolved_egress: {
+          members_in_scope: 2,
+          measured_sites: 146,
+          unresolved_sites: 141,
+          no_provider_in_workspace: 31,
+          by_reason: [{ reason: "base-url-runtime", sites: 141 }],
+          covers_all_members: true,
+          summary:
+            "no resolved cross-service impacts; 141 of 146 captured outbound sites in scope did not resolve across 2 members (base-url-runtime 141)",
+        },
+      },
+    });
+    mount();
+    await traceSymbol();
+
+    // The count IS the answer here: "no cross-service impact" and "141 outbound
+    // sites I could not resolve" must not render alike (CR-125 §2).
+    expect(await screen.findByText(/141 of 146 captured outbound sites/)).toBeInTheDocument();
+    expect(screen.queryByText(/no cross-service impact —/i)).not.toBeInTheDocument();
+  });
+
+  it("leaves the empty state untouched when the residue is ZERO", async () => {
+    // No `unresolved_egress` key at all is how a zero residue arrives; the
+    // rendering must be exactly what it was before CR-125.
+    stubApi({ impact: IMPACT_DEGRADED });
+    mount();
+    await traceSymbol();
+    expect(await screen.findByText(/no cross-service impact/i)).toBeInTheDocument();
+    expect(screen.queryByText(/did not resolve/i)).not.toBeInTheDocument();
+  });
+
   it("names the binding each far-side impact was stitched across", async () => {
     stubApi({
       impact: {

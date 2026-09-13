@@ -751,7 +751,8 @@ pub(crate) async fn workspace_callers(
     let repo = opt_param(&q, "repo");
     workspace_fan(backing, bridge, "api_v1_workspace_callers", move |registry, bridge| {
         let edges = fed_query::edges(bridge, registry);
-        fed_query::xservice_callers(registry, &edges, &symbol, limit, repo.as_deref())
+        let residue = fed_query::residue(bridge, registry);
+        fed_query::xservice_callers(registry, &edges, &residue, &symbol, limit, repo.as_deref())
     })
     .await
 }
@@ -773,7 +774,8 @@ pub(crate) async fn workspace_impact(
     let repo = opt_param(&q, "repo");
     workspace_fan(backing, bridge, "api_v1_workspace_impact", move |registry, bridge| {
         let edges = fed_query::edges(bridge, registry);
-        fed_query::xservice_impact(registry, &edges, &symbol, depth, repo.as_deref())
+        let residue = fed_query::residue(bridge, registry);
+        fed_query::xservice_impact(registry, &edges, &residue, &symbol, depth, repo.as_deref())
     })
     .await
 }

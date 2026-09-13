@@ -24,7 +24,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
     total
 }
 
-/// Budget: ≤ 982 non-blank lines of Rust across the whole MCP adapter
+/// Budget: ≤ 995 non-blank lines of Rust across the whole MCP adapter
 /// (NFR-MA-02 thick-core/thin-surface invariant).
 ///
 /// Derivation (combined S-020, S-022, S-048, S-051, S-053 re-base): 30 `#[tool]`
@@ -152,14 +152,37 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// three surfaces cannot drift in what they accept (ADR-01).
 ///
 /// [FR-NV-13]: ../../docs/specs/requirements/FR-NV-13.md
+///
+/// **S-401/[CR-125] 982→995** for the unresolved egress residue on the two
+/// reachability tools ([FR-WS-05]): measured 981→989 (+8), 6 lines of headroom.
+///
+/// Itemised, and it is delegation only. `run_xservice`/`run_xservice_result` now
+/// hand the closure the `ContractBridge` instead of a pre-computed `&[BridgeEdge]`
+/// (+5 doc, net 0 code), because the bridge's derived read-models are now two and
+/// only `callers`/`impact` want the second — so `search` and `route_providers`
+/// never pay for the residue's all-member walk. Each of the seven arms then pulls
+/// what it renders: `+1` line on five of them, `+2` on the two reachability arms
+/// (one `let` binding the pair, one call). Nothing is computed here — the residue
+/// is assembled once in `logos_core::federation::residue` behind the same
+/// stamp-keyed cache the edge set uses, which is exactly the point of [CR-125]
+/// §4.4: the MCP and CLI renderings must be incapable of disagreeing.
+///
+/// The two `description` strings grew substantially and cost **zero** lines —
+/// each is one long line — which is the right trade on this surface: the
+/// description IS the documentation an agent reads, and `unresolved_egress`
+/// present over an empty `cross_service` list is precisely the payload a reader
+/// must not mistake for an absence.
+///
+/// [CR-125]: ../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
+/// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
 #[test]
 fn mcp_surface_line_budget() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 982,
-        "mcp adapter exceeds the 982 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 995,
+        "mcp adapter exceeds the 995 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

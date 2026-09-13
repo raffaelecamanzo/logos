@@ -95,6 +95,7 @@ pub mod open_state;
 pub mod query;
 pub mod reach;
 pub mod registry;
+pub mod residue;
 pub mod topics;
 pub mod warm;
 pub mod warm_state;
@@ -133,6 +134,10 @@ pub use budget::WorkspaceBudget;
 pub use open_state::{DegradedCause, DegradedRollup, MemberOpen, MemberOpenState, StoreFile};
 pub use registry::{
     AnswerScope, Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode,
+};
+pub use residue::{
+    egress_residue, AnswerReach, EgressResidue, MemberEgressResidue, ResidueReason,
+    WorkspaceEgressResidue,
 };
 pub use topics::{workspace_topics, MemberTopics, TopicSummary};
 pub use warm_state::{MemberWarmState, WarmEvidence, WarmRollup};

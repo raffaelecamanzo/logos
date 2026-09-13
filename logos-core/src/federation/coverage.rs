@@ -75,7 +75,7 @@ use super::registry::{AnswerScope, MemberEngine};
 /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
 /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UnboundReason {
     /// No member in this workspace exposes a matching provider — outside this
@@ -320,6 +320,32 @@ fn arm_relation(relation: crate::model::ArtifactRelation) -> String {
 // enum in `resolve/framework.rs`. That is where the statistic is produced, and
 // this file no longer imports the type; a second copy of the argument here is
 // how the two would drift.
+
+impl UnboundReason {
+    /// This reason's [FR-WS-05] wire token — the same string the `--json`
+    /// rendering carries.
+    ///
+    /// Exists so a *composed* line (the residue's
+    /// [`summary`](super::residue::EgressResidue::summary)) names reasons in the
+    /// published vocabulary rather than in a second, prose-only spelling of it.
+    /// `the_reason_labels_are_the_wire_tokens` pins the two together by
+    /// round-tripping every variant through `serde`, so a rename on either side
+    /// fails rather than drifting — the hand-mirrored-twin failure this file's
+    /// own risk register names.
+    ///
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UnboundReason::NoProviderInWorkspace => "no-provider-in-workspace",
+            UnboundReason::PathNotComposed => "path-not-composed",
+            UnboundReason::BaseUrlRuntime => "base-url-runtime",
+            UnboundReason::Ambiguous => "ambiguous",
+            UnboundReason::TopicNotLiteral => "topic-not-literal",
+            UnboundReason::ConfigKeyMissing => "config-key-missing",
+            UnboundReason::ConfigPlaceholderValue => "config-placeholder-value",
+        }
+    }
+}
 
 impl From<ClientCallRefusal> for UnboundReason {
     /// Map the HTTP client-call arm's refusal ([`ClientCallRefusal`], S-252) onto
@@ -4897,6 +4923,36 @@ mod tests {
             serde_json::to_value(UnboundReason::PathNotComposed).unwrap(),
             "path-not-composed"
         );
+    }
+
+    /// [`UnboundReason::as_str`] and the `--json` token are **the same string**
+    /// for every variant ([FR-WS-05]).
+    ///
+    /// The label exists so the residue's composed line names reasons in the
+    /// published vocabulary; a second hand-written spelling of that vocabulary is
+    /// exactly the hand-mirrored twin this file's risk register names, so the two
+    /// are pinned to each other here rather than trusted to stay in step. The
+    /// match in `as_str` is exhaustive, so a new variant does not compile until it
+    /// has a label, and this test then proves the label is the wire token.
+    ///
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    #[test]
+    fn the_reason_labels_are_the_wire_tokens() {
+        for reason in [
+            UnboundReason::NoProviderInWorkspace,
+            UnboundReason::PathNotComposed,
+            UnboundReason::BaseUrlRuntime,
+            UnboundReason::Ambiguous,
+            UnboundReason::TopicNotLiteral,
+            UnboundReason::ConfigKeyMissing,
+            UnboundReason::ConfigPlaceholderValue,
+        ] {
+            assert_eq!(
+                serde_json::to_value(reason).unwrap(),
+                reason.as_str(),
+                "{reason:?} renders one way on the wire and another in prose"
+            );
+        }
     }
 
     /// **S-374 acceptance: a recorded client-call refusal reaches the [FR-WS-05]

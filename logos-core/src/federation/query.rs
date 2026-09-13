@@ -41,6 +41,7 @@ use super::bridge::BridgeEdge;
 use super::coverage::{cross_service_coverage, CrossServiceCoverage};
 use super::open_state::{self, DegradedRollup, MemberOpenState};
 use super::registry::{AnswerScope, EngineRegistry, MemberScoped};
+use super::residue::{AnswerReach, EgressResidue, WorkspaceEgressResidue};
 use super::topics::{workspace_topics, MemberTopics};
 use super::warm_state::{self, MemberWarmState, WarmEvidence, WarmRollup};
 
@@ -197,29 +198,65 @@ pub struct XserviceCallers {
     /// queried symbol — the consumer endpoint (`from`) is the cross-boundary
     /// caller. Never fabricated (exactly-one, [NFR-RA-05]).
     pub cross_service: Vec<BridgeEdge>,
+    /// What this answer **could not reach**: the unresolved egress residue of the
+    /// members in scope ([FR-WS-05], [BR-53], [CR-125]).
+    ///
+    /// **Absent exactly when the residue is zero**, which is the one case in
+    /// which silence is honest — so an answer over a fully-resolved scope
+    /// serializes byte-for-byte as it did before [CR-125]. Present otherwise,
+    /// including (and especially) when [`cross_service`](Self::cross_service) is
+    /// empty: an empty answer over a non-zero residue is the reading a developer
+    /// acts on, and it is the whole reason this field exists.
+    ///
+    /// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unresolved_egress: Option<EgressResidue>,
 }
 
-/// Callers of `symbol` across the workspace ([FR-WS-05]).
+/// Callers of `symbol` across the workspace, with what the answer could not
+/// reach ([FR-WS-05], [BR-53]).
+///
+/// `residue` is the workspace's unresolved egress, assembled once by
+/// [`residue`](self::residue) and merely **scoped** here — the surfaces hand it
+/// in exactly as they hand in `edges`, so none of them composes a figure of its
+/// own and the MCP, CLI and web renderings cannot disagree ([CR-125] §4.4).
+///
+/// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 pub fn xservice_callers(
     registry: &EngineRegistry<Engine>,
     edges: &[BridgeEdge],
+    residue: &WorkspaceEgressResidue,
     symbol: &str,
     limit: Option<usize>,
     repo: Option<&str>,
 ) -> XserviceCallers {
+    // The cross-service tier matches on the canonical symbol *string* alone
+    // (not member+symbol): a `LogosSymbol` is a database-portable identity
+    // and bridge edges are already exactly-one resolved cross-member, so a
+    // provider symbol identifies its consumers unambiguously.
+    let cross_service: Vec<BridgeEdge> = edges
+        .iter()
+        .filter(|edge| edge.to.symbol.as_str() == symbol)
+        .cloned()
+        .collect();
     XserviceCallers {
         query: symbol.to_string(),
         scope: repo.map(str::to_string),
         members: fan(registry, repo, |engine| engine.callers(symbol, limit)),
-        // The cross-service tier matches on the canonical symbol *string* alone
-        // (not member+symbol): a `LogosSymbol` is a database-portable identity
-        // and bridge edges are already exactly-one resolved cross-member, so a
-        // provider symbol identifies its consumers unambiguously.
-        cross_service: edges
-            .iter()
-            .filter(|edge| edge.to.symbol.as_str() == symbol)
-            .cloned()
-            .collect(),
+        // Read off the answer that was just built, never recounted from the
+        // inputs: the residue's "no resolved cross-service callers" and the
+        // `cross_service` list are then two renderings of one fact.
+        unresolved_egress: residue.beside(
+            repo,
+            AnswerReach {
+                resolved: cross_service.len(),
+                noun: "cross-service callers",
+            },
+        ),
+        cross_service,
     }
 }
 
@@ -248,6 +285,18 @@ pub struct XserviceImpact {
     /// Far-side impacts reached by fanning across the bridge edges the queried
     /// symbol is an endpoint of.
     pub cross_service: Vec<CrossServiceImpact>,
+    /// What this answer **could not reach**: the unresolved egress residue of the
+    /// members in scope ([FR-WS-05], [BR-53], [CR-125]).
+    ///
+    /// Absent exactly when that residue is zero, so a fully-resolved scope
+    /// renders as it did before [CR-125]; see
+    /// [`XserviceCallers::unresolved_egress`].
+    ///
+    /// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unresolved_egress: Option<EgressResidue>,
 }
 
 /// Transitive impact of `symbol`, stitched across bridge edges ([FR-WS-05]).
@@ -260,11 +309,12 @@ pub struct XserviceImpact {
 pub fn xservice_impact(
     registry: &EngineRegistry<Engine>,
     edges: &[BridgeEdge],
+    residue: &WorkspaceEgressResidue,
     symbol: &str,
     depth: Option<usize>,
     repo: Option<&str>,
 ) -> XserviceImpact {
-    let cross_service = edges
+    let cross_service: Vec<CrossServiceImpact> = edges
         .iter()
         .filter_map(|edge| {
             let far = if edge.from.symbol.as_str() == symbol {
@@ -288,6 +338,13 @@ pub fn xservice_impact(
         query: symbol.to_string(),
         scope: repo.map(str::to_string),
         seed: fan(registry, repo, |engine| engine.impact(symbol, depth)),
+        unresolved_egress: residue.beside(
+            repo,
+            AnswerReach {
+                resolved: cross_service.len(),
+                noun: "cross-service impacts",
+            },
+        ),
         cross_service,
     }
 }
@@ -647,6 +704,23 @@ pub fn edges(
     registry: &EngineRegistry<Engine>,
 ) -> Arc<Vec<BridgeEdge>> {
     bridge.edges(registry)
+}
+
+/// The workspace's unresolved egress residue, resolved once per call so a CLI
+/// one-shot and the serve loop share the same entry point ([CR-125], [FR-WS-05]).
+///
+/// The twin of [`edges`], deliberately: every surface reaches both the answer's
+/// inputs through this module, and the residue is assembled behind the same
+/// stamp-keyed cache rather than by whichever surface happens to render it
+/// ([CR-125] §4.4).
+///
+/// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+pub fn residue(
+    bridge: &super::bridge::ContractBridge,
+    registry: &EngineRegistry<Engine>,
+) -> Arc<WorkspaceEgressResidue> {
+    bridge.residue(registry)
 }
 
 #[cfg(test)]

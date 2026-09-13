@@ -67,6 +67,7 @@ use crate::resolve::route_template::route_key;
 pub(super) use crate::model::BridgeRole as Role;
 
 use super::registry::{AnswerScope, EngineRegistry, MemberEngine};
+use super::residue::{egress_residue, WorkspaceEgressResidue};
 
 /// One cross-service endpoint: the portable `(member, symbol)` identity of a
 /// contract-surface node ([FR-WS-04], [ADR-52]).
@@ -863,28 +864,92 @@ pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) ->
 /// The in-memory cross-service contract bridge over a workspace's members
 /// ([FR-WS-04], [ADR-52]).
 ///
-/// Holds only the cached edge set (keyed on member sync-stamps); the member set
-/// it reads is supplied per call as an [`EngineRegistry`], so one bridge tracks
-/// one workspace's registry. Shareable behind an [`Arc`]: the interior cache is
-/// a [`Mutex`], so the serve surface and concurrent callers see one bridge.
+/// Holds the derived read-models keyed on member sync-stamps — the edge set
+/// ([`edges`](Self::edges)) and the unresolved egress residue
+/// ([`residue`](Self::residue), [CR-125]); the member set it reads is supplied
+/// per call as an [`EngineRegistry`], so one bridge tracks one workspace's
+/// registry. Shareable behind an [`Arc`]: each interior cache is a [`Mutex`], so
+/// the serve surface and concurrent callers see one bridge.
 ///
+/// The two caches are **independent slots**, not one entry holding both: an
+/// `xservice search` or `route-providers` call wants only the edges, and filling
+/// a residue it will not render would spend a second all-member walk per query
+/// for nothing ([NFR-PE-01]).
+///
+/// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
+/// [NFR-PE-01]: ../../../docs/specs/requirements/NFR-PE-01.md
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 #[derive(Debug, Default)]
 pub struct ContractBridge {
-    cache: Mutex<Option<CacheEntry>>,
+    edges: StampCache<Vec<BridgeEdge>>,
+    residue: StampCache<WorkspaceEgressResidue>,
 }
 
-/// The cached bridge result and the member sync-stamps it was computed against.
+/// The bridge cache key: each member's sync-stamp at compute time, sorted by
+/// member. Any change — a stamp advancing, or a member appearing or
+/// disappearing — is a miss.
+type Stamps = Vec<(String, u64)>;
+
+/// A cache slot: empty, or the stamps a value was computed at beside the value,
+/// shared so repeated reads clone an [`Arc`] rather than the value.
+type Stamped<T> = Option<(Stamps, Arc<T>)>;
+
+/// One derived read-model cached against the member sync-stamps it was computed
+/// at ([FR-WS-04]).
+///
+/// Generic over what it holds, and **shared** by the bridge's two slots rather
+/// than written once per slot: a second hand-mirrored copy of this
+/// read-check-compute-store dance is precisely the twin-that-diverges failure the
+/// federation modules have been bitten by, and the miss/hit accounting is the
+/// part that must not differ between them.
 #[derive(Debug)]
-struct CacheEntry {
-    /// `(member, sync-stamp)` at compute time, sorted by member — the cache key.
-    /// Any change (a stamp advance, or a member appearing/disappearing) is a
-    /// miss.
-    stamps: Vec<(String, u64)>,
-    /// The computed edge set, shared so repeated reads clone an `Arc`, not a
-    /// `Vec`.
-    edges: Arc<Vec<BridgeEdge>>,
+struct StampCache<T> {
+    slot: Mutex<Stamped<T>>,
+}
+
+// Derived by hand: `#[derive(Default)]` would demand `T: Default`, which the
+// cached value never needs to be — an empty slot holds no `T` at all.
+impl<T> Default for StampCache<T> {
+    fn default() -> Self {
+        Self {
+            slot: Mutex::new(None),
+        }
+    }
+}
+
+impl<T> StampCache<T> {
+    /// The value for `stamps`, computing and storing it on a miss.
+    ///
+    /// `compute` runs **outside** the lock: it makes all-member reads through the
+    /// registry, and holding this mutex across them would serialise concurrent
+    /// serve requests behind one another for no gain. Two callers racing a miss
+    /// therefore both compute, and the last writer wins — the values are equal by
+    /// construction (same stamps, same inputs), so the race costs work, never
+    /// correctness.
+    fn get_or_compute(&self, stamps: Stamps, compute: impl FnOnce() -> T) -> Arc<T> {
+        {
+            let slot = self.lock();
+            if let Some((cached, value)) = slot.as_ref() {
+                if *cached == stamps {
+                    return Arc::clone(value);
+                }
+            }
+        }
+
+        let value = Arc::new(compute());
+        *self.lock() = Some((stamps, Arc::clone(&value)));
+        value
+    }
+
+    /// Lock the slot, recovering a poisoned lock rather than propagating the
+    /// poison — the cache is a derived read-model, so a poisoned view is still
+    /// usable and one caller's panic must not brick the bridge for the rest.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Stamped<T>> {
+        self.slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 impl ContractBridge {
@@ -914,32 +979,36 @@ impl ContractBridge {
     {
         let answer = registry.answer();
         let stamps = current_stamps(&answer);
-
-        {
-            let cache = self.lock_cache();
-            if let Some(entry) = cache.as_ref() {
-                if entry.stamps == stamps {
-                    return Arc::clone(&entry.edges);
-                }
-            }
-        }
-
-        let edges = Arc::new(compute_edges(&answer));
-        let mut cache = self.lock_cache();
-        *cache = Some(CacheEntry {
-            stamps,
-            edges: Arc::clone(&edges),
-        });
-        edges
+        self.edges
+            .get_or_compute(stamps, || compute_edges(&answer))
     }
 
-    /// Lock the cache, recovering a poisoned lock rather than propagating the
-    /// poison — the cache is a derived read-model, so a poisoned view is still
-    /// usable and one caller's panic must not brick the bridge for the rest.
-    fn lock_cache(&self) -> std::sync::MutexGuard<'_, Option<CacheEntry>> {
-        self.cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// The workspace's **unresolved egress residue** over `registry`'s members,
+    /// cached on the same member sync-stamps the edge set is ([CR-125],
+    /// [FR-WS-05]).
+    ///
+    /// Assembled here, once, so the MCP, CLI and web renderings of a reachability
+    /// answer cannot disagree about a figure none of them computes ([CR-125]
+    /// §4.4). It is a projection of
+    /// [`cross_service_coverage`](super::coverage::cross_service_coverage) — the
+    /// same classifier [`edges`](Self::edges) binds through — so the answer and
+    /// its residue cannot drift apart.
+    ///
+    /// Filled **lazily and separately** from the edge set: only the reachability
+    /// verbs render a residue, so `route-providers` and `search` never pay for
+    /// the all-member walk behind it ([NFR-PE-01]).
+    ///
+    /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    /// [NFR-PE-01]: ../../../docs/specs/requirements/NFR-PE-01.md
+    pub fn residue<E>(&self, registry: &EngineRegistry<E>) -> Arc<WorkspaceEgressResidue>
+    where
+        E: MemberEngine + MemberContracts,
+    {
+        let answer = registry.answer();
+        let stamps = current_stamps(&answer);
+        self.residue
+            .get_or_compute(stamps, || egress_residue(&answer))
     }
 }
 
@@ -947,7 +1016,7 @@ impl ContractBridge {
 /// cache key. A member whose engine fails to start contributes no stamp (it is
 /// skipped), so if it later starts the stamp vector changes and the cache
 /// invalidates.
-fn current_stamps<E>(answer: &AnswerScope<'_, E>) -> Vec<(String, u64)>
+fn current_stamps<E>(answer: &AnswerScope<'_, E>) -> Stamps
 where
     E: MemberEngine + MemberContracts,
 {

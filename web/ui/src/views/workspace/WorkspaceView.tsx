@@ -816,7 +816,17 @@ function ImpactPanel() {
                   ),
                 )}
                 {model.cross_service.length === 0 ? (
-                  <EmptyState message="No cross-service impact — no resolved binding reaches this symbol from another service. (An unmaterialized binding is unknown, not absent — see Cross-service coverage.)" />
+                  <EmptyState
+                    message={
+                      model.unresolved_egress
+                        ? // CR-125/BR-53: an empty answer over a non-zero residue is
+                          // UNRESOLVED, named with its count — never a bare empty set.
+                          // The count comes from the payload's own composed line, so
+                          // this view cannot state a figure the API did not compute.
+                          model.unresolved_egress.summary
+                        : "No cross-service impact — no resolved binding reaches this symbol from another service. (An unmaterialized binding is unknown, not absent — see Cross-service coverage.)"
+                    }
+                  />
                 ) : (
                   model.cross_service.map((far) => (
                     <CrossServicePanel key={`${far.member}:${far.via.from.symbol}`} far={far} />
