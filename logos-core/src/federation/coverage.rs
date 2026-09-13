@@ -18,7 +18,7 @@
 //! ([`crate::governance`]) — those operate on a single [`crate::Engine`] and
 //! have no dependency on `federation` at all, so the coverage tier is
 //! structurally incapable of moving the gate. [`cross_service_coverage`] is
-//! reachable only through an [`EngineRegistry`], which itself exists only when
+//! reachable only through an [`EngineRegistry`](super::EngineRegistry), which itself exists only when
 //! a workspace manifest is present ([`Backing::Federated`](super::Backing)) —
 //! the single-root path never constructs one, so this tier is inert with no
 //! manifest ([FR-WS-05]).
@@ -1048,8 +1048,9 @@ pub struct CrossServiceCoverage {
     ///
     /// **The retired `bound_ratio`'s formula, unchanged, under the name of what it
     /// always measured** ([CR-120] §5.2, [FR-WS-05]). It is dominated by
-    /// `contract-surface` intake — on the 84-member reference estate all 81 of its
-    /// bound rows are declared-contract matches — so it reports how far this
+    /// `contract-surface` intake — on the 84-member reference estate **81 of its 86**
+    /// bound rows are declared-contract matches, the other 5 being the
+    /// `config-bound` client calls S-397 T1's hop admitted — so it reports how far this
     /// workspace's *declarations* line up with its controllers, and it is **never**
     /// a measure of cross-service coupling. That headline is
     /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges), and
@@ -1635,10 +1636,28 @@ where
     // Only the members that actually name a key are opened. The scope's
     // `fan_out` is deliberately NOT used: it reaches every member of the
     // workspace, and on an 84-member estate where one service configures its
-    // base URL that would open 83 stores to read nothing ([NFR-PE-10]). Every
-    // member reached here already opened for this answer's invocation-refs walk
-    // — a member that failed to open contributes no consumer — so these are
-    // resident hits, not new attempts against the once-per-answer guarantee.
+    // base URL that would open 83 stores to read nothing ([NFR-PE-10]).
+    //
+    // Every member reached here already opened for this answer's invocation-refs
+    // walk — a member that failed to open contributes no consumer — so this can
+    // never add an attempt for a *broken* member, which is what the
+    // once-per-answer guarantee ([FR-WS-16] AC5) is about.
+    //
+    // It is NOT, however, always a resident hit, and an earlier wording here
+    // said it was. `engine_for` bypasses `AnswerScope::open_for_walk` and goes
+    // straight to admission, which evicts to `max_resident_members()` before
+    // every build; that budget is derived from the host's descriptor limit and
+    // is routinely far below an 84-member roster. A member that named a key
+    // early in the roster has therefore usually been evicted by the time this
+    // runs, and is rebuilt — a real engine start, counted in `engine_starts()`
+    // and `reconstructions()`. The cost is bounded (one rebuild per member that
+    // names a key, not per row) and correctly ledgered, but it is a cost, and
+    // S-397 T1 is what moved this path from dormant to live: before that hop the
+    // estate emitted zero `config-bound` rows, so `wanted` was always empty.
+    // `tests/workspace_connection_budget.rs` cannot see it either — its fixture
+    // never indexes, so `wanted` is empty there too and the `engine_starts()`
+    // equality it pins against `WALKS_PER_STATUS` omits this term. Recorded for
+    // the sprint-68 review rather than silently re-justified.
     for (member, keys) in wanted {
         match answer
             .registry()
@@ -3465,8 +3484,13 @@ mod tests {
     /// **Payload growth, measured against the reference workspace's shape**
     /// ([CR-118] §7, [NFR-CC-04]).
     ///
-    /// The 84-member `pec-services` workspace is un-enrolled, so this reproduces
-    /// its *measured shape* rather than re-running it: 875 references — 81 bound,
+    /// This reproduces the 84-member `pec-services` workspace's *measured shape*
+    /// rather than re-running it — a unit test must not depend on an estate that
+    /// may or may not be on this host, and the shape is what the assertion is
+    /// about. (The estate has been enrolled since 2026-09-08 and was re-indexed on
+    /// 2026-09-13; the earlier "is un-enrolled" premise recorded here was the
+    /// reason at the time and is no longer true, but the design conclusion is
+    /// unchanged.) The reproduced shape: 875 references — 81 bound,
     /// 146 ambiguous, the rest with no provider in the workspace — every tie
     /// four-way (the measured aggregator ceiling: three aggregators plus the
     /// origin), over SCIP symbols of realistic length. The before/after figures
@@ -3556,12 +3580,15 @@ mod tests {
         //
         // The fixture reproduces that split, not the corpus's whole population,
         // and the difference is stated so the numbers are not over-read. This
-        // shape carries no `invocation` rows at all; the live corpus carries 55,
-        // of which 0 bind — 54 broker `topic-not-literal` refusals plus the one
-        // workspace-wide `http-client-call` reference, which is bucketed
-        // `no-provider-in-workspace` rather than `unbound` (the term of art here
-        // excludes that bucket, so [CR-120] CRA-02's colloquial "unbound" would
-        // mislead in this file). The live figures are measured by
+        // shape carries no `invocation` rows at all. The live corpus carried 55 on
+        // the 2026-09-09 generation, of which 0 bound — 54 broker
+        // `topic-not-literal` refusals plus the one workspace-wide
+        // `http-client-call` reference. Since S-397 T1's accessor hop reached that
+        // index (re-measured 2026-09-13) it carries **186** — 5 bound, 9 ambiguous,
+        // 141 unbound, 31 `no-provider-in-workspace`. That last bucket is distinct
+        // from `unbound` (the term of art here excludes it, so [CR-120] CRA-02's
+        // colloquial "unbound" would mislead in this file). The live figures are
+        // measured by
         // `coverage_intake_split::measure_the_intake_split_over_the_reference_workspace_when_one_is_configured`
         // and recorded in `tests/coverage_intake_split/intake_split_finding.txt`.
         assert_eq!(

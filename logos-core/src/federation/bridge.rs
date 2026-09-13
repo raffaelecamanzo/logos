@@ -970,7 +970,7 @@ where
 /// `X` in the warning so both the contract-surface and invocation-consumer reads
 /// (and both tiers) share this handling verbatim.
 ///
-/// # An engine-start failure is announced once per command
+/// # An engine-start failure is announced once per answer
 /// The two arms warn on different schedules, because they report different
 /// things. A **read** failure is per-`read`: the same member can read its
 /// contract surface fine and fail on its invocation refs, so each read is its
