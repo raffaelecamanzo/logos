@@ -57,13 +57,17 @@
 //!
 //! # Recorded finding (2026-09-13, `~/source/pec-services`, 84 members)
 //!
+//! Re-recorded by [S-398] T2 over the estate re-indexed with merged Sprint 69
+//! Iteration-1 state. The previous generation's figures are kept beside it,
+//! because the movement is the finding:
+//!
 //! ```text
-//! references           1060
+//! references           1034                       (was 1060)
 //!                       bound  ambiguous  unbound  no-provider
-//! contract-surface         81        146        1          646
-//! invocation                5          9      141           31
-//! headline                 86        155      142          677
-//! 0.225 (86 of 383 measured; 677 excluded as no-provider-in-workspace)
+//! contract-surface         81        146        1          646   (unchanged)
+//! invocation               15         23       79           43   (was 5/9/141/31)
+//! headline                 96        169       80          689   (was 86/155/142/677)
+//! 0.278 (96 of 345 measured; 689 excluded as no-provider-in-workspace)
 //! ```
 //!
 //! **[CR-120] §6's criterion was met, on the generation it was written over: 81
@@ -76,10 +80,12 @@
 //!
 //! The figures above are a **later index generation** of the same estate, not a
 //! retraction of that. [S-397] T2 re-indexed all 84 members on 2026-09-13 from a
-//! binary carrying [S-374] and [S-397] T1, as its own acceptance criterion
-//! required. The contract-surface column is byte-identical across the two
-//! generations; every cell that moved is in the invocation column, and it moved
-//! for two reasons that are worth keeping apart:
+//! binary carrying [S-374] and [S-397] T1, and [S-398] T2 re-indexed them again
+//! the same day from a binary carrying the whole of Sprint 69 Iteration 1. The
+//! contract-surface column is byte-identical across **all three** generations;
+//! every cell that has ever moved is in the invocation column.
+//!
+//! Against the 1.4.7 generation it moved for two reasons worth keeping apart:
 //!
 //! * **`unbound` 54 → 141.** The 54 were the broker `topic-not-literal` refusals
 //!   (S-370/[CR-117]) that every generation carries. The 87 added are [S-374]'s
@@ -95,12 +101,34 @@
 //!   against [S-397] AC2's floor are `config_bound_admission.rs`'s subject, not
 //!   this file's.
 //!
+//! Against the [S-397] generation — the 1060/5/9/141/31 column above — it moved
+//! for two more, and those two must NOT be summed either:
+//!
+//! * **[S-398] T1, an admission.** `config-bound` rows rose 44 → 81, exactly +37,
+//!   as the qualified-receiver accessor shape became reachable. Those 37 rows left
+//!   the `base-url-runtime` refusals — 37 fewer of them in exactly the four Java
+//!   members that gained 37 `config-bound` rows, per member — and landed across
+//!   `bound` (+10), `ambiguous` (+14),
+//!   `no-provider-in-workspace` (+12) and one `path-not-composed` row (+1). The
+//!   invocation `unbound` column therefore reads 141 → 79: the 54
+//!   `topic-not-literal` broker refusals are untouched, 24 `base-url-runtime`
+//!   remain, and the new `path-not-composed` row is the +1.
+//! * **[S-402] T1, a population correction.** `references` fell 1060 → 1034 and
+//!   the whole invocation intake fell 186 → 160, all 26 of them in
+//!   `hermodr-mirror`, the estate's one Go member, whose captured client-call
+//!   sites went 37 → 11 when the candidacy gate became receiver-grained. All 26
+//!   were keyless refusals, so nothing that bound stopped binding — but this is a
+//!   smaller population, not better coverage, and the two halves are reported
+//!   separately for exactly that reason.
+//!
 //! The full record, including the verified read-only proof, is the durable
 //! artifact `coverage_intake_split/intake_split_finding.txt`.
 //!
 //! [CR-117]: ../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
 //! [S-374]: ../../docs/planning/journal.md#s-374-the-http-client-call-arm-records-its-refusals
 //! [S-397]: ../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
+//! [S-398]: ../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
+//! [S-402]: ../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
 //!
 //! [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 //! [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
@@ -251,15 +279,16 @@ fn measure_the_intake_split_over_the_reference_workspace_when_one_is_configured(
     // message, so a moved corpus reads as a moved corpus.
     assert_eq!(
         (cs.bound, inv.bound),
-        (81, 5),
-        "the recorded split is 81 contract-surface / 5 invocation bound rows, measured \
-         2026-09-13 over the S-397-generation index. Measured {} / {} over {} references. \
-         If the corpus has been re-indexed or re-enrolled again, RECORD the measured \
-         figure — here, and in the `by_intake` block in docs/howto/commands.md, which \
-         restates this split in prose no test reads — do not bend the classifier to \
-         reproduce this one. CR-120's own \
-         criterion was 81 / 0 and it was met on the 1.4.7 generation; the 5 is S-397 T1's \
-         accessor hop and is not a retraction of it.",
+        (81, 15),
+        "the recorded split is 81 contract-surface / 15 invocation bound rows, measured \
+         2026-09-13 by S-398 T2 over the merged-Iteration-1 index (it was 81 / 5 over the \
+         S-397 generation, and 81 / 0 over the 1.4.7 one). Measured {} / {} over {} \
+         references. If the corpus has been re-indexed or re-enrolled again, RECORD the \
+         measured figure — here, and in the `by_intake` block in docs/howto/commands.md, \
+         which restates this split in prose no test reads — do not bend the classifier to \
+         reproduce this one. CR-120's own criterion was 81 / 0 and it was met on the 1.4.7 \
+         generation; the invocation column is the accessor hop (S-397 T1, then S-398 T1) \
+         and is not a retraction of it.",
         cs.bound,
         inv.bound,
         cov.references.len()

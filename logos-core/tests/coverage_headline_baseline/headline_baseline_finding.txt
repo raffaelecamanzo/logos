@@ -10,10 +10,76 @@ CR-121 (S-380 onward) is blocked on this artifact existing, and every delta that
 programme reports is stated against it.
 
 
+SUPERSEDED IN PART — 2026-09-13 (S-398 T2), THE CURRENT GENERATION
+------------------------------------------------------------------
+
+READ THIS FIRST. This is the newest reading. The S-397 T2 section below it is the
+previous one and the original 2026-09-09 measurement follows both; each is
+preserved rather than rewritten, because a dated measurement that gets edited is
+no longer a measurement.
+
+The JSON beside this file has been REGENERATED again (`LOGOS_BASELINE_WRITE=1`)
+over a third index generation: 2026-09-13, all 84 members, from a binary built at
+3eebf933 — main with the whole of Sprint 69 Iteration 1 merged (S-398 T1,
+S-402 T1, S-400 T1, S-401 T1). The figures it produced:
+
+        references                     1034   (was 1060)
+        bound / ambiguous / unbound     96 / 169 / 80
+        no_provider_in_workspace         689   (was  677)
+        by_intake invocation      15 / 23 / 79 / 43   (was 5 / 9 / 141 / 31)
+        resolved_cross_service_edges       0   (still, and by construction)
+        egress_resolution              0.128 (15 of 117)  (was 0.032 of 155)
+        spec_conformance_ratio         0.278 (96 of 345)  (was 0.225 of 383)
+
+The contract-surface column is byte-identical for the third generation running.
+Every cell that has ever moved is in the invocation column.
+
+TWO INDEPENDENT MOVEMENTS PRODUCED THIS GENERATION, AND THEY ARE NOT SUMMED.
+
+  * S-398 T1 — AN ADMISSION, 37 sites. `config-bound` rows rose 44 -> 81 as the
+    qualified-receiver accessor shape became reachable, and the
+    `base-url-runtime` residue fell by exactly 37 in exactly the four Java
+    members that gained them, row for row per member. That is a coverage gain.
+
+  * S-402 T1 — A PRECISION CORRECTION, 26 sites. The captured invocation-intake
+    population itself fell 186 -> 160, all of it in hermodr-mirror, the estate's
+    one Go member, whose captured client-call sites went 37 -> 11 when the
+    candidacy gate became receiver-grained. All 26 were keyless refusals that
+    produced no target and no edge, so nothing that bound stopped binding. A
+    smaller denominator is not better coverage.
+
+  Read together, `base-url-runtime` fell 87 -> 24. Thirty-seven of that 63 is an
+  admission and twenty-six is a correction to what was ever captured.
+
+THE EGRESS RATE MOVED AND BOTH OF ITS TERMS MOVED, so it must not be quoted
+without its denominator. The numerator rose 5 -> 15 (ten more admitted rows bind
+a provider). The denominator fell 155 -> 117, and the -38 decomposes as -26
+(S-402's smaller population) and -12 (rows S-398 admitted whose resolved template
+names a service with no provider in this workspace, so they moved from `unbound`,
+inside the denominator, to `no-provider-in-workspace`, which ADR-53 holds outside
+it). Invocation `no_provider_in_workspace` rose 31 -> 43, +12, which is the other
+side of that same movement.
+
+WHAT DID NOT MOVE: `resolved_cross_service_edges`, still 0. A `config-bound` row
+is excluded from that headline by construction — the coverage tier resolves the
+placeholder, but the bridge still keys a consumer on its raw ledger target — so
+admitting 37 more of them cannot move it, and did not. CR-120's case is intact.
+
+The reading was taken twice, 34 minutes apart, with all 1034 reference rows
+byte-identical between them. A control reading was taken BEFORE the re-index, with
+the same new binary over the pre-sprint stores, and it reproduced the pre-sprint
+baseline to the digit — so no part of the movement above is a read-model change
+in the measuring binary.
+
+The current record, with both delivered figures stated over their own
+denominators, is
+`logos-core/tests/config_bound_admission/config_bound_admission_finding.txt`.
+
+
 SUPERSEDED IN PART — 2026-09-13 (S-397 T2)
 ------------------------------------------
 
-READ THIS FIRST. Everything below is the 2026-09-09 measurement and is preserved
+THE OLDEST GENERATION. Everything below is the 2026-09-09 measurement and is preserved
 as the historical record of it; it is NOT rewritten, because a dated measurement
 that gets edited is no longer a measurement. What has changed since:
 
@@ -40,9 +106,8 @@ that gets edited is no longer a measurement. What has changed since:
     route/invocation rows, of which 87 are `base-url-runtime` refusals and 44 are
     S-397 T1's configuration-bound rows. So `unbound` rose by 87, not by 131.
 
-The current record of the new generation is the JSON's own `generation` and
-`deltas` blocks, and the S-397 T2 finding at
-`logos-core/tests/config_bound_admission/config_bound_admission_finding.txt`.
+That generation was itself superseded the same day — see the S-398 T2 section
+above, which is the current one.
 
 
 1. WHAT WAS MEASURED, AND HOW

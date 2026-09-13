@@ -1,12 +1,10 @@
-//! **S-397 T2 — what the SHIPPED pipeline admits on the reference estate**
-//! ([FR-WS-19], [NFR-CC-04], [CR-122] §6).
+//! **S-398 T2 — what the SHIPPED pipeline admits on the reference estate**
+//! ([FR-WS-19], [NFR-CC-04], [CR-122] §6, [CR-123]).
 //!
-//! [S-397] T1 wired the accessor capture hop. Its acceptance criterion 2 is a
-//! figure, and it names the surface the figure must be read from: *"on the
-//! reference workspace the shipped pipeline admits at least 79 accessor-based
-//! client-call sites carrying `config-bound` provenance, measured through
-//! `logos workspace status --json` and **not** through the harness, against the 0
-//! it admits today"*.
+//! [S-397] T1 wired the accessor capture hop and [S-398] T1 widened it to reach an
+//! accessor behind a *qualified* receiver. [S-397] AC2 named the surface the figure
+//! must be read from: *"measured through `logos workspace status --json` and
+//! **not** through the harness"*, and [S-398] AC5 repeats it.
 //!
 //! That distinction is the whole reason this file is not part of the
 //! `operand_resolvability` harness. The harness resolves the estate's accessors
@@ -16,67 +14,109 @@
 //! `EngineRegistry<Engine>(RegistryMode::Lazy)` → [`workspace_status`] → the serde
 //! serialization `Output::print` applies for `--json` — and counts rows in the
 //! resulting payload. A figure the harness proves is not a figure the product
-//! emits, and on this estate the two differ by a factor of nearly two.
+//! emits; the two ran a factor of nearly two apart before [S-398] T1, and this
+//! file records where they stand after it.
 //!
 //! # The measured finding (2026-09-13, `~/source/pec-services`, 84 members)
 //!
-//! **The criterion is NOT met. The shipped pipeline admits 44, against a floor of
-//! 79.** Recorded rather than rounded, and the shortfall is diagnosed rather than
-//! absorbed:
+//! Measured on the estate re-indexed with merged Iteration-1 state ([S-398] T1,
+//! [S-402] T1, [S-400] T1, [S-401] T1), 84 of 84 members read, `covers_all = true`.
 //!
 //! ```text
-//! rows carrying `config-bound` provenance          44
-//!   of which bound                                  5
-//!   of which ambiguous                              9
-//!   of which no-provider-in-workspace              30
-//! rows carrying `config-unresolved` provenance      0
-//! the accessor denominator (S-382 reading)         108
-//! the harness's upper bound (79 agreed + 2 divergent) 81
-//! the criterion's floor                            79
-//! the same payload over the pre-hop index generation 0
+//! rows carrying `config-bound` provenance          81      (was 44)
+//!   of which bound                                 15      (was  5)
+//!   of which ambiguous                             23      (was  9)
+//!   of which no-provider-in-workspace              42      (was 30)
+//!   of which path-not-composed                      1      (was  0)
+//! rows carrying `config-unresolved` provenance      0      (was  0)
+//! reference rows in the payload                  1034      (was 1060)
+//! the accessor denominator (S-382 reading)         96      (was 108)
+//! the harness's upper bound (79 agreed + 2 divergent) 81   (unchanged)
 //! ```
 //!
-//! So: **44 of 108** accessor-denominator sites, **44 of 81** of what the harness
-//! proves resolvable, against a floor of **79**. The move from 0 is real and it is
-//! the whole of what T1 bought; the floor is not met.
+//! So: **81 of 96** accessor-denominator sites, and **81 of 81** of what the
+//! harness proves resolvable on that denominator. **No floor is asserted on this
+//! figure and none should be read into it.** [S-397] AC2's floor of 79 is now
+//! exceeded, which is recorded here as an outcome and deliberately *not* re-armed
+//! as a criterion for [S-398]: [Sprint 68] was bitten by an inherited census figure
+//! becoming a story's acceptance floor, and the defect turned out to be the
+//! criterion. `RECORDED_ADMITTED` below is an exact pin on what was measured, in
+//! both directions, which is a reproduction claim rather than a floor.
 //!
-//! **The 0 is a different INDEX GENERATION, not a different binary.** Both readings
-//! were produced by a `logos 1.4.9` binary; what separates them is that the stores
-//! were cold-indexed on 2026-09-08 with 1.4.7, before the accessor hop existed, and
-//! the hop records its key at index time. Saying "the figure on 1.4.9" would name
-//! the one thing the two runs share. The sprint document's own phrasing refers to
-//! the *released* 1.4.9, which happens to share a version string with the measuring
-//! build — which is exactly why it is not repeated here.
+//! **A lower refusal count is not a coverage gain on its own, and this run contains
+//! one of each.** Two independent things moved between the 44 and the 81:
 //!
-//! # The shortfall is one mechanism, and T1 predicted it
+//! * **[S-398] T1 — an admission.** `config-bound` rows rose 44 → 81, exactly
+//!   **+37**, and the `base-url-runtime` residue fell by the same 37 in the same
+//!   four members, site for site: `mailbox-aggregator-api` +19/−19,
+//!   `funnel-aggregator-api` +12/−12, `archive-manager` +5/−5,
+//!   `notification-adapter` +1/−1. Every row that stopped refusing started
+//!   carrying a resolved, committed value. That is a coverage gain.
+//! * **[S-402] T1 — a precision correction.** The invocation-intake population
+//!   itself fell 186 → 160, **−26**, all of it in `hermodr-mirror`, the estate's one
+//!   Go member, whose captured client-call sites went 37 → 11 when the candidacy
+//!   gate became receiver-grained. Those 26 were keyless refusals that produced no
+//!   reference and no edge, so nothing that bound stopped binding — but the
+//!   `base-url-runtime` count falls by 26 for a reason that is not a gain, and the
+//!   denominator every egress ratio is computed over falls with it.
 //!
-//! Diffing the harness census against the members' invocation ledgers site by
-//! site, the gap is **37 sites and every one of them spells `this.`**:
+//! Netting the two would report 63 fewer refusals as though they were one
+//! improvement. They are not, and the two halves are never summed here.
+//!
+//! # The `base-url-runtime` residue, with its own denominator
+//!
+//! ```text
+//! rows whose reason is `base-url-runtime`           24      (was 87)
+//!   of an invocation-intake population of          160      (was 186)
+//!   of an HTTP-arm (relation `route`) population of 106     (was 132)
+//!   of the egress-resolution denominator of        117      (was 155)
+//! ```
+//!
+//! All 24 are invocation-intake `route` rows, in four members: `hermodr-mirror` 11
+//! (Go, the genuine sites [S-402] kept), `mailbox-aggregator-api` 8,
+//! `pecserver-facade` 4, `funnel-aggregator-api` 1. `pecserver-facade`'s 4 did not
+//! move at all across the change, which is the control: it is the member whose
+//! accessors were already unqualified, so [S-398] had nothing to add there.
+//!
+//! # The shortfall [S-397] T2 recorded, and what closed it
+//!
+//! [S-397] T2 recorded the gap as **37 sites, every one of them spelling `this.`**:
 //! `this.mailboxConfigurationApi.getUriGetMailbox()`. `extract::config::accessor`
-//! refuses a **qualified receiver** by design — [NFR-RA-05], never guess — where
+//! refused a **qualified receiver** by design — [NFR-RA-05], never guess — where
 //! the harness's `operand_name` trims the expression to its last segment and
-//! resolves it. T1's own implementation notes record this ceiling in as many
-//! words: *"the census can resolve a site the product will not"*. The 79 the
-//! criterion was written against is a census figure, and 37 of those 79 sites are
-//! only reachable by the trim.
+//! resolves it. [S-398] T1 admitted exactly that shape, gated on the receiver's
+//! declared type rather than on the trim, and the estate moved by exactly the 37
+//! sites the diagnosis named. The prediction and the outcome agree to the site.
 //!
 //! Arithmetic, for a reader who wants to reconstruct it: the harness resolves 79
-//! agreed + 2 divergent = 81 Java sites. 37 of the 79 agreed are `this.`-qualified
-//! and the product refuses them, leaving 42; the 2 divergent sites are captured
-//! (their receiver is unqualified), giving **44**. No site is lost anywhere else,
-//! and nothing is lost in the coverage tier: the members' ledgers hold exactly 44
-//! `http-client-call` rows carrying a `${…}` target, and all 44 reach the payload.
+//! agreed + 2 divergent = 81 Java sites, and the payload now carries 81
+//! `config-bound` rows of which exactly **2** carry an overlay-divergent key (a
+//! `values` list with more than one entry). The totals and the divergent split both
+//! agree; site-level identity of the two sets was not independently checked and is
+//! not claimed here.
 //!
-//! # The `.properties` gap is NOT the cause, and that is measured too
+//! # The `.properties` gap is still open, and still costs this estate nothing
 //!
 //! [S-397] AC5 requires the `.properties` admission residue stated as a numerator
 //! over the accessor denominator, so the delivered figure is not read as full
 //! coverage. It is measured in
 //! `operand_resolvability/configuration_agreement.rs::properties_residue` and is
-//! **0 of 108**: this estate commits every key its accessors read in yaml, and the
-//! 3 `.properties` sources the corpus admits define none of them. The gap is still
-//! open and still unowned — a residue of zero says what it costs today, not that
-//! it is closed — but it accounts for none of the 44-against-79 shortfall.
+//! **0 of 96** (it was 0 of 108; the denominator moved, the residue did not): this
+//! estate commits every key its accessors read in yaml, and the 3 `.properties`
+//! sources the corpus admits define none of them. The gap is still open and still
+//! unowned — a residue of zero says what it costs today, not that it is closed.
+//!
+//! # What a reader should NOT conclude
+//!
+//! * Not "the pipeline resolves 81 of the estate's couplings". It admits 81 rows
+//!   carrying a resolved, committed value; 15 of them bind a provider, and
+//!   `resolved_cross_service_edges` is **still 0** — a `config-bound` row is
+//!   deliberately excluded from that headline because the bridge still keys a
+//!   consumer on its raw ledger target.
+//! * Not "egress resolution quadrupled". It reads 0.128 (15 of 117) against 0.032
+//!   (5 of 155), and the denominator moved underneath it for a reason that is not
+//!   a coverage change.
+//! * Not "79 was wrong". 79 is a correct census figure, and it remains one.
 //!
 //! # VOID is not zero ([NFR-CC-04])
 //!
@@ -147,26 +187,97 @@
 //! The full record is the durable artifact
 //! `config_bound_admission/config_bound_admission_finding.txt`.
 //!
+//! [Sprint 68]: ../../docs/planning/sprints/sprint-68.md
 //! [CR-122]: ../../docs/requests/CR-122-the-configuration-substrate-reaches-the-product.md
+//! [CR-123]: ../../docs/requests/CR-123-invocation-capture-accepts-the-qualified-receiver.md
 //! [FR-WS-19]: ../../docs/specs/requirements/FR-WS-19.md
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 //! [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
 //! [S-392]: ../../docs/planning/journal.md#s-392-measure-the-one-hop-parameter-forwarding-residue
 //! [S-397]: ../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
+//! [S-398]: ../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
+//! [S-400]: ../../docs/planning/journal.md#s-400-measure-whether-a-runtime-port-identifies-the-callee
+//! [S-401]: ../../docs/planning/journal.md#s-401-a-cross-service-reachability-answer-carries-its-unresolved-residue
+//! [S-402]: ../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
 
 use std::path::PathBuf;
 
 use logos_core::federation::{discover, workspace_status, EngineRegistry, RegistryMode};
 use logos_core::Engine;
 
-/// The recorded verdict, reproduced by the run and pinned by its assertions.
+/// The recorded verdict: printed beside the live run, and pinned on its headline
+/// figures by [`the_recorded_artifact_states_the_figures_this_file_pins`].
+///
+/// **Only the headline figures are pinned, and the distinction is worth keeping.**
+/// The artifact is prose; asserting it whole would make every wording change a test
+/// failure. What is asserted is that the numbers this file re-records appear in it —
+/// which is the failure this arm actually has, a stale artifact sitting beside a
+/// freshly re-recorded constant. The doc comment here previously claimed the whole
+/// artifact was "pinned by its assertions"; it was not pinned by anything, and
+/// falsifying every figure in it left the run green.
 const RECORDED_FINDING: &str = include_str!("config_bound_admission/config_bound_admission_finding.txt");
 
-/// [S-397] AC2's floor: the criterion asks for **at least** this many.
+/// The artifact beside this file must state the figures this file pins — corpus-free,
+/// so it holds in CI and in a fresh clone.
+///
+/// A durable finding is re-recorded by hand while the constants are re-recorded in
+/// code, and nothing made the two agree: the artifact could keep a superseded
+/// numerator beside a live one indefinitely. Each figure is checked as a whole word
+/// so `81` cannot be satisfied by `810` or by the `81` inside `1081`.
+#[test]
+fn the_recorded_artifact_states_the_figures_this_file_pins() {
+    // The two MEASURED figures, as whole words. A bare-number search is the right
+    // instrument for them precisely because they are large and estate-specific: a
+    // stale artifact keeps the old numerator, and the old numerator is absent.
+    for (figure, what) in [
+        (RECORDED_ADMITTED, "the admitted `config-bound` count"),
+        (ACCESSOR_DENOMINATOR, "the accessor denominator"),
+    ] {
+        let needle = figure.to_string();
+        let found = RECORDED_FINDING.match_indices(&needle).any(|(at, _)| {
+            let before = RECORDED_FINDING[..at].chars().next_back();
+            let after = RECORDED_FINDING[at + needle.len()..].chars().next();
+            !before.is_some_and(|c| c.is_ascii_digit()) && !after.is_some_and(|c| c.is_ascii_digit())
+        });
+        assert!(
+            found,
+            "config_bound_admission_finding.txt does not state {what} ({figure}) that \
+             this file pins. The artifact is the durable dated record of the same \
+             measurement — re-record it in the same change as the constant, never after."
+        );
+    }
+
+    // `CRITERION_FLOOR` is pinned to its own SENTENCE, not as a bare number, and the
+    // reason is a measured weakness of the loop above: a small historical literal is
+    // searched for in a document full of small numbers, so a mutation to 5 finds the
+    // `5` in the before-column of the bucket table and passes. Probed rather than
+    // assumed — that mutation ran green before this assertion existed. Tying it to
+    // the phrase makes the constant and the narration one thing.
+    let phrase = format!("floor of {CRITERION_FLOOR}");
+    assert!(
+        RECORDED_FINDING.contains(&phrase),
+        "the artifact does not contain the phrase \"{phrase}\". CRITERION_FLOOR is a \
+         frozen historical literal — the text of S-397 AC2 — so the only thing that can \
+         pin it is the sentence it appears in. If the artifact's wording changes, change \
+         this phrase with it; if the FLOOR changes, you are rewriting history."
+    );
+}
+
+/// [S-397] AC2's floor: that criterion asked for **at least** this many.
+///
+/// Historical. Nothing gates on it at runtime — the reasoning is at the removal
+/// site in the test body — and it is kept because the 81-against-79 relation is
+/// worth printing beside the measurement. Pinned to its own sentence in the
+/// artifact by [`the_recorded_artifact_states_the_figures_this_file_pins`].
 const CRITERION_FLOOR: usize = 79;
 
-/// What the shipped pipeline actually admits, measured 2026-09-13.
-const RECORDED_ADMITTED: usize = 44;
+/// What the shipped pipeline actually admits, re-measured 2026-09-13 over the
+/// estate re-indexed with merged Iteration-1 state (was 44 before [S-398] T1).
+///
+/// Pinned exactly, in both directions. That is a reproduction claim, not a floor:
+/// a run that reads a different number has changed the rule, the binary or the
+/// corpus, and all three need a human.
+const RECORDED_ADMITTED: usize = 81;
 
 /// The accessor denominator the figure is stated over — the S-382 reading's
 /// production client-call population.
@@ -176,19 +287,20 @@ const RECORDED_ADMITTED: usize = 44;
 /// harness, so it cannot compute the denominator its own headline is stated over.
 /// The owner is
 /// `operand_resolvability/configuration_agreement.rs`'s
-/// `(s382.denominator, s382.resolved, s382.divergent, s382.no_key) == (108, 79, 2, 27)`
-/// assertion, whose failure message lists this constant among the four places to
+/// `(s382.denominator, s382.resolved, s382.divergent, s382.no_key) == (96, 79, 2, 15)`
+/// assertion, whose failure message lists this constant among the places to
 /// re-record with it.
 ///
 /// That pointer is the whole guard, and it is here because the figure has
-/// **already drifted once in silence** (111 -> 108, documented at that assertion):
+/// **already moved twice** (111 -> 108 in silence, then 108 -> 96 when [S-402]
+/// emptied the Go row, documented at that assertion):
 /// unpinned, this constant would keep printing a stale denominator beside a live
 /// numerator and stay green. The `const` block at the end of the measurement holds
 /// the one relation this binary *can* check — that the admitted figure lies inside
 /// it.
-const ACCESSOR_DENOMINATOR: usize = 108;
+const ACCESSOR_DENOMINATOR: usize = 96;
 
-/// The three `(bucket, reason)` pairs the 44 admitted rows fall into, in the order
+/// The four `(bucket, reason)` pairs the 81 admitted rows fall into, in the order
 /// [`admission`] tallies them — a `BTreeMap`, so ascending by the pair rather than
 /// by count.
 ///
@@ -196,14 +308,33 @@ const ACCESSOR_DENOMINATOR: usize = 108;
 /// diagnosis.** `CoverageState::bucket` folds every non-ambiguous unbound reason —
 /// `no-provider-in-workspace`, `base-url-runtime`, `path-not-composed`,
 /// `config-key-missing` — into the single string `"unbound"`. Pinned on the bucket
-/// alone, this file's central claim (*the shortfall is capture, not resolution*)
-/// would have been prose only: a generation in which those 30 rows became
+/// alone, this file's central claim (*the shortfall was capture, not resolution*)
+/// would have been prose only: a generation in which those 42 rows became
 /// `config-key-missing` refusals would have passed with an unchanged split. A bound
 /// row names no reason, so its slot is `None`.
-const RECORDED_BUCKETS: [(&str, Option<&str>, usize); 3] = [
-    ("ambiguous", Some("ambiguous"), 9),
-    ("bound", None, 5),
-    ("unbound", Some("no-provider-in-workspace"), 30),
+///
+/// The fourth pair is new since [S-397] T2: one admitted row now refuses under
+/// `path-not-composed`, where before every admitted row keyed.
+///
+/// **That word arrives by the composed-template path, not by the arm's
+/// stored-target convention, and the difference is worth stating because the
+/// obvious reading is the wrong one.** A `config-bound` row is classified by
+/// `federation::coverage::record_config_bound`, whose unbound reason is
+/// `composed_refusal(&template).map_or(PathNotComposed, …)` — so the word here is
+/// the **fallback default** of that `map_or`: every proven composition failed
+/// `consumer_portable_key`, and the arm's own refusal test found nothing to say
+/// about the template (it is a valid rooted client-call path). It is *not*
+/// `client_call_refusal`'s "a non-empty stored target that will not key", which
+/// `coverage.rs` documents as unreachable for a store this binary writes and which
+/// a reader would otherwise take this row for — i.e. for a stale-binary artefact
+/// rather than for what it is.
+///
+/// One row is not a trend and is recorded rather than chased.
+const RECORDED_BUCKETS: [(&str, Option<&str>, usize); 4] = [
+    ("ambiguous", Some("ambiguous"), 23),
+    ("bound", None, 15),
+    ("unbound", Some("no-provider-in-workspace"), 42),
+    ("unbound", Some("path-not-composed"), 1),
 ];
 
 /// The reference workspace, or `None` when none is configured — the same
@@ -321,17 +452,18 @@ fn admission(payload: &serde_json::Value) -> Admission {
     out
 }
 
-/// The measurement [S-397] AC2 names, through the surface it names.
+/// The measurement [S-397] AC2 and [S-398] AC5 name, through the surface they name.
 ///
 /// The verdict is **asserted**, not printed. Without assertions a regression that
 /// moved the figure — in either direction — would pass silently, and this figure
-/// is what decides whether the qualified-receiver ceiling gets a story.
+/// is what says whether the qualified-receiver mechanism [Sprint 68] named is
+/// still reaching the product.
 ///
 /// **The remedy for a red run here is to RECORD the new figure** — in this file's
 /// docs, in the durable artifact beside it, and in the story's notes — never to
-/// bend the pipeline to reproduce this one, and never to relax the floor. If the
-/// figure has *risen* past 79 the criterion is met and that is the finding: say
-/// so, and say what moved it.
+/// bend the pipeline to reproduce this one. Say what moved it, and say which part
+/// of the move is an admission and which part is a population correction: a lower
+/// refusal count is not a coverage gain on its own.
 #[test]
 fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_configured() {
     let Some(root) = corpus_root() else {
@@ -367,15 +499,16 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
     let a = admission(&payload);
 
     println!(
-        "S-397 AC2 — `config-bound` admission over {} ({} of {} members read, covers_all={}):\n\
-         \x20 references                          {:>5}\n\
-         \x20 carrying `config-bound`             {:>5}   <- the figure\n\
+        "S-398 T2 — `config-bound` admission over {} ({} of {} members read, covers_all={}):\n\
+         \x20 references                          {:>5}   (1060 before S-402)\n\
+         \x20 carrying `config-bound`             {:>5}   <- the figure (44 before S-398 T1)\n\
          \x20 carrying `config-unresolved`        {:>5}\n\
          \x20 rows with NO provenance             {:>5}\n\
          \x20 by bucket                           {:?}\n\
-         \x20 criterion floor                     {:>5}\n\
-         \x20 accessor denominator (S-382)        {:>5}\n\
-         \x20 same payload, pre-hop index gen         0",
+         \x20 S-397's historical floor            {:>5}   (exceeded; not a criterion here)\n\
+         \x20 accessor denominator (S-382)        {:>5}   (108 before S-402)\n\
+         \x20 same payload, pre-hop index gen         0   (two generations back, \
+         before the accessor hop existed at all)",
         root.display(),
         a.members_read,
         a.members_total,
@@ -433,10 +566,10 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
     // bucket split and the unresolved count all held exactly.
     assert!(
         a.members_read >= 40 && a.references >= 900,
-        "the recorded finding measured 1060 references over 84 members; this run saw {} \
-         over {}. A collapsed corpus is a broken harness, not a new finding: do NOT \
-         record the figures below as a new measurement — find out why the estate \
-         shrank first.",
+        "the recorded finding measured 1034 references over 84 members (it was 1060 \
+         before S-402 corrected the Go client-call gate); this run saw {} over {}. A \
+         collapsed corpus is a broken harness, not a new finding: do NOT record the \
+         figures below as a new measurement — find out why the estate shrank first.",
         a.references,
         a.members_read,
     );
@@ -451,34 +584,36 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
         a.missing_provenance, a.references,
     );
 
-    // ── The figure, and the criterion it is measured against ────────────
+    // ── The figure ──────────────────────────────────────────────────────
     //
-    // **The floor is checked FIRST, and the order is load-bearing.** Behind the
-    // exact pin below it could never fail — 44 < 79 is a compile-time fact — so a
-    // rise past the floor would have surfaced as `44 != 137` rather than as the
-    // one thing a reader needs told. Here it is reachable: any run whose admitted
-    // count clears 79 stops here, whatever the pin says.
-    assert!(
-        a.config_bound < CRITERION_FLOOR,
-        "S-397 AC2's floor of {CRITERION_FLOOR} is now MET: {} rows carry `config-bound` \
-         provenance, against the {RECORDED_ADMITTED} recorded on 2026-09-13. That is a \
-         genuine change and this assertion is the one that must not be edited away — \
-         record what moved the figure (the qualified-receiver ceiling is the only \
-         mechanism between {RECORDED_ADMITTED} and {CRITERION_FLOOR}), mark AC2 \
-         satisfied, and restate the finding in this file and in the artifact beside it.",
-        a.config_bound,
-    );
+    // **The ordered floor guard that stood here until S-398 T2 is GONE, and its
+    // removal is deliberate rather than a tidy-up.** It read
+    // `assert!(a.config_bound < CRITERION_FLOOR)` and existed for one reason: while
+    // the recorded figure was 44 and the floor 79, a *rise* past the floor would
+    // otherwise have surfaced as an opaque `44 != 81` pin mismatch instead of as
+    // the sentence a reader needed. It did its job — that is exactly how this
+    // run's 81 was surfaced — and it cannot do it again, because the recorded
+    // figure now sits ABOVE the floor and the same assertion would fire on every
+    // green run.
+    //
+    // Its symmetric successor would be `a.config_bound >= CRITERION_FLOOR`, and
+    // that is NOT written here on purpose: it would turn a census figure into a
+    // standing acceptance floor on the product, which is the precise error
+    // [Sprint 68] recorded. The exact pin below carries the whole guard now, in
+    // both directions, and its message carries the reading.
     assert_eq!(
         a.config_bound, RECORDED_ADMITTED,
-        "S-397 T2's recorded finding is that the shipped pipeline admits \
+        "S-398 T2's recorded finding is that the shipped pipeline admits \
          {RECORDED_ADMITTED} `config-bound` client-call rows on the reference estate \
-         (of an accessor denominator of {ACCESSOR_DENOMINATOR}), against AC2's floor of \
-         {CRITERION_FLOOR}. This run read {}. If the corpus has been re-indexed or \
-         re-enrolled, or the accessor hop has widened, RECORD the new figure here, in \
-         the artifact beside this file, AND in the `config-bound` table under \
-         \"What this emits on a real estate today\" in docs/howto/commands.md, which \
-         restates this numerator in prose no test reads — do not bend the pipeline to \
-         reproduce this one, and do not relax the floor.",
+         (of an accessor denominator of {ACCESSOR_DENOMINATOR}; S-397's historical floor \
+         of {CRITERION_FLOOR} is exceeded and is not a criterion here). This run read \
+         {}. If the corpus has been re-indexed or re-enrolled, or the accessor hop has \
+         widened again, RECORD the new figure here, in the artifact beside this file, \
+         AND in the `config-bound` table under \"What this emits on a real estate \
+         today\" in docs/howto/commands.md, which restates this numerator in prose no \
+         test reads — do not bend the pipeline to reproduce this one. State with it \
+         which part of the move is an admission and which part is a change to the \
+         captured population: the two are not the same finding and must not be netted.",
         a.config_bound,
     );
     assert_eq!(
@@ -489,11 +624,11 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
         "the admitted rows' (bucket, reason) split moved. The headline can hold while the \
          split moves, and the split is the more informative half — it is what carries \
          this file's diagnosis rather than its prose. Two readings to keep apart: if the \
-         30 `no-provider-in-workspace` rows became `config-key-missing`, the estate's \
+         42 `no-provider-in-workspace` rows became `config-key-missing`, the estate's \
          committed sources have stopped defining keys the accessors resolve and the \
          shortfall is no longer capture-only; if `bound` moved, the estate's own topology \
          changed. Note that a `config-bound` row is excluded from \
-         `resolved_cross_service_edges` whatever its bucket, so `bound: 5` is not a \
+         `resolved_cross_service_edges` whatever its bucket, so `bound: 15` is not a \
          coverage claim. The split is restated in docs/howto/commands.md; re-record it \
          there in the same change.",
     );
@@ -507,18 +642,38 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
     );
 
     const {
-        // The recorded headline must itself be a shortfall, or the finding this
-        // file records is not the finding its assertions test. Nothing else
-        // constrains these two constants: the test body runs only under
-        // LOGOS_REF_WORKSPACE, so either could be edited to any value and a
-        // default `cargo test` would stay green.
+        // **The relations this binary can check WITHOUT the corpus, and they are the
+        // whole of what a default `cargo test` sees.** The test body above runs only
+        // under LOGOS_REF_WORKSPACE, which nothing in this repository sets, so any
+        // constant not checked here could be edited to any value and CI would stay
+        // green.
+        //
+        // Each of the three is a claim about this file's own RECORDED CONSTANTS —
+        // about whether the sentences it prints are self-consistent — and none is a
+        // claim about the product. That distinction is why re-arming
+        // `a.config_bound >= CRITERION_FLOOR` at RUNTIME would be wrong (see the
+        // comment on the removed runtime guard) while pinning the recorded 81
+        // against the recorded 79 here is not: the second says only "this file must
+        // not narrate a relation it does not hold", which is exactly the defect
+        // found when `CRITERION_FLOOR` was left with nothing constraining it —
+        // setting it to 5 compiled, ran green, and printed
+        // "S-397's historical floor 5 (exceeded; not a criterion here)".
         assert!(
-            RECORDED_ADMITTED < CRITERION_FLOOR,
-            "the recorded figure must be below the floor, or this is not a shortfall",
-        );
-        assert!(
-            RECORDED_ADMITTED < ACCESSOR_DENOMINATOR,
+            RECORDED_ADMITTED <= ACCESSOR_DENOMINATOR,
             "the admitted figure must be inside the denominator it is stated over",
+        );
+        // `<=`, not `<`: a numerator may legitimately equal its denominator — an
+        // estate in which every accessor-denominator site admits reads 96 of 96, and
+        // this file already records an 81-of-81 against the harness's upper bound.
+        // The strict form held at 81/96 and was loosened deliberately, not by
+        // accident.
+        assert!(
+            CRITERION_FLOOR <= RECORDED_ADMITTED,
+            "this file's docs, its printed table and its pin message all say S-397's \
+             historical floor is EXCEEDED. If a re-record ever takes the admitted \
+             figure back below it, that narration becomes false while every runtime \
+             assertion stays green — rewrite the narration in the same change rather \
+             than relaxing this.",
         );
     }
 

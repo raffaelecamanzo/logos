@@ -2,25 +2,30 @@
   "artifact": "S-376 / CR-120 post-change coverage baseline for the reference workspace",
   "workspace": "~/source/pec-services (84 members, all read; covers_all_members: true)",
   "measured_on": "2026-09-13",
+  "generations": [
+    "2026-09-09 — first, over a 1.4.7 index (the CR-120 acceptance baseline)",
+    "2026-09-13 — second, S-397 T2, over logos 1.4.9 + S-397 T1",
+    "2026-09-13 — third (this one), S-398 T2, over logos 1.4.10 + Sprint 69 Iteration 1"
+  ],
   "measured_by": "logos-core/tests/coverage_headline_baseline.rs, through the same discover -> EngineRegistry(Lazy) -> cross_service_coverage construction `logos workspace status` uses",
-  "reconciled_against": "logos-docs/ws-status-2026-09-08-v1.4.7.json — the pre-change capture sprint 66 §7 names for this purpose — for the CONTRACT-SURFACE half only, which reproduces from it cell for cell (81 bound / 146 ambiguous / 1 unbound / 646 no-provider). The invocation half no longer reproduces and must not be expected to: this store was re-indexed on 2026-09-13 with the S-397 T1 accessor hop, which is the whole subject of the S-374 and S-397 deltas below.",
-  "read_only_proof": "This HARNESS is read-only — it opens each member's existing store and reads it. The store it read was re-indexed once, deliberately and by hand, immediately before the run (see generation.index_built_on): 84 members, `logos --project <member> index`, exit 0 on every one, 7,895 files and 93,249 nodes in 67 s. That re-index is the S-397 T2 measurement step recorded in logos-core/tests/config_bound_admission/config_bound_admission_finding.txt; it is stated here rather than implied, because a figure whose index generation is unattributable is the defect this artifact exists to prevent.",
+  "reconciled_against": "logos-docs/ws-status-2026-09-08-v1.4.7.json — the pre-change capture sprint 66 §7 names for this purpose — for the CONTRACT-SURFACE half only, which reproduces from it cell for cell (81 bound / 146 ambiguous / 1 unbound / 646 no-provider) across all three generations of this store. The invocation half no longer reproduces and must not be expected to: this store was re-indexed on 2026-09-13 with the S-397 T1 accessor hop and then again the same day with S-398 T1's qualified-receiver hop and S-402 T1's receiver-grained Go gate, which are the whole subject of the S-374, S-397, S-398 and S-402 deltas below.",
+  "read_only_proof": "This HARNESS is read-only — it opens each member's existing store and reads it. The store it read was re-indexed once, deliberately and by hand, immediately before the run (see generation.index_built_on): 84 members, `logos --project <member> --quiet index`, exit 0 on every one of the 84, 7,895 files / 93,838 nodes / 102,427 edges in 67 s. That re-index is the S-398 T2 measurement step recorded in logos-core/tests/config_bound_admission/config_bound_admission_finding.txt; it is stated here rather than implied, because a figure whose index generation is unattributable is the defect this artifact exists to prevent. The reading was taken twice, 34 minutes apart, and all 1034 reference rows were byte-identical between them.",
   "generation": {
-    "index_built_by": "logos 1.4.9 + S-397 T1 (worktree sprint-68-I2-S1, merge base dbc1c443)",
+    "index_built_by": "logos 1.4.10 + Sprint 69 Iteration 1 (worktree sprint-69-I2-S1, merge base 3eebf933: S-398 T1, S-402 T1, S-400 T1, S-401 T1)",
     "index_built_on": "2026-09-13",
-    "read_by": "sprint-68-I2-S1 (S-397 T2) working tree",
+    "read_by": "sprint-69-I2-S1 (S-398 T2) working tree",
     "payload_shape": "post-CR-120 (S-376)",
     "contains_s374_refusal_rows": true,
-    "why": "Refusal rows and configuration-bound targets are both written at INDEX time. This store was re-indexed on 2026-09-13 from a binary carrying S-374 and S-397 T1, so it holds both: 87 `base-url-runtime` refusal rows and 44 rows whose target is a resolved configuration placeholder. The previous generation of this artifact was a post-CR-120 PAYLOAD SHAPE over a pre-S-374 INDEX GENERATION (1.4.7, 2026-09-08); that caveat is now discharged, and the contract-surface half is unchanged across the two generations, which is what makes the comparison sound.",
+    "why": "Refusal rows and configuration-bound targets are both written at INDEX time. This store was re-indexed on 2026-09-13 from a binary carrying S-374, S-397 T1, S-398 T1 and S-402 T1, so it holds 24 `base-url-runtime` refusal rows and 81 rows whose target is a resolved configuration placeholder. The first generation of this artifact was a post-CR-120 PAYLOAD SHAPE over a pre-S-374 INDEX GENERATION (1.4.7, 2026-09-08); that caveat was discharged by S-397 T2 and this is the generation after it. The contract-surface half is unchanged across all three generations, which is what makes the comparison sound.",
     "refresh_procedure": "At the sprint-review human gate, on a binary built from this sprint's merged main: (1) `logos init --workspace --yes` at ~/source/pec-services — this re-enrols the root and spawns the detached warm supervisor that indexes the 84 members (~43 s to return; a root `logos index` covers the ROOT ONLY, 3 files, and that is correct). (2) Wait for `.logos.workspace.warm.json` to report every member warm. (3) Re-run this harness with `LOGOS_REF_WORKSPACE=~/source/pec-services LOGOS_BASELINE_WRITE=1 cargo test -p logos-core --test coverage_headline_baseline -- --nocapture`, which rewrites the `measurement` block below. (4) Restate the `deltas` entries whose status is `pending-reindex` as `observed`, with the figures the run produced. (5) Commit the artifact and the finding beside it.",
-    "figures_the_refresh_would_change": "DISCHARGED — the refresh has been run and every figure below is observed rather than predicted. The prediction is kept here because it verified: S-374's recorded workspace-wide count is 131 client-call rows, and the re-index wrote exactly 131 route/invocation rows (132 ledger `http-client-call` rows less the one TypeScript e2e site that was already present). They did not all land as refusals, because S-397 T1's accessor hop resolved 44 of them: 131 = 87 `base-url-runtime` refusals + 44 `config-bound` rows. `resolved_cross_service_edges` stayed 0 exactly as predicted — a `config-bound` row is excluded from it by construction — while `egress_resolution` moved off 0.000 for the first time, to 0.032 (5 of 155), because 5 of the 44 admitted rows bind a provider."
+    "figures_the_refresh_would_change": "DISCHARGED — the refresh has been run and every figure below is observed rather than predicted. Two independent movements produced this generation and they are NOT summed anywhere: S-398 T1 ADMITTED 37 sites (config-bound rows 44 -> 81, and the `base-url-runtime` residue down by exactly 37 in the same four Java members, per member), while S-402 T1 CORRECTED the population (references 1060 -> 1034, the whole invocation intake 186 -> 160, all 26 of them in hermodr-mirror, the estate's one Go member, whose captured client-call sites went 37 -> 11). `resolved_cross_service_edges` stayed 0 — a `config-bound` row is excluded from it by construction — while `egress_resolution` moved 0.032 (5 of 155) -> 0.128 (15 of 117), both of its terms moving, and the denominator's -38 decomposing as -26 (S-402's smaller population) and -12 (rows S-398 admitted whose resolved template names a service with no provider here, which ADR-53 holds outside the denominator)."
   },
-  "headline_reading": "ZERO cross-service edges in this estate are resolved from a captured call site, over 155 captured egress sites — while the retired bound_ratio reads 0.225 on the same data and the pooled `bound` reads 86. 81 of those 86 are contract-surface matches (an OpenAPI operation matched to a controller route); by_intake.invocation.bound is 5, up from 0, and all 5 are configuration-bound client calls that bind a provider without drawing an edge. That contrast is CR-120's entire case, and the move from 0 to 5 is S-397's.",
+  "headline_reading": "ZERO cross-service edges in this estate are resolved from a captured call site, over 117 captured egress sites — while the retired bound_ratio reads 0.278 on the same data and the pooled `bound` reads 96. 81 of those 96 are contract-surface matches (an OpenAPI operation matched to a controller route); by_intake.invocation.bound is 15, up from 5 and from 0 before that, and all 15 are configuration-bound client calls that bind a provider without drawing an edge. That contrast is CR-120's entire case. The rate must never be quoted without its denominator: both of its terms moved, for the two separate reasons the `S-398` and `S-402` entries in `deltas` record.",
   "deltas": {
     "S-374": {
       "story": "The HTTP client-call arm records its refusals",
       "status": "observed",
-      "effect": "NOW OBSERVED. The 2026-09-13 re-index wrote 131 route/invocation rows where the 1.4.7 store held 1 — the workspace-wide figure S-374 recorded, landing at the upper end of the predicted 115-131 range exactly as the prediction said an index run would. 87 of them are `base-url-runtime` refusals and the other 44 are S-397 T1's configuration-bound rows, so the `unbound` column rose by 87 rather than by 131: the prediction's magnitude is confirmed and its split was not foreseen, because S-397 T1 had not been written when it was made. `egress_resolution_measured` 54 -> 155 and `spec_conformance_measured` 282 -> 383; `spec_conformance_ratio` 0.287 -> 0.225. `resolved_cross_service_edges` stayed 0 as predicted.",
+      "effect": "NOW OBSERVED, on the SECOND generation (S-397 T2; two re-indexes happened on 2026-09-13, see `generations`). That re-index wrote 131 route/invocation rows where the 1.4.7 store held 1 — the workspace-wide figure S-374 recorded, landing at the upper end of the predicted 115-131 range exactly as the prediction said an index run would. 87 of them are `base-url-runtime` refusals and the other 44 are S-397 T1's configuration-bound rows, so the `unbound` column rose by 87 rather than by 131: the prediction's magnitude is confirmed and its split was not foreseen, because S-397 T1 had not been written when it was made. `egress_resolution_measured` 54 -> 155 and `spec_conformance_measured` 282 -> 383; `spec_conformance_ratio` 0.287 -> 0.225. Those are that generation's figures and not the block above; the third generation moved them again, for reasons recorded under `S-398` and `S-402`. `resolved_cross_service_edges` stayed 0 as predicted.",
       "evidence": "logos-core/tests/operand_resolvability/client_call_refusal_finding.txt"
     },
     "S-375": {
@@ -38,22 +43,34 @@
     "S-376": {
       "story": "Retire the bound-ratio; the headline is a resolved-edge count (this story)",
       "status": "observed",
-      "effect": "Observed ON THE 1.4.7 GENERATION, which is where this delta was measured and where its figures belong: over that generation it renamed three summary fields and added four, moving no classification count — `bound_ratio 0.287` became `spec_conformance_ratio 0.287` with its composed line byte-identical, and the new headline read `resolved_cross_service_edges: 0` with `egress_resolution: 0.000 (0 of 54 egress sites resolved)`. Those two figures are NOT the measurement block above, which is the 2026-09-13 generation (0.225 of 383, and 0.032 of 155); the rename this delta describes is unaffected by the re-index, and the field names it introduced are the ones the block above uses. Measured payload cost on the reference workspace's shape: under 0.1% compact bytes, all of it on the summary object and none per-row.",
+      "effect": "Observed ON THE 1.4.7 GENERATION, which is where this delta was measured and where its figures belong: over that generation it renamed three summary fields and added four, moving no classification count — `bound_ratio 0.287` became `spec_conformance_ratio 0.287` with its composed line byte-identical, and the new headline read `resolved_cross_service_edges: 0` with `egress_resolution: 0.000 (0 of 54 egress sites resolved)`. Those two figures are NOT the measurement block above, which is the THIRD generation of this store (see `generations`) and carries different numbers; this entry deliberately names no figure from it, because the rename this delta describes is unaffected by any re-index and the field names it introduced are the ones the block above uses. Measured payload cost on the reference workspace's shape: under 0.1% compact bytes, all of it on the summary object and none per-row.",
       "evidence": "federation::coverage::tests::payload_growth_is_measured_against_the_reference_workspace_shape (S-376 rider)"
     },
     "S-397": {
       "story": "The accessor capture hop reaches the invocation arm",
       "status": "observed",
-      "effect": "The whole of the invocation column's bound and ambiguous halves: 0 -> 5 bound and 0 -> 9 ambiguous, plus 30 `no-provider-in-workspace`, being the 44 rows that now carry `config-bound` provenance where the 1.4.7 store carried none. It is also why the `unbound` rise is 87 and not 131 (see S-374). Measured against S-397 AC2's floor of 79 the 44 is a SHORTFALL, diagnosed in the evidence below as the qualified-receiver ceiling; this artifact records the payload effect, not the verdict.",
+      "effect": "The first 44 of the invocation column's config-bound rows: 0 -> 5 bound, 0 -> 9 ambiguous and 30 `no-provider-in-workspace` where the 1.4.7 store carried none. It is also why the `unbound` rise was 87 and not 131 (see S-374). Measured against S-397 AC2's floor of 79 the 44 was a SHORTFALL, diagnosed in the evidence below as the qualified-receiver ceiling — a diagnosis S-398 T1 then closed, exactly and only, at the 37 sites it named. This artifact records the payload effect, not the verdict.",
+      "evidence": "docs/planning/sprints/sprint-impl-68.md, S-397 T2's delivered figures — the dated record of that generation. NOT config_bound_admission_finding.txt any more: S-398 T2 rewrote that artifact as the THIRD generation's finding and its S-397-specific sections went with it."
+    },
+    "S-398": {
+      "story": "The accessor hop reaches a qualified receiver",
+      "status": "observed",
+      "effect": "AN ADMISSION, 37 sites. Rows carrying `config-bound` provenance rose 44 -> 81, and the `base-url-runtime` residue fell by exactly 37 in exactly the four Java members that gained them, row for row per member — the member-by-member table is in the `evidence` file, which owns that census. Because 12 of them crossed into the no-provider bucket, this story also removed 12 sites from the egress denominator without removing them from the captured population. NO FLOOR is asserted on the 81; it is what one estate produced on one date.",
       "evidence": "logos-core/tests/config_bound_admission/config_bound_admission_finding.txt"
+    },
+    "S-402": {
+      "story": "The Go client-call gate is receiver-grained",
+      "status": "observed",
+      "effect": "A PRECISION CORRECTION, 26 sites, and explicitly not a coverage change. `references` fell 1060 -> 1034 and the whole invocation intake fell 186 -> 160, all of it in hermodr-mirror, the estate's one Go member, whose captured client-call sites went 37 -> 11 — reproducing S-402's own isolated-copy measurement independently, through the shipped surface, over the whole estate. All 26 were keyless refusals that produced no target and no edge, so nothing that bound stopped binding; what changes is that every egress ratio is now computed over 11 real Go outbound sites instead of 37 mostly-imaginary ones. Netting this against S-398's 37 would report the whole 63-row fall in `base-url-runtime` as one improvement, which is why the two are recorded separately.",
+      "evidence": "docs/planning/sprints/sprint-impl-69.md, S-402 T1 reference-workspace measurement table"
     }
   },
   "measurement": {
-    "references": 1060,
-    "bound": 86,
-    "ambiguous": 155,
-    "unbound": 142,
-    "no_provider_in_workspace": 677,
+    "references": 1034,
+    "bound": 96,
+    "ambiguous": 169,
+    "unbound": 80,
+    "no_provider_in_workspace": 689,
     "by_intake": {
       "contract_surface": {
         "bound": 81,
@@ -62,19 +79,19 @@
         "no_provider_in_workspace": 646
       },
       "invocation": {
-        "bound": 5,
-        "ambiguous": 9,
-        "unbound": 141,
-        "no_provider_in_workspace": 31
+        "bound": 15,
+        "ambiguous": 23,
+        "unbound": 79,
+        "no_provider_in_workspace": 43
       }
     },
     "resolved_cross_service_edges": 0,
-    "egress_resolution": 0.03225806451612903,
-    "egress_resolution_measured": 155,
-    "resolved_edges_summary": "0 resolved cross-service edges; egress resolution 0.032 (5 of 155 egress sites resolved)",
-    "spec_conformance_ratio": 0.2245430809399478,
-    "spec_conformance_measured": 383,
-    "spec_conformance_summary": "0.225 (86 of 383 measured; 677 excluded as no-provider-in-workspace)",
+    "egress_resolution": 0.1282051282051282,
+    "egress_resolution_measured": 117,
+    "resolved_edges_summary": "0 resolved cross-service edges; egress resolution 0.128 (15 of 117 egress sites resolved)",
+    "spec_conformance_ratio": 0.2782608695652174,
+    "spec_conformance_measured": 345,
+    "spec_conformance_summary": "0.278 (96 of 345 measured; 689 excluded as no-provider-in-workspace)",
     "members_read": 84,
     "members_total": 84,
     "covers_all_members": true

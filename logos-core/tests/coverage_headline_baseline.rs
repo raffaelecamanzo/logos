@@ -23,30 +23,42 @@
 //! cold-indexed on 2026-09-08 with logos 1.4.7, **before** [S-374] merged, so the
 //! artifact was a post-change payload shape over a pre-[S-374] index generation.
 //! **That caveat is discharged.** [S-397] T2 re-indexed all 84 members on
-//! 2026-09-13 from a binary carrying [S-374] and [S-397] T1, as the measurement
-//! step its own acceptance criterion required, and the figures below are that
-//! generation. The `generation` block still labels which binary indexed the store,
-//! and its claim is now cross-checked against the measurement rather than merely
-//! stated.
+//! 2026-09-13 from a binary carrying [S-374] and [S-397] T1, and [S-398] T2
+//! re-indexed them again the same day from a binary carrying the whole of Sprint 69
+//! Iteration 1; the figures below are that third generation. The `generation` block
+//! still labels which binary indexed the store, and its claim is cross-checked
+//! against the measurement rather than merely stated.
 //!
 //! # Recorded finding (2026-09-13, `~/source/pec-services`, 84 members)
 //!
 //! ```text
 //! resolved_cross_service_edges   0
-//! egress_resolution              0.032 (5 of 155 egress sites resolved)
-//! spec_conformance_ratio         0.225 (86 of 383 measured; 677 excluded)
+//! egress_resolution              0.128 (15 of 117 egress sites resolved)
+//! spec_conformance_ratio         0.278 (96 of 345 measured; 689 excluded)
 //! ```
 //!
 //! **Still zero**, and that is the finding [CR-120] is about: not one
 //! cross-service edge in the estate is resolved from a captured call site, over
-//! 155 captured egress sites — while the retired `bound_ratio` reads `0.225` on
-//! the same data and the pooled `bound` reads 86. The egress *rate* moved off
-//! 0.000 for the first time, to 0.032, because [S-397] T1's accessor hop admitted
-//! 44 configuration-bound rows of which 5 bind a provider; a `config-bound` row is
-//! excluded from `resolved_cross_service_edges` by construction, so the edge count
-//! is unmoved. The previous generation of this finding read `0.000 (0 of 54)` and
-//! `0.287 (81 of 282)` over 929 references; every cell that moved is in the
-//! invocation column, and the contract-surface column is byte-identical.
+//! 117 captured egress sites — while the retired `bound_ratio` reads `0.278` on
+//! the same data and the pooled `bound` reads 96. A `config-bound` row is excluded
+//! from `resolved_cross_service_edges` by construction, so admitting more of them
+//! cannot move the edge count, and it has not.
+//!
+//! **The egress rate has moved twice and BOTH of its terms moved the second time,
+//! so it must not be quoted without its denominator.** It read `0.000 (0 of 54)`
+//! over 929 references; then `0.032 (5 of 155)` when [S-397] T1's accessor hop
+//! admitted 44 configuration-bound rows of which 5 bound a provider; it now reads
+//! `0.128 (15 of 117)`. The numerator rose because [S-398] T1 admitted 37 more
+//! such rows, of which 10 bind. The denominator fell by 38 for two different
+//! reasons: 26 sites left the captured population entirely when [S-402] made the
+//! Go client-call candidacy gate receiver-grained (they were never outbound calls,
+//! and were keyless refusals that bound nothing), and 12 moved from `unbound` to
+//! `no-provider-in-workspace`, the bucket [ADR-53] holds outside the denominator,
+//! because the templates [S-398] resolved name services this workspace does not
+//! serve. Only the first of those is a coverage change.
+//!
+//! Every cell that has moved across all three generations is in the invocation
+//! column; the contract-surface column is byte-identical throughout.
 //!
 //! The full record — the per-story delta attribution, the read-only proof and the
 //! human-gated refresh procedure — is the durable artifact
@@ -92,6 +104,9 @@
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 //! [S-374]: ../../docs/planning/journal.md#s-374-the-http-client-call-arm-records-its-refusals
 //! [S-397]: ../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
+//! [S-398]: ../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
+//! [S-402]: ../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
+//! [ADR-53]: ../../docs/specs/architecture/decisions/ADR-53.md
 
 use std::path::{Path, PathBuf};
 
@@ -132,7 +147,7 @@ fn corpus_root() -> Option<PathBuf> {
 
 /// The headline block of a coverage payload, as the artifact records it.
 ///
-/// Deliberately the *summary* fields only, and not the 1060 classified rows —
+/// Deliberately the *summary* fields only, and not the 1034 classified rows —
 /// committing a copy of them would add 500 KB to this repository, and the summary
 /// block is exactly what changes and exactly what every delta is stated against.
 /// The pre-change capture `logos-docs/ws-status-2026-09-08-v1.4.7.json` holds the
@@ -186,17 +201,18 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
     // It is labelled — and the label is the load-bearing part.
     let gen = &a["generation"];
     assert!(
-        gen["index_built_by"].as_str().is_some_and(|s| s.starts_with("logos 1.4.9 + S-397 T1")),
+        gen["index_built_by"].as_str().is_some_and(|s| s.starts_with("logos 1.4.10 + Sprint 69 Iteration 1")),
         "the artifact must name the binary that INDEXED the store, not the one that \
-         read it. The store was re-indexed on 2026-09-13 by a binary carrying S-397 T1's \
-         accessor hop (S-397 T2's measurement step); before that it read `logos 1.4.7`: {gen}"
+         read it. The store was re-indexed on 2026-09-13 by a binary carrying the whole \
+         of Sprint 69 Iteration 1 (S-398 T2's measurement step); before that it read \
+         `logos 1.4.9 + S-397 T1`, and before that `logos 1.4.7`: {gen}"
     );
     assert_eq!(gen["payload_shape"], "post-CR-120 (S-376)", "{gen}");
     assert_eq!(
         gen["contains_s374_refusal_rows"], true,
         "the store now POSTdates S-374, so the artifact must say so — a reader who took \
          this for a pre-S-374 measurement would attribute the invocation unbound column's \
-         87 rows to the wrong cause: {gen}"
+         `base-url-runtime` rows — 24 on this generation — to the wrong cause: {gen}"
     );
     assert!(
         gen["refresh_procedure"].as_str().is_some_and(|s| s.contains("logos init --workspace")),
@@ -229,8 +245,37 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
     // here or PENDING the re-index. An entry that claimed neither would be the kind
     // of unattributable figure this artifact exists to prevent.
     let deltas = a["deltas"].as_object().expect("per-story delta attribution");
-    for story in ["S-374", "S-375", "S-377"] {
-        let d = deltas.get(story).unwrap_or_else(|| panic!("no delta recorded for {story}"));
+    // **Iterate the object's OWN KEYS, and the inversion is the point.** This loop
+    // used to walk a frozen literal list, `["S-374", "S-375", "S-377"]`. A closed
+    // list cannot notice what it does not name: by the time [S-398] T2 added the
+    // `S-398` and `S-402` entries — the two that carry this artifact's whole
+    // admission-versus-population-correction argument — the guard had already
+    // silently stopped covering `S-376` and `S-397`, and it would have stopped
+    // covering the new pair too. Deleting both entirely left this test green, which
+    // is how the inversion was found. Enumerating the surface and requiring every
+    // member to be classified cannot go stale that way.
+    assert!(
+        !deltas.is_empty(),
+        "the artifact must attribute its figures to at least one story, or the \
+         measurement block below is unattributable: {a}"
+    );
+    // **The presence half IS a closed list, and that is stated rather than hidden.**
+    // An entry can go stale by disappearing as easily as by emptying, and no
+    // derivable source names which stories contributed to a hand-written
+    // attribution — so this roster must be extended by any story that adds an entry.
+    // It is the weaker of the two halves by construction; the shape loop above is
+    // the one that cannot go stale. The roster was three names
+    // (`S-374`/`S-375`/`S-377`) and had silently stopped covering `S-376` and
+    // `S-397` long before [S-398] T2 added two more; it is completed here.
+    for story in ["S-374", "S-375", "S-376", "S-377", "S-397", "S-398", "S-402"] {
+        assert!(
+            deltas.contains_key(story),
+            "no delta recorded for {story}, which contributed to these figures. If a \
+             story's contribution has genuinely been superseded, say so in its entry — \
+             do not delete it, or the figures it explains become unattributable."
+        );
+    }
+    for (story, d) in deltas {
         let status = d["status"].as_str().unwrap_or_default();
         assert!(
             status == "observed" || status == "pending-reindex",
@@ -241,6 +286,11 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
             d["effect"].as_str().is_some_and(|s| !s.is_empty()),
             "{story} must state its effect on these figures, and a pending one must \
              state the expected direction and magnitude with its reason: {d}"
+        );
+        assert!(
+            d["story"].as_str().is_some_and(|s| !s.is_empty()),
+            "{story}'s entry must name the story it attributes, so a reader of the \
+             artifact alone can tell what moved these figures: {d}"
         );
     }
 
@@ -285,10 +335,13 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
         inv_num("unbound") > 54,
         "the generation label and the measurement disagree: the artifact says \
          contains_s374_refusal_rows = {claims_s374} while the invocation population's \
-         unbound bucket holds {}. The 54 is the pre-S-374 floor — the broker \
-         `topic-not-literal` refusals, which every generation of this store carries — so \
-         a store holding S-374's client-call refusals reads strictly above it and one \
-         without them reads exactly at it.",
+         unbound bucket holds {}. The 54 is the broker `topic-not-literal` refusals, \
+         which every generation of this store carries — so a store holding S-374's \
+         client-call refusals reads well above it. It is a FLOOR, not an equality: a \
+         store without those refusals reads 54 PLUS any non-client-call unbound row, \
+         which is 55 on this generation (the one config-bound `path-not-composed` row \
+         S-398 T2 recorded). The discrimination survives that — 79 is well clear of \
+         both — but do not re-derive the pre-S-374 reading as exactly 54.",
         inv_num("unbound"),
     );
 

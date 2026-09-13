@@ -12,10 +12,57 @@ Path      federation::discover -> EngineRegistry<Engine>(RegistryMode::Lazy)
 Wall      47 s
 
 
+SUPERSEDED IN PART — 2026-09-13 (S-398 T2), THE CURRENT GENERATION
+------------------------------------------------------------------
+
+READ THIS FIRST. This is the newest reading; the S-397 T2 section below it is the
+previous one, and the original 2026-09-09 measurement follows both. Each is
+preserved rather than rewritten: a dated measurement that gets edited is no
+longer a measurement.
+
+S-398 T2 re-indexed all 84 members on 2026-09-13 from a binary built at
+3eebf933 — main with the whole of Sprint 69 Iteration 1 merged. Over that
+generation the same harness reads:
+
+                        bound  ambiguous  unbound  no-provider
+  contract-surface         81        146        1          646   (unchanged)
+  invocation               15         23       79           43
+  headline                 96        169       80          689
+  references             1034
+  0.278 (96 of 345 measured; 689 excluded as no-provider-in-workspace)
+
+The contract-surface column is byte-identical for the third generation running.
+The invocation column moved for two reasons that must NOT be summed:
+
+  * S-398 T1, AN ADMISSION — 37 sites. Rows carrying `config-bound` provenance
+    rose 44 -> 81 as the qualified-receiver accessor shape became reachable, and
+    the `base-url-runtime` refusals fell by exactly 37 in exactly the four Java
+    members that gained them, per member: mailbox-aggregator-api +19/-19,
+    funnel-aggregator-api +12/-12, archive-manager +5/-5,
+    notification-adapter +1/-1. pecserver-facade is the control and neither
+    column moved there. The 37 landed as bound +10, ambiguous +14,
+    no-provider-in-workspace +12 and one path-not-composed row.
+
+  * S-402 T1, A POPULATION CORRECTION — 26 sites. `references` fell 1060 -> 1034
+    and the whole invocation intake fell 186 -> 160, all of it in
+    hermodr-mirror, the estate's one Go member, whose captured client-call sites
+    went 37 -> 11 when the candidacy gate became receiver-grained. All 26 were
+    keyless refusals that produced no target and no edge, so nothing that bound
+    stopped binding. This is a smaller population, not better coverage.
+
+  Read together: `base-url-runtime` fell 87 -> 24, and 37 of that 63 is an
+  admission while 26 is a correction to what was ever captured. Netting them
+  would report the whole 63 as an improvement.
+
+The current record of this generation, with both figures stated over their own
+denominators, is
+`logos-core/tests/config_bound_admission/config_bound_admission_finding.txt`.
+
+
 SUPERSEDED IN PART — 2026-09-13 (S-397 T2)
 ------------------------------------------
 
-READ THIS FIRST. Everything below is the 2026-09-09 measurement over a store
+THE OLDEST GENERATION. Everything below is the 2026-09-09 measurement over a store
 cold-indexed with logos 1.4.7, and is preserved as the historical record of it
 rather than rewritten: a dated measurement that gets edited is no longer a
 measurement. CR-120 §6's criterion was met on that generation and nothing here
@@ -47,8 +94,8 @@ below predicted one of them and got the other wrong in a way worth recording:
   131 = 87 refusals + 44 admissions. Both halves reconcile against S-374's own
   recorded workspace-wide figure.
 
-The current record of the new generation is
-`logos-core/tests/config_bound_admission/config_bound_admission_finding.txt`.
+That generation was itself superseded the same day — see the S-398 T2 section
+above, which is the current one.
 
 
 THE HEADLINE — CR-120 §6's CRITERION, MET
