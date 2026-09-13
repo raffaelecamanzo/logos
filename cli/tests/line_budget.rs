@@ -325,6 +325,24 @@ fn adapter_lines() -> usize {
 /// left it. CR-084 §6 — recorded, not laundered.
 ///
 /// [FR-CL-06]: ../../docs/specs/requirements/FR-CL-06.md
+///
+/// **S-334/CR-103 spends nothing: 886 → 886.** The declined-to-empty fallback
+/// ([FR-IN-08]) needed the FR-IN-08 nudge's *provenance* to reach `run`'s
+/// empty-member branch, and it rides an `Option` that already existed rather
+/// than new surface: `nudge` returned `bool` and now returns `Option<bool>`
+/// (which entry point took the workspace path, not merely that one did), and
+/// `run`'s empty branch becomes a two-arm `match` — exactly the line count the
+/// one-arm `eprintln!` it replaces already spent. The fallback itself is the
+/// `Engine::init_with` call the `else` arm of the same dispatch `if` was
+/// already making. CR-103 §7 asked for a line-neutral or negative change
+/// because this budget had no headroom when the CR was written; it is neutral.
+///
+/// The duplication hunt is still negative and was re-run rather than assumed:
+/// the `stats`/`languages` `open_query` fold recorded above remains the only
+/// candidate and remains net-negative under this file's multi-line-signature
+/// convention. Nothing to record per CR-084 §6 — there is no raise to launder.
+///
+/// [FR-IN-08]: ../../docs/specs/requirements/FR-IN-08.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
