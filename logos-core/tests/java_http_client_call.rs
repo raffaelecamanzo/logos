@@ -425,7 +425,7 @@ fn the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row() {
 }
 
 /// **Stated over-capture ceiling** — the receiver rule reaches the plain
-/// receiver-method arm (patterns 4/4b) only. Patterns 1-3 and 5 constrain the
+/// receiver-method arm (pattern 4) only. Patterns 1-3 and 5 constrain the
 /// `.uri` link — its name, and the `URI.create` receiver *type* or the lambda's
 /// composition — but place no constraint on the receiver of the verb link, so a
 /// non-client receiver still captures through the fluent arm.
@@ -945,9 +945,11 @@ public class Calls {
 /// same reference the direct spelling would, with and without the `build(…)`
 /// terminal.
 ///
-/// All 13 of the reference workspace's `.uri(<lambda>)` sites carry the
-/// terminal, so the `terminated` row is the estate's shape and the `bare` row
-/// is the alternation's other branch, pinned so the two cannot drift apart.
+/// The `terminated` row is the estate's shape — Spring's
+/// `uri(Function<UriBuilder, URI>)` admits no other, so all 13 of the reference
+/// workspace's `.uri(<lambda>)` sites carry the terminal. The `bare` row pins
+/// the alternation's defensive branch; see the composition rule in
+/// `plugins/java/queries/invocations.scm` for why it is kept.
 ///
 /// The direct form is asserted **in the same call**, from the same fixture
 /// text, rather than written out as a third expected literal — "the same
@@ -1049,11 +1051,11 @@ public class Calls {
 /// its resolvable half ([NFR-RA-05]).
 ///
 /// The `queryParam` row is first because it is the estate's dominant lambda
-/// shape — 8 of the 13 `.uri(<lambda>)` sites on the reference workspace chain
-/// at least one (counted 2026-09-13) — so the criterion's cost is paid on the
-/// common case, not on a contrived one. Each row's path argument is a
-/// **resolvable** literal, so what is being pinned is the chain and not the
-/// operand.
+/// shape — see the composition rule in
+/// `plugins/java/queries/invocations.scm`, which carries the measured figure —
+/// so the criterion's cost is paid on the common case, not on a contrived one.
+/// Each row's path argument is a **resolvable** literal, so what is being
+/// pinned is the chain and not the operand.
 #[test]
 fn a_uri_builder_lambda_that_chains_past_path_stays_refused_whole() {
     for (label, body) in [

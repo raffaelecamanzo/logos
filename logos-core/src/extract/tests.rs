@@ -3308,9 +3308,11 @@ fn a_lambda_nested_accessor_reaches_the_ledger_as_the_same_reference() {
 /// ([NFR-RA-05]).
 ///
 /// This is the criterion's real cost, and it is asserted on the shape that
-/// carries it: 8 of the 13 `.uri(<lambda>)` sites in the reference workspace
-/// chain at least one `queryParam` (counted 2026-09-13), so this fixture — not
-/// the bare `path(…)` one above — is what most of the estate looks like.
+/// carries it: most of the reference workspace's `.uri(<lambda>)` sites chain
+/// at least one `queryParam` — the measured figure is stated once, in the
+/// composition rule in `plugins/java/queries/invocations.scm` — so this
+/// fixture, not the bare `path(…)` one above, is what most of the estate looks
+/// like.
 #[test]
 #[cfg(feature = "lang-java")]
 fn a_lambda_that_chains_a_query_param_binds_nothing_even_with_the_class_present() {

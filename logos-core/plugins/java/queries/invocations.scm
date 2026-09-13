@@ -213,7 +213,6 @@
 ; 5. Fluent verb-then-`uri` where the path is composed inside a `UriBuilder`
 ;    LAMBDA — the estate's second `@ConfigurationProperties` egress shape
 ;    (S-399, FR-WS-19):
-;      webClient.get().uri(builder -> builder.path(props.getUriGetReport()))
 ;      webClient.get().uri(builder -> builder.path(props.getUriActiveOffer()).build(userId))
 ;
 ;    Pattern 1 already matches these calls and sees the whole lambda, which is
@@ -233,8 +232,9 @@
 ;    unresolvable lambda records the one row it always recorded.
 ;
 ;    NUMBERED 5 rather than inserted beside patterns 1-3 it belongs with: the
-;    numbering is referenced by prose in this file and by test names, and
-;    append-only numbering keeps those true.
+;    numbering is referenced by prose in this file and in
+;    `logos-core/tests/java_http_client_call.rs`, and append-only numbering
+;    keeps those references true rather than requiring a sweep.
 ;
 ; ── What the lambda is allowed to compose (NFR-RA-05) ────────────────────────
 ;
@@ -257,7 +257,12 @@
 ;      * `build` is the only admitted terminal. It expands the template
 ;        variables, which the direct `.uri(template, a, b)` spelling passes as
 ;        trailing arguments pattern 1 also ignores — so admitting it emits the
-;        SAME reference, not a wider one.
+;        SAME reference, not a wider one. `@_lb_build` is bound ONLY by the
+;        second alternation branch, so `(#eq? @_lb_build "build")` is vacuously
+;        true when the first matched — tree-sitter satisfies a text predicate
+;        over a capture with no nodes. That vacuity is what lets the bare body
+;        match at all, and it is written down because a predicate that silently
+;        constrains nothing is a shipped-incident class in this repo's queries.
 ;
 ;    Everything else stays REFUSED WHOLE rather than binding on its resolvable
 ;    half. `queryParam(…)`/`queryParams(…)` are the ones that cost the most —
@@ -269,6 +274,17 @@
 ;    ONE pattern, not two, following pattern 4's convention: the bare
 ;    `path(…)` body and the `path(…).build(…)` body are a node alternation
 ;    binding ONE `@invoke.http.arg`, so the shapes cannot drift apart.
+;
+;    The bare body is DEFENSIVE, and pattern 4's two receiver spellings are not
+;    — the difference is worth stating so a later author does not read it as an
+;    estate shape. Spring's overload is `uri(Function<UriBuilder, URI>)` and
+;    `UriBuilder.path(String)` returns `UriBuilder`, so `builder ->
+;    builder.path(x)` does not compile against it: all 13 `.uri(<lambda>)` sites
+;    on the reference workspace carry the terminal, and that is the API, not the
+;    corpus. The branch is kept for a non-normative wrapper whose `uri` takes
+;    `Function<UriBuilder, UriBuilder>`, costs one alternation branch, and is
+;    pinned by the `bare` row of
+;    `a_uri_builder_lambda_yields_the_reference_the_direct_form_does`.
 ;
 ;    Stated ceiling: `parameters:` is constrained to a bare `(identifier)`, so a
 ;    parenthesised or typed lambda parameter (`(builder) ->`, `(UriBuilder b) ->`)
@@ -328,12 +344,15 @@
 ;     the positive control alone rather than as zero.
 ;   * OkHttp and Apache HttpClient — outside FR-WS-08's normative Java row.
 ;   * A `UriBuilder` lambda that composes MORE than `path(<one operand>)` and an
-;     optional `build(…)` — `queryParam(…)`, a second path segment, any other
-;     terminal (S-399). Refused whole, never bound on the resolvable half
-;     (NFR-RA-05). This is the most expensive ceiling in the list on the
-;     reference workspace: 8 of its 13 `.uri(<lambda>)` sites chain at least one
-;     `queryParam` (counted 2026-09-13). Pinned by
-;     `a_uri_builder_lambda_that_chains_past_path_stays_refused_whole`.
+;     optional `build(…)` — `queryParam(…)`, a second path segment, a call after
+;     the terminal, or a terminal that is not `build` (S-399). Refused whole,
+;     never bound on the resolvable half (NFR-RA-05). This is the most expensive
+;     ceiling in the list on the reference workspace; the `queryParam` figure is
+;     in the composition rule above, stated once. Pinned by
+;     `a_uri_builder_lambda_that_chains_past_path_stays_refused_whole` for the
+;     first three and by
+;     `the_uri_builder_composer_rule_is_probed_with_its_near_misses` for the
+;     non-`build` terminal.
 ;   * A `UriBuilder` lambda whose parameter is parenthesised or typed
 ;     (`(builder) ->`, `(UriBuilder b) ->`) — pattern 5 constrains `parameters:`
 ;     to a bare `(identifier)`. Zero such sites in the reference workspace.
