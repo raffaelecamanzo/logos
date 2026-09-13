@@ -576,7 +576,7 @@ fn go_client_calls_bind_go_routes_in_another_member() {
          exists as a provider: {bound:?}"
     );
 
-    let coverage = cross_service_coverage(&registry);
+    let coverage = cross_service_coverage(&registry.answer());
     assert_eq!(coverage.bound, 2, "both static calls are bound");
     assert_eq!(coverage.ambiguous, 0);
     // Pin the whole census, not just the bound bucket: a phantom reference

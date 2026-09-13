@@ -40,7 +40,7 @@ use crate::Engine;
 use super::bridge::BridgeEdge;
 use super::coverage::{cross_service_coverage, CrossServiceCoverage};
 use super::open_state::{self, DegradedRollup, MemberOpenState};
-use super::registry::{EngineRegistry, MemberScoped};
+use super::registry::{AnswerScope, EngineRegistry, MemberScoped};
 use super::topics::{workspace_topics, MemberTopics};
 use super::warm_state::{self, MemberWarmState, WarmEvidence, WarmRollup};
 
@@ -89,6 +89,11 @@ impl<T> MemberResult<T> {
 /// `repo = Some(name)` scopes to that one member (constructing only its engine,
 /// [NFR-PE-10]); `repo = None` fans over every member in discovery order. An
 /// unknown `repo` surfaces as a single per-member error, not a panic.
+///
+/// One walk, so this is the whole answer: it mints its own [`AnswerScope`]
+/// rather than taking one, and a caller that composes several of these must mint
+/// the scope itself and walk through it ([`workspace_status`] is the one that
+/// does).
 fn fan<T>(
     registry: &EngineRegistry<Engine>,
     repo: Option<&str>,
@@ -100,6 +105,7 @@ fn fan<T>(
             value: registry.engine_for(member).map(|engine| f(&engine)),
         })],
         None => registry
+            .answer()
             .fan_out(|_, engine| f(engine))
             .into_iter()
             .map(MemberResult::from_scoped)
@@ -120,8 +126,8 @@ fn fan<T>(
 /// visible to [`MemberStatus`].
 ///
 /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
-fn fan_status(registry: &EngineRegistry<Engine>) -> Vec<MemberResult<StatusInfo>> {
-    registry
+fn fan_status(answer: &AnswerScope<'_, Engine>) -> Vec<MemberResult<StatusInfo>> {
+    answer
         .fan_out(|_, engine| engine.try_status())
         .into_iter()
         .map(flatten_status)
@@ -521,7 +527,7 @@ where
 /// reads the ledger the fan-outs below already wrote, so `WALKS_PER_STATUS`
 /// stays at 4 ([NFR-PE-10]) — see `tests/workspace_connection_budget.rs`.
 ///
-/// # A broken member is attempted, and reported, once per command
+/// # A broken member is attempted, and reported, once per answer
 /// The three statements below are **four** all-member fan-outs — `coverage`
 /// reads twice (the contract surface and the invocation references), which is
 /// why `WALKS_PER_STATUS` above is 4 and not 3. The first of them makes a
@@ -529,22 +535,31 @@ where
 /// engine had already failed to start, so a single unopenable member cost three
 /// wasted opens and emitted the same `WARN` three times, growing as `3 × N`.
 ///
-/// The four walks now share one attempt and one announcement: the freshness
-/// walk makes the real attempt and records the diagnostic on the member row's
-/// `error`, while the three coverage and topic reads replay the recorded failure
-/// without touching the store
-/// ([`EngineRegistry::fan_out`](super::registry::EngineRegistry::fan_out)) and
-/// the first walk that reaches the human channel is the only one to speak
-/// ([`EngineRegistry::announce_open_failure`](super::registry::EngineRegistry::announce_open_failure)).
+/// The four walks share one attempt and one announcement because they share one
+/// [`AnswerScope`], minted here and dropped when this function returns: the
+/// freshness walk makes the real attempt and records the diagnostic on the
+/// member row's `error`, while the three coverage and topic reads replay the
+/// recorded failure without touching the store
+/// ([`AnswerScope::fan_out`](super::registry::AnswerScope::fan_out)), and the
+/// first walk that reaches the human channel is the only one to speak
+/// (`AnswerScope::announce_open_failure`).
+///
+/// The scope's lifetime is **one answer**, not the registry's, and that is the
+/// whole point of it. A `RegistryMode::Lazy` one-shot and a long-lived
+/// `RegistryMode::Serve` registry therefore behave identically here: the CLI
+/// command and `GET /api/v1/workspace/status` each pay one attempt and one line
+/// per broken member, and the *next* call — a fresh command or the next request
+/// against the same serving registry — mints a fresh scope and re-attempts, so a
+/// member whose failure was transient is not reported degraded once it recovers
+/// ([CR-105]).
 ///
 /// Nothing in this payload moves: the ledger read below is unchanged, so the
 /// member rows, [`degraded_rollup`](WorkspaceStatus::degraded_rollup), the
 /// coverage marker and the exit code derived from them are what they were. What
 /// changes is only how many times the same failure is paid for and repeated
-/// ([FR-WS-16], [NFR-CC-04], [NFR-PE-10]). A **fresh** command builds a fresh
-/// registry, so a member whose failure was transient is attempted again on the
-/// next invocation.
+/// ([FR-WS-16], [NFR-CC-04], [NFR-PE-10]).
 ///
+/// [CR-105]: ../../../docs/requests/CR-105-report-a-failed-member-open-once-per-answer.md
 /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
 ///
 /// # The warm labelling costs one file read, and no engine
@@ -577,9 +592,12 @@ where
 pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
     let evidence =
         WarmEvidence::none().with_outcomes(&warm_state::read_outcomes(&registry.federation().root));
-    let freshness = fan_status(registry);
-    let coverage = cross_service_coverage(registry);
-    let topics = workspace_topics(registry);
+    // One scope over all four walks below — the unit "once per answer" is
+    // measured in. It is dropped with this call, so the next one re-attempts.
+    let answer = registry.answer();
+    let freshness = fan_status(&answer);
+    let coverage = cross_service_coverage(&answer);
+    let topics = workspace_topics(&answer);
 
     // Read the open-state ledger **last**, after every walk this read-model
     // makes. A member that opened for the freshness walk and then failed under

@@ -148,7 +148,7 @@ fn a_static_client_call_binds_a_route_in_another_member() {
     );
 
     // The coverage read-model reports the same call as `bound`.
-    let coverage = cross_service_coverage(&registry);
+    let coverage = cross_service_coverage(&registry.answer());
     assert_eq!(coverage.bound, 1, "the client call is bound in the coverage tier");
     assert_eq!(coverage.ambiguous, 0);
     assert!(coverage
@@ -194,7 +194,7 @@ fn two_matching_routes_make_the_client_call_ambiguous() {
     );
 
     // The coverage tier records it as ambiguous, not bound.
-    let coverage = cross_service_coverage(&registry);
+    let coverage = cross_service_coverage(&registry.answer());
     assert_eq!(coverage.ambiguous, 1, "the ambiguous call is bucketed as such");
     assert_eq!(coverage.bound, 0);
 }
@@ -285,7 +285,7 @@ fn a_runtime_composed_client_call_records_a_keyless_refusal_and_never_binds() {
     );
 
     // ── the coverage tier's own word for it ──────────────────────────────────
-    let coverage = cross_service_coverage(&registry);
+    let coverage = cross_service_coverage(&registry.answer());
     assert_eq!(coverage.bound, 0);
     let reasons: Vec<String> = coverage
         .references

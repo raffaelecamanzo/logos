@@ -188,7 +188,7 @@ fn measure_the_intake_split_over_the_reference_workspace_when_one_is_configured(
     let members_total = federation.members.len();
     let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
 
-    let cov = cross_service_coverage(&registry);
+    let cov = cross_service_coverage(&registry.answer());
     let cs = cov.by_intake.contract_surface;
     let inv = cov.by_intake.invocation;
 

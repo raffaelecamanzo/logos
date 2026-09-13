@@ -66,7 +66,7 @@ use crate::resolve::route_template::route_key;
 /// Re-exported so [`super::coverage`] classifies with one role vocabulary.
 pub(super) use crate::model::BridgeRole as Role;
 
-use super::registry::{EngineRegistry, MemberEngine};
+use super::registry::{AnswerScope, EngineRegistry, MemberEngine};
 
 /// One cross-service endpoint: the portable `(member, symbol)` identity of a
 /// contract-surface node ([FR-WS-04], [ADR-52]).
@@ -901,12 +901,19 @@ impl ContractBridge {
     /// contract surface is read through each member's read pool via the
     /// registry fan-out and the edge set is recomputed and re-cached.
     ///
+    /// This is a top-level read-model entry point, so it mints the
+    /// [`AnswerScope`] its own walks share — the stamp read and, on a miss, the
+    /// two surface reads are **one** answer, and a member that will not open is
+    /// attempted and announced once across them ([FR-WS-16]).
+    ///
     /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     pub fn edges<E>(&self, registry: &EngineRegistry<E>) -> Arc<Vec<BridgeEdge>>
     where
         E: MemberEngine + MemberContracts,
     {
-        let stamps = current_stamps(registry);
+        let answer = registry.answer();
+        let stamps = current_stamps(&answer);
 
         {
             let cache = self.lock_cache();
@@ -917,7 +924,7 @@ impl ContractBridge {
             }
         }
 
-        let edges = Arc::new(compute_edges(registry));
+        let edges = Arc::new(compute_edges(&answer));
         let mut cache = self.lock_cache();
         *cache = Some(CacheEntry {
             stamps,
@@ -940,11 +947,11 @@ impl ContractBridge {
 /// cache key. A member whose engine fails to start contributes no stamp (it is
 /// skipped), so if it later starts the stamp vector changes and the cache
 /// invalidates.
-fn current_stamps<E>(registry: &EngineRegistry<E>) -> Vec<(String, u64)>
+fn current_stamps<E>(answer: &AnswerScope<'_, E>) -> Vec<(String, u64)>
 where
     E: MemberEngine + MemberContracts,
 {
-    let mut stamps: Vec<(String, u64)> = registry
+    let mut stamps: Vec<(String, u64)> = answer
         .fan_out(|_, engine| engine.contract_stamp())
         .into_iter()
         .filter_map(|scoped| scoped.value.ok().map(|stamp| (scoped.member, stamp)))
@@ -980,8 +987,9 @@ where
 /// `topics` once — its fourth walk, the freshness read, does not come through
 /// here), so the shipped code emitted one broken member's diagnostic three
 /// times over. The start arm therefore asks
-/// [`EngineRegistry::announce_open_failure`] whether the operator has been told
-/// yet, and stays quiet when they have ([FR-WS-16], [NFR-CC-04]). Nothing is
+/// [`AnswerScope::announce_open_failure`] whether the operator has been told
+/// yet *in this answer*, and stays quiet when they have ([FR-WS-16],
+/// [NFR-CC-04]). Nothing is
 /// lost: the member is still skipped, still recorded in the open-state ledger,
 /// and still named — with its cause — by the degraded roll-up's own notice.
 ///
@@ -989,7 +997,7 @@ where
 /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 pub(super) fn read_members<E, T>(
-    registry: &EngineRegistry<E>,
+    answer: &AnswerScope<'_, E>,
     subject: &str,
     read: impl Fn(&Arc<E>) -> Result<T>,
 ) -> Vec<(String, T)>
@@ -997,7 +1005,7 @@ where
     E: MemberEngine + MemberContracts,
 {
     let mut out = Vec::new();
-    for scoped in registry.fan_out(|_, engine| read(engine)) {
+    for scoped in answer.fan_out(|_, engine| read(engine)) {
         let member = scoped.member;
         match scoped.value {
             Ok(Ok(value)) => out.push((member, value)),
@@ -1006,7 +1014,7 @@ where
                 "reading a workspace member's {subject} failed; degraded without it: {err:#}"
             ),
             Err(err) => {
-                if registry.announce_open_failure(&member) {
+                if answer.announce_open_failure(&member) {
                     tracing::warn!(
                         member = %member,
                         "a workspace member engine failed to start; degraded without it: \
@@ -1022,14 +1030,14 @@ where
 /// Read every member's contract surface through its read pool, index providers
 /// on portable keys, split providers from consumers by role, and hand the two
 /// indexes to the namespace-generic [`match_indexed`] matcher.
-fn compute_edges<E>(registry: &EngineRegistry<E>) -> Vec<BridgeEdge>
+fn compute_edges<E>(answer: &AnswerScope<'_, E>) -> Vec<BridgeEdge>
 where
     E: MemberEngine + MemberContracts,
 {
     let mut providers: ProviderIndex = ProviderIndex::new();
     let mut consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake)> = Vec::new();
 
-    for (member, surface) in read_members(registry, "contract surface", |e| e.contract_surface()) {
+    for (member, surface) in read_members(answer, "contract surface", |e| e.contract_surface()) {
         for node in surface {
             let Some((key, role)) = classify(node.kind, &node.name) else {
                 continue;
@@ -1069,7 +1077,7 @@ where
     // keeps a publish from being counted twice, once through each intake
     // ([FR-WS-10], [FR-WS-11]).
     let mut broker_candidates: Vec<super::broker::BrokerCandidate> = Vec::new();
-    for (member, refs) in read_members(registry, "invocation references", |e| e.invocation_refs()) {
+    for (member, refs) in read_members(answer, "invocation references", |e| e.invocation_refs()) {
         for reference in refs {
             let endpoint = BridgeEndpoint {
                 member: member.clone(),

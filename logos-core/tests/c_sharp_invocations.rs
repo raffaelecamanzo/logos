@@ -762,7 +762,7 @@ fn c_sharp_client_calls_bind_asp_net_core_routes_in_another_member() {
          as a provider: {bound:?}"
     );
 
-    let coverage = cross_service_coverage(&registry);
+    let coverage = cross_service_coverage(&registry.answer());
     assert_eq!(coverage.bound, 2, "both static calls are bound");
     assert_eq!(coverage.ambiguous, 0);
     // Pin the whole census, not just the bound bucket: a phantom reference

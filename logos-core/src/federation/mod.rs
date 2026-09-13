@@ -131,7 +131,9 @@ pub use query::{
 };
 pub use budget::WorkspaceBudget;
 pub use open_state::{DegradedCause, DegradedRollup, MemberOpen, MemberOpenState, StoreFile};
-pub use registry::{Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode};
+pub use registry::{
+    AnswerScope, Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode,
+};
 pub use topics::{workspace_topics, MemberTopics, TopicSummary};
 pub use warm_state::{MemberWarmState, WarmEvidence, WarmRollup};
 

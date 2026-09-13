@@ -1,7 +1,18 @@
 //! Fitness function for **quiet** degraded-member reporting: one unopenable
-//! member in a `workspace status` run costs exactly one open attempt and exactly
-//! one diagnostic line, however many all-member walks the read-model makes
-//! ([CR-102] §4, [FR-WS-16], [NFR-CC-04], [NFR-PE-10]).
+//! member in a `workspace status` answer costs exactly one open attempt and
+//! exactly one diagnostic line, however many all-member walks the read-model
+//! makes — on **both** the CLI one-shot and the long-lived serve registry
+//! ([CR-102] §4, [CR-105], [FR-WS-16], [NFR-CC-04], [NFR-PE-10]).
+//!
+//! The unit for "once" is one **answer**, not one registry. S-332 delivered the
+//! guarantee by gating the suppression on `RegistryMode::Lazy`, which held for
+//! the one-shot and missed the one production `RegistryMode::Serve` registry —
+//! the federated web surface, where four walks × 63 degraded members was 252
+//! open attempts and ~100 KB of near-identical warning text on every
+//! `GET /api/v1/workspace/status`. S-336 replaced the mode gate with a
+//! per-answer scope, so the serve assertions below run the identical shape as
+//! the one-shot ones, and the *second request* assertions are what keep the
+//! scope from outliving its answer ([CR-105]).
 //!
 //! The unit tests in `federation::registry` prove the single-attempt seam against
 //! spy engines. This proves it against the **real read-model and a real
@@ -32,6 +43,7 @@
 //! count, and it is the test that fails if a fan-out is added.
 //!
 //! [CR-102]: ../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
+//! [CR-105]: ../../docs/requests/CR-105-report-a-failed-member-open-once-per-answer.md
 //! [FR-WS-16]: ../../docs/specs/requirements/FR-WS-16.md
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 //! [NFR-PE-10]: ../../docs/specs/requirements/NFR-PE-10.md
@@ -85,6 +97,28 @@ fn federation(root: &Path, members: Vec<Member>) -> Federation {
 /// dropped again when the command ends.
 fn one_shot(federation: Federation) -> EngineRegistry<Engine> {
     EngineRegistry::new(federation, RegistryMode::Lazy)
+}
+
+/// A **serve** registry — the shape the federated web surface builds once and
+/// holds for the process lifetime, answering many requests from it.
+///
+/// The eager warm it performs is itself one open attempt per member, so every
+/// assertion below measures a *delta* from the count after construction rather
+/// than an absolute.
+fn serving(federation: Federation) -> EngineRegistry<Engine> {
+    EngineRegistry::new(federation, RegistryMode::Serve)
+}
+
+/// The parts of a `workspace status` payload [CR-105] promises are unchanged:
+/// the degraded roll-up, the per-member rows, and both completeness markers.
+fn payload_contract(status: &WorkspaceStatus) -> serde_json::Value {
+    let value = serde_json::to_value(status).expect("status serialises");
+    serde_json::json!({
+        "degraded_rollup": value["degraded_rollup"],
+        "members": value["members"],
+        "coverage_covers_all_members": status.coverage.covers_all_members,
+        "coverage_read": [status.coverage.members_read, status.coverage.members_total],
+    })
 }
 
 /// Raise the process-wide max level once, for the same reason
@@ -338,6 +372,174 @@ fn a_healthy_workspace_reports_nothing_and_attempts_every_member() {
          resident for the remaining walks",
         registry.engine_starts(),
         status.members.len()
+    );
+}
+
+/// [CR-105] AC1 and AC2 on the **serve** surface: one unopenable member costs
+/// one open attempt and one diagnostic line per request, and the payload a
+/// consumer reads is byte-identical to the one-shot's.
+///
+/// The registry here outlives the answer, which is the whole difference from
+/// `one_unopenable_member_costs_one_attempt_and_one_diagnostic_line` above. The
+/// shipped behaviour before S-336 was four attempts and four `WARN`s, because
+/// the suppression was gated on `RegistryMode::Lazy`; the attempt count is the
+/// assertion rather than a proxy for it.
+///
+/// [CR-105]: ../../docs/requests/CR-105-report-a-failed-member-open-once-per-answer.md
+#[test]
+fn a_serve_registry_costs_one_attempt_and_one_line_per_request() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let healthy = member_repo(root, "api");
+    let broken = member_repo(root, "web");
+    obstruct_store(&broken);
+
+    let registry = serving(federation(root, vec![healthy.clone(), broken.clone()]));
+    // The eager warm is one attempt of its own, made outside any answer.
+    let warmed = registry.start_failures();
+    assert_eq!(warmed, 1, "the eager warm attempted the broken member once");
+
+    let (status, warnings) = captured_warnings(|| workspace_status(&registry));
+
+    assert_eq!(
+        registry.start_failures() - warmed,
+        1,
+        "the request attempted the broken member ONCE across all four walks, \
+         not once per walk — {} attempts recorded over the answer",
+        registry.start_failures() - warmed
+    );
+    let announced = start_failure_lines(&warnings);
+    assert_eq!(
+        announced.len(),
+        1,
+        "the operator is told once per request, not once per walk: {warnings:?}"
+    );
+    assert!(
+        announced[0].contains("web"),
+        "and the one line names the member: {}",
+        announced[0]
+    );
+
+    // The roll-up's own notice is the grouped form S-337 shipped: the cause once,
+    // over the members it affects — asserted here so the serve surface is pinned
+    // to the same text the CLI prints, not to a per-member vintage of it.
+    let notice = status
+        .degraded_rollup
+        .notice(&registry.open_states())
+        .expect("one member is degraded");
+    assert!(
+        notice.contains("affected (1): web"),
+        "the notice groups its members under one cause: {notice}"
+    );
+
+    // ── The payload is exactly the one-shot's ────────────────────────────
+    // Taken after the serving registry is dropped, so the two never hold the
+    // healthy member's store at the same time.
+    let serve_payload = payload_contract(&status);
+    drop(registry);
+    let cli = one_shot(federation(root, vec![healthy, broken]));
+    let cli_payload = payload_contract(&workspace_status(&cli));
+    assert_eq!(
+        serve_payload, cli_payload,
+        "same degraded_rollup, same per-member rows, same completeness markers — \
+         only the attempt and diagnostic counts behind them changed"
+    );
+}
+
+/// [CR-105] AC3, the positive: a **second** request re-attempts and
+/// re-announces, so cross-request suppression is not introduced.
+///
+/// This is the criterion a scope that accidentally outlives its answer fails. A
+/// registry-lifetime latch would make both deltas below zero, which is why they
+/// are asserted as equalities rather than as bounds.
+///
+/// [CR-105]: ../../docs/requests/CR-105-report-a-failed-member-open-once-per-answer.md
+#[test]
+fn a_second_request_re_attempts_and_re_announces_a_still_broken_member() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let healthy = member_repo(root, "api");
+    let broken = member_repo(root, "web");
+    obstruct_store(&broken);
+
+    let registry = serving(federation(root, vec![healthy, broken]));
+    let (_, first) = captured_warnings(|| workspace_status(&registry));
+    let after_first = registry.start_failures();
+    assert_eq!(
+        start_failure_lines(&first).len(),
+        1,
+        "the first request announces the member once: {first:?}"
+    );
+
+    let (second_status, second) = captured_warnings(|| workspace_status(&registry));
+
+    assert_eq!(
+        registry.start_failures() - after_first,
+        1,
+        "the second request really re-attempted the member — once, not zero and \
+         not four"
+    );
+    assert_eq!(
+        start_failure_lines(&second).len(),
+        1,
+        "and re-announced it, because a member that keeps failing across requests \
+         must keep being reported: {second:?}"
+    );
+    assert_eq!(
+        second_status.degraded_rollup.degraded_members,
+        ["web"],
+        "and it is still named in the second answer's roll-up"
+    );
+}
+
+/// [CR-105] AC3's other half: a member that **recovers** between two requests is
+/// not reported degraded by the later one, on the same long-lived registry.
+///
+/// The transient-recovery property the old `RegistryMode` gate existed to
+/// protect. Run against one serving registry with the obstruction cleared
+/// between the requests — a scope that outlived its answer would leave the
+/// member degraded until the process restarted, which is exactly the regression
+/// this asserts against.
+///
+/// [CR-105]: ../../docs/requests/CR-105-report-a-failed-member-open-once-per-answer.md
+#[test]
+fn a_member_that_recovers_between_requests_is_not_degraded_by_the_later_one() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let healthy = member_repo(root, "api");
+    let broken = member_repo(root, "web");
+    obstruct_store(&broken);
+
+    let registry = serving(federation(root, vec![healthy, broken.clone()]));
+    let before = workspace_status(&registry);
+    assert_eq!(
+        before.degraded_rollup.degraded_members,
+        ["web"],
+        "the first request reports the member degraded"
+    );
+
+    // The condition clears between the two requests: the directory squatting on
+    // the store path is gone, and the same registry serves the next request.
+    std::fs::remove_dir_all(broken.root.join(".logos")).expect("clear the obstruction");
+
+    let (after, warnings) = captured_warnings(|| workspace_status(&registry));
+    assert!(
+        after.degraded_rollup.degraded_members.is_empty(),
+        "the later request opens it and reports nothing degraded: {:?}",
+        after.degraded_rollup
+    );
+    assert!(
+        after.degraded_rollup.all_opened(),
+        "so the recovered workspace reads whole again"
+    );
+    assert!(
+        after.degraded_rollup.covers_all_members && after.coverage.covers_all_members,
+        "and both completeness markers say so: {:?}",
+        after.coverage
+    );
+    assert!(
+        start_failure_lines(&warnings).is_empty(),
+        "with nothing left to announce: {warnings:?}"
     );
 }
 

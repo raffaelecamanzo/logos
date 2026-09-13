@@ -541,8 +541,12 @@ pub fn app_wide_reachability<E>(
 where
     E: MemberEngine + MemberContracts,
 {
-    let coverage = cross_service_coverage(registry);
-    let surfaces = read_members(registry, "reachability surface", |e| e.reachability_surface());
+    // One answer over three all-member walks (`coverage` reads twice, the
+    // surface read once): a member that will not open is attempted and announced
+    // once for the whole view, and the next call re-attempts ([FR-WS-16]).
+    let answer = registry.answer();
+    let coverage = cross_service_coverage(&answer);
+    let surfaces = read_members(&answer, "reachability surface", |e| e.reachability_surface());
     let rider = CoverageRider::new(&coverage, surfaces.len(), registry.members().len());
     let roots = union_roots(edges);
 

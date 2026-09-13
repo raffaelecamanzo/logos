@@ -33,7 +33,7 @@ use crate::graph_store::{EdgeRow, NodeRow};
 use crate::model::{EdgeKind, NodeId, NodeKind};
 
 use super::bridge::{read_members, MemberContracts};
-use super::registry::{EngineRegistry, MemberEngine};
+use super::registry::{AnswerScope, MemberEngine};
 
 /// One topic in one member, with how many sites publish to and subscribe from it.
 ///
@@ -131,6 +131,10 @@ pub(super) fn topic_summaries_from(nodes: &[NodeRow], edges: &[EdgeRow]) -> Vec<
 /// The workspace topic inventory: every member's promoted topics, repo-qualified
 /// ([FR-WS-11]).
 ///
+/// Takes the [`AnswerScope`] rather than the registry because this walk is one of
+/// the four `workspace_status` makes, and the scope is what keeps a broken member
+/// to one open attempt and one diagnostic across them ([FR-WS-16], [NFR-PE-10]).
+///
 /// A member whose engine fails to start, or whose read fails, is **skipped with a
 /// warning** rather than aborting the answer — the degraded-not-fatal discipline
 /// every workspace read-model follows ([ADR-53]). A member with no topics
@@ -139,11 +143,11 @@ pub(super) fn topic_summaries_from(nodes: &[NodeRow], edges: &[EdgeRow]) -> Vec<
 ///
 /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
 /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
-pub fn workspace_topics<E>(registry: &EngineRegistry<E>) -> Vec<MemberTopics>
+pub fn workspace_topics<E>(answer: &AnswerScope<'_, E>) -> Vec<MemberTopics>
 where
     E: MemberEngine + MemberContracts,
 {
-    read_members(registry, "topic surface", |engine| engine.topic_surface())
+    read_members(answer, "topic surface", |engine| engine.topic_surface())
         .into_iter()
         .map(|(member, topics)| MemberTopics { member, topics })
         .collect()
