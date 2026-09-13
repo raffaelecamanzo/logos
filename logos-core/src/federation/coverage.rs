@@ -1993,19 +1993,17 @@ impl Tally {
         let resolved_edges_summary = summarize_resolved_edges(egress);
         // The two derivations over the same rows must describe them identically:
         // this walk reads each row's own `CoverageState`, `by_intake` counted the
-        // same value at `record` time. A future `record` call site that tallied
-        // one without pushing the other would be caught here rather than in a
-        // published figure ([CR-120]'s reconcile-against-`references` contract).
+        // same value at `record` time. [`Tally::record`] does both in one body, so
+        // the risk this covers is not "a future `record` call site" but a second
+        // filing path that bypasses `record` altogether — and, unlike the unit
+        // fixtures, this fires on the integration harnesses that run over the real
+        // 84-member estate ([CR-120]'s reconcile-against-`references` contract).
+        let invocation = self.by_intake.invocation;
         debug_assert_eq!(
+            (egress.resolved_sites, egress.measured),
             (
-                egress.resolved_sites,
-                egress.measured,
-            ),
-            (
-                self.by_intake.invocation.bound,
-                self.by_intake.invocation.bound
-                    + self.by_intake.invocation.ambiguous
-                    + self.by_intake.invocation.unbound,
+                invocation.bound,
+                invocation.bound + invocation.ambiguous + invocation.unbound
             ),
             "the row walk and the intake tally must count one population"
         );
@@ -2048,14 +2046,20 @@ impl Tally {
 ///
 /// So the three figures are produced together, by this one walk, and
 /// [`summarize_resolved_edges`] takes **this value** rather than three `u64`s.
-/// Recomputing either half independently at a call site is then not a discipline
-/// to remember — it is a signature that does not accept it.
+/// Be exact about what that buys, because it is easy to overstate: the two halves
+/// cannot be counted over different populations without editing one loop body,
+/// and the composed line cannot be handed a count from one source beside a
+/// numerator from another. It does **not** make the original defect unspellable —
+/// a filter added inside [`from_rows`](Self::from_rows) would reinstate it, and
+/// what catches that is the invariant test
+/// (`both_halves_of_the_resolved_edge_summary_are_derived_from_one_population`),
+/// not the type.
 ///
 /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
 /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Default)]
 struct EgressHeadline {
     /// Resolved cross-service **edges** — the workspace headline.
     edges: u64,
@@ -2250,8 +2254,9 @@ fn summarize_spec_conformance(bound: u64, denom: u64, excluded: u64, ratio: Opti
 /// edge count, the rate's numerator and its denominator together ([CR-127]). The
 /// count and the numerator differ only under fan-out, where one resolved site is
 /// several edges, and both are stated rather than one being derived from the
-/// other at a presentation site, because that derivation is exactly where a
-/// figure acquires a meaning it does not have.
+/// other. The rate IS re-derived here, from the same [`EgressHeadline`] rather
+/// than from the published field: [`EgressHeadline::rate`] is a pure function of
+/// the three counts, so the rendered line and `egress_resolution` cannot disagree.
 ///
 /// An absent rate reads "not measured", never `0.000` and never `1.000` — [CR-100]'s
 /// rule, which [BR-51] restates for this figure: no egress site captured is *no
@@ -2268,8 +2273,7 @@ fn summarize_resolved_edges(headline: EgressHeadline) -> String {
     // ([CR-127]). The superseded signature took the count, the rate's numerator
     // and its denominator as three separate `u64`s, and that is precisely how a
     // caller came to pass an edge count filtered one way beside a site count
-    // filtered another. A signature that cannot accept two populations is a
-    // stronger guarantee than a comment asking a caller not to supply them.
+    // filtered another. This signature cannot be handed two populations.
     let EgressHeadline {
         edges: resolved,
         resolved_sites: bound_sites,
