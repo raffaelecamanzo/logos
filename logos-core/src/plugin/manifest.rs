@@ -882,6 +882,30 @@ impl PluginManifest {
                         .to_string(),
                 );
             }
+            // A qualifier is matched as a PREFIX of the receiver's text, so a row
+            // that is not a self-contained word silently widens into something
+            // else entirely: `["t"]` reduces `t.api` — a general `holder.api`
+            // reduction, the exact thing this row's own documentation says it is
+            // not — and `["this.x"]` reduces `this.x.api`. Neither is a spelling
+            // any language uses for the enclosing instance, and both read as a
+            // typo rather than as intent ([NFR-RA-05]).
+            //
+            // The shape is "letters, digits and `_`, not starting with a digit",
+            // deliberately the SAME class the interpreter's own receiver
+            // predicate uses, so a row that parses is a row the matcher can
+            // recognise as a whole token. A sigil-led spelling (`$this`) is a
+            // real convention this rule would refuse; no shipped language needs
+            // one, and widening the rule when one does is a row in this comment
+            // away — which is the direction that fails safe.
+            if let Some(bad) = properties.self_references.iter().find(|s| {
+                let mut chars = s.chars();
+                !chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                    || !s.chars().all(|c| c.is_alphanumeric() || c == '_')
+            }) {
+                return bail(format!(
+                    "`[properties] self_references` entry '{bad}' is not a single word; a                      qualifier is matched as a prefix, so a partial one silently reduces                      an unrelated receiver (S-398, NFR-RA-05)"
+                ));
+            }
             let mut seen = std::collections::BTreeSet::new();
             if let Some(dup) = properties
                 .self_references
@@ -1625,6 +1649,22 @@ mod tests {
                 annotations = ["A"]
                 accessor_prefixes = ["get"]
                 self_references = ["this", "this"]"#, "duplicate entry"),
+            // A qualifier is matched as a PREFIX, so a row that is not a whole
+            // word reduces a receiver it does not name. `this.x` and `*` are the
+            // shapes review reproduced turning into a general `holder.api`
+            // reduction; `1st` pins the leading-digit half of the rule.
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get"]
+                self_references = ["this.x"]"#, "is not a single word"),
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get"]
+                self_references = ["*"]"#, "is not a single word"),
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get"]
+                self_references = ["1st"]"#, "is not a single word"),
         ];
         for (table, needle) in cases {
             let err = PluginManifest::parse("x/plugin.toml", &with(table)).unwrap_err();

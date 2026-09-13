@@ -587,6 +587,37 @@ fn the_kotlin_descriptor_names_the_same_vocabulary_and_a_wider_convention() {
     );
 }
 
+/// **The qualifier vocabulary is keyed by language, and a union would be wrong**
+/// (S-398).
+///
+/// Asserted on the INDEX rather than on the descriptor, because the descriptor
+/// asserts cannot tell a per-language map from a union — review demonstrated
+/// exactly that by replacing the lookup with `self_references.values().flatten()`
+/// and watching the whole suite stay green.
+///
+/// The trap is `conventions`' own, one row over: a language that declares a
+/// qualifier would lend it to every language in the index, including one whose
+/// use sites spell the enclosing instance differently or not at all.
+#[test]
+#[cfg(feature = "lang-kotlin")]
+fn the_qualifier_vocabulary_is_keyed_by_language_and_never_unioned() {
+    let index = PropertiesIndex::for_plugins(&[plugin("java"), plugin("kt")]);
+
+    assert_eq!(
+        index.self_references("java").collect::<Vec<_>>(),
+        ["this"],
+        "Java declares the qualifier",
+    );
+    assert!(
+        index.self_references("kt").next().is_none(),
+        "…and Kotlin, declared over the SAME index, borrows nothing from it",
+    );
+    assert!(
+        index.self_references("ruby").next().is_none(),
+        "…nor does a language this index was never declared over",
+    );
+}
+
 #[test]
 #[cfg(feature = "lang-kotlin")]
 fn a_kotlin_body_property_and_the_value_form_bind_too() {
