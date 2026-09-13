@@ -46,14 +46,14 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             // single-root `init` below.
             //
             // `nudge` reports *which* entry point took the workspace path, not
-            // merely that one did, and that provenance is what `run` needs to
-            // answer CR-103: only the offer Logos itself made falls back to the
-            // plain `init` when every member is declined. It rides as the flags
-            // that `init` would have been run with — `then_some`, so an accepted
-            // offer never evaluates `init_options` and so never revives the
-            // interactive host-setup prompts the offer just told the user it was
-            // dropping. An explicit `--workspace` passes `None` and cannot
-            // acquire the fallback by coincidence.
+            // merely that one did; `then_some` turns that into the CR-103
+            // fallback right, so an explicit `--workspace` passes `None` and
+            // cannot acquire it by coincidence. Why the payload is the raw
+            // `(interactive, hooks)` pair and not a built `InitOptions`:
+            // `init_options` *prompts* under `-i`, so building it here would
+            // interrogate the user on the accepted-offer path that goes on to
+            // enable members and never wants it. The rationale for the split
+            // lives once, on `workspace_init::run`'s `fallback` parameter.
             if let Some(nudged) = crate::workspace_init::nudge(root, workspace, interactive || hooks, crate::ask) {
                 crate::workspace_init::run(root, nudged.then_some((interactive, hooks)), yes, &exclude, out, crate::workspace_init::spawn_supervisor)
             } else {

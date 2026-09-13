@@ -5,7 +5,10 @@
 //! non-clobber per-member `init`, the incremental manifest write, and the
 //! workspace MCP injection are all core business logic
 //! ([`logos_core::federation::enable`]) — this module only resolves the
-//! anchor, gates, wires the warm, and reports.
+//! anchor, gates, wires the warm, reports, and — on the FR-IN-08 nudge's
+//! declined-to-empty path alone — completes the plain single-root `init` the
+//! user typed (CR-103), by delegating to the same [`logos_core::Engine`] call
+//! the declined-outright path in `dispatch` makes.
 //!
 //! The warm is **bounded** (FR-WS-14, BR-44): [`spawn_supervisor`] starts
 //! exactly one detached child whatever N is, and that child re-enters this
@@ -122,11 +125,16 @@ pub(crate) fn run(root: &Path, fallback: Option<(bool, bool)>, yes: bool, exclud
         // `Some` — the FR-IN-08 nudge: the workspace was *Logos's* suggestion,
         // and declining it down to nothing would otherwise drop the `logos init`
         // the user actually typed, which is a worse silence than the one
-        // FR-IN-08 exists to remove. Complete that init instead, with the flags
-        // it was typed with, and silently — no third prompt. Nothing else is
-        // emitted: no manifest, no `.mcp.json` entry, and no footprint or
-        // warm-start advisory, because no member gained anything. stdout carries
-        // exactly one machine document either way (FR-CL-02).
+        // FR-IN-08 exists to remove. Complete that init instead — precisely the
+        // one CR-103 §3 names, "the plain single-root `init` it would have run
+        // had the offer been declined", so the `-i`/`--hooks` the user typed are
+        // applied rather than dropped a second time. Under `-i` that means the
+        // ordinary host-setup questions are asked *here*; what the fallback
+        // never asks is a third **workspace** question — it does not re-offer
+        // what was just declined. Nothing else is emitted: no manifest, no
+        // `.mcp.json` entry, and no footprint or warm-start advisory, because no
+        // member gained anything. stdout carries exactly one machine document
+        // either way (FR-CL-02).
         match fallback {
             Some((interactive, hooks)) => out.print(&logos_core::Engine::init_with(root, &crate::init_options(interactive, hooks))?)?,
             None => eprintln!("logos init --workspace: no candidate member repositories found under {} — nothing to do", workspace_root.display()),
@@ -170,12 +178,10 @@ pub(crate) fn run(root: &Path, fallback: Option<(bool, bool)>, yes: bool, exclud
 /// rather than the user's. `None` everywhere else: a declined offer, and any
 /// other root, where nothing is printed and nothing is asked.
 ///
-/// The `bool` inside is not decoration. `run`'s empty-member branch is shared by
-/// both entry points and must behave *differently* for each (CR-103), so the
-/// entry point has to reach it — and reporting it from the one place that
-/// actually makes the routing decision is what keeps the two distinguishable by
-/// construction, rather than by a flag the call site happens to still have in
-/// scope.
+/// The `bool` inside is not decoration: `run`'s empty-member branch must behave
+/// differently for each entry point (CR-103), and reporting the provenance from
+/// the one place that actually makes the routing decision is what keeps the two
+/// distinguishable by construction — see `run`'s `fallback` parameter.
 ///
 /// `--workspace` is answered **before** `detect` is called, so the explicit flag
 /// still pays nothing for detection and never sees the nudge. That short-circuit
