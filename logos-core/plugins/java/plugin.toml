@@ -115,3 +115,25 @@ annotations = ["ConfigurationProperties"]
 # that also reads properties directly; Kotlin's descriptor is the worked
 # example.)
 accessor_prefixes = ["get", "is"]
+# How a Java use site qualifies a read of an INJECTED field (S-398, FR-WS-19) —
+# the shape the reference estate writes for essentially every one of its
+# accessors: `this.mailboxApiProperties.getUriGetMailbox()`.
+#
+# One row. Java also spells an enclosing instance `super.<field>` and
+# `Outer.this.<field>`, and neither is listed deliberately: the reduction is
+# answered from declarations THIS file makes, and an inherited or outer-class
+# field is not one — so those rows would buy nothing but a wider match.
+#
+# It buys a receiver of the form `this.<field>` being read as naming `<field>` of
+# the enclosing class, and nothing wider: a `holder.api` receiver stays refused,
+# because reducing THAT would resolve against a same-named local — a different
+# object — while `this.<field>` can name nothing but a field of this class. The
+# core enforces that with two gates review had to add — the receiver must be a
+# node the grammar parsed as more than one thing, and the name must resolve to a
+# FIELD-position declaration.
+#
+# Absent for every other language, including Kotlin: a Kotlin use site is not
+# reached at all (its grammar field-names neither the receiver nor the callee of
+# a member call — see `extract::config::accessor`'s module ceiling), so a row
+# there would be data no test could falsify.
+self_references = ["this"]

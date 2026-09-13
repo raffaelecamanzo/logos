@@ -494,7 +494,8 @@ pub struct AnchorDescriptor {
 /// the core walk reads only capture names, and each language supplies the
 /// vocabulary its own `properties.scm` captures against.
 ///
-/// Two halves, and the split is what makes the substrate language-agnostic:
+/// Two halves, and the split is what makes the substrate language-agnostic — the
+/// declaration vocabulary, and the use-site vocabulary that now carries two rows:
 ///
 /// - [`annotations`](Self::annotations) names the **binding vocabulary** — the
 ///   annotation the language spells to mark a class as configuration-bound. The
@@ -504,6 +505,9 @@ pub struct AnchorDescriptor {
 ///   from this one.
 /// - [`accessor_prefixes`](Self::accessor_prefixes) names the **accessor
 ///   convention** — how a use site spells a read of one property.
+/// - [`self_references`](Self::self_references) names the **qualifier
+///   convention** — how a use site spells the enclosing instance, when it
+///   qualifies a field read with one.
 ///
 /// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
 /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
@@ -542,6 +546,45 @@ pub struct PropertiesDescriptor {
     /// rather than the first one winning by table order.
     #[serde(default)]
     pub accessor_prefixes: Vec<String>,
+    /// How a use site spells a reference to the **enclosing instance**, when it
+    /// qualifies a field read with one — `["this"]` for Java (S-398,
+    /// [FR-WS-19]).
+    ///
+    /// The third row of the use-site vocabulary, beside
+    /// [`accessor_prefixes`](Self::accessor_prefixes), and here for the same
+    /// reason: it is one language's spelling, and
+    /// [`crate::extract::config::accessor`] may not name one. The [NFR-MA-01]
+    /// structural guard beside the interpreter enforces that literally — it
+    /// scans every double-quoted identifier in that file against both the JVM
+    /// node-kind set and the all-grammar field-name set, and `this` is a named
+    /// Java node kind. So a hardcoded qualifier fails the build; this row is
+    /// where it goes instead.
+    ///
+    /// **Empty by default, and that default is the refusal.** A language that
+    /// declares no row admits no qualified receiver at all, which is exactly
+    /// what every language did before this row existed ([NFR-RA-05]). A
+    /// language joins by adding a row, never by loosening a match.
+    ///
+    /// What an entry buys is narrow and bounded: a receiver **the grammar parsed
+    /// as more than one node**, spelled `<entry><separator><name>`, is read as
+    /// naming the field `<name>` of the enclosing class — and is then resolved
+    /// against field-position declarations only. Both of those narrowings are
+    /// review corrections, not decoration: without the first, `this$api` (one
+    /// legal Java identifier) split into two; without the second, a same-named
+    /// local answered for an inherited field. See
+    /// [`BindingView::declared_receiver_type`](crate::extract::config::accessor)
+    /// for both.
+    ///
+    /// It is **not** a general relaxation of the qualified-receiver refusal — a
+    /// `holder.api` receiver stays refused, because reducing it would resolve
+    /// against a same-named local, which is a different object. A self reference
+    /// cannot name a different object: it names a field of the enclosing class.
+    ///
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[serde(default)]
+    pub self_references: Vec<String>,
 }
 
 impl PluginManifest {
@@ -782,46 +825,115 @@ impl PluginManifest {
             }
         }
         if let Some(properties) = &self.properties {
-            // An annotation row is compared against captured text verbatim, so a
-            // stray space matches nothing and the arm degrades to silent
-            // no-capture — the failure mode the `http_client_detectors` guard
-            // above exists for, here on the binding arm.
-            if properties.annotations.iter().any(|a| a.trim().is_empty()) {
-                return bail("`[properties] annotations` entries must not be empty".to_string());
-            }
-            if properties.annotations.iter().any(|a| a != a.trim()) {
-                return bail(
-                    "`[properties] annotations` entries must not carry surrounding whitespace"
-                        .to_string(),
-                );
-            }
-            // `""` IS a legal accessor prefix — it spells direct property access
-            // — so the emptiness test that guards the annotation rows would be
-            // wrong here. Whitespace is still a typo rather than a convention.
-            if properties.accessor_prefixes.iter().any(|p| p != p.trim()) {
-                return bail(
-                    "`[properties] accessor_prefixes` entries must not carry surrounding \
-                     whitespace"
-                        .to_string(),
-                );
-            }
-            // A duplicated prefix would derive the same candidate twice. The
-            // interpreter dedups by canonical key so it cannot fabricate an
-            // ambiguity out of one, but a duplicate is a descriptor bug either
-            // way and reads as intent.
-            let mut seen = std::collections::BTreeSet::new();
-            if let Some(dup) = properties
-                .accessor_prefixes
-                .iter()
-                .find(|p| !seen.insert((*p).clone()))
-            {
-                return bail(format!(
-                    "`[properties] accessor_prefixes` carries the duplicate entry '{dup}'"
-                ));
+            if let Err(detail) = validate_properties(properties) {
+                return bail(detail);
             }
         }
         Ok(())
     }
+}
+
+
+/// The `[properties]` table's typo and shape rules (S-381, S-398).
+///
+/// Extracted from [`PluginManifest::validate`] rather than inlined beside its
+/// siblings: the row S-398 added pushed that function past the `max_cc = 50`
+/// architecture rule, and one table's rules are the natural seam. The caller
+/// attributes the returned detail to the descriptor file, so nothing here
+/// names one.
+fn validate_properties(properties: &PropertiesDescriptor) -> Result<(), String> {
+        // An annotation row is compared against captured text verbatim, so a
+        // stray space matches nothing and the arm degrades to silent
+        // no-capture — the failure mode the `http_client_detectors` guard
+        // above exists for, here on the binding arm.
+        if properties.annotations.iter().any(|a| a.trim().is_empty()) {
+            return Err("`[properties] annotations` entries must not be empty".to_string());
+        }
+        if properties.annotations.iter().any(|a| a != a.trim()) {
+            return Err(
+                "`[properties] annotations` entries must not carry surrounding whitespace"
+                    .to_string(),
+            );
+        }
+        // `""` IS a legal accessor prefix — it spells direct property access
+        // — so the emptiness test that guards the annotation rows would be
+        // wrong here. Whitespace is still a typo rather than a convention.
+        if properties.accessor_prefixes.iter().any(|p| p != p.trim()) {
+            return Err(
+                "`[properties] accessor_prefixes` entries must not carry surrounding \
+                 whitespace"
+                    .to_string(),
+            );
+        }
+        // A duplicated prefix would derive the same candidate twice. The
+        // interpreter dedups by canonical key so it cannot fabricate an
+        // ambiguity out of one, but a duplicate is a descriptor bug either
+        // way and reads as intent.
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(dup) = properties
+            .accessor_prefixes
+            .iter()
+            .find(|p| !seen.insert((*p).clone()))
+        {
+            return Err(format!(
+                "`[properties] accessor_prefixes` carries the duplicate entry '{dup}'"
+            ));
+        }
+        // Unlike `accessor_prefixes`, the EMPTY LIST is legal here — it is
+        // the default, and it means "this language admits no qualified
+        // receiver". An empty ENTRY is not: it would strip nothing and
+        // leave any separator-led receiver reading as a field of the
+        // enclosing class, which is the fabrication [NFR-RA-05] forbids.
+        if properties.self_references.iter().any(|s| s.trim().is_empty()) {
+            return Err(
+                "`[properties] self_references` entries must not be empty (S-398)".to_string(),
+            );
+        }
+        // A self reference is compared against captured receiver text
+        // verbatim, so a stray space matches nothing and the qualifier
+        // degrades to a silent refusal — the same failure mode the
+        // `annotations` and `accessor_prefixes` guards above exist for.
+        if properties.self_references.iter().any(|s| s != s.trim()) {
+            return Err(
+                "`[properties] self_references` entries must not carry surrounding whitespace"
+                    .to_string(),
+            );
+        }
+        // A qualifier is matched as a PREFIX of the receiver's text, so a row
+        // that is not a self-contained word silently widens into something
+        // else entirely: `["t"]` reduces `t.api` — a general `holder.api`
+        // reduction, the exact thing this row's own documentation says it is
+        // not — and `["this.x"]` reduces `this.x.api`. Neither is a spelling
+        // any language uses for the enclosing instance, and both read as a
+        // typo rather than as intent ([NFR-RA-05]).
+        //
+        // The shape is "letters, digits and `_`, not starting with a digit",
+        // deliberately the SAME class the interpreter's own receiver
+        // predicate uses, so a row that parses is a row the matcher can
+        // recognise as a whole token. A sigil-led spelling (`$this`) is a
+        // real convention this rule would refuse; no shipped language needs
+        // one, and widening the rule when one does is a row in this comment
+        // away — which is the direction that fails safe.
+        if let Some(bad) = properties.self_references.iter().find(|s| {
+            let mut chars = s.chars();
+            !chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                || !s.chars().all(|c| c.is_alphanumeric() || c == '_')
+        }) {
+            return Err(format!(
+                "`[properties] self_references` entry '{bad}' is not a single word; a                      qualifier is matched as a prefix, so a partial one silently reduces                      an unrelated receiver (S-398, NFR-RA-05)"
+            ));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(dup) = properties
+            .self_references
+            .iter()
+            .find(|s| !seen.insert((*s).clone()))
+        {
+            return Err(format!(
+                "`[properties] self_references` carries the duplicate entry '{dup}'"
+            ));
+        }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1536,6 +1648,38 @@ mod tests {
             (r#"[properties]
                 annotations = ["A"]
                 accessor_prefixes = ["get", "get"]"#, "duplicate entry"),
+            // The S-398 row. The empty ENTRY is a typo here even though the
+            // empty LIST is this row's default — the two are not the same
+            // claim, and the `accessor_prefixes` rule above is the reason the
+            // distinction has to be asserted rather than assumed.
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get"]
+                self_references = [""]"#, "self_references` entries must not be empty"),
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get"]
+                self_references = ["this "]"#, "surrounding whitespace"),
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get"]
+                self_references = ["this", "this"]"#, "duplicate entry"),
+            // A qualifier is matched as a PREFIX, so a row that is not a whole
+            // word reduces a receiver it does not name. `this.x` and `*` are the
+            // shapes review reproduced turning into a general `holder.api`
+            // reduction; `1st` pins the leading-digit half of the rule.
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get"]
+                self_references = ["this.x"]"#, "is not a single word"),
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get"]
+                self_references = ["*"]"#, "is not a single word"),
+            (r#"[properties]
+                annotations = ["A"]
+                accessor_prefixes = ["get"]
+                self_references = ["1st"]"#, "is not a single word"),
         ];
         for (table, needle) in cases {
             let err = PluginManifest::parse("x/plugin.toml", &with(table)).unwrap_err();
@@ -1551,9 +1695,15 @@ mod tests {
             ),
         )
         .expect("the empty prefix is direct property access, not a typo");
-        assert_eq!(
-            ok.properties.expect("[properties]").accessor_prefixes,
-            ["", "get"],
+        let ok = ok.properties.expect("[properties]");
+        assert_eq!(ok.accessor_prefixes, ["", "get"]);
+        // …and an ABSENT `self_references` is the legal default, not a rejected
+        // table: a language that admits no qualified receiver declares no row
+        // (S-398). Asserted on the same admitted descriptor, so the default and
+        // the typo rules above are proved not to overlap.
+        assert!(
+            ok.self_references.is_empty(),
+            "an absent `self_references` defaults to the empty vocabulary",
         );
     }
 

@@ -64,6 +64,14 @@ fn the_java_descriptor_names_its_vocabulary_and_its_accessor_convention() {
         ["get", "is"],
         "…and so is the accessor convention",
     );
+    assert_eq!(
+        descriptor.self_references,
+        ["this"],
+        "…and so is how a Java use site qualifies a read of an injected field \
+         (S-398). `this` is a named Java NODE KIND, so this row is not merely a \
+         tidier home for the spelling — it is the only legal one, and \
+         `the_interpreter_names_no_jvm_grammar_node_kind` is what enforces that",
+    );
 }
 
 #[test]
@@ -565,6 +573,49 @@ fn the_kotlin_descriptor_names_the_same_vocabulary_and_a_wider_convention() {
         "…and an accessor convention Java cannot express: `\"\"` is direct \
          property access",
     );
+    // Kotlin declares NO self reference, and the absence is deliberate rather
+    // than an oversight: a Kotlin use site is not reached at all (its grammar
+    // field-names neither the receiver nor the callee of a member call — the
+    // ceiling `extract::config::accessor`'s module docs record and
+    // `accessor_tests`'
+    // `a_kotlin_use_site_is_not_reached_and_the_same_class_still_resolves_from_java`
+    // pins), so a row here would be data no test could falsify. Asserted so
+    // that closing the Kotlin ceiling has to face this line (S-398).
+    assert!(
+        descriptor.self_references.is_empty(),
+        "Kotlin's use-site half is unreachable, so it declares no qualifier",
+    );
+}
+
+/// **The qualifier vocabulary is keyed by language, and a union would be wrong**
+/// (S-398).
+///
+/// Asserted on the INDEX rather than on the descriptor, because the descriptor
+/// asserts cannot tell a per-language map from a union — review demonstrated
+/// exactly that by replacing the lookup with `self_references.values().flatten()`
+/// and watching the whole suite stay green.
+///
+/// The trap is `conventions`' own, one row over: a language that declares a
+/// qualifier would lend it to every language in the index, including one whose
+/// use sites spell the enclosing instance differently or not at all.
+#[test]
+#[cfg(feature = "lang-kotlin")]
+fn the_qualifier_vocabulary_is_keyed_by_language_and_never_unioned() {
+    let index = PropertiesIndex::for_plugins(&[plugin("java"), plugin("kt")]);
+
+    assert_eq!(
+        index.self_references("java").collect::<Vec<_>>(),
+        ["this"],
+        "Java declares the qualifier",
+    );
+    assert!(
+        index.self_references("kt").next().is_none(),
+        "…and Kotlin, declared over the SAME index, borrows nothing from it",
+    );
+    assert!(
+        index.self_references("ruby").next().is_none(),
+        "…nor does a language this index was never declared over",
+    );
 }
 
 #[test]
@@ -818,7 +869,7 @@ fn from_sources_admits_the_same_population_as_build_over_the_same_files() {
 /// difference is worth keeping visible. `binding.rs` names no node kind because
 /// it reads only capture names. `accessor.rs` reads a parse tree directly and so
 /// *could*, but it reads only grammar FIELD names — `name`, `type`, `object`,
-/// `function`, `parameters`, `body` — and none of those six is a node kind in
+/// `parameters`, `body`, `arguments` — and none of those six is a node kind in
 /// either loaded JVM grammar. (`type` is the near miss: `tree-sitter-kotlin-ng`
 /// declares it in `node-types.json` as a supertype, which is not a parser node
 /// kind and so does not reach `node_kind_for_id`. If a grammar bump ever

@@ -555,3 +555,321 @@ fn a_bound_class_with_no_committed_source_refuses_by_naming_the_missing_key() {
         "…and that key is unproved, so the site refuses rather than binding",
     );
 }
+
+// ── The qualified receiver (S-398) ──────────────────────────────────────────
+
+/// **S-398 AC1.** The shape the reference estate actually writes — the accessor
+/// behind a field qualifier — resolves to the same canonical key the unqualified
+/// spelling does, by the same path.
+///
+/// The unqualified control shares the fixture and differs in the qualifier
+/// alone, so what this pins is the *qualifier* and not a second fixture that
+/// happens to resolve.
+#[test]
+fn a_self_qualified_receiver_resolves_the_same_key_the_bare_one_does() {
+    let index = index(&[("Props.java", PROPS)]);
+    let use_site = "public class Caller {\n\
+          private final MailServerConfigurationApi api;\n\
+          void go() { client.get(this.api.getUriGetArchive()); }\n\
+        }";
+    assert_eq!(
+        key_of(&index, use_site, "this.api.getUriGetArchive()").as_deref(),
+        Some("${mailserver.api.urigetarchive}"),
+        "`this.api` names a field of the enclosing class, whose declared type \
+         this file states",
+    );
+    assert_eq!(
+        key_of(
+            &index,
+            &use_site.replace("this.api.", "api."),
+            "api.getUriGetArchive()"
+        )
+        .as_deref(),
+        Some("${mailserver.api.urigetarchive}"),
+        "…and the unqualified control, which differs in the qualifier alone",
+    );
+}
+
+/// **The admission is gated on the receiver's DECLARED TYPE, never on the call
+/// shape** ([FR-WS-19], [NFR-RA-05]).
+///
+/// Each case below is the *same* `this.<field>.<accessor>()` shape as the
+/// admitted one and each resolves to nothing, so the shape alone proves
+/// nothing: what admits a site is the type the file declares for the field and
+/// what that class declares in turn.
+#[test]
+fn a_self_qualified_receiver_of_the_wrong_type_still_resolves_to_nothing() {
+    let index = index(&[("Props.java", PROPS)]);
+
+    for (field, operand, why) in [
+        (
+            "private final SomethingElse api;",
+            "this.api.getUriGetArchive()",
+            "the field's declared type is not a bound class",
+        ),
+        (
+            "private final MailServerConfigurationApi api;",
+            "this.api.getMissing()",
+            "an accessor naming a property the bound class does not declare",
+        ),
+        (
+            "private final MailServerConfigurationApi api;",
+            "this.api.compute()",
+            "not an accessor under Java's `get`/`is` convention",
+        ),
+        (
+            "private final MailServerConfigurationApi other;",
+            "this.api.getUriGetArchive()",
+            "a field the file never declares, reached through the qualifier",
+        ),
+    ] {
+        let use_site =
+            format!("public class Caller {{\n  {field}\n  void go() {{ client.get({operand}); }}\n}}");
+        assert_eq!(key_of(&index, &use_site, operand), None, "{operand}: {why}");
+    }
+}
+
+/// **The near misses, one character from the admitted spelling.** The qualifier
+/// is recognised as a **whole token beginning the receiver's text**, never as a
+/// substring of it: without that anchoring, any receiver whose head segment
+/// merely ended with the spelling would reduce.
+///
+/// The test is named for the whole-token rule alone, and deliberately. An
+/// earlier name claimed the separator rule too, and review showed that half
+/// could not fail: `thisApi` is refused by [`simple_identifier`] succeeding one
+/// arm earlier, not by the separator test, so no fixture here reaches it. The
+/// separator rule's own reachability is documented on [`self_qualified`]; the
+/// trap that *is* reachable — an identifier character read as a separator — is
+/// pinned by
+/// [`a_qualified_receiver_the_source_did_not_write_resolves_to_nothing`].
+#[test]
+fn the_self_qualifier_is_a_whole_token() {
+    let index = index(&[("Props.java", PROPS)]);
+
+    for (field, operand, why) in [
+        (
+            "private final MailServerConfigurationApi Api;",
+            "thisApi.getUriGetArchive()",
+            "`thisApi` is one identifier naming a receiver this file declares no \
+             type for — refused by the BARE arm, one hop before the qualifier is \
+             ever considered",
+        ),
+        (
+            "private final MailServerConfigurationApi api;",
+            "notthis.api.getUriGetArchive()",
+            "the qualifier is not a SUFFIX of the receiver's head segment",
+        ),
+        (
+            "private final MailServerConfigurationApi api;",
+            "this.holder.api.getUriGetArchive()",
+            "two segments behind the qualifier is not a field of this class, \
+             and the reduction would resolve against a different object",
+        ),
+        (
+            "private final MailServerConfigurationApi api;",
+            "this.getNested().getUriGetArchive()",
+            "a CALL behind the qualifier is not a field, so the \
+             nested-properties ceiling holds through the qualifier too",
+        ),
+    ] {
+        let use_site =
+            format!("public class Caller {{\n  {field}\n  void go() {{ client.get({operand}); }}\n}}");
+        assert_eq!(key_of(&index, &use_site, operand), None, "{operand}: {why}");
+    }
+
+    // …and the control: the refusals above are about the SPELLING and not about
+    // `Api` being unresolvable, because the qualified spelling of the very same
+    // field does resolve.
+    let use_site = "public class Caller {\n\
+          private final MailServerConfigurationApi Api;\n\
+          void go() { client.get(this.Api.getUriGetArchive()); }\n\
+        }";
+    assert_eq!(
+        key_of(&index, use_site, "this.Api.getUriGetArchive()").as_deref(),
+        Some("${mailserver.api.urigetarchive}"),
+    );
+}
+
+/// **The two over-captures review reproduced, and the gates that close them**
+/// (S-398 review).
+///
+/// Both admitted a key the source never named — the one thing [NFR-RA-05]
+/// forbids — and both were reachable through the qualified arm only, because
+/// the bare arm is answered by the receiver the source actually wrote.
+///
+/// 1. **A legal identifier character read as a separator.** `$` and a
+///    zero-width non-joiner are legal *inside* a Java identifier and are not
+///    `is_alphanumeric`, so `this$api` — ONE identifier — was split into
+///    `this` plus `api` and resolved against an unrelated field. The gate is
+///    structural: the grammar parses `this$api` as a single leaf, and
+///    `this.api` as a node with children.
+/// 2. **A shadowing local or parameter answering for an inherited field.**
+///    `this.api` denotes a field; the scope-blind walk answered from locals and
+///    parameters too, and where the real field is declared in ANOTHER file
+///    nothing poisons the entry. The gate is [`DeclaredTypes::field`].
+///
+/// Each case carries the control that makes its refusal about the gate rather
+/// than about an unresolvable fixture.
+///
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+fn a_qualified_receiver_the_source_did_not_write_resolves_to_nothing() {
+    let index = index(&[("Props.java", PROPS)]);
+
+    // ── 1. the identifier that merely LOOKS qualified ───────────────────────
+    for (decl, operand, why) in [
+        (
+            "private final SomethingElse this$api;",
+            "this$api.getUriGetArchive()",
+            "`this$api` is one legal Java identifier the file declares under an \
+             unrelated type — not the qualifier plus `api`",
+        ),
+        (
+            "private final SomethingElse this\u{200c}api;",
+            "this\u{200c}api.getUriGetArchive()",
+            "a zero-width non-joiner is an identifier character too",
+        ),
+        (
+            "",
+            "this$api.getUriGetArchive()",
+            "…and an UNDECLARED such identifier resolves to nothing rather than \
+             falling back to the reduction",
+        ),
+    ] {
+        let use_site = format!(
+            "public class Caller {{\n  private final MailServerConfigurationApi api;\n               {decl}\n  void go() {{ client.get({operand}); }}\n}}"
+        );
+        assert_eq!(key_of(&index, &use_site, operand), None, "{operand}: {why}");
+    }
+
+    // ── 2. the shadow that answered for an inherited field ──────────────────
+    for (body, why) in [
+        (
+            "void go(MailServerConfigurationApi api) { client.get(this.api.getUriGetArchive()); }",
+            "a PARAMETER named `api` — `this.api` is the inherited field, about \
+             which this file states nothing",
+        ),
+        (
+            "void go() { MailServerConfigurationApi api = null;              client.get(this.api.getUriGetArchive()); }",
+            "…and a LOCAL named `api`, the same shadow one scope further in",
+        ),
+    ] {
+        // `extends Base` is the whole point: the field `api` is declared in
+        // another file, so nothing in THIS one poisons the shadow.
+        let use_site = format!("public class Caller extends Base {{\n  {body}\n}}");
+        assert_eq!(
+            key_of(&index, &use_site, "this.api.getUriGetArchive()"),
+            None,
+            "{why}",
+        );
+    }
+
+    // The control for BOTH halves: the same accessor, on a receiver the source
+    // really did write as a field of this class, still resolves. Without it the
+    // refusals above would also be produced by a dead fixture.
+    let control = "public class Caller extends Base {\n\
+          private final MailServerConfigurationApi api;\n\
+          void go() { client.get(this.api.getUriGetArchive()); }\n\
+        }";
+    assert_eq!(
+        key_of(&index, control, "this.api.getUriGetArchive()").as_deref(),
+        Some("${mailserver.api.urigetarchive}"),
+    );
+}
+
+/// **A field and a disagreeing local now answer DIFFERENT questions**, and the
+/// qualified arm is the one that gains an answer (S-398 review).
+///
+/// The scope-blind poisoning rule is right for a bare `api` — which of the two
+/// a use site sees is a scope question this walk cannot answer — and wrong for
+/// `this.api`, which is not a scope question at all. Separating the two maps
+/// makes the second resolvable without weakening the first.
+#[test]
+fn a_disagreeing_local_poisons_the_bare_name_and_not_the_field() {
+    let source = "public class Caller {\n\
+          private final MailServerConfigurationApi api;\n\
+          void go() { SomethingElse api = null; }\n\
+        }";
+    let tree = parse(source);
+    let types = DeclaredTypes::build(tree.root_node(), source.as_bytes());
+
+    assert_eq!(types.get("api"), None, "a bare `api` is still a scope question");
+    assert_eq!(
+        types.field("api"),
+        Some("MailServerConfigurationApi"),
+        "…while `this.api` names the field, whatever a method body shadows it with",
+    );
+
+    // And the walk still separates the three positions it must.
+    let positions = "public class Caller {\n\
+          private final MailServerConfigurationApi field;\n\
+          Caller(MailServerConfigurationApi param) { MailServerConfigurationApi local = null; }\n\
+        }";
+    let tree = parse(positions);
+    let types = DeclaredTypes::build(tree.root_node(), positions.as_bytes());
+    for name in ["field", "param", "local"] {
+        assert_eq!(types.get(name), Some("MailServerConfigurationApi"), "{name}: any position");
+    }
+    assert_eq!(types.field("field"), Some("MailServerConfigurationApi"));
+    assert_eq!(types.field("param"), None, "a constructor parameter is not a field");
+    assert_eq!(types.field("local"), None, "nor is a method-body local");
+}
+
+/// **A generic wrapper whose URI is a method PARAMETER emits nothing, and that
+/// is a correct refusal rather than a miss** (S-398 AC3).
+///
+/// `get(String uri, Object... args)` is the idiom that would make a
+/// call-shape-gated admission fabricate: the wrapper sits in a class that *does*
+/// inject a bound properties class, and it *does* forward to a client — but the
+/// path it forwards is a value its own caller supplies, which no committed
+/// source defines. Pinned at this unit because a widening that reached for the
+/// call shape rather than for the receiver's declared type would admit it.
+#[test]
+fn a_wrapper_whose_uri_is_a_method_parameter_resolves_to_nothing() {
+    let index = index(&[("Props.java", PROPS)]);
+    let use_site = "public class Caller {\n\
+          private final MailServerConfigurationApi api;\n\
+          String get(String uri, Object... args) { return client.get(uri); }\n\
+        }";
+    assert_eq!(
+        key_of(&index, use_site, "uri"),
+        None,
+        "the operand is a method parameter — a value the CALLER supplies, which \
+         no committed configuration source defines",
+    );
+}
+
+/// Where the wrapper above is refused, stated rather than assumed: at
+/// [`member_call`], the FIRST hop, two hops before anything the qualifier
+/// touches.
+///
+/// Worth pinning separately because the sibling assertion is insensitive to
+/// which hop produced its [`None`] — and because the fixture's `uri` is spelled
+/// by two nodes (the parameter's declarator and the argument), so `node_with_text`
+/// may return either. Both are bare identifiers carrying no `object` field, so
+/// the refusal holds for either, and this test says so instead of depending on a
+/// walk order.
+#[test]
+fn a_bare_identifier_operand_is_refused_before_any_receiver_is_read() {
+    let use_site = "public class Caller {\n\
+          private final MailServerConfigurationApi api;\n\
+          String get(String uri, Object... args) { return client.get(uri); }\n\
+        }";
+    let tree = parse(use_site);
+    let src = use_site.as_bytes();
+    let mut seen = 0;
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+        drop(cursor);
+        if node.utf8_text(src).is_ok_and(|t| t == "uri") {
+            seen += 1;
+            assert!(
+                member_call(node).is_none(),
+                "a bare identifier names no member call, so no receiver is read",
+            );
+        }
+    }
+    assert_eq!(seen, 2, "the fixture spells `uri` at the declarator AND the argument");
+}

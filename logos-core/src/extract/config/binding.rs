@@ -30,7 +30,7 @@
 //! | what | where | Java's spelling |
 //! |------|-------|-----------------|
 //! | which tree shape is a bound class, its name, its prefix argument and its declared properties | the plugin's `properties` query | `plugins/java/queries/properties.scm` |
-//! | which annotation marks one, and how a use site spells a read | the descriptor's `[properties]` table | `annotations` / `accessor_prefixes` |
+//! | which annotation marks one, how a use site spells a read, and how it qualifies one | the descriptor's `[properties]` table | `annotations` / `accessor_prefixes` / `self_references` |
 //!
 //! This is what it replaces. The S-365 measurement harness indexed properties
 //! classes by walking tree-sitter Java nodes directly — `class_declaration`,
@@ -217,6 +217,19 @@ pub struct PropertiesIndex {
     /// silently emptied into its neighbours. Judging each declaration under its
     /// own language's convention is both correct and narrower.
     conventions: BTreeMap<String, BTreeSet<String>>,
+    /// Language name → how that language spells a reference to the enclosing
+    /// instance (S-398), carried beside [`conventions`](Self::conventions)
+    /// because it is the same kind of fact: one language's use-site spelling,
+    /// which the interpreter may read as data and may not name.
+    ///
+    /// Keyed by language for the same reason `conventions` is, and the reason
+    /// bites harder here: a union would let one language's qualifier admit a
+    /// receiver in a file of another language that spells the enclosing
+    /// instance differently, or not at all.
+    ///
+    /// A language absent from this map recognises **no** qualifier, which is
+    /// what every language did before the row existed.
+    self_references: BTreeMap<String, BTreeSet<String>>,
     /// Simple names whose declarations disagree; each resolves to nothing.
     pub collisions: BTreeSet<String>,
     /// Classes carrying a binding annotation this index could not key, counted
@@ -257,14 +270,26 @@ impl PropertiesIndex {
         index
     }
 
-    /// Adopt one plugin's accessor convention, under its own language name,
-    /// without absorbing any source.
+    /// Adopt one plugin's use-site vocabulary — its accessor convention and how
+    /// it spells the enclosing instance — under its own language name, without
+    /// absorbing any source.
     fn declare(&mut self, plugin: &dyn LanguagePlugin) {
         if let Some(descriptor) = plugin.semantics().properties.as_ref() {
             self.conventions
                 .entry(plugin.name().to_string())
                 .or_default()
                 .extend(descriptor.accessor_prefixes.iter().cloned());
+            // Adopted only when the descriptor declares one: an `or_default()`
+            // here would create an empty entry for every binding language, which
+            // answers identically today and would quietly become a *present,
+            // empty* vocabulary if the lookup ever grew a "declared at all"
+            // branch.
+            if !descriptor.self_references.is_empty() {
+                self.self_references
+                    .entry(plugin.name().to_string())
+                    .or_default()
+                    .extend(descriptor.self_references.iter().cloned());
+            }
         }
     }
 
@@ -582,6 +607,27 @@ impl PropertiesIndex {
     /// answer rather than a borrowed one.
     pub fn names_an_accessor(&self, language: &str, accessor: &str) -> bool {
         !self.candidates(language, accessor).is_empty()
+    }
+
+    /// Every spelling `language` uses for a reference to the enclosing instance
+    /// (S-398) — `this`, for Java.
+    ///
+    /// The use-site question [`names_an_accessor`](Self::names_an_accessor)'s
+    /// sibling does not cover: *what does this language call the object a field
+    /// read may be qualified with?* Descriptor data, so the interpreter that
+    /// consumes it names no language's vocabulary ([NFR-MA-01]).
+    ///
+    /// A language this index was never declared over, or one whose descriptor
+    /// declares no row, yields **nothing** — and a caller that finds nothing
+    /// admits no qualified receiver, which is the pre-S-398 behaviour.
+    ///
+    /// [NFR-MA-01]: ../../../../docs/specs/requirements/NFR-MA-01.md
+    pub fn self_references(&self, language: &str) -> impl Iterator<Item = &str> {
+        self.self_references
+            .get(language)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
     }
 
     /// Resolve `accessor` against `class`: **accessor → field → owning class →
