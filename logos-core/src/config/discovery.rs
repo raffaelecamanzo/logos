@@ -189,12 +189,25 @@ impl ZeroAdmissionDiagnostic {
     /// The artefact [`REMEDY`](Self::REMEDY) leaves at the root it is run in —
     /// the evidence that the advice has **already been taken** ([FR-WS-01]).
     ///
-    /// Spelled here rather than imported from
-    /// [`federation::manifest::MANIFEST_FILENAME`] so the config component keeps
-    /// its one-directional dependency on federation; the federation side pins the
-    /// two equal (`the_remedy_artefact_is_the_manifest_filename`), the same way
-    /// [`ParentOfRepos::SAMPLE_LIMIT`] borrows this type's `SAMPLE_LIMIT` rather
-    /// than restating `3`.
+    /// This is the **second** spelling of the literal — `federation` owns the
+    /// first, as [`federation::manifest::MANIFEST_FILENAME`]. The dependency
+    /// between the two components runs **federation → config** and only that way
+    /// (`federation::enable` imports this very type), so `config` cannot name
+    /// `federation`'s constant and the string has to be repeated here.
+    ///
+    /// The duplicate is guarded, not tolerated: `federation`'s
+    /// `the_remedy_artefact_is_this_manifest_filename` asserts the two equal, and
+    /// it is the only place the literal is checked, so drift fails the suite.
+    ///
+    /// The alternative — making `MANIFEST_FILENAME` an alias of *this* constant,
+    /// which would leave one definition and need no pin — was considered and
+    /// rejected: it would move the canonical spelling of **federation's own
+    /// manifest** into a diagnostic in `config`, so a reader of `manifest.rs`
+    /// would no longer find the filename its module is named for. A one-line
+    /// pinning test is the cheaper of the two costs. Note this is *not* the
+    /// [`ParentOfRepos::SAMPLE_LIMIT`] shape: that one genuinely borrows
+    /// (`= ZeroAdmissionDiagnostic::SAMPLE_LIMIT`) because it borrows in the
+    /// permitted direction. This constant cannot.
     ///
     /// [FR-WS-01]: ../../../../docs/specs/requirements/FR-WS-01.md
     /// [`federation::manifest::MANIFEST_FILENAME`]: ../federation/manifest/constant.MANIFEST_FILENAME.html
@@ -253,16 +266,40 @@ impl ZeroAdmissionDiagnostic {
     /// normal indexing path pays nothing ([NFR-PE-08]).
     ///
     /// # A diagnostic must not survive its own remedy
-    /// A root the user has **already** run [`REMEDY`](Self::REMEDY) at — one
-    /// carrying a [`REMEDY_ARTEFACT`](Self::REMEDY_ARTEFACT) manifest — still
-    /// admits zero files of its own and still prunes every member, so every
-    /// earlier gate holds and the text would tell the operator to do the thing
-    /// they have just done. That is the same class of confidently-wrong
-    /// instruction the depth-1 filter above exists to prevent ([NFR-CC-04]);
-    /// enablement indexes the *members*, and the parent's own zero admission is
-    /// then the correct and expected state rather than a fault. The suppression
-    /// lives **here**, in the one derivation, so `index`, `status` and `doctor`
-    /// inherit it together and cannot disagree ([FR-IX-11]).
+    /// A root carrying a [`REMEDY_ARTEFACT`](Self::REMEDY_ARTEFACT) manifest has
+    /// **already** been told to run [`REMEDY`](Self::REMEDY) and has done it, so
+    /// saying it again is the same class of confidently-wrong instruction the
+    /// depth-1 filter above exists to prevent ([NFR-CC-04]): enablement indexes
+    /// the *members*, and the parent's own zero admission is then the correct
+    /// and expected state rather than a fault.
+    ///
+    /// **Which path actually reaches this guard is worth stating, because the
+    /// obvious answer is the wrong one.** A *re-index* of an enabled root does
+    /// not: the manifest is itself an admitted config artefact, so `admitted`
+    /// is at least 1 and [`admits_diagnosis`](Self::admits_diagnosis) has
+    /// already returned `None` — `cli/tests/cli_surface.rs`'s
+    /// `the_zero_admission_warning_becomes_a_root_scope_note_after_enrolment`
+    /// pins exactly that, and it passed before this guard existed. The guard is
+    /// load-bearing on two other paths:
+    ///
+    /// - **the persisted-count seam, and this is the case the guard exists
+    ///   for.** `status` and `doctor` do not walk; they read the file count the
+    ///   *last completed index* stored ([`Engine::zero_admission_diagnostic`]).
+    ///   At a root indexed **before** enablement that count is `0` for as long
+    ///   as no index has run since, while the manifest is already on disk — so
+    ///   `admits_diagnosis` passes, the depth-1 prunes are still there, and
+    ///   without this guard both surfaces tell the operator to run a command
+    ///   they have already run.
+    /// - **configurations where the manifest is not an admitted candidate** — it
+    ///   is git-ignored, `config_artifacts` is disabled, `include` is narrowed,
+    ///   or the build has no TOML grammar. Then even a fresh `index` admits
+    ///   zero and reaches here.
+    ///
+    /// The suppression lives **here**, in the one derivation, so every surface
+    /// that reads it inherits the same answer and none can disagree
+    /// ([FR-IX-11]).
+    ///
+    /// [`Engine::zero_admission_diagnostic`]: ../struct.Engine.html
     ///
     /// It is the **last** guard deliberately. It is the only one that costs
     /// filesystem I/O, and the two free gates above — the admitted count and the
