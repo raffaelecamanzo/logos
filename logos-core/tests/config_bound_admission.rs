@@ -94,16 +94,32 @@
 //! file. A harness that quietly re-indexed would make its own figure
 //! unattributable.
 //!
-//! # `corpus_root` is duplicated, and the fourth measurement has now arrived
+//! # `corpus_root` is duplicated — the sixth copy, and the debt is already settled
 //!
-//! `coverage_intake_split.rs` states the trade and ends "Revisit if a fourth
-//! measurement arrives". This is it, so it was revisited rather than copied
-//! silently. The verdict is unchanged, and for this file it is stronger than for
-//! the other three: AC2 requires this arm to be independent of the
-//! `operand_resolvability` harness, and a `#[path]`-included reader shared with it
-//! would couple the two populations' entry point — the one coupling this
-//! measurement exists to avoid. Nineteen lines with no judgement in them remain
-//! the cheaper side of the trade.
+//! This is the **sixth** byte-identical copy of a nineteen-line `corpus_root`:
+//! `operand_resolvability.rs`, `config_corpus.rs`, `broker_topic_corpus.rs`,
+//! `coverage_intake_split.rs`, `coverage_headline_baseline.rs`, and this file.
+//!
+//! `coverage_intake_split.rs` arms a revisit "if a fourth measurement arrives".
+//! That trigger fired two files ago and the question is **already settled**, in
+//! `coverage_headline_baseline.rs`'s module docs, which examined the inherited
+//! "sharing would couple separately-recorded published figures" argument and
+//! **rejected it**: `corpus_root` performs no measurement, so a shared locator
+//! cannot move a recorded number. Its verdict is the plainer one — N byte-identical
+//! copies can drift, a `tests/common/mod.rs` is the idiomatic answer and costs
+//! almost nothing, and it is accepted debt until a story has business in those
+//! files.
+//!
+//! That verdict is adopted here rather than re-argued, and the AC2-flavoured
+//! version of the rejected argument is **not** made: this arm must be independent
+//! of the `operand_resolvability` harness's *reader and corpus walk*, which is
+//! what makes it a separate measurement — but both harnesses already read the same
+//! `LOGOS_REF_WORKSPACE` variable, so a locator owned by neither would not touch
+//! that independence. This file adds the sixth copy for the same reason the fifth
+//! was added: lifting a helper out of five unrelated harnesses is a drive-by this
+//! task has no business in. The debt is real, it is named, and the count is now
+//! stated correctly so the next file to face it inherits a fact rather than an
+//! arithmetic error.
 //!
 //! The full record is the durable artifact
 //! `config_bound_admission/config_bound_admission_finding.txt`.

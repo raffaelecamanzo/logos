@@ -64,9 +64,10 @@
 //! `when_one_is_configured` for that reason.
 //!
 //! `corpus_root` is duplicated from `coverage_intake_split.rs` /
-//! `broker_topic_corpus.rs` / `operand_resolvability.rs`, and this file is the
-//! fourth copy — so it is the one that owes an honest reason rather than an
-//! inherited one.
+//! `broker_topic_corpus.rs` / `operand_resolvability.rs` / `config_corpus.rs`, and
+//! this file is the fifth copy — so it is the one that owes an honest reason
+//! rather than an inherited one. (`config_bound_admission.rs` later made a sixth,
+//! adopting the verdict below rather than re-arguing it.)
 //!
 //! **The inherited reason does not survive examination, and is not repeated.**
 //! Those files argue that sharing would couple four separately-recorded published
@@ -76,11 +77,11 @@
 //! so a shared locator cannot move a recorded number — it can only change whether
 //! a corpus is *found*, and that failure is loud (a panic) or a printed skip.
 //!
-//! What is true is the plainer thing: four byte-identical copies can drift, and a
-//! fix applied to one (a `$HOME` fallback, symlink resolution) leaves three wrong
-//! with nothing to catch it. A `tests/common/mod.rs` is the idiomatic answer and
+//! What is true is the plainer thing: byte-identical copies can drift, and a
+//! fix applied to one (a `$HOME` fallback, symlink resolution) leaves the rest
+//! wrong with nothing to catch it. A `tests/common/mod.rs` is the idiomatic answer and
 //! costs almost nothing. It is **not** done here only because this story is a
-//! payload rename, and lifting a helper out of three unrelated measurement
+//! payload rename, and lifting a helper out of four unrelated measurement
 //! harnesses touches files it has no other business in — the kind of drive-by that
 //! makes a diff harder to review than the thing it fixes. Recorded as accepted
 //! debt with its real cost named, which is what the inherited rationale was not.

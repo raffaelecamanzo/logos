@@ -31,16 +31,29 @@
 //! with `--nocapture`. The test name carries `when_one_is_configured` for exactly
 //! that reason.
 //!
-//! `corpus_root` is duplicated from `broker_topic_corpus.rs` /
-//! `operand_resolvability.rs` rather than shared, and the reason is **editorial,
-//! not technical** — this file states the tradeoff those two leave implicit. A
-//! `#[path]`-included support module would work (`logos-core/tests` already uses
-//! that mechanism), and it would compile the module separately into each test
-//! binary, so there is no shared build unit to couple. What it would couple is
-//! three **published figures** to one file's edits: a change to the shared reader
-//! would silently alter the corpus three separate recorded measurements were taken
-//! over. Nineteen lines with no judgement in them is the cheaper side of that
-//! trade. Revisit if a fourth measurement arrives.
+//! `corpus_root` is duplicated rather than shared. This file used to argue that
+//! sharing would couple the **published figures** of the harnesses that copy it,
+//! and to arm a revisit "if a fourth measurement arrives". **Both halves were
+//! wrong and are withdrawn**, and the correction is left here rather than silently
+//! deleted because the argument was inherited from this file by the copies that
+//! followed it:
+//!
+//! * The coupling argument does not survive examination —
+//!   `coverage_headline_baseline.rs`'s module docs give the rebuttal in full:
+//!   `corpus_root` reads an environment variable, expands `~` and asserts the path
+//!   is a directory. It performs no measurement, so a shared locator cannot move a
+//!   recorded number; it can only change whether a corpus is *found*, and that
+//!   failure is loud.
+//! * The trigger fired long ago and nobody noticed, which is the more useful
+//!   lesson. There are now **six** byte-identical copies —
+//!   `operand_resolvability.rs`, `config_corpus.rs`, `broker_topic_corpus.rs`,
+//!   this file, `coverage_headline_baseline.rs` and `config_bound_admission.rs` —
+//!   so a count-based trigger was the wrong instrument for a debt nobody owns.
+//!
+//! The standing verdict is `coverage_headline_baseline.rs`'s: the real cost is
+//! drift across N copies, a `tests/common/mod.rs` is the idiomatic answer and costs
+//! almost nothing, and it is **accepted debt** until a story has legitimate
+//! business in those files. No count is armed here any more.
 //!
 //! # Recorded finding (2026-09-13, `~/source/pec-services`, 84 members)
 //!
