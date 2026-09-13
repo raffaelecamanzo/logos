@@ -3136,8 +3136,11 @@ impl Engine {
     /// diagnostic makes — it never changes a command's exit code, so it must not
     /// be able to fail one. The guards are ordered by cost: the free
     /// [`admits_diagnosis`](crate::config::ZeroAdmissionDiagnostic::admits_diagnosis)
-    /// test, then one point query, then the config load, then the filesystem probe
-    /// — so an ordinary indexed root pays nothing beyond the first ([NFR-PE-08]).
+    /// test, then one point query, then the config load, then the depth-1 prune
+    /// walk, and last — inside [`derive`] itself, reached only by a root about to
+    /// be diagnosed — the workspace-manifest probe that suppresses advice the
+    /// operator has already taken. An ordinary indexed root pays nothing beyond
+    /// the first ([NFR-PE-08]).
     ///
     /// [FR-IX-13]: ../../../docs/specs/requirements/FR-IX-13.md
     /// [FR-NV-07]: ../../../docs/specs/requirements/FR-NV-07.md

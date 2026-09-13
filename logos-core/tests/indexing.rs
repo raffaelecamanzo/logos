@@ -1257,6 +1257,108 @@ fn index_status_and_doctor_agree_on_the_zero_admission_diagnostic() {
     );
 }
 
+/// S-337: the remedied root falls silent on the **surfaces**, not just in the
+/// unit derivation — and this is the path the suppression actually exists for.
+///
+/// `status` and `doctor` do not walk; they read the file count the last
+/// *completed* index stored. So a root indexed **before** `logos init
+/// --workspace` keeps reporting `0` for as long as no index has run since, while
+/// the manifest is already on disk — and both surfaces went on naming a remedy
+/// the operator had already applied. Driven through `Engine` rather than through
+/// `derive`, because the unit tests cannot show that the surfaces inherit it.
+///
+/// The control half matters as much as the assertion: the same store, the same
+/// persisted zero, manifest removed, must still warn. Without it this test would
+/// pass against a diagnostic that had simply stopped working.
+#[test]
+fn a_root_indexed_before_enablement_stops_naming_the_remedy_once_it_is_applied() {
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path();
+    parent_of_sibling_repos(root, 4);
+
+    let engine = Engine::start(root).expect("engine starts");
+    let indexed = engine.index();
+    assert_eq!(indexed.files_indexed, 0, "indexed BEFORE enablement: nothing is admitted");
+    assert_eq!(
+        prune_warnings(&indexed.warnings).len(),
+        1,
+        "and the diagnostic fires: {:?}",
+        indexed.warnings
+    );
+
+    // The remedy is applied — but nothing re-indexes, so the persisted count the
+    // two surfaces read is still 0. This is the state the diagnostic survived.
+    fs::write(root.join("logos.workspace.toml"), "[workspace]\nname = \"w\"\nmembers = []\n")
+        .expect("manifest written");
+
+    let status = engine.status();
+    assert_eq!(status.file_count, 0, "the persisted count is unchanged — no index has run");
+    assert!(
+        prune_warnings(&status.warnings).is_empty(),
+        "`status` no longer names a remedy already applied: {:?}",
+        status.warnings
+    );
+    assert!(
+        engine.doctor().expect("doctor runs").zero_admission_warning.is_none(),
+        "and neither does `doctor`"
+    );
+
+    // Control: same store, same persisted zero, manifest gone ⇒ both speak again.
+    fs::remove_file(root.join("logos.workspace.toml")).expect("manifest removed");
+    assert_eq!(
+        prune_warnings(&engine.status().warnings).len(),
+        1,
+        "without the manifest the diagnostic is still live — the manifest is the differentiator"
+    );
+    assert!(engine.doctor().expect("doctor runs").zero_admission_warning.is_some());
+}
+
+/// The `index` seam's half of the same guarantee — the one the unit tests cannot
+/// reach, because `index` supplies the root itself.
+///
+/// A re-index of an enabled root is normally silent for a duller reason: the
+/// manifest is itself an admitted config artefact, so the zero-admission
+/// condition is not met at all. Git-ignoring it takes that away and leaves a root
+/// that genuinely admits nothing *and* carries the manifest — the only shape in
+/// which `index`'s own call into the derivation can be observed.
+///
+/// Without this, the root `index` hands the derivation is asserted by nothing:
+/// pointing it at a path the walk never visited leaves every other test green.
+#[test]
+fn the_index_seam_passes_the_walked_root_to_the_suppression() {
+    let tmp = TempDir::new().expect("temp root");
+    let root = tmp.path();
+    parent_of_sibling_repos(root, 3);
+    write(root, ".gitignore", "/logos.workspace.toml\n");
+    fs::write(root.join("logos.workspace.toml"), "[workspace]\nname = \"w\"\nmembers = []\n")
+        .expect("manifest written");
+
+    let engine = Engine::start(root).expect("engine starts");
+    let indexed = engine.index();
+    assert_eq!(
+        indexed.files_indexed, 0,
+        "git-ignored, the manifest is not admitted — the root really does admit nothing"
+    );
+    assert!(
+        prune_warnings(&indexed.warnings).is_empty(),
+        "`index` suppresses on the root it walked: {:?}",
+        indexed.warnings
+    );
+
+    // Control: identical fixture without the manifest still warns.
+    let other = TempDir::new().expect("temp root");
+    parent_of_sibling_repos(other.path(), 3);
+    write(other.path(), ".gitignore", "/logos.workspace.toml\n");
+    let control = Engine::start(other.path()).expect("engine starts").index();
+    assert_eq!(control.files_indexed, 0);
+    assert_eq!(
+        prune_warnings(&control.warnings).len(),
+        1,
+        "the same shape without a manifest is still diagnosed: {:?}",
+        control.warnings
+    );
+}
+
 #[test]
 fn status_carries_the_diagnostic_in_both_human_and_json_output() {
     // FR-IX-13 AC / S-320 AC1. Both CLI renderings of `status` serialise the same

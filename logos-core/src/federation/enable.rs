@@ -324,8 +324,19 @@ fn footprint(members: &[MemberReport]) -> WorkingTreeFootprint {
 /// `files_indexed: 0`, `coverage: 1.0` and exit 0, every signal consistent with
 /// success ([FR-IX-13]). The whole Workspace Federation feature set is invisible
 /// at exactly the root where it is the answer, so this states the shape and
-/// names [`ZeroAdmissionDiagnostic::REMEDY`] — the same remedy string `index`
-/// already prints, so the two surfaces cannot drift apart.
+/// names [`ZeroAdmissionDiagnostic::REMEDY`] — the same remedy **string**
+/// `index` already prints, so the two surfaces cannot word the remedy
+/// differently.
+///
+/// Their **firing conditions** are not shared, and since S-337 they genuinely
+/// differ: [`ZeroAdmissionDiagnostic::derive`] suppresses itself at a root that
+/// already carries the manifest `init --workspace` writes, and
+/// [`detect`](Self::detect) below does not — so a plain `logos init` at an
+/// already-enabled root still states the shape and still offers enablement.
+/// That is deliberate rather than an oversight: re-running `init --workspace`
+/// at an enabled root is how a newly-cloned sibling gets enrolled, so an offer
+/// there is useful where a *diagnostic* there is merely wrong. Do not align one
+/// with the other without deciding that question first.
 ///
 /// **Detection reuses the federation primitives rather than re-deriving either
 /// half** ([FR-WS-01]): [`git_root_known`] answers "is the root a repository?",

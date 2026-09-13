@@ -1243,7 +1243,11 @@ fn discover_candidates(
     // the default `include = ["**"]` a lone `LICENSE` or `.DS_Store` at the root
     // sits in `report.files` while `files_indexed` is still 0, and keying on the
     // walk would leave exactly the reported root silent.
+    // The canonicalised root, the same path `discover` walked — so the manifest
+    // probe inside `derive` looks where the walk looked, not at an uncanonicalised
+    // alias of it.
     if let Some(diagnostic) = config::ZeroAdmissionDiagnostic::derive(
+        &canon_root,
         candidates.len(),
         &pruned_nested_git,
     ) {

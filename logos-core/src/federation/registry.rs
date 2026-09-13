@@ -1728,9 +1728,19 @@ mod tests {
         assert_eq!(rollup.opened, 0);
         assert!(!rollup.covers_all_members);
         let notice = rollup.notice(&states).expect("two members degraded");
-        assert!(
-            notice.contains("a:") && notice.contains("b:"),
-            "the human notice names them, each with its own reason line: {notice}"
+        // Both failed *unclassified*, and the verbatim diagnostic names the member
+        // it came from, so the two reason texts differ and the notice's grouping
+        // keeps them apart: an unclassified member is never folded under another
+        // member's diagnostic (S-337).
+        assert_eq!(
+            notice.matches("affected (1): a").count(),
+            1,
+            "member `a` is named beneath its own diagnostic: {notice}"
+        );
+        assert_eq!(
+            notice.matches("affected (1): b").count(),
+            1,
+            "and `b` beneath its own: {notice}"
         );
         // The fixture's member roots do not exist, so the store path is ABSENT and
         // the classification correctly claims no cause — the verbatim CR-100

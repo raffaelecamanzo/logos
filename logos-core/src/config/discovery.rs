@@ -153,7 +153,12 @@ impl fmt::Display for UnindexedDocSymlink {
 /// established). [`ZeroAdmissionDiagnostic::derive`] is the **only** way to
 /// construct one — deliberately the single entry point, so a surface cannot pick
 /// up a subtly different gate — and its `None` arm *is* the condition, so no
-/// caller re-implements it.
+/// caller re-implements it. That is true **by construction**: the state is
+/// private and reachable only through [`pruned`](Self::pruned) and
+/// [`sample`](Self::sample), so no surface can assemble one field-by-field and
+/// bypass the gate. Closing it costs nothing — every reader is the renderer
+/// below — and could not be closed for free once a caller outside this module
+/// had named a field.
 ///
 /// Advisory only: it never changes an exit code, never becomes a rule finding,
 /// and never feeds the quality signal ([FR-IX-13], [FR-CL-03]).
@@ -164,11 +169,11 @@ impl fmt::Display for UnindexedDocSymlink {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZeroAdmissionDiagnostic {
     /// How many directories the walk pruned as nested git boundaries.
-    pub pruned: usize,
+    pruned: usize,
     /// A bounded, sorted sample of those directories' root-relative names — at
     /// most [`ZeroAdmissionDiagnostic::SAMPLE_LIMIT`] of them, so an 84-member
     /// parent folder yields a readable line rather than a wall of names.
-    pub sample: Vec<String>,
+    sample: Vec<String>,
 }
 
 impl ZeroAdmissionDiagnostic {
@@ -180,6 +185,48 @@ impl ZeroAdmissionDiagnostic {
     ///
     /// [FR-WS-02]: ../../../../docs/specs/requirements/FR-WS-02.md
     pub const REMEDY: &'static str = "logos init --workspace";
+
+    /// The artefact [`REMEDY`](Self::REMEDY) leaves at the root it is run in —
+    /// the evidence that the advice has **already been taken** ([FR-WS-01]).
+    ///
+    /// This is the **second** spelling of the literal — `federation` owns the
+    /// first, as [`federation::manifest::MANIFEST_FILENAME`]. The dependency
+    /// between the two components runs **federation → config** and only that way
+    /// (`federation::enable` imports this very type), so `config` cannot name
+    /// `federation`'s constant and the string has to be repeated here.
+    ///
+    /// The duplicate is guarded, not tolerated: `federation`'s
+    /// `the_remedy_artefact_is_this_manifest_filename` asserts the two equal, and
+    /// it is the only place the literal is checked, so drift fails the suite.
+    ///
+    /// The alternative — making `MANIFEST_FILENAME` an alias of *this* constant,
+    /// which would leave one definition and need no pin — was considered and
+    /// rejected: it would move the canonical spelling of **federation's own
+    /// manifest** into a diagnostic in `config`, so a reader of `manifest.rs`
+    /// would no longer find the filename its module is named for. A one-line
+    /// pinning test is the cheaper of the two costs. Note this is *not* the
+    /// [`ParentOfRepos::SAMPLE_LIMIT`] shape: that one genuinely borrows
+    /// (`= ZeroAdmissionDiagnostic::SAMPLE_LIMIT`) because it borrows in the
+    /// permitted direction. This constant cannot.
+    ///
+    /// [FR-WS-01]: ../../../../docs/specs/requirements/FR-WS-01.md
+    /// [`federation::manifest::MANIFEST_FILENAME`]: ../federation/manifest/constant.MANIFEST_FILENAME.html
+    /// [`ParentOfRepos::SAMPLE_LIMIT`]: ../federation/enable/struct.ParentOfRepos.html
+    pub const REMEDY_ARTEFACT: &'static str = "logos.workspace.toml";
+
+    /// How many directories the walk pruned as **immediate-child** nested git
+    /// boundaries — the count [`derive`](Self::derive) diagnosed on.
+    #[must_use]
+    pub const fn pruned(&self) -> usize {
+        self.pruned
+    }
+
+    /// The bounded, sorted sample of those directories' root-relative names — at
+    /// most [`SAMPLE_LIMIT`](Self::SAMPLE_LIMIT) of them.
+    #[must_use]
+    pub fn sample(&self) -> &[String] {
+        &self.sample
+    }
 
     /// Derive the diagnostic from the number of files the command will report as
     /// indexed and the walk's recorded nested-git prunes ([FR-IX-13]).
@@ -218,12 +265,61 @@ impl ZeroAdmissionDiagnostic {
     /// ([NFR-RA-06]). This runs **only** on the zero-admission branch, so the
     /// normal indexing path pays nothing ([NFR-PE-08]).
     ///
+    /// # A diagnostic must not survive its own remedy
+    /// A root carrying a [`REMEDY_ARTEFACT`](Self::REMEDY_ARTEFACT) manifest has
+    /// **already** been told to run [`REMEDY`](Self::REMEDY) and has done it, so
+    /// saying it again is the same class of confidently-wrong instruction the
+    /// depth-1 filter above exists to prevent ([NFR-CC-04]): enablement indexes
+    /// the *members*, and the parent's own zero admission is then the correct
+    /// and expected state rather than a fault.
+    ///
+    /// **Which path actually reaches this guard is worth stating, because the
+    /// obvious answer is the wrong one.** A *re-index* of an enabled root does
+    /// not: the manifest is itself an admitted config artefact, so `admitted`
+    /// is at least 1 and [`admits_diagnosis`](Self::admits_diagnosis) has
+    /// already returned `None` — `cli/tests/cli_surface.rs`'s
+    /// `the_zero_admission_warning_becomes_a_root_scope_note_after_enrolment`
+    /// pins exactly that, and it passed before this guard existed. The guard is
+    /// load-bearing on two other paths:
+    ///
+    /// - **the persisted-count seam, and this is the case the guard exists
+    ///   for.** `status` and `doctor` do not walk; they read the file count the
+    ///   *last completed index* stored ([`Engine::zero_admission_diagnostic`]).
+    ///   At a root indexed **before** enablement that count is `0` for as long
+    ///   as no index has run since, while the manifest is already on disk — so
+    ///   `admits_diagnosis` passes, the depth-1 prunes are still there, and
+    ///   without this guard both surfaces tell the operator to run a command
+    ///   they have already run.
+    /// - **configurations where the manifest is not an admitted candidate** — it
+    ///   is git-ignored, `config_artifacts` is disabled, `include` is narrowed,
+    ///   or the build has no TOML grammar. Then even a fresh `index` admits
+    ///   zero and reaches here.
+    ///
+    /// The suppression lives **here**, in the one derivation, so every surface
+    /// that reads it inherits the same answer and none can disagree
+    /// ([FR-IX-11]).
+    ///
+    /// [`Engine::zero_admission_diagnostic`]: ../struct.Engine.html
+    ///
+    /// It is the **last** guard deliberately. It is the only one that costs
+    /// filesystem I/O, and the two free gates above — the admitted count and the
+    /// depth-1 prune record — already answer every root that is not about to be
+    /// diagnosed. So a root that admits files never probes, and the normal
+    /// indexing path pays nothing for this ([NFR-PE-08]); the ordering is pinned
+    /// by `the_manifest_probe_is_skipped_when_files_were_admitted`.
+    ///
+    /// Presence is the whole test: the manifest is not parsed, and a malformed
+    /// one is still evidence that `init --workspace` ran. Nothing here can fail,
+    /// which is what keeps the diagnostic advisory ([ADR-14]).
+    ///
     /// [BR-43]: ../../../../docs/specs/software-spec.md
+    /// [FR-IX-11]: ../../../../docs/specs/requirements/FR-IX-11.md
     /// [NFR-RA-06]: ../../../../docs/specs/requirements/NFR-RA-06.md
     /// [NFR-PE-08]: ../../../../docs/specs/requirements/NFR-PE-08.md
     /// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+    /// [ADR-14]: ../../../../docs/specs/architecture/decisions/ADR-14.md
     /// [`federation::discover_candidates`]: ../federation/fn.discover_candidates.html
-    pub fn derive(admitted: usize, pruned: &[PathBuf]) -> Option<Self> {
+    pub fn derive(root: &Path, admitted: usize, pruned: &[PathBuf]) -> Option<Self> {
         if !Self::admits_diagnosis(admitted) {
             return None;
         }
@@ -231,6 +327,11 @@ impl ZeroAdmissionDiagnostic {
         // walk root — the only shape `logos init --workspace` can act on.
         let mut immediate = pruned.iter().filter(|p| p.components().count() == 1).peekable();
         immediate.peek()?;
+        // Last, and only now: the sole guard that touches the filesystem, reached
+        // only by a root that would otherwise be told to do what it has done.
+        if remedy_already_applied(root) {
+            return None;
+        }
         let sample: Vec<String> =
             immediate.clone().take(Self::SAMPLE_LIMIT).map(|p| to_forward_slash(p)).collect();
         Some(Self {
@@ -282,6 +383,38 @@ impl fmt::Display for ZeroAdmissionDiagnostic {
             Self::REMEDY,
         )
     }
+}
+
+/// Every root [`remedy_already_applied`] has probed, in call order — the
+/// test-only ledger that makes [NFR-PE-08]'s "an admitting root pays no
+/// filesystem I/O" an **observation** rather than a claim about the source.
+///
+/// Recording the root (not merely a count) is what lets the assertion be
+/// per-fixture, so tests running in parallel in one process cannot read each
+/// other's probes.
+///
+/// [NFR-PE-08]: ../../../../docs/specs/requirements/NFR-PE-08.md
+#[cfg(test)]
+static MANIFEST_PROBES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Whether [`ZeroAdmissionDiagnostic::REMEDY`] has already been applied at
+/// `root` — i.e. the root carries a workspace manifest ([FR-WS-01]).
+///
+/// The **only** filesystem touch in the derivation, which is why
+/// [`ZeroAdmissionDiagnostic::derive`] reaches it last and why every probe is
+/// recorded under `cfg(test)`.
+///
+/// `is_file` rather than `exists`: a *directory* named `logos.workspace.toml` is
+/// not a manifest and enablement has not been run. A present-but-malformed
+/// manifest **is** evidence the user ran `init --workspace`, so it is not parsed
+/// — parsing could fail, and this derivation must not be able to ([ADR-14]).
+///
+/// [FR-WS-01]: ../../../../docs/specs/requirements/FR-WS-01.md
+/// [ADR-14]: ../../../../docs/specs/architecture/decisions/ADR-14.md
+fn remedy_already_applied(root: &Path) -> bool {
+    #[cfg(test)]
+    MANIFEST_PROBES.lock().unwrap_or_else(PoisonError::into_inner).push(root.to_path_buf());
+    root.join(ZeroAdmissionDiagnostic::REMEDY_ARTEFACT).is_file()
 }
 
 /// The result of a discovery walk.
@@ -1276,7 +1409,7 @@ pub fn zero_admission_diagnostic(
         return Ok(None);
     }
     let pruned = nested_git_prunes(root, config)?;
-    Ok(ZeroAdmissionDiagnostic::derive(admitted, &pruned))
+    Ok(ZeroAdmissionDiagnostic::derive(root, admitted, &pruned))
 }
 
 #[cfg(test)]
@@ -1428,12 +1561,12 @@ mod tests {
 
         let report = discover_with_threads(&root, &config, 0).unwrap();
         let diagnostic =
-            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+            ZeroAdmissionDiagnostic::derive(&root, report.files.len(), &report.pruned_nested_git)
                 .expect("a zero-admission walk behind nested-git prunes is diagnosed");
 
-        assert_eq!(diagnostic.pruned, 12);
+        assert_eq!(diagnostic.pruned(), 12);
         assert_eq!(
-            diagnostic.sample,
+            diagnostic.sample(),
             vec!["svc-00".to_string(), "svc-01".to_string(), "svc-02".to_string()],
             "the sample is the first `SAMPLE_LIMIT` names in the record's sorted order"
         );
@@ -1457,10 +1590,10 @@ mod tests {
 
         let report = discover_with_threads(&root, &config, 0).unwrap();
         let diagnostic =
-            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+            ZeroAdmissionDiagnostic::derive(&root, report.files.len(), &report.pruned_nested_git)
                 .expect("two pruned children still diagnose");
 
-        assert_eq!(diagnostic.sample, vec!["svc-00".to_string(), "svc-01".to_string()]);
+        assert_eq!(diagnostic.sample(), vec!["svc-00".to_string(), "svc-01".to_string()]);
         let rendered = diagnostic.to_string();
         assert!(!rendered.contains("more"), "no elision tail when nothing is elided: {rendered}");
     }
@@ -1477,7 +1610,7 @@ mod tests {
         assert!(!report.files.is_empty(), "the parent repo admits its own files");
         assert!(!report.pruned_nested_git.is_empty(), "the record is still populated");
         assert!(
-            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+            ZeroAdmissionDiagnostic::derive(&root, report.files.len(), &report.pruned_nested_git)
                 .is_none(),
             "a repo that admits files is never diagnosed (BR-43)"
         );
@@ -1499,7 +1632,7 @@ mod tests {
         let report = discover_with_threads(&root, &config, 0).unwrap();
         assert!(report.files.is_empty());
         assert!(report.pruned_nested_git.is_empty());
-        assert!(ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+        assert!(ZeroAdmissionDiagnostic::derive(&root, report.files.len(), &report.pruned_nested_git)
             .is_none());
     }
 
@@ -1513,10 +1646,10 @@ mod tests {
 
         let report = discover_with_threads(&root, &config, 0).unwrap();
         let diagnostic =
-            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+            ZeroAdmissionDiagnostic::derive(&root, report.files.len(), &report.pruned_nested_git)
                 .expect("a single pruned child still diagnoses");
 
-        assert_eq!(diagnostic.pruned, 1);
+        assert_eq!(diagnostic.pruned(), 1);
         let rendered = diagnostic.to_string();
         assert!(
             rendered.contains("1 directory was pruned as a nested git boundary ("),
@@ -1548,7 +1681,7 @@ mod tests {
             "depth-2 boundaries are still recorded, root-relative and sorted"
         );
         assert!(
-            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+            ZeroAdmissionDiagnostic::derive(&root, report.files.len(), &report.pruned_nested_git)
                 .is_none(),
             "a wrapper directory over sibling repos is NOT diagnosed — \
              `logos init --workspace` would find no members there"
@@ -1576,7 +1709,7 @@ mod tests {
             report.pruned_nested_git
         );
         assert!(
-            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+            ZeroAdmissionDiagnostic::derive(&root, report.files.len(), &report.pruned_nested_git)
                 .is_none(),
             "and so it is never diagnosed as a parent-of-repos root"
         );
@@ -1598,14 +1731,14 @@ mod tests {
         let report = discover_with_threads(&root, &config, 0).unwrap();
         assert_eq!(report.files.len(), 1, "the stray file IS admitted by the walk");
         assert!(
-            ZeroAdmissionDiagnostic::derive(report.files.len(), &report.pruned_nested_git)
+            ZeroAdmissionDiagnostic::derive(&root, report.files.len(), &report.pruned_nested_git)
                 .is_none(),
             "keying on the raw walk count is what went wrong — it suppresses"
         );
         // The pipeline passes its post-admission candidate count, which is 0 here.
-        let diagnostic = ZeroAdmissionDiagnostic::derive(0, &report.pruned_nested_git)
+        let diagnostic = ZeroAdmissionDiagnostic::derive(&root, 0, &report.pruned_nested_git)
             .expect("keyed on the reported count, the root is diagnosed");
-        assert_eq!(diagnostic.pruned, 5);
+        assert_eq!(diagnostic.pruned(), 5);
     }
 
     // ── The `status`/`doctor` probe: `nested_git_prunes` + `zero_admission_diagnostic`
@@ -1709,11 +1842,11 @@ mod tests {
         let config = test_config(1 << 20);
 
         let walked = discover_with_threads(&root, &config, 0).unwrap();
-        let from_index = ZeroAdmissionDiagnostic::derive(0, &walked.pruned_nested_git);
+        let from_index = ZeroAdmissionDiagnostic::derive(&root, 0, &walked.pruned_nested_git);
         let from_surface = zero_admission_diagnostic(&root, &config, 0).unwrap();
 
         assert_eq!(from_surface, from_index, "one derivation, two ways in");
-        assert_eq!(from_surface.expect("diagnosed").pruned, 12);
+        assert_eq!(from_surface.expect("diagnosed").pruned(), 12);
     }
 
     #[test]
@@ -1757,6 +1890,148 @@ mod tests {
             None,
             "but a root that admitted a file is never diagnosed"
         );
+    }
+
+    // ── The diagnostic must not survive its own remedy ([FR-IX-13], [FR-IX-11],
+    //    S-337) ───────────────────────────────────────────────────────────────
+
+    /// How many times [`remedy_already_applied`] probed exactly `root`.
+    ///
+    /// Read per-fixture rather than as a total, so tests sharing this process
+    /// cannot see each other's probes.
+    fn manifest_probes_for(root: &Path) -> usize {
+        MANIFEST_PROBES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|probed| probed.as_path() == root)
+            .count()
+    }
+
+    #[test]
+    fn a_root_that_already_carries_a_workspace_manifest_is_not_diagnosed() {
+        // S-337: the remedied root. It is still a parent of sibling repositories,
+        // it still admits nothing, and every earlier gate still passes — so before
+        // this guard it told a user who had ALREADY run `logos init --workspace` to
+        // run `logos init --workspace`. The SAME fixture without the manifest is
+        // asserted diagnosed, so the suppression is shown to be the manifest and
+        // not some property of the fixture.
+        let (_tmp, root) = build_parent_of_repos(4);
+        let config = test_config(1 << 20);
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+
+        assert!(
+            ZeroAdmissionDiagnostic::derive(&root, 0, &report.pruned_nested_git).is_some(),
+            "the un-remedied root is diagnosed"
+        );
+
+        write(&root.join(ZeroAdmissionDiagnostic::REMEDY_ARTEFACT), "members = []\n");
+        assert_eq!(
+            ZeroAdmissionDiagnostic::derive(&root, 0, &report.pruned_nested_git),
+            None,
+            "a root carrying the manifest is not told to create one"
+        );
+    }
+
+    #[test]
+    fn the_manifest_suppression_lives_in_the_shared_derivation() {
+        // FR-IX-11 parity: `index` derives from its own walk and `status`/`doctor`
+        // from the persisted-graph helper. Asserting the suppression through BOTH
+        // seams of the ONE derivation is what makes the three surfaces unable to
+        // disagree — a suppression added at an emission site would pass one of
+        // these two and fail the other.
+        let (_tmp, root) = build_parent_of_repos(6);
+        let config = test_config(1 << 20);
+        let walked = discover_with_threads(&root, &config, 0).unwrap();
+
+        // Before the remedy: both seams diagnose, and byte-for-byte alike.
+        let index_before = ZeroAdmissionDiagnostic::derive(&root, 0, &walked.pruned_nested_git);
+        let surface_before = zero_admission_diagnostic(&root, &config, 0).unwrap();
+        assert_eq!(surface_before, index_before, "one derivation, two ways in");
+        assert!(index_before.is_some(), "the un-remedied root is diagnosed on both seams");
+
+        write(&root.join(ZeroAdmissionDiagnostic::REMEDY_ARTEFACT), "members = []\n");
+
+        // After it: both seams fall silent, together.
+        assert_eq!(
+            ZeroAdmissionDiagnostic::derive(&root, 0, &walked.pruned_nested_git),
+            None,
+            "`index`'s seam is silent"
+        );
+        assert_eq!(
+            zero_admission_diagnostic(&root, &config, 0).unwrap(),
+            None,
+            "and `status`/`doctor`'s seam is silent by the same derivation"
+        );
+    }
+
+    #[test]
+    fn a_directory_named_like_the_manifest_does_not_suppress() {
+        // The near miss one character from matching: `logos.workspace.toml` as a
+        // DIRECTORY is not a manifest and enablement has not been run, so the
+        // remedy is still the right advice. `exists()` would have suppressed here.
+        let (_tmp, root) = build_parent_of_repos(3);
+        let config = test_config(1 << 20);
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        std::fs::create_dir_all(root.join(ZeroAdmissionDiagnostic::REMEDY_ARTEFACT)).unwrap();
+
+        assert!(
+            ZeroAdmissionDiagnostic::derive(&root, 0, &report.pruned_nested_git).is_some(),
+            "a directory of that name is not the artefact `init --workspace` leaves"
+        );
+    }
+
+    #[test]
+    fn the_manifest_probe_is_skipped_when_files_were_admitted() {
+        // NFR-PE-08, counted rather than claimed: the probe is the derivation's
+        // ONLY filesystem touch, so it is ordered last, behind the two free gates.
+        // A root that admits files must therefore record ZERO probes — the guard is
+        // observable, not an assertion about how the source reads.
+        let (_tmp, root) = build_parent_of_repos(3);
+        let config = test_config(1 << 20);
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        let before = manifest_probes_for(&root);
+
+        assert_eq!(
+            ZeroAdmissionDiagnostic::derive(&root, 7, &report.pruned_nested_git),
+            None,
+            "an admitting root is undiagnosed by the free gate alone"
+        );
+        assert_eq!(
+            manifest_probes_for(&root),
+            before,
+            "and it paid no filesystem I/O for the manifest probe"
+        );
+
+        // The same root on the zero-admission arm does reach it — otherwise the
+        // count above would be trivially satisfied by a probe that never runs.
+        assert!(ZeroAdmissionDiagnostic::derive(&root, 0, &report.pruned_nested_git).is_some());
+        assert_eq!(
+            manifest_probes_for(&root),
+            before + 1,
+            "the diagnosable arm probes exactly once"
+        );
+    }
+
+    #[test]
+    fn a_root_with_no_immediate_prune_never_reaches_the_manifest_probe() {
+        // The second free gate, same counting discipline: a wrapper root whose
+        // boundaries are all at depth 2 is rejected before the probe, so the cost
+        // guard covers both undiagnosable shapes and not just the admitting one.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join("repos/alpha/.git/HEAD"), "ref: refs/heads/main\n");
+        write(&root.join("repos/beta/.git/HEAD"), "ref: refs/heads/main\n");
+        let config = test_config(1 << 20);
+        let report = discover_with_threads(&root, &config, 0).unwrap();
+        let before = manifest_probes_for(&root);
+
+        assert_eq!(
+            ZeroAdmissionDiagnostic::derive(&root, 0, &report.pruned_nested_git),
+            None,
+            "no immediate-child boundary, so nothing to diagnose"
+        );
+        assert_eq!(manifest_probes_for(&root), before, "and no probe was paid for");
     }
 
     #[test]

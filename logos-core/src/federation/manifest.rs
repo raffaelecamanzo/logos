@@ -578,6 +578,29 @@ mod tests {
         path
     }
 
+    /// The config component's [`REMEDY_ARTEFACT`] is **this** filename.
+    ///
+    /// `ZeroAdmissionDiagnostic::derive` suppresses itself when the root already
+    /// carries the artefact `logos init --workspace` leaves, and it has to spell
+    /// that name itself: the dependency runs **federation → config** (this module
+    /// imports `config::ConfigError`; `enable` imports the diagnostic), so
+    /// `config` cannot name a federation constant.
+    ///
+    /// That leaves exactly one place the two spellings can drift, and this is it.
+    /// The assertion belongs on **this** side because federation is the side that
+    /// may see both. It is the only check on the literal: every other reference in
+    /// either component goes through one of the two constants.
+    ///
+    /// [`REMEDY_ARTEFACT`]: crate::config::ZeroAdmissionDiagnostic::REMEDY_ARTEFACT
+    #[test]
+    fn the_remedy_artefact_is_this_manifest_filename() {
+        assert_eq!(
+            crate::config::ZeroAdmissionDiagnostic::REMEDY_ARTEFACT,
+            MANIFEST_FILENAME,
+            "the zero-admission diagnostic probes for the file `init --workspace` writes"
+        );
+    }
+
     /// A full manifest parses: name, members, default, autodiscover, and links.
     #[test]
     fn parses_a_full_manifest() {
