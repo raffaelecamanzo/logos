@@ -322,6 +322,42 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
         "…and name the recorded denominator: {line:?}"
     );
 
+    // **The artifact is subject to the same biconditional the payload is**
+    // ([CR-127]). Everything above checks that the recorded line QUOTES the
+    // recorded fields; none of it relates the recorded edge count to the recorded
+    // resolved-site count. So a measurement block of `0` edges beside "15 of 117
+    // egress sites resolved" — the exact sentence this file's own module docs
+    // quote as the defect CR-127 was filed for — passed every assertion here.
+    // Verified: hand-editing the block to that shape left this file at 2 passed,
+    // 0 failed.
+    //
+    // The recorded numerator is also pinned to `by_intake.invocation.bound`, which
+    // is the field the line's "N of M" head is, so the three cannot drift apart in
+    // a hand-edited block. The `measurement` block is machine-written by
+    // `LOGOS_BASELINE_WRITE=1`; the blocks BESIDE it are hand-written, and this
+    // guard is what stops a hand edit landing a self-contradicting figure in the
+    // artifact every later delta is stated against.
+    assert_eq!(
+        edges == 0,
+        inv_num("bound") == 0,
+        "the recorded baseline contradicts itself: {edges} resolved edges over {}          resolved egress sites. A resolved site and a resolved edge are the same          rows counted two ways (CR-127): {m}",
+        inv_num("bound"),
+    );
+    assert!(
+        edges >= inv_num("bound"),
+        "one resolved site is one edge, or several under fan-out, never fewer:          {edges} < {}: {m}",
+        inv_num("bound"),
+    );
+    assert!(
+        line.contains(&format!(
+            "({} of {} egress site",
+            inv_num("bound"),
+            num("egress_resolution_measured")
+        )),
+        "…and the line's own numerator must be the recorded invocation bound count          ({}), not a third figure: {line:?}",
+        inv_num("bound"),
+    );
+
     // The pre-change capture this baseline is stated against, named by path so the
     // pair can be found together.
     assert!(

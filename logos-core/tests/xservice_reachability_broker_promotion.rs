@@ -281,6 +281,27 @@ fn a_cross_member_publish_promotes_an_otherwise_dead_subscribe_handler_to_live()
     assert_eq!(view.coverage.members_read, 2, "both members read");
     assert_eq!(view.coverage.bound, 1, "the publish bound its subscriber");
 
+    // **The figure the promotion above actually rests on** ([CR-127], [FR-WS-12]).
+    //
+    // Asserted HERE, in the test that proves the promotion, because that is the
+    // claim it underwrites: `live_via_cross_service` is non-empty precisely
+    // because the bridge drew an invocation edge, and this is the count of them.
+    //
+    // It is the one end-to-end pin on the wiring. Before it existed, replacing the
+    // edge slice handed to `CoverageRider::new` with `&[]` — so the view is seeded
+    // from the real edges while the rider reports over nothing — left the whole
+    // federation suite, both reachability integration tests and the CLI surface
+    // test green. The unit test covers the PREDICATE over a hand-built array; only
+    // this one ties the published figure to the slice the walk actually used.
+    assert_eq!(
+        view.coverage.bridge_invocation_edges, 1,
+        "one publish, one cross-member subscriber, one invocation edge — and it is          that edge, not the coverage tier's resolved-edge headline, that seeded          the promotion asserted above (CR-127)"
+    );
+    assert!(
+        !view.live_via_cross_service.is_empty(),
+        "the promotion this figure underwrites must actually be present, or the          assertion above pins a number against nothing"
+    );
+
     // ── No demotion / advisory: the per-repo gated signal is unchanged ────────
     let after = per_repo_dead_verdicts(&web);
     assert_eq!(
