@@ -241,8 +241,8 @@ movement above is a read-model change in the measuring binary; all of it is
 capture, and the re-index is what applied it.
 
 
-THREE COMMITTED HARNESSES PIN ESTATE FIGURES THIS RE-INDEX MOVED
------------------------------------------------------------------
+FOUR COMMITTED HARNESSES PIN ESTATE FIGURES THIS RE-INDEX MOVED
+----------------------------------------------------------------
 
 Each carries an explicit "RECORD the new figure" instruction rather than a
 tolerance, and each was re-recorded in the same change:

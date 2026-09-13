@@ -147,7 +147,7 @@ fn corpus_root() -> Option<PathBuf> {
 
 /// The headline block of a coverage payload, as the artifact records it.
 ///
-/// Deliberately the *summary* fields only, and not the 1060 classified rows —
+/// Deliberately the *summary* fields only, and not the 1034 classified rows —
 /// committing a copy of them would add 500 KB to this repository, and the summary
 /// block is exactly what changes and exactly what every delta is stated against.
 /// The pre-change capture `logos-docs/ws-status-2026-09-08-v1.4.7.json` holds the
@@ -212,7 +212,7 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
         gen["contains_s374_refusal_rows"], true,
         "the store now POSTdates S-374, so the artifact must say so — a reader who took \
          this for a pre-S-374 measurement would attribute the invocation unbound column's \
-         87 rows to the wrong cause: {gen}"
+         `base-url-runtime` rows — 24 on this generation — to the wrong cause: {gen}"
     );
     assert!(
         gen["refresh_procedure"].as_str().is_some_and(|s| s.contains("logos init --workspace")),

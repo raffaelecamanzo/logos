@@ -1002,7 +1002,7 @@ N excluded" is the informative statement. The same absent-not-zero rule governs
 
 ##### Each reference names the other end
 
-`bound: 86` and `ambiguous: 155` are not actionable on their own — the obvious
+`bound: 96` and `ambiguous: 169` are not actionable on their own — the obvious
 next question is *bound to what?*, and *ambiguous between what?*. Every row in
 `coverage.references` answers it:
 

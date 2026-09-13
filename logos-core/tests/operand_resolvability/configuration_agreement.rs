@@ -1844,7 +1844,7 @@ pub struct PropertiesResidue {
 /// here. Reaching it needs the promoted `Resolver` run over a `.properties`-stripped
 /// corpus rather than a definition-set query, which is a larger instrument than the
 /// figure currently justifies: on this estate every admitted row is single-key
-/// (`bound` has exactly one entry on all 44), so the profile condition is vacuous
+/// (`bound` has exactly one entry on all 81), so the profile condition is vacuous
 /// and both counters read 0. Revisit if either counter ever leaves zero.
 pub fn properties_residue(m: &super::Measurement) -> PropertiesResidue {
     let mut out = PropertiesResidue {

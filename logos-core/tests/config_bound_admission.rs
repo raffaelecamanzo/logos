@@ -113,7 +113,7 @@
 //!   `resolved_cross_service_edges` is **still 0** — a `config-bound` row is
 //!   deliberately excluded from that headline because the bridge still keys a
 //!   consumer on its raw ledger target.
-//! * Not "egress resolution tripled". It reads 0.128 (15 of 117) against 0.032
+//! * Not "egress resolution quadrupled". It reads 0.128 (15 of 117) against 0.032
 //!   (5 of 155), and the denominator moved underneath it for a reason that is not
 //!   a coverage change.
 //! * Not "79 was wrong". 79 is a correct census figure, and it remains one.
