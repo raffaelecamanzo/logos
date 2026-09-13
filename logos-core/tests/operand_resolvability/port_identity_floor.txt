@@ -1,0 +1,130 @@
+S-400 T1 — MATERIALITY FLOOR, DECLARED BEFORE THE RUN
+=====================================================
+
+Declared (UTC):  2026-09-13T13:13:50Z
+Declared by:     Dev Session 1.3 (sprint-69, branch sprint-69-I1-S3)
+Story:           S-400 — Measure whether a runtime port identifies the callee
+Gate decides:    CR-124 section 3.2. Below the floor the finding is recorded as
+                 FALSIFIED with its evidence and date, NO requirement is created,
+                 and NO dependent story is planned. FR-WS-22 stays withdrawn.
+
+Estate under measurement: ~/source/pec-services (LOGOS_REF_WORKSPACE), 84 members,
+read-only against the estate SOURCE. Nothing under that path is written.
+
+This file is committed in this session's FIRST commit, before any measurement code
+exists, so the ordering is auditable in git history rather than asserted. It is
+TRACKED, not written to the gitignored `.pending/` directory — S-384's review
+finding 18, where a gitignored declaration would have vanished at sprint teardown.
+
+
+THE FLOOR
+---------
+
+    >= 16 NET-NEW THIRD-PARTY port-resolved consumer-to-provider call-site edges
+       on the pec-services estate.
+
+Three words in that sentence carry the whole definition, and each is fixed here
+rather than at measurement time.
+
+"CALL-SITE EDGE" means, exactly: one distinct
+
+    (consumer member, normalized route template, provider member)
+
+triple — the identical grain S-384's `Findings::net_new` counts, so that the two
+experiments are directly comparable. CR-124's Decision Log fixes this unit
+explicitly and rejects the alternative: "16 net-new SERVICE PAIRS (census suggests
+9 — likely falsification) ... a pair-based floor would reject on a unit S-384 never
+measured." Two call sites in one class reading one key at one template are ONE
+edge. The distinct member-to-member coupling count is a different, smaller figure;
+it is reported beside the headline and it does NOT clear or fail this gate.
+
+"NET-NEW" means, exactly: an edge that path-only matching — normalized positional
+template plus the exactly-one-candidate rule of FR-CG-09 — would NOT already have
+bound, because two or more members register that template and the exactly-one rule
+therefore refuses. An edge the path alone would already have bound is reported in
+its own column and is NOT evidence for the port signal.
+
+"THIRD-PARTY" means, exactly: consumer member != provider member. A self-tie —
+a consumer whose port-resolved provider is itself — is NOT counted toward this
+floor. This word is in the floor because of S-384: its headline of 12 net-new
+edges was 11 self-ties and ONE genuine third-party edge, and the headline did not
+say so at the point it was printed. CR-124's premise rests on that correction, so
+the correction is written into the floor rather than left to the reporting.
+
+Measured net-new third-party < 16  =>  FALSIFIED.
+Measured net-new third-party >= 16 =>  the gate holds and a DELIVERY story may be
+                                       planned, which is what would then create
+                                       the requirement (CR-124 section 5.1).
+
+
+WHY 16 — AND WHY IT IS NOT DERIVED FROM THIS CR'S OWN CENSUS
+------------------------------------------------------------
+
+1. It is S-384's floor, unchanged, on S-384's metric. CR-124 section 3.2 states
+   the reason in one sentence: "matching S-384's floor and its metric so the two
+   experiments are directly comparable". This gate exists to be new evidence
+   against FR-WS-22's withdrawal banner, and evidence is only comparable against
+   the experiment it is offered to overturn if it is measured the same way.
+
+2. It is deliberately NOT derived from CR-124's own hand census of "39 call sites
+   / 9 service pairs". That census is an upper bound produced by an unreviewed
+   ad-hoc script, and CR-124 section 2 says so in its own words: "This census is
+   not a finding ... it is NOT a prediction of what the product will admit, and it
+   must not become an acceptance floor. That distinction is the defect S-397
+   carried, where a harness census of 79 became an unreachable story criterion."
+   A floor derived from the census would be a measurement of what a permissive
+   reader can derive, dressed as a prediction about the measurement.
+
+3. 16 remains above the single-consumer-coincidence threshold that justified it
+   for S-384. The census attributes most of its sites to two aggregators
+   (`mailbox-aggregator-api` and `funnel-aggregator-api`). A result that is one
+   aggregator's configuration file and nothing else is an estate coincidence, not
+   an estate-wide signal, and is not a basis for building an identity tier into
+   FR-WS-20's ladder.
+
+4. The floor is inherited, so it is NOT tuned to this signal's expected yield.
+   That is a deliberate cost: a floor chosen after seeing which side of it the
+   answer falls on is not a floor. If the measurement shows 16 was the wrong
+   number for this signal, that is stated in the implementation notes with its
+   reasoning, and THIS FILE STANDS UNCHANGED.
+
+
+WHAT IS *NOT* A FLOOR
+---------------------
+
+Everything else CR-124 section 6 and S-400's acceptance criteria require is a
+REPORT. None of them can clear or fail this gate on its own:
+
+  - how many resolved base-url values carry a port, and how many do not;
+  - how many ports resolve to exactly one member, to two or more, and to none,
+    with the unmatched ports ENUMERATED for human adjudication;
+  - the already-bound-by-path column;
+  - the self-tie count, printed beside the third-party count at the headline;
+  - the distinct member-to-member coupling count;
+  - the literal call-site occurrence count, which is larger than the edge count
+    and is reported so the census's "39 call sites" figure can be read against
+    something;
+  - the reconciliation against S-384's one third-party edge.
+
+They are required for the finding to be ADJUDICABLE — they attribute a
+falsification to whichever join broke — but there is exactly one decisive number,
+so the gate cannot be cleared by substituting a more favourable statistic.
+
+
+A RUN THAT SEES NO ESTATE REPORTS *VOID*, NEVER ZERO
+-----------------------------------------------------
+
+Per NFR-CC-04: where `LOGOS_REF_WORKSPACE` is unset the measurement has not been
+performed, and 0 net-new third-party edges is not the finding — there is no
+finding. The estate arm reports VOID and asserts nothing about the gate. The
+classifier that decides the gate carries its own always-run coverage, so its rules
+are pinned even where the estate is unavailable.
+
+
+COMMITMENT
+----------
+
+This floor is not revised after the run. The constant in the measurement code is
+PARSED from this file rather than compared with a literal written beside it, so
+the constant cannot be edited to clear a run without this declaration being edited
+too — in the file whose whole purpose is to say it must not be.

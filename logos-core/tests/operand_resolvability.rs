@@ -130,6 +130,14 @@
 //! `method_invocation`/`method_reference` pattern and a `method_declaration`
 //! pattern, all Java tree shapes.
 //!
+//! Sprint 69 added one: `port_identity`'s `SERVER_PORT_KEY` (S-400), the Spring
+//! configuration key a member declares its own listening port under. Its own doc
+//! argues the key must not be widened to `management.server.port`, which is
+//! exactly the kind of framework-specific judgement the prohibition below is
+//! about. `is_deploy_path` in the same module is a directory convention rather
+//! than a framework table, and is named here only so the reader does not have to
+//! decide that for themselves.
+//!
 //! This list is **open, not closed**: anything of that kind added to this
 //! harness or its submodules is covered by the same carve-out and the same
 //! prohibition. The fitness function cannot enforce it — it scans
@@ -183,6 +191,16 @@ mod identity;
 /// `tests/forwarding.rs` would become a second cargo test target.
 #[path = "operand_resolvability/forwarding.rs"]
 mod forwarding;
+
+/// S-400's port-identity gate — its own module, so the port join does not
+/// co-edit the file the deploy-corpus arm owns. Reads `identity`'s corpus,
+/// provider index and pair classifier, and this module's `measurement` for the
+/// configuration corpus and the call sites; adds no walk of the estate.
+///
+/// `#[path]`-attached for the same reason its three siblings are: a plain
+/// `tests/port_identity.rs` would become a second cargo test target.
+#[path = "operand_resolvability/port_identity.rs"]
+mod port_identity;
 
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
