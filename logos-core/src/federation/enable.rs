@@ -1100,6 +1100,15 @@ mod tests {
             !ignores("logos.workspace.toml"),
             "the checked-in manifest still travels"
         );
+        // Root-anchored, and this is the assertion that says so. A member
+        // admitted by `.logos/logos.db` alone has no `.git` of its own, so it
+        // shares this repository: an unanchored basename would reach down into
+        // it and hide a same-named file the member's own tree tracks.
+        fs::create_dir_all(root.join("member/nested")).unwrap();
+        assert!(
+            !ignores("member/nested/.logos.workspace.warm.json"),
+            "the entry is anchored to the workspace root, not matched at every depth"
+        );
     }
 
     // ── WarmStartDisclosure (FR-WS-02, FR-WS-15, FR-WS-17, CR-119) ────────
