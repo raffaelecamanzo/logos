@@ -581,16 +581,17 @@ mod tests {
     /// The config component's [`REMEDY_ARTEFACT`] is **this** filename.
     ///
     /// `ZeroAdmissionDiagnostic::derive` suppresses itself when the root already
-    /// carries the artefact `logos init --workspace` leaves, and it spells that
-    /// name itself rather than importing from here, so the config component keeps
-    /// its one-directional dependency on federation ([ADR-01]). That leaves one
-    /// place the two can drift, and this is it — pinned from the federation side,
-    /// which already depends on config, exactly as
-    /// [`ParentOfRepos::SAMPLE_LIMIT`](super::enable::ParentOfRepos::SAMPLE_LIMIT)
-    /// borrows the diagnostic's sample bound rather than restating it.
+    /// carries the artefact `logos init --workspace` leaves, and it has to spell
+    /// that name itself: the dependency runs **federation → config** (this module
+    /// imports `config::ConfigError`; `enable` imports the diagnostic), so
+    /// `config` cannot name a federation constant.
+    ///
+    /// That leaves exactly one place the two spellings can drift, and this is it.
+    /// The assertion belongs on **this** side because federation is the side that
+    /// may see both. It is the only check on the literal: every other reference in
+    /// either component goes through one of the two constants.
     ///
     /// [`REMEDY_ARTEFACT`]: crate::config::ZeroAdmissionDiagnostic::REMEDY_ARTEFACT
-    /// [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
     #[test]
     fn the_remedy_artefact_is_this_manifest_filename() {
         assert_eq!(
