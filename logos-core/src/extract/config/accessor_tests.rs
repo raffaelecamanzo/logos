@@ -699,10 +699,10 @@ fn the_self_qualifier_is_a_whole_token() {
 ///
 /// 1. **A legal identifier character read as a separator.** `$` and a
 ///    zero-width non-joiner are legal *inside* a Java identifier and are not
-///    `is_alphanumeric`, so `this$api` — ONE identifier — was split into `this`
-///    + `api` and resolved against an unrelated field. The gate is structural:
-///    the grammar parses `this$api` as a single leaf and `this.api` as a node
-///    with children.
+///    `is_alphanumeric`, so `this$api` — ONE identifier — was split into
+///    `this` plus `api` and resolved against an unrelated field. The gate is
+///    structural: the grammar parses `this$api` as a single leaf, and
+///    `this.api` as a node with children.
 /// 2. **A shadowing local or parameter answering for an inherited field.**
 ///    `this.api` denotes a field; the scope-blind walk answered from locals and
 ///    parameters too, and where the real field is declared in ANOTHER file

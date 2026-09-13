@@ -825,100 +825,115 @@ impl PluginManifest {
             }
         }
         if let Some(properties) = &self.properties {
-            // An annotation row is compared against captured text verbatim, so a
-            // stray space matches nothing and the arm degrades to silent
-            // no-capture — the failure mode the `http_client_detectors` guard
-            // above exists for, here on the binding arm.
-            if properties.annotations.iter().any(|a| a.trim().is_empty()) {
-                return bail("`[properties] annotations` entries must not be empty".to_string());
-            }
-            if properties.annotations.iter().any(|a| a != a.trim()) {
-                return bail(
-                    "`[properties] annotations` entries must not carry surrounding whitespace"
-                        .to_string(),
-                );
-            }
-            // `""` IS a legal accessor prefix — it spells direct property access
-            // — so the emptiness test that guards the annotation rows would be
-            // wrong here. Whitespace is still a typo rather than a convention.
-            if properties.accessor_prefixes.iter().any(|p| p != p.trim()) {
-                return bail(
-                    "`[properties] accessor_prefixes` entries must not carry surrounding \
-                     whitespace"
-                        .to_string(),
-                );
-            }
-            // A duplicated prefix would derive the same candidate twice. The
-            // interpreter dedups by canonical key so it cannot fabricate an
-            // ambiguity out of one, but a duplicate is a descriptor bug either
-            // way and reads as intent.
-            let mut seen = std::collections::BTreeSet::new();
-            if let Some(dup) = properties
-                .accessor_prefixes
-                .iter()
-                .find(|p| !seen.insert((*p).clone()))
-            {
-                return bail(format!(
-                    "`[properties] accessor_prefixes` carries the duplicate entry '{dup}'"
-                ));
-            }
-            // Unlike `accessor_prefixes`, the EMPTY LIST is legal here — it is
-            // the default, and it means "this language admits no qualified
-            // receiver". An empty ENTRY is not: it would strip nothing and
-            // leave any separator-led receiver reading as a field of the
-            // enclosing class, which is the fabrication [NFR-RA-05] forbids.
-            if properties.self_references.iter().any(|s| s.trim().is_empty()) {
-                return bail(
-                    "`[properties] self_references` entries must not be empty (S-398)".to_string(),
-                );
-            }
-            // A self reference is compared against captured receiver text
-            // verbatim, so a stray space matches nothing and the qualifier
-            // degrades to a silent refusal — the same failure mode the
-            // `annotations` and `accessor_prefixes` guards above exist for.
-            if properties.self_references.iter().any(|s| s != s.trim()) {
-                return bail(
-                    "`[properties] self_references` entries must not carry surrounding whitespace"
-                        .to_string(),
-                );
-            }
-            // A qualifier is matched as a PREFIX of the receiver's text, so a row
-            // that is not a self-contained word silently widens into something
-            // else entirely: `["t"]` reduces `t.api` — a general `holder.api`
-            // reduction, the exact thing this row's own documentation says it is
-            // not — and `["this.x"]` reduces `this.x.api`. Neither is a spelling
-            // any language uses for the enclosing instance, and both read as a
-            // typo rather than as intent ([NFR-RA-05]).
-            //
-            // The shape is "letters, digits and `_`, not starting with a digit",
-            // deliberately the SAME class the interpreter's own receiver
-            // predicate uses, so a row that parses is a row the matcher can
-            // recognise as a whole token. A sigil-led spelling (`$this`) is a
-            // real convention this rule would refuse; no shipped language needs
-            // one, and widening the rule when one does is a row in this comment
-            // away — which is the direction that fails safe.
-            if let Some(bad) = properties.self_references.iter().find(|s| {
-                let mut chars = s.chars();
-                !chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
-                    || !s.chars().all(|c| c.is_alphanumeric() || c == '_')
-            }) {
-                return bail(format!(
-                    "`[properties] self_references` entry '{bad}' is not a single word; a                      qualifier is matched as a prefix, so a partial one silently reduces                      an unrelated receiver (S-398, NFR-RA-05)"
-                ));
-            }
-            let mut seen = std::collections::BTreeSet::new();
-            if let Some(dup) = properties
-                .self_references
-                .iter()
-                .find(|s| !seen.insert((*s).clone()))
-            {
-                return bail(format!(
-                    "`[properties] self_references` carries the duplicate entry '{dup}'"
-                ));
+            if let Err(detail) = validate_properties(properties) {
+                return bail(detail);
             }
         }
         Ok(())
     }
+}
+
+
+/// The `[properties]` table's typo and shape rules (S-381, S-398).
+///
+/// Extracted from [`PluginManifest::validate`] rather than inlined beside its
+/// siblings: the row S-398 added pushed that function past the `max_cc = 50`
+/// architecture rule, and one table's rules are the natural seam. The caller
+/// attributes the returned detail to the descriptor file, so nothing here
+/// names one.
+fn validate_properties(properties: &PropertiesDescriptor) -> Result<(), String> {
+        // An annotation row is compared against captured text verbatim, so a
+        // stray space matches nothing and the arm degrades to silent
+        // no-capture — the failure mode the `http_client_detectors` guard
+        // above exists for, here on the binding arm.
+        if properties.annotations.iter().any(|a| a.trim().is_empty()) {
+            return Err("`[properties] annotations` entries must not be empty".to_string());
+        }
+        if properties.annotations.iter().any(|a| a != a.trim()) {
+            return Err(
+                "`[properties] annotations` entries must not carry surrounding whitespace"
+                    .to_string(),
+            );
+        }
+        // `""` IS a legal accessor prefix — it spells direct property access
+        // — so the emptiness test that guards the annotation rows would be
+        // wrong here. Whitespace is still a typo rather than a convention.
+        if properties.accessor_prefixes.iter().any(|p| p != p.trim()) {
+            return Err(
+                "`[properties] accessor_prefixes` entries must not carry surrounding \
+                 whitespace"
+                    .to_string(),
+            );
+        }
+        // A duplicated prefix would derive the same candidate twice. The
+        // interpreter dedups by canonical key so it cannot fabricate an
+        // ambiguity out of one, but a duplicate is a descriptor bug either
+        // way and reads as intent.
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(dup) = properties
+            .accessor_prefixes
+            .iter()
+            .find(|p| !seen.insert((*p).clone()))
+        {
+            return Err(format!(
+                "`[properties] accessor_prefixes` carries the duplicate entry '{dup}'"
+            ));
+        }
+        // Unlike `accessor_prefixes`, the EMPTY LIST is legal here — it is
+        // the default, and it means "this language admits no qualified
+        // receiver". An empty ENTRY is not: it would strip nothing and
+        // leave any separator-led receiver reading as a field of the
+        // enclosing class, which is the fabrication [NFR-RA-05] forbids.
+        if properties.self_references.iter().any(|s| s.trim().is_empty()) {
+            return Err(
+                "`[properties] self_references` entries must not be empty (S-398)".to_string(),
+            );
+        }
+        // A self reference is compared against captured receiver text
+        // verbatim, so a stray space matches nothing and the qualifier
+        // degrades to a silent refusal — the same failure mode the
+        // `annotations` and `accessor_prefixes` guards above exist for.
+        if properties.self_references.iter().any(|s| s != s.trim()) {
+            return Err(
+                "`[properties] self_references` entries must not carry surrounding whitespace"
+                    .to_string(),
+            );
+        }
+        // A qualifier is matched as a PREFIX of the receiver's text, so a row
+        // that is not a self-contained word silently widens into something
+        // else entirely: `["t"]` reduces `t.api` — a general `holder.api`
+        // reduction, the exact thing this row's own documentation says it is
+        // not — and `["this.x"]` reduces `this.x.api`. Neither is a spelling
+        // any language uses for the enclosing instance, and both read as a
+        // typo rather than as intent ([NFR-RA-05]).
+        //
+        // The shape is "letters, digits and `_`, not starting with a digit",
+        // deliberately the SAME class the interpreter's own receiver
+        // predicate uses, so a row that parses is a row the matcher can
+        // recognise as a whole token. A sigil-led spelling (`$this`) is a
+        // real convention this rule would refuse; no shipped language needs
+        // one, and widening the rule when one does is a row in this comment
+        // away — which is the direction that fails safe.
+        if let Some(bad) = properties.self_references.iter().find(|s| {
+            let mut chars = s.chars();
+            !chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                || !s.chars().all(|c| c.is_alphanumeric() || c == '_')
+        }) {
+            return Err(format!(
+                "`[properties] self_references` entry '{bad}' is not a single word; a                      qualifier is matched as a prefix, so a partial one silently reduces                      an unrelated receiver (S-398, NFR-RA-05)"
+            ));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(dup) = properties
+            .self_references
+            .iter()
+            .find(|s| !seen.insert((*s).clone()))
+        {
+            return Err(format!(
+                "`[properties] self_references` carries the duplicate entry '{dup}'"
+            ));
+        }
+    Ok(())
 }
 
 #[cfg(test)]
