@@ -1163,9 +1163,25 @@ impl<'r, E: MemberEngine> AnswerScope<'r, E> {
     }
 
     /// Lock this answer's walk state, **recovering** a poisoned lock rather than
-    /// propagating the poison — for the reason
-    /// [`EngineRegistry::lock_admission`] does: a panic inside one member's `f`
-    /// must not brick the rest of the answer.
+    /// propagating the poison, as [`EngineRegistry::lock_admission`] does.
+    ///
+    /// Defensive rather than load-bearing, and the distinction is worth stating
+    /// because the obvious rationale is the wrong one: a panic inside a walk's
+    /// `f` cannot poison this mutex, because `f` runs in
+    /// [`fan_out`](Self::fan_out)'s `map` *after*
+    /// [`open_for_walk`](Self::open_for_walk) has returned and every guard taken
+    /// here has already dropped. Nothing this lock is held across can panic
+    /// today. It recovers anyway, so that the one policy this module has for a
+    /// poisoned lock holds for all three of them rather than for two — a scope
+    /// that propagated where the registry recovers would be a second policy to
+    /// discover the hard way.
+    ///
+    /// A [`Mutex`] and not a [`RefCell`]: the state is behind `&self` only
+    /// because [`fan_out`](Self::fan_out) takes `&self`, and keeping the scope
+    /// `Sync` is what leaves a parallel fan-out over the shared worker pool open
+    /// as a later change ([NFR-PE-11]) instead of making it a type change.
+    ///
+    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
     fn lock_state(&self) -> std::sync::MutexGuard<'_, ScopeState> {
         self.state
             .lock()
