@@ -73,6 +73,13 @@
 //! and exactly **1** to a same-unit constant — `JSESSIONID_COOKIE_NAME`, a
 //! cookie name, not a path.
 //!
+//! S-399 moved 3 of those 9 lambdas out of `other`: the arm now reads the
+//! operand inside a lambda composing `path(<one operand>)` and an optional
+//! `build(…)`, so such a site classifies from that operand and the remaining 6
+//! — which chain a `queryParam` — stay `other`. The figure predates the change
+//! and the table is not re-run here; the conclusion above is untouched, since
+//! constant folding still admits nothing either way.
+//!
 //! Go's 6 same-unit constants are likewise not paths: they are HTTP **header
 //! names** (`Origin`, `AccessControlRequestMethod`, `HeaderXForwardedHost`)
 //! read through `header.Get(…)` inside a `net/http` file — the then-documented

@@ -1029,21 +1029,28 @@ public class Calls {
 /// count.
 #[test]
 fn a_uri_builder_lambda_with_an_unresolvable_path_records_its_refusal_unchanged() {
-    assert_eq!(
-        client_call_rows(
-            r#"
-public class Calls {
+    // Both shapes the criterion names — a bare variable AND a runtime-composed
+    // base. The second is the one the criterion spells that the first does not
+    // cover: a concatenation is not a static literal and not an accessor, so it
+    // must reach the same refusal by a different route through the dispatch.
+    for (label, path_arg) in [("a bare variable", "uri"), ("a composed base", "base + uri")] {
+        assert_eq!(
+            client_call_rows(&format!(
+                r#"
+public class Calls {{
     private WebClient webClient;
-    Object runtime(String uri) {
-        return webClient.get().uri(builder -> builder.path(uri).build()).retrieve();
-    }
-}
+    private String base;
+    Object runtime(String uri) {{
+        return webClient.get().uri(builder -> builder.path({path_arg}).build()).retrieve();
+    }}
+}}
 "#
-        ),
-        (vec![], 1),
-        "a bare variable proves nothing, so the site stays the one keyless \
-         base-url-runtime row it was"
-    );
+            )),
+            (vec![], 1),
+            "{label} proves nothing, so the site stays the one keyless \
+             base-url-runtime row it was"
+        );
+    }
 }
 
 /// **S-399 AC3.** The composition is not approximated: a lambda that chains

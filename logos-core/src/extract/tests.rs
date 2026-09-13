@@ -3289,6 +3289,31 @@ fn a_lambda_nested_accessor_reaches_the_ledger_as_the_same_reference() {
          empty string)",
     );
 
+    // The BARE-receiver spelling too. Pattern 5 binds the operand as `(_)`, so
+    // the qualified and unqualified accessors are structurally identical at the
+    // query layer — but which `DeclaredTypes` arm answers for them is not
+    // (S-398 split `get` from `field` precisely there), so both spellings are
+    // asserted rather than one standing for the other.
+    let bare = ACCESSOR_CALLER_SOURCE.replace(
+        "uri(api.getUriGetArchive())",
+        "uri(builder -> builder.path(api.getUriGetArchive()).build(1))",
+    );
+    assert_ne!(bare, nested, "the two spellings really do differ");
+    let facts = extract_files(
+        &[
+            FileInput::new(ACCESSOR_PROPS_FILE, ACCESSOR_PROPS_SOURCE),
+            FileInput::new(ACCESSOR_CALLER_FILE, &bare),
+        ],
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        client_call_targets(&facts, ACCESSOR_CALLER_FILE),
+        expected,
+        "an unqualified receiver inside the lambda reaches the same key through \
+         `DeclaredTypes::get`, as it does outside one",
+    );
+
     // The negative control, on the SAME nested fixture: with the properties
     // class removed the identical site records no key and stays the keyless
     // refusal row. Without it the assertion above would also be produced by a
