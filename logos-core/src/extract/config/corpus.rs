@@ -618,10 +618,12 @@ pub struct ConfigValueFact {
 /// The corpus admits **3** `.properties` sources of its 174; the **31** is a count
 /// of `application*.properties` on the estate's *disk*, of which **28** sit under a
 /// hidden `.helm/` directory the discovery walk never enters and which were never
-/// corpus candidates at all. The site-level cost of the gap is **0 of 108** — no
-/// accessor site on that estate resolves only via a `.properties` source. A residue
-/// of zero does not close the ingestion gap; it means this estate commits the keys
-/// its accessors read in yaml. Pinned by `properties_residue` /
+/// corpus candidates at all. The site-level cost of the gap is **0 of 96** — no
+/// accessor site on that estate resolves only via a `.properties` source. (It read
+/// 0 of 108 when first measured; [S-398] T2 re-recorded the denominator after
+/// [S-402] emptied the Go row of that arm. The denominator moved; the residue did
+/// not.) A residue of zero does not close the ingestion gap; it means this estate
+/// commits the keys its accessors read in yaml. Pinned by `properties_residue` /
 /// `properties_files_on_disk` in
 /// `tests/operand_resolvability/configuration_agreement.rs`.
 /// Closing the gap needs a `.properties` artifact plugin — registry work that no
@@ -629,6 +631,8 @@ pub struct ConfigValueFact {
 /// on this estate rather than at 31.
 ///
 /// [S-397]: ../../../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
+/// [S-398]: ../../../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
+/// [S-402]: ../../../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
 pub fn source_facts(path: &str, text: &str) -> Option<ConfigSourceFact> {
     let name = path.rsplit('/').next().unwrap_or(path);
     let profile = config_profile(name)?;

@@ -1,187 +1,289 @@
-S-397 T2 — WHAT THE SHIPPED PIPELINE ADMITS ON THE REFERENCE ESTATE
+S-398 T2 — WHAT THE SHIPPED PIPELINE ADMITS ON THE REFERENCE ESTATE
 ===================================================================
 
 Measured  2026-09-13
 Corpus    ~/source/pec-services — 84 members declared, 84 read, covers_all = true
-Binary    built from sprint-68-I2-S1 at merge base dbc1c443 (S-397 T1 merged),
-          logos 1.4.9, release profile
+Binary    built from sprint-69-I2-S1 at merge base 3eebf933 — main with the whole
+          of Sprint 69 Iteration 1 merged (S-398 T1, S-402 T1, S-400 T1,
+          S-401 T1), logos 1.4.10, release profile
 Surface   `logos workspace status --json` — federation::discover ->
           EngineRegistry<Engine>(RegistryMode::Lazy) -> query::workspace_status
           -> serde_json, i.e. exactly what cli/src/main.rs `Output::print`
-          serializes for `--json`
+          serializes for `--json`.  NOT the measurement harness: that
+          distinction is the task, and the two are cross-checked below rather
+          than substituted for one another.
 Harness   logos-core/tests/config_bound_admission.rs
           (LOGOS_REF_WORKSPACE=~/source/pec-services)
-Wall      re-index 67 s over 84 members; status read 45 s
+Wall      re-index 67 s over 84 members (18:34:44Z -> 18:35:51Z), exit 0 on all
+          84; status read ~35 s
+
+This supersedes the S-397 T2 finding this file previously held. That record was
+correct at its date and is not retracted; its figures are carried below as the
+BEFORE column so the movement is legible rather than overwritten.
 
 
-THE HEADLINE — AC2's CRITERION IS NOT MET
------------------------------------------
+NO FLOOR IS ASSERTED ON EITHER FIGURE
+-------------------------------------
 
-  rows carrying `config-bound` provenance      44      floor: 79
+Both figures below are reported with their own denominators and nothing else.
+S-397 AC2's floor of 79 is exceeded, which is recorded as an outcome and is
+deliberately NOT re-armed as a criterion: a census figure is a statement about
+what is DERIVABLE, and Sprint 68 recorded at length what happens when one is
+promoted to a prediction about the product — the product admitted 44 against a
+floor of 79 and the CRITERION turned out to be the defect.
 
-  Against the 0 the same payload carried over the PRE-HOP INDEX GENERATION,
-  verified on this machine before the re-index (see BASELINE below). The
-  discriminator is the index generation, not the binary: both readings were
-  produced by a logos 1.4.9 binary, and the stores were cold-indexed 2026-09-08
-  with 1.4.7 — before the accessor hop, which records its key at index time. The move from 0 is real and is the
-  whole of what T1 bought. The floor is not met, and the figure is recorded at
-  44 rather than rounded, re-based or netted against a smaller denominator.
-
-
-THE FIGURE WITH ITS DENOMINATORS
---------------------------------
-
-  44 of 108   the accessor denominator — production client-call sites the arm
-              refuses today, the S-382 reading's own population, measured on
-              the same corpus by
-              operand_resolvability/configuration_agreement.rs
-
-              THAT FILE OWNS THIS FIGURE. It is pinned there by
-              (denominator, resolved, divergent, no_key) == (108, 79, 2, 27),
-              and nothing in this document or in config_bound_admission.rs can
-              verify it — so if it moves, that assertion reds first and its
-              message lists every place, including this one, to re-record. The
-              figure has drifted silently once already (111 -> 108).
-  44 of  81   what the measurement harness proves resolvable on that
-              denominator (79 agreed-key + 2 overlay-divergent)
-  44 of  79   against the criterion's floor, which is the 79 alone
-
-  The 44 split by display bucket:
-
-              bound                      5
-              ambiguous                  9
-              no-provider-in-workspace  30
-
-  `bound: 5` is not a coverage claim. A `config-bound` row is deliberately
-  excluded from `resolved_cross_service_edges` (the bridge still keys a
-  consumer on its raw ledger target), so the estate's resolved-edge count is
-  still 0; the 5 is what this estate's own topology yields for the resolved
-  templates.
-
-  Rows carrying `config-unresolved` provenance: 0. No admitted accessor names a
-  key the committed sources fail to define — so the shortfall is CAPTURE, not
-  resolution, and nothing is being lost at the corpus.
+And a lower refusal count is not a coverage gain on its own. Two independent
+things moved here, one of each kind, and they are never netted.
 
 
-THE SHORTFALL IS ONE MECHANISM, AND T1 PREDICTED IT
----------------------------------------------------
+(a) THE RESOLVED-PLACEHOLDER COUNT, WITH ITS DENOMINATORS
+---------------------------------------------------------
 
-The members' invocation ledgers hold 132 `http-client-call` rows, of which 44
-carry a `${…}` target — the placeholder form the accessor hop records. All 44
-reach the payload: nothing is lost in the coverage tier. So the gap is at
-capture time, and it is diagnosable site by site.
+                                                     after    before
+  rows carrying `config-bound` provenance               81        44
+    of which bucket `bound`                             15         5
+    of which bucket `ambiguous`                         23         9
+    of which `unbound` / no-provider-in-workspace       42        30
+    of which `unbound` / path-not-composed               1         0
+  rows carrying `config-unresolved` provenance           0         0
+  rows carrying no `provenance` key at all               0         0
+  bound key entries across those rows                   81        44
+    …of which carry an overlay-divergent key             2         2
 
-Diffing the harness's 94-site Java census against those ledgers:
+  Every one of the 81 is an `intake: invocation`, `relation: route` row, and
+  every bound entry reads `"source": "placeholder"`.
 
-  resolved by the harness AND captured in production      42
-  captured in production, refused by the harness           2   (the two
-                                                               overlay-divergent
-                                                               sites; ADR-64
-                                                               admits them,
-                                                               CR-115 §3.4 did
-                                                               not)
-  resolved by the harness, NOT captured in production     37
+  Denominators, each stated rather than chosen:
 
-  All 37 spell `this.`:
-      this.mailboxConfigurationApi.getUriGetMailbox()
-      this.mailServerConfigurationApi.getUriUpdateArchive()
-      this.filterApiProperties.getUriGetFilter()
-      …
+    81 of  96   the accessor denominator — production client-call sites the
+                arm refuses without configuration, the S-382 reading's own
+                population, measured on the same corpus by
+                operand_resolvability/configuration_agreement.rs.
+                THAT FILE OWNS THIS FIGURE and pins it at
+                (denominator, resolved, divergent, no_key) == (96, 79, 2, 15).
+                It has now moved twice: 111 -> 108 (a silent corpus drift that
+                predates S-382) and 108 -> 96 (S-402, below).
+    81 of  81   what the measurement harness proves resolvable on that
+                denominator (79 agreed-key + 2 overlay-divergent). This upper
+                bound did NOT move across either drift.
+    81 of 160   the whole invocation-intake reference population
+    81 of 106   the HTTP arm of it (`relation: route`)
+    81 of 1034  every cross-boundary reference the payload classifies
 
-`extract::config::accessor` refuses a QUALIFIED RECEIVER by design (NFR-RA-05 —
-never guess), where the harness's `operand_name` trims the expression to its
-last segment and resolves it. S-397 T1's implementation notes record exactly
-this ceiling, in as many words: "the census can resolve a site the product will
-not". The 79 the criterion was written against is a census figure, and 37 of
-those 79 sites are reachable only through that trim.
-
-Arithmetic: 79 agreed − 37 `this.`-qualified = 42, plus the 2 divergent the
-product captures = 44.
+  The 81-of-81 coincidence is an observation on ONE estate, not a property. The
+  totals agree and the divergent split agrees (2 rows carry a `values` list with
+  more than one entry, matching the harness's 2 disagreeing sites); site-level
+  identity of the two sets was not independently checked and is not claimed.
 
 
-THE .properties RESIDUE — AC5, STATED AS A NUMERATOR
------------------------------------------------------
+(b) THE `base-url-runtime` RESIDUE, WITH ITS OWN DENOMINATORS
+-------------------------------------------------------------
 
-  RESIDUE: accessor sites resolved ONLY by a `.properties` source   0 of 108
+                                                     after    before
+  rows whose `reason` is `base-url-runtime`             24        87
+
+  All 24 are `intake: invocation`, `relation: route` rows. Denominators:
+
+    24 of 160   the whole invocation-intake reference population (was 186)
+    24 of 106   the HTTP arm of it (was 132)
+    24 of 117   the egress-resolution denominator the payload computes its own
+                ratio over — bound + ambiguous + unbound, excluding the
+                no-provider bucket ADR-53 holds outside it (was 155)
+
+  By member, which is what makes the attribution below a measurement:
+
+    member                    after   before   delta
+    hermodr-mirror               11       37     -26
+    mailbox-aggregator-api        8       27     -19
+    funnel-aggregator-api         1       13     -12
+    archive-manager               0        5      -5
+    pecserver-facade              4        4       0
+    notification-adapter          0        1      -1
+
+
+WHICH PART IS AN ADMISSION AND WHICH PART IS A POPULATION CORRECTION
+--------------------------------------------------------------------
+
+S-398 T1 — AN ADMISSION.  37 sites.
+
+  `config-bound` rows rose by exactly +37, and the `base-url-runtime` residue
+  fell by exactly 37 in the same four Java members, per member:
+
+    member                    config-bound     base-url-runtime
+    mailbox-aggregator-api      11 -> 30 (+19)     27 ->  8 (-19)
+    funnel-aggregator-api        8 -> 20 (+12)     13 ->  1 (-12)
+    archive-manager              0 ->  5  (+5)      5 ->  0  (-5)
+    notification-adapter         1 ->  2  (+1)      1 ->  0  (-1)
+    pecserver-facade            21 -> 21   (0)      4 ->  4   (0)
+
+  Row for row, in the same member, a site that refused with an empty target now
+  carries a resolved, committed value. `pecserver-facade` is the control: its
+  accessors were already unqualified, so S-398 had nothing to add there and
+  neither column moved.
+
+  37 is also exactly the figure S-397 T2 diagnosed as the remaining gap — "37
+  sites and every one of them spells `this.`". The prediction and the outcome
+  agree to the site.
+
+S-402 T1 — A PRECISION CORRECTION.  26 sites.
+
+  The captured invocation-intake population itself fell 186 -> 160, all of it in
+  `hermodr-mirror`, the estate's one Go member, whose captured client-call sites
+  went 37 -> 11 when the candidacy gate became receiver-grained. That reproduces
+  S-402's own 37 -> 11 measurement independently, through the shipped surface and
+  over the whole estate, where S-402 measured it on an isolated copy of the one
+  member.
+
+  All 26 were keyless refusals: they produced no reference target and no edge, so
+  nothing that bound stopped binding. But the `base-url-runtime` count falls by
+  26 for a reason that is not a coverage gain, and every egress denominator falls
+  with it.
+
+  Netting the two would report 63 fewer refusals (87 -> 24) as one improvement.
+  37 of the 63 are an admission and 26 are a smaller population.
+
+
+THE HEADLINE FIGURES THE SAME PAYLOAD CARRIES
+----------------------------------------------
+
+                                        after                    before
+  references                             1034                      1060
+  bound / ambiguous / unbound      96 / 169 / 80           86 / 155 / 142
+  no-provider-in-workspace                689                       677
+  by_intake contract-surface     81/146/1/646              81/146/1/646
+  by_intake invocation            15/23/79/43                5/9/141/31
+  resolved_cross_service_edges              0                         0
+  egress_resolution        0.128 (15 of 117)         0.032 (5 of 155)
+  spec_conformance_ratio   0.278 (96 of 345)        0.225 (86 of 383)
+
+  The contract-surface column is byte-identical across the two runs; every cell
+  that moved is in the invocation column.
+
+  `resolved_cross_service_edges` IS STILL 0, and that is not a defect in this
+  measurement. A `config-bound` row is deliberately excluded from that headline —
+  the coverage tier resolves the placeholder, but the bridge still keys a
+  consumer on its raw ledger target, so no edge is drawn for it yet.
+
+  The egress denominator fell 155 -> 117, and the -38 decomposes as -26 (S-402's
+  smaller population) and -12 (rows S-398 admitted whose resolved template names
+  a service with no provider in this workspace, so they moved from `unbound`,
+  which is inside the denominator, to `no-provider-in-workspace`, which ADR-53
+  holds outside it). Invocation `no_provider_in_workspace` rose 31 -> 43, +12,
+  which is the other side of that same movement.
+
+  So `egress_resolution` reads four times its previous value, and BOTH of its
+  terms moved. It is quoted here with its denominator for that reason and should
+  never be quoted without one.
+
+
+THE ONE NEW `path-not-composed` INVOCATION ROW
+-----------------------------------------------
+
+One of the 81 admitted rows refuses under `path-not-composed` — the arm accepted
+a `"METHOD /template"` and `route_key` declined it. There was no such invocation
+row before. It is:
+
+  mailbox-aggregator-api  MailboxApiRestClient#getExportDownloadLink()
+  key   mailboxaggregate.api.urigetexportdownloadlink
+  value /v1/users/{userId}/mailboxes/{mailboxId}/import-export/download-exported/{job-id}
+
+The estate's PROVIDER half of that same path — the swagger operation in
+`software-architecture-documents` — reads `path-not-composed` too, and did
+before this change. So the refusal is symmetric: both ends decline the same
+template and no edge is being lost to a one-sided normalizer. One row is not a
+trend; it is recorded here rather than explained, and it is not chased in this
+task, which widened nothing.
+
+
+THE `.properties` RESIDUE — RESTATED OVER THE NEW DENOMINATOR
+--------------------------------------------------------------
+
+  RESIDUE: accessor sites resolved ONLY by a `.properties` source   0 of 96
   sites a `.properties` source contributes a value to beside a
-    source production reads                                         0 of 108
+    source production reads                                         0 of 96
   `.properties` files among the corpus's admitted sources           3 of 174
-  `application*.properties` files on the estate's disk                    31
-  …of which sit under a hidden `.helm/` directory the discovery
-    walk never enters                                                     28
 
-Measured by `configuration_agreement::properties_residue`, whose counterfactual
-is production's own: a source whose path ends `.properties` is removed from the
-definition set and the site is asked whether any definition survives — which is
-what production sees, because production never ingested the file.
-
-A residue of ZERO does not mean the gap is closed. Production ingestion still
-reads no `.properties` at all (`source_facts` is reached only for a file the
-plugin registry claims; no descriptor claims the extension; no story owns the
-artifact plugin that would). What the zero says is what the gap COSTS TODAY on
-THIS corpus: nothing, because this estate commits the keys its accessors read
-in yaml. It accounts for none of the 44-against-79 shortfall.
-
-This replaces a prose line that read "31 of the 174 discovered sources", which
-was wrong on both halves: the 174 admitted sources hold 3 `.properties` files,
-and the 31 is a disk count of which 28 are not in the 174 at all.
-
-
-BASELINE: THE 0 THIS IS MEASURED AGAINST
-----------------------------------------
-
-Before the re-index, the same command against the same 84 stores (cold-indexed
-2026-09-08 with 1.4.7) returned:
-
-  references 929   bound 81   ambiguous 146   unbound 55   no-provider 647
-  by_intake  contract-surface 81/146/1/646   invocation 0/0/54/1
-  rows carrying `config-bound` provenance: 0
-
-which reproduces CR-120 CRA-02 and the S-377 recorded split exactly. That 0 is
-AC2's comparison point and it was verified on this machine, not quoted.
-
-After the re-index, the same command returns:
-
-  references 1060  bound 86   ambiguous 155   unbound 142  no-provider 677
-  by_intake  contract-surface 81/146/1/646   invocation 5/9/141/31
-  rows carrying `config-bound` provenance: 44
-
-The contract-surface column is byte-identical across the two runs; every cell
-that moved is in the invocation column. The invocation `unbound` column rose by
-87 — the S-374 HTTP client-call refusals the 1.4.7 store predates, which the
-S-377 finding anticipated at "roughly 115 production rows".
+The denominator moved (108 -> 96); the residue did not. Production ingestion
+still reads no `.properties` at all. A residue of zero says what the gap COSTS
+TODAY on THIS corpus, not that it is closed.
 
 
 THE RE-INDEX
 ------------
 
-The figure required one, because the accessor hop records its key at INDEX
-time: the 1.4.7 stores could not carry it whatever the reading binary. Run once
-by hand before the measurement:
+Required, because the accessor hop records its key at INDEX time: stores written
+before it could not carry the key whatever the reading binary. Run once, by
+hand, before the measurement, and NOT by this harness — a harness that quietly
+re-indexed would make its own figure unattributable.
 
-  84 members, `logos --project <member> index`, exit 0 on every one
-  7,895 files indexed, 93,249 nodes created, 67 s total
-  3 members indexed 0 files — they are empty checkouts (0 entries on disk)
+  84 members, `logos --project <member> --quiet index`, exit 0 on every one
+  (84 of 84), 67 s total
+  7,895 files, 93,838 nodes, 102,427 edges, summed from `status --json` per
+  member afterwards
+  3 members indexed 0 files — official-log-export-reporting-adapter,
+  official-log-metrics-adapter, pecserver-reporting-adapter — they are empty
+  checkouts
 
-The 7,895 reproduces the 2026-09-08 cold baseline exactly. Node count moved
-from 93,838 to 93,249 (−589) across the 1.4.7 → 1.4.9+T1 version change; it is
-recorded here rather than explained, because nothing in this story turns on it.
+The 7,895 reproduces the 2026-09-08 cold baseline and the 2026-09-13 S-397
+re-index exactly. The node count reads 93,838, which is the 1.4.7 cold baseline
+figure and +589 on the 93,249 S-397 T2 recorded a few hours earlier on the same
+corpus. Recorded rather than explained: nothing in either figure above turns on
+it, and it is stated so a later reader does not discover it as a surprise.
 
-Two committed harnesses pin estate figures the re-index moved, and both carry
-an explicit "RECORD the new figure" instruction rather than a tolerance. Both
-were re-recorded:
+A CONTROL RUN WAS TAKEN FIRST, and it is what makes the re-index the only
+discriminator. Before touching the stores, the same new binary read the same
+84 stores as they stood (indexed 2026-09-13 with 1.4.10, pre-sprint) and
+returned the coordinator's pre-sprint baseline to the digit: 1060 references,
+44 `config-bound`, 87 `base-url-runtime`, by_intake invocation 5/9/141/31,
+`0 resolved cross-service edges; egress resolution 0.032 (5 of 155 egress sites
+resolved)`, spec_conformance_ratio 0.2245430809399478. So no part of the
+movement above is a read-model change in the measuring binary; all of it is
+capture, and the re-index is what applied it.
 
-  coverage_intake_split.rs          81/0 bound split -> 81/5, 929 refs -> 1060
-  coverage_headline_baseline.rs     artifact rewritten via LOGOS_BASELINE_WRITE=1
+
+THREE COMMITTED HARNESSES PIN ESTATE FIGURES THIS RE-INDEX MOVED
+-----------------------------------------------------------------
+
+Each carries an explicit "RECORD the new figure" instruction rather than a
+tolerance, and each was re-recorded in the same change:
+
+  config_bound_admission.rs        44 -> 81, buckets, 1060 -> 1034 refs
+  coverage_intake_split.rs         bound split 81/5 -> 81/15, 1060 -> 1034
+  coverage_headline_baseline.rs    artifact rewritten via LOGOS_BASELINE_WRITE=1
+  configuration_agreement.rs       s382 (108,79,2,27) -> (96,79,2,15); the
+                                   non-vacuity floor 100 -> 90
+
+A FOURTH PLACE WAS DELIBERATELY NOT TOUCHED: the S-397 T2 figures in
+docs/planning/sprints/sprint-impl-68.md, which the configuration_agreement
+assertion's message used to list. They are a DATED record of what the product
+emitted before S-398 T1, they were correct at that date, and rewriting them
+would falsify a delivered sprint's notes rather than repair a stale one. The
+live figure lives here and in sprint-impl-69.md, and the assertion's message now
+says so.
+
+
+VOID IS NOT ZERO (NFR-CC-04)
+-----------------------------
+
+This run saw the estate: 84 members declared, 84 read, covers_all = true, 1034
+references classified. Had it not, the figures above would read VOID and not 0 —
+"measured zero" and "measured nothing" are different findings. The harness
+enforces that with three gates that panic rather than pass with a zero, and they
+are exercised by this run rather than merely present.
 
 
 WHAT A READER SHOULD NOT CONCLUDE
 ---------------------------------
 
-* Not "the pipeline resolves 44 of the estate's couplings". It admits 44 rows
-  carrying a resolved, committed value; 5 of them bind a provider, and none of
+* Not "the pipeline resolves 81 of the estate's couplings". It admits 81 rows
+  carrying a resolved, committed value; 15 of them bind a provider, and none of
   them draws a cross-service edge.
+* Not "egress resolution quadrupled". Both terms of that ratio moved, and 26 of
+  the 38 sites that left its denominator left for a reason that is not a
+  coverage change.
+* Not "the refusal count fell by 63, so coverage rose by 63". 37 of the 63 are
+  an admission; 26 are a population correction.
+* Not "81 is a floor the product now holds". It is what was measured on one
+  estate on one date, pinned exactly so a move in either direction is seen.
 * Not "the .properties gap is closed". It is open, unowned, and currently free.
-* Not "79 was wrong". 79 is a correct census figure. What it is not is a
-  prediction of the product, because 37 of its sites rest on a receiver trim
-  the product refuses on purpose.
+* Not "79 was wrong". 79 is a correct census figure and remains one.

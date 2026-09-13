@@ -2120,10 +2120,29 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
     // a broker arm that regressed to 6 sites of which 5 admit still reads
     // "material". These guard the ORDER OF MAGNITUDE the finding was recorded
     // at, loosely enough to survive corpus churn.
+    //
+    // **The client floor was re-recorded 100 -> 90 by [S-398] T2, and the cause is
+    // named rather than absorbed.** The whole client-call arm fell 140 -> 96 when
+    // [S-402] made the Go client-call candidacy gate receiver-grained: the `go` row
+    // of the per-language table went from a denominator the S-365 finding described
+    // as "41 Go names the unit never binds" to `denom 0, literal 11`. **The `java`
+    // row did not move at all** — 94 denom / 79 new / 2 divergent / 13 no-key,
+    // byte-identical to the census `config_bound_admission.rs` diffs against — which
+    // is what says the fall is [S-402]'s precision correction and no part of it is
+    // [S-398]'s admission. That invariance is structural, not luck: this arm's
+    // denominator is "sites whose composition needs a value the source does not
+    // hold", decided by `is_already_static_literal` on operand KINDS, and [S-398]
+    // widened what an operand RESOLVES to, never what kind it is. A story that did
+    // move the Java row would be changing the harness's own population and would owe
+    // this guard a fresh reading rather than a relaxed floor.
+    //
+    // [S-398]: ../../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
+    // [S-402]: ../../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
     assert!(
-        client.denominator >= 100 && broker.denominator >= 40,
-        "the recorded finding measured 140 client / 54 broker refused-today sites; this run \
-         saw {} / {}. A collapsed denominator is a broken harness, not a new finding.",
+        client.denominator >= 90 && broker.denominator >= 40,
+        "the recorded finding measured 96 client / 54 broker refused-today sites (the client \
+         arm was 140 before S-402 corrected the Go gate); this run saw {} / {}. A collapsed \
+         denominator is a broken harness, not a new finding.",
         client.denominator,
         broker.denominator,
     );
@@ -2204,40 +2223,73 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
     // criterion is a reproduction claim: a run that produced different numbers
     // has either changed the rule or changed the corpus, and both need a human.
     let s382 = s382_reading(m);
-    // **The denominator has drifted from the recorded finding, and that is stated
-    // here rather than absorbed into a looser assertion.** S-382 AC5 is written
-    // over S-365's recorded figures — 79 of **111** production client-call sites,
-    // 2 divergent, **30** no-key. This run reads 79 of **108**, 2 divergent, **27**
-    // no-key: three sites have left the arm's denominator and all three were
-    // `no-key` refusals. The drift is **not** this story's: measured on the same
+    // **The denominator has moved TWICE now, for two unrelated reasons, and both
+    // are stated here rather than absorbed into a looser assertion.** S-382 AC5 is
+    // written over S-365's recorded figures — 79 of **111** production client-call
+    // sites, 2 divergent, **30** no-key.
+    //
+    // *First move, a corpus drift that predates S-382:* measured on the same
     // reference workspace at the merge base (2026-09-12, before any S-382 change),
-    // the run already read 79 of 108 / 137 whole-arm against the finding's 111 /
-    // 140. S-365's own guard is `denominator >= 100`, so a three-site drift was
-    // invisible to it by construction.
+    // the run already read 79 of **108** / 137 whole-arm. S-365's own guard was
+    // `denominator >= 100`, so a three-site drift was invisible to it by
+    // construction.
+    //
+    // *Second move, re-recorded by [S-398] T2 on 2026-09-13 over the re-indexed
+    // estate:* this run reads 79 of **96**, 2 divergent, **15** no-key. Twelve
+    // sites left, and **every one of them left the `no_key` residue** (27 -> 15)
+    // while `resolved` and `divergent` did not move at all. That shape is the
+    // attribution:
+    //
+    // * The `java` row of the per-language table is byte-identical across the
+    //   move — `denom 94 / new 79 / disagree 2 / no-key 13`, the same 94-site Java
+    //   census `config_bound_admission.rs` diffs against. 94 + the 2 python sites
+    //   = the 96 read here, so today's population is Java and Python only.
+    // * The `go` row is now `denom 0` (11 sites, all already static literals),
+    //   because [S-402] made the Go client-call candidacy gate receiver-grained and
+    //   dropped 26 captured non-call sites. Go was the only other language with
+    //   client-call sites in this population, so the 12 that left were Go — an
+    //   arithmetic reading of two rows whose invariance is measured, not an
+    //   independent per-language re-derivation of the pre-change split.
+    // * **No part of the move is [S-398]'s**, and that is structural rather than
+    //   lucky: this arm's denominator is "gate-admitted sites whose composition
+    //   needs a value the source does not hold", decided by
+    //   `is_already_static_literal` on operand KINDS. [S-398] widened what an
+    //   operand RESOLVES to and never what kind it is, so a site it admits stays
+    //   in this denominator and merely becomes one of the 79 the arm already
+    //   counted as newly admitted. The product-side figure moved 44 -> 81 on the
+    //   same run; this one did not move at all.
     //
     // Pinned at what the run produces rather than at what the criterion quotes,
     // because a test asserting 111 would fail on a corpus nothing in this
     // repository controls; the three figures the criterion is actually *about* —
     // 79 resolved, 2 divergent, each emitting two profile-labelled values — are
-    // reproduced exactly.
+    // reproduced exactly, and have been across every move.
+    //
+    // [S-398]: ../../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
+    // [S-402]: ../../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
     assert_eq!(
         (s382.denominator, s382.resolved, s382.divergent, s382.no_key),
-        (108, 79, 2, 27),
+        (96, 79, 2, 15),
         "S-382 AC5 names 79 production client-call sites resolved and 2 divergent, over \
-         a denominator S-365 recorded as 111 (30 no-key) and this repository now \
-         measures as 108 (27 no-key) — a corpus drift that predates S-382. This run \
-         read {s382:?}. Re-measure against the reference workspace's recorded 1.4.7 \
-         baseline before changing this assertion.\n\
+         a denominator S-365 recorded as 111 (30 no-key), which drifted to 108 (27 \
+         no-key) before S-382 and which S-398 T2 re-recorded as 96 (15 no-key) on \
+         2026-09-13 after S-402 emptied the Go row. This run read {s382:?}. Re-measure \
+         against the reference workspace before changing this assertion.\n\
          \n\
-         THIS DENOMINATOR IS RESTATED IN FOUR PLACES THIS BINARY CANNOT REACH, and \
-         it has drifted silently once already (111 -> 108). If it moves, re-record \
+         THIS DENOMINATOR IS RESTATED IN THREE PLACES THIS BINARY CANNOT REACH, and \
+         it has now moved twice (111 -> 108 -> 96). If it moves again, re-record \
          ALL of them in the same change:\n\
          \x20 - `ACCESSOR_DENOMINATOR` in logos-core/tests/config_bound_admission.rs \
-         (the 108), and the `79 agreed + 2 divergent = 81` upper bound its module \
-         docs state;\n\
+         (the 96), and the `79 agreed + 2 divergent = 81` upper bound its module \
+         docs state — that upper bound has NOT moved across either drift;\n\
          \x20 - logos-core/tests/config_bound_admission/config_bound_admission_finding.txt;\n\
-         \x20 - the accessor-denominator table in docs/howto/commands.md;\n\
-         \x20 - the S-397 T2 figures in docs/planning/sprints/sprint-impl-68.md.",
+         \x20 - the accessor-denominator table in docs/howto/commands.md.\n\
+         \n\
+         A FOURTH PLACE WAS DELIBERATELY DROPPED FROM THIS LIST: the S-397 T2 figures \
+         in docs/planning/sprints/sprint-impl-68.md. They are a DATED record of what \
+         the product emitted on 2026-09-13 before S-398 T1, they were correct at that \
+         date, and rewriting them would falsify a delivered sprint's notes rather than \
+         repair a stale one. The live figure lives here and in sprint-impl-69.md.",
     );
     assert_eq!(
         s382.divergent_values, 4,
