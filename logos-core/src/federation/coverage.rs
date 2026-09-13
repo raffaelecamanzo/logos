@@ -47,7 +47,7 @@ use super::bridge::{
     sort_buckets, BridgeEndpoint, BridgeIntake, MemberContracts, PortableKey, ProviderIndex,
     Role,
 };
-use super::registry::{EngineRegistry, MemberEngine};
+use super::registry::{AnswerScope, EngineRegistry, MemberEngine};
 
 /// Why one cross-boundary reference did not bind ([FR-WS-05], [ADR-53]).
 ///
@@ -1205,8 +1205,14 @@ pub struct SpecConformanceReading {
     pub spec_conformance_summary: String,
 }
 
-/// Classify every cross-boundary reference over `registry`'s members
-/// ([FR-WS-05], [ADR-53]).
+/// Classify every cross-boundary reference over the members of `answer`'s
+/// registry ([FR-WS-05], [ADR-53]).
+///
+/// Takes the [`AnswerScope`] rather than the registry because this tier makes
+/// **two** all-member walks and is itself composed into read-models that make
+/// more (`workspace_status`, `app_wide_reachability`): the scope is what makes a
+/// broken member cost one open attempt and one diagnostic across all of them
+/// ([FR-WS-16], [NFR-PE-10]).
 ///
 /// Reads each member's contract surface through the same
 /// [`MemberContracts::contract_surface`] the bridge uses, indexes providers on
@@ -1225,7 +1231,7 @@ pub struct SpecConformanceReading {
 ///
 /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-pub fn cross_service_coverage<E>(registry: &EngineRegistry<E>) -> CrossServiceCoverage
+pub fn cross_service_coverage<E>(answer: &AnswerScope<'_, E>) -> CrossServiceCoverage
 where
     E: MemberEngine + MemberContracts,
 {
@@ -1256,7 +1262,7 @@ where
     let mut ledger_endpoints: std::collections::HashSet<(PortableKey, bool, String, String)> =
         std::collections::HashSet::new();
 
-    let surfaces = read_members(registry, "contract surface", |e| e.contract_surface());
+    let surfaces = read_members(answer, "contract surface", |e| e.contract_surface());
     // The members that actually contributed — the numerator of the coverage
     // marker below. A member whose engine failed to start or whose surface read
     // failed is skipped here, and without recording that shortfall the summary
@@ -1297,7 +1303,7 @@ where
     //
     // [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
     // [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    for (member, refs) in read_members(registry, "invocation references", |e| e.invocation_refs()) {
+    for (member, refs) in read_members(answer, "invocation references", |e| e.invocation_refs()) {
         for reference in refs {
             match reference.relation.bridge_role() {
                 Some(BridgeRole::Consumer) => {
@@ -1424,7 +1430,7 @@ where
     // (S-382). A member with no such reference is not read at all; a member whose
     // read fails contributes an empty corpus, so its references refuse as
     // `config-key-missing` rather than aborting the workspace ([ADR-53]).
-    let corpora = member_corpora(registry, &inv_consumers);
+    let corpora = member_corpora(answer.registry(), &inv_consumers);
 
     // Classify the arm-tagged invocation consumers against the same provider index
     // (S-252 HTTP, S-253 gRPC, S-254/S-256 broker). A stored consumer target
@@ -1539,7 +1545,7 @@ where
         );
     }
 
-    tally.finish(members_read, registry.members().len())
+    tally.finish(members_read, answer.registry().members().len())
 }
 
 /// A member's committed configuration, as the coverage tier reads it: canonical
@@ -2393,7 +2399,7 @@ mod tests {
         set_member("api", vec![op("GET /users/{id}", "local op_get")]);
         set_member("web", vec![route("GET /users/{id}", "local route_get")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let cov = cross_service_coverage(&registry(&["api", "web"]).answer());
 
         assert_eq!(cov.members_read, 2);
         assert_eq!(cov.members_total, 2);
@@ -2418,7 +2424,7 @@ mod tests {
         // `broken`'s engine start fails; it would have provided the route.
         set_member("broken", vec![route("GET /users/{id}", "local route_get")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "broken"]));
+        let cov = cross_service_coverage(&registry(&["api", "broken"]).answer());
 
         assert_eq!(cov.members_read, 1, "only `api` contributed");
         assert_eq!(cov.members_total, 2);
@@ -2454,7 +2460,7 @@ mod tests {
         set_member("api", vec![op("GET /users/{id}", "local op_get")]);
         set_member("unreadable", vec![route("GET /users/{id}", "local route_get")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "unreadable"]));
+        let cov = cross_service_coverage(&registry(&["api", "unreadable"]).answer());
 
         assert_eq!(cov.members_read, 1);
         assert_eq!(cov.members_total, 2);
@@ -2483,7 +2489,7 @@ mod tests {
         reset();
         set_member("broken", vec![route("GET /users/{id}", "local route_get")]);
 
-        let cov = cross_service_coverage(&registry(&["broken"]));
+        let cov = cross_service_coverage(&registry(&["broken"]).answer());
 
         assert_eq!(cov.members_read, 0, "not one member contributed");
         assert_eq!(cov.members_total, 1);
@@ -2507,7 +2513,7 @@ mod tests {
     #[test]
     fn an_empty_workspace_covers_all_members_and_measures_nothing() {
         reset();
-        let cov = cross_service_coverage(&registry(&[]));
+        let cov = cross_service_coverage(&registry(&[]).answer());
 
         assert_eq!(cov.members_read, 0);
         assert_eq!(cov.members_total, 0);
@@ -2522,7 +2528,7 @@ mod tests {
         set_member("api", vec![op("GET /users/{id}", "local op_get")]);
         set_member("web", vec![route("GET /users/{id}", "local route_get")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let cov = cross_service_coverage(&registry(&["api", "web"]).answer());
 
         assert_eq!(cov.bound, 1);
         assert_eq!(cov.ambiguous, 0);
@@ -2612,7 +2618,7 @@ mod tests {
         set_member("api", vec![op("GET /users/{id}", "local op_get")]);
         set_member("web", vec![route("GET /users/{id}", "local route_get")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let cov = cross_service_coverage(&registry(&["api", "web"]).answer());
 
         let row = &cov.references[0];
         assert_eq!(row.state, CoverageState::Bound);
@@ -2652,7 +2658,7 @@ mod tests {
         set_member("web", vec![route("GET /users/{id}", "local route_get")]);
 
         let reg = registry(&["api", "web"]);
-        let cov = cross_service_coverage(&reg);
+        let cov = cross_service_coverage(&reg.answer());
         let edges = super::super::bridge::ContractBridge::new().edges(&reg);
 
         assert_eq!(edges.len(), 1, "one cross-service binding: {edges:?}");
@@ -2704,7 +2710,7 @@ mod tests {
             "mailbox-core",
             "mailbox-aggregator-api",
             "funnel-aggregator-api",
-        ]));
+        ]).answer());
 
         assert_eq!(cov.ambiguous, 1);
         assert_eq!(cov.bound, 0, "the exactly-one rule refuses, correctly");
@@ -2806,7 +2812,7 @@ mod tests {
         let mut names: Vec<&str> = subs.iter().map(String::as_str).collect();
         names.push("orders");
 
-        let cov = cross_service_coverage(&registry(&names));
+        let cov = cross_service_coverage(&registry(&names).answer());
 
         let publish = cov
             .references
@@ -2846,7 +2852,7 @@ mod tests {
         let mut names: Vec<&str> = providers.iter().map(String::as_str).collect();
         names.push("consumer");
 
-        let cov = cross_service_coverage(&registry(&names));
+        let cov = cross_service_coverage(&registry(&names).answer());
 
         assert_eq!(cov.ambiguous, 1);
         let tied = cov.references[0]
@@ -2896,7 +2902,7 @@ mod tests {
         set_consumers("billing", vec![broker_subscribe("orders.created", "local bill_sub")]);
         set_consumers("shipping", vec![broker_subscribe("orders.created", "local ship_sub")]);
 
-        let cov = cross_service_coverage(&registry(&["orders", "billing", "shipping"]));
+        let cov = cross_service_coverage(&registry(&["orders", "billing", "shipping"]).answer());
 
         let publish = cov
             .references
@@ -2949,7 +2955,7 @@ mod tests {
         );
 
         let reg = registry(&["orders", "billing"]);
-        let cov = cross_service_coverage(&reg);
+        let cov = cross_service_coverage(&reg.answer());
         let edges = super::super::bridge::ContractBridge::new().edges(&reg);
 
         let publish = cov
@@ -2983,7 +2989,7 @@ mod tests {
         set_member("api", vec![op("GET /orphans/{id}", "local op_orphan")]);
         set_member("web", vec![]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let cov = cross_service_coverage(&registry(&["api", "web"]).answer());
 
         let value = serde_json::to_value(&cov.references[0]).unwrap();
         for field in ["to", "candidates"] {
@@ -3315,7 +3321,7 @@ mod tests {
             ],
         );
 
-        cross_service_coverage(&registry(&["api", "web", "admin"]))
+        cross_service_coverage(&registry(&["api", "web", "admin"]).answer())
     }
 
     /// **The [CR-118] invariant: no reference changes bucket.** Every bucket, in one
@@ -3525,7 +3531,7 @@ mod tests {
             "mailbox-aggregator-api",
             "funnel-aggregator-api",
             "deprecated-mailbox-core",
-        ]));
+        ]).answer());
 
         // The shape is the reference workspace's, so the growth figure describes it.
         assert_eq!(cov.references.len(), 875);
@@ -3835,7 +3841,7 @@ mod tests {
             &[("src/main/resources/application-docker.yml", Some("docker"), "/orders")],
         );
 
-        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
 
         assert_eq!(cov.references.len(), 1);
         let row = &cov.references[0];
@@ -3881,7 +3887,7 @@ mod tests {
             ],
         );
 
-        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
 
         assert_eq!(cov.references.len(), 1, "one call site is one row, however many overlays");
         let Provenance::ConfigBound { bound } = &cov.references[0].provenance else {
@@ -3918,7 +3924,7 @@ mod tests {
         set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
         // Nothing committed at all.
 
-        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
 
         assert_eq!(cov.references.len(), 1);
         let row = &cov.references[0];
@@ -3948,7 +3954,7 @@ mod tests {
         set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
         commit_config("web", "orders.base", &[("application.yml", None, "${ORDERS_BASE}")]);
 
-        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
 
         assert_eq!(
             cov.references[0].state,
@@ -3971,7 +3977,7 @@ mod tests {
         // Committed by the PROVIDER, not by the member that reads the key.
         commit_config("orders", "orders.base", &[("application.yml", None, "/orders")]);
 
-        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
 
         assert_eq!(
             cov.references[0].state,
@@ -3993,7 +3999,7 @@ mod tests {
             vec![http_call("GET ${orders.base}/{id}", "local fetch_order")],
         );
 
-        let cov = cross_service_coverage(&registry(&["orders", "unreadable"]));
+        let cov = cross_service_coverage(&registry(&["orders", "unreadable"]).answer());
 
         // The member's surface read fails too, so it contributes no rows at all —
         // the degrade path — and the workspace still answers.
@@ -4014,7 +4020,7 @@ mod tests {
         set_member("web", vec![op("GET /orders/{id}", "local declared")]);
         set_consumers("web", vec![http_call("GET /orders/{id}", "local fetch_order")]);
 
-        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
 
         assert!(cov.references.len() >= 2);
         for row in &cov.references {
@@ -4140,7 +4146,7 @@ mod tests {
             &[("application-it.yml", Some("it"), "/orders")],
         );
 
-        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
         let json = serde_json::to_value(&cov).unwrap();
         let rows = json["references"].as_array().unwrap();
         let admitted = rows
@@ -4187,7 +4193,7 @@ mod tests {
         commit_config("web", "svc.base", &[("application.yml", None, "/orders")]);
         commit_config("web", "svc.version", &[("application-it.yml", Some("it"), "/v2")]);
 
-        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
 
         let Provenance::ConfigBound { bound } = &cov.references[0].provenance else {
             panic!("expected config-bound provenance: {:?}", cov.references[0]);
@@ -4233,7 +4239,7 @@ mod tests {
         // Composes `GET https://orders:8080` — absolute, so it never keys.
         commit_config("web", "orders.base", &[("application.yml", None, "https://orders:8080")]);
 
-        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
 
         assert_eq!(
             cov.references[0].state,
@@ -4267,7 +4273,7 @@ mod tests {
         set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
         commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
 
-        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
 
         assert!(
             cov.references.is_empty(),
@@ -4295,7 +4301,7 @@ mod tests {
         set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
         commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
 
-        let cov = cross_service_coverage(&registry(&["orders", "web"]));
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
 
         assert_eq!(cov.references[0].state, CoverageState::Bound, "the ROW is bound");
         assert_eq!(
@@ -4333,7 +4339,7 @@ mod tests {
             &[("application.yml", None, "orders-v1")],
         );
 
-        let cov = cross_service_coverage(&registry(&["api", "worker"]));
+        let cov = cross_service_coverage(&registry(&["api", "worker"]).answer());
 
         assert_eq!(cov.bound, 1, "the placeholder keys and binds as the literal it is");
         assert!(
@@ -4353,7 +4359,7 @@ mod tests {
         set_member("api", vec![op("GET /orphans/{id}", "local op_orphan")]);
         set_member("web", vec![]); // no route anywhere
 
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let cov = cross_service_coverage(&registry(&["api", "web"]).answer());
 
         assert_eq!(cov.no_provider_in_workspace, 1);
         assert_eq!(cov.bound, 0);
@@ -4385,7 +4391,7 @@ mod tests {
             vec![route("GET /users/{userId}", "local route_admin")],
         );
 
-        let cov = cross_service_coverage(&registry(&["api", "web", "admin"]));
+        let cov = cross_service_coverage(&registry(&["api", "web", "admin"]).answer());
 
         assert_eq!(cov.ambiguous, 1);
         assert_eq!(cov.bound, 0);
@@ -4413,7 +4419,7 @@ mod tests {
         set_member("web", vec![route("GET /users/{id}", "local route_web")]);
 
         let reg = registry(&["api", "web"]);
-        let cov = cross_service_coverage(&reg);
+        let cov = cross_service_coverage(&reg.answer());
         assert_eq!(cov.ambiguous, 1);
         assert_eq!(cov.bound, 0);
 
@@ -4470,7 +4476,7 @@ mod tests {
         );
 
         let reg = registry(&["api"]);
-        let cov = cross_service_coverage(&reg);
+        let cov = cross_service_coverage(&reg.answer());
 
         assert_eq!(cov.ambiguous, 1, "pre-existing: a 2+ tie applies no member filter");
         let tied = cov.references[0]
@@ -4502,7 +4508,7 @@ mod tests {
             vec![route("GET /files/{*rest}", "local route_catchall")],
         );
 
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let cov = cross_service_coverage(&registry(&["api", "web"]).answer());
         assert_eq!(cov.no_provider_in_workspace, 1);
         assert_eq!(cov.bound, 0);
     }
@@ -4519,7 +4525,7 @@ mod tests {
         );
         set_member("web", vec![route("GET /files/{id}", "local route_get")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let cov = cross_service_coverage(&registry(&["api", "web"]).answer());
 
         assert_eq!(cov.unbound, 1);
         assert_eq!(cov.bound, 0);
@@ -4547,7 +4553,7 @@ mod tests {
             ],
         );
 
-        let cov = cross_service_coverage(&registry(&["api"]));
+        let cov = cross_service_coverage(&registry(&["api"]).answer());
 
         assert!(
             cov.references.is_empty(),
@@ -4566,10 +4572,10 @@ mod tests {
         set_member("api", vec![op("GET /users/{id}", "local op_get")]);
         set_member("web", vec![route("GET /users/{id}", "local route_get")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web", "broken"]));
+        let cov = cross_service_coverage(&registry(&["api", "web", "broken"]).answer());
         assert_eq!(cov.bound, 1);
 
-        let cov2 = cross_service_coverage(&registry(&["api", "web", "unreadable"]));
+        let cov2 = cross_service_coverage(&registry(&["api", "web", "unreadable"]).answer());
         assert_eq!(cov2.bound, 1);
     }
 
@@ -4597,7 +4603,7 @@ mod tests {
         );
         set_member("svc", vec![route("GET /b/{id}", "local route_b2")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web", "svc"]));
+        let cov = cross_service_coverage(&registry(&["api", "web", "svc"]).answer());
         assert_eq!(cov.bound, 1);
         assert_eq!(cov.ambiguous, 1);
         assert_eq!(cov.unbound, 1);
@@ -4716,12 +4722,12 @@ mod tests {
             ],
         );
 
-        let with_proto_graphql = cross_service_coverage(&registry(&["api", "web"]));
+        let with_proto_graphql = cross_service_coverage(&registry(&["api", "web"]).answer());
 
         reset();
         set_member("api", vec![op("GET /users/{id}", "local op_get")]);
         set_member("web", vec![route("GET /users/{id}", "local route_get")]);
-        let without = cross_service_coverage(&registry(&["api", "web"]));
+        let without = cross_service_coverage(&registry(&["api", "web"]).answer());
 
         assert_eq!(
             with_proto_graphql.references, without.references,
@@ -4745,8 +4751,8 @@ mod tests {
         set_member("web", vec![route("GET /a/{id}", "local route_a")]);
         set_member("svc", vec![route("GET /b/{id}", "local route_b")]);
 
-        let one = cross_service_coverage(&registry(&["api", "web", "svc"]));
-        let two = cross_service_coverage(&registry(&["svc", "web", "api"]));
+        let one = cross_service_coverage(&registry(&["api", "web", "svc"]).answer());
+        let two = cross_service_coverage(&registry(&["svc", "web", "api"]).answer());
         assert_eq!(one.references, two.references);
     }
 
@@ -4761,7 +4767,7 @@ mod tests {
         set_consumers("web", vec![http_call("GET /users/{id}", "local get_user_call")]);
         set_member("api", vec![route("GET /users/{userId}", "local route_get")]);
 
-        let cov = cross_service_coverage(&registry(&["web", "api"]));
+        let cov = cross_service_coverage(&registry(&["web", "api"]).answer());
 
         assert_eq!(cov.bound, 1);
         assert_eq!(cov.ambiguous, 0);
@@ -4781,7 +4787,7 @@ mod tests {
         set_member("api", vec![route("GET /users/{id}", "local route_api")]);
         set_member("admin", vec![route("GET /users/{userId}", "local route_admin")]);
 
-        let cov = cross_service_coverage(&registry(&["web", "api", "admin"]));
+        let cov = cross_service_coverage(&registry(&["web", "api", "admin"]).answer());
 
         assert_eq!(cov.ambiguous, 1);
         assert_eq!(cov.bound, 0);
@@ -4797,7 +4803,7 @@ mod tests {
         set_consumers("web", vec![http_call("GET /orphans/{id}", "local orphan_call")]);
         set_member("api", vec![]);
 
-        let cov = cross_service_coverage(&registry(&["web", "api"]));
+        let cov = cross_service_coverage(&registry(&["web", "api"]).answer());
 
         assert_eq!(cov.no_provider_in_workspace, 1);
         assert_eq!(cov.bound, 0);
@@ -4816,7 +4822,7 @@ mod tests {
         set_consumers("web", vec![http_call("GET /users/{id}", "local get_user_call")]);
         set_member("web", vec![route("GET /users/{id}", "local route_local")]);
 
-        let cov = cross_service_coverage(&registry(&["web"]));
+        let cov = cross_service_coverage(&registry(&["web"]).answer());
         assert!(
             cov.references.is_empty(),
             "an intra-repo client call→route pair is not a cross-boundary reference: {:?}",
@@ -4899,7 +4905,7 @@ mod tests {
         set_member("web", vec![]);
         set_member("api", vec![route("GET /users/{id}", "local users_route")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let cov = cross_service_coverage(&registry(&["api", "web"]).answer());
 
         let mut refused: Vec<&str> = cov
             .references
@@ -5001,7 +5007,7 @@ mod tests {
         // indexed, and simply has no `route` node at the consumer's key.
         set_member("api", vec![route("GET /v1/health", "local route_health")]);
 
-        let cov = cross_service_coverage(&registry(&["web", "api"]));
+        let cov = cross_service_coverage(&registry(&["web", "api"]).answer());
 
         assert_eq!(cov.references.len(), 1, "{:?}", cov.references);
         assert_eq!(
@@ -5056,7 +5062,7 @@ mod tests {
             }
             let names: Vec<&str> = members.iter().map(String::as_str).collect();
 
-            let cov = cross_service_coverage(&registry(&names));
+            let cov = cross_service_coverage(&registry(&names).answer());
 
             assert_eq!(
                 cov.references.len(),
@@ -5086,7 +5092,7 @@ mod tests {
         set_member("a", vec![route("ANY /v1/users/{uid}/mailboxes/{m}", "local route_a")]);
         set_member("b", vec![route("ANY /v1/users/{u}/mailboxes/{box}", "local route_b")]);
 
-        let cov = cross_service_coverage(&registry(&["spec", "a", "b"]));
+        let cov = cross_service_coverage(&registry(&["spec", "a", "b"]).answer());
 
         assert_eq!(cov.ambiguous, 1, "the two-owner template is ambiguous");
         assert_eq!(cov.bound, 0, "no provider is guessed (NFR-RA-05)");
@@ -5107,7 +5113,7 @@ mod tests {
         set_consumers("web", vec![http_call("GET /orders/{id}", "local orders_call")]);
         set_member("api", vec![route("GET /orders/{id}", "local route_orders")]);
 
-        let cov = cross_service_coverage(&registry(&["spec", "web", "api"]));
+        let cov = cross_service_coverage(&registry(&["spec", "web", "api"]).answer());
         assert_eq!(cov.bound, 2, "the operation and the client call each bind once");
         assert_eq!(cov.references.len(), 2);
         assert!(cov.references.iter().all(|r| r.relation == "route"));
@@ -5129,7 +5135,7 @@ mod tests {
             vec![grpc_consumer("example.v1.UserService/GetUser", "local stub")],
         );
 
-        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+        let cov = cross_service_coverage(&registry(&["api", "svc"]).answer());
         assert_eq!(cov.bound, 1);
         assert_eq!(cov.references.len(), 1);
         assert_eq!(cov.references[0].state, CoverageState::Bound);
@@ -5166,7 +5172,7 @@ mod tests {
         // A second member with no matching proto service provider.
         set_member("svc", vec![proto_service("example.v1.Other/Do", "local other")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+        let cov = cross_service_coverage(&registry(&["api", "svc"]).answer());
         assert_eq!(cov.no_provider_in_workspace, 1);
         assert_eq!(cov.bound, 0);
         assert_eq!(
@@ -5193,7 +5199,7 @@ mod tests {
             vec![grpc_consumer("example.v1.UserService/GetUser", "local stub")],
         );
 
-        let cov = cross_service_coverage(&registry(&["svc"]));
+        let cov = cross_service_coverage(&registry(&["svc"]).answer());
         assert!(
             cov.references.is_empty(),
             "a same-member stub→provider pair is intra-repo, not a cross-boundary reference: {:?}",
@@ -5220,7 +5226,7 @@ mod tests {
             vec![grpc_consumer("example.v1.UserService/GetUser", "local stub")],
         );
 
-        let cov = cross_service_coverage(&registry(&["api", "svc1", "svc2"]));
+        let cov = cross_service_coverage(&registry(&["api", "svc1", "svc2"]).answer());
         assert_eq!(cov.ambiguous, 1);
         assert_eq!(cov.bound, 0);
         assert_eq!(cov.references[0].state.bucket(), "ambiguous");
@@ -5255,7 +5261,7 @@ mod tests {
         set_consumers("api", vec![broker_publish("orders", "local emit_order")]);
         set_member("svc", vec![]);
 
-        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+        let cov = cross_service_coverage(&registry(&["api", "svc"]).answer());
 
         assert_eq!(
             cov.unbound, 0,
@@ -5301,7 +5307,7 @@ mod tests {
         );
         set_member("api", vec![]);
 
-        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+        let cov = cross_service_coverage(&registry(&["api", "svc"]).answer());
 
         let refused: Vec<&ReferenceCoverage> = cov
             .references
@@ -5399,7 +5405,7 @@ mod tests {
         set_member("producer", vec![]);
         set_member("consumer", vec![]);
 
-        let cov = cross_service_coverage(&registry(&["consumer", "producer"]));
+        let cov = cross_service_coverage(&registry(&["consumer", "producer"]).answer());
 
         let mut refused: Vec<&str> = cov
             .references
@@ -5463,7 +5469,7 @@ mod tests {
         set_member("api", vec![]);
         set_member("svc", vec![]);
 
-        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+        let cov = cross_service_coverage(&registry(&["api", "svc"]).answer());
 
         assert_eq!(cov.bound, 0, "a refusal binds nothing: {:?}", cov.references);
         assert_eq!(cov.unbound, 2, "both refusals are reported: {:?}", cov.references);
@@ -5496,7 +5502,7 @@ mod tests {
         set_member("api", vec![]);
         set_member("svc", vec![]);
 
-        let cov = cross_service_coverage(&registry(&["api", "svc"]));
+        let cov = cross_service_coverage(&registry(&["api", "svc"]).answer());
 
         assert_eq!(
             cov.bound, 1,
@@ -6132,7 +6138,7 @@ mod tests {
         set_member("billing", vec![]);
         set_consumers("billing", vec![broker_subscribe("orders", "local on_order")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "billing"]));
+        let cov = cross_service_coverage(&registry(&["api", "billing"]).answer());
 
         assert_eq!(
             cov.bound, 1,
@@ -6169,7 +6175,7 @@ mod tests {
         set_member("shipping", vec![]);
         set_consumers("shipping", vec![broker_subscribe("orders", "local ship_on_order")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "billing", "shipping"]));
+        let cov = cross_service_coverage(&registry(&["api", "billing", "shipping"]).answer());
 
         assert_eq!(
             cov.ambiguous, 0,
@@ -6195,7 +6201,7 @@ mod tests {
         );
         set_member("billing", vec![]);
 
-        let cov = cross_service_coverage(&registry(&["api", "billing"]));
+        let cov = cross_service_coverage(&registry(&["api", "billing"]).answer());
 
         assert!(
             cov.references.is_empty(),
@@ -6216,7 +6222,7 @@ mod tests {
         set_member("web", vec![route("GET /users/{id}", "local route_a")]);
         set_member("svc", vec![route("GET /users/{id}", "local route_b")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web", "svc"]));
+        let cov = cross_service_coverage(&registry(&["api", "web", "svc"]).answer());
 
         assert_eq!(
             cov.ambiguous, 1,
@@ -6247,7 +6253,7 @@ mod tests {
         set_member("web", vec![route("GET /users/{id}", "local route_users")]);
         set_consumers("api", vec![http_call("GET /users/{id}", "local fetch_user")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let cov = cross_service_coverage(&registry(&["api", "web"]).answer());
 
         assert_eq!(
             (cov.by_intake.contract_surface.bound, cov.by_intake.invocation.bound),
@@ -6311,7 +6317,7 @@ mod tests {
             );
         }
 
-        let cov = cross_service_coverage(&registry(&["api", "web", "audit"]));
+        let cov = cross_service_coverage(&registry(&["api", "web", "audit"]).answer());
 
         assert_eq!(
             cov.references.len(),
@@ -6349,7 +6355,7 @@ mod tests {
         );
         set_consumers("web", vec![broker_subscribe("orders", "local on_web")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let cov = cross_service_coverage(&registry(&["api", "web"]).answer());
 
         assert_eq!(
             cov.by_intake.invocation.bound, 1,
@@ -6451,7 +6457,7 @@ mod tests {
         reset();
         set_member("api", vec![op("GET /orphans/{id}", "local op_orphan")]);
         set_member("web", vec![]);
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let cov = cross_service_coverage(&registry(&["api", "web"]).answer());
         assert_eq!(cov.spec_conformance_ratio, None, "the fixture must be degenerate");
 
         let post = serde_json::to_value(&cov).unwrap();
@@ -6561,7 +6567,7 @@ mod tests {
             ],
         );
 
-        let cov = cross_service_coverage(&registry(&["api", "web", "audit", "billing"]));
+        let cov = cross_service_coverage(&registry(&["api", "web", "audit", "billing"]).answer());
 
         assert_eq!(cov.by_intake.invocation.bound, 1, "one publish, one egress site");
         assert_eq!(
@@ -6613,7 +6619,7 @@ mod tests {
         set_member("api", vec![op("GET /users/{id}", "local op_users")]);
         set_member("web", vec![route("GET /users/{id}", "local route_users")]);
 
-        let cov = cross_service_coverage(&registry(&["api", "web"]));
+        let cov = cross_service_coverage(&registry(&["api", "web"]).answer());
 
         assert_eq!(
             cov.spec_conformance_ratio,
@@ -6666,11 +6672,11 @@ mod tests {
                 reset();
                 set_member("api", vec![op("GET /users/{id}", "local op_users")]);
                 set_member("web", vec![route("GET /users/{id}", "local route_users")]);
-                cross_service_coverage(&registry(&["api", "web"]))
+                cross_service_coverage(&registry(&["api", "web"]).answer())
             }),
             ("empty workspace", {
                 reset();
-                cross_service_coverage(&registry(&[]))
+                cross_service_coverage(&registry(&[]).answer())
             }),
         ] {
             let wire = serde_json::to_value(&cov).unwrap();
@@ -6731,7 +6737,7 @@ mod tests {
 
         // Computing the coverage tier must not be a prerequisite for, nor
         // side-effect into, the gated surfaces below.
-        let _ = cross_service_coverage(&registry(&["api", "web"]));
+        let _ = cross_service_coverage(&registry(&["api", "web"]).answer());
 
         let tmp = tempfile::TempDir::new().expect("temp root");
         let engine = crate::Engine::start(tmp.path()).expect("engine starts");

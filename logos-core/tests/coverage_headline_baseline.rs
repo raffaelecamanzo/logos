@@ -330,7 +330,7 @@ fn the_reference_workspace_reproduces_the_recorded_baseline_when_one_is_configur
             )
         });
     let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
-    let cov = cross_service_coverage(&registry);
+    let cov = cross_service_coverage(&registry.answer());
     let measured = headline(&cov);
 
     println!(

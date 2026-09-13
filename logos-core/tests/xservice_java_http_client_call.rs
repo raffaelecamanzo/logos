@@ -156,7 +156,7 @@ fn a_static_java_client_call_binds_a_spring_route_in_another_member() {
     );
 
     // The coverage read-model reports the same call as `bound`.
-    let coverage = cross_service_coverage(&registry);
+    let coverage = cross_service_coverage(&registry.answer());
     assert_eq!(coverage.bound, 1, "the Java client call is bound");
     assert_eq!(coverage.ambiguous, 0);
 }
@@ -197,7 +197,7 @@ fn a_runtime_composed_java_client_call_records_a_keyless_refusal_and_never_binds
     );
 
     // The refusal reaches the coverage tier as a row, not as an absence.
-    let coverage = cross_service_coverage(&registry);
+    let coverage = cross_service_coverage(&registry.answer());
     assert_eq!(coverage.bound, 0);
     assert_eq!(coverage.ambiguous, 0);
     let reasons: Vec<String> = coverage
@@ -257,7 +257,7 @@ fn two_matching_spring_routes_make_the_java_client_call_ambiguous() {
         "two providers of one client-call key are ambiguous — no edge: {edges:?}"
     );
 
-    let coverage = cross_service_coverage(&registry);
+    let coverage = cross_service_coverage(&registry.answer());
     assert_eq!(coverage.ambiguous, 1, "the ambiguous call is bucketed as such");
     assert_eq!(coverage.bound, 0);
 }

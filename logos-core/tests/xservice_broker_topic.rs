@@ -192,7 +192,7 @@ fn a_publish_in_one_member_binds_a_subscribe_on_the_same_topic_in_another() {
     );
 
     // ── The workspace topic inventory the service map renders ─────────────────
-    let inventory = workspace_topics(&registry);
+    let inventory = workspace_topics(&registry.answer());
     let api_topics = inventory
         .iter()
         .find(|m| m.member == "api")
@@ -214,7 +214,7 @@ fn a_publish_in_one_member_binds_a_subscribe_on_the_same_topic_in_another() {
     assert_eq!(billing_topics.topics[0].consumers, 1);
 
     // ── The coverage board must AGREE with the bridge ([NFR-CC-04]) ───────────
-    let cov = cross_service_coverage(&registry);
+    let cov = cross_service_coverage(&registry.answer());
     assert_eq!(
         cov.bound, 1,
         "the coverage tier reports the publish BOUND — it must not deny the provider the \
@@ -269,7 +269,7 @@ fn a_per_repo_topic_is_visible_across_the_workspace_with_no_cross_repo_match() {
     );
 
     // …yet the topic is fully visible in the workspace inventory the map draws.
-    let inventory = workspace_topics(&registry);
+    let inventory = workspace_topics(&registry.answer());
     let api_topics = inventory.iter().find(|m| m.member == "api").expect("api reports");
     assert_eq!(api_topics.topics[0].topic, "orders");
     assert_eq!(api_topics.topics[0].producers, 1);
