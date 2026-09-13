@@ -608,12 +608,27 @@ pub struct ConfigValueFact {
 /// function is only ever *reached* for a file the plugin registry claims. No
 /// descriptor claims `.properties` — a grammar for it does not exist — so
 /// `is_config_admitted` never admits one, and the `parse_properties` arm below is
-/// unreachable from the production pipeline. On the reference estate that is 31
-/// of the 174 discovered sources. [`ConfigCorpus::discover`] walks the filesystem
-/// itself and does read them, which is why the census and the tables count
-/// different populations and why the census is measured through `discover`.
+/// unreachable from the production pipeline. [`ConfigCorpus::discover`] walks the
+/// filesystem itself and does read the ones it finds, which is why the census and
+/// the tables count different populations and why the census is measured through
+/// `discover`.
+///
+/// **Measured 2026-09-13 ([S-397] T2), because the figure this paragraph used to
+/// carry was wrong in both halves.** It said "31 of the 174 discovered sources".
+/// The corpus admits **3** `.properties` sources of its 174; the **31** is a count
+/// of `application*.properties` on the estate's *disk*, of which **28** sit under a
+/// hidden `.helm/` directory the discovery walk never enters and which were never
+/// corpus candidates at all. The site-level cost of the gap is **0 of 108** — no
+/// accessor site on that estate resolves only via a `.properties` source. A residue
+/// of zero does not close the ingestion gap; it means this estate commits the keys
+/// its accessors read in yaml. Pinned by `properties_residue` /
+/// `properties_files_on_disk` in
+/// `tests/operand_resolvability/configuration_agreement.rs`.
 /// Closing the gap needs a `.properties` artifact plugin — registry work that no
-/// story in this sprint owns.
+/// story in this sprint owns, and which the measured residue prices at zero sites
+/// on this estate rather than at 31.
+///
+/// [S-397]: ../../../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
 pub fn source_facts(path: &str, text: &str) -> Option<ConfigSourceFact> {
     let name = path.rsplit('/').next().unwrap_or(path);
     let profile = config_profile(name)?;
