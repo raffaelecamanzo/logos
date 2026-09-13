@@ -205,8 +205,63 @@ use std::path::PathBuf;
 use logos_core::federation::{discover, workspace_status, EngineRegistry, RegistryMode};
 use logos_core::Engine;
 
-/// The recorded verdict, reproduced by the run and pinned by its assertions.
+/// The recorded verdict: printed beside the live run, and pinned on its headline
+/// figures by [`the_recorded_artifact_states_the_figures_this_file_pins`].
+///
+/// **Only the headline figures are pinned, and the distinction is worth keeping.**
+/// The artifact is prose; asserting it whole would make every wording change a test
+/// failure. What is asserted is that the numbers this file re-records appear in it —
+/// which is the failure this arm actually has, a stale artifact sitting beside a
+/// freshly re-recorded constant. The doc comment here previously claimed the whole
+/// artifact was "pinned by its assertions"; it was not pinned by anything, and
+/// falsifying every figure in it left the run green.
 const RECORDED_FINDING: &str = include_str!("config_bound_admission/config_bound_admission_finding.txt");
+
+/// The artifact beside this file must state the figures this file pins — corpus-free,
+/// so it holds in CI and in a fresh clone.
+///
+/// A durable finding is re-recorded by hand while the constants are re-recorded in
+/// code, and nothing made the two agree: the artifact could keep a superseded
+/// numerator beside a live one indefinitely. Each figure is checked as a whole word
+/// so `81` cannot be satisfied by `810` or by the `81` inside `1081`.
+#[test]
+fn the_recorded_artifact_states_the_figures_this_file_pins() {
+    // The two MEASURED figures, as whole words. A bare-number search is the right
+    // instrument for them precisely because they are large and estate-specific: a
+    // stale artifact keeps the old numerator, and the old numerator is absent.
+    for (figure, what) in [
+        (RECORDED_ADMITTED, "the admitted `config-bound` count"),
+        (ACCESSOR_DENOMINATOR, "the accessor denominator"),
+    ] {
+        let needle = figure.to_string();
+        let found = RECORDED_FINDING.match_indices(&needle).any(|(at, _)| {
+            let before = RECORDED_FINDING[..at].chars().next_back();
+            let after = RECORDED_FINDING[at + needle.len()..].chars().next();
+            !before.is_some_and(|c| c.is_ascii_digit()) && !after.is_some_and(|c| c.is_ascii_digit())
+        });
+        assert!(
+            found,
+            "config_bound_admission_finding.txt does not state {what} ({figure}) that \
+             this file pins. The artifact is the durable dated record of the same \
+             measurement — re-record it in the same change as the constant, never after."
+        );
+    }
+
+    // `CRITERION_FLOOR` is pinned to its own SENTENCE, not as a bare number, and the
+    // reason is a measured weakness of the loop above: a small historical literal is
+    // searched for in a document full of small numbers, so a mutation to 5 finds the
+    // `5` in the before-column of the bucket table and passes. Probed rather than
+    // assumed — that mutation ran green before this assertion existed. Tying it to
+    // the phrase makes the constant and the narration one thing.
+    let phrase = format!("floor of {CRITERION_FLOOR}");
+    assert!(
+        RECORDED_FINDING.contains(&phrase),
+        "the artifact does not contain the phrase \"{phrase}\". CRITERION_FLOOR is a \
+         frozen historical literal — the text of S-397 AC2 — so the only thing that can \
+         pin it is the sentence it appears in. If the artifact's wording changes, change \
+         this phrase with it; if the FLOOR changes, you are rewriting history."
+    );
+}
 
 /// [S-397] AC2's floor: that criterion asked for **at least** this many.
 ///
@@ -575,21 +630,38 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
     );
 
     const {
-        // The one relation this binary can check without the corpus, and the only
-        // one left now that the shortfall has closed: the numerator must lie inside
-        // the denominator it is stated over. Nothing else constrains these
-        // constants — the test body runs only under LOGOS_REF_WORKSPACE, so any of
-        // them could be edited to any value and a default `cargo test` would stay
+        // **The relations this binary can check WITHOUT the corpus, and they are the
+        // whole of what a default `cargo test` sees.** The test body above runs only
+        // under LOGOS_REF_WORKSPACE, which nothing in this repository sets, so any
+        // constant not checked here could be edited to any value and CI would stay
         // green.
         //
-        // The companion `RECORDED_ADMITTED < CRITERION_FLOOR` assertion was removed
-        // with the runtime floor guard above, for the same reason and not for a
-        // different one: it encoded "this file records a shortfall", which stopped
-        // being true when the shortfall closed. It is NOT replaced by its mirror
-        // image — see the comment on the runtime guard.
+        // Each of the three is a claim about this file's own RECORDED CONSTANTS —
+        // about whether the sentences it prints are self-consistent — and none is a
+        // claim about the product. That distinction is why re-arming
+        // `a.config_bound >= CRITERION_FLOOR` at RUNTIME would be wrong (see the
+        // comment on the removed runtime guard) while pinning the recorded 81
+        // against the recorded 79 here is not: the second says only "this file must
+        // not narrate a relation it does not hold", which is exactly the defect
+        // found when `CRITERION_FLOOR` was left with nothing constraining it —
+        // setting it to 5 compiled, ran green, and printed
+        // "S-397's historical floor 5 (exceeded; not a criterion here)".
         assert!(
             RECORDED_ADMITTED <= ACCESSOR_DENOMINATOR,
             "the admitted figure must be inside the denominator it is stated over",
+        );
+        // `<=`, not `<`: a numerator may legitimately equal its denominator — an
+        // estate in which every accessor-denominator site admits reads 96 of 96, and
+        // this file already records an 81-of-81 against the harness's upper bound.
+        // The strict form held at 81/96 and was loosened deliberately, not by
+        // accident.
+        assert!(
+            CRITERION_FLOOR <= RECORDED_ADMITTED,
+            "this file's docs, its printed table and its pin message all say S-397's \
+             historical floor is EXCEEDED. If a re-record ever takes the admitted \
+             figure back below it, that narration becomes false while every runtime \
+             assertion stays green — rewrite the narration in the same change rather \
+             than relaxing this.",
         );
     }
 
