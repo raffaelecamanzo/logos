@@ -128,6 +128,14 @@
 //! `method_invocation`/`method_reference` pattern and a `method_declaration`
 //! pattern, all Java tree shapes.
 //!
+//! Sprint 69 added one: `port_identity`'s `SERVER_PORT_KEY` (S-400), the Spring
+//! configuration key a member declares its own listening port under. Its own doc
+//! argues the key must not be widened to `management.server.port`, which is
+//! exactly the kind of framework-specific judgement the prohibition below is
+//! about. `is_deploy_path` in the same module is a directory convention rather
+//! than a framework table, and is named here only so the reader does not have to
+//! decide that for themselves.
+//!
 //! This list is **open, not closed**: anything of that kind added to this
 //! harness or its submodules is covered by the same carve-out and the same
 //! prohibition. The fitness function cannot enforce it — it scans

@@ -30,7 +30,9 @@
 //!   port: 9013
 //! ```
 //!
-//! The host label here is `localhost` for every `base-url` on the estate, so
+//! The host label here is `localhost` for every `base-url` a resolved call site
+//! reads on this estate (the estate also commits an IP literal and a `changeit`
+//! placeholder elsewhere, which no resolved site reaches), so
 //! [FR-WS-20]'s ladder matches no member and the port — the only part of the
 //! authority that distinguishes one callee from another — is **discarded**.
 //! That is why [S-384]'s review could record joining application-config evidence
@@ -184,7 +186,7 @@ pub const DECLARED_FLOOR: &str = include_str!("port_identity_floor.txt");
 pub const NET_NEW_THIRD_PARTY_FLOOR: usize = 16;
 
 /// The configuration key a member declares its own runtime port under, in the
-/// canonical form [`logos_core::extract::config::canonical_key`] produces.
+/// canonical form [`logos_core::extract::config::corpus::canonical_key`] produces.
 ///
 /// One key and no synonyms, deliberately. `server.port` is what [CR-124] names
 /// and what all 30 of the estate's declaring members write; admitting
@@ -243,7 +245,37 @@ impl Population {
 
     /// Whether a provider-side configuration source is admitted for its
     /// `server.port`.
+    ///
+    /// The deploy exclusion is stated here rather than delegated. On the
+    /// consumer side it is `TargetRef::is_deploy`, an **overlay** property; a
+    /// path-shaped test alone returns `Tree::Main` for `.helm/values.yaml` and
+    /// `docker-compose.yml`, so "the signal here never touches a deploy
+    /// manifest" was enforced on one side only. It is latent rather than live —
+    /// `ConfigCorpus::discover` admits a file only if its BASENAME is
+    /// `application[-profile].{yml,yaml,properties}`, so no values file reaches
+    /// this predicate today — but a guard that holds by another module's
+    /// basename rule is a guard the reader cannot see, and it would stop holding
+    /// the moment an `application-*.yml` were committed under a deploy
+    /// directory.
+    /// Whether a consumer-side configuration source is admitted — the same
+    /// population [`Population::admits_target`] expresses over a `TargetRef`,
+    /// stated over a path so the base-URL census can be taken over values that
+    /// never became a `TargetRef`.
+    fn admits_config_source(self, path: &str) -> bool {
+        if is_deploy_path(path) {
+            return false;
+        }
+        match self {
+            Self::Headline => Tree::of(path) == Tree::Main,
+            Self::WithTestTree => true,
+            Self::WithDeployEvidence => Tree::of(path) == Tree::Main,
+        }
+    }
+
     fn admits_provider_source(self, path: &str) -> bool {
+        if is_deploy_path(path) {
+            return false;
+        }
         match self {
             Self::Headline | Self::WithDeployEvidence => Tree::of(path) == Tree::Main,
             Self::WithTestTree => true,
@@ -257,6 +289,22 @@ impl Population {
             Self::WithDeployEvidence => "deploy evidence admitted as a consumer-side target",
         }
     }
+}
+
+/// Whether a path is deploy evidence, by directory.
+///
+/// The consumer side gets this for free from `TargetRef::is_deploy`, which knows
+/// the overlay a reference came from. The provider side reads configuration
+/// sources, which carry only a path — so the same exclusion has to be spelled
+/// here. Deliberately narrow: Helm's hidden chart directory and a Compose file,
+/// the two shapes `identity::deploy_role` recognises on this estate.
+fn is_deploy_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("/.helm/")
+        || lower.starts_with(".helm/")
+        || lower.contains("/deploy-")
+        || lower.starts_with("deploy-")
+        || lower.rsplit('/').next().is_some_and(|n| n.starts_with("docker-compose"))
 }
 
 // ── The port index ──────────────────────────────────────────────────────────
@@ -275,14 +323,35 @@ pub struct PortIndex {
 }
 
 impl PortIndex {
+    /// Record one member's declaration of its own port, applying the one rule
+    /// that decides whether it is a port at all.
+    ///
+    /// A method rather than three lines inside [`port_index`], because
+    /// `port_index` runs only where `LOGOS_REF_WORKSPACE` is set: the review's
+    /// mutation sweep deleted the `is_a_port` filter from that loop and all
+    /// eighteen fixtures stayed green. Extracting the predicate alone did not
+    /// close the hole — its CALL SITE is the rule. The fixtures now build every
+    /// index through here, so the guard, the claimant set and the declaration
+    /// counter are all exercised by production code.
+    fn claim(&mut self, member: &str, port: &str) {
+        if !is_a_port(port) {
+            return;
+        }
+        self.declarations += 1;
+        self.declaring_members.insert(member.to_string());
+        self.claimants.entry(port.to_string()).or_default().insert(member.to_string());
+    }
+
     /// The member a port identifies, or `None` — either because no member
     /// declares it, or because **two or more** do and a same-tier collision
     /// resolves to nothing rather than to a guess.
     ///
     /// This mirrors [`identity::Corpus::member_for`]'s rule exactly, and
-    /// [FR-WS-20] AC2 is where that rule is written. [CR-124]'s own risk table
-    /// names the estate's two collisions (`9009`, `9007`) and requires this
-    /// outcome for them: *"Two members claiming one port resolve to nothing."*
+    /// [FR-WS-20] AC2 is where that rule is written. [CR-124]'s risk table names
+    /// two of them (`9009`, `9007`) and requires this outcome: *"Two members
+    /// claiming one port resolve to nothing."* The estate carries more than two —
+    /// `9000` and `9001` collide as well — so the count belongs to the CR's row,
+    /// not to the estate.
     ///
     /// [CR-124]: ../../../docs/requests/CR-124-runtime-port-as-a-target-identity-tier.md
     /// [FR-WS-20]: ../../../docs/specs/requirements/FR-WS-20.md
@@ -290,7 +359,10 @@ impl PortIndex {
         let claimants = self.claimants.get(port)?;
         match claimants.len() {
             1 => claimants.iter().next().map(String::as_str),
-            _ => None, // zero is unreachable through `claimants`; two or more collide
+            // Two or more collide. Zero is reachable only through a hand-built
+            // index (`claimants` is `pub`), and resolves to nothing for the same
+            // reason a collision does: nothing is established.
+            _ => None,
         }
     }
 
@@ -324,6 +396,45 @@ pub struct PortCensus {
     pub unclaimed: BTreeSet<String>,
 }
 
+/// The base-URL key that is the sibling of one path key, in the separator-free
+/// form the join compares on — or `None` for a key with no prefix to hang it on.
+///
+/// **This is the join rule**, stated once: *"the same configuration that
+/// supplies the path also supplies the base URL"* ([CR-121] §3.2), which is what
+/// [CR-124]'s hypothesis is written over. `identity::judge` derives it inline and
+/// byte-identically; the twin check in
+/// [`assert_traversal_agrees_with_the_identity_gate`] compares the two gates'
+/// resulting key sets on every estate run, so the duplication cannot drift
+/// silently.
+///
+/// A named free function rather than an expression inside [`judge_ports`], for
+/// the reason [`identity::classify`] and [`Verdict::decide`] are: `judge_ports`
+/// runs only where `LOGOS_REF_WORKSPACE` is set. Replacing `.base-url` with
+/// `.baseurl` here left all 18 fixtures green — the review's mutation sweep
+/// proved it — and that is the single rule the whole join hangs on.
+///
+/// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
+/// [CR-124]: ../../../docs/requests/CR-124-runtime-port-as-a-target-identity-tier.md
+fn base_url_sibling_key(path_key: &str) -> Option<String> {
+    let (prefix, _) = path_key.rsplit_once('.')?;
+    Some(flat_key(&format!("{prefix}.base-url")))
+}
+
+/// Whether an edge is one the consumer could not have reached without crossing a
+/// service boundary, under [S-384]'s rule.
+///
+/// One function, called from both places that need it: [`PortPair::party`]'s
+/// [`Reading::AsMeasuredByS384`] arm, and [`s384_net_new_third_party`], which
+/// applies it to S-384's own pairs so the reconciliation is a reproduction
+/// rather than a quotation. Written twice, the two copies could diverge and the
+/// asserted reconciliation would compare different rules while staying green —
+/// the review's mutation sweep found the second copy uncovered.
+///
+/// [S-384]: ../../../docs/planning/journal.md#s-384-measure-service-identity-resolvability-across-the-deploy-corpus
+fn is_s384_third_party(consumer: &str, provider: &str, consumer_serves: bool) -> bool {
+    consumer != provider && !consumer_serves
+}
+
 /// Whether a committed configuration value is a port at all.
 ///
 /// A named free function rather than an inline guard inside [`port_index`], for
@@ -338,7 +449,51 @@ pub struct PortCensus {
 /// Found by the falsifiability sweep: replacing the guard with `if false` left
 /// every fixture green.
 fn is_a_port(value: &str) -> bool {
-    !value.is_empty() && value.chars().all(|c| c.is_ascii_digit())
+    // Digits alone is not enough, and the join is STRING equality. `09013` would
+    // be a claim no caller can write (`url_target` yields the authority's own
+    // spelling), `0` is not a listening port, and `99999` is outside the range
+    // — each would either sit inert in the index or, worse, bind an edge to a
+    // port nothing serves, which NFR-RA-05 forbids.
+    !value.starts_with('0') && value.parse::<u16>().is_ok_and(|port| port != 0)
+}
+
+/// Every `base-url` value an admitted configuration source commits, by
+/// `(member, flat key)` — **whether or not it parses as a URL**.
+///
+/// This exists because the residue buckets were wrong without it. `judge_ports`
+/// can only see a value that became a `TargetRef`, and a value becomes a
+/// `TargetRef` only if `identity::url_target_or_reason` parsed it. So a call
+/// site whose sibling base-URL key IS committed, by a value that establishes no
+/// authority, was reported under "no admitted source proves this key" — false
+/// for it — and could never reach the `base_urls_read` denominator, which made
+/// the "carrying a port" share structurally unable to count its own
+/// counterexample.
+///
+/// Built once per pass, from the same `OnceLock`-backed corpus as
+/// [`port_index`], so it costs no traversal of the estate.
+fn base_url_index(
+    root: &Path,
+    members: &BTreeSet<String>,
+    population: Population,
+) -> BTreeMap<(String, String), BTreeSet<String>> {
+    let mut out: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for source in &crate::measurement(root).config.sources {
+        if !population.admits_config_source(&source.path) {
+            continue;
+        }
+        let Some(member) = source.path.split('/').next() else { continue };
+        if !members.contains(member) {
+            continue;
+        }
+        for (key, values) in &source.values {
+            let flat = flat_key(key);
+            if !flat.ends_with("baseurl") {
+                continue;
+            }
+            out.entry((member.to_string(), flat)).or_default().extend(values.iter().cloned());
+        }
+    }
+    out
 }
 
 /// Read every member's own `server.port` out of the configuration corpus the
@@ -357,11 +512,8 @@ fn port_index(root: &Path, members: &BTreeSet<String>, population: Population) -
         if !members.contains(member) {
             continue;
         }
-        let declared = source.values.get(SERVER_PORT_KEY).into_iter().flatten();
-        for port in declared.filter(|p| is_a_port(p)) {
-            index.declarations += 1;
-            index.declaring_members.insert(member.to_string());
-            index.claimants.entry(port.clone()).or_default().insert(member.to_string());
+        for port in source.values.get(SERVER_PORT_KEY).into_iter().flatten() {
+            index.claim(member, port);
         }
     }
     index
@@ -458,14 +610,16 @@ impl PortPair {
     /// template, so `consumer_serves` can be false while the two members are the
     /// same one.
     pub fn party(&self, reading: Reading) -> Party {
-        let self_tie = match reading {
-            Reading::AsDeclared => self.consumer == self.provider,
-            Reading::AsMeasuredByS384 => self.consumer == self.provider || self.consumer_serves,
+        let third_party = match reading {
+            Reading::AsDeclared => self.consumer != self.provider,
+            Reading::AsMeasuredByS384 => {
+                is_s384_third_party(&self.consumer, &self.provider, self.consumer_serves)
+            }
         };
-        if self_tie {
-            Party::SelfTie
-        } else {
+        if third_party {
             Party::ThirdParty
+        } else {
+            Party::SelfTie
         }
     }
 }
@@ -474,9 +628,15 @@ impl PortPair {
 #[derive(Debug, Default)]
 pub struct Judgement {
     pub pairs: Vec<PortPair>,
-    /// Resolved `base-url` values a consumer call site actually read, counted
-    /// once per `(member, key, value)` — the denominator [CR-124] §6's first
-    /// report is taken over.
+    /// `base-url` values a consumer call site actually read, counted once per
+    /// `(member, key, value)` — the denominator [CR-124] §6's first report is
+    /// taken over.
+    ///
+    /// Includes values that establish **no** authority. An earlier shape counted
+    /// only values `identity::url_target_or_reason` had already parsed, which
+    /// made the "carrying a port" share 18 of 18 — a 100% that was structurally
+    /// incapable of seeing its own counterexample, because an unparseable value
+    /// never became a `TargetRef` and so never reached this set.
     pub base_urls_read: BTreeSet<(String, String, String)>,
     /// The subset of those that parse to an authority carrying a port.
     pub base_urls_with_port: BTreeSet<(String, String, String)>,
@@ -484,9 +644,29 @@ pub struct Judgement {
     /// it — so a port that resolves to nothing can be adjudicated by a human
     /// against the caller that wrote it, rather than as a bare number.
     pub ports_referenced: BTreeMap<String, BTreeSet<String>>,
+    /// Every `(consumer, flat base-URL key)` a resolved call site reads,
+    /// collected whether or not anything proves that key.
+    ///
+    /// This is the set `identity::Findings::call_site_base_keys` holds for the
+    /// other gate, computed here by [`base_url_sibling_key`] — the ONE rule the
+    /// whole join hangs on, and the one the two gates derive independently.
+    /// [`assert_traversal_agrees_with_the_identity_gate`] compares the two sets,
+    /// so the duplication the module admits to cannot drift silently.
+    pub call_site_base_keys: BTreeSet<(String, String)>,
     /// Call sites that resolved a template and whose base-URL sibling key no
     /// admitted configuration source proves — the residue, enumerated.
     pub sites_without_base_url: BTreeSet<String>,
+    /// Call sites whose base-URL sibling key **is** committed by an admitted
+    /// source, but whose value establishes no authority — so the port signal has
+    /// nothing to join on.
+    ///
+    /// A third bucket, and not a refinement for its own sake. Without it the
+    /// estate's one such site — `official-log-ingestion-batch` committing
+    /// `base-url: http://localhost:xxxx`, a placeholder port — was reported
+    /// under "no admitted source proves this key", which is **false** for it:
+    /// the key is proved, the value is unusable. The two are different findings
+    /// about the estate and only one of them is about the corpus.
+    pub sites_with_unusable_base_url: BTreeSet<String>,
     /// Call sites whose base URL resolved but carries no port at all.
     pub sites_without_port: BTreeSet<String>,
     pub sites_considered: usize,
@@ -542,11 +722,26 @@ impl Judgement {
     ///
     /// [CR-124]: ../../../docs/requests/CR-124-runtime-port-as-a-target-identity-tier.md
     pub fn couplings(&self, party: Party, reading: Reading) -> BTreeSet<(&str, &str)> {
-        self.pairs
-            .iter()
-            .filter(|p| p.class != PairClass::TargetServesNothing && p.party(reading) == party)
-            .map(|p| (p.consumer.as_str(), p.provider.as_str()))
-            .collect()
+        // Party is a per-TEMPLATE property, so one coupling can be third-party at
+        // one template and a self-tie at another. Filtering per pair and then
+        // collapsing put such a coupling in BOTH columns, and the two printed
+        // numbers summed above the true distinct total — the review reproduced
+        // it with a fixture. A coupling that is a self-tie anywhere is reported
+        // as one, so the two columns partition.
+        let produced = self.pairs.iter().filter(|p| p.class != PairClass::TargetServesNothing);
+        let mut self_tied: BTreeSet<(&str, &str)> = BTreeSet::new();
+        let mut all: BTreeSet<(&str, &str)> = BTreeSet::new();
+        for p in produced {
+            let coupling = (p.consumer.as_str(), p.provider.as_str());
+            all.insert(coupling);
+            if p.party(reading) == Party::SelfTie {
+                self_tied.insert(coupling);
+            }
+        }
+        match party {
+            Party::SelfTie => self_tied,
+            Party::ThirdParty => all.difference(&self_tied).copied().collect(),
+        }
     }
 
     /// Literal call-site occurrences behind the net-new third-party edges — a
@@ -583,6 +778,7 @@ fn judge_ports(
     population: Population,
 ) -> Judgement {
     let m = crate::measurement(root);
+    let committed = base_url_index(root, &corpus.members, population);
     let mut out = Judgement::default();
 
     for stats in m.per_language.values() {
@@ -599,22 +795,30 @@ fn judge_ports(
                 continue;
             };
 
+            let mut key_is_committed = false;
             let mut read_a_base_url = false;
             let mut saw_a_port = false;
-            // The base URL of a path key is its sibling under the same prefix:
-            // "the same configuration that supplies the path also supplies the
-            // base URL" (CR-121 §3.2), which is the rule `identity::judge`
-            // applies and the one CR-124's hypothesis is written over.
             for key in site.key_outcomes.iter().flatten().filter_map(|o| o.key()) {
-                let Some((prefix, _)) = key.rsplit_once('.') else { continue };
-                let base_flat = flat_key(&format!("{prefix}.base-url"));
+                let Some(base_flat) = base_url_sibling_key(key) else { continue };
+                out.call_site_base_keys.insert((consumer.clone(), base_flat.clone()));
+                // Every value an admitted source commits for this key, parsed or
+                // not — so a committed-but-unusable base URL lands in its own
+                // bucket instead of being reported as an unproven key.
+                let key = (consumer.clone(), base_flat.clone());
+                for value in committed.get(&key).into_iter().flatten() {
+                    key_is_committed = true;
+                    let seen = (consumer.clone(), base_flat.clone(), value.clone());
+                    if carries_a_port(value) {
+                        out.base_urls_with_port.insert(seen.clone());
+                    }
+                    out.base_urls_read.insert(seen);
+                }
                 for target in corpus.targets.iter().filter(|t| {
                     t.member == consumer
                         && t.via_flat == base_flat
                         && population.admits_target(t)
                 }) {
                     read_a_base_url = true;
-                    judge_one_target(&mut out, target, &consumer);
                     let Some(port) = target.port.as_deref() else { continue };
                     saw_a_port = true;
                     out.ports_referenced
@@ -638,8 +842,10 @@ fn judge_ports(
                     });
                 }
             }
-            if !read_a_base_url {
+            if !key_is_committed {
                 out.sites_without_base_url.insert(where_);
+            } else if !read_a_base_url {
+                out.sites_with_unusable_base_url.insert(where_);
             } else if !saw_a_port {
                 out.sites_without_port.insert(where_);
             }
@@ -648,40 +854,21 @@ fn judge_ports(
     out
 }
 
-/// Record one `base-url` value a call site read, in the two census populations
-/// [CR-124] §6's first report is taken over.
+/// Whether a committed `base-url` value establishes an authority carrying a
+/// port — the one thing the port signal can join on.
 ///
-/// A named free function rather than two `insert`s inside [`judge_ports`]'s
-/// innermost loop, because the run reports **18 read and 18 carrying a port** —
-/// a figure that reads exactly like a counter incremented in the
-/// port-resolution branch, i.e. equal by construction. It is not: the reader can
-/// see here that `base_urls_read` is written unconditionally, and
-/// [`a_base_url_with_no_port_is_still_a_base_url_that_was_read`] pins it without
-/// needing the estate.
+/// Both census populations are computed from this single predicate over the same
+/// committed values, so "carrying a port" is necessarily a SUBSET of "read".
+/// An earlier shape derived the numerator from parsed `TargetRef`s and the
+/// denominator from the same, which reported 18 of 18 — a 100% that could not
+/// see its own counterexample, because a value the parser refused never became
+/// a `TargetRef` at all. The estate has exactly one:
+/// `official-log-ingestion-batch` commits `base-url: http://localhost:xxxx`.
 ///
-/// [CR-124]: ../../../docs/requests/CR-124-runtime-port-as-a-target-identity-tier.md
-fn judge_one_target(out: &mut Judgement, target: &TargetRef, consumer: &str) {
-    let value = (
-        consumer.to_string(),
-        target.via_key.clone(),
-        format!("{}://{}", target.scheme, authority_of(target)),
-    );
-    if target.port.is_some() {
-        out.base_urls_with_port.insert(value.clone());
-    }
-    out.base_urls_read.insert(value);
-}
-
-/// The authority a [`TargetRef`] was parsed from, reassembled for the census.
-///
-/// The reference keeps the host **label** and the port separately, so this is
-/// the closest honest reconstruction — enough to distinguish two values in the
-/// census, and deliberately not presented as the original text.
-fn authority_of(target: &TargetRef) -> String {
-    match &target.port {
-        Some(port) => format!("{}:{port}", target.label),
-        None => target.label.clone(),
-    }
+/// Delegates to `identity::url_target`, the same parser the references are built
+/// with, rather than re-deciding what a URL is.
+fn carries_a_port(value: &str) -> bool {
+    identity::url_target(value).is_some_and(|(_, _, port)| port.is_some())
 }
 
 // ── The verdict ─────────────────────────────────────────────────────────────
@@ -732,9 +919,10 @@ impl Verdict {
 
 // ── The report ──────────────────────────────────────────────────────────────
 
-/// Print the census. One section per acceptance criterion, in the order
-/// [CR-124] §6 states them, so the output reads against the story without a
-/// decoder — the shape `identity::report` already uses.
+/// Print the census, in the order [CR-124] §6 raises the questions, so the
+/// output reads against the story without a decoder — the shape
+/// `identity::report` already uses. The section headings below are this report's
+/// own; §6 is a bullet list and numbers nothing.
 ///
 /// [CR-124]: ../../../docs/requests/CR-124-runtime-port-as-a-target-identity-tier.md
 fn report(ports: &PortIndex, j: &Judgement, counterfactuals: &[(Population, Judgement)], members: usize) {
@@ -753,7 +941,8 @@ fn report(ports: &PortIndex, j: &Judgement, counterfactuals: &[(Population, Judg
     report_counterfactuals(j, counterfactuals);
 }
 
-/// [CR-124] §6, report 1: how many resolved `base-url` values carry a port.
+/// How many `base-url` values a resolved call site reads carry a port — the
+/// first half of [CR-124] §6's second bullet.
 ///
 /// [CR-124]: ../../../docs/requests/CR-124-runtime-port-as-a-target-identity-tier.md
 fn report_base_urls(j: &Judgement) {
@@ -768,6 +957,13 @@ fn report_base_urls(j: &Judgement) {
         "  call sites whose base-URL key no admitted source proves: {}",
         j.sites_without_base_url.len(),
     );
+    println!(
+        "  call sites whose base-URL key IS proved but whose value establishes no authority: {}",
+        j.sites_with_unusable_base_url.len(),
+    );
+    for site in &j.sites_with_unusable_base_url {
+        println!("      {site}");
+    }
     println!("  call sites whose base URL carries no port: {}", j.sites_without_port.len());
     if !j.templates_not_normalizable.is_empty() {
         println!(
@@ -781,8 +977,9 @@ fn report_base_urls(j: &Judgement) {
     }
 }
 
-/// [CR-124] §6, report 2: how the referenced ports resolve, with the ones that
-/// resolve to nothing **enumerated for human adjudication**.
+/// How the referenced ports resolve, with the ones that resolve to nothing
+/// **enumerated for human adjudication** — the second half of [CR-124] §6's
+/// second bullet.
 ///
 /// [CR-124]: ../../../docs/requests/CR-124-runtime-port-as-a-target-identity-tier.md
 fn report_ports(ports: &PortIndex, j: &Judgement) {
@@ -844,9 +1041,9 @@ fn report_ports(ports: &PortIndex, j: &Judgement) {
     }
 }
 
-/// [CR-124] §6, reports 3 and 4: the pairs, split by whether path-only matching
-/// would already have bound them **and** by whether they cross a service
-/// boundary — both splits at the point the headline appears.
+/// The pairs, split by whether path-only matching would already have bound them
+/// **and** by whether they cross a service boundary — [CR-124] §6's third and
+/// fourth bullets, both splits at the point the headline appears.
 ///
 /// [CR-124]: ../../../docs/requests/CR-124-runtime-port-as-a-target-identity-tier.md
 fn report_pairs(j: &Judgement) {
@@ -887,7 +1084,10 @@ fn report_pairs(j: &Judgement) {
     report_edge_detail(j);
 }
 
-/// Every judged edge, with the evidence that bound it. Grouped by the **S-384
+/// Every edge identity PRODUCES, with the evidence that bound it — the net-new
+/// and already-bound classes. `TargetServesNothing` is a refusal rather than an
+/// edge and is reported as a count in the table above, not enumerated here.
+/// Grouped by the **S-384
 /// reading**, which is the stricter of the two: an edge it calls a self-tie is
 /// one the consumer serves itself, and saying so beside the edge is what lets a
 /// human check the split rather than take it.
@@ -978,27 +1178,9 @@ fn report_reconciliation(j: &Judgement, s384: &identity::Findings) -> usize {
          columns use S-384's own rule applied to each experiment's own pairs — a reproduction,\n  \
          not a quotation of its finding text. The S-384 row reproducing its recorded 1 is\n  \
          ASSERTED, not eyeballed; if it ever stops doing so, the two readings are not\n  \
-         comparable and this run fails rather than printing two numbers side by side."
-    );
-    println!(
-        "\n  WHAT DIFFERS BETWEEN THE TWO SIGNALS\n  \
-         S-384 joins the first DNS label of a DEPLOY-overridden base URL\n  \
-         (`http://official-log-export-api.pec-services.svc.cluster.local:9020`) to a member's\n  \
-         Service / chart / Compose / directory / application name. S-400 joins the PORT of the\n  \
-         APPLICATION-committed base URL (`http://localhost:9020`) to that member's own\n  \
-         `{SERVER_PORT_KEY}`, and reads no deploy evidence at all — `TargetRef::is_deploy` is\n  \
-         the partition, and `Population::Headline` enforces it.\n\n  \
-         The two readings are therefore NOT contradictory. They are taken over DISJOINT target\n  \
-         populations, and each is silent on the other's: every application-committed base URL\n  \
-         on this estate has the host label `localhost`, which no member claims, so S-384's\n  \
-         ladder produces nothing there by construction rather than refusing anything; and no\n  \
-         deploy values file is read here at all. A third signal reading BOTH is reported as the\n  \
-         `deploy evidence admitted` counterfactual above, and it adds nothing on this estate —\n  \
-         the same edges, because the deploy override and the application default name the same\n  \
-         port.\n\n  \
-         What the two DO agree on is the shape of the shortfall: in both experiments the\n  \
-         ambiguity identity discharges is overwhelmingly one the consumer created against\n  \
-         itself by re-registering its callee's template on its own controller."
+         comparable and this run fails rather than printing two numbers side by side.\n  \
+         WHAT DIFFERS between the two signals, and why this is not a contradiction, is\n  \
+         argued once — in the recorded finding printed below, not restated here."
     );
     s384_third_party
 }
@@ -1016,8 +1198,9 @@ fn s384_net_new_third_party(s384: &identity::Findings) -> usize {
         .iter()
         .filter(|p| p.class == PairClass::NetNewAmbiguous)
         .filter(|p| {
-            p.consumer != p.provider
-                && !s384.providers.serving(&p.normalized).contains(p.consumer.as_str())
+            let consumer_serves =
+                s384.providers.serving(&p.normalized).contains(p.consumer.as_str());
+            is_s384_third_party(&p.consumer, &p.provider, consumer_serves)
         })
         .map(|p| (p.consumer.as_str(), p.normalized.as_str(), p.provider.as_str()))
         .collect::<BTreeSet<_>>()
@@ -1131,6 +1314,13 @@ fn measure_port_target_identity_over_the_reference_workspace() {
         j.net_new_self_ties(Reading::AsMeasuredByS384),
     );
     assert_eq!(
+        j.target_serves_nothing(Party::ThirdParty, Reading::AsDeclared),
+        RECORDED_TARGET_SERVES_NOTHING,
+        "the port-target-serves-nothing column moved from {RECORDED_TARGET_SERVES_NOTHING} \
+         to {}; the recorded finding quotes it as a figure, so it is pinned",
+        j.target_serves_nothing(Party::ThirdParty, Reading::AsDeclared),
+    );
+    assert_eq!(
         j.already_bound(Party::ThirdParty, Reading::AsDeclared),
         RECORDED_ALREADY_BOUND_THIRD_PARTY,
         "the already-bound-by-path third-party column moved from \
@@ -1158,6 +1348,26 @@ fn measure_port_target_identity_over_the_reference_workspace() {
             "the `{}` counterfactual moved from {recorded} to {measured}",
             population.label(),
         );
+        // The SET, not just its size. `WithTestTree` is the one non-monotone
+        // population — widening the provider side can create a new same-port
+        // collision and so REMOVE an edge — and an equal count would hide one
+        // edge being swapped for another.
+        for (class, party) in [
+            (PairClass::NetNewAmbiguous, Party::ThirdParty),
+            (PairClass::NetNewAmbiguous, Party::SelfTie),
+            (PairClass::AlreadyBoundByPath, Party::ThirdParty),
+        ] {
+            assert_eq!(
+                c.edges(class, party, Reading::AsDeclared),
+                j.edges(class, party, Reading::AsDeclared),
+                "the `{}` counterfactual reports the same COUNT as the headline for {} / {} \
+                 but not the same edges — one edge was swapped for another, which an equal \
+                 count hides",
+                population.label(),
+                class.label(),
+                party.label(),
+            );
+        }
         for reading in [Reading::AsDeclared, Reading::AsMeasuredByS384] {
             assert!(
                 c.net_new_third_party(reading) < NET_NEW_THIRD_PARTY_FLOOR,
@@ -1194,6 +1404,17 @@ fn assert_traversal_agrees_with_the_identity_gate(j: &Judgement, s384: &identity
         j.templates_not_normalizable, s384.templates_not_normalizable,
         "the two gates refused different templates as non-normalizable, so one of the two \
          traversals has drifted from the other",
+    );
+    // The sibling-key rule itself, not just the loop around it. The review found
+    // that the two previous assertions cover only the OUTER loop, so changing
+    // `.base-url` to `.baseurl` in one file would leave both gates green while
+    // they compared different key populations — precisely the drift this check
+    // exists to catch.
+    assert_eq!(
+        j.call_site_base_keys, s384.call_site_base_keys,
+        "the two gates derived different base-URL sibling keys from the same call sites, so \
+         CR-121 section 3.2's rule has drifted between `port_identity::base_url_sibling_key` \
+         and `identity::judge`'s inline copy of it",
     );
 }
 
@@ -1264,6 +1485,11 @@ pub const RECORDED_NET_NEW_SELF_TIES_AS_S384: usize = 3;
 /// The already-bound-by-path third-party column.
 pub const RECORDED_ALREADY_BOUND_THIRD_PARTY: usize = 8;
 
+/// Edges whose port target registers no route at the template — a figure the
+/// recorded finding quotes twice, so it is pinned for the same reason the
+/// already-bound column is.
+pub const RECORDED_TARGET_SERVES_NOTHING: usize = 6;
+
 /// Net-new third-party with test-tree configuration admitted — the sensitivity
 /// of the headline to the first of its two judgement calls.
 pub const RECORDED_NET_NEW_THIRD_PARTY_WITH_TEST: usize = 3;
@@ -1289,16 +1515,13 @@ pub const RECORDED_NET_NEW_THIRD_PARTY_WITH_DEPLOY: usize = 3;
 mod fixtures {
     use super::*;
 
+    /// Build an index through `PortIndex::claim` — production's own rule — so a
+    /// fixture reading `declarations` or `claimants` is reading what the
+    /// measurement would have written, not what the fixture wrote.
     fn index_of(claims: &[(&str, &str)]) -> PortIndex {
         let mut index = PortIndex::default();
         for (member, port) in claims {
-            index.declarations += 1;
-            index.declaring_members.insert((*member).to_string());
-            index
-                .claimants
-                .entry((*port).to_string())
-                .or_default()
-                .insert((*member).to_string());
+            index.claim(member, port);
         }
         index
     }
@@ -1352,10 +1575,14 @@ mod fixtures {
         // with the literal written a few hundred lines above it, which no
         // mutation can falsify and which says nothing about what was declared
         // before the run.
+        // Anchored on the line that names the METRIC, not merely on the first
+        // `>= ` line: a declaration that gained an earlier `>= n …` line would
+        // otherwise silently redefine the floor.
         let declared: usize = DECLARED_FLOOR
             .lines()
+            .filter(|l| l.contains("call-site edges"))
             .find_map(|l| l.trim().strip_prefix(">= ")?.split_whitespace().next()?.parse().ok())
-            .expect("the declaration states its floor as a `>= NN ...` line");
+            .expect("the declaration states its floor as a `>= NN ... call-site edges` line");
         assert_eq!(
             declared, NET_NEW_THIRD_PARTY_FLOOR,
             "NET_NEW_THIRD_PARTY_FLOOR is {NET_NEW_THIRD_PARTY_FLOOR} but the floor declared \
@@ -1491,6 +1718,161 @@ mod fixtures {
         assert_eq!(j.couplings(Party::ThirdParty, r).len(), 1);
     }
 
+    // ── The join rules the estate arm alone would leave uncovered ───────────
+    //
+    // Every rule below was proved uncovered by the review's mutation sweep:
+    // breaking it in production left all eighteen fixtures green. These are the
+    // CR-124 §4.4 requirement applied to the rules that actually decide the
+    // gate, not only to the ones that were convenient to reach.
+
+    #[test]
+    fn the_base_url_is_the_sibling_of_the_path_key_under_the_same_prefix() {
+        // CR-121 §3.2's rule, and the single rule the whole join hangs on.
+        // Replacing `.base-url` with `.baseurl` here left the suite green.
+        assert_eq!(
+            base_url_sibling_key("official-log-aggregate.api.uri-request-official-log"),
+            Some(flat_key("official-log-aggregate.api.base-url")),
+        );
+        // Relaxed binding: the three spellings of the same key agree.
+        assert_eq!(
+            base_url_sibling_key("officialLogAggregate.api.uriRequestOfficialLog"),
+            base_url_sibling_key("official-log-aggregate.api.uri-request-official-log"),
+        );
+        // The near miss: it is the SIBLING, not the key itself, and not the
+        // grandparent's. A path key one level deeper hangs its base URL one
+        // level deeper too.
+        assert_ne!(
+            base_url_sibling_key("a.api.rest.uri-x"),
+            base_url_sibling_key("a.api.uri-x"),
+        );
+        assert_eq!(base_url_sibling_key("a.api.rest.uri-x"), Some(flat_key("a.api.rest.base-url")));
+        // A key with no prefix has no sibling to hang a base URL on.
+        assert_eq!(base_url_sibling_key("uri-x"), None);
+        assert_eq!(base_url_sibling_key(""), None);
+    }
+
+    #[test]
+    fn the_s384_party_rule_is_one_function_used_by_both_gates() {
+        // Written twice, the two copies could diverge and the asserted
+        // reconciliation would compare different rules while staying green.
+        assert!(is_s384_third_party("notification-adapter", "notification-api", false));
+        assert!(!is_s384_third_party("mailbox-aggregator-api", "official-log-export-api", true));
+        assert!(!is_s384_third_party("a", "a", false), "a member bound to itself");
+        assert!(!is_s384_third_party("a", "a", true));
+        // …and it is exactly what `PortPair::party` answers under that reading.
+        for (consumer, provider, serves) in
+            [("a", "b", false), ("a", "b", true), ("a", "a", false), ("a", "a", true)]
+        {
+            let p = pair_serving(consumer, provider, "/v1/x/{}", PairClass::NetNewAmbiguous, serves);
+            let expected = if is_s384_third_party(consumer, provider, serves) {
+                Party::ThirdParty
+            } else {
+                Party::SelfTie
+            };
+            assert_eq!(p.party(Reading::AsMeasuredByS384), expected);
+        }
+    }
+
+    #[test]
+    fn the_key_the_port_index_reads_is_the_members_own_server_port() {
+        // The constant's doc argues at length that admitting the actuator's
+        // separate port would fabricate edges under NFR-RA-05 — and nothing
+        // tested it. Swapping it for `management.server.port` left the suite
+        // green.
+        assert_eq!(SERVER_PORT_KEY, "server.port");
+        assert_ne!(SERVER_PORT_KEY, "management.server.port");
+        assert_ne!(SERVER_PORT_KEY, "server.ports");
+    }
+
+    #[test]
+    fn a_deploy_manifest_is_never_read_for_a_provider_port() {
+        // CR-124 §2's "never touches a deploy manifest" was enforced on the
+        // consumer side only: `Tree::of` returns `Main` for a Helm values file,
+        // so `Headline` admitted one. Latent — `ConfigCorpus::discover` filters
+        // on basename — but a guard held by another module's rule is a guard the
+        // reader cannot see.
+        for path in [
+            "mailbox-api/.helm/values.yaml",
+            ".helm/values.yaml",
+            "mailbox-aggregator-api/deploy-coll-bp/values.yaml",
+            "mailbox-api/docker-compose.yml",
+        ] {
+            assert!(is_deploy_path(path), "{path} is deploy evidence");
+            for population in
+                [Population::Headline, Population::WithTestTree, Population::WithDeployEvidence]
+            {
+                assert!(
+                    !population.admits_provider_source(path),
+                    "{path} must not supply a provider port under {}",
+                    population.label(),
+                );
+            }
+        }
+        // The near miss: an application source is not deploy evidence merely by
+        // sitting near one, and the estate's real provider sources still pass.
+        assert!(!is_deploy_path("mailbox-api/src/main/resources/application.yml"));
+        assert!(Population::Headline
+            .admits_provider_source("mailbox-api/src/main/resources/application.yml"));
+    }
+
+    #[test]
+    fn a_coupling_that_is_a_self_tie_anywhere_is_reported_as_one() {
+        // Party is a per-TEMPLATE property, so filtering per pair and then
+        // collapsing put one coupling in BOTH columns and the two printed
+        // numbers summed above the true distinct total.
+        let j = judgement(vec![
+            pair_serving("a", "b", "/v1/x/{}", PairClass::NetNewAmbiguous, true),
+            pair_serving("a", "b", "/v1/y/{}", PairClass::AlreadyBoundByPath, false),
+        ]);
+        let r = Reading::AsMeasuredByS384;
+        assert_eq!(j.couplings(Party::SelfTie, r).len(), 1);
+        assert_eq!(j.couplings(Party::ThirdParty, r).len(), 0);
+        // The two columns partition: their sum is the distinct coupling count.
+        assert_eq!(
+            j.couplings(Party::SelfTie, r).len() + j.couplings(Party::ThirdParty, r).len(),
+            1,
+        );
+        // …and a refusal is not a coupling at all.
+        let with_refusal = judgement(vec![
+            pair("a", "b", "/v1/x/{}", PairClass::NetNewAmbiguous),
+            pair("a", "c", "/v1/z/{}", PairClass::TargetServesNothing),
+        ]);
+        assert_eq!(with_refusal.couplings(Party::ThirdParty, r).len(), 1);
+    }
+
+    #[test]
+    fn the_call_site_count_behind_the_headline_counts_only_net_new_third_party() {
+        // Both filters were uncovered: every pair in the earlier fixture was
+        // net-new AND third-party, so the function was indistinguishable from
+        // "count distinct sites".
+        let r = Reading::AsMeasuredByS384;
+        let mut bound = pair("a", "c", "/v1/y/{}", PairClass::AlreadyBoundByPath);
+        bound.site = "a/src/main/java/Bound.java:2".to_string();
+        let mut tie = pair_serving("a", "d", "/v1/z/{}", PairClass::NetNewAmbiguous, true);
+        tie.site = "a/src/main/java/Tie.java:3".to_string();
+        let j = judgement(vec![pair("a", "b", "/v1/x/{}", PairClass::NetNewAmbiguous), bound, tie]);
+        assert_eq!(j.net_new_third_party_sites(r).len(), 1);
+        assert_eq!(
+            j.net_new_third_party_sites(r).into_iter().collect::<Vec<_>>(),
+            vec!["a/src/main/java/X.java:1"],
+        );
+    }
+
+    #[test]
+    fn every_printed_label_says_what_it_means() {
+        // The module's whole thesis is that the third-party/self-tie split must
+        // survive TO THE PRINTED HEADLINE. Swapping the two label strings broke
+        // exactly that and left the suite green.
+        assert_eq!(Verdict::decide(None, 16).label(), "VOID");
+        assert_eq!(Verdict::decide(Some(0), 16).label(), "FALSIFIED");
+        assert_eq!(Verdict::decide(Some(16), 16).label(), "HOLDS");
+        assert!(Party::ThirdParty.label().starts_with("third-party"));
+        assert!(Party::SelfTie.label().starts_with("SELF-TIE"));
+        assert_ne!(Party::ThirdParty.label(), Party::SelfTie.label());
+        assert_ne!(Reading::AsDeclared.label(), Reading::AsMeasuredByS384.label());
+        assert!(Reading::AsDeclared.label().contains("consumer != provider"));
+    }
+
     // ── The port join ───────────────────────────────────────────────────────
 
     #[test]
@@ -1508,6 +1890,14 @@ mod fixtures {
         assert!(!is_a_port("-1"));
         assert!(!is_a_port("9000,9001"));
         assert!(!is_a_port("http://localhost:9000"));
+        // Digits alone is not enough, and the join is STRING equality: a
+        // leading-zero spelling is a claim no caller can write, and neither 0
+        // nor a value past the 16-bit range is a port anything listens on.
+        assert!(!is_a_port("0"));
+        assert!(!is_a_port("09013"));
+        assert!(!is_a_port("99999"));
+        assert!(!is_a_port("65536"));
+        assert!(is_a_port("65535"), "the top of the range is still a port");
     }
 
     #[test]
@@ -1534,6 +1924,30 @@ mod fixtures {
         ]);
         assert_eq!(index.member_for("9009"), None);
         assert_eq!(index.member_for("9007"), None);
+    }
+
+    #[test]
+    fn the_index_refuses_a_declaration_that_is_not_a_port() {
+        // `is_a_port` is covered as a predicate; this covers its CALL SITE,
+        // which is the rule. The review proved that deleting the guard from the
+        // index left every fixture green — extracting the predicate alone had
+        // not closed the hole, because no fixture ever offered the index a
+        // value it must refuse.
+        let index = index_of(&[
+            ("mailbox-api", "9000"),
+            ("a", "${PORT}"),
+            ("b", "${SERVER_PORT:9000}"),
+            ("c", ""),
+            ("d", "0"),
+            ("e", "09013"),
+        ]);
+        assert_eq!(index.declarations, 1, "only the real port is a declaration");
+        assert_eq!(index.declaring_members, ["mailbox-api".to_string()].into_iter().collect());
+        assert_eq!(index.claimants.len(), 1);
+        assert_eq!(index.member_for("9000"), Some("mailbox-api"));
+        // The consequence the guard exists for: two members holding the same
+        // placeholder must not collide and cancel out the ports they declare.
+        assert_eq!(index.member_for("${PORT}"), None);
     }
 
     #[test]
@@ -1638,42 +2052,21 @@ mod fixtures {
     }
 
     #[test]
-    fn a_base_url_with_no_port_is_still_a_base_url_that_was_read() {
-        // The estate reports 18 read and 18 carrying a port, which reads exactly
-        // like a denominator that is equal by construction. This is the proof it
-        // is not — and it needs no estate to run.
-        let mut out = Judgement::default();
-        let with_port = target("application:<none>", "a/src/main/resources/application.yml");
-        let without = TargetRef {
-            port: None,
-            via_key: "pec-server.base-url".into(),
-            ..with_port.clone()
-        };
-        judge_one_target(&mut out, &with_port, "a");
-        judge_one_target(&mut out, &without, "a");
-        assert_eq!(out.base_urls_read.len(), 2);
-        assert_eq!(out.base_urls_with_port.len(), 1);
-        // …and two call sites reading the SAME value are one value, or the
-        // denominator counts sites rather than values.
-        judge_one_target(&mut out, &with_port, "a");
-        assert_eq!(out.base_urls_read.len(), 2);
-    }
-
-    #[test]
-    fn the_authority_a_reference_is_reassembled_from_keeps_its_port() {
-        let with_port = TargetRef {
-            member: "a".into(),
-            overlay: "application:<none>".into(),
-            label: "localhost".into(),
-            scheme: "http".into(),
-            port: Some("9013".into()),
-            via_flat: flat_key("filters.api.base-url"),
-            via_key: "filters.api.base-url".into(),
-            file: "a/src/main/resources/application.yml".into(),
-        };
-        assert_eq!(authority_of(&with_port), "localhost:9013");
-        let without = TargetRef { port: None, ..with_port };
-        assert_eq!(authority_of(&without), "localhost");
+    fn a_base_url_the_parser_refuses_is_still_a_base_url_that_was_read() {
+        // The defect the review found: an earlier shape derived BOTH census
+        // populations from parsed references, so a value the parser refused was
+        // invisible to the denominator and the run reported 18 of 18 (100%)
+        // carrying a port. The estate's counterexample is real — the run's own
+        // fixture below pins that `http://localhost:xxxx` is refused — so the
+        // 100% could never have been falsified by the data.
+        assert!(carries_a_port("http://localhost:9013"));
+        assert!(carries_a_port("http://mailbox-api.pec-services.svc.cluster.local:9000"));
+        // …and every shape the estate commits that cannot be joined on:
+        assert!(!carries_a_port("http://localhost:xxxx"), "a placeholder port");
+        assert!(!carries_a_port("changeit"), "not a URL at all");
+        assert!(!carries_a_port("http://localhost"), "a URL with no port");
+        assert!(!carries_a_port("https://192.168.54.134:444/postedoc-ws"), "an IP literal");
+        assert!(!carries_a_port("http://${SERVICE_HOST}:${PORT}"), "a templated authority");
     }
 
     #[test]

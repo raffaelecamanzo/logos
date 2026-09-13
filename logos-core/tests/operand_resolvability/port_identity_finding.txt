@@ -115,10 +115,11 @@ THE JOIN, STEP BY STEP — WHERE THE POPULATION GOES
       distinct port values declared                                27
     consumer call sites considered (gate-admitted, main tree,
       template resolved)                                           79
-    resolved base-url values those sites read                      18
-      carrying a port                                              18   (100%)
-      carrying no port                                              0
-    call sites whose base-URL sibling key no admitted source proves  1
+    base-url values those sites read                               19
+      establishing an authority with a port                        18   (94.7%)
+      establishing no authority the port signal can join on         1
+    call sites whose base-URL sibling key no admitted source proves  0
+    call sites whose key IS proved but whose value is unusable       1
     templates that resolved but do not positionally normalize        1
 
     distinct ports referenced by a consumer                        11
@@ -126,11 +127,24 @@ THE JOIN, STEP BY STEP — WHERE THE POPULATION GOES
       claimed by TWO OR MORE members  -> resolve to NOTHING         2
       claimed by NO member            -> resolve to NOTHING         4
 
-Every mechanical step works. 18 of 18 base-url values carry a port — the estate
-writes `http://localhost:<port>` without exception, exactly as CR-124 says — and
-5 of the 11 referenced ports name exactly one member. The signal is not blocked
-by capture, by parsing, or by the corpus. It is blocked by what the edges turn
-out to be.
+Every mechanical step works. 18 of the 19 base-url values a resolved call site
+reads carry a port, and 5 of the 11 referenced ports name exactly one member. The
+signal is not blocked by capture, by parsing, or by the corpus. It is blocked by
+what the edges turn out to be.
+
+The nineteenth is worth naming, because an earlier version of this harness could
+not see it. `official-log-ingestion-batch` commits
+`time-stamp-authority.api.base-url: http://localhost:xxxx` -- a placeholder port
+-- and its one call site (`TSARestClient.java:87`) reads the sibling path key.
+The key IS proved by an admitted source; the VALUE establishes nothing. Deriving
+both census populations from already-parsed references put that site in the "no
+admitted source proves this key" bucket, which is false for it, and made the
+carrying-a-port share read 18 of 18 (100%) -- a figure structurally incapable of
+counting its own counterexample. Found at review; the buckets are now separate
+and the denominator is taken over committed values, parsed or not. CR-124's
+"every base-url committed in the reference estate is `http://localhost:<port>`"
+is a good approximation, not a fact: the estate also commits an IP literal and a
+`changeit`, neither of which any resolved call site reaches.
 
 
 THE TWO SAME-TIER COLLISIONS, AND THE FOUR UNMATCHED PORTS
@@ -236,10 +250,10 @@ resolving it yields an edge from a member to a service it already fronts.
 WHAT THIS FINDING DOES NOT SAY
 -------------------------------
 
-It does not say the port signal is unreadable. 18 of 18 base URLs carry a port,
-5 ports name exactly one member, and the join produces 17 classified edges (3
-net-new, 8 already bound by path alone, 6 whose target serves no such route).
-Every mechanical step CR-124 describes works on committed source.
+It does not say the port signal is unreadable. 18 of the 19 base URLs read carry
+a port, 5 ports name exactly one member, and the join produces 17 classified
+edges (3 net-new, 8 already bound by path alone, 6 whose target serves no such
+route). Every mechanical step CR-124 describes works on committed source.
 
 It does not say a port tier would be harmful. It says a port tier would produce
 at most 3 net-new edges on the one estate available to measure it against a floor
@@ -255,8 +269,8 @@ generality, and a falsification on that estate does not need to.
 It does not re-derive CR-124's hand census of "39 call sites / 9 service pairs".
 That census counted `base-url` values carrying a port against members declaring
 it, without the exactly-one rule, without the provider route index, and without
-the self-tie split. This run's comparable figures are 18 base-url values, 6
-third-party couplings and 8 already-bound edges. CR-124 said of its own census:
+the self-tie split. This run's comparable figures are 19 base-url values read,
+6 third-party couplings and 8 already-bound edges. CR-124 said of its own census:
 "This census is not a finding ... it must not become an acceptance floor." That
 was correct, and the floor was correctly taken from S-384 instead.
 
