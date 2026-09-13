@@ -62,7 +62,7 @@ denominators, is
 SUPERSEDED IN PART — 2026-09-13 (S-397 T2)
 ------------------------------------------
 
-READ THIS FIRST. Everything below is the 2026-09-09 measurement over a store
+THE OLDEST GENERATION. Everything below is the 2026-09-09 measurement over a store
 cold-indexed with logos 1.4.7, and is preserved as the historical record of it
 rather than rewritten: a dated measurement that gets edited is no longer a
 measurement. CR-120 §6's criterion was met on that generation and nothing here

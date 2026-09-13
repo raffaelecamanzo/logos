@@ -335,10 +335,13 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
         inv_num("unbound") > 54,
         "the generation label and the measurement disagree: the artifact says \
          contains_s374_refusal_rows = {claims_s374} while the invocation population's \
-         unbound bucket holds {}. The 54 is the pre-S-374 floor — the broker \
-         `topic-not-literal` refusals, which every generation of this store carries — so \
-         a store holding S-374's client-call refusals reads strictly above it and one \
-         without them reads exactly at it.",
+         unbound bucket holds {}. The 54 is the broker `topic-not-literal` refusals, \
+         which every generation of this store carries — so a store holding S-374's \
+         client-call refusals reads well above it. It is a FLOOR, not an equality: a \
+         store without those refusals reads 54 PLUS any non-client-call unbound row, \
+         which is 55 on this generation (the one config-bound `path-not-composed` row \
+         S-398 T2 recorded). The discrimination survives that — 79 is well clear of \
+         both — but do not re-derive the pre-S-374 reading as exactly 54.",
         inv_num("unbound"),
     );
 

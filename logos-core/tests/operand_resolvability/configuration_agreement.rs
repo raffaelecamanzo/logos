@@ -2287,14 +2287,18 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
          2026-09-13 after S-402 emptied the Go row. This run read {s382:?}. Re-measure \
          against the reference workspace before changing this assertion.\n\
          \n\
-         THIS DENOMINATOR IS RESTATED IN THREE PLACES THIS BINARY CANNOT REACH, and \
+         THIS DENOMINATOR IS RESTATED IN FOUR PLACES THIS BINARY CANNOT REACH, and \
          it has now moved twice (111 -> 108 -> 96). If it moves again, re-record \
          ALL of them in the same change:\n\
          \x20 - `ACCESSOR_DENOMINATOR` in logos-core/tests/config_bound_admission.rs \
          (the 96), and the `79 agreed + 2 divergent = 81` upper bound its module \
          docs state — that upper bound has NOT moved across either drift;\n\
          \x20 - logos-core/tests/config_bound_admission/config_bound_admission_finding.txt;\n\
-         \x20 - the accessor-denominator table in docs/howto/commands.md.\n\
+         \x20 - the accessor-denominator table in docs/howto/commands.md;\n\
+         \x20 - the `.properties` gap's site-level cost on `source_facts` in \
+         logos-core/src/extract/config/corpus.rs, which states it as `0 of 96` — the \
+         one PRODUCTION file that restates this denominator, and the one this list \
+         did not name until S-398 T2's review added it.\n\
          \n\
          A FOURTH PLACE WAS DELIBERATELY DROPPED FROM THIS LIST: the S-397 T2 figures \
          in docs/planning/sprints/sprint-impl-68.md. They are a DATED record of what \

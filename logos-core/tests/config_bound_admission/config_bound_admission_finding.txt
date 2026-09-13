@@ -21,6 +21,17 @@ This supersedes the S-397 T2 finding this file previously held. That record was
 correct at its date and is not retracted; its figures are carried below as the
 BEFORE column so the movement is legible rather than overwritten.
 
+THIS ARTIFACT CARRIES ONE GENERATION, AND THAT DIFFERS DELIBERATELY FROM THE TWO
+BESIDE IT. `coverage_intake_split/intake_split_finding.txt` and
+`coverage_headline_baseline/headline_baseline_finding.txt` prepend a section per
+generation and preserve the older ones whole; this file replaces its headline
+and keeps the previous reading only as the BEFORE column. The reason is
+mechanical, not a difference of principle: this file alone is `include_str!`'d
+into `config_bound_admission.rs` and printed IN FULL on every run, so unbounded
+growth has a cost the other two do not pay. Superseded generations of this
+artifact live in the delivering sprint's notes — S-397 T2's in
+`docs/planning/sprints/sprint-impl-68.md`, this one's in `sprint-impl-69.md`.
+
 
 NO FLOOR IS ASSERTED ON EITHER FIGURE
 -------------------------------------
@@ -120,6 +131,12 @@ S-398 T1 — AN ADMISSION.  37 sites.
   carries a resolved, committed value. `pecserver-facade` is the control: its
   accessors were already unqualified, so S-398 had nothing to add there and
   neither column moved.
+
+  THE TABLE IS THE MEMBERS THAT MOVED, PLUS THE CONTROL — its columns sum to
+  41 -> 78, not 44 -> 81. The three rows outside it are one `config-bound` row
+  each in `archive-api`, `archive-api-logiclens-fork` and
+  `official-log-ingestion-batch`, unchanged across the measurement. Stated so a
+  reader reconstructing 44 -> 81 from the table does not stop three short.
 
   37 is also exactly the figure S-397 T2 diagnosed as the remaining gap — "37
   sites and every one of them spells `this.`". The prediction and the outcome
