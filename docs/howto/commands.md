@@ -1169,6 +1169,28 @@ A member with no index yet is `deferred` / `opened` — honest and
 cannot be opened is `degraded` on both, with a `degraded_reason` and, where the
 diagnostic identifies one, a `degraded_cause`:
 
+> **A failed member is attempted and announced once per answer, on both
+> surfaces.** `workspace status` walks every member four times to build one
+> answer. Before [CR-105](../requests/CR-105-report-a-failed-member-open-once-per-answer.md)
+> the report-once guarantee was gated on the CLI's one-shot registry, so the
+> one-shot obeyed it and the **served** surface did not: a broken member cost
+> four open attempts and four near-identical diagnostics on *every* `GET
+> /api/v1/workspace/status`. On an 84-member workspace with 63 degraded members
+> that is 252 attempts and roughly 100 KB of repeated warning text per request,
+> under exactly the file-descriptor pressure that caused the failures in the
+> first place. The guarantee is now scoped to the **answer** rather than to the
+> registry's mode, so it holds identically for `logos workspace status` and for
+> the served endpoint.
+>
+> This is deliberately *not* caching across requests. A **later** request
+> re-attempts the member and re-announces it, so a member that recovers between
+> two requests stops being reported degraded by the second one — the
+> transient-recovery property the old mode gate existed to protect. The payload
+> is unchanged: same `degraded_rollup`, same per-member rows, same
+> `covers_all_members` marker. Only the number of attempts and the volume of
+> repeated text change.
+
+
 Three similarly-named fields can appear on a degraded row, and each answers a
 different question: `error` is the row's canonical single fact (its verbatim
 engine diagnostic) when a consumer wants just one field; `degraded_reason` /
