@@ -214,46 +214,52 @@ describe("buildCoverageDashboard (S-250, FR-UI-29, FR-WS-05)", () => {
     expect(model.bound).toBe(1);
   });
 
-  /** **A NON-ZERO headline reaches the model verbatim** — the shape the reference
-   *  estate produces since S-403, and the one every fixture in this file lacked
-   *  while the server could only ever send `0` beside a non-zero resolved-site
-   *  count (CR-127).
+  /** **A NON-ZERO headline reaches the model VERBATIM, and is not rebuilt from the
+   *  numbers beside it** — the shape the reference estate produces since S-403, and
+   *  the one every fixture in this file lacked while the server could only ever
+   *  send `0` beside a non-zero resolved-site count (CR-127).
    *
-   *  The figures are the estate's own (2026-09-13): 15 resolved edges over 15 of
-   *  117 egress sites. The assertion that matters is that the model does not
-   *  RECOMPOSE the line — `resolvedEdgesSummary` is the server's string, and a
-   *  view that rebuilt it from the two numbers would drift from the CLI and MCP
-   *  renderings of the same payload, which is the three-surface agreement
-   *  FR-WS-05 requires. */
+   *  A view that recomposed the sentence would drift from the CLI and MCP
+   *  renderings of the same payload, which is the three-surface agreement FR-WS-05
+   *  requires. Pinning that needs a fixture whose summary is **not derivable** from
+   *  its own fields: the first version of this test made every input mutually
+   *  consistent, so a model that rebuilt the string produced a byte-identical one
+   *  and passed. Proved in review — a recomposing `coverageModel.ts` left it at 30
+   *  passed, 0 failed.
+   *
+   *  Two discriminators do the work, because the first alone was not enough — a
+   *  recomposition that reads `by_intake.invocation.bound` reproduces a fan-out
+   *  numerator correctly, and passed. So the fixture also lands on the server's
+   *  GRAMMAR: one captured egress site, and the server writes "1 of 1 egress
+   *  **site**" singular, as `summarize_resolved_edges` does. A view rebuilding the
+   *  sentence has to reimplement both the fan-out numerator and the pluralisation
+   *  to match — and reimplementing the server's string is the drift this asserts
+   *  against. */
   it("carries a non-zero resolved-edge headline and the server's line verbatim", () => {
     const model = buildCoverageDashboard(
-      coverage([...bound("route", 15), ...unbound("route", "base-url-runtime", 79, "invocation")], {
-        bound: 15,
-        unbound: 79,
+      coverage([...bound("broker-topic", 1)], {
+        bound: 1,
         by_intake: {
           contract_surface: counts({}),
-          invocation: counts({ bound: 15, ambiguous: 23, unbound: 79 }),
+          invocation: counts({ bound: 1 }),
         },
-        resolved_cross_service_edges: 15,
-        egress_resolution: 15 / 117,
-        egress_resolution_measured: 117,
+        // A fan-out: one publish binds three cross-member subscribers, so the
+        // count (3 edges) and the rate's numerator (1 site) are different numbers
+        // — and with a denominator of 1 the server says "egress site", singular.
+        resolved_cross_service_edges: 3,
+        egress_resolution: 1,
+        egress_resolution_measured: 1,
         resolved_edges_summary:
-          "15 resolved cross-service edges; egress resolution 0.128 (15 of 117 egress sites resolved)",
+          "3 resolved cross-service edges; egress resolution 1.000 (1 of 1 egress site resolved)",
       }),
     );
 
-    expect(model.resolvedCrossServiceEdges).toBe(15);
-    expect(model.egressResolutionMeasured).toBe(117);
+    expect(model.resolvedCrossServiceEdges).toBe(3);
+    expect(model.egressResolutionMeasured).toBe(1);
+    // The server's string, byte for byte.
     expect(model.resolvedEdgesSummary).toBe(
-      "15 resolved cross-service edges; egress resolution 0.128 (15 of 117 egress sites resolved)",
+      "3 resolved cross-service edges; egress resolution 1.000 (1 of 1 egress site resolved)",
     );
-    // The line the model carries names the same count the model carries — the
-    // self-agreement CR-127 makes structural server-side, asserted here so the
-    // SPA cannot be the surface that breaks it.
-    expect(model.resolvedEdgesSummary.startsWith(`${model.resolvedCrossServiceEdges} resolved`)).toBe(
-      true,
-    );
-    expect(model.resolvedEdgesSummary).toContain(`of ${model.egressResolutionMeasured} egress sites`);
   });
 
   it("carries an ABSENT egress resolution through as null, never as a number", () => {

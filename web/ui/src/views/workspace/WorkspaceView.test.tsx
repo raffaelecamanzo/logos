@@ -750,10 +750,11 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
    *
    *  Every other fixture on this surface carries `0`, which is what the server
    *  could send while the count excluded `config-bound` rows — so the rendering of
-   *  the shape the estate now actually produces was untested. The figures are the
-   *  reference estate's (2026-09-13): 15 edges over 15 of 117 sites. Asserted on
-   *  rendered DOM text, so a view that rebuilt the sentence from the two numbers
-   *  and drifted from the CLI and MCP renderings would fail here. */
+   *  the shape the estate now actually produces was untested. Asserted on rendered
+   *  DOM text, so a view that rebuilt the sentence from the numbers beside it and
+   *  drifted from the CLI and MCP renderings fails here — verified by making
+   *  `WorkspaceView` recompose the line, which fails this test and its
+   *  absent-rate sibling. */
   it("renders a NON-ZERO resolved-edge headline as the server composed it", async () => {
     stubApi({
       coverage: {
