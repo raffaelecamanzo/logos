@@ -483,9 +483,9 @@ impl DegradedRollup {
     ///
     /// # Grouped by cause, one copy of each
     /// Each distinct reason is printed **once**, as a heading over the members it
-    /// affects. [`DegradedCause::message`] is ~440 characters and the roll-up
+    /// affects. [`DegradedCause::message`] is 388 characters and the roll-up
     /// [CR-100] observed was 63 degraded members of 84 — one reason per member
-    /// meant the same paragraph 63 times, about 28 KB of stderr saying two
+    /// meant the same paragraph 63 times, about 24 KB of stderr saying two
     /// things. Grouping is not a summary: every degraded member is still named,
     /// and its reason is still recoverable from the text, because this is the
     /// only degraded channel `workspace check` and `workspace reachability` have.
@@ -1000,7 +1000,7 @@ mod tests {
     /// S-337: **one copy of the cause, however many members share it.**
     ///
     /// The shape [CR-100] measured — most of the roster failing the same way. The
-    /// remedy sentence is ~440 characters, so one copy per member was the same
+    /// remedy sentence is 388 characters, so one copy per member was the same
     /// paragraph 63 times; this is the assertion that the repetition is gone and
     /// that removing it cost no member its name.
     ///
