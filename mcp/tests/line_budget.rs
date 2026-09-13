@@ -156,16 +156,26 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// **S-401/[CR-125] 982→995** for the unresolved egress residue on the two
 /// reachability tools ([FR-WS-05]): measured 981→989 (+8), 6 lines of headroom.
 ///
-/// Itemised, and it is delegation only. `run_xservice`/`run_xservice_result` now
-/// hand the closure the `ContractBridge` instead of a pre-computed `&[BridgeEdge]`
-/// (+5 doc, net 0 code), because the bridge's derived read-models are now two and
-/// only `callers`/`impact` want the second — so `search` and `route_providers`
-/// never pay for the residue's all-member walk. Each of the seven arms then pulls
-/// what it renders: `+1` line on five of them, `+2` on the two reachability arms
-/// (one `let` binding the pair, one call). Nothing is computed here — the residue
-/// is assembled once in `logos_core::federation::residue` behind the same
-/// stamp-keyed cache the edge set uses, which is exactly the point of [CR-125]
-/// §4.4: the MCP and CLI renderings must be incapable of disagreeing.
+/// Itemised, and it adds up — the first spelling of this note did not, claiming
+/// +14 against its own measured +8, which the story's review caught:
+///
+/// | Region | Before | After | Δ |
+/// |---|---|---|---|
+/// | `run_xservice`/`run_xservice_result` doc | 3 | 10 | **+7** |
+/// | the two runner bodies | 40 | 39 | **−1** |
+/// | the seven tool arms | 83 | 85 | **+2** |
+/// | | | | **+8** |
+///
+/// It is delegation only. The runners hand the closure the `ContractBridge`
+/// instead of a pre-computed `&[BridgeEdge]` — the shape `api_v1::workspace_fan`
+/// already used — because the bridge's derived read-models are now two and only
+/// `callers`/`impact` want the second, so `search` and `route_providers` never
+/// pay for the residue's all-member walk. `run_xservice_result` therefore stops
+/// computing the edges itself (−1); five arms are line-for-line replacements
+/// (net 0); the two reachability arms gain one `let` binding each (+2). Nothing
+/// is computed here — the residue is assembled once in
+/// `logos_core::federation::residue` behind the stamp-keyed cache the edge set
+/// shares, which is the point of [CR-125] §4.4.
 ///
 /// The two `description` strings grew substantially and cost **zero** lines —
 /// each is one long line — which is the right trade on this surface: the
@@ -173,6 +183,14 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// present over an empty `cross_service` list is precisely the payload a reader
 /// must not mistake for an absence.
 ///
+/// **Why 6 lines of headroom and not 1.** The prior raises in this file bank a
+/// line or two; this one banks six deliberately, because the story's own review
+/// left two follow-ups that land on these same arms ([S-403] shares this file)
+/// and a cap set to the measurement forces the next author to re-derive the
+/// budget before making a one-line change. Six is this file's own precedent
+/// (S-360 took 5).
+///
+/// [S-403]: ../../docs/planning/journal.md#s-403-the-resolved-edge-headline-agrees-with-its-payload
 /// [CR-125]: ../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 /// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
 #[test]

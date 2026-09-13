@@ -343,6 +343,24 @@ fn adapter_lines() -> usize {
 /// mechanism.
 ///
 /// [FR-IN-08]: ../../docs/specs/requirements/FR-IN-08.md
+///
+/// **S-401/[CR-125] spends 2 and raises nothing: 886 → 888**, 2 lines of
+/// headroom left under 890. `xservice callers` and `xservice impact` each gain
+/// one line — a `let (edges, residue) = query::reachability_inputs(…)` binding
+/// where they previously bound the edges alone. The residue itself is assembled
+/// in `logos_core::federation::residue` and merely serialised here, so this is
+/// delegation, not logic.
+///
+/// **It first spent 4, landing at 890 of 890 — the whole headroom, silently.**
+/// The story's review caught it: the arms were calling `query::edges` and a
+/// separate residue accessor on two lines. Folding them into the one
+/// `reachability_inputs` entry point was required anyway (two calls read the
+/// member sync-stamps twice and let the answer and its residue describe two
+/// different generations), and it hands back half the spend. Recorded because a
+/// budget silently consumed to zero is discovered by the next author as a gate
+/// failure with no context — CR-084 §6, recorded, not laundered.
+///
+/// [CR-125]: ../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
