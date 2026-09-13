@@ -121,10 +121,13 @@ impl DegradedCause {
     /// remedy names **both** — asserting the narrower one is the same class of
     /// misdiagnosis, merely relocated ([NFR-CC-04], [CR-102]).
     ///
-    /// Kept as tight as that allows, because [`DegradedRollup::notice`] repeats
-    /// this sentence **once per degraded member**: on the 63-of-84 shortfall
-    /// [CR-100] measured, every character here is paid 63 times, and a remedy
-    /// that is quieter to read is the other half of the same story.
+    /// Kept as tight as that allows. It used to be paid **once per degraded
+    /// member** — 63 copies on the 63-of-84 shortfall [CR-100] measured;
+    /// [`DegradedRollup::notice`] now prints it **once** as a heading over the
+    /// members it affects, so length is paid once per *cause* rather than once
+    /// per member. The row's own `degraded_reason` still carries the full
+    /// sentence per member, so terseness is still worth something here — just no
+    /// longer proportional to the roster.
     ///
     /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
     /// [CR-102]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
@@ -478,8 +481,32 @@ impl DegradedRollup {
     /// cause would leave those two commands exiting 1 with no diagnosis, which is
     /// the misdiagnosis [FR-WS-16] exists to remove, merely made silent.
     ///
+    /// # Grouped by cause, one copy of each
+    /// Each distinct reason is printed **once**, as a heading over the members it
+    /// affects. [`DegradedCause::message`] is ~440 characters and the roll-up
+    /// [CR-100] observed was 63 degraded members of 84 — one reason per member
+    /// meant the same paragraph 63 times, about 28 KB of stderr saying two
+    /// things. Grouping is not a summary: every degraded member is still named,
+    /// and its reason is still recoverable from the text, because this is the
+    /// only degraded channel `workspace check` and `workspace reachability` have.
+    ///
+    /// The grouping key is the member's **reason text**, not its
+    /// [`DegradedCause`]. For a classified member the two are the same key —
+    /// `degraded_reason` *is* `cause.message()`, and distinct causes give
+    /// distinct messages — while an *unclassified* member carries its own
+    /// verbatim engine diagnostic there. Keying on `Option<DegradedCause>` would
+    /// collapse every unclassified member into one `None` group under a single
+    /// member's diagnostic, destroying the evidence the absent cause is precisely
+    /// why they need ([NFR-CC-04]). Keying on the text groups what is genuinely
+    /// identical and nothing else.
+    ///
+    /// Order is first-appearance, inside groups and between them, so the text is
+    /// as deterministic as the roster order it is fed ([NFR-RA-06]).
+    ///
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     #[must_use]
     pub fn notice<'a>(&self, opens: impl IntoIterator<Item = &'a MemberOpen>) -> Option<String> {
         if self.degraded_members.is_empty() {
@@ -493,10 +520,25 @@ impl DegradedRollup {
             self.members,
             self.opened,
         );
+        // A `Vec` rather than a map: the distinct-reason count is one or two in
+        // practice, ordering must be first-appearance rather than hash order, and
+        // the keys are the long message strings a map would have to hash in full.
+        let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
         for open in opens {
-            if let Some(reason) = open.state.reason() {
-                lines.push_str(&format!("\n  {}: {reason}", open.member));
+            let Some(reason) = open.state.reason() else {
+                continue;
+            };
+            match groups.iter_mut().find(|(known, _)| *known == reason) {
+                Some((_, members)) => members.push(&open.member),
+                None => groups.push((reason, vec![&open.member])),
             }
+        }
+        for (reason, members) in groups {
+            lines.push_str(&format!(
+                "\n  {reason}\n    affected ({}): {}",
+                members.len(),
+                members.join(", "),
+            ));
         }
         Some(lines)
     }
@@ -934,22 +976,152 @@ mod tests {
             notice.contains("only the 1 that opened"),
             "the notice states the reduced coverage, grammatically: {notice}"
         );
-        // Each member's own reason rides its own line — the classified sentence
-        // for the one that classified, the verbatim diagnostic for the one that
-        // did not.
+        // Each reason is a heading with its members named beneath — the classified
+        // sentence for the one that classified, the verbatim diagnostic for the
+        // one that did not. The two reasons differ, so this is two groups of one.
         assert!(
-            notice.contains("web: not a damaged store"),
+            notice.contains(&format!(
+                "{}\n    affected (1): web",
+                DegradedCause::HostResourceLimit.message()
+            )),
             "the classified cause reaches the human channel, leading with what is \
-             known: {notice}"
+             known, and names the member it covers: {notice}"
         );
         assert!(
-            notice.contains("svc: database disk image is malformed"),
-            "and an unclassified failure carries its diagnostic there: {notice}"
+            notice.contains("database disk image is malformed\n    affected (1): svc"),
+            "and an unclassified failure carries its own diagnostic there: {notice}"
         );
         assert!(
             !notice.contains("api"),
             "a healthy member is not named: {notice}"
         );
+    }
+
+    /// S-337: **one copy of the cause, however many members share it.**
+    ///
+    /// The shape [CR-100] measured — most of the roster failing the same way. The
+    /// remedy sentence is ~440 characters, so one copy per member was the same
+    /// paragraph 63 times; this is the assertion that the repetition is gone and
+    /// that removing it cost no member its name.
+    ///
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    #[test]
+    fn the_notice_prints_a_shared_cause_once_over_every_member_it_affects() {
+        let members = ["alpha", "beta", "gamma", "delta", "epsilon"];
+        let mut rows = vec![opened("api")];
+        rows.extend(members.iter().map(|m| degraded(m, OBSERVED, StoreFile::Present)));
+        let notice = rollup(&rows).notice(&rows).expect("five members degraded");
+
+        let remedy = DegradedCause::HostResourceLimit.message();
+        assert_eq!(
+            notice.matches(remedy).count(),
+            1,
+            "five members sharing one cause yield ONE copy of its text: {notice}"
+        );
+        // …and grouping dropped nobody: every member is still named, and named
+        // beneath the cause that diagnoses it.
+        assert!(
+            notice.contains(&format!("{remedy}\n    affected (5): alpha, beta, gamma, delta, epsilon")),
+            "every affected member is named under the one heading: {notice}"
+        );
+        assert!(notice.contains("5 of 6"), "{notice}");
+        assert!(!notice.contains("api"), "a healthy member is not named: {notice}");
+    }
+
+    /// The near miss the grouping key has to survive: two members that failed
+    /// **unclassified** with *different* verbatim diagnostics are two groups, not
+    /// one.
+    ///
+    /// Keying on `Option<DegradedCause>` would put both under `None` and print
+    /// one member's diagnostic as if it were the other's — destroying exactly the
+    /// evidence an absent cause makes load-bearing ([NFR-CC-04]). Keying on the
+    /// reason text cannot: it groups what is identical and nothing else.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn two_unclassified_members_with_different_diagnostics_are_not_merged() {
+        let rows = vec![
+            degraded("svc", "database disk image is malformed", StoreFile::Present),
+            degraded("web", "no such column: symbols.kind", StoreFile::Present),
+        ];
+        let notice = rollup(&rows).notice(&rows).expect("two members degraded");
+
+        assert!(
+            notice.contains("database disk image is malformed\n    affected (1): svc"),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("no such column: symbols.kind\n    affected (1): web"),
+            "{notice}"
+        );
+        assert_eq!(
+            notice.matches("affected (").count(),
+            2,
+            "two distinct diagnostics are two groups: {notice}"
+        );
+    }
+
+    /// Two *different* causes are two headings, each once, in first-appearance
+    /// order ([NFR-RA-06]) — the grouping is by cause and not a single bucket.
+    ///
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    #[test]
+    fn each_distinct_cause_is_its_own_heading_in_first_appearance_order() {
+        let rows = vec![
+            degraded("web", OBSERVED, StoreFile::Present),
+            degraded("svc", OBSERVED, StoreFile::Obstructed),
+            degraded("api", OBSERVED, StoreFile::Present),
+        ];
+        let notice = rollup(&rows).notice(&rows).expect("three members degraded");
+
+        let host = DegradedCause::HostResourceLimit.message();
+        let obstructed = DegradedCause::StoreObstructed.message();
+        assert_eq!(notice.matches(host).count(), 1, "{notice}");
+        assert_eq!(notice.matches(obstructed).count(), 1, "{notice}");
+        assert!(
+            notice.contains(&format!("{host}\n    affected (2): web, api")),
+            "members keep roster order inside their group: {notice}"
+        );
+        assert!(notice.contains(&format!("{obstructed}\n    affected (1): svc")), "{notice}");
+        assert!(
+            notice.find(host) < notice.find(obstructed),
+            "groups appear in the order their first member does: {notice}"
+        );
+    }
+
+    /// S-337's containment assertion: grouping the **human text** moved neither
+    /// the roll-up's counters, nor `covers_all_members`, nor the serialized row.
+    ///
+    /// The notice is a rendering of rows the payload also carries; a refactor of
+    /// it that quietly changed what those rows say would be a schema change
+    /// dressed as a wording change.
+    #[test]
+    fn grouping_the_notice_changes_no_counter_and_no_wire_field() {
+        let rows = vec![
+            opened("api"),
+            not_attempted("idle"),
+            degraded("web", OBSERVED, StoreFile::Present),
+            degraded("svc", OBSERVED, StoreFile::Present),
+        ];
+        let rolled = rollup(&rows);
+
+        assert_eq!(rolled.members, 4);
+        assert_eq!(rolled.opened, 1);
+        assert_eq!(rolled.not_attempted, 1);
+        assert_eq!(rolled.degraded_members, ["web", "svc"], "named, in roster order");
+        assert!(!rolled.covers_all_members, "one member opened of four");
+        assert!(!rolled.all_opened());
+
+        // The wire shape of a degraded row, unchanged by the notice's grouping.
+        let value = serde_json::to_value(&rows[2].state).expect("serialises");
+        assert_eq!(value["open_state"], "degraded", "{value}");
+        assert_eq!(value["degraded_cause"], "host-resource-limit", "{value}");
+        assert_eq!(
+            value["degraded_reason"],
+            DegradedCause::HostResourceLimit.message(),
+            "the row still carries the full sentence — only the NOTICE dedupes it"
+        );
+        assert_eq!(value["degraded_diagnostic"], OBSERVED, "{value}");
     }
 
     /// The wire shape: `open_state` is the tag, and the degraded arm's keys are

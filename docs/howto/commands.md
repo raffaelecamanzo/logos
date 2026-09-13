@@ -200,7 +200,12 @@ command that would not help
   ([NFR-PE-06](../specs/requirements/NFR-PE-06.md)).
 - Before enablement, the same root still gives the
   [`FR-IX-13`](../specs/requirements/FR-IX-13.md) zero-admission warning
-  (`files_indexed: 0`). The two states are distinct and both are asserted.
+  (`files_indexed: 0`). The two states are distinct and both are asserted:
+  **after** enablement the zero-admission warning is suppressed, because its
+  whole content is "run `logos init --workspace`" and the root carrying a
+  `logos.workspace.toml` is the evidence that you already did. The suppression
+  lives in the one shared derivation, so `index`, `status` and `doctor` fall
+  silent together.
 
 Indexing is **hybrid**: the command returns immediately while a **single
 detached supervisor** warms the approved members through a bounded queue — at
@@ -1157,8 +1162,12 @@ different read-models:
 | `workspace check` | nothing structured — its payload is a bare governance `Option` that must keep serialising as `null`, so stderr is its only channel |
 
 **All three** additionally print a human-readable warning to **stderr** naming
-each degraded member *and its cause*, one per line, so `--json` stdout stays
-machine-clean and `check` is not left exiting 1 with no diagnosis.
+each degraded member *and its cause*, so `--json` stdout stays machine-clean and
+`check` is not left exiting 1 with no diagnosis. The warning is **grouped by
+cause**: each distinct cause is printed once, as a heading, with an
+`affected (N): …` line naming every member it covers. A workspace where most
+members fail the same way therefore reads the remedy once rather than once per
+member, and no member loses its name or its diagnosis.
 
 On `workspace status`, `degraded_rollup.covers_all_members: false` marks the
 member rows and the warm roll-up folded from them as covering fewer than all

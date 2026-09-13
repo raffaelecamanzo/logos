@@ -578,6 +578,28 @@ mod tests {
         path
     }
 
+    /// The config component's [`REMEDY_ARTEFACT`] is **this** filename.
+    ///
+    /// `ZeroAdmissionDiagnostic::derive` suppresses itself when the root already
+    /// carries the artefact `logos init --workspace` leaves, and it spells that
+    /// name itself rather than importing from here, so the config component keeps
+    /// its one-directional dependency on federation ([ADR-01]). That leaves one
+    /// place the two can drift, and this is it — pinned from the federation side,
+    /// which already depends on config, exactly as
+    /// [`ParentOfRepos::SAMPLE_LIMIT`](super::enable::ParentOfRepos::SAMPLE_LIMIT)
+    /// borrows the diagnostic's sample bound rather than restating it.
+    ///
+    /// [`REMEDY_ARTEFACT`]: crate::config::ZeroAdmissionDiagnostic::REMEDY_ARTEFACT
+    /// [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
+    #[test]
+    fn the_remedy_artefact_is_this_manifest_filename() {
+        assert_eq!(
+            crate::config::ZeroAdmissionDiagnostic::REMEDY_ARTEFACT,
+            MANIFEST_FILENAME,
+            "the zero-admission diagnostic probes for the file `init --workspace` writes"
+        );
+    }
+
     /// A full manifest parses: name, members, default, autodiscover, and links.
     #[test]
     fn parses_a_full_manifest() {
