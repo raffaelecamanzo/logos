@@ -277,7 +277,9 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
     // every assertion still green, because nothing tied the label to a number.
     // S-374's refusal rows land in the invocation population's `unbound` bucket,
     // so the claim has an observable consequence and it is asserted here.
-    let claims_s374 = gen["contains_s374_refusal_rows"].as_bool().expect("a bool: {gen}");
+    let claims_s374 = gen["contains_s374_refusal_rows"]
+        .as_bool()
+        .unwrap_or_else(|| panic!("`contains_s374_refusal_rows` must be a bool: {gen}"));
     assert_eq!(
         claims_s374,
         inv_num("unbound") > 54,

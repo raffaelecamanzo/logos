@@ -33,12 +33,20 @@
 //! the accessor denominator (S-382 reading)         108
 //! the harness's upper bound (79 agreed + 2 divergent) 81
 //! the criterion's floor                            79
-//! the figure the same payload carried on 1.4.9      0
+//! the same payload over the pre-hop index generation 0
 //! ```
 //!
 //! So: **44 of 108** accessor-denominator sites, **44 of 81** of what the harness
 //! proves resolvable, against a floor of **79**. The move from 0 is real and it is
 //! the whole of what T1 bought; the floor is not met.
+//!
+//! **The 0 is a different INDEX GENERATION, not a different binary.** Both readings
+//! were produced by a `logos 1.4.9` binary; what separates them is that the stores
+//! were cold-indexed on 2026-09-08 with 1.4.7, before the accessor hop existed, and
+//! the hop records its key at index time. Saying "the figure on 1.4.9" would name
+//! the one thing the two runs share. The sprint document's own phrasing refers to
+//! the *released* 1.4.9, which happens to share a version string with the measuring
+//! build — which is exactly why it is not repeated here.
 //!
 //! # The shortfall is one mechanism, and T1 predicted it
 //!
@@ -78,7 +86,19 @@
 //! each failing loudly rather than passing with a zero:
 //!
 //! * `LOGOS_REF_WORKSPACE` unset → the test **skips** and says so on stdout and
-//!   stderr. A skip that reads as a pass is a false green, so it is named.
+//!   stderr. Be exact about how weak that is: libtest captures BOTH streams for a
+//!   test that PASSES, and neither `cargo test --workspace` in CI nor
+//!   `scripts/gate.sh` passes `--nocapture`, so **the notice below is never shown
+//!   by the runs that matter** — they print `1 passed` over a measurement that did
+//!   not happen. Nothing in this repository sets the variable, so that is the
+//!   normal case, not the exceptional one. The honest remedy is
+//!   `#[ignore = "requires LOGOS_REF_WORKSPACE"]`, which turns `1 passed` into
+//!   `0 passed; 1 ignored` — an honest denominator in the default summary. It is
+//!   NOT applied here because all six estate-gated harnesses
+//!   (S-355/S-365/S-374/S-377/S-392 and this one) share the skip convention, and
+//!   changing one of six would leave the other five reading as passes while
+//!   implying the whole set had been fixed. Recorded as a defect of the
+//!   convention, with its scope named, rather than half-fixed.
 //! * `LOGOS_REF_WORKSPACE` set but not a directory, or not a Logos workspace →
 //!   **panic**. A typo'd path would otherwise report a green run over nothing.
 //! * The workspace opens but no member could be read, or the roster is empty →
@@ -352,7 +372,7 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
          \x20 by bucket                           {:?}\n\
          \x20 criterion floor                     {:>5}\n\
          \x20 accessor denominator (S-382)        {:>5}\n\
-         \x20 the same payload on 1.4.9               0",
+         \x20 same payload, pre-hop index gen         0",
         root.display(),
         a.members_read,
         a.members_total,

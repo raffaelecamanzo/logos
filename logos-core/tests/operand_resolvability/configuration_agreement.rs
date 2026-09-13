@@ -1917,8 +1917,15 @@ pub fn properties_residue(m: &super::Measurement) -> PropertiesResidue {
     out
 }
 
-/// `application*.properties` files present on the estate's disk that
-/// [`ConfigCorpus::discover`] never walks — the hidden-directory half of the gap.
+/// Every `application*.properties` file on the estate's disk, **admitted or not**.
+///
+/// Not "the ones the walk misses": the count includes the sources
+/// [`ConfigCorpus::discover`] does admit, and the hidden-directory half of the gap
+/// is the *difference* against
+/// [`properties_sources`](PropertiesResidue::properties_sources), taken at the call
+/// site. The name and the doc said "beyond the walk" while the body returned the
+/// whole population — a three-file discrepancy in a helper whose whole purpose is
+/// to correct a caveat that was wrong about its own corpus.
 ///
 /// Measured with `hidden(false)` against the same walker configuration
 /// `discover` uses in every other respect, so the difference between the two
@@ -1926,7 +1933,7 @@ pub fn properties_residue(m: &super::Measurement) -> PropertiesResidue {
 /// "the corpus holds 3 `.properties` sources" is not read as "this estate commits
 /// 3 `.properties` files" — it commits many more, and they are invisible to the
 /// harness for a reason unrelated to the ingestion gap.
-pub fn properties_files_beyond_the_walk(root: &std::path::Path) -> usize {
+pub fn properties_files_on_disk(root: &std::path::Path) -> usize {
     ignore::WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(true)
@@ -2296,22 +2303,22 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
     // of 0 over a corpus holding NO `.properties` source would read exactly like
     // a residue of 0 over a corpus holding three that nothing reads, and only
     // the second is the finding.
-    let beyond = properties_files_beyond_the_walk(&root);
+    let on_disk = properties_files_on_disk(&root);
     println!(
         "\n  `.properties` corpus-level census (S-397 AC5): {} of {} admitted sources; \
-         {beyond} `application*.properties` files exist on disk, so {} sit in a hidden \
+         {on_disk} `application*.properties` files exist on disk, so {} sit in a hidden \
          directory `ConfigCorpus::discover` never walks.",
         residue.properties_sources,
         residue.sources_total,
-        beyond.saturating_sub(residue.properties_sources),
+        on_disk.saturating_sub(residue.properties_sources),
     );
     assert_eq!(
-        (residue.properties_sources, beyond),
+        (residue.properties_sources, on_disk),
         (3, 31),
         "the recorded census is 3 `.properties` sources admitted of 31 on disk — the other \
          28 are under a hidden `.helm/` directory the discovery walk skips, which is a \
          SECOND and unrelated reason a `.properties` key is invisible here. This run read \
-         {} admitted / {beyond} on disk. If the estate has changed, record both figures: \
+         {} admitted / {on_disk} on disk. If the estate has changed, record both figures: \
          a residue of zero is only meaningful beside them.",
         residue.properties_sources,
     );

@@ -38,7 +38,7 @@
     "S-376": {
       "story": "Retire the bound-ratio; the headline is a resolved-edge count (this story)",
       "status": "observed",
-      "effect": "Renames three summary fields and adds four; moves no classification count. `bound_ratio 0.287` is now `spec_conformance_ratio 0.287` with its composed line byte-identical, and the new headline reads `resolved_cross_service_edges: 0` with `egress_resolution: 0.000 (0 of 54 egress sites resolved)`. Measured payload cost on the reference workspace's shape: under 0.1% compact bytes, all of it on the summary object and none per-row.",
+      "effect": "Observed ON THE 1.4.7 GENERATION, which is where this delta was measured and where its figures belong: over that generation it renamed three summary fields and added four, moving no classification count — `bound_ratio 0.287` became `spec_conformance_ratio 0.287` with its composed line byte-identical, and the new headline read `resolved_cross_service_edges: 0` with `egress_resolution: 0.000 (0 of 54 egress sites resolved)`. Those two figures are NOT the measurement block above, which is the 2026-09-13 generation (0.225 of 383, and 0.032 of 155); the rename this delta describes is unaffected by the re-index, and the field names it introduced are the ones the block above uses. Measured payload cost on the reference workspace's shape: under 0.1% compact bytes, all of it on the summary object and none per-row.",
       "evidence": "federation::coverage::tests::payload_growth_is_measured_against_the_reference_workspace_shape (S-376 rider)"
     },
     "S-397": {

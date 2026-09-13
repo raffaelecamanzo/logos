@@ -19,8 +19,11 @@ THE HEADLINE — AC2's CRITERION IS NOT MET
 
   rows carrying `config-bound` provenance      44      floor: 79
 
-  Against the 0 the same payload carried on 1.4.9, verified on this machine
-  before the re-index (see BASELINE below). The move from 0 is real and is the
+  Against the 0 the same payload carried over the PRE-HOP INDEX GENERATION,
+  verified on this machine before the re-index (see BASELINE below). The
+  discriminator is the index generation, not the binary: both readings were
+  produced by a logos 1.4.9 binary, and the stores were cold-indexed 2026-09-08
+  with 1.4.7 — before the accessor hop, which records its key at index time. The move from 0 is real and is the
   whole of what T1 bought. The floor is not met, and the figure is recorded at
   44 rather than rounded, re-based or netted against a smaller denominator.
 
