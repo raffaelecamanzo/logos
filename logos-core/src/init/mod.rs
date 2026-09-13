@@ -680,8 +680,12 @@ fn upsert_block_file(
 /// byte-for-byte and a settled re-run reports `Unchanged`.
 ///
 /// # Errors
-/// Only on I/O failure writing the file. An existing file whose markers are
-/// unbalanced is `Skipped` with the reason rather than guessed at (DL-07).
+/// On I/O failure **reading or writing** the file — two of the three reachable
+/// failures are reads, not writes: an existing `.gitignore` that is a directory,
+/// and one that is not valid UTF-8, both fail in [`read_optional`] before
+/// anything is written. An existing file whose markers are unbalanced is not a
+/// failure at all: it is `Skipped` with the reason rather than guessed at
+/// (DL-07).
 ///
 /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
