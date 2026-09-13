@@ -5,6 +5,11 @@
 //! background index warm are CLI-surface concerns (terminal I/O / process
 //! spawning) that live in the `cli` crate, not here.
 //!
+//! Enablement also maintains the **workspace-root ignore entry** for the
+//! [FR-WS-17] warm-outcome sidecar, but only where the root is a git working
+//! tree ([`maintain_root_ignore`], [CR-104]) — through [`crate::init`]'s
+//! existing managed-block writer rather than a second copy of it.
+//!
 //! The report also states the **working-tree footprint** enablement leaves
 //! behind ([`WorkingTreeFootprint`]): how many members now carry a fresh
 //! untracked `.logos/`, and what inside it travels versus what is ignored
@@ -21,6 +26,8 @@
 //! [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
 //! [FR-IN-08]: ../../../docs/specs/requirements/FR-IN-08.md
 //! [NFR-MA-02]: ../../../docs/specs/requirements/NFR-MA-02.md
+//! [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+//! [CR-104]: ../../../docs/requests/CR-104-managed-workspace-root-ignore-for-the-warm-sidecar.md
 
 use std::fmt;
 use std::path::Path;
@@ -33,7 +40,7 @@ use crate::init::{self, InitOptions};
 use crate::models::pipeline::{InitAction, InitResult, InitStep};
 use crate::workspace::git_root_known;
 
-use super::{discover_candidates, Member};
+use super::{discover_candidates, warm_state, Member};
 
 /// The `.mcp.json` server key for the workspace-wide entry — distinct from
 /// the per-repo `"logos"` key so a client walking `.mcp.json` up-tree from a
@@ -73,6 +80,17 @@ pub struct WorkspaceEnableReport {
     pub members: Vec<MemberReport>,
     pub manifest: InitStep,
     pub mcp: InitStep,
+    /// The workspace-root managed ignore entry for the [FR-WS-17] warm-outcome
+    /// sidecar ([CR-104]) — `Skipped`, carrying the reason, at a root that is
+    /// not a git working tree.
+    ///
+    /// Reported as a step rather than omitted so the skip is *visible*: the
+    /// canonical parent-of-repos root is deliberately not a repository, and an
+    /// absent field would read as a write that silently failed.
+    ///
+    /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+    /// [CR-104]: ../../../docs/requests/CR-104-managed-workspace-root-ignore-for-the-warm-sidecar.md
+    pub root_ignore: InitStep,
     /// What enabling this workspace did to the members' working trees
     /// ([FR-WS-02], [FR-IN-04]) — the fact that used to be left unsaid.
     ///
@@ -476,19 +494,64 @@ pub fn candidates_for_approval(
         .collect())
 }
 
+/// Maintain the workspace-root ignore entry for the [FR-WS-17] warm-outcome
+/// sidecar — **only where it means something** ([FR-WS-02], [CR-104]).
+///
+/// The sidecar is host-local machine state written beside `logos.workspace.toml`,
+/// which is checked-in configuration; a workspace root can therefore legitimately
+/// be a tracked working tree in which `git add -A` picks the sidecar up. Logos
+/// already owns this discipline for every other derived artefact it writes
+/// ([FR-IN-04]), so this extends it rather than inventing a policy — through the
+/// **same** managed-block writer, never a second copy ([NFR-MA-02]).
+///
+/// The pattern is [`warm_state::OUTCOME_FILENAME`] itself, not a literal spelled
+/// again here: the name of the file and the entry that ignores it are one fact.
+///
+/// # The gate is tri-state, deliberately
+/// [`git_root_known`] rather than [`is_git_root`](crate::workspace::is_git_root):
+/// with no `git` on PATH the question is *unanswered*, not answered "no", and
+/// writing into a directory whose repository status could not be established is
+/// the wrong direction to guess in. `Some(true)` — and only that — writes. The
+/// ordinary parent-of-repos root answers `Some(false)` and gains nothing, which
+/// is the point: an inert ignore file in a directory Logos was asked to federate
+/// rather than own is litter.
+///
+/// One `git` invocation, once, at enablement time — never on an indexing walk
+/// ([NFR-PE-08]).
+///
+/// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
+/// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+/// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
+/// [NFR-MA-02]: ../../../docs/specs/requirements/NFR-MA-02.md
+/// [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
+/// [CR-104]: ../../../docs/requests/CR-104-managed-workspace-root-ignore-for-the-warm-sidecar.md
+fn maintain_root_ignore(root: &Path) -> Result<InitStep> {
+    if git_root_known(root) == Some(true) {
+        return init::workspace_root_gitignore(root, warm_state::OUTCOME_FILENAME);
+    }
+    Ok(InitStep {
+        target: ".gitignore".to_string(),
+        action: InitAction::Skipped,
+        detail: "workspace root is not a git working tree — nothing to keep out of version control"
+            .to_string(),
+    })
+}
+
 /// Run the non-interactive half of `init --workspace` for the approved member
-/// set: a non-clobber per-member `init`, the incremental manifest upsert, and
-/// the idempotent workspace MCP injection ([FR-WS-02]). Never blocks on
-/// indexing — kicking off the background warm is the caller's concern.
+/// set: a non-clobber per-member `init`, the incremental manifest upsert, the
+/// idempotent workspace MCP injection, and — at a root that is a git working
+/// tree — the managed ignore entry for the warm-outcome sidecar
+/// ([`maintain_root_ignore`], [FR-WS-02]). Never blocks on indexing — kicking
+/// off the background warm is the caller's concern.
 ///
 /// The report carries the [`WorkingTreeFootprint`] this run left in the members'
 /// trees, rolled up from the same per-member step reports rather than from a
 /// second walk over them ([CRA-07]).
 ///
 /// # Errors
-/// Only if the manifest or `.mcp.json` cannot be written; a member's own
-/// `init` failure is caught and reported [`MemberOutcome::Degraded`], never
-/// fatal to the rest of the command.
+/// Only if the manifest, `.mcp.json` or the workspace-root `.gitignore` cannot
+/// be written; a member's own `init` failure is caught and reported
+/// [`MemberOutcome::Degraded`], never fatal to the rest of the command.
 ///
 /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 pub fn enable(root: &Path, name: &str, members: &[Member]) -> Result<WorkspaceEnableReport> {
@@ -522,6 +585,7 @@ pub fn enable(root: &Path, name: &str, members: &[Member]) -> Result<WorkspaceEn
     let member_names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
     let manifest_step = super::manifest::upsert(root, name, &member_names)?;
     let mcp_step = init::inject_mcp_entry(root, WORKSPACE_MCP_SERVER_KEY, init::mcp_server_entry())?;
+    let root_ignore = maintain_root_ignore(root)?;
 
     Ok(WorkspaceEnableReport {
         workspace: name.to_string(),
@@ -529,6 +593,7 @@ pub fn enable(root: &Path, name: &str, members: &[Member]) -> Result<WorkspaceEn
         members: reports,
         manifest: manifest_step,
         mcp: mcp_step,
+        root_ignore,
         footprint,
         // The CLI adapter overwrites this once the warm-supervisor decision is
         // known — `enable` itself never blocks on indexing ([FR-WS-02]).
@@ -562,6 +627,26 @@ mod tests {
         fs::write(dir.join("f.txt"), "x\n").unwrap();
         sh_git(dir, &["add", "."]);
         sh_git(dir, &["commit", "-q", "-m", "init"]);
+    }
+
+    /// `git status --porcelain` at `dir`, with untracked display pinned for the
+    /// same reason `sh_git` pins the identity: a host whose gitconfig sets
+    /// `status.showUntrackedFiles=all` expands a collapsed directory line into
+    /// one line per file, failing an exact-string assertion against code that
+    /// is behaving perfectly.
+    fn porcelain(dir: &Path) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "status.showUntrackedFiles=normal",
+                "status",
+                "--porcelain",
+            ])
+            .output()
+            .expect("git is on PATH");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
     // ── candidates_for_approval (FR-WS-02) ────────────────────────────────
@@ -876,19 +961,8 @@ mod tests {
         );
 
         // git's own verdict, not ours: the only dirt is the untracked `.logos/`.
-        //
-        // `showUntrackedFiles` is pinned for the same reason `sh_git` pins the
-        // identity — a host (or CI) whose gitconfig sets it to `all` expands the
-        // one collapsed directory line into one line per file, failing this exact
-        // string against code that is behaving perfectly.
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(&member)
-            .args(["-c", "status.showUntrackedFiles=normal", "status", "--porcelain"])
-            .output()
-            .expect("git is on PATH");
         assert_eq!(
-            String::from_utf8_lossy(&status.stdout).trim(),
+            porcelain(&member),
             "?? .logos/",
             "one new untracked directory, nothing modified"
         );
@@ -906,6 +980,126 @@ mod tests {
         assert!(!ignored(".logos/config.toml"), "config.toml must stay committable");
         assert!(!ignored(".logos/rules.toml"), "rules.toml must stay committable");
         assert!(ignored(".logos/logos.db"), "the derived store is ignored");
+    }
+
+    // ── The workspace-root ignore entry (FR-WS-02, FR-WS-17, CR-104) ──────
+
+    /// A tracked workspace root: git's own verdict is that a completed warm
+    /// leaves the tree clean ([FR-WS-02] AC, [CR-104]).
+    ///
+    /// Asserted against the path [`warm_state::outcome_path`] actually writes
+    /// rather than against a restated literal, so the constant and the entry
+    /// cannot drift apart without this failing.
+    #[test]
+    fn a_tracked_workspace_root_ignores_the_warm_sidecar() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(root);
+
+        let report = enable(root, "shop", &[]).expect("enables");
+        assert_eq!(report.root_ignore.target, ".gitignore");
+        assert_eq!(report.root_ignore.action, InitAction::Created);
+
+        // Commit everything enablement wrote — the manifest is *meant* to
+        // travel — so the only thing left to dirty the tree is the sidecar.
+        sh_git(root, &["add", "-A"]);
+        sh_git(root, &["commit", "-q", "-m", "enable"]);
+        assert_eq!(porcelain(root), "", "enablement output is committable");
+
+        fs::write(warm_state::outcome_path(root), "{}\n").unwrap();
+        assert_eq!(
+            porcelain(root),
+            "",
+            "a completed warm leaves the workspace root clean"
+        );
+    }
+
+    /// The canonical parent-of-repos root is deliberately **not** a repository,
+    /// so an ignore file there would be inert litter ([CR-104]).
+    #[test]
+    fn a_workspace_root_that_is_not_a_repository_gains_no_gitignore() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(&tmp.path().join("api"));
+
+        let members = discover_candidates(tmp.path());
+        let report = enable(tmp.path(), "shop", &members).expect("enables");
+
+        assert_eq!(report.root_ignore.action, InitAction::Skipped);
+        assert!(
+            !tmp.path().join(".gitignore").exists(),
+            "no .gitignore is written at a root that is not a working tree"
+        );
+    }
+
+    /// The workspace root is a shared, human-authored directory in a way a
+    /// generated `.logos/` is not, so the managed block is appended and the
+    /// user's own lines survive byte-for-byte — and a re-run does not duplicate
+    /// the block ([CR-104] risk row 1).
+    #[test]
+    fn an_existing_root_gitignore_keeps_its_own_lines_and_a_re_run_adds_no_second_block() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(root);
+        let own = "# the operator's own\n/build\n*.log\n";
+        fs::write(root.join(".gitignore"), own).unwrap();
+
+        let first = enable(root, "shop", &[]).expect("enables");
+        assert_eq!(first.root_ignore.action, InitAction::Updated);
+        let after = fs::read_to_string(root.join(".gitignore")).unwrap();
+        assert!(
+            after.starts_with(own),
+            "unmanaged lines are preserved byte-for-byte, got:\n{after}"
+        );
+
+        let second = enable(root, "shop", &[]).expect("re-enables");
+        assert_eq!(second.root_ignore.action, InitAction::Unchanged);
+        let again = fs::read_to_string(root.join(".gitignore")).unwrap();
+        assert_eq!(again, after, "a re-run rewrites nothing");
+        assert_eq!(
+            again.matches("logos:managed:begin").count(),
+            1,
+            "exactly one managed block, got:\n{again}"
+        );
+    }
+
+    /// The ignored pattern **is** the sidecar's filename: this fails the moment
+    /// `warm_state::OUTCOME_FILENAME` and the entry diverge ([CR-104] AC 5).
+    ///
+    /// Read as git resolves it, not as a substring of the file — a line that
+    /// merely *mentions* the name (a comment, a near-miss like
+    /// `not.logos.workspace.warm.json`) would satisfy a `contains` check while
+    /// ignoring nothing.
+    #[test]
+    fn the_ignored_pattern_derives_from_the_sidecar_filename() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(root);
+        enable(root, "shop", &[]).expect("enables");
+
+        let ignores = |rel: &str| {
+            Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["check-ignore", "-q", rel])
+                .status()
+                .expect("git is on PATH")
+                .success()
+        };
+
+        assert!(
+            ignores(warm_state::OUTCOME_FILENAME),
+            "the entry ignores exactly the file the sidecar writer creates"
+        );
+        // The near miss: a name one character away must stay visible, so the
+        // entry cannot be a loose glob that happens to cover the constant.
+        assert!(
+            !ignores(&format!("not{}", warm_state::OUTCOME_FILENAME)),
+            "the entry is the filename, not a substring match"
+        );
+        assert!(
+            !ignores("logos.workspace.toml"),
+            "the checked-in manifest still travels"
+        );
     }
 
     // ── WarmStartDisclosure (FR-WS-02, FR-WS-15, FR-WS-17, CR-119) ────────
