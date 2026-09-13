@@ -327,20 +327,20 @@ fn adapter_lines() -> usize {
 /// [FR-CL-06]: ../../docs/specs/requirements/FR-CL-06.md
 ///
 /// **S-334/CR-103 spends nothing: 886 → 886.** The declined-to-empty fallback
-/// ([FR-IN-08]) needed the FR-IN-08 nudge's *provenance* to reach `run`'s
-/// empty-member branch, and it rides an `Option` that already existed rather
-/// than new surface: `nudge` returned `bool` and now returns `Option<bool>`
-/// (which entry point took the workspace path, not merely that one did), and
-/// `run`'s empty branch becomes a two-arm `match` — exactly the line count the
-/// one-arm `eprintln!` it replaces already spent. The fallback itself is the
-/// `Engine::init_with` call the `else` arm of the same dispatch `if` was
-/// already making. CR-103 §7 asked for a line-neutral or negative change
-/// because this budget had no headroom when the CR was written; it is neutral.
+/// ([FR-IN-08]) needed the nudge's *provenance* to reach `run`'s empty-member
+/// branch, and it rides `Option`s that already existed: `nudge`'s `bool` return
+/// becomes `Option<bool>`, and the one-arm `eprintln!` becomes a two-arm
+/// `match` of the same length. CR-103 §7 asked for line-neutral or negative;
+/// it is neutral, so there is no raise to record under CR-084 §6.
 ///
-/// The duplication hunt is still negative and was re-run rather than assumed:
-/// the `stats`/`languages` `open_query` fold recorded above remains the only
-/// candidate and remains net-negative under this file's multi-line-signature
-/// convention. Nothing to record per CR-084 §6 — there is no raise to launder.
+/// The duplication hunt, re-run rather than assumed, now has **two** candidates
+/// and rejects both on measurement. The standing `stats`/`languages`
+/// `open_query` fold is still net-negative. The new one is this change's own:
+/// `Engine::init_with(root, &init_options(i, h))` appears in both `dispatch.rs`
+/// and `workspace_init.rs`. A shared `plain_init` helper costs +3 and removes
+/// 0 — both call sites stay one line — landing at 889 of 890 to de-duplicate a
+/// single expression. Rejected: the duplication is an expression, not a
+/// mechanism.
 ///
 /// [FR-IN-08]: ../../docs/specs/requirements/FR-IN-08.md
 #[test]
