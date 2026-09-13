@@ -200,12 +200,16 @@ command that would not help
   ([NFR-PE-06](../specs/requirements/NFR-PE-06.md)).
 - Before enablement, the same root still gives the
   [`FR-IX-13`](../specs/requirements/FR-IX-13.md) zero-admission warning
-  (`files_indexed: 0`). The two states are distinct and both are asserted:
-  **after** enablement the zero-admission warning is suppressed, because its
-  whole content is "run `logos init --workspace`" and the root carrying a
-  `logos.workspace.toml` is the evidence that you already did. The suppression
-  lives in the one shared derivation, so `index`, `status` and `doctor` fall
-  silent together.
+  (`files_indexed: 0`). The two states are distinct and both are asserted.
+  **After** enablement a re-run of `index` is silent for the plainest of
+  reasons — the root now admits its own `logos.workspace.toml`, so the
+  zero-admission condition is simply not met. What that leaves is the surface
+  that does *not* re-walk: `status` and `doctor` read the file count the last
+  completed index stored, so at a root indexed **before** enablement they keep
+  seeing `0` until you re-index, and before this was fixed they went on telling
+  you to run `logos init --workspace` — which you had already done. The
+  diagnostic is now suppressed at any root carrying a `logos.workspace.toml`,
+  in the one shared derivation, so every surface falls silent together.
 
 Indexing is **hybrid**: the command returns immediately while a **single
 detached supervisor** warms the approved members through a bounded queue — at
@@ -338,6 +342,13 @@ emits and `doctor` reports in `zero_admission_warning`, derived from one shared
 helper, so you meet the same explanation whichever surface you reach for next.
 It is advisory: `status` has no exit code to move, and the diagnostic never
 becomes a rule finding or feeds the quality signal.
+
+It is **suppressed** when the root already carries a `logos.workspace.toml` —
+you have run the remedy it names, so repeating it would be wrong. This matters
+most here: `status` reports the count the last completed index stored, so a root
+indexed *before* you enabled the workspace keeps reporting `0` until you
+re-index, and that is exactly the state in which the advice would be stale. See
+[`init --workspace`](#init) for the two states.
 
 ## Navigation
 
@@ -1469,9 +1480,12 @@ or changes the exit status — it flags docs you likely meant to index but aren'
 `zero_admission_warning` is the other advisory, and answers the opposite
 question — why the graph is *empty* rather than why it holds too much. It is
 populated (otherwise `null`) when the root admitted **no** files because every
-immediate child was pruned as a nested `.git` boundary: a parent folder of
-sibling repositories. It names the prune count, a bounded sample of the pruned
-directory names, and the remedy — `logos init --workspace`
+immediate child was pruned as a nested `.git` boundary — a parent folder of
+sibling repositories — **and** the root does not already carry a
+`logos.workspace.toml`. That last clause is the "don't repeat advice already
+taken" rule the shared helper applies: see [`status`](#status), which reaches
+the same state by the same route. It names the prune count, a bounded sample of
+the pruned directory names, and the remedy — `logos init --workspace`
 ([FR-IX-13](../specs/requirements/FR-IX-13.md),
 [CR-098](../requests/CR-098-nested-git-prune-diagnostic.md)). It is the **same
 line**, derived from the same helper, that `index` emits in its `warnings` and
