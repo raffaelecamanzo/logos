@@ -218,6 +218,14 @@ fn simple_type_name(declared: &str) -> &str {
 /// rather than trimmed down to its last segment: the trimming would resolve
 /// `holder.api` against a same-named local, which is a different object.
 ///
+/// It is **narrower than the measurement harness's** `operand_name`, which is
+/// deliberately generous and reduces `holder.api` to its last segment before
+/// resolving. That is a real difference in answers, not just in shape: the
+/// census can resolve a qualified-receiver site the shipped pipeline refuses. It
+/// is refused here because the reduction resolves `holder.api` against a
+/// same-named local, which is a different object — and a census figure the
+/// product cannot reproduce is the safer direction of the two.
+///
 /// This is also where a **chained** accessor is refused —
 /// `config.getMail().getHost()`, the nested-properties-type ceiling each
 /// `properties.scm` records — because the receiver's text is then a whole call
@@ -258,9 +266,17 @@ fn member_call<'t>(node: Node<'t>) -> Option<(Node<'t>, Node<'t>)> {
 /// accessor: the member's class index, the reading file's declared types, and
 /// the language whose accessor convention judges the name.
 ///
-/// A struct rather than four parameters, for the reason `EmitCtx` gives beside
-/// it: these travel together through every call in the arm, and the capture
-/// dispatch was already at its argument limit.
+/// A struct rather than four more parameters: the capture dispatch it is threaded
+/// through is already over clippy's argument limit, and these four are one
+/// thing — the answer to "what does this member's configuration say?" — that a
+/// second consumer would want whole.
+///
+/// `module` is the one field that encodes no choice today: the only production
+/// constructor of the index stamps [`MEMBER_SCOPE`](super::binding::MEMBER_SCOPE)
+/// on every class, so nothing else can be passed meaningfully. It is a field
+/// rather than a constant read inside [`key_for`](Self::placeholder_for) so the
+/// scope a lookup is made in stays visible at the construction site, next to the
+/// index it must agree with.
 pub struct BindingView<'a> {
     /// Every configuration-bound class the member declares.
     pub index: &'a PropertiesIndex,

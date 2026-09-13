@@ -499,3 +499,49 @@ fn a_kotlin_use_site_is_not_reached_and_the_same_class_still_resolves_from_java(
         Some("${k.host}"),
     );
 }
+
+/// **The shape every fixture in this task actually has**: a member that declares
+/// a bound class and commits **no** configuration source.
+///
+/// The hop changes what such a member reports, and the change is worth pinning
+/// because it is easy to read as a regression. Before, the accessor site was a
+/// keyless row the coverage tier calls `base-url-runtime` — "the path is
+/// composed at runtime", which was false about the repository. Now it is a
+/// config-bound target whose key no committed source defines, which resolves to
+/// [`ValueRefusal::MissingKey`] and reports as `config-key-missing` — naming the
+/// key that could not be proved, which is what [FR-WS-19] AC3's first clause
+/// asks for.
+///
+/// Still a refusal either way; what moved is which one, and that shows up in the
+/// census [S-397](../../../../docs/planning/journal.md) T2 measures.
+///
+/// [FR-WS-19]: ../../../../docs/specs/requirements/FR-WS-19.md
+#[test]
+fn a_bound_class_with_no_committed_source_refuses_by_naming_the_missing_key() {
+    use crate::graph_store::ConfigDefinition;
+    use crate::resolve::binding::{ConfigLookup, Resolver, ValueRefusal};
+
+    /// A member whose configuration corpus is empty — every key is undefined.
+    struct NoCorpus;
+    impl ConfigLookup for NoCorpus {
+        fn definitions(&self, _key: &str, _module: &str) -> Vec<ConfigDefinition> {
+            Vec::new()
+        }
+    }
+
+    let index = index(&[("Props.java", PROPS)]);
+    let use_site = "public class Caller {\n\
+          private final MailServerConfigurationApi api;\n\
+          void go() { client.get(api.getUriGetArchive()); }\n\
+        }";
+    let recorded =
+        key_of(&index, use_site, "api.getUriGetArchive()").expect("the accessor resolves a key");
+
+    // The coverage tier's own reader, built the way it builds it.
+    let resolver = Resolver { corpus: &NoCorpus, module: MEMBER_SCOPE };
+    assert_eq!(
+        resolver.resolve_template(&recorded).expect("the target carries a placeholder"),
+        Err(ValueRefusal::MissingKey),
+        "the key is named and unproved, so the site refuses rather than binding",
+    );
+}
