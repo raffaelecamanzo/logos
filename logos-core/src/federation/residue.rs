@@ -127,12 +127,14 @@ pub struct EgressResidue {
     /// How many members contributed captured egress to this residue.
     ///
     /// **The spread of the unresolved sites, never the workspace's roster size.**
-    /// A member inside the scope that made no captured outbound call has no
-    /// egress for the residue to cover and is not counted here, so this figure
-    /// is `≤` the number of members the query fanned across. Stated because the
-    /// two are easy to conflate, and a residue that implied a roster size would
-    /// be the kind of over-read this whole block exists to prevent
-    /// ([NFR-CC-04]).
+    /// Counts exactly the members contributing at least one unresolved site, so
+    /// it is `≤` the number of members the query fanned across and reconciles
+    /// with the `across N members` the composed line renders. A member that made
+    /// no captured outbound call, that resolved all of it, or whose only rows are
+    /// out-of-workspace contributes nothing here. Stated because the readings are
+    /// easy to conflate, and a residue implying a roster size — or claiming one
+    /// site is spread across two members — is the over-read this whole block
+    /// exists to prevent ([NFR-CC-04]).
     ///
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub members_in_scope: u64,
@@ -218,9 +220,10 @@ impl WorkspaceEgressResidue {
     /// report sites the answer never considered) and never narrower (that is the
     /// silence this criterion removes).
     ///
-    /// A member in scope that made **no** captured outbound call contributes
-    /// nothing — it has no egress, resolved or otherwise — and so does not appear
-    /// in [`members_in_scope`](EgressResidue::members_in_scope), which counts the
+    /// A member in scope that contributes no **unresolved** site — because it
+    /// made no captured outbound call, resolved all of it, or holds only
+    /// out-of-workspace rows — is absent from
+    /// [`members_in_scope`](EgressResidue::members_in_scope), which counts the
     /// spread of the sites rather than the roster.
     ///
     /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
@@ -247,7 +250,12 @@ impl WorkspaceEgressResidue {
 
         let residue = EgressResidue {
             scope: repo.map(str::to_string),
-            members_in_scope: rows.len() as u64,
+            // The members the unresolved sites are actually spread across — NOT
+            // every member with captured egress. A member that resolved all of
+            // its egress, or whose only rows are out-of-workspace, contributed
+            // nothing to `unresolved_sites` and must not be counted in the span
+            // the composed line reports them "across".
+            members_in_scope: rows.iter().filter(|r| r.unresolved_sites > 0).count() as u64,
             measured_sites,
             unresolved_sites,
             no_provider_in_workspace,
@@ -551,6 +559,44 @@ mod tests {
             residue.summary.ends_with("; 1 more have no provider in this workspace"),
             "the separately-bucketed remainder is still reported: {:?}",
             residue.summary
+        );
+    }
+
+    /// **`members_in_scope` is the spread of the unresolved sites, and a member
+    /// that resolved its egress is not part of that spread** ([NFR-CC-04]).
+    ///
+    /// The reading this pins out is a line that contradicts itself on its face —
+    /// *"1 of 3 … did not resolve across 2 members"* — one site cannot be spread
+    /// across two. Both shapes that produce it are here: a member whose egress is
+    /// entirely bound, and a member whose only rows are out-of-workspace (which
+    /// are excluded from the residue's own denominator, so such a member
+    /// contributes to neither half).
+    #[test]
+    fn only_members_carrying_an_unresolved_site_are_in_the_spread() {
+        let refs = [
+            bound("api"),
+            unbound("api", UnboundReason::BaseUrlRuntime),
+            // `web` captured egress and resolved all of it.
+            bound("web"),
+            // `ext` calls only things this workspace does not contain.
+            unbound("ext", UnboundReason::NoProviderInWorkspace),
+            unbound("ext", UnboundReason::NoProviderInWorkspace),
+        ];
+        let residue = residue_from(&refs, true).beside(None, CALLERS).unwrap();
+
+        assert_eq!(residue.unresolved_sites, 1);
+        assert_eq!(residue.measured_sites, 3, "bound api + unbound api + bound web");
+        assert_eq!(residue.no_provider_in_workspace, 2);
+        assert_eq!(
+            residue.members_in_scope, 1,
+            "only `api` carries the unresolved site: {residue:?}"
+        );
+        assert_eq!(
+            residue.summary,
+            "no resolved cross-service callers; 1 of 3 captured outbound sites in \
+             scope did not resolve across 1 member (base-url-runtime 1); 2 more \
+             have no provider in this workspace",
+            "the span in the line is the span of the sites"
         );
     }
 
