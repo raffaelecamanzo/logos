@@ -425,10 +425,10 @@ fn the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row() {
 }
 
 /// **Stated over-capture ceiling** — the receiver rule reaches the plain
-/// receiver-method arm (patterns 4/4b) only. Patterns 1-3 constrain the `.uri`
-/// link and the `URI.create` receiver *type*, but place no constraint on the
-/// receiver of the verb link, so a non-client receiver still captures through
-/// the fluent arm.
+/// receiver-method arm (patterns 4/4b) only. Patterns 1-3 and 5 constrain the
+/// `.uri` link — its name, and the `URI.create` receiver *type* or the lambda's
+/// composition — but place no constraint on the receiver of the verb link, so a
+/// non-client receiver still captures through the fluent arm.
 ///
 /// Asserted as the capture it is, not as zero, so the residual is pinned rather
 /// than merely conceded in prose — and so closing it later is a deliberate
@@ -437,28 +437,84 @@ fn the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row() {
 /// (`WebClient.create(base).get().uri(…)`), so a receiver rule there buys this
 /// over-capture back as under-capture on the estate's dominant shape.
 ///
+/// **S-399 widened the residual, so the second row was added with it.** Before
+/// pattern 5 a lambda-composed path on a non-client receiver emitted *nothing*
+/// — the lambda was unreadable, so the site refused. It now emits the same
+/// reference the literal form does. The prose in the `.scm` was amended to say
+/// "patterns 1-3 and 5"; a widened residual whose pin does not follow is the
+/// ceilings index naming something it does not pin, which that file calls a
+/// lie.
+///
 /// The shape is narrow — a non-client receiver with a no-argument
-/// HTTP-verb-named method chained into `.uri(<literal>)` — and the reference
+/// HTTP-verb-named method chained into `.uri(…)` — and the reference
 /// workspace's 94 Java sites contain none. It matters to
 /// [S-374](../../docs/planning/journal.md#s-374-the-http-client-call-arm-records-its-refusals),
 /// which writes one refusal row per site ([ADR-54], [NFR-RA-05]).
 #[test]
 fn the_fluent_arm_receiver_is_an_unguarded_over_capture_ceiling() {
-    assert_eq!(
-        client_calls(
+    for (label, call) in [
+        ("a literal", r#"perms.get().uri("/admin/users").retrieve()"#),
+        (
+            "a lambda-composed literal (S-399)",
+            r#"perms.get().uri(b -> b.path("/admin/users")).retrieve()"#,
+        ),
+    ] {
+        let calls = client_calls(&format!(
             r#"
-public class Calls {
+public class Calls {{
     private RestClient restClient;
     private java.util.Map<String, String> perms;
-    Object notACall() {
-        return perms.get().uri("/admin/users").retrieve();
+    Object notACall() {{
+        return {call};
+    }}
+}}
+"#
+        ));
+        assert_eq!(
+            calls,
+            ["GET /admin/users"],
+            "{label}: the fluent arm's verb-link receiver is unguarded — a \
+             stated ADR-54 residual, narrower than the blanket file-grained one \
+             S-375 retired"
+        );
     }
 }
-"#
-        ),
-        ["GET /admin/users"],
-        "the fluent arm's verb-link receiver is unguarded — a stated ADR-54 \
-         residual, narrower than the blanket file-grained one S-375 retired"
+
+/// **Stated over-capture residual, S-399's own.** Pattern 5 is the first shape
+/// that puts the captured operand inside a **binder**, and the accessor hop
+/// behind it is scope-blind: `DeclaredTypes::get` answers from the file's
+/// declarations "at any position", which a lambda parameter is not one of.
+///
+/// So a lambda whose parameter **shadows** a configuration-bound field, and
+/// which then reads an accessor off that parameter, binds the field's key —
+/// a key this source does not prove, since inside the lambda the name denotes
+/// the `UriBuilder` ([NFR-RA-05]).
+///
+/// **It is unreachable in Spring, and that is an accident of a third-party API
+/// rather than a guard.** `plugins/java/plugin.toml` declares
+/// `accessor_prefixes = ["get", "is"]`, and `UriBuilder` declares no `getX()`
+/// or `isX()` — so the fixture below does not compile as Java, which is why it
+/// costs nothing measured and why no site on the reference workspace reaches
+/// it. Widening `accessor_prefixes`, or giving another builder language this
+/// pattern, reopens it.
+///
+/// Recorded and pinned rather than worked around ([ADR-54]): closing it
+/// structurally would mean splitting the operand wildcard into member-call and
+/// non-member-call alternatives so the operand's receiver could be `#not-eq?`'d
+/// against the lambda parameter — four branches for a hazard the API blocks.
+/// Asserted as the capture it is, so re-deciding it later fails this test.
+#[test]
+fn a_lambda_parameter_shadowing_a_bound_field_is_a_stated_over_capture() {
+    let props = "package a;\n        @ConfigurationProperties(prefix = \"mailserver.api\")\n        public class MailServerConfigurationApi { private String uriGetArchive; }\n";
+    let caller = "public class Calls {\n        \x20   private RestClient restClient;\n        \x20   private final MailServerConfigurationApi api;\n        \x20   String a() { return restClient.get()\n        \x20     .uri(api -> api.path(api.getUriGetArchive()).build(1))\n        \x20     .retrieve().body(String.class); }\n        }\n";
+    let calls = client_calls_raw(&format!(
+        "package com.example;\n{CLIENT_IMPORTS}\n{props}\n{caller}"
+    ));
+    assert_eq!(
+        calls,
+        ["GET ${mailserver.api.urigetarchive}"],
+        "the lambda parameter shadows the field, and the scope-blind hop reads \
+         the field anyway — a recorded over-capture, not a behaviour to rely on"
     );
 }
 

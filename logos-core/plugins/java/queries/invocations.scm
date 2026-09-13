@@ -383,7 +383,25 @@
 ; Pinned as the stated residual by
 ; `the_fluent_arm_receiver_is_an_unguarded_over_capture_ceiling`.
 ;
-; It is left as a ceiling rather than closed, deliberately: pattern 1's inner
+; S-399 added a SECOND over-capture residual, and a different one: pattern 5 is
+; the first shape that puts the captured operand inside a BINDER, and the
+; accessor hop behind it (`extract::config::accessor::DeclaredTypes::get`)
+; answers from the file's declarations "at any position" — which a lambda
+; parameter is not one of. A lambda whose parameter SHADOWS a
+; `@ConfigurationProperties` field, and which reads an accessor off that
+; parameter, binds the field's key: a key the source does not prove
+; (NFR-RA-05). It is unreachable in Spring, and that is an accident of a
+; third-party API rather than a guard — `[properties] accessor_prefixes` is
+; `["get", "is"]` and `UriBuilder` declares no `getX()`/`isX()`, so such a
+; lambda does not compile. Widening those prefixes, or giving another builder
+; language this pattern, reopens it. Pinned as the capture it is by
+; `a_lambda_parameter_shadowing_a_bound_field_is_a_stated_over_capture`.
+;
+; Both residuals are left as ceilings rather than closed, deliberately. Closing
+; the SHADOWING one structurally would mean splitting pattern 5's operand
+; wildcard into member-call and non-member-call alternatives, so the operand's
+; receiver could be `#not-eq?`'d against the lambda parameter — four branches
+; for a hazard the API already blocks. For the RECEIVER one: pattern 1's inner
 ; `object:` is legitimately a `method_invocation`
 ; (`WebClient.create(base).get().uri(…)`) and patterns 2-3's is a class name, so
 ; a receiver rule there would trade this over-capture for new UNDER-capture on
