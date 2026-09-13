@@ -140,7 +140,13 @@ const OBJECT_FIELD: &str = "object";
 /// the answer back.
 ///
 /// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
-const CALLABLE_FIELDS: [&str; 3] = ["parameters", "body", "arguments"];
+const CALLABLE_FIELDS: [&str; 3] = [PARAMETERS_FIELD, "body", "arguments"];
+
+/// The grammar field naming a callable's parameter list — the one member of
+/// [`CALLABLE_FIELDS`] that is also a **scope** marker, and so is named
+/// separately for [`field_position`] to read. Every node that introduces a
+/// callable scope carries it; a type's own member declarations do not.
+const PARAMETERS_FIELD: &str = "parameters";
 
 /// Every name this file binds to a declared **simple** type name.
 ///
@@ -153,6 +159,16 @@ pub struct DeclaredTypes {
     /// name → the single simple type it is declared with, or [`None`] when the
     /// file declares it with two that disagree.
     by_name: BTreeMap<String, Option<String>>,
+    /// The same, restricted to names declared at a **field position** — outside
+    /// every callable the file declares (S-398).
+    ///
+    /// A separate map rather than a flag on the one above, because the two
+    /// answer different questions and poison **independently**: a field `api`
+    /// beside a disagreeing local `api` leaves [`get`](Self::get) with nothing
+    /// (correctly — a bare `api` is a scope question this walk cannot answer)
+    /// while [`field`](Self::field) still answers, because `this.api` is not a
+    /// scope question at all.
+    fields_by_name: BTreeMap<String, Option<String>>,
 }
 
 impl DeclaredTypes {
@@ -164,6 +180,11 @@ impl DeclaredTypes {
     /// (`private Foo bar;` field-names the type on the declaration and the name
     /// on the declarator) and what a parameter does not (it carries both). A
     /// node that declares a callable is skipped entirely.
+    ///
+    /// Every binding is recorded twice when it is declared at a **field
+    /// position** — see [`field_position`] for what that means and what it
+    /// costs — so that [`field`](Self::field) can answer the one question
+    /// [`get`](Self::get) must not: *what does `this.<name>` denote?*
     pub fn build(root: Node<'_>, src: &[u8]) -> Self {
         let mut types = Self::default();
         let mut stack = vec![root];
@@ -197,28 +218,84 @@ impl DeclaredTypes {
             let Some(declared) = declared else {
                 continue;
             };
-            types
-                .by_name
-                .entry(name.to_string())
-                // A second, DISAGREEING declaration poisons the entry rather
-                // than losing to (or beating) the first: which one a use site
-                // sees is a scope question this walk cannot answer, and picking
-                // either would be the guess [NFR-RA-05] forbids.
-                .and_modify(|held| {
-                    if held.as_deref() != Some(declared) {
-                        *held = None;
-                    }
-                })
-                .or_insert_with(|| Some(declared.to_string()));
+            record(&mut types.by_name, name, declared);
+            if field_position(node) {
+                record(&mut types.fields_by_name, name, declared);
+            }
         }
         types
     }
 
     /// The simple type this file declares for `name`, when it declares exactly
-    /// one.
+    /// one — **at any position**, which is why a use site that names a scope
+    /// must not ask this one.
     pub fn get(&self, name: &str) -> Option<&str> {
         self.by_name.get(name)?.as_deref()
     }
+
+    /// The simple type this file declares for `name` **as a field**, when it
+    /// declares exactly one (S-398).
+    ///
+    /// The lookup a self-qualified receiver makes, and the reason it is separate
+    /// from [`get`](Self::get) is a reproduced over-capture, not symmetry.
+    /// `this.<name>` denotes a field of the enclosing class; [`get`](Self::get)
+    /// is scope-blind and answers from parameters and locals too. Where the
+    /// field is **inherited** — declared in another file, so nothing in this one
+    /// poisons the entry — a same-named local of a *different* bound type
+    /// answered for it, and the site bound a key the source never named. Three
+    /// independent reviews reproduced it end to end.
+    pub fn field(&self, name: &str) -> Option<&str> {
+        self.fields_by_name.get(name)?.as_deref()
+    }
+}
+
+/// Record one `name` → `declared` binding, poisoning a disagreement.
+///
+/// A second, DISAGREEING declaration poisons the entry rather than losing to (or
+/// beating) the first: which one a use site sees is a scope question this walk
+/// cannot answer, and picking either would be the guess [NFR-RA-05] forbids.
+///
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+fn record(into: &mut BTreeMap<String, Option<String>>, name: &str, declared: &str) {
+    into.entry(name.to_string())
+        .and_modify(|held| {
+            if held.as_deref() != Some(declared) {
+                *held = None;
+            }
+        })
+        .or_insert_with(|| Some(declared.to_string()));
+}
+
+/// Whether `node` declares at a **field position** — that is, whether it sits
+/// outside every callable its file declares.
+///
+/// Expressed the only way this module is allowed to express it: by a grammar
+/// **field name**, never a node kind ([NFR-MA-01]). A node that declares or
+/// calls a callable field-names `parameters`, so a declaration with no such
+/// ancestor is not inside a method, a constructor or a lambda — it is a member
+/// of the type. That is exactly the separation the C-family shapes need, because
+/// the one-hop type rule cannot make it: a field (`private Foo bar;`) and a
+/// local (`Foo bar = …;`) are *field-identical*, both taking their type from the
+/// parent declaration, and only their enclosing scope tells them apart.
+///
+/// **What it costs, stated rather than left to be discovered.** A language whose
+/// member declarations sit under a `parameters`-bearing node reads as having no
+/// fields at all — a Java `record`'s components are the shipped example, since
+/// `record_declaration` field-names `parameters`. Such a declaration resolves to
+/// nothing through the self-qualified arm. That is the refusing direction, so it
+/// is a miss and never a fabrication ([NFR-RA-05]).
+///
+/// [NFR-MA-01]: ../../../../docs/specs/requirements/NFR-MA-01.md
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+fn field_position(node: Node<'_>) -> bool {
+    let mut at = Some(node);
+    while let Some(current) = at {
+        if current.child_by_field_name(PARAMETERS_FIELD).is_some() {
+            return false;
+        }
+        at = current.parent();
+    }
+    true
 }
 
 /// The simple name of a possibly-generic, possibly-qualified type:
@@ -393,8 +470,7 @@ impl BindingView<'_> {
         if !self.index.names_an_accessor(self.language, accessor) {
             return None;
         }
-        let receiver_name = self.receiver_name(receiver.utf8_text(src).ok()?)?;
-        let declared = self.types.get(receiver_name)?;
+        let declared = self.declared_receiver_type(receiver, src)?;
         let class = self.index.get(declared, self.module)?;
         let binding = self.index.bind(class, accessor).ok()?;
         // Canonical, not the source spelling: this key is recorded for a
@@ -404,9 +480,19 @@ impl BindingView<'_> {
         placeholder(&canonical_key(&binding.key))
     }
 
-    /// The name [`DeclaredTypes`] is asked about for a receiver spelled `text` —
-    /// the receiver itself when it is a bare identifier, or the field behind a
-    /// self qualifier (S-398).
+    /// The simple type this file declares for the object `receiver` names — the
+    /// one fact the whole chain turns on, and the only hop S-398 changed.
+    ///
+    /// Two arms, and **each asks a different question of [`DeclaredTypes`]**,
+    /// which is the correction three independent reviews forced:
+    ///
+    /// - A **bare identifier** receiver names whatever the file declares under
+    ///   that name, at any position — [`DeclaredTypes::get`]. Unchanged.
+    /// - A **self-qualified** receiver names a *field of the enclosing class*,
+    ///   so it asks [`DeclaredTypes::field`], which answers from field positions
+    ///   only. Asking `get` here read a same-named local or parameter as though
+    ///   it were the field, and where the real field was inherited nothing
+    ///   poisoned the entry — a reproduced fabrication ([NFR-RA-05]).
     ///
     /// The qualifier is judged in the **reading** file's language, the same
     /// language the accessor's shape is judged in and for the same reason: the
@@ -417,12 +503,38 @@ impl BindingView<'_> {
     /// Ordered bare-first so the qualified reading is only ever reached by a
     /// receiver the existing predicate already refused: this widens what is
     /// *captured* and changes no answer that had one.
-    fn receiver_name<'t>(&self, text: &'t str) -> Option<&'t str> {
-        simple_identifier(text).or_else(|| {
-            self.index
-                .self_references(self.language)
-                .find_map(|spelling| self_qualified(text, spelling))
-        })
+    ///
+    /// # The second arm is gated on the TREE, not on the text
+    ///
+    /// `receiver.named_child_count() > 0` — the qualified arm is offered only a
+    /// receiver the grammar itself parsed as **more than one thing**. Without
+    /// it the arm judged by text alone, and text cannot tell a qualifier from a
+    /// name: `$` and a zero-width non-joiner are legal *inside* a Java
+    /// identifier but are not `is_alphanumeric`, so a receiver spelled
+    /// `this$api` — one identifier, which the file may well declare under an
+    /// unrelated type — was split into `this` + `api` and bound the wrong
+    /// class's key. Two independent reviews reproduced that end to end.
+    ///
+    /// The grammar has no such ambiguity: `this$api` is a single leaf, and
+    /// `this.api` is a node with children. It is also the same leaf test
+    /// [`DeclaredTypes::build`] already makes on a name node, and it names no
+    /// node kind and no grammar field, so it costs the module nothing it was
+    /// keeping ([NFR-MA-01]).
+    ///
+    /// [NFR-MA-01]: ../../../../docs/specs/requirements/NFR-MA-01.md
+    /// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+    fn declared_receiver_type(&self, receiver: Node<'_>, src: &[u8]) -> Option<&str> {
+        let text = receiver.utf8_text(src).ok()?;
+        if let Some(bare) = simple_identifier(text) {
+            return self.types.get(bare);
+        }
+        if receiver.named_child_count() == 0 {
+            return None;
+        }
+        self.index
+            .self_references(self.language)
+            .find_map(|spelling| self_qualified(text, spelling))
+            .and_then(|field| self.types.field(field))
     }
 }
 

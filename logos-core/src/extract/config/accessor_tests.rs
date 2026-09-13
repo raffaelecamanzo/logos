@@ -681,6 +681,131 @@ fn the_self_qualifier_is_a_whole_token_followed_by_a_separator() {
     );
 }
 
+/// **The two over-captures review reproduced, and the gates that close them**
+/// (S-398 review).
+///
+/// Both admitted a key the source never named — the one thing [NFR-RA-05]
+/// forbids — and both were reachable through the qualified arm only, because
+/// the bare arm is answered by the receiver the source actually wrote.
+///
+/// 1. **A legal identifier character read as a separator.** `$` and a
+///    zero-width non-joiner are legal *inside* a Java identifier and are not
+///    `is_alphanumeric`, so `this$api` — ONE identifier — was split into `this`
+///    + `api` and resolved against an unrelated field. The gate is structural:
+///    the grammar parses `this$api` as a single leaf and `this.api` as a node
+///    with children.
+/// 2. **A shadowing local or parameter answering for an inherited field.**
+///    `this.api` denotes a field; the scope-blind walk answered from locals and
+///    parameters too, and where the real field is declared in ANOTHER file
+///    nothing poisons the entry. The gate is [`DeclaredTypes::field`].
+///
+/// Each case carries the control that makes its refusal about the gate rather
+/// than about an unresolvable fixture.
+///
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+fn a_qualified_receiver_the_source_did_not_write_resolves_to_nothing() {
+    let index = index(&[("Props.java", PROPS)]);
+
+    // ── 1. the identifier that merely LOOKS qualified ───────────────────────
+    for (decl, operand, why) in [
+        (
+            "private final SomethingElse this$api;",
+            "this$api.getUriGetArchive()",
+            "`this$api` is one legal Java identifier the file declares under an \
+             unrelated type — not the qualifier plus `api`",
+        ),
+        (
+            "private final SomethingElse this\u{200c}api;",
+            "this\u{200c}api.getUriGetArchive()",
+            "a zero-width non-joiner is an identifier character too",
+        ),
+        (
+            "",
+            "this$api.getUriGetArchive()",
+            "…and an UNDECLARED such identifier resolves to nothing rather than \
+             falling back to the reduction",
+        ),
+    ] {
+        let use_site = format!(
+            "public class Caller {{\n  private final MailServerConfigurationApi api;\n               {decl}\n  void go() {{ client.get({operand}); }}\n}}"
+        );
+        assert_eq!(key_of(&index, &use_site, operand), None, "{operand}: {why}");
+    }
+
+    // ── 2. the shadow that answered for an inherited field ──────────────────
+    for (body, why) in [
+        (
+            "void go(MailServerConfigurationApi api) { client.get(this.api.getUriGetArchive()); }",
+            "a PARAMETER named `api` — `this.api` is the inherited field, about \
+             which this file states nothing",
+        ),
+        (
+            "void go() { MailServerConfigurationApi api = null;              client.get(this.api.getUriGetArchive()); }",
+            "…and a LOCAL named `api`, the same shadow one scope further in",
+        ),
+    ] {
+        // `extends Base` is the whole point: the field `api` is declared in
+        // another file, so nothing in THIS one poisons the shadow.
+        let use_site = format!("public class Caller extends Base {{\n  {body}\n}}");
+        assert_eq!(
+            key_of(&index, &use_site, "this.api.getUriGetArchive()"),
+            None,
+            "{why}",
+        );
+    }
+
+    // The control for BOTH halves: the same accessor, on a receiver the source
+    // really did write as a field of this class, still resolves. Without it the
+    // refusals above would also be produced by a dead fixture.
+    let control = "public class Caller extends Base {\n\
+          private final MailServerConfigurationApi api;\n\
+          void go() { client.get(this.api.getUriGetArchive()); }\n\
+        }";
+    assert_eq!(
+        key_of(&index, control, "this.api.getUriGetArchive()").as_deref(),
+        Some("${mailserver.api.urigetarchive}"),
+    );
+}
+
+/// **A field and a disagreeing local now answer DIFFERENT questions**, and the
+/// qualified arm is the one that gains an answer (S-398 review).
+///
+/// The scope-blind poisoning rule is right for a bare `api` — which of the two
+/// a use site sees is a scope question this walk cannot answer — and wrong for
+/// `this.api`, which is not a scope question at all. Separating the two maps
+/// makes the second resolvable without weakening the first.
+#[test]
+fn a_disagreeing_local_poisons_the_bare_name_and_not_the_field() {
+    let source = "public class Caller {\n\
+          private final MailServerConfigurationApi api;\n\
+          void go() { SomethingElse api = null; }\n\
+        }";
+    let tree = parse(source);
+    let types = DeclaredTypes::build(tree.root_node(), source.as_bytes());
+
+    assert_eq!(types.get("api"), None, "a bare `api` is still a scope question");
+    assert_eq!(
+        types.field("api"),
+        Some("MailServerConfigurationApi"),
+        "…while `this.api` names the field, whatever a method body shadows it with",
+    );
+
+    // And the walk still separates the three positions it must.
+    let positions = "public class Caller {\n\
+          private final MailServerConfigurationApi field;\n\
+          Caller(MailServerConfigurationApi param) { MailServerConfigurationApi local = null; }\n\
+        }";
+    let tree = parse(positions);
+    let types = DeclaredTypes::build(tree.root_node(), positions.as_bytes());
+    for name in ["field", "param", "local"] {
+        assert_eq!(types.get(name), Some("MailServerConfigurationApi"), "{name}: any position");
+    }
+    assert_eq!(types.field("field"), Some("MailServerConfigurationApi"));
+    assert_eq!(types.field("param"), None, "a constructor parameter is not a field");
+    assert_eq!(types.field("local"), None, "nor is a method-body local");
+}
+
 /// **A generic wrapper whose URI is a method PARAMETER emits nothing, and that
 /// is a correct refusal rather than a miss** (S-398 AC3).
 ///
