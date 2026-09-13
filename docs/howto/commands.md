@@ -879,16 +879,16 @@ all**:
 
 ```bash
 logos workspace status            # human
-#   0 resolved cross-service edges; egress resolution 0.000 (0 of 54 egress sites resolved)
+#   0 resolved cross-service edges; egress resolution 0.032 (5 of 155 egress sites resolved)
 ```
 
 ```jsonc
 // logos workspace status --json
 "coverage": {
   "resolved_cross_service_edges": 0,    // edges resolved from a captured invocation
-  "egress_resolution": 0.0,             // absent (null) when no egress site was captured
-  "egress_resolution_measured": 54,     // the rate's denominator, explicit
-  "resolved_edges_summary": "0 resolved cross-service edges; egress resolution 0.000 (0 of 54 egress sites resolved)"
+  "egress_resolution": 0.032,           // absent (null) when no egress site was captured
+  "egress_resolution_measured": 155,    // the rate's denominator, explicit
+  "resolved_edges_summary": "0 resolved cross-service edges; egress resolution 0.032 (5 of 155 egress sites resolved)"
 }
 ```
 
@@ -938,23 +938,23 @@ So every rendering carries the **denominator and the excluded count** beside it:
 
 ```bash
 logos workspace status            # human
-#   0.287 (81 of 282 measured; 647 excluded as no-provider-in-workspace)
+#   0.225 (86 of 383 measured; 677 excluded as no-provider-in-workspace)
 ```
 
 ```jsonc
 // logos workspace status --json
 "coverage": {
-  "bound": 81,
-  "ambiguous": 146,
-  "unbound": 55,
-  "no_provider_in_workspace": 647,          // the excluded bucket
-  "spec_conformance_ratio": 0.287,
-  "spec_conformance_measured": 282,         // the denominator, explicit
-  "spec_conformance_summary": "0.287 (81 of 282 measured; 647 excluded as no-provider-in-workspace)"
+  "bound": 86,
+  "ambiguous": 155,
+  "unbound": 142,
+  "no_provider_in_workspace": 677,          // the excluded bucket
+  "spec_conformance_ratio": 0.225,
+  "spec_conformance_measured": 383,         // the denominator, explicit
+  "spec_conformance_summary": "0.225 (86 of 383 measured; 677 excluded as no-provider-in-workspace)"
 }
 ```
 
-Those are real figures from an 84-member Spring estate, measured 2026-09-09.
+Those are real figures from an 84-member Spring estate, measured 2026-09-13.
 
 `spec_conformance_measured` and `no_provider_in_workspace` are explicit fields, so
 a machine consumer never re-implements the denominator rule. The same figures ride
@@ -967,7 +967,7 @@ N excluded" is the informative statement. The same absent-not-zero rule governs
 
 ##### Each reference names the other end
 
-`bound: 81` and `ambiguous: 146` are not actionable on their own — the obvious
+`bound: 86` and `ambiguous: 155` are not actionable on their own — the obvious
 next question is *bound to what?*, and *ambiguous between what?*. Every row in
 `coverage.references` answers it:
 
@@ -1040,24 +1040,55 @@ Five things worth knowing about these fields:
   overlays commit different values and every one is retained with the profiles
   that prove it, never averaged and never refused.
 
-- **What this emits on a real estate today, stated plainly.** The row shape above
-  is implemented and tested, but the pipeline that would *populate* it is not yet
-  wired end to end. `@ConfigurationProperties` accessor expressions — which on the
-  reference estate are where **all 79** configuration-bound client-call sites live —
-  are currently recorded as `path_dynamic` with no key, because the accessor
-  capture hop is missing and the descriptor-driven properties index has no caller
-  outside tests. So on that estate the shipped pipeline emits **0** `config-bound`
-  rows today, even though the measurement harness proves 79 of them are resolvable.
-  Placeholder (`${...}`) targets are unaffected. Wiring the accessor hop is
-  corpus-level work no story currently owns. Do not read the documented shape as
-  current coverage. Note that a `config-bound`
-  row is deliberately **excluded from `resolved_cross_service_edges`**: the
-  coverage tier resolves the placeholders, but the bridge still keys a consumer
-  on its raw ledger target, so no edge is drawn for it yet.
+- **What this emits on a real estate today, measured rather than estimated.** The
+  accessor capture hop is now wired: an `@ConfigurationProperties` accessor
+  expression resolves to its canonical key at index time and reaches the same
+  resolution a `${...}` placeholder already took. On the 84-member reference
+  estate, `logos workspace status --json` emits **44** rows carrying `config-bound`
+  provenance — 5 `bound`, 9 `ambiguous`, 30 `no-provider-in-workspace` — against
+  the **0** the same command emitted before the hop existed. Read that figure with
+  its denominators, because it is **not** full coverage:
+
+  | | |
+  |---|---|
+  | rows carrying `config-bound` provenance | **44** |
+  | the accessor denominator (production client-call sites the arm refuses without configuration) | 108 |
+  | what the measurement harness proves resolvable on that denominator | 81 |
+  | rows carrying `config-unresolved` provenance | 0 |
+
+  (The 108 and the 81 are measured and pinned by
+  `logos-core/tests/operand_resolvability/configuration_agreement.rs`, which names
+  this table among the places to re-record if they move; the 44 is pinned by
+  `logos-core/tests/config_bound_admission.rs`.)
+
+  The 37-site gap between 44 and 81 is **one mechanism**: a *qualified receiver*.
+  `this.mailboxConfigurationApi.getUriGetMailbox()` resolves to nothing, on
+  purpose — the extract pass refuses a receiver it cannot see declared in the
+  reading file rather than trimming the expression to its last segment and
+  guessing. A **Kotlin** use site resolves to nothing for a related reason (the
+  grammar field-names neither the receiver nor the callee of a member call), and a
+  chained accessor (`config.getMail().getHost()`) likewise. Each is a refusal, not
+  a wrong answer.
+
+  Two further gaps are open and stated so the 44 is not read as a ceiling reached:
+  production ingestion reads **no** `.properties` source at all (no plugin
+  descriptor claims the extension), which costs this particular estate nothing —
+  a measured residue of **0 of 108** accessor sites, because it commits its keys
+  in yaml — but would cost an estate that used them; and an accessor-resolved key
+  reports `"source": "placeholder"` rather than a distinct `"properties"` label,
+  so the `--json`, MCP and dashboard surfaces cannot yet tell the two spellings
+  apart. Nothing is mislabelled as *admitted* by that: the provenance, the key,
+  the defining sources and the profile set are all correct.
+
+  Note finally that a `config-bound` row is deliberately **excluded from
+  `resolved_cross_service_edges`**: the coverage tier resolves the placeholders,
+  but the bridge still keys a consumer on its raw ledger target, so no edge is
+  drawn for it yet. On the reference estate that count is still 0 while
+  `egress_resolution` reads `0.032 (5 of 155 egress sites resolved)`.
 
 ##### The counts are two populations: read the split
 
-`bound: 81` adds two different claims together. A **`contract-surface`** reference
+`bound: 86` adds two different claims together. A **`contract-surface`** reference
 is a *declared* endpoint (an OpenAPI operation) matched to a controller; an
 **`invocation`** reference is a *captured call site* (an HTTP client call, or a
 broker publish or subscribe — a gRPC stub call would qualify but no arm captures
@@ -1070,19 +1101,22 @@ Every row carries its `intake`, and the four counters are reported split by it:
 ```jsonc
 // logos workspace status --json
 "coverage": {
-  "bound": 81, "ambiguous": 146, "unbound": 55, "no_provider_in_workspace": 647,
+  "bound": 86, "ambiguous": 155, "unbound": 142, "no_provider_in_workspace": 677,
   "by_intake": {
     "contract_surface": { "bound": 81, "ambiguous": 146,
                           "unbound": 1, "no_provider_in_workspace": 646 },
-    "invocation":       { "bound":  0, "ambiguous":   0,
-                          "unbound": 54, "no_provider_in_workspace": 1 }
+    "invocation":       { "bound":  5, "ambiguous":   9,
+                          "unbound": 141, "no_provider_in_workspace": 31 }
   }
 }
 ```
 
-Those are the real figures from an 84-member Spring estate. `bound: 81` looks like
-a workspace that binds; `by_intake.invocation.bound: 0` says **no outbound call
-site in it resolves at all**. That is what the split is for.
+Those are the real figures from an 84-member Spring estate, measured 2026-09-13.
+`bound: 86` looks like a workspace that binds; `by_intake.invocation.bound: 5`
+says that of its 186 captured outbound call sites, five resolve. That is what the
+split is for — and on the generation of this estate indexed before the accessor
+capture hop existed, the same field read **0** beside the same `bound: 81`, which
+is the starker form of the same point.
 
 The two populations always **sum** to the four counters above them — the headline
 is computed from the split, so the two cannot disagree — and because every row

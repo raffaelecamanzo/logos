@@ -10,6 +10,41 @@ CR-121 (S-380 onward) is blocked on this artifact existing, and every delta that
 programme reports is stated against it.
 
 
+SUPERSEDED IN PART — 2026-09-13 (S-397 T2)
+------------------------------------------
+
+READ THIS FIRST. Everything below is the 2026-09-09 measurement and is preserved
+as the historical record of it; it is NOT rewritten, because a dated measurement
+that gets edited is no longer a measurement. What has changed since:
+
+  * The JSON beside this file has been REGENERATED over a new index generation.
+    Its `measurement` block no longer matches section 2 below.
+  * The human-gated re-index section 6 describes HAS BEEN RUN — 2026-09-13, all
+    84 members, from a binary carrying S-374 and S-397 T1. Sections 4 and 6's
+    "pending-reindex" language is discharged.
+  * The figures the re-index produced:
+
+        references                     1060   (was  929)
+        bound / ambiguous / unbound     86 / 155 / 142
+        no_provider_in_workspace         677   (was  647)
+        by_intake invocation       5 / 9 / 141 / 31   (was 0 / 0 / 54 / 1)
+        resolved_cross_service_edges       0   (unmoved, as predicted)
+        egress_resolution              0.032 (5 of 155)   (was 0.000 of 54)
+        spec_conformance_ratio         0.225 (86 of 383)  (was 0.287 of 282)
+
+    The contract-surface column is byte-identical across the two generations.
+    Every cell that moved is in the invocation column.
+
+  * Section 4's prediction for S-374 VERIFIED, at the upper end of its stated
+    range and with one split it could not have foreseen: the re-index wrote 131
+    route/invocation rows, of which 87 are `base-url-runtime` refusals and 44 are
+    S-397 T1's configuration-bound rows. So `unbound` rose by 87, not by 131.
+
+The current record of the new generation is the JSON's own `generation` and
+`deltas` blocks, and the S-397 T2 finding at
+`logos-core/tests/config_bound_admission/config_bound_admission_finding.txt`.
+
+
 1. WHAT WAS MEASURED, AND HOW
 -----------------------------
 

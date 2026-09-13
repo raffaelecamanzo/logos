@@ -12,6 +12,45 @@ Path      federation::discover -> EngineRegistry<Engine>(RegistryMode::Lazy)
 Wall      47 s
 
 
+SUPERSEDED IN PART — 2026-09-13 (S-397 T2)
+------------------------------------------
+
+READ THIS FIRST. Everything below is the 2026-09-09 measurement over a store
+cold-indexed with logos 1.4.7, and is preserved as the historical record of it
+rather than rewritten: a dated measurement that gets edited is no longer a
+measurement. CR-120 §6's criterion was met on that generation and nothing here
+retracts it.
+
+S-397 T2 re-indexed all 84 members on 2026-09-13 from a binary carrying S-374
+and S-397 T1. Over that generation the same harness reads:
+
+                        bound  ambiguous  unbound  no-provider
+  contract-surface         81        146        1          646   (unchanged)
+  invocation                5          9      141           31
+  headline                 86        155      142          677
+  references             1060
+  0.225 (86 of 383 measured; 677 excluded as no-provider-in-workspace)
+
+The contract-surface column is byte-identical. The invocation column moved for
+two separable reasons, and the section "WHAT THE INVOCATION COLUMN IS, EXACTLY"
+below predicted one of them and got the other wrong in a way worth recording:
+
+  * It predicted the `unbound` column would rise "by roughly 115 production rows
+    (131 workspace-wide)". The re-index wrote exactly 131 client-call rows. 87 of
+    them landed in `unbound` as S-374 `base-url-runtime` refusals.
+  * It said "`bound` is not expected to move, because a refusal never binds."
+    The reasoning was sound; the conclusion is wrong, because S-397 T1 landed
+    between the prediction and the re-index and turned 44 of those 131 rows into
+    admissions carrying `config-bound` provenance — 5 bound, 9 ambiguous, 30
+    no-provider-in-workspace.
+
+  131 = 87 refusals + 44 admissions. Both halves reconcile against S-374's own
+  recorded workspace-wide figure.
+
+The current record of the new generation is
+`logos-core/tests/config_bound_admission/config_bound_admission_finding.txt`.
+
+
 THE HEADLINE — CR-120 §6's CRITERION, MET
 -----------------------------------------
 
