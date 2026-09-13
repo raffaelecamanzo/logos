@@ -742,12 +742,88 @@ fn build_indexes_every_binding_language_the_registry_loaded() {
     assert_eq!(index.len(), 3);
 }
 
+/// [`PropertiesIndex::from_sources`] — the ingestion constructor S-397 added —
+/// admits exactly the population [`PropertiesIndex::build`] does, over the same
+/// fixture (S-397, [CR-122]).
+///
+/// The failure this exists to catch is a hand-mirrored twin: two whole-index
+/// constructors, each with its own copy of "which files bind", drifting apart in
+/// a later edit so that the measured figure and the shipped figure stop being
+/// about the same set of classes. They share [`binder_for`] and the annotation
+/// pre-filter precisely so they cannot, and this is the check on that claim.
+///
+/// The one deliberate difference is the module scope: `build` partitions by
+/// build descriptor, `from_sources` takes the whole member
+/// ([`MEMBER_SCOPE`]). The fixture is single-module so both spell it `""`, which
+/// is what lets the two populations be compared at all.
+///
+/// [CR-122]: ../../../../docs/requests/CR-122-the-configuration-substrate-reaches-the-product.md
+#[test]
+#[cfg(feature = "lang-kotlin")]
+fn from_sources_admits_the_same_population_as_build_over_the_same_files() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    // The same near-miss roster `build_indexes_every_binding_language_the_registry_loaded`
+    // pins, so the two constructors are compared where the admission rule is
+    // actually interesting rather than on three easy rows.
+    let files = [
+        ("pom.xml", "<project/>\n"),
+        (
+            "src/J.java",
+            "@ConfigurationProperties(prefix = \"j\")\npublic class J { private String host; }",
+        ),
+        ("src/K.kt", "@ConfigurationProperties(prefix = \"k\")\ndata class K(val host: String)"),
+        ("src/Plain.java", "public class Plain { private String host; }"),
+        (
+            "notes/J.java.txt",
+            "@ConfigurationProperties(prefix = \"t\")\npublic class T { private String host; }",
+        ),
+        (
+            "src/U.JAVA",
+            "@ConfigurationProperties(prefix = \"u\")\npublic class U { private String host; }",
+        ),
+        ("src/main/resources/application.yml", "a:\n  b: 1\n"),
+        ("src/lib.rs", "// @ConfigurationProperties(prefix = \"r\")\npub struct R;\n"),
+    ];
+    for (rel, body) in files {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("has parent")).expect("mkdir");
+        std::fs::write(path, body).expect("write");
+    }
+
+    let corpus = crate::extract::config::corpus::ConfigCorpus::discover(root);
+    let walked = PropertiesIndex::build(root, &corpus, registry());
+    let ingested = PropertiesIndex::from_sources(registry(), files.iter().copied());
+
+    assert_eq!(ingested.len(), walked.len(), "the same number of distinct names");
+    assert_eq!(ingested.len(), 3, "…and it is the roster `build`'s own test pins");
+    for name in ["J", "K", "U", "T", "Plain", "R"] {
+        assert_eq!(
+            ingested.get(name, MEMBER_SCOPE).map(|c| c.prefix.as_str()),
+            walked.get(name, MEMBER_SCOPE).map(|c| c.prefix.as_str()),
+            "the two constructors disagree about {name}",
+        );
+    }
+    assert_eq!(ingested.collisions, walked.collisions);
+    assert_eq!(ingested.prefixless, walked.prefixless);
+}
+
 // ── The structural guard behind AC2 ─────────────────────────────────────────
 
-/// Node kinds the interpreter legitimately names that also exist in a JVM
-/// grammar. Measured: this is the complete intersection today, and it is empty —
-/// the interpreter names no node kind at all, because it reads only capture
-/// names. An entry added here is a decision someone has to write down.
+/// Node kinds either half of the chain legitimately names that also exist in a
+/// JVM grammar. Measured: this is the complete intersection today, and it is
+/// **empty**. An entry added here is a decision someone has to write down.
+///
+/// It stays empty across both files for two different reasons, and the
+/// difference is worth keeping visible. `binding.rs` names no node kind because
+/// it reads only capture names. `accessor.rs` reads a parse tree directly and so
+/// *could*, but it reads only grammar FIELD names — `name`, `type`, `object`,
+/// `function`, `parameters`, `body` — and none of those six is a node kind in
+/// either loaded JVM grammar. (`type` is the near miss: `tree-sitter-kotlin-ng`
+/// declares it in `node-types.json` as a supertype, which is not a parser node
+/// kind and so does not reach `node_kind_for_id`. If a grammar bump ever
+/// promotes it, this guard fires and the entry is written then, with that
+/// reason — not pre-emptively now, where it would sit unfalsifiable.)
 #[cfg(feature = "lang-kotlin")]
 const BINDING_KIND_ALLOWLIST: &[&str] = &[];
 
@@ -794,35 +870,46 @@ fn the_interpreter_names_no_jvm_grammar_node_kind() {
     // DOUBLE-QUOTED identifiers and `binding.rs` writes every node kind it
     // discusses in `backticks`. If a future comment does double-quote one, the
     // guard flags it and the fix is to backtick it like its neighbours.
-    let code = include_str!("binding.rs");
-    for literal in quoted_identifiers(code) {
-        if !jvm_kinds.contains(literal.as_str()) {
-            continue;
-        }
-        assert!(
-            BINDING_KIND_ALLOWLIST.contains(&literal.as_str()),
-            "binding.rs names the JVM node kind {literal:?}; the interpreter must \
-             stay language-neutral and read capture names only. If this really is \
-             unavoidable, add it to BINDING_KIND_ALLOWLIST with a reason.",
-        );
-    }
-    // A language-specific reading need not name a node kind at all — a
-    // `plugin.name() == "java"` branch would do — so that is asserted directly.
-    // Every needle is DOUBLE-QUOTED, because a double-quoted literal is the only
-    // way code can name one of these; a bare needle would trip on prose and is
-    // what forced the comment-stripping the paragraph above retired.
-    for id in [
-        "\"java\"",
-        "\"kotlin\"",
-        "\"kt\"",
-        "\"scala\"",
-        "\"ConfigurationProperties\"",
+    // BOTH halves of the chain, each with its own allowlist. The use-site half
+    // was added by S-397 and is the one that reads a parse tree directly, so
+    // leaving it outside this guard would leave the whole criterion resting on
+    // the half that structurally cannot break it.
+    for (file, code) in [
+        ("binding.rs", include_str!("binding.rs")),
+        ("accessor.rs", include_str!("accessor.rs")),
     ] {
-        assert!(
-            !code.contains(id),
-            "binding.rs names {id}; the interpreter must be driven by capture \
-             names and descriptor data, never by which language it is looking at",
-        );
+        for literal in quoted_identifiers(code) {
+            if !jvm_kinds.contains(literal.as_str()) {
+                continue;
+            }
+            assert!(
+                BINDING_KIND_ALLOWLIST.contains(&literal.as_str()),
+                "{file} names the JVM node kind {literal:?}; the chain must stay \
+                 language-neutral and read capture names and grammar FIELD names \
+                 only. If this really is unavoidable, add it to \
+                 BINDING_KIND_ALLOWLIST with a reason.",
+            );
+        }
+        // A language-specific reading need not name a node kind at all — a
+        // `plugin.name() == "java"` branch would do — so that is asserted
+        // directly. Every needle is DOUBLE-QUOTED, because a double-quoted
+        // literal is the only way code can name one of these; a bare needle
+        // would trip on prose and is what forced the comment-stripping the
+        // paragraph above retired.
+        for id in [
+            "\"java\"",
+            "\"kotlin\"",
+            "\"kt\"",
+            "\"scala\"",
+            "\"ConfigurationProperties\"",
+        ] {
+            assert!(
+                !code.contains(id),
+                "{file} names {id}; the chain must be driven by capture names, \
+                 grammar field names and descriptor data, never by which \
+                 language it is looking at",
+            );
+        }
     }
 }
 

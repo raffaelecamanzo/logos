@@ -103,6 +103,14 @@ pub mod corpus;
 // two reasons: the measurement harness drives it, and S-382 resolves against it.
 pub mod binding;
 
+// The USE-SITE half of configuration binding (S-397, CR-122, FR-WS-19): reading
+// a captured invocation operand as an accessor on one of those classes, and
+// naming the canonical key it resolves to. Split from `binding` because it is
+// the one part of the chain that reads a parse tree rather than a query's
+// captures, and the NFR-MA-01 structural guard treats the two differently for
+// exactly that reason. Public for the same reasons its two neighbours are.
+pub mod accessor;
+
 // Cross-artifact reference capture (S-068, CR-011, FR-CG-07): the seam that lets
 // each format's walk capture references between artifacts and to code, bound by
 // the resolution pass into ArtifactRef/ArtifactBinding edges. The substrate ships

@@ -1927,6 +1927,11 @@ fn invocation_sites(ext: &str, source: &str) -> Vec<crate::extract::config::Invo
         // producing zero sites, so an empty map here would make the C# twins
         // below vacuous in the opposite direction.
         &plugin.semantics().invocation_methods,
+        // No configuration-binding view: these fixtures are single files, and an
+        // accessor's owning class is declared in another one by construction
+        // (S-397). The fixtures that DO exercise the accessor hop drive
+        // `extract_files`, which is where the member's index is built.
+        None,
     )
     .into_iter()
     .map(|call| call.site)
@@ -2148,6 +2153,9 @@ fn a_name_declared_verb_is_gated_and_outranked_by_a_source_read_one() {
             &[],
             Some(&module),
             &std::collections::BTreeMap::new(),
+            // Single-file fixture; see `invocation_sites` for why no
+            // configuration-binding view is supplied here.
+            None,
         )
         .into_iter()
         .map(|call| call.site)
@@ -2636,6 +2644,9 @@ fn a_table_value_that_is_not_an_http_verb_captures_nothing() {
             &[],
             Some(&module),
             &table,
+            // Single-file fixture; see `invocation_sites` for why no
+            // configuration-binding view is supplied here.
+            None,
         )
     };
 
@@ -3040,4 +3051,185 @@ fn every_landed_invocations_arm_hands_a_non_normalizing_path_to_the_interpreter(
             case.plugin
         );
     }
+}
+
+// ── S-397: the accessor capture hop reaches the invocation arm ──────────────
+
+/// The Spring shape the reference estate is built out of: a
+/// `@ConfigurationProperties` class in one file, and a `WebClient` call in
+/// another whose request path is an accessor on an injected instance of it.
+///
+/// Two files, because that is the whole point — an accessor's owning class is
+/// never in the file that reads it, which is why the index is built once for the
+/// member and not per file.
+#[cfg(feature = "lang-java")]
+const ACCESSOR_PROPS_FILE: &str = "src/main/java/MailServerConfigurationApi.java";
+#[cfg(feature = "lang-java")]
+const ACCESSOR_PROPS_SOURCE: &str = "package a;\n\
+    @ConfigurationProperties(prefix = \"mailserver.api\")\n\
+    public class MailServerConfigurationApi {\n\
+    \x20   private String uriGetArchive;\n\
+    }\n";
+#[cfg(feature = "lang-java")]
+const ACCESSOR_CALLER_FILE: &str = "src/main/java/ArchiveClient.java";
+#[cfg(feature = "lang-java")]
+const ACCESSOR_CALLER_SOURCE: &str = "package a;\n\
+    import org.springframework.web.client.RestClient;\n\
+    public class ArchiveClient {\n\
+    \x20   private RestClient restClient;\n\
+    \x20   private final MailServerConfigurationApi api;\n\
+    \x20   ArchiveClient(MailServerConfigurationApi api) { this.api = api; }\n\
+    \x20   String a() { return restClient.get().uri(api.getUriGetArchive()).retrieve().body(String.class); }\n\
+    }\n";
+
+/// Every **HTTP client-call** reference `extract_files` emitted for `path`, by
+/// target.
+///
+/// Filtered on the relation, not on `RefForm::Path` alone: a Java import lands
+/// as a `Path`-form ref too, and reading the arm's output through the wider
+/// filter made this fixture assert on `RestClient` beside the target it is about.
+#[cfg(feature = "lang-java")]
+fn client_call_targets(facts: &[Facts], path: &str) -> Vec<String> {
+    facts
+        .iter()
+        .filter(|f| f.path == path)
+        .flat_map(|f| f.refs.iter())
+        .filter(|r| r.relation == Some(ArtifactRelation::HttpClientCall))
+        .map(|r| r.target.clone())
+        .collect()
+}
+
+/// **S-397 AC1.** The extract pass builds the member's properties index, and the
+/// invocation arm records the canonical key the accessor resolves to — as a
+/// `${…}` placeholder, so the site reaches S-382's resolution by the same path a
+/// source-written placeholder already takes ([FR-WS-19]).
+///
+/// Asserted through `extract_files`, the driver the pipeline actually calls,
+/// because the whole defect this closes was that the substrate had no production
+/// caller: a unit test of the index would have passed on the shipped 1.4.9
+/// binary too.
+///
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn an_accessor_operand_reaches_the_ledger_as_its_canonical_configuration_key() {
+    let reg = registry();
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let inputs = vec![
+        FileInput::new(ACCESSOR_PROPS_FILE, ACCESSOR_PROPS_SOURCE),
+        FileInput::new(ACCESSOR_CALLER_FILE, ACCESSOR_CALLER_SOURCE),
+    ];
+    let facts = extract_files(&inputs, &reg, &ctx);
+
+    assert_eq!(
+        client_call_targets(&facts, ACCESSOR_CALLER_FILE),
+        vec!["GET ${mailserver.api.urigetarchive}".to_string()],
+        "the accessor's canonical key is the operand's key, spelled as the \
+         placeholder S-382's resolution already consumes",
+    );
+    // …and the EMITTED target — not a copy of it written out here — classifies
+    // as config-bound rather than refused, which is the difference the story
+    // exists to make. Read back through the arm's own classifier, so the
+    // fixture cannot drift from `classify_client_call`.
+    use crate::resolve::http_client_call::{METHOD_SLOT, PATH_SLOT};
+    let emitted = client_call_targets(&facts, ACCESSOR_CALLER_FILE);
+    let (method, path) = emitted[0].split_once(' ').expect("a METHOD /template target");
+    let slots: std::collections::BTreeMap<String, String> = [
+        (METHOD_SLOT.to_string(), method.to_string()),
+        (PATH_SLOT.to_string(), path.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        crate::resolve::http_client_call::classify_client_call(&slots),
+        Ok(crate::resolve::http_client_call::ClientCallPath::ConfigBound(
+            emitted[0].clone()
+        )),
+        "the recorded target takes the ConfigBound admission — the same one a \
+         source-written `${{…}}` takes, with no second rule",
+    );
+}
+
+/// The negative half, on the **same** two-file fixture: with the properties
+/// class removed, the identical call site records no key and stays a
+/// runtime-composed path.
+///
+/// This is what makes the positive assertion above about the *hop* rather than
+/// about the fixture: only one input changes between the two.
+#[test]
+#[cfg(feature = "lang-java")]
+fn without_the_properties_class_the_same_accessor_records_no_key() {
+    let reg = registry();
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let inputs = vec![FileInput::new(ACCESSOR_CALLER_FILE, ACCESSOR_CALLER_SOURCE)];
+    let facts = extract_files(&inputs, &reg, &ctx);
+
+    assert!(
+        client_call_targets(&facts, ACCESSOR_CALLER_FILE)
+            .iter()
+            .all(|t| t.is_empty()),
+        "an unresolvable accessor contributes no bind target — only the keyless \
+         refusal row the arm already recorded: {:?}",
+        client_call_targets(&facts, ACCESSOR_CALLER_FILE),
+    );
+}
+
+/// **S-397 AC4, the byte-for-byte half.** The hop changes the client-call row
+/// and **nothing else**: extract the identical caller file in a member that
+/// declares the properties class and in one that does not, and every other fact
+/// is equal.
+///
+/// A differential rather than a snapshot, so it says what it means. "A member
+/// with no configuration corpus is byte-for-byte unaffected" is a claim about
+/// the *rest* of extraction — nodes, edges, warnings, the corpus fact, the
+/// non-client references — and a snapshot of one arm could drift with the
+/// fixture while still agreeing with itself.
+#[test]
+#[cfg(feature = "lang-java")]
+fn the_hop_changes_the_client_call_row_and_nothing_else() {
+    let reg = registry();
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let caller = FileInput::new(ACCESSOR_CALLER_FILE, ACCESSOR_CALLER_SOURCE);
+
+    let with_class = extract_files(
+        &[
+            FileInput::new(ACCESSOR_PROPS_FILE, ACCESSOR_PROPS_SOURCE),
+            caller.clone(),
+        ],
+        &reg,
+        &ctx,
+    );
+    let without = extract_files(std::slice::from_ref(&caller), &reg, &ctx);
+
+    let bound = with_class
+        .iter()
+        .find(|f| f.path == ACCESSOR_CALLER_FILE)
+        .expect("the caller was extracted in both arms");
+    let plain = &without[0];
+
+    assert_eq!(bound.nodes, plain.nodes, "the hop emits no node");
+    assert_eq!(bound.edges, plain.edges, "…no edge");
+    assert_eq!(bound.warnings, plain.warnings, "…no warning");
+    assert_eq!(bound.config_source, plain.config_source, "…and no corpus fact");
+    assert_eq!(bound.partial, plain.partial);
+
+    // Every reference EXCEPT the client-call row is byte-identical; the two arms
+    // differ in that row alone, and in its target alone.
+    let others = |f: &Facts| -> Vec<RefFact> {
+        f.refs
+            .iter()
+            .filter(|r| r.relation != Some(ArtifactRelation::HttpClientCall))
+            .cloned()
+            .collect()
+    };
+    assert_eq!(others(bound), others(plain), "no other reference moves");
+    assert_eq!(
+        client_call_targets(&with_class, ACCESSOR_CALLER_FILE),
+        vec!["GET ${mailserver.api.urigetarchive}".to_string()],
+    );
+    assert_eq!(
+        client_call_targets(&without, ACCESSOR_CALLER_FILE),
+        vec![String::new()],
+        "without the class, the same site is the keyless refusal row it always was",
+    );
 }
