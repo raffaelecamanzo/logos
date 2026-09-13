@@ -1003,6 +1003,48 @@ fn a_missing_git_binary_suppresses_the_nudge_rather_than_inverting_it() {
     assert!(repo.join(".logos").join("config.toml").is_file());
 }
 
+/// **The `--workspace` half of the CR-103 asymmetry, proven through the real
+/// binary.** The *pair* of assertions that makes that asymmetry visible sits in
+/// `cli/src/workspace_init.rs`'s unit module, because the nudge's accept arm is
+/// TTY-only and a test-spawned binary has no terminal. This backs the half that
+/// needs no terminal, at the one seam the pair cannot reach: `dispatch`'s
+/// `nudged.then_some(..)` — the single line deciding which entry point may fall
+/// back at all. Deleting it leaves the whole unit suite green while `logos init
+/// --workspace` starts writing a `.logos/` it must never write, which is
+/// precisely the "simplified away" regression FR-IN-08's acceptance criterion
+/// exists to prevent (verified: the mutated binary creates `.logos/` here).
+///
+/// It also pins the *message*. "Still reports nothing to do" is in FR-IN-08 and
+/// in the AC, and deleting the `eprintln!` is otherwise invisible — the command
+/// becomes wholly silent and every test stays green.
+///
+/// No TTY is needed: `--workspace` short-circuits inside `nudge` before any
+/// detection, and `--exclude '*'` empties the approved set without a prompt.
+#[test]
+fn an_explicit_workspace_that_approves_no_member_writes_nothing_and_says_so() {
+    let tmp = two_member_fixture();
+    let out = logos(tmp.path(), &["init", "--workspace", "--exclude", "*"]);
+
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("nothing to do"),
+        "the explicit path still REPORTS nothing to do (FR-IN-08): {stderr}"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "and emits no machine document at all: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !tmp.path().join(".logos").exists(),
+        "an explicit --workspace that enables nothing must initialise nothing — a \
+         `.logos/` here means the CR-103 nudge fallback leaked onto this entry point"
+    );
+    assert!(!tmp.path().join("logos.workspace.toml").exists());
+    assert!(!tmp.path().join(".mcp.json").exists());
+}
+
 // ── FR-WS-17: the durable warm-outcome record, across two processes ────────
 
 /// Every entry in `dir` with its byte length — enough to catch a file added,
