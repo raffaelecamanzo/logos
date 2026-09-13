@@ -706,21 +706,23 @@ pub fn edges(
     bridge.edges(registry)
 }
 
-/// The workspace's unresolved egress residue, resolved once per call so a CLI
-/// one-shot and the serve loop share the same entry point ([CR-125], [FR-WS-05]).
+/// The inputs one **cross-service reachability** answer is built from — the edge
+/// set and the unresolved egress residue — resolved together ([CR-125],
+/// [FR-WS-05]).
 ///
-/// The twin of [`edges`], deliberately: every surface reaches both the answer's
-/// inputs through this module, and the residue is assembled behind the same
-/// stamp-keyed cache rather than by whichever surface happens to render it
-/// ([CR-125] §4.4).
+/// The reachability twin of [`edges`], and the entry point `callers`/`impact`
+/// use instead of it. Both values come from **one** walk at **one** member
+/// sync-stamp snapshot, so the answer and the residue printed beside it can
+/// never describe two different generations of the workspace
+/// ([`ContractBridge::reachability_inputs`] carries the full reasoning).
 ///
 /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
-pub fn residue(
+pub fn reachability_inputs(
     bridge: &super::bridge::ContractBridge,
     registry: &EngineRegistry<Engine>,
-) -> Arc<WorkspaceEgressResidue> {
-    bridge.residue(registry)
+) -> (Arc<Vec<BridgeEdge>>, Arc<WorkspaceEgressResidue>) {
+    bridge.reachability_inputs(registry)
 }
 
 #[cfg(test)]

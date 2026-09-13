@@ -868,7 +868,7 @@ impl LogosMcp {
         Parameters(p): Parameters<XserviceCallersParams>,
     ) -> Result<CallToolResult, ErrorData> {
         self.run_xservice("xservice_callers", move |reg, bridge| {
-            let (edges, residue) = (query::edges(bridge, reg), query::residue(bridge, reg));
+            let (edges, residue) = query::reachability_inputs(bridge, reg);
             query::xservice_callers(reg, &edges, &residue, &p.symbol, p.limit, p.repo.as_deref())
         })
         .await
@@ -882,7 +882,7 @@ impl LogosMcp {
         Parameters(p): Parameters<XserviceImpactParams>,
     ) -> Result<CallToolResult, ErrorData> {
         self.run_xservice("xservice_impact", move |reg, bridge| {
-            let (edges, residue) = (query::edges(bridge, reg), query::residue(bridge, reg));
+            let (edges, residue) = query::reachability_inputs(bridge, reg);
             query::xservice_impact(reg, &edges, &residue, &p.symbol, p.depth, p.repo.as_deref())
         })
         .await

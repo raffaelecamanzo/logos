@@ -109,8 +109,7 @@ async fn both_surfaces(
     let cli = {
         let reg = registry("shop", root, members.clone());
         let bridge = ContractBridge::new();
-        let edges = query::edges(&bridge, &reg);
-        let residue = query::residue(&bridge, &reg);
+        let (edges, residue) = query::reachability_inputs(&bridge, &reg);
         serde_json::to_value(query::xservice_callers(
             &reg,
             &edges,

@@ -143,8 +143,7 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
             limit,
             repo,
         } => {
-            let edges = query::edges(&bridge, &registry);
-            let residue = query::residue(&bridge, &registry);
+            let (edges, residue) = query::reachability_inputs(&bridge, &registry);
             out.print(&query::xservice_callers(
                 &registry,
                 &edges,
@@ -159,8 +158,7 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
             depth,
             repo,
         } => {
-            let edges = query::edges(&bridge, &registry);
-            let residue = query::residue(&bridge, &registry);
+            let (edges, residue) = query::reachability_inputs(&bridge, &registry);
             out.print(&query::xservice_impact(
                 &registry,
                 &edges,

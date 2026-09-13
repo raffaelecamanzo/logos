@@ -871,10 +871,20 @@ pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) ->
 /// registry. Shareable behind an [`Arc`]: each interior cache is a [`Mutex`], so
 /// the serve surface and concurrent callers see one bridge.
 ///
-/// The two caches are **independent slots**, not one entry holding both: an
-/// `xservice search` or `route-providers` call wants only the edges, and filling
-/// a residue it will not render would spend a second all-member walk per query
-/// for nothing ([NFR-PE-01]).
+/// The two caches are **separate slots**, so an `xservice search` or
+/// `route-providers` call pays only for the edges and never for a residue it
+/// will not render ([NFR-PE-01]). They are nonetheless filled through **one**
+/// entry point on the reachability path ([`reachability_inputs`](Self::reachability_inputs)),
+/// keyed on one stamp snapshot, because two independent snapshots can straddle a
+/// member re-sync and make the answer contradict its own residue.
+///
+/// # A deliberate upward dependency, recorded rather than incurred silently
+/// Holding the residue slot means this module names [`WorkspaceEgressResidue`],
+/// a read-model defined above it — the first edge from the bridge back up into
+/// the derived modules. It is taken knowingly: the alternative is a second cache
+/// owner beside the bridge, and then nothing could key the two read-models on
+/// one snapshot, which is the guarantee above. The `super::residue` import is
+/// the whole of the coupling; no derived logic lives here.
 ///
 /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
@@ -882,8 +892,8 @@ pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) ->
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 #[derive(Debug, Default)]
 pub struct ContractBridge {
-    edges: StampCache<Vec<BridgeEdge>>,
-    residue: StampCache<WorkspaceEgressResidue>,
+    edge_cache: StampCache<Vec<BridgeEdge>>,
+    residue_cache: StampCache<WorkspaceEgressResidue>,
 }
 
 /// The bridge cache key: each member's sync-stamp at compute time, sorted by
@@ -942,6 +952,13 @@ impl<T> StampCache<T> {
         value
     }
 
+    /// The stamps this slot was last filled at, for the coherence guard that
+    /// asserts the bridge's two slots are keyed on one snapshot.
+    #[cfg(test)]
+    fn cached_stamps(&self) -> Option<Stamps> {
+        self.lock().as_ref().map(|(stamps, _)| stamps.clone())
+    }
+
     /// Lock the slot, recovering a poisoned lock rather than propagating the
     /// poison — the cache is a derived read-model, so a poisoned view is still
     /// usable and one caller's panic must not brick the bridge for the rest.
@@ -979,36 +996,57 @@ impl ContractBridge {
     {
         let answer = registry.answer();
         let stamps = current_stamps(&answer);
-        self.edges
+        self.edge_cache
             .get_or_compute(stamps, || compute_edges(&answer))
     }
 
-    /// The workspace's **unresolved egress residue** over `registry`'s members,
-    /// cached on the same member sync-stamps the edge set is ([CR-125],
-    /// [FR-WS-05]).
+    /// **The derived read-models one cross-service reachability answer needs**,
+    /// resolved against a **single** stamp snapshot ([CR-125], [FR-WS-05]).
     ///
-    /// Assembled here, once, so the MCP, CLI and web renderings of a reachability
-    /// answer cannot disagree about a figure none of them computes ([CR-125]
-    /// §4.4). It is a projection of
-    /// [`cross_service_coverage`](super::coverage::cross_service_coverage) — the
-    /// same classifier [`edges`](Self::edges) binds through — so the answer and
-    /// its residue cannot drift apart.
+    /// Returns the edge set the answer is built from and the unresolved egress
+    /// residue reported beside it. Both are projections of the members this call
+    /// walked, so the answer and its residue cannot drift apart.
     ///
-    /// Filled **lazily and separately** from the edge set: only the reachability
-    /// verbs render a residue, so `route-providers` and `search` never pay for
-    /// the all-member walk behind it ([NFR-PE-01]).
+    /// # Why one entry point and not two calls ([FR-WS-16] AC5, [NFR-CC-04])
+    /// Calling [`edges`](Self::edges) and a separate residue accessor in sequence
+    /// mints **two** [`AnswerScope`]s and reads the member sync-stamps **twice**.
+    /// Both are defects, and the second is the serious one:
+    ///
+    /// - a member that will not open is attempted and diagnosed once per scope,
+    ///   and [FR-WS-16] AC5 says *once per command*; and
+    /// - between the two stamp reads a member can re-sync under `logos serve`'s
+    ///   watcher, so the edge set comes from one generation and the residue from
+    ///   the next. A call site resolved in the first then reads as *unresolved*
+    ///   in the second — the answer contradicting its own residue, which is
+    ///   exactly the drift [CR-125] §4.4 requires be impossible. A transient
+    ///   open failure between the two reads splits `covers_all_members` from the
+    ///   coverage the edges were actually computed over, so a partial answer can
+    ///   read as complete ([NFR-CC-04]).
+    ///
+    /// One `answer()` and one [`current_stamps`] fixes both: the two slots are
+    /// keyed on the **same** vector, so they hit together, miss together, and a
+    /// miss recomputes both from one walk of one generation.
     ///
     /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
-    /// [NFR-PE-01]: ../../../docs/specs/requirements/NFR-PE-01.md
-    pub fn residue<E>(&self, registry: &EngineRegistry<E>) -> Arc<WorkspaceEgressResidue>
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub fn reachability_inputs<E>(
+        &self,
+        registry: &EngineRegistry<E>,
+    ) -> (Arc<Vec<BridgeEdge>>, Arc<WorkspaceEgressResidue>)
     where
         E: MemberEngine + MemberContracts,
     {
         let answer = registry.answer();
         let stamps = current_stamps(&answer);
-        self.residue
-            .get_or_compute(stamps, || egress_residue(&answer))
+        let edges = self
+            .edge_cache
+            .get_or_compute(stamps.clone(), || compute_edges(&answer));
+        let residue = self
+            .residue_cache
+            .get_or_compute(stamps, || egress_residue(&answer));
+        (edges, residue)
     }
 }
 
@@ -1358,6 +1396,9 @@ mod tests {
     thread_local! {
         static FIXTURES: RefCell<HashMap<String, MemberFixture>> = RefCell::new(HashMap::new());
         static SURFACE_READS: Cell<usize> = const { Cell::new(0) };
+        /// When set, the FIRST contract-surface read re-syncs `web` — a member
+        /// re-indexing mid-answer, which is what `logos serve`'s watcher does.
+        static RESYNC_ON_FIRST_READ: Cell<bool> = const { Cell::new(false) };
     }
 
     #[derive(Clone, Default)]
@@ -1370,6 +1411,7 @@ mod tests {
     fn reset() {
         FIXTURES.with(|f| f.borrow_mut().clear());
         SURFACE_READS.with(|c| c.set(0));
+        RESYNC_ON_FIRST_READ.with(|c| c.set(false));
     }
     fn set_member(name: &str, stamp: u64, nodes: Vec<ContractNode>) {
         FIXTURES.with(|f| {
@@ -1434,6 +1476,62 @@ mod tests {
             f.borrow_mut().entry(name.to_string()).or_default().stamp += 1;
         });
     }
+    /// **The coherence guarantee [CR-125] §4.4 rests on: one answer, one
+    /// generation.** The edge set and the residue must never describe the
+    /// workspace at two different member sync-stamps — if they can, the same
+    /// captured call site is reported *resolved* in `cross_service` and
+    /// *unresolved* in the residue printed beside it, the answer contradicting
+    /// its own residue.
+    ///
+    /// Proven against a member that **re-syncs mid-answer**, which is exactly
+    /// what `logos serve`'s watcher does while a request is in flight: the
+    /// fixture bumps `web`'s stamp on the first contract-surface read. Two
+    /// independent snapshots would then straddle that bump and key the two slots
+    /// differently; [`ContractBridge::reachability_inputs`] takes the snapshot
+    /// **before** either slot is filled, so both are keyed on one vector and the
+    /// window does not exist.
+    ///
+    /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
+    #[test]
+    fn one_reachability_answer_reads_both_models_at_one_generation() {
+        reset();
+        set_member("web", 1, vec![route("GET /users/{id}", "local web_route")]);
+        set_member("api", 1, Vec::new());
+        set_consumers("api", vec![http_call("GET /users/{id}", "local api_call")]);
+        let reg = registry(&["api", "web"]);
+        let bridge = ContractBridge::new();
+
+        // `web` re-indexes the instant this answer starts reading surfaces.
+        RESYNC_ON_FIRST_READ.with(|c| c.set(true));
+        let (edges, residue) = bridge.reachability_inputs(&reg);
+
+        assert_eq!(
+            bridge.edge_cache.cached_stamps(),
+            bridge.residue_cache.cached_stamps(),
+            "both derived models must be keyed on ONE snapshot; a member re-synced \
+             mid-answer and they were filled at different generations"
+        );
+
+        // And the two agree about the one captured site: it is an edge, and it is
+        // therefore not in the residue.
+        assert_eq!(edges.len(), 1, "the call site binds web's route");
+        assert_eq!(
+            residue
+                .members
+                .iter()
+                .map(|m| m.measured_sites - m.unresolved_sites)
+                .sum::<u64>(),
+            1,
+            "the residue counts that same site as resolved: {:?}",
+            residue.members
+        );
+        assert_eq!(
+            residue.members.iter().map(|m| m.unresolved_sites).sum::<u64>(),
+            0,
+            "nothing is both an edge and a residue row"
+        );
+    }
+
     fn surface_reads() -> usize {
         SURFACE_READS.with(Cell::get)
     }
@@ -1473,6 +1571,9 @@ mod tests {
     impl MemberContracts for FakeEngine {
         fn contract_surface(&self) -> Result<Vec<ContractNode>> {
             SURFACE_READS.with(|c| c.set(c.get() + 1));
+            if RESYNC_ON_FIRST_READ.with(|c| c.replace(false)) {
+                bump_stamp("web");
+            }
             // A member literally named "unreadable" starts fine but its surface
             // READ fails — the `Ok(Err)` degrade arm, distinct from a start
             // failure ("broken").
