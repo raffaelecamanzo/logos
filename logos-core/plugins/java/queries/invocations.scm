@@ -11,9 +11,14 @@
 ;                         `post`, …). Kept only when it is one of the HTTP verbs.
 ;   @invoke.http.arg    — the node holding the request path. Kept as a
 ;                         `"METHOD /template"` reference only when it is a static
-;                         string literal; a bare variable / concatenation /
-;                         builder lambda is refused as `base-url-runtime`
-;                         (never approximately matched, NFR-RA-05).
+;                         string literal, or a `@ConfigurationProperties`
+;                         accessor naming a committed key (S-397/S-398); a bare
+;                         variable or a concatenation is refused as
+;                         `base-url-runtime` (never approximately matched,
+;                         NFR-RA-05). A `UriBuilder` LAMBDA is bound to the
+;                         operand INSIDE it by pattern 5, and stays refused
+;                         whole when the lambda composes more than that pattern
+;                         admits (S-399).
 ;
 ; ── The fluent-chain decision (S-341, the shape Kotlin/Ruby/PHP/C# consume) ───
 ;
@@ -205,6 +210,97 @@
     (_) @invoke.http.arg)
   (#match? @_recv "^[_$]?(restClient|restTemplate|restOperations|webClient|httpClient)([A-Z0-9_$][A-Za-z0-9_$]*)?$|^[a-z_$][A-Za-z0-9_$]*(RestClient|RestTemplate|RestOperations|WebClient|HttpClient)$|^client$"))
 
+; 5. Fluent verb-then-`uri` where the path is composed inside a `UriBuilder`
+;    LAMBDA — the estate's second `@ConfigurationProperties` egress shape
+;    (S-399, FR-WS-19):
+;      webClient.get().uri(builder -> builder.path(props.getUriGetReport()))
+;      webClient.get().uri(builder -> builder.path(props.getUriActiveOffer()).build(userId))
+;
+;    Pattern 1 already matches these calls and sees the whole lambda, which is
+;    not an operand anything can read — so the site is refused as
+;    `base-url-runtime`. This pattern matches the SAME call a second time and
+;    binds `@invoke.http.arg` to the operand INSIDE the lambda, which the
+;    generic dispatch then judges exactly as it judges a direct `.uri(<operand>)`
+;    argument: a static literal fills the path slot, a `@ConfigurationProperties`
+;    accessor resolves to its canonical key, and anything else refuses.
+;
+;    The two matches do not double-count, and the mechanism is not new here:
+;    `record_refusals` cancels a refusal candidate when a RESOLVED operand of the
+;    same relation lies inside its range, which is what already makes patterns
+;    2-3 (`URI.create(<literal>)`) cancel pattern 1's candidate on the same call.
+;    Where the inner operand does NOT resolve, both matches refuse and the two
+;    candidates collapse to one row per `(relation, declaration, line)` — so an
+;    unresolvable lambda records the one row it always recorded.
+;
+;    NUMBERED 5 rather than inserted beside patterns 1-3 it belongs with: the
+;    numbering is referenced by prose in this file and by test names, and
+;    append-only numbering keeps those true.
+;
+; ── What the lambda is allowed to compose (NFR-RA-05) ────────────────────────
+;
+;    `path(<one operand>)`, on the lambda's OWN parameter, optionally followed
+;    by `build(…)` — and nothing else. Everything about that sentence is a
+;    constraint the pattern spells, because the alternative is approximating a
+;    composition:
+;
+;      * `@_lb_path` is `#eq?`-matched, never prefix-matched, so `pathSegment(…)`
+;        — a real `UriBuilder` method taking a runtime segment — is not read as
+;        `path`.
+;      * The `path` argument list is anchored on BOTH ends, so a two-argument
+;        `path(a, b)` binds nothing. Spring's `UriBuilder` declares no such
+;        overload today, so this is the droppable-query guard (FR-PL-04) and a
+;        guard against a same-named method on some other builder — not a probe
+;        of a shape the estate writes.
+;      * `@_lb_recv` must be the `@_lb_param` the lambda declares, so a `path(…)`
+;        call on some other object that merely happens to sit in this position is
+;        not read as the builder's.
+;      * `build` is the only admitted terminal. It expands the template
+;        variables, which the direct `.uri(template, a, b)` spelling passes as
+;        trailing arguments pattern 1 also ignores — so admitting it emits the
+;        SAME reference, not a wider one.
+;
+;    Everything else stays REFUSED WHOLE rather than binding on its resolvable
+;    half. `queryParam(…)`/`queryParams(…)` are the ones that cost the most —
+;    8 of the 13 `.uri(<lambda>)` sites in the reference workspace chain at least
+;    one (counted 2026-09-13) — and they are refused on the same rule, not
+;    exempted: a chain the arm reads only part of is a composition it has not
+;    proven (NFR-RA-05).
+;
+;    ONE pattern, not two, following pattern 4's convention: the bare
+;    `path(…)` body and the `path(…).build(…)` body are a node alternation
+;    binding ONE `@invoke.http.arg`, so the shapes cannot drift apart.
+;
+;    Stated ceiling: `parameters:` is constrained to a bare `(identifier)`, so a
+;    parenthesised or typed lambda parameter (`(builder) ->`, `(UriBuilder b) ->`)
+;    is not reached. Under-capture, and no such site exists in the reference
+;    workspace.
+(method_invocation
+  object: (method_invocation
+    name: (identifier) @invoke.http.method
+    arguments: (argument_list))
+  name: (identifier) @_uri_lambda
+  arguments: (argument_list
+    .
+    (lambda_expression
+      parameters: (identifier) @_lb_param
+      body: [
+        (method_invocation
+          object: (identifier) @_lb_recv
+          name: (identifier) @_lb_path
+          arguments: (argument_list . (_) @invoke.http.arg .))
+        (method_invocation
+          object: (method_invocation
+            object: (identifier) @_lb_recv
+            name: (identifier) @_lb_path
+            arguments: (argument_list . (_) @invoke.http.arg .))
+          name: (identifier) @_lb_build
+          arguments: (argument_list))
+      ]))
+  (#eq? @_uri_lambda "uri")
+  (#eq? @_lb_path "path")
+  (#eq? @_lb_build "build")
+  (#eq? @_lb_recv @_lb_param))
+
 ; ── Stated coverage ceilings (ADR-54: recorded, never worked around) ─────────
 ;
 ; NOT captured. Each one is asserted in
@@ -231,6 +327,18 @@
 ;     `the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row`, each as
 ;     the positive control alone rather than as zero.
 ;   * OkHttp and Apache HttpClient — outside FR-WS-08's normative Java row.
+;   * A `UriBuilder` lambda that composes MORE than `path(<one operand>)` and an
+;     optional `build(…)` — `queryParam(…)`, a second path segment, any other
+;     terminal (S-399). Refused whole, never bound on the resolvable half
+;     (NFR-RA-05). This is the most expensive ceiling in the list on the
+;     reference workspace: 8 of its 13 `.uri(<lambda>)` sites chain at least one
+;     `queryParam` (counted 2026-09-13). Pinned by
+;     `a_uri_builder_lambda_that_chains_past_path_stays_refused_whole`.
+;   * A `UriBuilder` lambda whose parameter is parenthesised or typed
+;     (`(builder) ->`, `(UriBuilder b) ->`) — pattern 5 constrains `parameters:`
+;     to a bare `(identifier)`. Zero such sites in the reference workspace.
+;     Pinned, with the composer rule's other near misses, by
+;     `the_uri_builder_composer_rule_is_probed_with_its_near_misses`.
 ;
 ; The first two share one root cause: the arm's `@invoke.http.method` slot needs
 ; a node whose *text* is literally an HTTP verb, and these encode it in a method
@@ -268,10 +376,11 @@
 ; 4 now carries one, so the test that pinned the blanket over-capture is
 ; inverted (`a_route_shaped_collection_get_on_a_non_client_receiver_is_refused`).
 ;
-; What survives is the FLUENT arm: patterns 1-3 constrain the `.uri` link and
-; the `URI.create` receiver type, but place NO constraint on the receiver of the
-; verb link, so `perms.get().uri("/admin/users")` in a gate-admitted file still
-; captures. Pinned as the stated residual by
+; What survives is the FLUENT arm: patterns 1-3 and 5 constrain the `.uri` link
+; — its name, and the `URI.create` receiver type or the lambda's composition —
+; but place NO constraint on the receiver of the verb link, so
+; `perms.get().uri("/admin/users")` in a gate-admitted file still captures.
+; Pinned as the stated residual by
 ; `the_fluent_arm_receiver_is_an_unguarded_over_capture_ceiling`.
 ;
 ; It is left as a ceiling rather than closed, deliberately: pattern 1's inner

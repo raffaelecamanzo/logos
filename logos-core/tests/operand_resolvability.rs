@@ -838,6 +838,30 @@ fn is_http_method(name: &str) -> bool {
 /// has no attributable enclosing symbol; this does not. The omission can only
 /// *add* sites, so it biases in favour of CRA-01 like every other judgement
 /// call here (see the module docs).
+///
+/// # One site per call, and the NARROWEST operand wins (S-399)
+///
+/// Several shipped `.scm` patterns match the **same** call, each binding
+/// `@invoke.http.arg` to a different node — Java's and Kotlin's
+/// `.uri(URI.create(<literal>))` (patterns 1 and 2-3) and, since S-399, Java's
+/// `.uri(<UriBuilder lambda>)` (patterns 1 and 5). Left alone, that is one call
+/// counted twice in every taxonomy column here, with one row classified from
+/// the wrapper and one from what it wraps.
+///
+/// Production does not count it twice, and this mirrors the rule it uses rather
+/// than inventing a second one: `extract::config::record_refusals` cancels a
+/// refusal candidate whenever a RESOLVED operand of the same relation lies
+/// **inside** its range, so the operand the arm's answer comes from is the
+/// innermost one it could read. Keeping the narrowest operand per anchor is
+/// that same preference, computed here without the resolution step this harness
+/// does not run.
+///
+/// The corpus this bias was measured on contains **zero** `URI.create(…)` sites
+/// in Java and Kotlin (counted 2026-09-13), so on `pec-services` the rule moves
+/// only the lambda shape: the 3 `.uri(builder -> builder.path(<accessor>)…)`
+/// sites pattern 5 admits are classified from the accessor rather than from the
+/// lambda. The module header's Sprint-64 table predates that and is not re-run
+/// here.
 fn collect_sites<'t>(
     query: &Query,
     root: Node<'t>,
@@ -888,9 +912,23 @@ fn collect_sites<'t>(
         let anchor = method_node
             .or(declared.map(|(_, n)| n))
             .unwrap_or(arg_node);
-        sites.push((anchor.start_position().row as u32 + 1, arg_node));
+        sites.push((anchor.id(), anchor.start_position().row as u32 + 1, arg_node));
     }
-    sites
+    // One row per call: where two patterns matched the same anchor, the
+    // narrowest operand is the one production's reconcile lets answer.
+    let mut kept: Vec<(usize, u32, Node<'t>)> = Vec::with_capacity(sites.len());
+    for (id, line, arg) in sites {
+        match kept.iter_mut().find(|(seen, _, _)| *seen == id) {
+            Some(held) => {
+                let width = |n: &Node<'_>| n.byte_range().len();
+                if width(&arg) < width(&held.2) {
+                    held.2 = arg;
+                }
+            }
+            None => kept.push((id, line, arg)),
+        }
+    }
+    kept.into_iter().map(|(_, line, arg)| (line, arg)).collect()
 }
 
 /// Whether this file passes the [FR-FW-04] ledger gate: its extracted refs name
@@ -2194,12 +2232,38 @@ fn a_parameter_is_other_even_in_a_method_mentioning_properties() {
     assert_eq!(a.kinds, vec![OperandKind::Other]);
 }
 
-/// A `uriBuilder -> …` lambda is `Other` — 9 of the corpus's Java sites.
+/// A `uriBuilder -> …` lambda — 9 of the corpus's Java sites — is classified
+/// from whatever the arm can actually read inside it, which S-399 changed.
+///
+/// Before S-399 the whole lambda was the captured operand and every one of the
+/// 9 was `Other`. Pattern 5 now binds the operand **inside** a lambda composing
+/// `path(<one operand>)` and an optional `build(…)`, so such a lambda is
+/// classified from that operand — while a lambda composing anything more stays
+/// captured whole and stays `Other`, which is the half that still covers 6 of
+/// the corpus's 9 (counted 2026-09-13).
+///
+/// Both rows are asserted, because the pair is the rule: the first alone would
+/// also pass if pattern 5 had swallowed every lambda.
 #[cfg(feature = "lang-java")]
 #[test]
-fn a_uri_builder_lambda_is_other() {
-    let a = java("", "builder -> builder.path(\"/x\").build()");
-    assert_eq!(a.kinds, vec![OperandKind::Other]);
+fn a_uri_builder_lambda_is_classified_from_what_the_arm_reads_inside_it() {
+    let admitted = java("", "builder -> builder.path(\"/x\").build()");
+    assert_eq!(
+        admitted.kinds,
+        vec![OperandKind::Literal],
+        "pattern 5 binds the `path(…)` operand, so the site is that literal"
+    );
+
+    let refused = java(
+        "",
+        "builder -> builder.path(\"/x\").queryParam(\"q\", q).build()",
+    );
+    assert_eq!(
+        refused.kinds,
+        vec![OperandKind::Other],
+        "a chained lambda is captured whole and stays unreadable — NFR-RA-05, \
+         never bound on its resolvable half"
+    );
 }
 
 /// A name the unit does not bind is `Other` — never guessed.
