@@ -54,10 +54,8 @@ framework_detectors = ["net::http", "github::com::gin-gonic::gin"]
 # Since S-402 (CR-126) the decision that separates `cache.Get("/admin/users")`
 # from a genuine client call is made on the RECEIVER, in
 # `queries/invocations.scm` — read its "Candidacy" header before changing either.
-# A file-grained gate cannot answer a question about a CALL, and in an HTTP
-# gateway every file imports `net/http`, so `r.Header.Get(k)` and
-# `r.URL.Query().Get("idp")` cleared the verb and path filters and were captured:
-# 26 of 37 sites on the reference estate's Go member (NFR-RA-05).
+# A file-grained gate cannot answer a question about a CALL; the query header
+# carries the measurement that established it (NFR-RA-05).
 http_client_detectors = ["net::http"]
 
 [queries]

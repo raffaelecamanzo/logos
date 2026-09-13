@@ -172,7 +172,10 @@ func ListUsers() { http.Get(`/users`) }
 /// its quotes.
 ///
 /// The trailing `client.Do(req)` deliberately contributes nothing: `Do` is not an
-/// HTTP verb and carries neither slot.
+/// HTTP verb and carries neither slot. The receiver is spelled `client` — one the
+/// S-402 rule ADMITS — so the verb filter is what refuses it here, not the
+/// receiver rule; otherwise this fixture would stop proving what it claims, and
+/// `client.Do(req)` is named verbatim in FR-WS-08's normative Go row.
 #[test]
 fn a_constructor_argument_call_takes_its_verb_from_the_first_argument() {
     let facts = extract_go(
@@ -180,9 +183,9 @@ fn a_constructor_argument_call_takes_its_verb_from_the_first_argument() {
 
 import "net/http"
 
-func GetUser(c *http.Client) {
+func GetUser(client *http.Client) {
 	req, _ := http.NewRequest("GET", "/users/{id}", nil)
-	c.Do(req)
+	client.Do(req)
 }
 "#,
     );
@@ -206,9 +209,9 @@ import (
 	"net/http"
 )
 
-func DeleteOrder(ctx context.Context, c *http.Client) {
+func DeleteOrder(ctx context.Context, client *http.Client) {
 	req, _ := http.NewRequestWithContext(ctx, "DELETE", "/orders/{id}", nil)
-	c.Do(req)
+	client.Do(req)
 }
 "#,
     );
@@ -363,10 +366,12 @@ fn an_absolute_but_non_normalizing_path_is_not_captured() {
 import "net/http"
 
 func ListUsers() { http.Get("/v{version}/users") }
+func Probe() { http.Get("/probe") }
 "#,
     );
-    assert!(
-        client_call_targets(&facts).is_empty(),
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /probe".to_string()],
         "a mixed literal/parameter segment is path-not-composed — no reference \
          AND, deliberately, no recorded refusal (that reason needs a non-keyless \
          row, S-374): {:?}",
@@ -468,57 +473,104 @@ func Authorize(w http.ResponseWriter, r *http.Request, mapping Mapping) {
 }
 
 /// The receiver rule is a **boundary** rule over [FR-WS-08]'s normative Go row,
-/// not a substring test — the same posture the Java arm's
-/// `the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row` takes.
+/// not a substring test — the same posture, and the same vocabulary decisions,
+/// as the Java arm's
+/// `the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row`.
 ///
-/// Admitted: the package qualifier `http` that `import "net/http"` binds, a
-/// `client`-prefixed value with an optional camel/digit-boundary suffix, and any
-/// name ending in the type-derived `Client` — including the field spelling
-/// (`http.DefaultClient`, `s.httpClient`), read one selector level down.
+/// Admitted: the package qualifier `http` that `import "net/http"` binds; the
+/// type-derived token `httpClient` as a prefix and `HttpClient`/`HTTPClient` as
+/// a suffix; the stdlib package var `DefaultClient`; and the bare word `client`
+/// WHOLE. The receiver is read as a bare identifier or as the FIELD one selector
+/// level down, so `http.DefaultClient.Get` and `s.client.Get` are both admitted.
 ///
-/// Refused: everything else, and in particular the near misses one character
-/// from matching — `clientcache` (no boundary after `client`) and
-/// `routerClientele` (no boundary before the end).
+/// Refused, and this is the rule's sharpest line: a bare `Client` SUFFIX
+/// (`cacheClient`, `redisClient`, `zkClient`) and a `client`-PREFIXED
+/// non-client (`clientCache`, `clientRegistry`, `clientStore`). Each clears the
+/// verb and absolute-path filters in ordinary Go, so admitting them reopens
+/// [CR-110]'s fabrication class on the consumer side ([NFR-RA-05]) — the reason
+/// `ff257427` removed the suffix from the Java rule, adopted here.
+///
+/// Both argument shapes are exercised for every receiver, because the query
+/// binds one receiver guard across an `arguments:` alternation: a loop that
+/// drove only the single-argument shape left the content-type arm unpinned, and
+/// deleting the guard from it passed the whole suite.
+///
+/// [CR-110]: ../../docs/requests/CR-110-framework-route-false-positives.md
 #[test]
 fn the_receiver_rule_is_a_boundary_rule_over_the_normative_go_row() {
-    // Each receiver spelled into the SAME call shape, so the receiver name is
-    // the only variable between an admitted and a refused row.
+    // `{recv}` spelled into BOTH argument shapes the one pattern accepts — path
+    // alone, and path followed by a content-type string.
+    let shapes = |recv: &str| {
+        [
+            format!("{recv}.Get(\"/users\")"),
+            format!("{recv}.Post(\"/users\", \"application/json\", nil)"),
+        ]
+    };
+
     for recv in [
         "http",
         "client",
-        "clientV2",
+        "httpClient",
         "_httpClient",
-        "apiClient",
+        "httpClientV2",
+        "apiHttpClient",
+        "usersHTTPClient",
+        "DefaultClient",
         "http.DefaultClient",
         "s.client",
     ] {
-        let facts = extract_go(&format!(
-            "package client\n\nimport \"net/http\"\n\nfunc Probe() {{ {recv}.Get(\"/users\") }}\n"
-        ));
-        assert_eq!(
-            client_call_references(&facts),
-            vec!["GET /users".to_string()],
-            "`{recv}` names an http.Client value and must be admitted"
-        );
+        for (i, call) in shapes(recv).iter().enumerate() {
+            let facts = extract_go(&format!(
+                "package client\n\nimport \"net/http\"\n\nfunc Probe() {{ {call} }}\n"
+            ));
+            let verb = if i == 0 { "GET" } else { "POST" };
+            assert_eq!(
+                client_call_references(&facts),
+                vec![format!("{verb} /users")],
+                "`{recv}` names an http.Client value and must be admitted in \
+                 argument shape {i}"
+            );
+        }
     }
 
     for recv in [
+        // The bare `Client` suffix — every client protocol in existence.
+        "cacheClient",
+        "redisClient",
+        "zkClient",
+        "kafkaClient",
+        "apiClient",
+        // The generic word is whole-only: the same objects, spelled round the
+        // other way.
+        "clientCache",
+        "clientRegistry",
+        "clientStore",
+        "clientV2",
+        // Boundary near-misses, one character from matching.
         "clientcache",
         "routerClientele",
         "httpclient",
+        // Ordinary collaborators, and the shapes CR-126 measured.
         "mapping",
         "perms",
         "cache",
         "r.Header",
     ] {
-        let facts = extract_go(&format!(
-            "package client\n\nimport \"net/http\"\n\nfunc Probe() {{ {recv}.Get(\"/users\") }}\n\nfunc Control() {{ http.Get(\"/probe\") }}\n"
-        ));
-        assert_eq!(
-            client_call_references(&facts),
-            vec!["GET /probe".to_string()],
-            "`{recv}` carries no client token — only the control must survive"
-        );
+        for (i, call) in shapes(recv).iter().enumerate() {
+            let facts = extract_go(&format!(
+                "package client\n\nimport \"net/http\"\n\nfunc Probe() {{ {call} }}\n\nfunc Control() {{ http.Get(\"/probe\") }}\n"
+            ));
+            // `client_call_targets`, not `client_call_references`: a refused
+            // receiver must leave NO keyless refusal row either. Those rows are
+            // exactly what inflated the denominator CR-126 measured, so a helper
+            // that filtered them out would hide the story's own subject.
+            assert_eq!(
+                client_call_targets(&facts),
+                vec!["GET /probe".to_string()],
+                "`{recv}` carries no client token — only the control must \
+                 survive, with no refusal row, in argument shape {i}"
+            );
+        }
     }
 }
 
@@ -825,15 +877,21 @@ fn a_named_constant_verb_is_a_stated_ceiling_not_a_capture() {
 
 import "net/http"
 
-func GetUser(c *http.Client) {
+func GetUser(client *http.Client) {
 	req, _ := http.NewRequest(http.MethodGet, "/users", nil)
-	c.Do(req)
+	client.Do(req)
 }
+
+func Probe() { http.Get("/probe") }
 "#,
     );
-    assert!(
-        client_call_targets(&facts).is_empty(),
-        "a named-constant verb is honestly uncaptured, never guessed: {:?}",
+    // Positive control — without it this assertion would also pass if the arm
+    // never ran at all (mutation H: a detector row that matches nothing).
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /probe".to_string()],
+        "a named-constant verb is honestly uncaptured, never guessed, and the \
+         file was genuinely scanned: {:?}",
         client_call_targets(&facts)
     );
 }

@@ -40,19 +40,37 @@
 ;     which is the whole of `http.Get` / `http.Post`. An aliased import
 ;     (`import nethttp "net/http"`) falls outside it and is honestly uncaptured,
 ;     the safe direction — the same posture the constructor anchor below takes.
-;   * a name derived from the client TYPE `http.Client`: one STARTING with
-;     `client` after an optional `_`, with an optional camel/digit-boundary
-;     suffix (`client`, `clientV2`, `_client`), or one ENDING in `Client` with
-;     the same optional suffix (`httpClient`, `apiClient`, `myClientV2`).
+;   * a name derived from the client TYPE `http.Client`: one STARTING with the
+;     type-derived token `httpClient` (optional `_` prefix, optional
+;     camel/digit-boundary suffix — `httpClient`, `_httpClient`,
+;     `httpClientV2`), one ENDING in the type-derived `HttpClient`/`HTTPClient`
+;     (`apiHttpClient`, `usersHTTPClient`), the stdlib package var
+;     `DefaultClient`, or the bare word `client` WHOLE.
 ;     The receiver is read as a bare identifier OR as the FIELD of one selector
 ;     level down, so `http.DefaultClient.Get(url)` and `s.httpClient.Get(url)`
 ;     are both admitted while `r.Header.Get(k)` is not — `Header` carries no
 ;     client token. `r.URL.Query().Get("idp")` matches neither shape at all: its
 ;     receiver is a call, not a name.
 ;
-; The boundary is what separates this from a substring test: `clientcache` and
-; `routerClientele` are both refused. Pinned by
+; A bare `Client` SUFFIX is deliberately NOT in the vocabulary, and the bare word
+; `client` is admitted only WHOLE. This is the Java rule's sharpest line, adopted
+; here for the reason `ff257427` recorded when S-375's review added it: the
+; suffix names every client protocol in existence, and `cacheClient.Get("/x")`,
+; `zkClient.Delete("/config/orders")` and `redisClient.Get("/config/features")`
+; each clear the verb and absolute-path filters in ordinary Go — reopening
+; CR-110's fabrication class on the consumer side (NFR-RA-05). `clientCache`,
+; `clientRegistry` and `clientStore` are the same object spelled the other way
+; round, which is why the generic word is whole-only. S-402's first cut admitted
+; all six and this review narrowed it; on the reference estate the narrowing
+; costs ZERO sites, because every genuine Go receiver there is a bare `client`.
+;
+; It is a BOUNDARY rule, never a substring test: `clientcache`, `clientCache` and
+; `routerClientele` are all refused. Pinned on both edges by
 ; `go_invocations.rs::the_receiver_rule_is_a_boundary_rule_over_the_normative_go_row`.
+;
+; The price, and it is Java's price too: a generically-named wrapper
+; (`apiClient`, `ordersClient`) stays a stated under-capture ceiling, as does a
+; bare package-level `Client`. Under-capture is the safe direction.
 ;
 ; Two ceilings follow from it, both stated rather than worked around (ADR-54):
 ;
@@ -66,6 +84,15 @@
 ;     on a cache) still captures inside a gate-admitted file. That residual is
 ;     narrow and named, where the blanket file-grained one was not. Pinned as the
 ;     positive control of `a_route_shaped_get_outside_a_net_http_file_is_not_captured`.
+;   * A receiver that is not a NAME — a call, an index, a composite literal, a
+;     parenthesized expression (`s.Client().Get(url)`, `NewClient().Get(url)`,
+;     `clients[0].Get(url)`, `(&http.Client{}).Get(url)`) — is refused by the
+;     operand alternation. These were captured before S-402 and are genuine
+;     `net/http` shapes, so the narrowing is recorded rather than silent; on the
+;     reference estate it costs zero sites (every site it newly refuses there is
+;     a `.Header.Get` / `*Store.Get`, none an outbound call). `extract::
+;     capture_http_client_call_arm` enumerates the same class as "a chained
+;     receiver".
 ;
 ; ── The constructor-argument anchor (S-345's decision, consumed by S-346) ────
 ;
@@ -132,14 +159,11 @@
 ;
 ;     This paragraph used to close by asserting that a text predicate "cannot
 ;     help here", the receiver name (`c`/`client` vs `r`/`router`) being the
-;     fragile heuristic CR-110 was cleaning up after. S-402 retires that claim,
-;     for the same reason S-375 retired Java's: a receiver-NAME BOUNDARY rule
-;     over a normative client row is not the CR-110 heuristic — CR-110's fault
-;     was guessing a role from a receiver's spelling with nothing to anchor it,
-;     and this rule anchors on the one package FR-WS-08's Go row names. The
-;     arity rule still carries the registration case on its own, which is why it
-;     stays: `r` is refused by the receiver rule, but a router idiomatically
-;     spelled `apiClient` would not be.
+;     fragile heuristic CR-110 was cleaning up after. S-402 retires that claim —
+;     see Candidacy above for why a boundary rule over a normative row is not
+;     that heuristic. The arity rule stays because it is independent: `r` is
+;     refused by the receiver rule, but a router spelled `httpClientRouter`
+;     would not be.
 ;
 ;   * verb-as-constructor-argument — the callee is pinned BY NAME to the two
 ;     `net/http` constructors. Nothing structural distinguishes them: an earlier
@@ -162,15 +186,23 @@
 ; Droppable on disk at `.logos/plugins/go/queries/invocations.scm` (FR-PL-04,
 ; FR-PL-05).
 
-; ── Verb-as-method-name, path is the sole argument ──────────────────────────
-; `http.Get("/p")`, `client.Head("/p")`, and their runtime-composed forms
-; (`http.Get(url)`, `http.Get(fmt.Sprintf(…))`) — one pattern, because
-; `static_string_literal` is what separates a static path from a composed one.
-; A composed path still yields a SITE, so the arm classifies it base-url-runtime
-; instead of never seeing it; the normalizer then emits no reference. (That
-; classification is not yet observable in any output — nothing consumes
-; `UnboundReason` outside tests — so this is forward parity with the Rust arm,
-; not a live coverage guarantee.)
+; ── Verb-as-method-name ─────────────────────────────────────────────────────
+; `http.Get("/p")`, `client.Head("/p")` and their runtime-composed forms
+; (`http.Get(url)`, `http.Get(fmt.Sprintf(…))`), plus the content-type form
+; `http.Post("/p", "application/json", body)`. A composed path still yields a
+; SITE, so the arm classifies it base-url-runtime instead of never seeing it;
+; the normalizer then emits no reference. (That classification is not yet
+; observable in any output — nothing consumes `UnboundReason` outside tests — so
+; this is forward parity with the Rust arm, not a live coverage guarantee.)
+;
+; ONE pattern, not two, with the two argument shapes as a node alternation. The
+; receiver rule therefore has a SINGLE copy. S-375's first cut spelled the guard
+; twice and its review had to collapse it (`ff257427`): "reverting either copy
+; alone re-admitted `this.perms.get(…)` with the whole suite green". S-402's
+; first cut reproduced that exact state here, and deleting the second copy left
+; all 24 Go fixtures green while `mapping.Get("/authorize/claims",
+; "application/json")` fabricated an outbound edge. One copy, or the test cannot
+; hold it.
 (call_expression
   function: (selector_expression
     operand: [
@@ -178,28 +210,20 @@
       (selector_expression field: (field_identifier) @_recv)
     ]
     field: (field_identifier) @invoke.http.method)
-  arguments: (argument_list
-    .
-    (_) @invoke.http.arg
-    .)
-  (#match? @_recv "^http$|^_?client([A-Z0-9_][A-Za-z0-9_]*)?$|^_?[A-Za-z][A-Za-z0-9_]*Client([A-Z0-9_][A-Za-z0-9_]*)?$"))
-
-; ── Verb-as-method-name, path followed by a content-type string ─────────────
-; `http.Post("/p", "application/json", body)`. The second argument must be a
-; string literal, which a route handler never is. Same receiver rule.
-(call_expression
-  function: (selector_expression
-    operand: [
-      (identifier) @_recv
-      (selector_expression field: (field_identifier) @_recv)
-    ]
-    field: (field_identifier) @invoke.http.method)
-  arguments: (argument_list
-    .
-    (_) @invoke.http.arg
-    .
-    [(interpreted_string_literal) (raw_string_literal)])
-  (#match? @_recv "^http$|^_?client([A-Z0-9_][A-Za-z0-9_]*)?$|^_?[A-Za-z][A-Za-z0-9_]*Client([A-Z0-9_][A-Za-z0-9_]*)?$"))
+  arguments: [
+    ; `net/http`'s verb functions take the path ALONE …
+    (argument_list
+      .
+      (_) @invoke.http.arg
+      .)
+    ; … or followed by a content-type STRING, which a route handler never is.
+    (argument_list
+      .
+      (_) @invoke.http.arg
+      .
+      [(interpreted_string_literal) (raw_string_literal)])
+  ]
+  (#match? @_recv "^http$|^client$|^DefaultClient$|^_?httpClient([A-Z0-9_][A-Za-z0-9_]*)?$|^_?[A-Za-z][A-Za-z0-9_]*(HttpClient|HTTPClient)$"))
 
 ; ── Verb-as-constructor-argument ────────────────────────────────────────────
 ; `http.NewRequest("GET", "/p", body)` and `http.NewRequestWithContext(ctx,
