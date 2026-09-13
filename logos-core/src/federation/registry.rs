@@ -1883,15 +1883,19 @@ mod tests {
     /// re-attempted by that later walk, ends the command degraded, and is
     /// announced by the walk that actually failed — then replayed for the rest.
     ///
-    /// The branch this pins is [`Admission::recorded_failure`]'s middle state.
-    /// `opens` holds `Option<Option<String>>`, and an *opened* member is
-    /// `Some(None)` — which must read as "nothing to replay", so the next walk
-    /// attempts for real. Flattening that to a key-presence check, or caching
-    /// successes into the replay path, would make an opened-then-failed member
-    /// report `opened` for the whole answer: the wrong exit code and a coverage
-    /// figure counting a member nobody read ([FR-WS-16], [NFR-CC-04]). Every
-    /// other test here starts from a member that fails on its *first* attempt,
-    /// so none of them can see that.
+    /// The branch this pins is what [`ScopeState::failures`] leaves **absent**.
+    /// The scope records only failures, so a member that *opened* has no entry —
+    /// which must read as "nothing to replay", so the next walk attempts for
+    /// real. Caching successes into the replay path would make an
+    /// opened-then-failed member report `opened` for the whole answer: the wrong
+    /// exit code and a coverage figure counting a member nobody read
+    /// ([FR-WS-16], [NFR-CC-04]). Every other test here starts from a member
+    /// that fails on its *first* attempt, so none of them can see that.
+    ///
+    /// The registry's own ledger keeps the full three-way split for the
+    /// roll-up — [`Admission::opens`] holds `Some(None)` for an opened member
+    /// and absence for a never-attempted one — and this test reads it too,
+    /// through [`EngineRegistry::open_states`].
     ///
     /// Load-bearing for a real fan-out under descriptor pressure, which is
     /// exactly how [CR-100] failed: members opened until the descriptor table
