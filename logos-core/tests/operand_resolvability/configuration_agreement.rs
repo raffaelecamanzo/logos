@@ -1790,14 +1790,22 @@ pub struct PropertiesResidue {
     /// The residue can only be drawn from these: a site with no key at all
     /// refuses for a reason `.properties` ingestion could not repair.
     pub keyed: usize,
-    /// **The residue.** Sites whose every defining source for every key they
-    /// name is a `.properties` file — they resolve in this harness and refuse in
-    /// production, and closing the ingestion gap is what would move them.
+    /// **The residue.** Sites naming at least one key whose every defining source
+    /// is a `.properties` file — they resolve in this harness and refuse in
+    /// production, and closing the ingestion gap is what would move them. One such
+    /// key is enough, because production refuses the whole template on it.
+    ///
+    /// Sites that already refuse for an unrelated reason — some key no source
+    /// defines at all — are excluded: closing the gap would not buy them back, so
+    /// counting them would overstate what it is worth.
     pub properties_only: usize,
-    /// Sites a `.properties` source contributes a value to alongside at least one
-    /// source production does read. The key survives in production; what it loses
-    /// is those values — which can turn a divergence into an agreement, so it is
-    /// counted apart from `properties_only` rather than added to it.
+    /// Sites where **no** key is `.properties`-only, but at least one key is
+    /// *also* defined by a `.properties` source. Every such key survives in
+    /// production; what it loses is those values — which can turn a divergence
+    /// into an agreement, so it is counted apart from
+    /// [`properties_only`](Self::properties_only) rather than added to it. A site
+    /// with both kinds of key counts in `properties_only`, because production
+    /// refuses it outright.
     pub properties_contributing: usize,
     /// `.properties` files among the corpus's admitted sources, and the corpus
     /// total — the corpus-level half of the same gap.
@@ -1809,9 +1817,24 @@ pub struct PropertiesResidue {
 /// Measure the `.properties` residue over the S-382 production client-call arm.
 ///
 /// The counterfactual is production's, not a hypothetical: a source whose path
-/// ends `.properties` is removed from the definition set, and the site is then
-/// asked whether any definition survives. That is exactly what production sees,
-/// because production never ingested the file in the first place.
+/// ends `.properties` is removed from the definition set, and each key the site
+/// names is then asked whether any definition survives. It is applied **per key
+/// and all-or-nothing**, because that is how production composes —
+/// `Resolver::compose_template` resolves one placeholder at a time and refuses
+/// the whole template on the first key it cannot prove — so one `.properties`-only
+/// key costs the site, not just that key.
+///
+/// # The one approximation left, named rather than buried
+///
+/// Production applies a further condition this does not: a site resolves only if
+/// some **single profile** proves every key at once. So a site whose keys are each
+/// individually provable outside `.properties`, but only under profiles that
+/// stopped overlapping once the `.properties` overlay was removed, would be missed
+/// here. Reaching it needs the promoted `Resolver` run over a `.properties`-stripped
+/// corpus rather than a definition-set query, which is a larger instrument than the
+/// figure currently justifies: on this estate every admitted row is single-key
+/// (`bound` has exactly one entry on all 44), so the profile condition is vacuous
+/// and both counters read 0. Revisit if either counter ever leaves zero.
 pub fn properties_residue(m: &super::Measurement) -> PropertiesResidue {
     let mut out = PropertiesResidue {
         sources_total: m.config.sources.len(),
@@ -1841,27 +1864,49 @@ pub fn properties_residue(m: &super::Measurement) -> PropertiesResidue {
         }
         out.keyed += 1;
         let module = m.config.module_of(&site.file).to_string();
-        let mut any_definition = false;
-        let mut any_outside_properties = false;
-        let mut any_properties = false;
+        // **Per KEY, not per site.** `Resolver::compose_template` pushes one
+        // resolution per placeholder and `?`s on the first refusal, so ONE
+        // unprovable key refuses the whole site. A union over the site's keys
+        // would therefore misclassify in both directions: a site naming a yaml
+        // key and a `.properties`-only key would read `properties_contributing`
+        // ("the key survives") when production loses the site outright, and a
+        // site whose other key no source defines at all would read
+        // `properties_only` when production refuses it whatever the gap.
+        let mut undefined_key = false;
+        let mut properties_only_key = false;
+        let mut contributing_key = false;
         for key in keys {
-            for definition in definitions_in(&m.config, &canonical_key(key), Some(&module)) {
-                any_definition = true;
+            let definitions = definitions_in(&m.config, &canonical_key(key), Some(&module));
+            let (mut from_properties, mut from_elsewhere) = (false, false);
+            for definition in &definitions {
                 if definition.path.ends_with(".properties") {
-                    any_properties = true;
+                    from_properties = true;
                 } else {
-                    any_outside_properties = true;
+                    from_elsewhere = true;
                 }
             }
+            match (from_properties, from_elsewhere) {
+                // This key is proved only by a source production never reads, so
+                // production refuses it — and with it the whole site.
+                (true, false) => properties_only_key = true,
+                // Production keeps the key and loses those values.
+                (true, true) => contributing_key = true,
+                // Defined only outside `.properties`: the gap costs it nothing.
+                (false, true) => {}
+                // No source defines it at all. Not `.properties` residue: it
+                // refuses in both readings, for a reason ingestion would not
+                // repair — and it refuses the site with it.
+                (false, false) => undefined_key = true,
+            }
         }
-        // A key no source defines at all is not `.properties` residue — it
-        // refuses in both readings, for a reason ingestion would not repair.
-        if !any_definition {
+        // An already-refusing site is not something closing the gap would buy
+        // back, so it is excluded before either bucket is credited.
+        if undefined_key {
             continue;
         }
-        if !any_outside_properties {
+        if properties_only_key {
             out.properties_only += 1;
-        } else if any_properties {
+        } else if contributing_key {
             out.properties_contributing += 1;
         }
     }
