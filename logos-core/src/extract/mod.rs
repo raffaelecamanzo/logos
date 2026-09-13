@@ -887,8 +887,14 @@ fn extract_one(
 ///   kind**, and this reason requires one. Workspace-wide the population is
 ///   **not separately measured** — it is bounded above by the gated sites that
 ///   produced no row (63 of 195), a gap dominated by the per-declaration dedup
-///   rather than by this reason (Go alone collapses 98 sites into 36 rows). The
+///   rather than by this reason (Go alone collapsed 98 sites into 36 rows). The
 ///   bound is stated rather than the value, because the value is not known.
+///   Both figures are S-374's reading, taken 2026-09-09 and **not** re-derived
+///   since: S-402 made Go's candidacy receiver-grained and removed 26 of its 37
+///   captured sites on the reference estate, so Go's share of the gated
+///   population — and therefore the 63-of-195 bound built on it — is now an
+///   upper bound on an upper bound. Anchored rather than re-measured, because
+///   re-deriving it is a workspace measurement rather than a doc edit.
 ///
 /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md

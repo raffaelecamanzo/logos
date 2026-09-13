@@ -75,8 +75,10 @@
 //!
 //! Go's 6 same-unit constants are likewise not paths: they are HTTP **header
 //! names** (`Origin`, `AccessControlRequestMethod`, `HeaderXForwardedHost`)
-//! read through `header.Get(…)` inside a `net/http` file — the documented
-//! [ADR-54] file-grained gate ceiling, not outbound calls.
+//! read through `header.Get(…)` inside a `net/http` file — the then-documented
+//! [ADR-54] file-grained gate ceiling, not outbound calls. S-402 closed that
+//! ceiling for Go: `header.Get(…)` is no longer captured at all, so these 6
+//! will not appear on a re-run. The figure predates the change.
 //!
 //! Ignoring the ledger gate entirely raises the ceiling to **3** sites
 //! workspace-wide, all `WebTestClient` in-process test calls in two test files

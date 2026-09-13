@@ -98,8 +98,10 @@ new place (NFR-CC-04):
      cross-check exists to police, so the bound is reported instead.
 
      Go's 51 static literals (S-355) are HTTP HEADER names read through
-     `header.Get(…)` — the documented file-grained gate ceiling, and relative,
-     hence base-url-runtime rather than path-not-composed. That is inference
+     `header.Get(…)` — the then-documented file-grained gate ceiling (closed for
+     Go by S-402, which stopped capturing that shape entirely; this figure
+     predates it), and relative, hence base-url-runtime rather than
+     path-not-composed. That is inference
      from the recorded shapes, not a measurement, and is offered as the reason
      the bound is expected to be loose.
   3. The 26 gated Java files vs 2 447 scanned. The file-level detector gate is
