@@ -83,7 +83,7 @@ can act on them programmatically — e.g. `logos index --json | jq '.warnings'`.
 
 ## The `pre-push` enforcing gate
 
-The `pre-push` git hook installed by [`logos init --hooks`](commands.md#init--i---hooks)
+The `pre-push` git hook installed by [`logos init --hooks`](commands.md#init--i---hooks---workspace---yes---exclude-glob)
 turns exit `1` into an **enforcement point**: it runs `logos check` and
 **propagates its exit code** as the hook's own. So an error-severity violation
 (rule / structural / admission / dead-code) makes `git push` **fail with exit 1**

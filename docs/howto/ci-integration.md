@@ -6,7 +6,7 @@ your editor, at `git push`, and in CI. Four moves, in order:
 | Move | What it does | Command | Blocking? |
 |---|---|---|---|
 | **Freshen** | Bring the graph in step with the code before anything reads it | `logos index` / `logos sync` (every quality command also reconciles first) | — |
-| **Enforce** | Fail the build on any regression — rule, structural, admission, or dead-code | [`logos check`](commands.md#check---rules-file) → **exit 1** | **Yes** |
+| **Enforce** | Fail the build on any regression — rule, structural, admission, or dead-code | [`logos check`](commands.md#check---rules-file---allow-no-rules) → **exit 1** | **Yes** |
 | **Report** | Surface the 0–10000 signal without blocking anyone | [`logos scan --json`](commands.md#scan) | No |
 | **Bless** | Record the current signal as the new accepted baseline | [`logos gate --save`](commands.md#gate---save---threshold-n---label-l) | **Release only** |
 
@@ -19,7 +19,7 @@ alone; everywhere else the gate only *compares* to the last blessed baseline.
 ## Where each move already lives
 
 Two of these moves are wired into your local workflow the moment you run
-[`logos init`](commands.md#init--i---hooks) — this document covers the **CI leg** the hooks
+[`logos init`](commands.md#init--i---hooks---workspace---yes---exclude-glob) — this document covers the **CI leg** the hooks
 cannot reach (the shared pipeline every push runs), and the release-time bless
 cadence.
 
@@ -34,7 +34,7 @@ The `pre-push` gate is a **local pre-flight**, not a substitute for the CI
 enforce step: it can be bypassed with `git push --no-verify` and it never runs
 for pushes made from a machine without the binary. CI is the authoritative
 enforcement point; the hook just moves the failure earlier and cheaper. See the
-[`init` reference](commands.md#init--i---hooks) for the full hook set and
+[`init` reference](commands.md#init--i---hooks---workspace---yes---exclude-glob) for the full hook set and
 [error handling](error-handling.md#the-pre-push-enforcing-gate) for the
 `pre-push` exit-1 contract.
 
@@ -195,7 +195,7 @@ like in CI.
 ## See also
 
 - [Commands](commands.md#quality--governance) — full flags for `check`, `scan`, `gate`, `doctor`, `verify`.
-- [`init` reference](commands.md#init--i---hooks) — the git hooks and the session-start quality-report hook that cover the local legs of the loop.
+- [`init` reference](commands.md#init--i---hooks---workspace---yes---exclude-glob) — the git hooks and the session-start quality-report hook that cover the local legs of the loop.
 - [Usage → Quality and governance](usage.md#quality-and-governance) — the same loop from the day-to-day angle.
 - [Metrics](metrics.md) — how the 0–10000 signal and the versioned baseline are computed.
 - [Error handling](error-handling.md) — exit codes and the fail-soft / fail-loud contract the gate rides on.

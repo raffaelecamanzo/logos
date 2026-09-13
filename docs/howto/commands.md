@@ -8,17 +8,17 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 
 | Command | Status | One-liner |
 |---|---|---|
-| [`init`](#init) | ✅ | Initialise `.logos/`, policy files, MCP host, and git hooks |
+| [`init`](#init--i---hooks---workspace---yes---exclude-glob) | ✅ | Initialise `.logos/`, policy files, MCP host, and git hooks |
 | [`index`](#index) | ✅ | Build or rebuild the full code-graph index |
-| [`sync`](#sync) | ✅ | Incrementally sync changed files into the index |
+| [`sync`](#sync-paths) | ✅ | Incrementally sync changed files into the index |
 | [`status`](#status) | ✅ | Index and sync health |
 | [`search`](#search) | ✅ | Full-text search over the code graph |
 | [`query`](#query) | ✅ | Façade over search/callers/callees |
 | [`context`](#context) | ✅ | Deterministic context bundle for a task |
 | [`explore`](#explore) | ✅ | Neighbourhood exploration, grouped by file |
 | [`node`](#node) | ✅ | Full info for one symbol |
-| [`callers`](#callers) | ✅ | Direct callers of a symbol |
-| [`callees`](#callees) | ✅ | Direct callees of a symbol |
+| [`callers`](#callers--callees) | ✅ | Direct callers of a symbol |
+| [`callees`](#callers--callees) | ✅ | Direct callees of a symbol |
 | [`impact`](#impact) | ✅ | Transitive impact, both directions |
 | [`impact-intersection`](#impact-intersection) | ✅ | Which planned work items collide, and on what |
 | [`precedent`](#precedent) | ✅ | Structurally analogous code — the sibling that already does this |
@@ -34,7 +34,7 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`workspace reachability`](#workspace-reachability) | ✅ | App-wide cross-service dead-code union view — advisory, never a gate input; exits 1 if a member could not be opened |
 | [`workspace check`](#workspace-check) | ✅ | Evaluate workspace governance rules over cross-service bindings — advisory: a violation never moves the exit code (an unopenable member exits 1) |
 | [`scan`](#scan) | ✅ | Full architecture-quality scan |
-| [`check`](#check) | ✅ | Architecture-rules compliance check |
+| [`check`](#check---rules-file---allow-no-rules) | ✅ | Architecture-rules compliance check |
 | [`gate`](#gate---save---threshold-n---label-l) | ✅ | CI quality gate on the signal |
 | [`health`](#health) | ✅ | Architecture health — DB integrity, schema, FTS, structural + admission drift |
 | [`session-start`](#session-start--session-end) | ✅ | Record the quality baseline before edits (the CLI half of the session gate) |
@@ -44,8 +44,8 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`coverage refresh`](#coverage-refresh) | ✅ | Run the configured `refresh_cmd` and ingest what it produced |
 | [`quality-report`](#quality-report---hook-json) | ✅ | Non-blocking quality readout — writes nothing, always exits 0 (CLI-only) |
 | [`evolution`](#evolution) | ✅ | Signal evolution over snapshots |
-| [`dsm`](#dsm) | ✅ | Dependency-structure-matrix clusters |
-| [`doc-gaps`](#doc-gaps) | ✅ | Undocumented exported symbols |
+| [`dsm`](#dsm---granularity-g) | ✅ | Dependency-structure-matrix clusters |
+| [`doc-gaps`](#doc-gaps---limit-n) | ✅ | Undocumented exported symbols |
 | [`hotspots`](#hotspots) | ✅ | Churn × complexity ranking — the non-gated temporal tier |
 | [`coverage ingest`](#coverage-ingest-report---format-fmt) | ✅ | Ingest an LCOV/Cobertura report into the evidence store |
 | [`coverage status`](#coverage-status) | ✅ | Per-file coverage freshness + the overall fraction |
@@ -113,7 +113,7 @@ flavours are installed:
   run `logos sync` on the changed file set after their git event, keeping the
   graph fresh. They are best-effort: they bail out silently when `logos` is
   absent and always exit 0, so they never block or fail a git operation.
-- **Enforcing gate** — a `pre-push` hook runs [`logos check`](#check) and
+- **Enforcing gate** — a `pre-push` hook runs [`logos check`](#check---rules-file---allow-no-rules) and
   **propagates its exit code**: a `severity='error'` violation
   (rule / structural / admission / dead-code) makes `git push` fail with exit
   1 and names the offending violation, turning "code about to leave the
@@ -365,7 +365,7 @@ you have run the remedy it names, so repeating it would be wrong. This matters
 most here: `status` reports the count the last completed index stored, so a root
 indexed *before* you enabled the workspace keeps reporting `0` until you
 re-index, and that is exactly the state in which the advice would be stale. See
-[`init --workspace`](#init) for the two states.
+[`init --workspace`](#init--i---hooks---workspace---yes---exclude-glob) for the two states.
 
 ## Navigation
 
@@ -777,7 +777,7 @@ curl 127.0.0.1:4983/api/v1/workspace/status          # (workspace mode) per-memb
 These commands answer **cross-service** questions over a
 [workspace](configuration.md) — a `logos.workspace.toml` manifest at a parent
 folder listing sibling member repos (set up with
-[`init --workspace`](#init)). They compute an **in-memory overlay** over each
+[`init --workspace`](#init--i---hooks---workspace---yes---exclude-glob)). They compute an **in-memory overlay** over each
 member's own graph: nothing is persisted, no graph union is ever written, and no
 `NodeId` crosses a member's database boundary ([ADR-52](../specs/architecture/decisions/ADR-52.md)).
 Every answer is repo-qualified; a member whose engine fails to start degrades to
@@ -1323,7 +1323,7 @@ endpoint has no cross-service callers". Rules quantify over real bridge matches,
 never a fabricated edge set.
 
 Governance is reported at the **workspace level** and is **advisory by design**:
-it is a separate family from the per-repo rules ([`check`](#check)), it never
+it is a separate family from the per-repo rules ([`check`](#check---rules-file---allow-no-rules)), it never
 alters any member's per-repo quality gate, and a governance violation **never
 moves the exit code** — it is *reported*, not *gated*. With no `[governance]`
 rules declared, there is no output at all (`null` under `--json`) — an honest
@@ -1436,10 +1436,10 @@ logos quality-report --hook-json  # the agent-host session-start payload
 
 The **report tier**: the current signal, the blessed baseline, their delta, and
 the recorded rule violations. Always exits 0 — it reports, it never gates. Use
-[`gate`](#gate) when you want a verdict and an exit code.
+[`gate`](#gate---save---threshold-n---label-l) when you want a verdict and an exit code.
 
 It **writes nothing**, which is the whole reason it exists as its own command.
-Both [`scan`](#scan) and [`gate`](#gate) persist a metric snapshot on every run,
+Both [`scan`](#scan) and [`gate`](#gate---save---threshold-n---label-l) persist a metric snapshot on every run,
 so a readout on an automatic, frequent trigger — the
 [session-start hook](#wiki-hook---emit---force) fires at startup, at every
 resume and at every `/clear` — would fill your
@@ -1455,13 +1455,13 @@ Two consequences worth knowing:
   blessed baseline reads `no baseline saved`, not a delta against zero. A baseline
   scored under a different metric version or threshold set reads
   `not comparable` with no delta invented.
-- **The violations are as of your last [`check`](#check)**, and say so. Re-evaluating
+- **The violations are as of your last [`check`](#check---rules-file---allow-no-rules)**, and say so. Re-evaluating
   the rules re-materialises the derived policy graph, which is a write — so the
   readout reports what was last recorded rather than paying a write to look
   current. An empty findings table reads `none recorded`, never `0 violations`:
   a clean check and no check at all leave it identically empty, and the readout
   will not claim a pass that may never have happened. Run
-  [`check`](#check) when you want current findings.
+  [`check`](#check---rules-file---allow-no-rules) when you want current findings.
 
 `--hook-json` renders the same read-model as the agent-host session-start payload
 (`systemMessage` + `hookSpecificOutput.additionalContext`). It exists for the

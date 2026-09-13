@@ -236,7 +236,7 @@ This is the **freshen → enforce → report → bless** loop: `index` freshens,
 `check` enforces (exit 1 fails the build), `scan --json` reports the signal
 without blocking, and `gate --save` blesses a new baseline — **at release only,
 never in the PR path**. The same loop is wired into your editor and `git push`
-by [`logos init`](commands.md#init--i---hooks) (the freshness hooks, the `pre-push` gate,
+by [`logos init`](commands.md#init--i---hooks---workspace---yes---exclude-glob) (the freshness hooks, the `pre-push` gate,
 and the session-start quality-report hook — which uses
 [`quality-report`](commands.md#quality-report---hook-json), the write-free
 readout, precisely so a per-session trigger never grows the snapshot series).

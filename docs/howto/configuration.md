@@ -532,7 +532,7 @@ tab: the **chat API key** field (under `.logos/secrets.toml`) is a write-only
 password input — enter a key and **Save key** to store or replace it, or save it
 empty to clear it. The field shows the masked presence of an existing key but
 never reveals it. See
-[usage.md](usage.md#editing-config-config--the-one-mutating-view).
+[usage.md](usage.md#interacting-with-the-dashboard).
 
 ## `[wiki]` — the source-wiki generation model
 
