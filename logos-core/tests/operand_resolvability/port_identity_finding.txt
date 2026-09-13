@@ -1,0 +1,267 @@
+S-400 — DOES A RUNTIME PORT IDENTIFY THE CALLEE?  THE RECORDED FINDING
+======================================================================
+
+Measured:   2026-09-13, sprint-69 Dev Session 1.3 (branch sprint-69-I1-S3)
+Estate:     ~/source/pec-services (LOGOS_REF_WORKSPACE), 84 members, read-only
+            against the estate SOURCE on logos 1.4.10
+Gate:       CR-124 section 3.2. Floor declared 2026-09-13T13:13:50Z, before any
+            measurement code existed, in the tracked port_identity_floor.txt.
+Decides:    whether CR-124 is "new evidence" against FR-WS-22's withdrawal banner.
+
+
+THE VERDICT
+-----------
+
+    net-new THIRD-PARTY port-resolved consumer->provider call-site edges:
+        read as the floor declaration defines it   (consumer != provider)    3
+        read as S-384 measured it   (the tie is between two other members)   0
+    floor declared before the run:                                          16
+
+    CR-124 IS FALSIFIED, under both readings.
+
+The verdict is read off the DECLARED figure (3), because the declaration is the
+contract and its COMMITMENT section forbids revising it after a run. The second
+row exists because the declaration and the experiment it was written to be
+comparable with do not define "third-party" the same way -- see THE TWO READINGS
+below. Both are far below 16, so nothing about the verdict turns on it.
+
+No requirement is created. No dependent story is planned. FR-WS-22 stays
+withdrawn, and its withdrawal banner's clause — "not re-proposed without new
+evidence" — is not discharged by this measurement.
+
+The port signal is NOT dead on this estate: it resolves, it produces edges, and
+every mechanical step of the join works. It produces at most THREE net-new edges
+on the whole estate against a floor of sixteen, and ZERO once S-384's own
+self-tie rule is applied -- because all three are ties the calling aggregator
+created against itself.
+
+
+THE TWO READINGS OF "THIRD-PARTY", AND WHY BOTH ARE PRINTED
+------------------------------------------------------------
+
+This was found during the run and is reported rather than resolved by fiat.
+
+The floor declaration says: "THIRD-PARTY means, exactly: consumer member !=
+provider member" -- while citing, as its whole motivation, S-384's split of 11
+self-ties and one third-party edge. Those two statements are inconsistent.
+S-384's self-ties are NOT consumers bound to themselves; its finding says so
+directly:
+
+    "11 of the 12 are ties the CONSUMER creates against ITSELF: an aggregator
+     re-registers the callee's template on its own controller, so two members
+     serve it, path-only refuses, and identity binds. ... identity's genuine
+     THIRD-PARTY contribution, WHERE THE TIE IS BETWEEN TWO OTHER MEMBERS, is
+     ONE edge."
+
+So S-384's discriminator is the SERVING SET, not the two member names. Under the
+declaration's literal wording, S-384's own headline would split 12 third-party /
+0 self-tie, contradicting the sentence that justifies the word.
+
+The declaration is committed evidence and is NOT revised after the run. Both
+readings are therefore measured, the verdict is read off the declared one, and
+the run ASSERTS that the S-384 reading is below the floor too. A future gate
+declaring this metric should write S-384's definition, not this one.
+
+
+THE HEADLINE, WITH ITS SPLIT AT THE POINT IT IS PRINTED
+--------------------------------------------------------
+
+  as the floor declaration defines it (consumer != provider):
+
+                                             third-party    SELF-TIE
+    NET-NEW (path-only ties, >=2 serving)              3           0
+    already bound by path alone -- NOT evidence        8           0
+    port target serves no such route                   6           0
+    distinct member->member couplings                  8           0
+    literal call sites behind NET-NEW third-party      3
+
+  as S-384 measured it (the tie is between two other members):
+
+                                             third-party    SELF-TIE
+    NET-NEW (path-only ties, >=2 serving)              0           3
+    already bound by path alone -- NOT evidence        8           0
+    port target serves no such route                   6           0
+    distinct member->member couplings                  6           2
+    literal call sites behind NET-NEW third-party      0
+
+THE 3 NET-NEW EDGES ARE ALL SELF-TIES UNDER S-384'S RULE, and that is the
+substantive finding. Every one of them is `mailbox-aggregator-api` calling a
+service whose route template `mailbox-aggregator-api` ALSO registers on its own
+controller:
+
+    mailbox-aggregator-api -> official-log-export-api  /v1/users/{}/mailboxes/{}/official-log
+    mailbox-aggregator-api -> official-log-export-api  /v1/users/{}/mailboxes/{}/official-log/{}
+    mailbox-aggregator-api -> reporting-api            /v1/users/{}/mailboxes/{}/usage
+
+In each, exactly 2 members serve the template and one of the two IS the consumer.
+The ambiguity the port "resolved" is one the aggregator manufactured by
+re-exposing its callee's route, so the port bought no fact the member did not
+already hold about itself. This is S-384's mechanism, reproduced verbatim by a
+different signal.
+
+The 8 already-bound edges are real cross-service couplings — funnel-aggregator-api
+and mailbox-aggregator-api to notification-api, filters-api and pecserver-facade,
+and notification-adapter to notification-api — but path-only matching reaches
+every one of them alone (exactly 1 member serves each template), so they are not
+evidence for identity. They are what FR-WS-04's exactly-one rule already binds.
+
+
+THE JOIN, STEP BY STEP — WHERE THE POPULATION GOES
+---------------------------------------------------
+
+    members in the estate                                          84
+    members declaring their own `server.port`                      30
+      declarations (one member may declare in several profiles)    31
+      distinct port values declared                                27
+    consumer call sites considered (gate-admitted, main tree,
+      template resolved)                                           79
+    resolved base-url values those sites read                      18
+      carrying a port                                              18   (100%)
+      carrying no port                                              0
+    call sites whose base-URL sibling key no admitted source proves  1
+    templates that resolved but do not positionally normalize        1
+
+    distinct ports referenced by a consumer                        11
+      identifying EXACTLY ONE member                                5
+      claimed by TWO OR MORE members  -> resolve to NOTHING         2
+      claimed by NO member            -> resolve to NOTHING         4
+
+Every mechanical step works. 18 of 18 base-url values carry a port — the estate
+writes `http://localhost:<port>` without exception, exactly as CR-124 says — and
+5 of the 11 referenced ports name exactly one member. The signal is not blocked
+by capture, by parsing, or by the corpus. It is blocked by what the edges turn
+out to be.
+
+
+THE TWO SAME-TIER COLLISIONS, AND THE FOUR UNMATCHED PORTS
+-----------------------------------------------------------
+
+Two members claiming one port resolve to NOTHING, mirroring FR-WS-20 AC2's
+same-tier collision rule and NFR-RA-05's prohibition on fabricating an edge.
+CR-124's risk table predicted this failure mode and named 9009 and 9007. Both
+are real; 9007 is declared twice but never referenced by a resolved call site,
+so the two collisions that actually bite are 9009 and one the CR did not
+predict:
+
+    9000  ->  NOTHING;  claimed by deprecated-mailbox-core and mailbox-api
+                        referenced by funnel-aggregator-api, mailbox-aggregator-api
+    9009  ->  NOTHING;  claimed by archive-api and archive-api-logiclens-fork
+                        referenced by funnel-aggregator-api, mailbox-aggregator-api
+
+The 9009 collision is the SAME fork repository that cost S-384 its `archive-api`
+edges through the host-label ladder. One estate artefact defeats both signals at
+the same two members, by two different routes.
+
+Four referenced ports are claimed by no member's `server.port`, ENUMERATED HERE
+FOR HUMAN ADJUDICATION rather than absorbed into a count:
+
+    8000  -- `mailserver.api.base-url`, read by archive-manager. A mail server,
+             not a workspace member.
+    8082  -- `pec-server.base-url`, read by pecserver-facade. The PEC server the
+             facade fronts; it is not in the workspace.
+    8083  -- `notification-gateway.api.base-url`, read by notification-adapter.
+             An external notification gateway.
+    9050  -- `pec-manager.api.base-url`, read by mailbox-aggregator-api. No
+             member of this estate declares 9050 as its own `server.port`.
+
+None of the four is a workspace member's port. Three are named for systems that
+are demonstrably outside the estate, and the fourth is a member-shaped name the
+estate does not contain. A signal that guessed a member for any of them would be
+fabricating an edge, which NFR-RA-05 forbids — so "resolves to nothing" is the
+correct outcome for all four, not a shortfall.
+
+
+THE TWO JUDGEMENT CALLS, MEASURED RATHER THAN ARGUED
+-----------------------------------------------------
+
+Neither rescues the result, and neither is load-bearing:
+
+  - TEST-TREE CONFIGURATION. The headline reads main-source configuration on
+    both sides. Admitting `src/test` profiles on both sides leaves the split
+    EXACTLY unchanged under BOTH readings: 3/0 declared, 0/3 as S-384 measures
+    it, 8 already bound. The falsification is not an artefact of the main/test
+    split.
+
+  - DEPLOY EVIDENCE. The headline reads no deploy manifest at all, because
+    CR-124 section 2 says the signal "never touches a deploy manifest" — and
+    because a deploy values file writes
+    `http://official-log-export-api.pec-services.svc.cluster.local:9020`, whose
+    HOST LABEL is S-384's signal, not this one. Admitting deploy evidence as a
+    consumer-side target too also leaves the split exactly unchanged under both
+    readings, for a reason worth recording: on this estate the deploy override
+    and the application default name the SAME port, so the wider population
+    produces the same three edges. The two signals do not compound.
+
+
+RECONCILIATION AGAINST S-384 — AND WHY THE TWO DO NOT CONTRADICT
+-----------------------------------------------------------------
+
+Both rows below are computed in ONE process, from ONE walk of the estate, and
+the third-party column of both is computed by S-384's OWN rule, so this is a
+reproduction rather than a quotation:
+
+                                            net-new  third-party  self-tie
+    S-384  (host label, deploy evidence)         12            1        11
+    S-400  (runtime port, application config)     3            0         3
+
+The S-400 run ASSERTS that re-splitting S-384's own pairs reproduces its recorded
+1. If it ever stops doing so, either this gate's self-tie rule is not S-384's or
+S-384's finding text has drifted from its measurement, and the comparison would
+be meaningless; the run fails rather than printing two numbers side by side.
+
+WHAT DIFFERS. S-384 joins the first DNS label of a DEPLOY-overridden base URL to
+a member's Service / chart / Compose / directory / application name. S-400 joins
+the PORT of the APPLICATION-committed base URL to that member's own
+`server.port`. The populations are DISJOINT — `TargetRef::is_deploy` is the
+partition — and each signal is silent on the other's rather than negative about
+it: every application-committed base URL on this estate has the host label
+`localhost`, which no member claims, so S-384's ladder produces nothing there by
+construction; and no deploy values file is read here at all.
+
+So the readings are not contradictory, and the difference in the headline figures
+(12 against 3) is not evidence that one of them is wrong. CR-124's premise — that
+this is new evidence rather than a re-proposal of S-384's — is CONFIRMED. What is
+falsified is the hypothesis that the new evidence is favourable.
+
+WHAT THE TWO AGREE ON, and this is the durable finding. In both experiments,
+nearly every ambiguity identity discharges is one the consumer created against
+itself by re-registering its callee's template on its own controller: 11 of 12
+for S-384, 3 of 3 here. Two independent signals, joined on two different bytes of
+two different URLs, read out of two disjoint corpora, and both land on the same
+wall. The obstacle is not which identity signal is used. It is that on this
+estate the exactly-one rule's ambiguity is overwhelmingly self-inflicted, and
+resolving it yields an edge from a member to a service it already fronts.
+
+
+WHAT THIS FINDING DOES NOT SAY
+-------------------------------
+
+It does not say the port signal is unreadable. 18 of 18 base URLs carry a port,
+5 ports name exactly one member, and the join produces 17 classified edges (3
+net-new, 8 already bound by path alone, 6 whose target serves no such route).
+Every mechanical step CR-124 describes works on committed source.
+
+It does not say a port tier would be harmful. It says a port tier would produce
+at most 3 net-new edges on the one estate available to measure it against a floor
+of 16, and ZERO that a service boundary was crossed to reach — which is not a
+basis for extending FR-WS-20's ladder, and certainly not the "new evidence"
+FR-WS-22's withdrawal banner requires.
+
+It does not test CR-124's assumption CRA-02 — that `localhost:<port>` generalises
+beyond this estate. CR-124 records that assumption as unvalidated and says the
+gate cannot test it. It still cannot. One estate cannot establish a convention's
+generality, and a falsification on that estate does not need to.
+
+It does not re-derive CR-124's hand census of "39 call sites / 9 service pairs".
+That census counted `base-url` values carrying a port against members declaring
+it, without the exactly-one rule, without the provider route index, and without
+the self-tie split. This run's comparable figures are 18 base-url values, 6
+third-party couplings and 8 already-bound edges. CR-124 said of its own census:
+"This census is not a finding ... it must not become an acceptance floor." That
+was correct, and the floor was correctly taken from S-384 instead.
+
+Nothing here needs to be re-derived by hand. Re-run before re-deciding:
+
+    LOGOS_REF_WORKSPACE=~/source/pec-services \
+      cargo test -p logos-core --test operand_resolvability \
+      port_identity -- --nocapture

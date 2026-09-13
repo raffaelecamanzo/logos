@@ -1098,7 +1098,13 @@ impl PairClass {
 /// is unset, i.e. in every default `cargo test` run. Replacing the whole
 /// classifier with a constant left the suite green; the fixtures below now pin
 /// each branch unconditionally.
-fn classify(serving: &BTreeSet<&str>, provider: &str) -> PairClass {
+///
+/// `pub(crate)` so the `port_identity` sibling gate judges its pairs with **this**
+/// function rather than with a hand-mirrored twin of it. The two signals differ in
+/// how they name a provider, never in what identity then does to a call site, and
+/// a second copy of this three-branch decision is exactly the divergence that
+/// would make one of the two measurements quietly wrong.
+pub(crate) fn classify(serving: &BTreeSet<&str>, provider: &str) -> PairClass {
     if !serving.contains(provider) {
         // Identity names a provider that registers no route at this template,
         // so identity yields no edge here whatever path-only would have done.
@@ -1306,7 +1312,11 @@ fn judge(root: &Path, corpus: &Corpus, providers: &Providers, mode: Resolution) 
 }
 
 /// The measurement, computed once per test binary.
-fn findings(root: &Path) -> &'static Findings {
+///
+/// `pub(crate)` so the `port_identity` sibling gate reads the same deploy corpus
+/// and the same provider index out of the same `OnceLock` — one estate walk for
+/// both gates, and no second reading of what each member serves.
+pub(crate) fn findings(root: &Path) -> &'static Findings {
     static ONCE: std::sync::OnceLock<Findings> = std::sync::OnceLock::new();
     ONCE.get_or_init(|| {
         let mut corpus = Corpus::default();

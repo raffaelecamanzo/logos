@@ -182,6 +182,16 @@ mod identity;
 #[path = "operand_resolvability/forwarding.rs"]
 mod forwarding;
 
+/// S-400's port-identity gate — its own module, so the port join does not
+/// co-edit the file the deploy-corpus arm owns. Reads `identity`'s corpus,
+/// provider index and pair classifier, and this module's `measurement` for the
+/// configuration corpus and the call sites; adds no walk of the estate.
+///
+/// `#[path]`-attached for the same reason its three siblings are: a plain
+/// `tests/port_identity.rs` would become a second cargo test target.
+#[path = "operand_resolvability/port_identity.rs"]
+mod port_identity;
+
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
 /// printed by it.
