@@ -1032,6 +1032,60 @@ mod tests {
         );
     }
 
+    /// A tracked root **with members**: the two named ACs that no other test
+    /// reaches in combination ([FR-WS-02], [CR-104]).
+    ///
+    /// Every other test that populates `root_ignore` passes an empty member
+    /// set, and the one test with real members uses a root that is not a
+    /// repository — so "no member's `.logos/.gitignore` changes" and "an
+    /// already-committed sidecar is not retroactively un-tracked" were both
+    /// stated by the acceptance criteria and proven by nothing.
+    #[test]
+    fn a_tracked_root_with_members_leaves_members_alone_and_untracks_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(root);
+        let member = root.join("api");
+        init_repo(&member);
+
+        // The sidecar is already committed at the root, from before enablement.
+        fs::write(warm_state::outcome_path(root), "{}\n").unwrap();
+        sh_git(root, &["add", "-f", warm_state::OUTCOME_FILENAME]);
+        sh_git(root, &["commit", "-q", "-m", "sidecar committed by a previous life"]);
+
+        let members = discover_candidates(root);
+        assert_eq!(members.len(), 1, "the member repo is discovered");
+        let report = enable(root, "shop", &members).expect("enables");
+        assert_eq!(report.root_ignore.action, InitAction::Created);
+
+        // AC: no member's `.logos/.gitignore` changes — it is FR-IN-04's file,
+        // written by the member's own `init`, and the root entry is not it.
+        let member_gitignore = fs::read_to_string(member.join(".logos/.gitignore"))
+            .expect("the member's own managed .gitignore");
+        assert!(
+            !member_gitignore.contains(warm_state::OUTCOME_FILENAME),
+            "the workspace-root pattern never leaks into a member: {member_gitignore}"
+        );
+        assert!(
+            member_gitignore.contains("logos.db*"),
+            "the member's own FR-IN-04 block is intact: {member_gitignore}"
+        );
+
+        // AC: an already-committed sidecar is NOT retroactively un-tracked.
+        // A gitignore entry does not evict a tracked path, and nothing in the
+        // enablement path runs `git rm --cached` — asserted through git's index
+        // rather than by reading the code that would have to do it.
+        let tracked = git_cmd(root)
+            .args(["ls-files", "--", warm_state::OUTCOME_FILENAME])
+            .output()
+            .expect("git is on PATH");
+        assert_eq!(
+            String::from_utf8_lossy(&tracked.stdout).trim(),
+            warm_state::OUTCOME_FILENAME,
+            "a sidecar committed before enablement stays tracked"
+        );
+    }
+
     /// The canonical parent-of-repos root is deliberately **not** a repository,
     /// so an ignore file there would be inert litter ([CR-104]).
     #[test]
