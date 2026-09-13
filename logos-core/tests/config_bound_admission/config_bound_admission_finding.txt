@@ -179,9 +179,8 @@ THE HEADLINE FIGURES THE SAME PAYLOAD CARRIES
 THE ONE NEW `path-not-composed` INVOCATION ROW
 -----------------------------------------------
 
-One of the 81 admitted rows refuses under `path-not-composed` — the arm accepted
-a `"METHOD /template"` and `route_key` declined it. There was no such invocation
-row before. It is:
+One of the 81 admitted rows refuses under `path-not-composed`. There was no such
+invocation row before. It is:
 
   mailbox-aggregator-api  MailboxApiRestClient#getExportDownloadLink()
   key   mailboxaggregate.api.urigetexportdownloadlink
@@ -189,10 +188,21 @@ row before. It is:
 
 The estate's PROVIDER half of that same path — the swagger operation in
 `software-architecture-documents` — reads `path-not-composed` too, and did
-before this change. So the refusal is symmetric: both ends decline the same
-template and no edge is being lost to a one-sided normalizer. One row is not a
-trend; it is recorded here rather than explained, and it is not chased in this
-task, which widened nothing.
+before this change (the contract-surface column's single `unbound` row is
+byte-identical across all three generations). So the refusal is symmetric: both
+ends decline the same template and no edge is being lost to a one-sided
+normalizer.
+
+READ THE WORD CORRECTLY. It is NOT the HTTP arm's "a non-empty stored target that
+`route_key` later declined" — `coverage.rs` documents that branch as unreachable
+for a store this binary writes, so reading it that way would make this row look
+like a stale-binary artefact. A `config-bound` row never reaches it. The word
+arrives as the FALLBACK DEFAULT of `record_config_bound`'s
+`composed_refusal(&template).map_or(PathNotComposed, …)`: every composition the
+resolver proved failed `consumer_portable_key`, and `composed_refusal` had
+nothing of its own to say about the template, because the template is a valid
+rooted client-call path. One row is not a trend; it is recorded here rather than
+chased, and it is not chased in this task, which widened nothing.
 
 
 THE `.properties` RESIDUE — RESTATED OVER THE NEW DENOMINATOR

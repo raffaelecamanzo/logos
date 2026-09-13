@@ -316,9 +316,22 @@ const ACCESSOR_DENOMINATOR: usize = 96;
 /// row names no reason, so its slot is `None`.
 ///
 /// The fourth pair is new since [S-397] T2: one admitted row now refuses under
-/// `path-not-composed` — the arm accepted a `"METHOD /template"` and `route_key`
-/// declined it — where before every admitted row keyed. One row is not a trend and
-/// is recorded rather than explained.
+/// `path-not-composed`, where before every admitted row keyed.
+///
+/// **That word arrives by the composed-template path, not by the arm's
+/// stored-target convention, and the difference is worth stating because the
+/// obvious reading is the wrong one.** A `config-bound` row is classified by
+/// `federation::coverage::record_config_bound`, whose unbound reason is
+/// `composed_refusal(&template).map_or(PathNotComposed, …)` — so the word here is
+/// the **fallback default** of that `map_or`: every proven composition failed
+/// `consumer_portable_key`, and the arm's own refusal test found nothing to say
+/// about the template (it is a valid rooted client-call path). It is *not*
+/// `client_call_refusal`'s "a non-empty stored target that will not key", which
+/// `coverage.rs` documents as unreachable for a store this binary writes and which
+/// a reader would otherwise take this row for — i.e. for a stale-binary artefact
+/// rather than for what it is.
+///
+/// One row is not a trend and is recorded rather than chased.
 const RECORDED_BUCKETS: [(&str, Option<&str>, usize); 4] = [
     ("ambiguous", Some("ambiguous"), 23),
     ("bound", None, 15),
