@@ -5,7 +5,10 @@
 //! non-clobber per-member `init`, the incremental manifest write, and the
 //! workspace MCP injection are all core business logic
 //! ([`logos_core::federation::enable`]) — this module only resolves the
-//! anchor, gates, wires the warm, and reports.
+//! anchor, gates, wires the warm, reports, and — on the FR-IN-08 nudge's
+//! declined-to-empty path alone — completes the plain single-root `init` the
+//! user typed (CR-103), by delegating to the same [`logos_core::Engine`] call
+//! the declined-outright path in `dispatch` makes.
 //!
 //! The warm is **bounded** (FR-WS-14, BR-44): [`spawn_supervisor`] starts
 //! exactly one detached child whatever N is, and that child re-enters this
@@ -42,6 +45,14 @@ pub(crate) const SUPERVISOR_COMMAND: &str = "internal-warm";
 /// [`enable::enable`] runs the non-clobber per-member `init`, the manifest
 /// upsert, and the workspace MCP injection.
 ///
+/// `fallback` carries the *provenance* of this invocation, threaded down from
+/// the one caller that decided it ([`nudge`]): `None` for an explicit
+/// `logos init --workspace`, and `Some((interactive, hooks))` — the very flags
+/// the plain `init` would have been run with — when the workspace was Logos's
+/// own FR-IN-08 suggestion. It is read only where the two entry points
+/// deliberately differ: the approval gate ending empty (CR-103, see that branch
+/// below). Everywhere else this is an ordinary `--workspace` run.
+///
 /// Returns without blocking on indexing: the **newly** approved members are
 /// warmed by a single detached background supervisor at a bounded concurrency
 /// ([`spawn_supervisor`], FR-WS-14) — best-effort, never awaited. Members
@@ -56,7 +67,7 @@ pub(crate) const SUPERVISOR_COMMAND: &str = "internal-warm";
 /// dirties N repositories, and that no longer goes unsaid (FR-WS-02,
 /// FR-IN-04). Its one-line prose form goes to stderr, so stdout stays exactly
 /// one machine document.
-pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm: fn(&[Member], Option<usize>) -> bool) -> Result<i32> {
+pub(crate) fn run(root: &Path, fallback: Option<(bool, bool)>, yes: bool, exclude: &[String], out: &Output, warm: fn(&[Member], Option<usize>) -> bool) -> Result<i32> {
     let existing = federation::discover(root)?;
     let workspace_root = existing
         .as_ref()
@@ -102,10 +113,32 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm
     members.extend(approved_new.iter().cloned());
 
     if members.is_empty() {
-        eprintln!(
-            "logos init --workspace: no candidate member repositories found under {} — nothing to do",
-            workspace_root.display()
-        );
+        // The one branch both entry points share — and the CR-103 asymmetry
+        // lives *here*, decided by the provenance the caller threaded in rather
+        // than re-derived from a flag, so the two stay distinguishable by
+        // construction instead of by coincidence.
+        //
+        // `None` — an explicit `logos init --workspace`: the user asked for a
+        // workspace and approved none, so "nothing to do" is honest and nothing
+        // is written. Unchanged, deliberately (CR-103 §3).
+        //
+        // `Some` — the FR-IN-08 nudge: the workspace was *Logos's* suggestion,
+        // and declining it down to nothing would otherwise drop the `logos init`
+        // the user actually typed, which is a worse silence than the one
+        // FR-IN-08 exists to remove. Complete that init instead — precisely the
+        // one CR-103 §3 names, "the plain single-root `init` it would have run
+        // had the offer been declined", so the `-i`/`--hooks` the user typed are
+        // applied rather than dropped a second time. Under `-i` that means the
+        // ordinary host-setup questions are asked *here*; what the fallback
+        // never asks is a third **workspace** question — it does not re-offer
+        // what was just declined. Nothing else is emitted: no manifest, no
+        // `.mcp.json` entry, and no footprint or warm-start advisory, because no
+        // member gained anything. stdout carries exactly one machine document
+        // either way (FR-CL-02).
+        match fallback {
+            Some((interactive, hooks)) => out.print(&logos_core::Engine::init_with(root, &crate::init_options(interactive, hooks))?)?,
+            None => eprintln!("logos init --workspace: no candidate member repositories found under {} — nothing to do", workspace_root.display()),
+        }
         return Ok(0);
     }
 
@@ -136,11 +169,19 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm
     Ok(0)
 }
 
-/// **Should this invocation take the FR-WS-02 workspace path?** The whole
-/// `init` routing decision, in one testable unit: `true` outright for an
-/// explicit `--workspace`, otherwise the FR-IN-08 parent-of-repos nudge —
-/// explain the shape on stderr, and on a TTY offer to take that path instead.
-/// `false` at any other root, where nothing is printed and nothing is asked.
+/// **Should this invocation take the FR-WS-02 workspace path — and on whose
+/// suggestion?** The whole `init` routing decision, in one testable unit:
+/// `Some(false)` outright for an explicit `--workspace`, the path the user
+/// asked for by name; otherwise the FR-IN-08 parent-of-repos nudge — explain
+/// the shape on stderr, and on a TTY offer to take that path instead, which an
+/// accepted offer answers `Some(true)` because the workspace was *Logos's* idea
+/// rather than the user's. `None` everywhere else: a declined offer, and any
+/// other root, where nothing is printed and nothing is asked.
+///
+/// The `bool` inside is not decoration: `run`'s empty-member branch must behave
+/// differently for each entry point (CR-103), and reporting the provenance from
+/// the one place that actually makes the routing decision is what keeps the two
+/// distinguishable by construction — see `run`'s `fallback` parameter.
 ///
 /// `--workspace` is answered **before** `detect` is called, so the explicit flag
 /// still pays nothing for detection and never sees the nudge. That short-circuit
@@ -159,7 +200,7 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm
 /// assertable without a terminal: the unit test below passes an `ask` that
 /// behaves exactly as the non-TTY one does.
 ///
-/// The default is **decline** — `false`, not `gate`'s `true`. Enabling a
+/// The default is **decline** — `None`, not `gate`'s `true`. Enabling a
 /// workspace writes to N sibling repositories; a prompt the operator did not
 /// ask for must not do that by timing out into yes.
 ///
@@ -178,13 +219,14 @@ pub(crate) fn run(root: &Path, yes: bool, exclude: &[String], out: &Output, warm
 ///
 /// Composition lives in the core ([`enable::ParentOfRepos`]); this only renders
 /// and prompts (NFR-MA-02).
-pub(crate) fn nudge(root: &Path, workspace: bool, host_setup: bool, mut ask: impl FnMut(&str, bool) -> bool) -> bool {
+pub(crate) fn nudge(root: &Path, workspace: bool, host_setup: bool, mut ask: impl FnMut(&str, bool) -> bool) -> Option<bool> {
     // `then` keeps `detect` lazy, so `--workspace` spawns no `git` at all; the
-    // `else` arm then answers `workspace` itself — `true` for the explicit flag,
-    // `false` for a root that is not the shape.
-    let Some(shape) = (!workspace).then(|| enable::ParentOfRepos::detect(root)).flatten() else { return workspace };
+    // `else` arm then answers `workspace` itself — `Some(false)` for the
+    // explicit flag (the workspace path, on the user's own request), `None` for
+    // a root that is not the shape.
+    let Some(shape) = (!workspace).then(|| enable::ParentOfRepos::detect(root)).flatten() else { return workspace.then_some(false) };
     eprintln!("{shape}");
-    ask(&shape.question(host_setup), false)
+    ask(&shape.question(host_setup), false).then_some(true)
 }
 
 /// Filter `candidates` down to the approved set: `--yes` accepts every one
@@ -561,7 +603,7 @@ mod tests {
         let tmp = fixture(&["api", "web"]);
         SEEN.lock().unwrap().clear();
         let out = Output { json: true, quiet: true };
-        assert_eq!(run(tmp.path(), true, &[], &out, record).unwrap(), 0);
+        assert_eq!(run(tmp.path(), None, true, &[], &out, record).unwrap(), 0);
 
         let seen = SEEN.lock().unwrap().clone();
         assert_eq!(
@@ -600,7 +642,7 @@ mod tests {
 
         SEEN.lock().unwrap().clear();
         let out = Output { json: true, quiet: true };
-        assert_eq!(run(tmp.path(), true, &[], &out, record).unwrap(), 0);
+        assert_eq!(run(tmp.path(), None, true, &[], &out, record).unwrap(), 0);
 
         let seen = SEEN.lock().unwrap().clone();
         assert_eq!(seen, [Some(2)], "the declared override reaches the warm");
@@ -642,7 +684,7 @@ mod tests {
 
         let tmp = fixture(&["api", "web"]);
         let out = Output { json: true, quiet: true };
-        assert_eq!(run(tmp.path(), true, &[], &out, record).unwrap(), 0);
+        assert_eq!(run(tmp.path(), None, true, &[], &out, record).unwrap(), 0);
 
         // A third sibling appears only for the second run.
         let batch = tmp.path().join("batch");
@@ -653,7 +695,7 @@ mod tests {
         git(&batch, &["commit", "-q", "-m", "init"]);
 
         SEEN.lock().unwrap().clear();
-        assert_eq!(run(tmp.path(), true, &[], &out, record).unwrap(), 0);
+        assert_eq!(run(tmp.path(), None, true, &[], &out, record).unwrap(), 0);
 
         let seen = SEEN.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "still one invocation: {seen:?}");
@@ -688,8 +730,9 @@ mod tests {
         let tmp = fixture(&["api", "web"]);
         // Exactly what `crate::ask` does on a non-TTY: yield the default,
         // reading nothing.
-        assert!(
-            !nudge(tmp.path(), false, false, |_, default| default),
+        assert_eq!(
+            nudge(tmp.path(), false, false, |_, default| default),
+            None,
             "a non-TTY answer is the default, and the default is decline"
         );
     }
@@ -699,7 +742,7 @@ mod tests {
     #[test]
     fn accepting_the_offer_reports_true() {
         let tmp = fixture(&["api", "web"]);
-        assert!(nudge(tmp.path(), false, false, |_, _| true), "an accepted offer branches to --workspace");
+        assert_eq!(nudge(tmp.path(), false, false, |_, _| true), Some(true), "an accepted offer branches to --workspace");
     }
 
     /// An explicit `--workspace` is answered `true` **without** detecting: no
@@ -710,12 +753,13 @@ mod tests {
     fn an_explicit_workspace_flag_short_circuits_before_any_detection() {
         let tmp = fixture(&["api", "web"]);
         let mut asked = 0;
-        assert!(
+        assert_eq!(
             nudge(tmp.path(), true, false, |_, _| {
                 asked += 1;
                 false
             }),
-            "--workspace routes to the enablement path on its own"
+            Some(false),
+            "--workspace routes to the enablement path on its own — and reports that it is NOT the nudge's suggestion"
         );
         assert_eq!(asked, 0, "and is never offered a choice it did not ask for");
     }
@@ -726,7 +770,7 @@ mod tests {
     fn neither_the_flag_nor_the_shape_declines() {
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join("notes")).unwrap();
-        assert!(!nudge(tmp.path(), false, false, |_, _| true), "no flag and no shape ⇒ plain init");
+        assert_eq!(nudge(tmp.path(), false, false, |_, _| true), None, "no flag and no shape ⇒ plain init");
     }
 
     /// …and the question the operator is asked names the stake, so "yes" is
@@ -735,10 +779,13 @@ mod tests {
     fn the_offer_names_how_many_repositories_it_would_enable() {
         let tmp = fixture(&["api", "web"]);
         let mut asked: Vec<String> = Vec::new();
-        assert!(!nudge(tmp.path(), false, false, |q, d| {
-            asked.push(q.to_string());
-            d
-        }));
+        assert_eq!(
+            nudge(tmp.path(), false, false, |q, d| {
+                asked.push(q.to_string());
+                d
+            }),
+            None
+        );
 
         assert_eq!(asked.len(), 1, "asked exactly once, not once per member: {asked:?}");
         assert!(asked[0].contains("2 member repositories"), "{}", asked[0]);
@@ -757,11 +804,12 @@ mod tests {
         git(&repo.join("vendor"), &["init", "-q", "-b", "main"]);
 
         let mut asks = 0;
-        assert!(
-            !nudge(&repo, false, false, |_, _| {
+        assert_eq!(
+            nudge(&repo, false, false, |_, _| {
                 asks += 1;
                 true
             }),
+            None,
             "a repository root is not the shape"
         );
         assert_eq!(asks, 0, "no prompt is ever reached there");
@@ -775,13 +823,173 @@ mod tests {
     #[test]
     fn an_accepted_offer_leads_to_a_written_workspace_manifest() {
         let tmp = fixture(&["api", "web"]);
-        assert!(nudge(tmp.path(), false, false, |_, _| true));
+        assert_eq!(nudge(tmp.path(), false, false, |_, _| true), Some(true));
 
         let out = Output { json: true, quiet: true };
-        assert_eq!(run(tmp.path(), true, &[], &out, |_, _| true).unwrap(), 0);
+        assert_eq!(run(tmp.path(), None, true, &[], &out, |_, _| true).unwrap(), 0);
         assert!(
             tmp.path().join(logos_core::federation::MANIFEST_FILENAME).is_file(),
             "accepting writes logos.workspace.toml via the FR-WS-02 path"
+        );
+    }
+
+    // ── the declined-to-empty fallback, and its deliberate asymmetry (CR-103) ──
+    //
+    // Both halves live here, in one file and side by side, because the whole
+    // value of the change is that the two entry points behave *differently*
+    // (CR-103 §6): a later "simplification" that collapses them has to delete a
+    // visible pair rather than silently widen one branch.
+    //
+    // They sit at this seam rather than in `cli/tests/init_workspace.rs` (which
+    // CR-103 §4.4 named) for the reason
+    // `an_accepted_offer_leads_to_a_written_workspace_manifest` above already
+    // records: the offer is TTY-only, and a binary spawned by the test suite has
+    // no terminal, so the *accept* arm is unreachable end to end without pulling
+    // in a pty to re-test `IsTerminal`. Only one half of the pair could live
+    // there, which is exactly what the acceptance criterion forbids.
+    //
+    // `--exclude '*'` is how "the user declined every member" is reached: `run`'s
+    // own approval gate calls `crate::ask` directly, which approves by default on
+    // a non-TTY, so the gate cannot be driven to decline from a test. What the
+    // shared branch actually sees — an empty approved set at a root that really
+    // does have candidates — is identical either way.
+
+    /// The nudge's own suggestion, declined down to nothing, completes the
+    /// `logos init` the user actually typed rather than dropping it (CR-103,
+    /// FR-IN-08): a `.logos/`, exit `0`, and none of the workspace artefacts,
+    /// because no member gained anything.
+    #[test]
+    fn a_nudged_offer_that_approves_no_member_falls_back_to_the_plain_init() {
+        let tmp = fixture(&["api", "web"]);
+        assert_eq!(
+            nudge(tmp.path(), false, false, |_, _| true),
+            Some(true),
+            "the offer was Logos's own, and it was accepted"
+        );
+
+        let out = Output { json: true, quiet: true };
+        // The warm panics rather than returning: no member was approved, so
+        // nothing may be warmed, and the early return must happen before it.
+        let code = run(tmp.path(), Some((false, false)), false, &["*".to_string()], &out, |_, _| {
+            unreachable!("nothing was approved, so nothing is warmed")
+        });
+        assert_eq!(code.unwrap(), 0);
+
+        assert!(
+            tmp.path().join(".logos").is_dir(),
+            "the `logos init` the user typed is completed, not silently dropped"
+        );
+        assert!(
+            tmp.path().join(".logos").join("config.toml").is_file(),
+            "and it is the ordinary init step list, not a bare directory"
+        );
+        assert!(
+            !tmp.path().join(logos_core::federation::MANIFEST_FILENAME).exists(),
+            "no manifest is written on the fallback path"
+        );
+        // No `.mcp.json` at all here, so a fortiori no `logos-workspace` entry.
+        // `the_fallback_applies_the_flags_it_was_given_rather_than_the_defaults`
+        // below is what stops this being true merely because the flags were
+        // dropped on the floor.
+        assert!(!tmp.path().join(".mcp.json").exists(), "and no MCP entry — the workspace one least of all");
+    }
+
+    /// The other half of the pair, and the reason the provenance exists at all:
+    /// an explicit `logos init --workspace` that approves no member is
+    /// **unchanged** — the user asked for a workspace and approved none, so
+    /// "nothing to do" is honest and nothing at all is initialised (CR-103 §3,
+    /// "explicitly not in scope").
+    #[test]
+    fn an_explicit_workspace_that_approves_no_member_initialises_nothing() {
+        let tmp = fixture(&["api", "web"]);
+        assert_eq!(
+            nudge(tmp.path(), true, false, |_, _| true),
+            Some(false),
+            "--workspace is the user's own request, never Logos's suggestion"
+        );
+
+        let out = Output { json: true, quiet: true };
+        let code = run(tmp.path(), None, false, &["*".to_string()], &out, |_, _| {
+            unreachable!("nothing was approved, so nothing is warmed")
+        });
+        assert_eq!(code.unwrap(), 0);
+
+        assert!(
+            !tmp.path().join(".logos").exists(),
+            "an explicit --workspace that enables nothing must still initialise nothing"
+        );
+        assert!(!tmp.path().join(logos_core::federation::MANIFEST_FILENAME).exists());
+        assert!(!tmp.path().join(".mcp.json").exists());
+    }
+
+    /// **The payload, not just the branch.** `fallback` carries the flags the
+    /// `logos init` was typed with, and dropping them — `InitOptions::default()`
+    /// instead of `crate::init_options(interactive, hooks)` — is invisible to
+    /// every other test here, because `init_options(false, false)` is
+    /// field-for-field `InitOptions::default()`. That silent drop is the exact
+    /// bug class CR-103 exists to fix, one flag further in, so it gets its own
+    /// witness.
+    ///
+    /// `hooks` is the assertable half and `interactive` deliberately is not:
+    /// `install_hooks` is the one `InitOptions` field with a non-prompting
+    /// producer (`hooks || (interactive && ask(..))`) and a filesystem-visible
+    /// effect. `interactive: true` would call `crate::ask` five times in this
+    /// process, against a stdin that is a terminal whenever the suite is run
+    /// from one — do not be the first test to do that.
+    ///
+    /// The root here is a git repository holding one sibling repository, rather
+    /// than the parent-of-repos shape the nudge detects, for the same reason:
+    /// `install_hooks` reports `Skipped` outside a repository and writes
+    /// nothing. The shape is irrelevant to what is under test — `run`'s fallback
+    /// arm forwarding the flags it was handed — and `run` reaches that arm from
+    /// an empty approved set regardless of the root's own git status.
+    #[test]
+    fn the_fallback_applies_the_flags_it_was_given_rather_than_the_defaults() {
+        let tmp = fixture(&["api"]);
+        let root = tmp.path();
+        git(root, &["init", "-q", "-b", "main"]);
+
+        let out = Output { json: true, quiet: true };
+        let warm: fn(&[Member], Option<usize>) -> bool = |_, _| unreachable!("nothing is warmed");
+        assert_eq!(run(root, Some((false, true)), false, &["*".to_string()], &out, warm).unwrap(), 0);
+
+        let hooks_path = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", "core.hooksPath"])
+            .output()
+            .expect("git is on PATH");
+        assert_eq!(
+            String::from_utf8_lossy(&hooks_path.stdout).trim(),
+            ".logos/hooks",
+            "`--hooks` reached the fallback's init rather than being defaulted away"
+        );
+        assert!(root.join(".logos").join("hooks").is_dir(), "and the managed hooks were written");
+        // The half that stays off: nothing here asked for the `-i` host setup,
+        // so the single-repo MCP entry is absent — which is what makes the
+        // sibling tests' `.mcp.json` assertions mean "no workspace entry"
+        // rather than "no MCP entry, trivially".
+        assert!(!root.join(".mcp.json").exists(), "and only the flags that were given were applied");
+    }
+
+    /// The fallback inherits FR-IN-01's non-clobber contract for free, because
+    /// it *is* the ordinary `init`: a second run leaves an existing
+    /// `config.toml` byte-for-byte alone.
+    #[test]
+    fn re_running_init_after_a_fallback_stays_non_clobbering() {
+        let tmp = fixture(&["api", "web"]);
+        let out = Output { json: true, quiet: true };
+        let warm: fn(&[Member], Option<usize>) -> bool = |_, _| unreachable!("nothing is warmed");
+        assert_eq!(run(tmp.path(), Some((false, false)), false, &["*".to_string()], &out, warm).unwrap(), 0);
+
+        let config = tmp.path().join(".logos").join("config.toml");
+        assert!(config.is_file(), "the fallback ran the ordinary init and wrote a config.toml");
+        std::fs::write(&config, "# hand-edited\n").unwrap();
+        assert_eq!(run(tmp.path(), Some((false, false)), false, &["*".to_string()], &out, warm).unwrap(), 0);
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "# hand-edited\n",
+            "an existing config.toml is reported unchanged, never rewritten (FR-IN-01)"
         );
     }
 }

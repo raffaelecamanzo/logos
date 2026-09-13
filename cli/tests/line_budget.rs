@@ -325,6 +325,24 @@ fn adapter_lines() -> usize {
 /// left it. CR-084 §6 — recorded, not laundered.
 ///
 /// [FR-CL-06]: ../../docs/specs/requirements/FR-CL-06.md
+///
+/// **S-334/CR-103 spends nothing: 886 → 886.** The declined-to-empty fallback
+/// ([FR-IN-08]) needed the nudge's *provenance* to reach `run`'s empty-member
+/// branch, and it rides `Option`s that already existed: `nudge`'s `bool` return
+/// becomes `Option<bool>`, and the one-arm `eprintln!` becomes a two-arm
+/// `match` of the same length. CR-103 §7 asked for line-neutral or negative;
+/// it is neutral, so there is no raise to record under CR-084 §6.
+///
+/// The duplication hunt, re-run rather than assumed, now has **two** candidates
+/// and rejects both on measurement. The standing `stats`/`languages`
+/// `open_query` fold is still net-negative. The new one is this change's own:
+/// `Engine::init_with(root, &init_options(i, h))` appears in both `dispatch.rs`
+/// and `workspace_init.rs`. A shared `plain_init` helper costs +3 and removes
+/// 0 — both call sites stay one line — landing at 889 of 890 to de-duplicate a
+/// single expression. Rejected: the duplication is an expression, not a
+/// mechanism.
+///
+/// [FR-IN-08]: ../../docs/specs/requirements/FR-IN-08.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();

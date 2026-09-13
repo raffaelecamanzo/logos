@@ -150,8 +150,18 @@ output would otherwise mislead. Accepting on a TTY runs the same
 takes — which, like an explicit `logos init --workspace -i`, drops `-i`/
 `--hooks` rather than applying them per member; the offer names that trade-off
 before you answer, so accepting is an informed choice, not a silent downgrade.
-At an ordinary repository root, or on a re-run once a `logos.workspace.toml`
-already exists, nothing fires.
+If you then decline **every** member, the `logos init` you typed is still
+carried out: the command completes the ordinary single-root `init` — with the
+`-i`/`--hooks` you asked for, since the workspace those were traded against is
+not being created — rather than leaving the root with neither a workspace nor a
+`.logos/` ([CR-103](../requests/CR-103-nudge-declined-to-empty-falls-back-to-plain-init.md)).
+An explicit `logos init --workspace` is deliberately **not** the same here: there
+you asked for a workspace by name, so approving no member reports nothing to do
+and writes nothing at all. At an ordinary repository root nothing fires at all.
+A re-run at a root that is *already* a workspace still nudges — detection reads
+the directory's shape, not whether a `logos.workspace.toml` is sitting there —
+so accepting the offer again simply re-runs enablement over the existing
+manifest, which is non-clobbering and preserves your hand-written keys.
 
 **Workspace (`--workspace`)** — turns a parent folder of sibling repositories
 into a **Logos workspace** ([FR-WS-02](../specs/requirements/FR-WS-02.md)). Run

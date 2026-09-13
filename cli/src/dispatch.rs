@@ -44,8 +44,18 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             // and, on a TTY only, the offer (FR-IN-08). Declining — the default,
             // and the whole of the non-TTY path — falls through to the unchanged
             // single-root `init` below.
-            if crate::workspace_init::nudge(root, workspace, interactive || hooks, crate::ask) {
-                crate::workspace_init::run(root, yes, &exclude, out, crate::workspace_init::spawn_supervisor)
+            //
+            // `nudge` reports *which* entry point took the workspace path, not
+            // merely that one did; `then_some` turns that into the CR-103
+            // fallback right, so an explicit `--workspace` passes `None` and
+            // cannot acquire it by coincidence. Why the payload is the raw
+            // `(interactive, hooks)` pair and not a built `InitOptions`:
+            // `init_options` *prompts* under `-i`, so building it here would
+            // interrogate the user on the accepted-offer path that goes on to
+            // enable members and never wants it. The rationale for the split
+            // lives once, on `workspace_init::run`'s `fallback` parameter.
+            if let Some(nudged) = crate::workspace_init::nudge(root, workspace, interactive || hooks, crate::ask) {
+                crate::workspace_init::run(root, nudged.then_some((interactive, hooks)), yes, &exclude, out, crate::workspace_init::spawn_supervisor)
             } else {
                 out.print(&Engine::init_with(root, &init_options(interactive, hooks))?)?;
                 Ok(0)
