@@ -2180,18 +2180,31 @@ fn edge_multiplicity(row: &ReferenceCoverage) -> u64 {
         // that got it wrong would add the whole tied set to the headline, which
         // is the exact direction [CR-120] exists to prevent.
         (None, Some(c)) if c.disposition == ProviderDisposition::BoundTo => c.total,
-        // A bound row that names nothing it bound to, or names only a set it did
-        // NOT bind: no evidence of an edge, so no edge. Both are structurally
-        // unreachable today — every `Bound` arm of `tier` yields `Sole` or
-        // `Several(BoundTo)` — and both count **zero** rather than one.
+        // A bound row naming only a set it did NOT bind. `TiedBetween` means
+        // *none* of these providers is reached, so the set is no evidence of an
+        // edge and contributes **zero** — the reading the arm above exists to
+        // refuse, stated here as its own arm rather than folded into the
+        // malformed case below.
         //
-        // Zero is the honest direction here, and the direction matters enough to
-        // state: for a headline whose whole purpose is to stop a coverage figure
+        // The two were one arm until S-403 T1's review, and the conflation cost a
+        // guard: the shared `debug_assert!` made this shape panic in a dev build,
+        // so the only test that could pin the disposition rule was one that could
+        // not be written. Separating them keeps the assert on the case that is
+        // genuinely malformed and lets `a_tied_set_on_a_bound_row_contributes_no_edge`
+        // exercise this one.
+        //
+        // Zero is the honest direction, and the direction matters enough to state:
+        // for a headline whose whole purpose is to stop a coverage figure
         // flattering the capability it describes ([CR-120] §2), asserting an edge
         // from a row carrying no evidence of one is the flattering direction.
         // Under-counting is the conservative side of a never-fabricate rule
         // ([NFR-RA-05]); over-counting is not.
-        (None, _) => {
+        (None, Some(_)) => 0,
+        // A bound row naming NOTHING — neither a provider nor a set. Structurally
+        // unreachable (every `Bound` arm of `tier` yields `Sole` or
+        // `Several(BoundTo)`) and malformed if it ever occurs, so it keeps the
+        // assert. It counts zero for the same never-fabricate reason.
+        (None, None) => {
             debug_assert!(
                 false,
                 "a bound row must name the provider or the bound set it reached"
@@ -6813,15 +6826,9 @@ mod tests {
         );
 
         // The figure is reconcilable from the rows, which is what makes it
-        // checkable rather than merely reported ([CR-120]'s whole subject).
-        let from_rows: u64 = cov
-            .references
-            .iter()
-            .filter(|r| {
-                r.intake == BridgeIntake::Invocation && matches!(r.state, CoverageState::Bound)
-            })
-            .map(|r| r.candidates.as_ref().map_or(1, |c| c.total))
-            .sum();
+        // checkable rather than merely reported ([CR-120]'s whole subject) — by
+        // the one shared recipe, not a second hand-copy of the production walk.
+        let (from_rows, _, _) = reconcile_from_rows(&cov.references);
         assert_eq!(from_rows, cov.resolved_cross_service_edges);
     }
 
@@ -6874,6 +6881,59 @@ mod tests {
             wire.get("egress_resolution").is_none(),
             "absence reaches the wire as an omitted key, never as a number: {wire}"
         );
+    }
+
+    /// **The reconciliation recipe `docs/howto/commands.md` publishes**, written by
+    /// hand so it does not call the function it audits ([CR-120], [CR-127]).
+    ///
+    /// Returns `(edges, resolved_sites, measured)` over the invocation population.
+    /// Two tests reconcile the published headline against the rendered rows, and
+    /// before S-403 T1's review each carried its own inline copy of this walk —
+    /// two hand-mirrored twins in one file, 280 lines apart, that any change to
+    /// [`edge_multiplicity`] had to find both of.
+    ///
+    /// **It reads `disposition`, and that is the whole point of it being here.**
+    /// Both superseded copies wrote `candidates.map_or(1, |c| c.total)`, which
+    /// agrees with production only on the shapes [`tier`] emits today: it counts a
+    /// `TiedBetween` set as bound edges, where production counts **zero**. So
+    /// deleting production's disposition gate made the twin and the product
+    /// *agree*, and the guard whose comment says it exists to stop a tied set
+    /// reaching the headline — "the exact direction [CR-120] exists to prevent" —
+    /// was pinned by nothing. Proved in review: dropping that gate left the whole
+    /// federation suite green.
+    ///
+    /// Independence is preserved where it matters. This is the manual's rule, not
+    /// a call into [`edge_multiplicity`], so a production walk that starts
+    /// filtering one half of the summary still shows up as a disagreement.
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
+    fn reconcile_from_rows(references: &[ReferenceCoverage]) -> (u64, u64, u64) {
+        let (mut edges, mut sites, mut measured) = (0_u64, 0_u64, 0_u64);
+        for row in references
+            .iter()
+            .filter(|r| r.intake == BridgeIntake::Invocation)
+        {
+            match &row.state {
+                CoverageState::Bound => {
+                    measured += 1;
+                    sites += 1;
+                    edges += match (&row.to, &row.candidates) {
+                        (Some(_), _) => 1,
+                        (None, Some(c)) if c.disposition == ProviderDisposition::BoundTo => c.total,
+                        // A tied set is "none of these is reached", and a row
+                        // naming neither names no evidence of an edge. Both are
+                        // zero, and both are the direction that under-counts.
+                        (None, _) => 0,
+                    };
+                }
+                CoverageState::Unbound {
+                    reason: UnboundReason::NoProviderInWorkspace,
+                } => {}
+                CoverageState::Unbound { .. } => measured += 1,
+            }
+        }
+        (edges, sites, measured)
     }
 
     /// A workspace mixing every shape the headline is computed over, in ONE run:
@@ -7008,6 +7068,70 @@ mod tests {
         (edges, sites, measured)
     }
 
+    /// **A tied set on a bound row contributes ZERO edges** — the guard
+    /// [`edge_multiplicity`] spends twelve lines defending, and which nothing
+    /// pinned until S-403 T1's review ([CR-120], [NFR-RA-05]).
+    ///
+    /// `tier` never pairs a `TiedBetween` set with a `Bound` state, and
+    /// [`ReferenceCoverage::new`] `debug_assert`s that it cannot — so this row is
+    /// built as a struct literal, deliberately bypassing both. That is the only
+    /// way to exercise the arm at all, and the arm exists precisely for the
+    /// successor `record` call site that gets the pairing wrong: a `debug_assert`
+    /// is compiled out of a release build, and this file is scheduled to receive
+    /// more of them.
+    ///
+    /// **Proved necessary rather than assumed.** Deleting the
+    /// `disposition == BoundTo` guard from [`edge_multiplicity`] left the entire
+    /// federation suite green (420 passed, 0 failed) before this test existed: the
+    /// reconciliation walks that would have caught it were themselves written
+    /// `map_or(1, |c| c.total)`, ignoring disposition, so dropping the guard made
+    /// the product and its own audit agree. A tied set reaching the headline is
+    /// "the exact direction [CR-120] exists to prevent".
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn a_tied_set_on_a_bound_row_contributes_no_edge() {
+        let endpoint = |member: &str, symbol: &str| BridgeEndpoint {
+            member: member.to_string(),
+            symbol: LogosSymbol::parse(symbol).unwrap(),
+        };
+        let tied = ProviderCandidates::new(
+            ProviderDisposition::TiedBetween,
+            vec![endpoint("a", "local a"), endpoint("b", "local b")],
+        );
+        assert_eq!(tied.total, 2, "the fixture must carry a set worth over-counting");
+
+        let row = ReferenceCoverage {
+            relation: "route".to_string(),
+            from: endpoint("web", "local fetch"),
+            bucket: CoverageState::Bound.bucket(),
+            state: CoverageState::Bound,
+            to: None,
+            intake: BridgeIntake::Invocation,
+            candidates: Some(tied),
+            provenance: Provenance::Literal,
+        };
+
+        assert_eq!(
+            edge_multiplicity(&row),
+            0,
+            "a `tied-between` set means NONE of its providers is reached, so it is \
+             no evidence of an edge — reading the bucket instead of the disposition \
+             would add the whole tied set to the headline"
+        );
+
+        // …and the same row read through the shared reconciliation recipe, so the
+        // audit path and the product agree on this shape too. Before the review
+        // they did not: the recipe counted `total` here.
+        assert_eq!(
+            reconcile_from_rows(std::slice::from_ref(&row)),
+            (0, 1, 1),
+            "the manual's recipe must reach the same zero — a resolved SITE with no \
+             resolved edge is exactly the shape that must not silently agree"
+        );
+    }
+
     /// **THE invariant [CR-127] exists to install: both halves of
     /// `resolved_edges_summary` are derived from ONE population, and the sentence
     /// cannot contradict itself.**
@@ -7038,11 +7162,16 @@ mod tests {
             ("every egress shape", every_egress_shape_at_once()),
             ("mixed buckets", every_bucket_in_both_populations()),
             // The reference estate's own shape, and the one the shipped defect
-            // published as `0`: EVERY bound egress row is config-bound. It is in
-            // the battery so assertion (3) is load-bearing rather than implied by
-            // (2) — a future filter applied to the published derivation AND
-            // mirrored into the reconciliation walk beside it would satisfy (2)
-            // and still print "0 edges" over a resolved site here.
+            // published as `0`: EVERY bound egress row is config-bound.
+            //
+            // It is in the battery to give assertion (3) a reachable failure. The
+            // three assertions catch different mutations, and only together do
+            // they cover the space: a filter added to `from_rows` alone fails (2)
+            // (the walks disagree); one added to the SITE count as well fails (2b)
+            // (`by_intake` is counted by a different path and does not move); and
+            // one mirrored into `reconcile_from_rows` beside it satisfies both and
+            // still prints "0 edges" over a resolved site *here*, which is (3).
+            // Verified by running each of those three mutations, not argued.
             ("config-bound only", {
                 reset();
                 set_member("orders", vec![route("GET /orders/{id}", "local get_order")]);
@@ -7089,28 +7218,11 @@ mod tests {
                 cov.resolved_edges_summary
             );
 
-            // (2) One walk of the rendered rows reproduces all three. ONE filter,
-            // applied once: the site count and the edge count are read out of the
-            // SAME matched rows, which is what a second, narrower filter on either
-            // half would break.
-            let (mut rows_edges, mut rows_sites, mut rows_measured) = (0_u64, 0_u64, 0_u64);
-            for row in cov
-                .references
-                .iter()
-                .filter(|r| r.intake == BridgeIntake::Invocation)
-            {
-                match &row.state {
-                    CoverageState::Bound => {
-                        rows_measured += 1;
-                        rows_sites += 1;
-                        rows_edges += row.candidates.as_ref().map_or(1, |c| c.total);
-                    }
-                    CoverageState::Unbound {
-                        reason: UnboundReason::NoProviderInWorkspace,
-                    } => {}
-                    CoverageState::Unbound { .. } => rows_measured += 1,
-                }
-            }
+            // (2) The rendered rows reproduce all three, by the recipe the manual
+            // publishes. ONE filter, applied once: the site count and the edge
+            // count are read out of the SAME matched rows, which is what a
+            // second, narrower filter on either half would break.
+            let (rows_edges, rows_sites, rows_measured) = reconcile_from_rows(&cov.references);
             assert_eq!(
                 (rows_edges, rows_sites, rows_measured),
                 (edges, sites, measured),
@@ -7119,7 +7231,24 @@ mod tests {
                 cov.references
             );
 
-            // (3) The biconditional the shipped code violated.
+            // (2b) …and against the SECOND, independently maintained population.
+            // `by_intake` is counted at `Tally::record` time from each row's own
+            // state; the figures above are counted by walking the finished rows.
+            // Reconciling against both is what stops this test degenerating into a
+            // restatement of the production walk — a filter added to `from_rows`
+            // AND mirrored into `reconcile_from_rows` still fails here.
+            let inv = cov.by_intake.invocation;
+            assert_eq!(
+                (sites, measured),
+                (inv.bound, inv.bound + inv.ambiguous + inv.unbound),
+                "{label}: the rate's halves must equal the intake tally's invocation \
+                 population, which is counted by a different path: {:?}",
+                cov.by_intake
+            );
+
+            // (3) The biconditional the shipped code violated — the last line of
+            // defence, reached when a mutation has been mirrored into this test's
+            // own audit walk and so satisfies (2) and (2b).
             assert_eq!(
                 edges == 0,
                 sites == 0,
