@@ -32,6 +32,13 @@ THE FIGURE WITH ITS DENOMINATORS
               refuses today, the S-382 reading's own population, measured on
               the same corpus by
               operand_resolvability/configuration_agreement.rs
+
+              THAT FILE OWNS THIS FIGURE. It is pinned there by
+              (denominator, resolved, divergent, no_key) == (108, 79, 2, 27),
+              and nothing in this document or in config_bound_admission.rs can
+              verify it — so if it moves, that assertion reds first and its
+              message lists every place, including this one, to re-record. The
+              figure has drifted silently once already (111 -> 108).
   44 of  81   what the measurement harness proves resolvable on that
               denominator (79 agreed-key + 2 overlay-divergent)
   44 of  79   against the criterion's floor, which is the 79 alone

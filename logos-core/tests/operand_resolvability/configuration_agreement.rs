@@ -2171,7 +2171,17 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
          a denominator S-365 recorded as 111 (30 no-key) and this repository now \
          measures as 108 (27 no-key) — a corpus drift that predates S-382. This run \
          read {s382:?}. Re-measure against the reference workspace's recorded 1.4.7 \
-         baseline before changing this assertion.",
+         baseline before changing this assertion.\n\
+         \n\
+         THIS DENOMINATOR IS RESTATED IN FOUR PLACES THIS BINARY CANNOT REACH, and \
+         it has drifted silently once already (111 -> 108). If it moves, re-record \
+         ALL of them in the same change:\n\
+         \x20 - `ACCESSOR_DENOMINATOR` in logos-core/tests/config_bound_admission.rs \
+         (the 108), and the `79 agreed + 2 divergent = 81` upper bound its module \
+         docs state;\n\
+         \x20 - logos-core/tests/config_bound_admission/config_bound_admission_finding.txt;\n\
+         \x20 - the accessor-denominator table in docs/howto/commands.md;\n\
+         \x20 - the S-397 T2 figures in docs/planning/sprints/sprint-impl-68.md.",
     );
     assert_eq!(
         s382.divergent_values, 4,

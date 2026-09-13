@@ -146,8 +146,23 @@ const CRITERION_FLOOR: usize = 79;
 const RECORDED_ADMITTED: usize = 44;
 
 /// The accessor denominator the figure is stated over — the S-382 reading's
-/// production client-call population, measured on the same corpus by
-/// `operand_resolvability/configuration_agreement.rs`.
+/// production client-call population.
+///
+/// **Measured and pinned in another test binary, and deliberately not re-measured
+/// here**: AC2 requires this arm to be independent of the `operand_resolvability`
+/// harness, so it cannot compute the denominator its own headline is stated over.
+/// The owner is
+/// `operand_resolvability/configuration_agreement.rs`'s
+/// `(s382.denominator, s382.resolved, s382.divergent, s382.no_key) == (108, 79, 2, 27)`
+/// assertion, whose failure message lists this constant among the four places to
+/// re-record with it.
+///
+/// That pointer is the whole guard, and it is here because the figure has
+/// **already drifted once in silence** (111 -> 108, documented at that assertion):
+/// unpinned, this constant would keep printing a stale denominator beside a live
+/// numerator and stay green. The `const` block at the end of the measurement holds
+/// the one relation this binary *can* check — that the admitted figure lies inside
+/// it.
 const ACCESSOR_DENOMINATOR: usize = 108;
 
 /// The three buckets the 44 admitted rows fall into, in the order

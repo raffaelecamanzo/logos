@@ -1056,6 +1056,11 @@ Five things worth knowing about these fields:
   | what the measurement harness proves resolvable on that denominator | 81 |
   | rows carrying `config-unresolved` provenance | 0 |
 
+  (The 108 and the 81 are measured and pinned by
+  `logos-core/tests/operand_resolvability/configuration_agreement.rs`, which names
+  this table among the places to re-record if they move; the 44 is pinned by
+  `logos-core/tests/config_bound_admission.rs`.)
+
   The 37-site gap between 44 and 81 is **one mechanism**: a *qualified receiver*.
   `this.mailboxConfigurationApi.getUriGetMailbox()` resolves to nothing, on
   purpose — the extract pass refuses a receiver it cannot see declared in the
