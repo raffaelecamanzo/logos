@@ -1753,16 +1753,172 @@ fn report_s382(m: &super::Measurement) {
          \x20 refused: operand resolves to no key      {}\n",
         r.denominator, r.resolved, r.divergent, r.divergent_values, r.no_key,
     );
+    report_properties_residue(m);
+}
+
+/// The `.properties` **admission residue**, stated as a numerator over the
+/// accessor denominator rather than as a prose caveat (S-397 AC5).
+///
+/// # What the gap is
+///
+/// These figures are measured through [`ConfigCorpus::discover`], which walks the
+/// filesystem and DOES read `.properties`. Production **ingestion** does not:
+/// `source_facts` is reached only for a file the plugin registry claims, no
+/// descriptor claims the extension, and no story owns the artifact plugin that
+/// would. A key committed ONLY in a `.properties` file therefore refuses in
+/// production as `config-key-missing` while resolving here.
+///
+/// # Why it is stated as a numerator and not as a source count
+///
+/// The line this replaced said "31 of the 174 discovered sources", and both
+/// halves were wrong about the corpus it described. The 174 admitted sources hold
+/// **3** `.properties` files, not 31; 31 is the number of `application*.properties`
+/// files on the estate's *disk*, of which 28 sit under a hidden `.helm/` directory
+/// that [`ConfigCorpus::discover`] never walks — so they are not "of the 174" at
+/// all. More importantly a source count answers the wrong question: what a reader
+/// needs is how many *sites* the gap costs, over the denominator the delivered
+/// figure is read against ([S-397] AC5). That is [`properties_only`].
+///
+/// [properties_only]: Self::properties_only
+/// [S-397]: ../../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PropertiesResidue {
+    /// The S-382 denominator this residue is stated over — production
+    /// client-call sites the arm refuses today.
+    pub denominator: usize,
+    /// Of the denominator, the sites that resolve to a key under the S-382 rule.
+    /// The residue can only be drawn from these: a site with no key at all
+    /// refuses for a reason `.properties` ingestion could not repair.
+    pub keyed: usize,
+    /// **The residue.** Sites whose every defining source for every key they
+    /// name is a `.properties` file — they resolve in this harness and refuse in
+    /// production, and closing the ingestion gap is what would move them.
+    pub properties_only: usize,
+    /// Sites a `.properties` source contributes a value to alongside at least one
+    /// source production does read. The key survives in production; what it loses
+    /// is those values — which can turn a divergence into an agreement, so it is
+    /// counted apart from `properties_only` rather than added to it.
+    pub properties_contributing: usize,
+    /// `.properties` files among the corpus's admitted sources, and the corpus
+    /// total — the corpus-level half of the same gap.
+    pub properties_sources: usize,
+    /// Every source [`ConfigCorpus::discover`] admitted.
+    pub sources_total: usize,
+}
+
+/// Measure the `.properties` residue over the S-382 production client-call arm.
+///
+/// The counterfactual is production's, not a hypothetical: a source whose path
+/// ends `.properties` is removed from the definition set, and the site is then
+/// asked whether any definition survives. That is exactly what production sees,
+/// because production never ingested the file in the first place.
+pub fn properties_residue(m: &super::Measurement) -> PropertiesResidue {
+    let mut out = PropertiesResidue {
+        sources_total: m.config.sources.len(),
+        properties_sources: m
+            .config
+            .sources
+            .iter()
+            .filter(|s| s.path.ends_with(".properties"))
+            .count(),
+        ..PropertiesResidue::default()
+    };
+    for site in m
+        .per_language
+        .values()
+        .flat_map(|s| s.sites.iter())
+        .filter(|s| s.gate_admitted && Tree::of(&s.file) == Tree::Main)
+    {
+        // The same denominator `s382_reading` reads, by the same two exclusions,
+        // so the numerator and the denominator describe one population.
+        if matches!(site.cr115, Verdict::AlreadyAdmitted | Verdict::NotConfigurationBound) {
+            continue;
+        }
+        out.denominator += 1;
+        let keys: Vec<&str> = site.key_outcomes.iter().flatten().filter_map(KeyOutcome::key).collect();
+        if keys.is_empty() {
+            continue;
+        }
+        out.keyed += 1;
+        let module = m.config.module_of(&site.file).to_string();
+        let mut any_definition = false;
+        let mut any_outside_properties = false;
+        let mut any_properties = false;
+        for key in keys {
+            for definition in definitions_in(&m.config, &canonical_key(key), Some(&module)) {
+                any_definition = true;
+                if definition.path.ends_with(".properties") {
+                    any_properties = true;
+                } else {
+                    any_outside_properties = true;
+                }
+            }
+        }
+        // A key no source defines at all is not `.properties` residue — it
+        // refuses in both readings, for a reason ingestion would not repair.
+        if !any_definition {
+            continue;
+        }
+        if !any_outside_properties {
+            out.properties_only += 1;
+        } else if any_properties {
+            out.properties_contributing += 1;
+        }
+    }
+    out
+}
+
+/// `application*.properties` files present on the estate's disk that
+/// [`ConfigCorpus::discover`] never walks — the hidden-directory half of the gap.
+///
+/// Measured with `hidden(false)` against the same walker configuration
+/// `discover` uses in every other respect, so the difference between the two
+/// counts is attributable to that one flag and nothing else. Reported so that
+/// "the corpus holds 3 `.properties` sources" is not read as "this estate commits
+/// 3 `.properties` files" — it commits many more, and they are invisible to the
+/// harness for a reason unrelated to the ingestion gap.
+pub fn properties_files_beyond_the_walk(root: &std::path::Path) -> usize {
+    ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(false)
+        .ignore(false)
+        .parents(false)
+        .build()
+        .flatten()
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.ends_with(".properties") && config_profile(&name).is_some()
+        })
+        .count()
+}
+
+fn report_properties_residue(m: &super::Measurement) {
+    let r = properties_residue(m);
     println!(
-        "  THE .properties GAP, STATED RATHER THAN ABSORBED. These figures are measured\n\
-         \x20 through `ConfigCorpus::discover`, which walks the filesystem and DOES read\n\
-         \x20 `.properties`. Production INGESTION does not: `source_facts` is reached only\n\
-         \x20 for a file the plugin registry claims, no descriptor claims the extension, and\n\
-         \x20 no story owns the artifact plugin that would. On this estate that is 31 of the\n\
-         \x20 174 discovered sources. A key committed ONLY in a `.properties` file therefore\n\
-         \x20 refuses in production as `config-key-missing` while resolving here — so these\n\
-         \x20 figures are an UPPER BOUND on what the shipped pipeline admits, not a\n\
-         \x20 measurement of it.\n"
+        "  THE .properties GAP, MEASURED RATHER THAN ASSERTED (S-397 AC5). These figures\n\
+         \x20 are measured through `ConfigCorpus::discover`, which walks the filesystem and\n\
+         \x20 DOES read `.properties`. Production INGESTION does not: `source_facts` is\n\
+         \x20 reached only for a file the plugin registry claims, no descriptor claims the\n\
+         \x20 extension, and no story owns the artifact plugin that would. So these figures\n\
+         \x20 are an UPPER BOUND on what the shipped pipeline admits, and this is the part\n\
+         \x20 of the bound the gap accounts for:\n\
+         \n\
+         \x20 corpus sources ending `.properties`       {:>4} of {}\n\
+         \x20 RESIDUE: sites resolved ONLY by one       {:>4} of {}   <- the numerator\n\
+         \x20 sites a `.properties` source contributes  {:>4} of {}\n\
+         \x20 to beside a source production reads\n\
+         \n\
+         \x20 A residue of zero does NOT mean the gap is closed — it means this estate\n\
+         \x20 commits the keys its accessors read in yaml. The gap is still open and still\n\
+         \x20 unowned; what is measured here is what it costs TODAY, on THIS corpus.\n",
+        r.properties_sources,
+        r.sources_total,
+        r.properties_only,
+        r.denominator,
+        r.properties_contributing,
+        r.denominator,
     );
 }
 
@@ -2030,6 +2186,61 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
         "the three S-382 populations must partition the denominator exactly; a \
          remainder means a verdict is counted in neither, which is how a coverage \
          figure acquires a denominator nobody can reconstruct",
+    );
+
+    // ── S-397 AC5: the `.properties` residue, over the same denominator ──
+    //
+    // Stated as a numerator over the accessor denominator, because the figure
+    // S-397 T2 delivers through `logos workspace status --json` must not be read
+    // as full coverage. It is pinned rather than printed for the reason every
+    // other figure in this file is: `report_properties_residue` prints a table,
+    // and a printed table nothing asserts is a table a regression may silently
+    // rewrite.
+    let residue = properties_residue(m);
+    assert_eq!(
+        (residue.denominator, residue.keyed),
+        (s382.denominator, s382.resolved + s382.divergent),
+        "the residue must be stated over the SAME denominator the S-382 reading is, or the \
+         numerator and the denominator describe two different populations and the fraction \
+         means nothing. This run read {residue:?} against {s382:?}.",
+    );
+    assert_eq!(
+        (residue.properties_only, residue.properties_contributing),
+        (0, 0),
+        "S-397 AC5's measured residue is ZERO accessor sites of {}: this estate commits \
+         every key its accessors read in yaml, and the 3 `.properties` sources the corpus \
+         admits define none of them. This run read {} / {}. A NON-zero residue is a real \
+         finding, not a broken test — it means the ingestion gap has started costing \
+         coverage: RECORD the new numerator here, in `configuration_agreement_finding.txt` \
+         and in the delivered figure's own statement, and do not net it out of the \
+         admitted count.",
+        residue.denominator,
+        residue.properties_only,
+        residue.properties_contributing,
+    );
+    // Zero is the weakest possible evidence that a measurement ran at all, so
+    // the two corpus-level counts are pinned beside it: without them a residue
+    // of 0 over a corpus holding NO `.properties` source would read exactly like
+    // a residue of 0 over a corpus holding three that nothing reads, and only
+    // the second is the finding.
+    let beyond = properties_files_beyond_the_walk(&root);
+    println!(
+        "\n  `.properties` corpus-level census (S-397 AC5): {} of {} admitted sources; \
+         {beyond} `application*.properties` files exist on disk, so {} sit in a hidden \
+         directory `ConfigCorpus::discover` never walks.",
+        residue.properties_sources,
+        residue.sources_total,
+        beyond.saturating_sub(residue.properties_sources),
+    );
+    assert_eq!(
+        (residue.properties_sources, beyond),
+        (3, 31),
+        "the recorded census is 3 `.properties` sources admitted of 31 on disk — the other \
+         28 are under a hidden `.helm/` directory the discovery walk skips, which is a \
+         SECOND and unrelated reason a `.properties` key is invisible here. This run read \
+         {} admitted / {beyond} on disk. If the estate has changed, record both figures: \
+         a residue of zero is only meaningful beside them.",
+        residue.properties_sources,
     );
 
     // The verdicts are pinned per arm and never on the combined figure: a

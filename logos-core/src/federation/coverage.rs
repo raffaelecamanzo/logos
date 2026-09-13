@@ -930,8 +930,12 @@ pub struct CrossServiceCoverage {
     /// The four counters above are the sum of these two, and are computed from
     /// them ([`IntakeSplit::total`]), so the split can never report less than the
     /// headline it sits beside. Reading `by_intake.invocation.bound` is the
-    /// question no earlier payload could answer: on the reference workspace it is
-    /// **0** against a headline `bound` of 81 ([CR-120] §3.1, [NFR-CC-04]).
+    /// question no earlier payload could answer: on the reference workspace it
+    /// read **0** against a headline `bound` of 81 ([CR-120] §3.1, [NFR-CC-04]),
+    /// and since S-397 T1's accessor capture hop reached that estate's index it
+    /// reads **5** against a headline of 86 — five configuration-bound client
+    /// calls, and still no edge, because a `config-bound` row is excluded from
+    /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges).
     ///
     /// Every row carries the discriminator these counts group on
     /// ([`ReferenceCoverage::intake`]), so the split is auditable from

@@ -42,39 +42,52 @@
 //! over. Nineteen lines with no judgement in them is the cheaper side of that
 //! trade. Revisit if a fourth measurement arrives.
 //!
-//! # Recorded finding (2026-09-09, `~/source/pec-services`, 84 members)
+//! # Recorded finding (2026-09-13, `~/source/pec-services`, 84 members)
 //!
 //! ```text
-//! references            929
+//! references           1060
 //!                       bound  ambiguous  unbound  no-provider
 //! contract-surface         81        146        1          646
-//! invocation                0          0       54            1
-//! headline                 81        146       55          647
-//! 0.287 (81 of 282 measured; 647 excluded as no-provider-in-workspace)
+//! invocation                5          9      141           31
+//! headline                 86        155      142          677
+//! 0.225 (86 of 383 measured; 677 excluded as no-provider-in-workspace)
 //! ```
 //!
-//! **[CR-120] §6's criterion is met: 81 contract-surface / 0 invocation bound
-//! rows.** Reconciled against the baseline sprint 66 §7 names for the purpose,
-//! `logos-docs/ws-status-2026-09-08-v1.4.7.json`: all five figures above are
-//! reproduced from it exactly, and it settles the 81/0 pair from the pre-change
-//! artifact rather than from anything this change asserts — of its 929 rows, 81
-//! carry `intake` and all 81 read `contract-surface`, while the other **848 carry
-//! no `intake` at all**. Those 848 rows are what AC1 changes, and their absence
-//! is [CR-120] §3.1's defect visible in a shipped payload.
+//! **[CR-120] §6's criterion was met, on the generation it was written over: 81
+//! contract-surface / 0 invocation bound rows, measured 2026-09-09 over a store
+//! cold-indexed with 1.4.7.** That measurement reconciled cell for cell against
+//! the baseline sprint 66 §7 names for the purpose,
+//! `logos-docs/ws-status-2026-09-08-v1.4.7.json`, whose 929 rows carried `intake`
+//! on 81 and none at all on the other 848 — [CR-120] §3.1's defect visible in a
+//! shipped payload, and what AC1 changed.
 //!
-//! The invocation column's 55 rows are **not** S-374's ~115 HTTP client-call
-//! refusals: those are written at *index* time and this store was cold-indexed on
-//! 2026-09-08 with 1.4.7, before S-374 merged. They are the 54 broker
-//! `topic-not-literal` refusals (S-370/[CR-117]) plus the one workspace-wide
-//! `http-client-call` reference, which is bucketed `no-provider-in-workspace`
-//! rather than `unbound`. Expect the invocation `unbound` column to rise by ~115
-//! on the first re-index that carries S-374; `bound` is not expected to move,
-//! because a refusal never binds.
+//! The figures above are a **later index generation** of the same estate, not a
+//! retraction of that. [S-397] T2 re-indexed all 84 members on 2026-09-13 from a
+//! binary carrying [S-374] and [S-397] T1, as its own acceptance criterion
+//! required. The contract-surface column is byte-identical across the two
+//! generations; every cell that moved is in the invocation column, and it moved
+//! for two reasons that are worth keeping apart:
+//!
+//! * **`unbound` 54 → 141.** The 54 were the broker `topic-not-literal` refusals
+//!   (S-370/[CR-117]) that every generation carries. The 87 added are [S-374]'s
+//!   HTTP client-call refusals, which are written at *index* time and which the
+//!   1.4.7 store predated. This doc used to predict "~115 on the first re-index";
+//!   the re-index wrote **131** client-call rows, of which 87 landed here.
+//! * **`bound` 0 → 5, `ambiguous` 0 → 9, `no-provider` 1 → 31.** The other 44 of
+//!   those 131 rows carry `config-bound` provenance — [S-397] T1's accessor hop.
+//!   This doc also used to say "`bound` is not expected to move, because a refusal
+//!   never binds"; that reasoning was sound and its conclusion was still wrong,
+//!   because a story landed between the prediction and the re-index that turned 44
+//!   of the refusals into admissions. The admitted figure and its shortfall
+//!   against [S-397] AC2's floor are `config_bound_admission.rs`'s subject, not
+//!   this file's.
 //!
 //! The full record, including the verified read-only proof, is the durable
 //! artifact `coverage_intake_split/intake_split_finding.txt`.
 //!
 //! [CR-117]: ../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
+//! [S-374]: ../../docs/planning/journal.md#s-374-the-http-client-call-arm-records-its-refusals
+//! [S-397]: ../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
 //!
 //! [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 //! [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
@@ -118,14 +131,14 @@ fn corpus_root() -> Option<PathBuf> {
 ///
 /// Three things are checked, and only the first is [CR-120]'s headline:
 ///
-/// 1. the `bound` count splits as **81 contract-surface / 0 invocation**;
+/// 1. the `bound` count splits as **81 contract-surface / 5 invocation**;
 /// 2. every row carries an intake, so the split is auditable from the rows rather
 ///    than taken on trust — the property AC1 adds and the one that makes (1)
 ///    reproducible by a reader with the same `--json`;
 /// 3. the two populations sum to the headline counters, so the split cannot
 ///    under-report what it sits beside.
 ///
-/// **The 81/0 pair is asserted, and a moved corpus fails this harness
+/// **The 81/5 pair is asserted, and a moved corpus fails this harness
 /// deliberately.** Its failure message prints the measured figure and the split
 /// beside it, because the criterion's number is a recorded measurement of a
 /// specific workspace at a specific commit: the remedy for a red run here is to
@@ -225,11 +238,13 @@ fn measure_the_intake_split_over_the_reference_workspace_when_one_is_configured(
     // message, so a moved corpus reads as a moved corpus.
     assert_eq!(
         (cs.bound, inv.bound),
-        (81, 0),
-        "CR-120's criterion: 81 contract-surface / 0 invocation bound rows. Measured \
-         {} / {} over {} references. If the corpus has been re-indexed or re-enrolled \
-         since 2026-09-08, RECORD the measured figure — do not bend the classifier to \
-         reproduce this one.",
+        (81, 5),
+        "the recorded split is 81 contract-surface / 5 invocation bound rows, measured \
+         2026-09-13 over the S-397-generation index. Measured {} / {} over {} references. \
+         If the corpus has been re-indexed or re-enrolled again, RECORD the measured \
+         figure — do not bend the classifier to reproduce this one. CR-120's own \
+         criterion was 81 / 0 and it was met on the 1.4.7 generation; the 5 is S-397 T1's \
+         accessor hop and is not a retraction of it.",
         cs.bound,
         inv.bound,
         cov.references.len()
