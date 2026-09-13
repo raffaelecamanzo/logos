@@ -537,11 +537,21 @@ fn a_bound_class_with_no_committed_source_refuses_by_naming_the_missing_key() {
     let recorded =
         key_of(&index, use_site, "api.getUriGetArchive()").expect("the accessor resolves a key");
 
+    // WHICH key is refused is half the claim, and over an empty corpus the
+    // refusal alone cannot show it — every key is missing there, so a fabricated
+    // one would refuse identically. Assert the identity through the reader the
+    // coverage tier uses, so the row names the accessor's own key.
+    assert_eq!(
+        crate::resolve::binding::placeholder_keys(&recorded),
+        Some(vec!["mailserver.api.urigetarchive".to_string()]),
+        "the recorded target names the accessor's canonical key, and only it",
+    );
+
     // The coverage tier's own reader, built the way it builds it.
     let resolver = Resolver { corpus: &NoCorpus, module: MEMBER_SCOPE };
     assert_eq!(
         resolver.resolve_template(&recorded).expect("the target carries a placeholder"),
         Err(ValueRefusal::MissingKey),
-        "the key is named and unproved, so the site refuses rather than binding",
+        "…and that key is unproved, so the site refuses rather than binding",
     );
 }
