@@ -23,9 +23,13 @@
 //! boundary, not an unresolved site inside it.
 //!
 //! # One assembly point ([CR-125] §4.4)
-//! [`egress_residue`] is the only producer, and every surface — MCP, CLI and the
-//! web API — reaches it through [`super::query`]'s read-models, so the two
-//! renderings cannot disagree about a figure neither of them computes. It is the
+//! [`egress_residue`] is the only producer — `residue_from` is private, this
+//! module exports no constructor, and `WorkspaceEgressResidue` is deliberately
+//! not `Default` — and every surface (MCP, CLI, the web API) reaches it through
+//! [`super::query::reachability_inputs`], which also fixes the answer and its
+//! residue to **one** member sync-stamp snapshot. So the renderings cannot
+//! disagree about a figure none of them computes, and the figure cannot describe
+//! a different generation of the workspace than the answer beside it. It is the
 //! same discipline [ADR-52] applies to the bind/refuse classifier, applied to the
 //! refusal's *report*.
 //!
