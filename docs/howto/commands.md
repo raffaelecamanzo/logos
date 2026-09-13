@@ -979,19 +979,19 @@ So every rendering carries the **denominator and the excluded count** beside it:
 
 ```bash
 logos workspace status            # human
-#   0.225 (86 of 383 measured; 677 excluded as no-provider-in-workspace)
+#   0.278 (96 of 345 measured; 689 excluded as no-provider-in-workspace)
 ```
 
 ```jsonc
 // logos workspace status --json
 "coverage": {
-  "bound": 86,
-  "ambiguous": 155,
-  "unbound": 142,
-  "no_provider_in_workspace": 677,          // the excluded bucket
-  "spec_conformance_ratio": 0.225,
-  "spec_conformance_measured": 383,         // the denominator, explicit
-  "spec_conformance_summary": "0.225 (86 of 383 measured; 677 excluded as no-provider-in-workspace)"
+  "bound": 96,
+  "ambiguous": 169,
+  "unbound": 80,
+  "no_provider_in_workspace": 689,          // the excluded bucket
+  "spec_conformance_ratio": 0.278,
+  "spec_conformance_measured": 345,         // the denominator, explicit
+  "spec_conformance_summary": "0.278 (96 of 345 measured; 689 excluded as no-provider-in-workspace)"
 }
 ```
 
@@ -1008,7 +1008,7 @@ N excluded" is the informative statement. The same absent-not-zero rule governs
 
 ##### Each reference names the other end
 
-`bound: 86` and `ambiguous: 155` are not actionable on their own — the obvious
+`bound: 96` and `ambiguous: 169` are not actionable on their own — the obvious
 next question is *bound to what?*, and *ambiguous between what?*. Every row in
 `coverage.references` answers it:
 
@@ -1138,7 +1138,7 @@ Five things worth knowing about these fields:
 
 ##### The counts are two populations: read the split
 
-`bound: 86` adds two different claims together. A **`contract-surface`** reference
+`bound: 96` adds two different claims together. A **`contract-surface`** reference
 is a *declared* endpoint (an OpenAPI operation) matched to a controller; an
 **`invocation`** reference is a *captured call site* (an HTTP client call, or a
 broker publish or subscribe — a gRPC stub call would qualify but no arm captures
@@ -1151,22 +1151,22 @@ Every row carries its `intake`, and the four counters are reported split by it:
 ```jsonc
 // logos workspace status --json
 "coverage": {
-  "bound": 86, "ambiguous": 155, "unbound": 142, "no_provider_in_workspace": 677,
+  "bound": 96, "ambiguous": 169, "unbound": 80, "no_provider_in_workspace": 689,
   "by_intake": {
     "contract_surface": { "bound": 81, "ambiguous": 146,
                           "unbound": 1, "no_provider_in_workspace": 646 },
-    "invocation":       { "bound":  5, "ambiguous":   9,
-                          "unbound": 141, "no_provider_in_workspace": 31 }
+    "invocation":       { "bound": 15, "ambiguous":  23,
+                          "unbound": 79, "no_provider_in_workspace": 43 }
   }
 }
 ```
 
 Those are the real figures from an 84-member Spring estate, measured 2026-09-13.
-`bound: 86` looks like a workspace that binds; `by_intake.invocation.bound: 5`
-says that of its 186 captured outbound call sites, five resolve. That is what the
-split is for — and on the generation of this estate indexed before the accessor
-capture hop existed, the same field read **0** beside the same `bound: 81`, which
-is the starker form of the same point.
+`bound: 96` looks like a workspace that binds; `by_intake.invocation.bound: 15`
+says that of its 160 captured outbound call sites, fifteen resolve. That is what
+the split is for — and on the generation of this estate indexed before the
+accessor capture hop existed, the same field read **0** beside a `bound` of 81,
+which is the starker form of the same point.
 
 The two populations always **sum** to the four counters above them — the headline
 is computed from the split, so the two cannot disagree — and because every row
