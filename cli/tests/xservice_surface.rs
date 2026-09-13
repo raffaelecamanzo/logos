@@ -1667,6 +1667,19 @@ symbol = \"[unclosed\"
 //
 // [CR-125]: ../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 
+/// An `api` client whose only outbound call is a **static** absolute literal —
+/// the HTTP client-call arm captures it and it binds `web`'s route, so the
+/// workspace has captured egress and resolves **all** of it. The zero-residue
+/// case that matters: the answer is unqualified because nothing was left
+/// unresolved, not because nothing was looked at.
+const FULLY_RESOLVED_CLIENT: &str = r#"
+use reqwest::Client;
+
+pub async fn fetch_user(client: Client) {
+    let _ = client.get("/users/{id}").await;
+}
+"#;
+
 /// An `api` client whose only outbound call composes its URL at **runtime** — the
 /// HTTP client-call arm captures the site and records one keyless refusal for it
 /// (S-374), so the workspace has a non-zero egress residue and **no** resolved
@@ -1693,6 +1706,32 @@ fn workspace_with_unresolved_egress() -> TempDir {
     init_repo(&web);
     write(&api, "api/openapi.yaml", ORPHAN_OPENAPI_YAML);
     write(&api, "src/client.rs", RUNTIME_COMPOSED_CLIENT);
+    write(&web, "src/main.rs", AXUM_MAIN);
+
+    assert!(logos(&api, &["index"]).status.success(), "index api");
+    assert!(logos(&web, &["index"]).status.success(), "index web");
+
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"web\"]\ndefault = \"api\"\n",
+    )
+    .unwrap();
+    tmp
+}
+
+/// The two-member workspace with captured egress that **fully resolves**: `api`'s
+/// one client call is static and binds `web`'s route, so `measured_sites > 0`
+/// and `unresolved_sites == 0`.
+fn workspace_with_fully_resolved_egress() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let api = root.join("api");
+    let web = root.join("web");
+
+    init_repo(&api);
+    init_repo(&web);
+    write(&api, "api/openapi.yaml", OPENAPI_YAML);
+    write(&api, "src/client.rs", FULLY_RESOLVED_CLIENT);
     write(&web, "src/main.rs", AXUM_MAIN);
 
     assert!(logos(&api, &["index"]).status.success(), "index api");
@@ -1785,7 +1824,22 @@ fn an_empty_reachability_answer_over_a_non_zero_residue_names_the_count() {
 /// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
 #[test]
 fn a_zero_residue_leaves_the_reachability_answer_exactly_as_it_was() {
-    let tmp = workspace();
+    // The fixture that makes this the ZERO-residue case rather than the
+    // nothing-captured one: `api` makes a real outbound call and it binds.
+    // Asserted on the shipped payload, not assumed, via `workspace status`.
+    let tmp = workspace_with_fully_resolved_egress();
+    let coverage = &logos_json(tmp.path(), &["workspace", "status"])["coverage"];
+    assert_eq!(
+        coverage["by_intake"]["invocation"]["bound"], 1,
+        "the fixture must CAPTURE egress and resolve it, or `unchanged` is \
+         pinned over a workspace that made no outbound call at all: {coverage}"
+    );
+    assert_eq!(
+        coverage["by_intake"]["invocation"]["unbound"].as_u64().unwrap_or(0)
+            + coverage["by_intake"]["invocation"]["ambiguous"].as_u64().unwrap_or(0),
+        0,
+        "and must leave nothing unresolved: {coverage}"
+    );
     let symbol = route_symbol(tmp.path());
 
     let callers = logos_json(tmp.path(), &["xservice", "callers", &symbol]);
@@ -1793,8 +1847,8 @@ fn a_zero_residue_leaves_the_reachability_answer_exactly_as_it_was() {
     // or "unchanged" would be asserted over an answer that is empty for a reason.
     assert_eq!(
         callers["cross_service"].as_array().map(Vec::len),
-        Some(1),
-        "the fixture's contract-surface edge must be here: {callers}"
+        Some(2),
+        "both the contract-surface edge and the resolved client call are here: {callers}"
     );
     let mut keys: Vec<&str> = callers.as_object().expect("object").keys().map(String::as_str).collect();
     keys.sort_unstable();
