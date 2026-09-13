@@ -1049,6 +1049,28 @@ mod tests {
         assert_eq!(first.action, InitAction::Created);
         let written = fs::read_to_string(&gitignore).unwrap();
 
+        // The header and the trailing newline are part of what is written, so
+        // they are asserted rather than left to a reader's assumption: emptying
+        // the header constant, or dropping the final newline, broke no test
+        // before this. The newline matters beyond tidiness — `upsert_managed_block`
+        // falls back to `existing.len()` when the end marker has no newline, so
+        // the block still round-trips and the omission is otherwise silent.
+        let begin_at = find_marker(&written, GI_BEGIN).expect("a begin marker");
+        assert!(
+            begin_at > 0,
+            "the header is written ABOVE the block, outside the markers, so a \
+             user may edit or remove it freely: {written:?}"
+        );
+        assert_eq!(
+            &written[..begin_at],
+            WORKSPACE_GITIGNORE_HEADER,
+            "everything above the marker is exactly the header"
+        );
+        assert!(
+            written.ends_with(&format!("{GI_END}\n")),
+            "the file ends with the end marker and a newline: {written:?}"
+        );
+
         let second = workspace_root_gitignore(tmp.path(), ".logos.workspace.warm.json").unwrap();
         assert_eq!(
             second.action,
