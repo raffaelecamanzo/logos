@@ -815,8 +815,21 @@ function ImpactPanel() {
                     </Card>
                   ),
                 )}
+                {/* CR-125/BR-53: the residue rides EVERY reachability answer,
+                    not only the empty one. An empty answer over a non-zero
+                    residue is UNRESOLVED, named with its count, never a bare
+                    empty set — and a partial answer is still partial. The text
+                    is the payload's own composed line, so this view cannot state
+                    a figure the API did not compute. */}
+                {model.unresolved_egress && (
+                  <Card title="Unresolved egress">
+                    <p className="muted">{model.unresolved_egress.summary}</p>
+                  </Card>
+                )}
                 {model.cross_service.length === 0 ? (
-                  <EmptyState message="No cross-service impact — no resolved binding reaches this symbol from another service. (An unmaterialized binding is unknown, not absent — see Cross-service coverage.)" />
+                  model.unresolved_egress ? null : (
+                    <EmptyState message="No cross-service impact — no resolved binding reaches this symbol from another service. (An unmaterialized binding is unknown, not absent — see Cross-service coverage.)" />
+                  )
                 ) : (
                   model.cross_service.map((far) => (
                     <CrossServicePanel key={`${far.member}:${far.via.from.symbol}`} far={far} />

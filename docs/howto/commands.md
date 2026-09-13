@@ -835,6 +835,40 @@ working, not a defect.
 builds all N, [NFR-PE-10](../specs/requirements/NFR-PE-10.md)). All `--json`
 output is a single machine-clean line.
 
+**A reachability answer carries its unresolved residue** ([CR-125], [BR-53]).
+`callers` and `impact` answer "what reaches this / what does this reach" across a
+boundary, and an **empty** answer there is read as safety. So both — on the CLI,
+the `xservice_*` MCP tools and `/api/v1/workspace/*` alike — carry an
+`unresolved_egress` block reporting the captured outbound call sites *in scope*
+that did not resolve:
+
+| Field | What it says |
+|---|---|
+| `unresolved_sites` | how many captured outbound sites in scope produced no edge |
+| `measured_sites` | the denominator — the same `bound + ambiguous + unbound` egress population `workspace status`'s `egress_resolution` is computed over, so `unresolved_sites = measured_sites − bound` |
+| `by_reason` | the per-reason breakdown, most sites first; sums exactly to `unresolved_sites` |
+| `no_provider_in_workspace` | sites whose provider is outside this workspace — bucketed **apart**, never counted inside the residue |
+| `scope` / `members_in_scope` | which members' egress this covers — `members_in_scope` is how many members the unresolved sites are **spread across**, not the workspace's roster size |
+| `covers_all_members` | `false` marks a residue computed over fewer than all members |
+| `summary` | the one composed line carrying all of it |
+
+**The block is absent exactly when the residue is zero**, and only then — so an
+answer over a fully-resolved scope reads exactly as it always has. Read the two
+together: an empty `cross_service` list *beside* an `unresolved_egress` block does
+not say "nothing reaches this symbol", it says the question was answered over a
+graph missing that many outbound calls. `--repo` scopes the residue to that
+member's egress, the same narrowing it applies to the answer's own fan-out. The
+residue is advisory — it is never a gate input and moves no verdict or baseline.
+
+`--repo` narrows the per-member fan-out and the residue; it does **not** narrow
+the cross-service tier, which matches on the queried symbol alone. Under a scope
+the `summary` line therefore names the population of each half — the resolved
+count as *workspace-wide*, the residue as the member it covers — so the two are
+never read as one figure.
+
+[BR-53]: ../specs/software-spec.md#327-workspace-federation
+[CR-125]: ../requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
+
 **Cross-service invocation arms.** The bridge binds real runtime invocations, not
 just declared contracts, through a pluggable arm contract (each arm normalizes a
 call to a portable key and refuses anything non-static — zero approximate binds).

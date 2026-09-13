@@ -750,8 +750,8 @@ pub(crate) async fn workspace_callers(
     let limit = opt_param(&q, "limit").and_then(|n| n.parse::<usize>().ok());
     let repo = opt_param(&q, "repo");
     workspace_fan(backing, bridge, "api_v1_workspace_callers", move |registry, bridge| {
-        let edges = fed_query::edges(bridge, registry);
-        fed_query::xservice_callers(registry, &edges, &symbol, limit, repo.as_deref())
+        let (edges, residue) = fed_query::reachability_inputs(bridge, registry);
+        fed_query::xservice_callers(registry, &edges, &residue, &symbol, limit, repo.as_deref())
     })
     .await
 }
@@ -772,8 +772,8 @@ pub(crate) async fn workspace_impact(
     let depth = opt_param(&q, "depth").and_then(|n| n.parse::<usize>().ok());
     let repo = opt_param(&q, "repo");
     workspace_fan(backing, bridge, "api_v1_workspace_impact", move |registry, bridge| {
-        let edges = fed_query::edges(bridge, registry);
-        fed_query::xservice_impact(registry, &edges, &symbol, depth, repo.as_deref())
+        let (edges, residue) = fed_query::reachability_inputs(bridge, registry);
+        fed_query::xservice_impact(registry, &edges, &residue, &symbol, depth, repo.as_deref())
     })
     .await
 }

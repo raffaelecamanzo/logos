@@ -1662,3 +1662,240 @@ symbol = \"[unclosed\"
         "an uncompilable rule glob must not report a clean workspace",
     );
 }
+
+// ── S-401 / [CR-125]: a reachability answer carries its unresolved residue ────
+//
+// [CR-125]: ../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
+
+/// An `api` client whose only outbound call is a **static** absolute literal —
+/// the HTTP client-call arm captures it and it binds `web`'s route, so the
+/// workspace has captured egress and resolves **all** of it. The zero-residue
+/// case that matters: the answer is unqualified because nothing was left
+/// unresolved, not because nothing was looked at.
+const FULLY_RESOLVED_CLIENT: &str = r#"
+use reqwest::Client;
+
+pub async fn fetch_user(client: Client) {
+    let _ = client.get("/users/{id}").await;
+}
+"#;
+
+/// An `api` client whose only outbound call composes its URL at **runtime** — the
+/// HTTP client-call arm captures the site and records one keyless refusal for it
+/// (S-374), so the workspace has a non-zero egress residue and **no** resolved
+/// cross-service edge from it.
+const RUNTIME_COMPOSED_CLIENT: &str = r#"
+use reqwest::Client;
+
+pub async fn fetch_dynamic(client: Client, url: String) {
+    let _ = client.get(url).await;
+}
+"#;
+
+/// The two-member workspace with a **non-zero** egress residue: `api` consumes an
+/// OpenAPI operation nothing provides *and* makes one runtime-composed client
+/// call, so no cross-service edge reaches `web`'s route while an outbound site
+/// stays unresolved — the exact state [CR-125] says must not render as an absence.
+fn workspace_with_unresolved_egress() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let api = root.join("api");
+    let web = root.join("web");
+
+    init_repo(&api);
+    init_repo(&web);
+    write(&api, "api/openapi.yaml", ORPHAN_OPENAPI_YAML);
+    write(&api, "src/client.rs", RUNTIME_COMPOSED_CLIENT);
+    write(&web, "src/main.rs", AXUM_MAIN);
+
+    assert!(logos(&api, &["index"]).status.success(), "index api");
+    assert!(logos(&web, &["index"]).status.success(), "index web");
+
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"web\"]\ndefault = \"api\"\n",
+    )
+    .unwrap();
+    tmp
+}
+
+/// The two-member workspace with captured egress that **fully resolves**: `api`'s
+/// one client call is static and binds `web`'s route, so `measured_sites > 0`
+/// and `unresolved_sites == 0`.
+fn workspace_with_fully_resolved_egress() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let api = root.join("api");
+    let web = root.join("web");
+
+    init_repo(&api);
+    init_repo(&web);
+    write(&api, "api/openapi.yaml", OPENAPI_YAML);
+    write(&api, "src/client.rs", FULLY_RESOLVED_CLIENT);
+    write(&web, "src/main.rs", AXUM_MAIN);
+
+    assert!(logos(&api, &["index"]).status.success(), "index api");
+    assert!(logos(&web, &["index"]).status.success(), "index web");
+
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"web\"]\ndefault = \"api\"\n",
+    )
+    .unwrap();
+    tmp
+}
+
+/// The `web` axum route's symbol, resolved through the shipped binary.
+fn route_symbol(root: &Path) -> String {
+    let hits = logos_json(
+        root,
+        &["xservice", "search", "users", "--kind", "route", "--repo", "web"],
+    );
+    hits["members"][0]["result"]["hits"][0]["symbol"]
+        .as_str()
+        .expect("the axum route node is indexed in web")
+        .to_string()
+}
+
+/// **The fixture [CR-125] is filed for: an empty answer over a non-zero residue
+/// renders as unresolved, naming the count — never as a bare empty set**
+/// ([FR-WS-05], [BR-53]).
+///
+/// Both reachability verbs, on the shipped CLI, in the `--json` rendering the web
+/// API and every script read. The human rendering is the same read-model
+/// pretty-printed ([`crate::Output::print`]), so the composed `summary` line is
+/// what a human sees — the same single-field discipline `resolved_edges_summary`
+/// carries for `workspace status` ([CR-111] §4.4).
+///
+/// [BR-53]: ../../docs/specs/software-spec.md#327-workspace-federation
+/// [CR-111]: ../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+/// [CR-125]: ../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
+/// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
+#[test]
+fn an_empty_reachability_answer_over_a_non_zero_residue_names_the_count() {
+    let tmp = workspace_with_unresolved_egress();
+    let symbol = route_symbol(tmp.path());
+
+    for (verb, noun) in [("callers", "cross-service callers"), ("impact", "cross-service impacts")] {
+        let answer = logos_json(tmp.path(), &["xservice", verb, &symbol]);
+        assert_eq!(
+            answer["cross_service"].as_array().map(Vec::len),
+            Some(0),
+            "`xservice {verb}` resolves nothing here — the empty answer under test: {answer}"
+        );
+
+        let residue = &answer["unresolved_egress"];
+        assert!(
+            residue.is_object(),
+            "`xservice {verb}` must carry its unresolved egress residue: {answer}"
+        );
+        assert_eq!(
+            residue["unresolved_sites"], 1,
+            "the runtime-composed client call is the one unresolved outbound site: {residue}"
+        );
+        assert_eq!(residue["measured_sites"], 1, "captured egress in scope: {residue}");
+        assert_eq!(
+            residue["by_reason"],
+            serde_json::json!([{ "reason": "base-url-runtime", "sites": 1 }]),
+            "the per-reason breakdown, in the FR-WS-05 wire vocabulary: {residue}"
+        );
+        assert_eq!(
+            residue["summary"].as_str(),
+            Some(
+                format!(
+                    "no resolved {noun}; 1 of 1 captured outbound site in scope did not \
+                     resolve across 1 member (base-url-runtime 1)"
+                )
+                .as_str()
+            ),
+            "the one composed line names the count and its reasons: {residue}"
+        );
+    }
+}
+
+/// **Where the residue is zero the rendering is unchanged**: no key is added, so
+/// an answer over a fully-resolved scope serializes exactly as it did before
+/// [CR-125] ([FR-WS-05] — silence is honest in this one case).
+///
+/// Asserted on the **key set**, not on the absence of one name: a residue block
+/// smuggled in under any other key would fail this too.
+///
+/// [CR-125]: ../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
+/// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
+#[test]
+fn a_zero_residue_leaves_the_reachability_answer_exactly_as_it_was() {
+    // The fixture that makes this the ZERO-residue case rather than the
+    // nothing-captured one: `api` makes a real outbound call and it binds.
+    // Asserted on the shipped payload, not assumed, via `workspace status`.
+    let tmp = workspace_with_fully_resolved_egress();
+    let coverage = &logos_json(tmp.path(), &["workspace", "status"])["coverage"];
+    assert_eq!(
+        coverage["by_intake"]["invocation"]["bound"], 1,
+        "the fixture must CAPTURE egress and resolve it, or `unchanged` is \
+         pinned over a workspace that made no outbound call at all: {coverage}"
+    );
+    assert_eq!(
+        coverage["by_intake"]["invocation"]["unbound"].as_u64().unwrap_or(0)
+            + coverage["by_intake"]["invocation"]["ambiguous"].as_u64().unwrap_or(0),
+        0,
+        "and must leave nothing unresolved: {coverage}"
+    );
+    let symbol = route_symbol(tmp.path());
+
+    let callers = logos_json(tmp.path(), &["xservice", "callers", &symbol]);
+    // Guard the guard: this fixture must genuinely resolve its cross-service tier,
+    // or "unchanged" would be asserted over an answer that is empty for a reason.
+    assert_eq!(
+        callers["cross_service"].as_array().map(Vec::len),
+        Some(2),
+        "both the contract-surface edge and the resolved client call are here: {callers}"
+    );
+    let mut keys: Vec<&str> = callers.as_object().expect("object").keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["cross_service", "members", "query"],
+        "no residue block over a zero residue: {callers}"
+    );
+
+    let impact = logos_json(tmp.path(), &["xservice", "impact", &symbol]);
+    let mut keys: Vec<&str> = impact.as_object().expect("object").keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["cross_service", "query", "seed"],
+        "no residue block over a zero residue: {impact}"
+    );
+}
+
+/// The scope rule ([FR-WS-05]): `--repo` reports that member's residue alone —
+/// the same narrowing it applies to the answer's own fan-out.
+#[test]
+fn repo_scopes_the_residue_to_the_named_members_egress() {
+    let tmp = workspace_with_unresolved_egress();
+    let symbol = route_symbol(tmp.path());
+
+    let scoped = logos_json(tmp.path(), &["xservice", "callers", &symbol, "--repo", "api"]);
+    let residue = &scoped["unresolved_egress"];
+    assert_eq!(residue["scope"], "api", "the residue names the scope it covers: {residue}");
+    assert_eq!(residue["members_in_scope"], 1);
+    assert_eq!(residue["unresolved_sites"], 1, "api owns the unresolved site: {residue}");
+    // `--repo` narrows the residue but NOT the cross-service tier, so the line
+    // says which population each of its halves covers ([NFR-CC-04]).
+    assert_eq!(
+        residue["summary"].as_str(),
+        Some(
+            "no resolved cross-service callers workspace-wide; 1 of 1 captured \
+             outbound site in api did not resolve across 1 member (base-url-runtime 1)"
+        ),
+        "the scoped line names both populations: {residue}"
+    );
+
+    // `web` makes no outbound call at all, so its residue is zero and the answer
+    // stands unqualified — the zero case, reached by scoping rather than by luck.
+    let elsewhere = logos_json(tmp.path(), &["xservice", "callers", &symbol, "--repo", "web"]);
+    assert!(
+        elsewhere.get("unresolved_egress").is_none(),
+        "`web` has no captured egress, so nothing is added: {elsewhere}"
+    );
+}

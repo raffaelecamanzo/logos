@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use logos_core::federation::{
-    self, query, workspace_governance, Backing, BridgeEdge, ContractBridge, EngineRegistry,
+    self, query, workspace_governance, Backing, ContractBridge, EngineRegistry,
 };
 use logos_core::{governance::DsmGranularity, model::NodeKind, Engine};
 use rmcp::{
@@ -135,8 +135,15 @@ impl LogosMcp {
     }
 
     /// Run one `xservice_*` read-model over the member registry (FR-WS-05):
-    /// resolve the federated registry, compute the cached bridge edges, and hand
-    /// both to the thick-core [`query`] fn (no surface logic, NFR-MA-02).
+    /// resolve the federated registry and hand it, with the workspace's
+    /// [`ContractBridge`], to the thick-core [`query`] fn (no surface logic,
+    /// NFR-MA-02).
+    ///
+    /// The **bridge**, not a pre-computed edge slice: its derived read-models are
+    /// now two (edges, and S-401's unresolved egress residue) and only the
+    /// reachability verbs want the second, so each tool pulls exactly what it
+    /// renders and `search` never pays for a walk it discards (NFR-PE-01). The
+    /// shape `api_v1::workspace_fan` already uses.
     async fn run_xservice<T, F>(
         &self,
         tool: &'static str,
@@ -144,9 +151,9 @@ impl LogosMcp {
     ) -> Result<CallToolResult, ErrorData>
     where
         T: serde::Serialize + Send + 'static,
-        F: FnOnce(&EngineRegistry<Engine>, &[BridgeEdge]) -> T + Send + 'static,
+        F: FnOnce(&EngineRegistry<Engine>, &ContractBridge) -> T + Send + 'static,
     {
-        self.run_xservice_result(tool, move |registry, edges| Ok(call(registry, edges)))
+        self.run_xservice_result(tool, move |registry, bridge| Ok(call(registry, bridge)))
             .await
     }
 
@@ -165,7 +172,7 @@ impl LogosMcp {
     ) -> Result<CallToolResult, ErrorData>
     where
         T: serde::Serialize + Send + 'static,
-        F: FnOnce(&EngineRegistry<Engine>, &[BridgeEdge]) -> anyhow::Result<T> + Send + 'static,
+        F: FnOnce(&EngineRegistry<Engine>, &ContractBridge) -> anyhow::Result<T> + Send + 'static,
     {
         let backing = Arc::clone(&self.backing);
         let bridge = Arc::clone(&self.bridge);
@@ -173,8 +180,7 @@ impl LogosMcp {
             let registry = backing
                 .as_federated()
                 .context("xservice tools require a federated workspace backing")?;
-            let edges = query::edges(&bridge, registry);
-            call(registry, &edges)
+            call(registry, &bridge)
         })
         .await
     }
@@ -848,34 +854,36 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<XserviceRepoParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run_xservice("xservice_route_providers", move |_reg, edges| {
-            query::xservice_route_providers(edges, p.repo.as_deref())
+        self.run_xservice("xservice_route_providers", move |reg, bridge| {
+            query::xservice_route_providers(&query::edges(bridge, reg), p.repo.as_deref())
         })
         .await
     }
 
     #[tool(
-        description = "Cross-service callers of a symbol (FR-WS-05): each member's intra-repo callers (repo-qualified) plus the cross-service consumers that reach it over a bridge edge. `repo` scopes the intra-repo fan-out to one member."
+        description = "Cross-service callers of a symbol (FR-WS-05): each member's intra-repo callers (repo-qualified) plus the cross-service consumers that reach it over a bridge edge. `repo` scopes the intra-repo fan-out to one member. EVERY ANSWER CARRIES ITS UNRESOLVED RESIDUE (CR-125, BR-53): `unresolved_egress` reports the captured outbound call sites in scope that did NOT resolve — `unresolved_sites` (the count), `measured_sites` (its denominator, the same `bound+ambiguous+unbound` egress population `workspace_status`'s `egress_resolution` is taken over, so `unresolved_sites = measured_sites - bound`), `by_reason` (the per-reason breakdown, summing exactly to `unresolved_sites`), `no_provider_in_workspace` (sites whose provider is outside this workspace — bucketed APART, never inside the residue), `members_in_scope` (how many members the unresolved sites are SPREAD ACROSS — not the workspace roster size), `covers_all_members` and `summary`, the one composed line carrying all of it. THE FIELD IS ABSENT EXACTLY WHEN THE RESIDUE IS ZERO, and only then: an EMPTY `cross_service` list WITH an `unresolved_egress` block does NOT mean \"nothing reaches this\" — it means the question was answered over a graph missing that many outbound calls. Do not read it as an absence. `repo` scopes the residue to that member's egress, exactly as it scopes the per-member fan-out — but NOT the cross-service tier, which matches on the symbol alone; under a `repo` scope the `summary` says so, marking the resolved count workspace-wide and naming the member the residue covers. Advisory only, never a gate input."
     )]
     async fn xservice_callers(
         &self,
         Parameters(p): Parameters<XserviceCallersParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run_xservice("xservice_callers", move |reg, edges| {
-            query::xservice_callers(reg, edges, &p.symbol, p.limit, p.repo.as_deref())
+        self.run_xservice("xservice_callers", move |reg, bridge| {
+            let (edges, residue) = query::reachability_inputs(bridge, reg);
+            query::xservice_callers(reg, &edges, &residue, &p.symbol, p.limit, p.repo.as_deref())
         })
         .await
     }
 
     #[tool(
-        description = "Cross-service impact of changing a symbol (FR-WS-05): the seed member's impact plus the far member's impact stitched across every bridge edge the symbol is an endpoint of, all repo-qualified. `repo` scopes the seed to one member."
+        description = "Cross-service impact of changing a symbol (FR-WS-05): the seed member's impact plus the far member's impact stitched across every bridge edge the symbol is an endpoint of, all repo-qualified. `repo` scopes the seed to one member. EVERY ANSWER CARRIES ITS UNRESOLVED RESIDUE (CR-125, BR-53): `unresolved_egress` reports the captured outbound call sites in scope that did NOT resolve — `unresolved_sites` (the count), `measured_sites` (its denominator, the same `bound+ambiguous+unbound` egress population `workspace_status`'s `egress_resolution` is taken over, so `unresolved_sites = measured_sites - bound`), `by_reason` (the per-reason breakdown, summing exactly to `unresolved_sites`), `no_provider_in_workspace` (sites whose provider is outside this workspace — bucketed APART, never inside the residue), `members_in_scope` (how many members the unresolved sites are SPREAD ACROSS — not the workspace roster size), `covers_all_members` and `summary`, the one composed line carrying all of it. THE FIELD IS ABSENT EXACTLY WHEN THE RESIDUE IS ZERO, and only then: an EMPTY `cross_service` list WITH an `unresolved_egress` block does NOT mean \"nothing reaches this\" — it means the question was answered over a graph missing that many outbound calls. Do not read it as an absence. `repo` scopes the residue to that member's egress, exactly as it scopes the per-member fan-out — but NOT the cross-service tier, which matches on the symbol alone; under a `repo` scope the `summary` says so, marking the resolved count workspace-wide and naming the member the residue covers. Advisory only, never a gate input."
     )]
     async fn xservice_impact(
         &self,
         Parameters(p): Parameters<XserviceImpactParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run_xservice("xservice_impact", move |reg, edges| {
-            query::xservice_impact(reg, edges, &p.symbol, p.depth, p.repo.as_deref())
+        self.run_xservice("xservice_impact", move |reg, bridge| {
+            let (edges, residue) = query::reachability_inputs(bridge, reg);
+            query::xservice_impact(reg, &edges, &residue, &p.symbol, p.depth, p.repo.as_deref())
         })
         .await
     }
@@ -888,7 +896,7 @@ impl LogosMcp {
         Parameters(p): Parameters<XserviceSearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let kind = parse_kind(p.kind.as_deref())?;
-        self.run_xservice("xservice_search", move |reg, _edges| {
+        self.run_xservice("xservice_search", move |reg, _bridge| {
             query::xservice_search(reg, &p.query, kind, p.limit, p.repo.as_deref())
         })
         .await
@@ -898,7 +906,7 @@ impl LogosMcp {
         description = "Workspace status (FR-WS-05): each member's index freshness and warm state, the workspace warm roll-up, plus the 3-state (bound/ambiguous/unbound-with-reasons) cross-service coverage summary. Each member row carries `warm_state`: `warm` (its graph holds at least one indexed file), `deferred` (no index yet and none attempted — honest and NON-alarming, it indexes lazily on first query, FR-IX-07), or `degraded` (attempted and FAILED, with the reason). `warming` is in the vocabulary but is never reported without a live signal from the warm supervisor, and the roll-up then OMITS the `warming` key entirely rather than sending 0 — an absent `warming` means not-knowable, never none (FR-WS-15, NFR-CC-04). Each row ALSO carries `open_state` on a SEPARATE axis (FR-WS-16): `opened` (its store was opened — a member later evicted to stay inside the workspace connection budget still reads `opened`, because eviction reclaims a success), `not-attempted` (nothing needed this member, so nothing was opened — not a failure), or `degraded` (opening was attempted and FAILED, carrying `degraded_reason` and, when the diagnostic identifies one, `degraded_cause` — `host-resource-limit` means the store is intact and the process ran out of file descriptors, so a re-index is NOT the remedy). `warm_state` is about index presence and `open_state` about store openability: different questions, never merge them. The `degraded_rollup` names every unopenable member and its `covers_all_members: false` marks the warm roll-up, the coverage summary and the topic inventory as computed over fewer than all members. THE HEADLINE IS `coverage.resolved_cross_service_edges` — cross-service edges resolved from a captured `invocation` (a caller→callee HTTP client call, a producer→consumer broker publish, a gRPC stub call) — and it is NEVER read without `coverage.egress_resolution` beside it, the rate at which captured egress sites resolve at all (BR-51). `coverage.resolved_edges_summary` carries both in one line, and `coverage.egress_resolution_measured` is that rate's explicit denominator. `egress_resolution` is ABSENT when no egress site was captured, never a fabricated 1.0 — an absent rate with `egress_resolution_measured: 0` means NOTHING OUTBOUND WAS CAPTURED, which is a different statement from `0.0` (captured and none resolved). The edge count counts EDGES, not sites: one broker publish binds every cross-member subscriber and the bridge emits one edge per subscriber, so it is NOT `egress_resolution`'s numerator. `coverage.spec_conformance_ratio` is `bound / (bound+ambiguous+unbound)` — the RETIRED `bound_ratio`'s formula under the name of what it measures: how far this workspace's DECLARATIONS line up with its controllers. It is dominated by contract-surface intake and is NEVER a measure of cross-service coupling; read `resolved_cross_service_edges` for that. It is likewise ABSENT when nothing was measured (bound+ambiguous+unbound = 0), never a fabricated 1.0, and never bare: `coverage.spec_conformance_measured` is its denominator and `coverage.spec_conformance_summary` the composed line (CR-111). `bound_ratio` IS NO LONGER SENT (CR-120) — a reader of it gets nothing, deliberately, rather than a renamed figure. No warm state affects the CLI exit code; an unopenable member makes `logos workspace status` exit 1 (FR-WS-16) — MCP calls report it in the payload instead. The coverage tier is advisory only, never a gate input. Each row in `coverage.references` NAMES THE OTHER END (CR-118): a bound row carries `to` (the provider's member+symbol — the same pair `xservice route-providers` reports for it); an ambiguous row carries `candidates`, the providers it tied between. Read `candidates.disposition`, never the row's bucket: `tied-between` means NONE of them is bound (no edge; naming a candidate is not binding to it), `bound-to` means ALL of them are (the broker fan-out, where one publish reaches every cross-member subscriber and there is no single `to`). The set is capped at 8 with `total` and `omitted` disclosing any truncation. Both fields are OPTIONAL and absent when there is nothing to name — an older store has neither. EVERY row also carries `intake` (`contract-surface` for a declared endpoint, `invocation` for a captured call site), in every state — bound, ambiguous and unbound alike — and it is NOT optional (S-377/CR-120). Do not read its presence as \"this row bound something\": that is `bucket`/`state`. `coverage.by_intake` reports the same four classification counters split by it — `by_intake.contract_surface` and `by_intake.invocation`, each with `bound`/`ambiguous`/`unbound`/`no_provider_in_workspace` — and the two populations SUM to the four top-level counters, so the split can never report less than the headline beside it. READ THE SPLIT before drawing any conclusion from `bound`: it counts two different things as one. On the 84-member reference estate the split is 81 `contract-surface` and 0 `invocation` bound rows, i.e. no outbound call site in the whole workspace resolves — a state a bare `bound: 81` reads as healthy (CR-120, NFR-CC-04). A high `ambiguous` count is usually NOT a matching defect: where several members legitimately serve one template (the aggregator pattern), the exactly-one rule is refusing correctly and no path-normalisation or method precedence can resolve it — that ambiguity is call-site-gated, not match-gated (FR-CG-09)."
     )]
     async fn workspace_status(&self) -> Result<CallToolResult, ErrorData> {
-        self.run_xservice("workspace_status", |reg, _edges| {
+        self.run_xservice("workspace_status", |reg, _bridge| {
             query::workspace_status(reg)
         })
         .await
@@ -912,8 +920,8 @@ impl LogosMcp {
         Parameters(p): Parameters<XserviceReachabilityParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let scope = federation::ReachabilityScope::new(p.repo, p.all.unwrap_or(false));
-        self.run_xservice("workspace_reachability", move |reg, edges| {
-            federation::app_wide_reachability(reg, edges).bound(scope)
+        self.run_xservice("workspace_reachability", move |reg, bridge| {
+            federation::app_wide_reachability(reg, &query::edges(bridge, reg)).bound(scope)
         })
         .await
     }
@@ -922,8 +930,8 @@ impl LogosMcp {
         description = "Workspace governance (FR-WS-13): evaluate the workspace rule family ([governance] in logos.workspace.toml — service-layer boundaries and no-cross-service-callers contracts) over the cross-service bridge bindings. Reported at the workspace level and ADVISORY: it never alters any member's per-repo quality gate. Returns null when no workspace rules are declared (honest empty), never a fabricated passing report."
     )]
     async fn workspace_check(&self) -> Result<CallToolResult, ErrorData> {
-        self.run_xservice_result("workspace_check", |reg, edges| {
-            workspace_governance(reg.federation(), edges)
+        self.run_xservice_result("workspace_check", |reg, bridge| {
+            workspace_governance(reg.federation(), &query::edges(bridge, reg))
         })
         .await
     }

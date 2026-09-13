@@ -1481,6 +1481,43 @@ export interface CrossServiceImpact {
   impact: ImpactResult;
 }
 
+/** One refusal reason with the number of unresolved egress sites carrying it
+ *  (mirrors `ResidueReason`). `reason` is an [FR-WS-05] wire token — treat the
+ *  union as OPEN, exactly as `UnboundReason` is treated elsewhere here. */
+export interface ResidueReason {
+  reason: string;
+  sites: number;
+}
+
+/** What a cross-service reachability answer COULD NOT REACH (CR-125, BR-53) —
+ *  mirrors `EgressResidue`.
+ *
+ *  Present exactly when the residue is non-zero, and **absent** when it is zero:
+ *  an answer whose `cross_service` list is empty AND that carries this block has
+ *  not said "nothing reaches this symbol", it has said "the graph this was
+ *  answered over is missing `unresolved_sites` outbound calls". Rendering the
+ *  empty list without it is the misreading CR-125 exists to remove. */
+export interface EgressResidue {
+  /** The `?repo=` member this residue covers, absent when unscoped. */
+  scope?: string;
+  /** How many members contributed captured egress — the spread of the
+   *  unresolved sites, NOT the workspace's roster size. */
+  members_in_scope: number;
+  /** The denominator: captured outbound sites in scope
+   *  (`bound + ambiguous + unbound`, the egress-resolution population). */
+  measured_sites: number;
+  /** Of those, the ones that produced no edge. Never zero. */
+  unresolved_sites: number;
+  /** Sites whose provider is outside this workspace — bucketed APART from the
+   *  residue, never inside it. */
+  no_provider_in_workspace: number;
+  /** Sums exactly to `unresolved_sites`. */
+  by_reason: ResidueReason[];
+  covers_all_members: boolean;
+  /** The one composed line carrying the answer and its residue together. */
+  summary: string;
+}
+
 /** `GET /api/v1/workspace/impact?symbol=<s>` — the seed member(s)\' impact plus
  *  each far-side impact stitched across a bridge edge (the cross-service impact
  *  view). */
@@ -1489,4 +1526,6 @@ export interface XserviceImpact {
   scope?: string;
   seed: MemberResult<ImpactResult>[];
   cross_service: CrossServiceImpact[];
+  /** The unresolved egress residue, absent exactly when it is zero (CR-125). */
+  unresolved_egress?: EgressResidue;
 }
