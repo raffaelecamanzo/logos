@@ -839,7 +839,7 @@ fn is_http_method(name: &str) -> bool {
 /// *add* sites, so it biases in favour of CRA-01 like every other judgement
 /// call here (see the module docs).
 ///
-/// # One site per call, and the NARROWEST operand wins (S-399)
+/// # One site per call: an operand that CONTAINS another is dropped (S-399)
 ///
 /// Several shipped `.scm` patterns match the **same** call, each binding
 /// `@invoke.http.arg` to a different node — Java's and Kotlin's
@@ -848,16 +848,28 @@ fn is_http_method(name: &str) -> bool {
 /// counted twice in every taxonomy column here, with one row classified from
 /// the wrapper and one from what it wraps.
 ///
-/// Production does not count it twice, and this mirrors the rule it uses rather
-/// than inventing a second one: `extract::config::record_refusals` cancels a
-/// refusal candidate whenever a RESOLVED operand of the same relation lies
-/// **inside** its range, so the operand the arm's answer comes from is the
-/// innermost one it could read. Keeping the narrowest operand per anchor is
-/// that same preference, computed here without the resolution step this harness
-/// does not run.
+/// Production does not count it twice, and the rule below is production's own,
+/// not a proxy for it: `extract::config::record_refusals` cancels a refusal
+/// candidate whenever a resolved operand of the same relation lies **inside**
+/// its byte range. Keying on containment is that test with "resolved" widened
+/// to "any other captured operand" — the harness does not run the resolution
+/// step, so it cannot ask which operand resolved, but the nesting it keys on is
+/// the same nesting.
 ///
-/// The corpus this bias was measured on contains **zero** `URI.create(…)` sites
-/// in Java and Kotlin (counted 2026-09-13), so on `pec-services` the rule moves
+/// **Containment, not the anchor node.** An earlier spelling grouped by the
+/// anchor the verb was read from and kept the narrowest operand in each group.
+/// It agrees with production on every nested pair, and diverges where two
+/// genuinely distinct calls share one anchor: `restTemplate.get("/a").uri("/b")`
+/// binds `@invoke.http.method` to the same `get` identifier from pattern 4 and
+/// from pattern 1, so the anchor rule discarded `"/a"` — an operand belonging
+/// to the *other* call, which production counts. No `RestClient`/`RestTemplate`/
+/// `WebClient`/`HttpClient` verb method takes an argument *and* returns
+/// something with `.uri(…)`, so it was latent rather than a live census error;
+/// it is spelled out because the two rules are indistinguishable on every
+/// fixture in this file.
+///
+/// The corpus this was measured on contains **zero** `URI.create(…)` sites in
+/// Java and Kotlin (counted 2026-09-13), so on `pec-services` the rule moves
 /// only the lambda shape: the 3 `.uri(builder -> builder.path(<accessor>)…)`
 /// sites pattern 5 admits are classified from the accessor rather than from the
 /// lambda. The module header's Sprint-64 table predates that and is not re-run
@@ -912,23 +924,23 @@ fn collect_sites<'t>(
         let anchor = method_node
             .or(declared.map(|(_, n)| n))
             .unwrap_or(arg_node);
-        sites.push((anchor.id(), anchor.start_position().row as u32 + 1, arg_node));
+        sites.push((anchor.start_position().row as u32 + 1, arg_node));
     }
-    // One row per call: where two patterns matched the same anchor, the
-    // narrowest operand is the one production's reconcile lets answer.
-    let mut kept: Vec<(usize, u32, Node<'t>)> = Vec::with_capacity(sites.len());
-    for (id, line, arg) in sites {
-        match kept.iter_mut().find(|(seen, _, _)| *seen == id) {
-            Some(held) => {
-                let width = |n: &Node<'_>| n.byte_range().len();
-                if width(&arg) < width(&held.2) {
-                    held.2 = arg;
-                }
-            }
-            None => kept.push((id, line, arg)),
-        }
-    }
-    kept.into_iter().map(|(_, line, arg)| (line, arg)).collect()
+    // One row per call, by CONTAINMENT — production's own rule, not a proxy for
+    // it. A site is dropped when another site's operand lies inside its own,
+    // which is the `record_refusals` test spelled with `resolved` replaced by
+    // "any other captured operand": the harness does not run the resolution
+    // step, so it cannot ask which operand resolved, but the nesting it keys on
+    // is the same nesting.
+    let contains = |outer: &Node<'t>, inner: &Node<'t>| {
+        let (o, i) = (outer.byte_range(), inner.byte_range());
+        i.start >= o.start && i.end <= o.end && i != o
+    };
+    sites
+        .iter()
+        .filter(|(_, arg)| !sites.iter().any(|(_, other)| contains(arg, other)))
+        .copied()
+        .collect()
 }
 
 /// Whether this file passes the [FR-FW-04] ledger gate: its extracted refs name
@@ -2230,6 +2242,42 @@ fn a_parameter_is_other_even_in_a_method_mentioning_properties() {
          client.get().uri(uri);\n  }\n}\n",
     );
     assert_eq!(a.kinds, vec![OperandKind::Other]);
+}
+
+/// Two genuinely distinct calls that share one verb anchor are **two** sites.
+///
+/// `restTemplate.get("/a").uri("/b")` binds `@invoke.http.method` to the same
+/// `get` identifier from pattern 4 and from pattern 1, so an anchor-keyed
+/// dedup would discard one call's operand entirely. Containment does not: the
+/// two operands do not nest. The fixture is not idiomatic Java — no shipped
+/// client's verb method both takes an argument and returns a `.uri(…)` builder
+/// — which is exactly why the rule needs a test rather than a corpus.
+#[cfg(feature = "lang-java")]
+#[test]
+fn two_calls_sharing_one_verb_anchor_stay_two_sites() {
+    let source = "package com.example;\n        import org.springframework.web.client.RestTemplate;\n        public class Calls {\n        \x20   private RestTemplate restTemplate;\n        \x20   void call() { restTemplate.get(\"/aaaa\").uri(\"/b\"); }\n        }\n";
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    let plugin = registry.for_path("Calls.java").expect("java plugin");
+    let query = plugin.query("invocations").expect("invocations query");
+    let mut parser = Parser::new();
+    parser.set_language(plugin.language()).expect("language");
+    let tree = parser.parse(source, None).expect("parse");
+    let mut operands: Vec<String> = collect_sites(
+        query,
+        tree.root_node(),
+        source.as_bytes(),
+        &plugin.semantics().invocation_methods,
+    )
+    .into_iter()
+    .map(|(_, arg)| arg.utf8_text(source.as_bytes()).unwrap_or_default().to_string())
+    .collect();
+    operands.sort();
+    assert_eq!(
+        operands,
+        vec!["\"/aaaa\"".to_string(), "\"/b\"".to_string()],
+        "neither call's operand contains the other, so both survive — an \
+         anchor-keyed dedup kept only the narrower one"
+    );
 }
 
 /// A `uriBuilder -> …` lambda — 9 of the corpus's Java sites — is classified
