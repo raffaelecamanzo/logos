@@ -188,18 +188,30 @@ pub struct EgressResidue {
 /// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnswerReach {
-    /// How many cross-service rows the answer resolved.
+    /// How many cross-service rows the answer resolved. **Workspace-wide**: the
+    /// cross-service tier matches on the queried symbol alone and `--repo` does
+    /// not narrow it, which is why [`EgressResidue::compose`] says so whenever a
+    /// scope is in force.
     pub resolved: usize,
-    /// What those rows are, plural, for the composed line.
+    /// What one of those rows is, singular — the composed line pluralises it
+    /// itself, because it reads "1 resolved cross-service caller" at arity one.
     pub noun: &'static str,
 }
 
 impl AnswerReach {
     /// The answer's own half of the composed line.
-    fn phrase(self) -> String {
+    ///
+    /// `scoped` qualifies the count as **workspace-wide**, which it always is:
+    /// `--repo` narrows the answer's per-member fan-out and the residue, but not
+    /// the cross-service tier this counts. Saying nothing would leave the line
+    /// joining a workspace-wide numerator to a member-scoped residue with no
+    /// sign that the two halves cover different populations ([NFR-CC-04]).
+    fn phrase(self, scoped: bool) -> String {
+        let where_ = if scoped { " workspace-wide" } else { "" };
         match self.resolved {
-            0 => format!("no resolved {}", self.noun),
-            n => format!("{n} resolved {}", self.noun),
+            0 => format!("no resolved {}s{where_}", self.noun),
+            1 => format!("1 resolved {}{where_}", self.noun),
+            n => format!("{n} resolved {}s{where_}", self.noun),
         }
     }
 }
@@ -276,22 +288,29 @@ impl EgressResidue {
     ///
     /// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
     fn compose(&self, reach: AnswerReach) -> String {
-        let members = plural(self.members_in_scope, "member");
         let reasons: Vec<String> = self
             .by_reason
             .iter()
             .map(|entry| format!("{} {}", entry.reason.as_str(), entry.sites))
             .collect();
+        // The residue's own half names the members it covers, because `--repo`
+        // narrows it and not the resolved count it sits beside.
+        let scope = match self.scope.as_deref() {
+            Some(member) => format!("in {member}"),
+            None => "in scope".to_string(),
+        };
         let mut line = format!(
-            "{}; {} of {} captured outbound sites in scope did not resolve across {members} ({})",
-            reach.phrase(),
+            "{}; {} of {} did not resolve across {} ({})",
+            reach.phrase(self.scope.is_some()),
             self.unresolved_sites,
-            self.measured_sites,
+            plural(self.measured_sites, &format!("captured outbound site {scope}")),
+            plural(self.members_in_scope, "member"),
             reasons.join(", "),
         );
         if self.no_provider_in_workspace > 0 {
+            let has = if self.no_provider_in_workspace == 1 { "has" } else { "have" };
             line.push_str(&format!(
-                "; {} more have no provider in this workspace",
+                "; {} more {has} no provider in this workspace",
                 self.no_provider_in_workspace
             ));
         }
@@ -302,12 +321,23 @@ impl EgressResidue {
     }
 }
 
-/// `n member` / `n members` — the composed line reads as English at both arities.
+/// `n member` / `n members` — the composed line reads as English at both
+/// arities, including when the noun carries a trailing qualifier
+/// (`"captured outbound site in api"` → `"2 captured outbound sites in api"`),
+/// where the plural `s` belongs on the head word and not at the end.
 fn plural(n: u64, noun: &str) -> String {
     if n == 1 {
-        format!("{n} {noun}")
-    } else {
-        format!("{n} {noun}s")
+        return format!("{n} {noun}");
+    }
+    match noun.split_once(' ') {
+        // Multi-word: the head is everything up to the qualifier. The nouns this
+        // composes are all `<adjectives> <head> <qualifier>` with the head last
+        // before the qualifier, so split on the qualifier's preposition.
+        Some(_) => match noun.rsplit_once(" in ") {
+            Some((head, qualifier)) => format!("{n} {head}s in {qualifier}"),
+            None => format!("{n} {noun}s"),
+        },
+        None => format!("{n} {noun}s"),
     }
 }
 
@@ -423,7 +453,7 @@ mod tests {
     /// The two nouns the reachability verbs answer with ([BR-53]).
     const CALLERS: AnswerReach = AnswerReach {
         resolved: 0,
-        noun: "cross-service callers",
+        noun: "cross-service caller",
     };
 
     fn reference(
@@ -556,7 +586,7 @@ mod tests {
             "an out-of-workspace provider is not an unresolved site inside it"
         );
         assert!(
-            residue.summary.ends_with("; 1 more have no provider in this workspace"),
+            residue.summary.ends_with("; 1 more has no provider in this workspace"),
             "the separately-bucketed remainder is still reported: {:?}",
             residue.summary
         );
@@ -674,6 +704,43 @@ mod tests {
         );
     }
 
+    /// **Under `--repo` the line names which population each half covers**
+    /// ([NFR-CC-04]).
+    ///
+    /// `--repo` narrows the answer's per-member fan-out and the residue, but
+    /// **not** the cross-service tier, which matches on the queried symbol alone.
+    /// So the resolved count beside a scoped residue is workspace-wide, and a
+    /// line that said only "no resolved cross-service callers; 1 of 1 captured
+    /// outbound sites **in scope**" would join two populations with nothing to
+    /// tell them apart — the same silent conflation this whole block exists to
+    /// remove, one level down.
+    #[test]
+    fn a_scoped_residue_says_which_population_each_half_of_the_line_covers() {
+        let refs = [
+            unbound("api", UnboundReason::BaseUrlRuntime),
+            unbound("web", UnboundReason::Ambiguous),
+        ];
+        let scoped = residue_from(&refs, true)
+            .beside(Some("api"), CALLERS)
+            .unwrap();
+        assert_eq!(
+            scoped.summary,
+            "no resolved cross-service callers workspace-wide; 1 of 1 captured \
+             outbound site in api did not resolve across 1 member \
+             (base-url-runtime 1)",
+            "the resolved half is workspace-wide; the residue half names `api`"
+        );
+
+        // Unscoped, there is one population and the line says `in scope`.
+        let unscoped = residue_from(&refs, true).beside(None, CALLERS).unwrap();
+        assert_eq!(
+            unscoped.summary,
+            "no resolved cross-service callers; 2 of 2 captured outbound sites in \
+             scope did not resolve across 2 members (ambiguous 1, base-url-runtime 1)",
+            "unscoped there is one population, and the line says `in scope`"
+        );
+    }
+
     /// A **contract-surface** row is a declared endpoint, not an outbound call.
     /// Counting declarations as egress would rebuild the pooled numerator
     /// [CR-120] retired.
@@ -743,14 +810,17 @@ mod tests {
         );
     }
 
-    /// One member is `1 member`, not `1 members` — the line is read by humans.
+    /// Every count slot reads as English at arity one — `1 member`, `1 captured
+    /// outbound site`, and (below) `1 resolved cross-service caller` / `1 more
+    /// has`. The line is read by humans, and three of the four slots were
+    /// hard-plural before the Sprint 69 review.
     #[test]
     fn the_composed_line_reads_as_english_at_one_member() {
         let refs = [unbound("api", UnboundReason::BaseUrlRuntime)];
         let residue = residue_from(&refs, true).beside(None, CALLERS).unwrap();
         assert_eq!(
             residue.summary,
-            "no resolved cross-service callers; 1 of 1 captured outbound sites in \
+            "no resolved cross-service callers; 1 of 1 captured outbound site in \
              scope did not resolve across 1 member (base-url-runtime 1)"
         );
     }

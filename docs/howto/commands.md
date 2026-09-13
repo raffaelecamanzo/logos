@@ -860,6 +860,12 @@ graph missing that many outbound calls. `--repo` scopes the residue to that
 member's egress, the same narrowing it applies to the answer's own fan-out. The
 residue is advisory — it is never a gate input and moves no verdict or baseline.
 
+`--repo` narrows the per-member fan-out and the residue; it does **not** narrow
+the cross-service tier, which matches on the queried symbol alone. Under a scope
+the `summary` line therefore names the population of each half — the resolved
+count as *workspace-wide*, the residue as the member it covers — so the two are
+never read as one figure.
+
 [BR-53]: ../specs/software-spec.md#327-workspace-federation
 [CR-125]: ../requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 

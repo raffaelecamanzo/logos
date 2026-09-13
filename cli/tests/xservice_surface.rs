@@ -1764,7 +1764,7 @@ fn an_empty_reachability_answer_over_a_non_zero_residue_names_the_count() {
             residue["summary"].as_str(),
             Some(
                 format!(
-                    "no resolved {noun}; 1 of 1 captured outbound sites in scope did not \
+                    "no resolved {noun}; 1 of 1 captured outbound site in scope did not \
                      resolve across 1 member (base-url-runtime 1)"
                 )
                 .as_str()
@@ -1826,6 +1826,16 @@ fn repo_scopes_the_residue_to_the_named_members_egress() {
     assert_eq!(residue["scope"], "api", "the residue names the scope it covers: {residue}");
     assert_eq!(residue["members_in_scope"], 1);
     assert_eq!(residue["unresolved_sites"], 1, "api owns the unresolved site: {residue}");
+    // `--repo` narrows the residue but NOT the cross-service tier, so the line
+    // says which population each of its halves covers ([NFR-CC-04]).
+    assert_eq!(
+        residue["summary"].as_str(),
+        Some(
+            "no resolved cross-service callers workspace-wide; 1 of 1 captured \
+             outbound site in api did not resolve across 1 member (base-url-runtime 1)"
+        ),
+        "the scoped line names both populations: {residue}"
+    );
 
     // `web` makes no outbound call at all, so its residue is zero and the answer
     // stands unqualified — the zero case, reached by scoping rather than by luck.

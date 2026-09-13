@@ -253,7 +253,7 @@ pub fn xservice_callers(
             repo,
             AnswerReach {
                 resolved: cross_service.len(),
-                noun: "cross-service callers",
+                noun: "cross-service caller",
             },
         ),
         cross_service,
@@ -342,7 +342,7 @@ pub fn xservice_impact(
             repo,
             AnswerReach {
                 resolved: cross_service.len(),
-                noun: "cross-service impacts",
+                noun: "cross-service impact",
             },
         ),
         cross_service,
