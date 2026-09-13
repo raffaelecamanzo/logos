@@ -1698,19 +1698,30 @@ pub struct S382Reading {
     pub no_key: usize,
 }
 
-/// Read the production client-call arm of `m` under the S-382 rule.
-pub fn s382_reading(m: &super::Measurement) -> S382Reading {
-    let mut out = S382Reading::default();
-    for site in m
-        .per_language
+/// **The S-382 denominator's population, defined once.**
+///
+/// Production client-call sites the arm refuses today: gate-admitted, production
+/// tree, and neither already-admitted nor not-configuration-bound — the same two
+/// exclusions `Tally::add` applies.
+///
+/// It exists because two tallies must agree on it — [`s382_reading`] and
+/// [`properties_residue`], the denominator and the numerator of the figure S-397
+/// T2 delivers. They were two copies of the predicate kept honest by a runtime
+/// assertion, which is weaker than it looks: the assertion runs only under
+/// `LOGOS_REF_WORKSPACE`, so a divergence was invisible to a default `cargo test`.
+/// One definition removes the possibility instead of detecting it.
+fn s382_population(m: &super::Measurement) -> impl Iterator<Item = &super::Site> {
+    m.per_language
         .values()
         .flat_map(|s| s.sites.iter())
         .filter(|s| s.gate_admitted && Tree::of(&s.file) == Tree::Main)
-    {
-        // The same denominator `Tally::add` builds, by the same two exclusions.
-        if matches!(site.cr115, Verdict::AlreadyAdmitted | Verdict::NotConfigurationBound) {
-            continue;
-        }
+        .filter(|s| !matches!(s.cr115, Verdict::AlreadyAdmitted | Verdict::NotConfigurationBound))
+}
+
+/// Read the production client-call arm of `m` under the S-382 rule.
+pub fn s382_reading(m: &super::Measurement) -> S382Reading {
+    let mut out = S382Reading::default();
+    for site in s382_population(m) {
         out.denominator += 1;
         match &site.cr115 {
             Verdict::NewlyAdmitted { .. } => out.resolved += 1,
@@ -1846,17 +1857,10 @@ pub fn properties_residue(m: &super::Measurement) -> PropertiesResidue {
             .count(),
         ..PropertiesResidue::default()
     };
-    for site in m
-        .per_language
-        .values()
-        .flat_map(|s| s.sites.iter())
-        .filter(|s| s.gate_admitted && Tree::of(&s.file) == Tree::Main)
-    {
-        // The same denominator `s382_reading` reads, by the same two exclusions,
-        // so the numerator and the denominator describe one population.
-        if matches!(site.cr115, Verdict::AlreadyAdmitted | Verdict::NotConfigurationBound) {
-            continue;
-        }
+    // The same population `s382_reading` reads — the SAME iterator, not a copy of
+    // its predicate — so the numerator and the denominator cannot describe two
+    // different populations.
+    for site in s382_population(m) {
         out.denominator += 1;
         let keys: Vec<&str> = site.key_outcomes.iter().flatten().filter_map(KeyOutcome::key).collect();
         if keys.is_empty() {
@@ -2252,12 +2256,26 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
     // and a printed table nothing asserts is a table a regression may silently
     // rewrite.
     let residue = properties_residue(m);
+    // The denominators are equal **by construction** — both tallies walk
+    // `s382_population` — so asserting that would be a guard that cannot fail, and
+    // this file's own standard rejects those. What is asserted instead is the one
+    // relation between them that a corpus can move: every site in the denominator
+    // that resolves to a key is exactly a site the S-382 reading counts as
+    // resolved or divergent.
     assert_eq!(
-        (residue.denominator, residue.keyed),
-        (s382.denominator, s382.resolved + s382.divergent),
-        "the residue must be stated over the SAME denominator the S-382 reading is, or the \
-         numerator and the denominator describe two different populations and the fraction \
-         means nothing. This run read {residue:?} against {s382:?}.",
+        residue.keyed,
+        s382.resolved + s382.divergent,
+        "every site carrying a resolvable key should be one the S-382 reading counts as \
+         resolved or divergent, and this run read {} against {}. The two can legitimately \
+         part company on a MULTI-OPERAND site — one operand resolving to a key while \
+         another does not makes the site `NoKey` while `keyed` still counts it — so a \
+         mismatch here is a corpus finding about multi-placeholder templates, NOT a \
+         population mismatch: the denominators are equal by construction \
+         ({} == {}). Record it rather than relaxing this.",
+        residue.keyed,
+        s382.resolved + s382.divergent,
+        residue.denominator,
+        s382.denominator,
     );
     assert_eq!(
         (residue.properties_only, residue.properties_contributing),
