@@ -135,9 +135,13 @@ pub use open_state::{DegradedCause, DegradedRollup, MemberOpen, MemberOpenState,
 pub use registry::{
     AnswerScope, Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode,
 };
+// The surfaces serialize `EgressResidue`/`ResidueReason` and pass
+// `WorkspaceEgressResidue` through; `AnswerReach` and `egress_residue` are the
+// assembly primitives and stay reachable only as `federation::residue::…`, so
+// "assembled once" is a property of the export surface and not only of today's
+// call sites ([CR-125] §4.4).
 pub use residue::{
-    egress_residue, AnswerReach, EgressResidue, MemberEgressResidue, ResidueReason,
-    WorkspaceEgressResidue,
+    EgressResidue, MemberEgressResidue, ResidueReason, WorkspaceEgressResidue,
 };
 pub use topics::{workspace_topics, MemberTopics, TopicSummary};
 pub use warm_state::{MemberWarmState, WarmEvidence, WarmRollup};

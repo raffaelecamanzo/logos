@@ -95,7 +95,14 @@ pub struct MemberEgressResidue {
 /// query's answer was computed over ([`beside`](Self::beside)).
 ///
 /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Deliberately **not** `Default`, for the reason
+/// [`CrossServiceCoverage`](super::coverage::CrossServiceCoverage) gives for the
+/// same field: a derived `covers_all_members: false` is a *lie* over the empty
+/// workspace a defaulted value describes. It would also be a second public
+/// constructor beside [`egress_residue`], and a surface handed a defaulted value
+/// would silently render no residue at all with nothing failing to compile
+/// ([CR-125] §4.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceEgressResidue {
     /// One row per member that contributed a captured outbound site, in the
     /// member order [`cross_service_coverage`] produced.
@@ -369,7 +376,7 @@ fn rank_reasons(totals: BTreeMap<UnboundReason, u64>) -> Vec<ResidueReason> {
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
-pub(super) fn residue_from(
+fn residue_from(
     references: &[ReferenceCoverage],
     covers_all_members: bool,
 ) -> WorkspaceEgressResidue {

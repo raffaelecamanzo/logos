@@ -328,10 +328,12 @@ impl UnboundReason {
     /// Exists so a *composed* line (the residue's
     /// [`summary`](super::residue::EgressResidue::summary)) names reasons in the
     /// published vocabulary rather than in a second, prose-only spelling of it.
-    /// `the_reason_labels_are_the_wire_tokens` pins the two together by
-    /// round-tripping every variant through `serde`, so a rename on either side
-    /// fails rather than drifting — the hand-mirrored-twin failure this file's
-    /// own risk register names.
+    /// `every_unbound_reason_is_documented_on_every_surface_that_enumerates_them`
+    /// round-trips every variant through `serde` against this label, so a rename
+    /// on either side fails rather than drifting — the hand-mirrored-twin failure
+    /// this file's own risk register names. That guard reads this function rather
+    /// than carrying its own copy of the match, which it did until S-401's review
+    /// noticed the copy.
     ///
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     pub fn as_str(self) -> &'static str {
@@ -4925,36 +4927,6 @@ mod tests {
         );
     }
 
-    /// [`UnboundReason::as_str`] and the `--json` token are **the same string**
-    /// for every variant ([FR-WS-05]).
-    ///
-    /// The label exists so the residue's composed line names reasons in the
-    /// published vocabulary; a second hand-written spelling of that vocabulary is
-    /// exactly the hand-mirrored twin this file's risk register names, so the two
-    /// are pinned to each other here rather than trusted to stay in step. The
-    /// match in `as_str` is exhaustive, so a new variant does not compile until it
-    /// has a label, and this test then proves the label is the wire token.
-    ///
-    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
-    #[test]
-    fn the_reason_labels_are_the_wire_tokens() {
-        for reason in [
-            UnboundReason::NoProviderInWorkspace,
-            UnboundReason::PathNotComposed,
-            UnboundReason::BaseUrlRuntime,
-            UnboundReason::Ambiguous,
-            UnboundReason::TopicNotLiteral,
-            UnboundReason::ConfigKeyMissing,
-            UnboundReason::ConfigPlaceholderValue,
-        ] {
-            assert_eq!(
-                serde_json::to_value(reason).unwrap(),
-                reason.as_str(),
-                "{reason:?} renders one way on the wire and another in prose"
-            );
-        }
-    }
-
     /// **S-374 acceptance: a recorded client-call refusal reaches the [FR-WS-05]
     /// payload as `base-url-runtime`, and reaches it as an unbound row rather
     /// than as nothing.**
@@ -5635,19 +5607,10 @@ mod tests {
     /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
     #[test]
     fn every_unbound_reason_is_documented_on_every_surface_that_enumerates_them() {
-        /// The wire token of one reason. Exhaustive on purpose: a new variant does
-        /// not compile until it is named here.
-        fn wire(reason: UnboundReason) -> &'static str {
-            match reason {
-                UnboundReason::NoProviderInWorkspace => "no-provider-in-workspace",
-                UnboundReason::PathNotComposed => "path-not-composed",
-                UnboundReason::BaseUrlRuntime => "base-url-runtime",
-                UnboundReason::Ambiguous => "ambiguous",
-                UnboundReason::TopicNotLiteral => "topic-not-literal",
-                UnboundReason::ConfigKeyMissing => "config-key-missing",
-                UnboundReason::ConfigPlaceholderValue => "config-placeholder-value",
-            }
-        }
+        // The wire token comes from `UnboundReason::as_str`, the production
+        // label, not from a second hand-written match here: a guard against a
+        // hand-mirrored vocabulary must not itself be one. `as_str` is exhaustive,
+        // so a new variant does not compile until it is named there.
         /// Every variant. The fixed length is the second half of the guard: adding a
         /// variant without extending this fails to compile.
         const ALL: [UnboundReason; 7] = [
@@ -5665,7 +5628,7 @@ mod tests {
         for reason in ALL {
             assert_eq!(
                 serde_json::to_value(reason).unwrap(),
-                wire(reason),
+                reason.as_str(),
                 "{reason:?} must serialise as its documented token"
             );
         }
@@ -5718,11 +5681,11 @@ mod tests {
             }
             for reason in ALL {
                 assert!(
-                    enumerated(&text, wire(reason)),
+                    enumerated(&text, reason.as_str()),
                     "{rel} enumerates the unbound reasons but does not mention \
                      `{}` as a reason token — a reason the payload can carry that \
                      this surface cannot explain ([NFR-CC-04])",
-                    wire(reason)
+                    reason.as_str()
                 );
             }
         }
