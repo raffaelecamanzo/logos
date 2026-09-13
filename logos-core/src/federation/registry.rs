@@ -1046,9 +1046,29 @@ struct ScopeState {
 /// four near-identical `WARN` lines per broken member, per request ([CR-105]).
 /// Widening the gate to cover `Serve` would have been worse than the defect —
 /// one transiently-unavailable member would read degraded until the process
-/// restarted. The scope keeps both properties at once because its lifetime is
-/// the answer on **either** mode: within one answer a broken member is attempted
-/// and announced once, and the next answer mints a fresh scope and re-attempts.
+/// restarted. The scope holds on **either** mode because its lifetime is the
+/// answer: within one answer a broken member is attempted and announced once,
+/// and the next answer mints a fresh scope and re-attempts.
+///
+/// # The unit moved from *command* to *answer*, and three CLI commands are two
+/// Recorded here because the difference is invisible in any single diff and
+/// [FR-WS-16] AC5 is still written in terms of a **command**. A command whose
+/// read-model is one entry point — `logos workspace status`, `workspace check`,
+/// `xservice route-providers`, `xservice search` — is one answer, and nothing
+/// moved for it. Three commands call two entry points and so mint two scopes:
+/// `workspace reachability` ([`ContractBridge::edges`] then
+/// [`app_wide_reachability`](super::reach::app_wide_reachability)), and
+/// `xservice callers` / `xservice impact` ([`ContractBridge::edges`] then
+/// [`fan`](super::query::fan)). On those three a broken member is attempted and
+/// announced **twice** where the registry-wide latch [S-332] installed paid once,
+/// because the second scope has no record of the first's failure. The doubling is
+/// bounded and each attempt is correctly ledgered — no payload, exit code or
+/// `degraded_rollup` moves — but it is a narrowing of a guarantee that previously
+/// held, and it is the sprint-68 review's deferred decision: mint one scope per
+/// command at the adapter and thread it into both entry points (which reaches
+/// `mcp/src/server.rs` and `web/src/api_v1.rs`, both under [NFR-MA-02]'s budget,
+/// and is out of [CR-105]'s stated scope), or restate AC5's unit as the answer.
+/// Not chosen here; see `sprint-review-68.md`.
 ///
 /// # What is deliberately *not* scoped
 /// [`EngineRegistry::engine_for`] — a caller asking for **one named member** —
@@ -1850,10 +1870,18 @@ mod tests {
     /// it did not read), and the ledger still reads `degraded`; what is spent
     /// once is the open.
     ///
-    /// The command's walks share **one** [`AnswerScope`], which is what the CLI
-    /// one-shot's single `workspace status` answer is: since S-336 that scope,
-    /// rather than the registry's `Lazy` mode, is what bounds the suppression.
-    /// Every assertion below is the one [S-332] shipped.
+    /// The walks below share **one** [`AnswerScope`], which is what the CLI
+    /// one-shot's single `logos workspace status` answer is: since S-336 that
+    /// scope, rather than the registry's `Lazy` mode, is what bounds the
+    /// suppression. Every assertion below is the one [S-332] shipped.
+    ///
+    /// **The name says "command" and the unit is the answer.** For this command
+    /// the two coincide, which is why the name was kept; they do not coincide
+    /// for `workspace reachability`, `xservice callers` or `xservice impact`,
+    /// each of which calls two read-model entry points and so mints two scopes.
+    /// This test cannot see that — it mints one scope — and nothing else does
+    /// either. See [`AnswerScope`]'s "The unit moved from *command* to *answer*"
+    /// section and the sprint-68 review record.
     ///
     /// [CR-102]: ../../../docs/requests/CR-102-warm-outcome-record-and-spec-corrections.md
     /// [S-332]: ../../../docs/planning/journal.md#s-332-accurate-and-quiet-degraded-member-diagnostics

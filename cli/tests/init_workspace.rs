@@ -207,6 +207,19 @@ fn second_run_does_not_duplicate_the_workspace_mcp_entry() {
     let report: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
     assert_eq!(report["mcp"]["action"], "unchanged");
     assert_eq!(report["manifest"]["action"], "unchanged");
+    // S-335 added a third step to this report and to the same sentence of
+    // `docs/howto/commands.md` that this pair pins, and the pair did not grow
+    // with it. It is asserted here as `skipped`, not `unchanged`, deliberately:
+    // `two_member_fixture`'s root is the canonical parent-of-repos shape — two
+    // git repos under a plain directory — so `git_root_known(root)` is
+    // `Some(false)` and `maintain_root_ignore` writes nothing, on the first run
+    // and on every re-run. That is the case the manual calls ordinary, and it is
+    // the one an `unchanged`-shaped assertion would have got wrong.
+    assert_eq!(
+        report["root_ignore"]["action"], "skipped",
+        "a non-repository workspace root never gains a .gitignore, so its step \
+         stays `skipped` across re-runs rather than settling to `unchanged`: {report}"
+    );
 }
 
 /// A folder with no sibling git repos is a no-op, not a fabricated

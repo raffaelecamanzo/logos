@@ -1636,10 +1636,28 @@ where
     // Only the members that actually name a key are opened. The scope's
     // `fan_out` is deliberately NOT used: it reaches every member of the
     // workspace, and on an 84-member estate where one service configures its
-    // base URL that would open 83 stores to read nothing ([NFR-PE-10]). Every
-    // member reached here already opened for this answer's invocation-refs walk
-    // — a member that failed to open contributes no consumer — so these are
-    // resident hits, not new attempts against the once-per-answer guarantee.
+    // base URL that would open 83 stores to read nothing ([NFR-PE-10]).
+    //
+    // Every member reached here already opened for this answer's invocation-refs
+    // walk — a member that failed to open contributes no consumer — so this can
+    // never add an attempt for a *broken* member, which is what the
+    // once-per-answer guarantee ([FR-WS-16] AC5) is about.
+    //
+    // It is NOT, however, always a resident hit, and an earlier wording here
+    // said it was. `engine_for` bypasses `AnswerScope::open_for_walk` and goes
+    // straight to admission, which evicts to `max_resident_members()` before
+    // every build; that budget is derived from the host's descriptor limit and
+    // is routinely far below an 84-member roster. A member that named a key
+    // early in the roster has therefore usually been evicted by the time this
+    // runs, and is rebuilt — a real engine start, counted in `engine_starts()`
+    // and `reconstructions()`. The cost is bounded (one rebuild per member that
+    // names a key, not per row) and correctly ledgered, but it is a cost, and
+    // S-397 T1 is what moved this path from dormant to live: before that hop the
+    // estate emitted zero `config-bound` rows, so `wanted` was always empty.
+    // `tests/workspace_connection_budget.rs` cannot see it either — its fixture
+    // never indexes, so `wanted` is empty there too and the `engine_starts()`
+    // equality it pins against `WALKS_PER_STATUS` omits this term. Recorded for
+    // the sprint-68 review rather than silently re-justified.
     for (member, keys) in wanted {
         match answer
             .registry()

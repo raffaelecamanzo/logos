@@ -265,7 +265,8 @@ returned is currently not reported anywhere: it simply stays un-indexed and
 shows as `deferred` in [`workspace status`](#workspace-status) until its first
 real use indexes it. stdout stays machine-clean (the approval prompt is on
 stderr), so `logos init --workspace --yes` is safe to script. Re-running is
-incremental — `manifest`/`mcp`/`root_ignore` actions report `unchanged`, and
+incremental — `manifest` and `mcp` report `unchanged`, `root_ignore` reports
+`unchanged` on a tracked root and `skipped` on one that is not a repository, and
 neither a duplicate MCP entry nor a second managed ignore block is written.
 When the workspace root **is** a git working tree, `root_ignore` reports the
 managed `.gitignore` block keeping the warm sidecar out of version control; at
