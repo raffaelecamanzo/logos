@@ -2122,14 +2122,24 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
     // at, loosely enough to survive corpus churn.
     //
     // **The client floor was re-recorded 100 -> 90 by [S-398] T2, and the cause is
-    // named rather than absorbed.** The whole client-call arm fell 140 -> 96 when
-    // [S-402] made the Go client-call candidacy gate receiver-grained: the `go` row
-    // of the per-language table went from a denominator the S-365 finding described
-    // as "41 Go names the unit never binds" to `denom 0, literal 11`. **The `java`
-    // row did not move at all** — 94 denom / 79 new / 2 divergent / 13 no-key,
-    // byte-identical to the census `config_bound_admission.rs` diffs against — which
-    // is what says the fall is [S-402]'s precision correction and no part of it is
-    // [S-398]'s admission. That invariance is structural, not luck: this arm's
+    // named rather than absorbed. Three figures, and keeping them apart is the whole
+    // point:** S-365 RECORDED 140; the run at the pre-S-382 merge base already
+    // MEASURED 137 (the silent corpus drift this file documents 100 lines below, the
+    // same drift that took the production denominator 111 -> 108); and this run reads
+    // 96. So the leg attributable to [S-402] is **137 -> 96**, a fall of 41 — not the
+    // 44 a reader would get by subtracting from the recorded 140. The `go` row of the
+    // per-language table is now `denom 0, literal 11`, and the whole 41 is that row
+    // emptying when [S-402] made the Go client-call candidacy gate receiver-grained.
+    //
+    // (The S-365 finding's "41 Go names the unit never binds" is a NO-KEY RESIDUE
+    // count across both trees, not this arm's Go denominator — 41 + 14 + 4 = 59 over
+    // a residue that sentence calls 30 production sites. It coincides with the fall
+    // and is not evidence for it; the evidence is the `go` row reading 0 today.)
+    //
+    // **The `java` row did not move at all** — 94 denom / 79 new / 2 divergent /
+    // 13 no-key, byte-identical to the census `config_bound_admission.rs` diffs
+    // against — which is what says the fall is [S-402]'s precision correction and no
+    // part of it is [S-398]'s admission. That invariance is structural, not luck: this arm's
     // denominator is "sites whose composition needs a value the source does not
     // hold", decided by `is_already_static_literal` on operand KINDS, and [S-398]
     // widened what an operand RESOLVES to, never what kind it is. A story that did
@@ -2140,9 +2150,10 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
     // [S-402]: ../../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
     assert!(
         client.denominator >= 90 && broker.denominator >= 40,
-        "the recorded finding measured 96 client / 54 broker refused-today sites (the client \
-         arm was 140 before S-402 corrected the Go gate); this run saw {} / {}. A collapsed \
-         denominator is a broken harness, not a new finding.",
+        "this repository records 96 client / 54 broker refused-today sites (S-365 recorded \
+         140, the pre-S-382 run measured 137, and S-402's Go-gate correction took that 137 \
+         to 96); this run saw {} / {}. A collapsed denominator is a broken harness, not a \
+         new finding.",
         client.denominator,
         broker.denominator,
     );
