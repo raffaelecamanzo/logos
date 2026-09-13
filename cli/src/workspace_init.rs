@@ -887,7 +887,11 @@ mod tests {
             !tmp.path().join(logos_core::federation::MANIFEST_FILENAME).exists(),
             "no manifest is written on the fallback path"
         );
-        assert!(!tmp.path().join(".mcp.json").exists(), "and no workspace MCP entry");
+        // No `.mcp.json` at all here, so a fortiori no `logos-workspace` entry.
+        // `the_fallback_applies_the_flags_it_was_given_rather_than_the_defaults`
+        // below is what stops this being true merely because the flags were
+        // dropped on the floor.
+        assert!(!tmp.path().join(".mcp.json").exists(), "and no MCP entry — the workspace one least of all");
     }
 
     /// The other half of the pair, and the reason the provenance exists at all:
@@ -916,6 +920,56 @@ mod tests {
         );
         assert!(!tmp.path().join(logos_core::federation::MANIFEST_FILENAME).exists());
         assert!(!tmp.path().join(".mcp.json").exists());
+    }
+
+    /// **The payload, not just the branch.** `fallback` carries the flags the
+    /// `logos init` was typed with, and dropping them — `InitOptions::default()`
+    /// instead of `crate::init_options(interactive, hooks)` — is invisible to
+    /// every other test here, because `init_options(false, false)` is
+    /// field-for-field `InitOptions::default()`. That silent drop is the exact
+    /// bug class CR-103 exists to fix, one flag further in, so it gets its own
+    /// witness.
+    ///
+    /// `hooks` is the assertable half and `interactive` deliberately is not:
+    /// `install_hooks` is the one `InitOptions` field with a non-prompting
+    /// producer (`hooks || (interactive && ask(..))`) and a filesystem-visible
+    /// effect. `interactive: true` would call `crate::ask` five times in this
+    /// process, against a stdin that is a terminal whenever the suite is run
+    /// from one — do not be the first test to do that.
+    ///
+    /// The root here is a git repository holding one sibling repository, rather
+    /// than the parent-of-repos shape the nudge detects, for the same reason:
+    /// `install_hooks` reports `Skipped` outside a repository and writes
+    /// nothing. The shape is irrelevant to what is under test — `run`'s fallback
+    /// arm forwarding the flags it was handed — and `run` reaches that arm from
+    /// an empty approved set regardless of the root's own git status.
+    #[test]
+    fn the_fallback_applies_the_flags_it_was_given_rather_than_the_defaults() {
+        let tmp = fixture(&["api"]);
+        let root = tmp.path();
+        git(root, &["init", "-q", "-b", "main"]);
+
+        let out = Output { json: true, quiet: true };
+        let warm: fn(&[Member], Option<usize>) -> bool = |_, _| unreachable!("nothing is warmed");
+        assert_eq!(run(root, Some((false, true)), false, &["*".to_string()], &out, warm).unwrap(), 0);
+
+        let hooks_path = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", "core.hooksPath"])
+            .output()
+            .expect("git is on PATH");
+        assert_eq!(
+            String::from_utf8_lossy(&hooks_path.stdout).trim(),
+            ".logos/hooks",
+            "`--hooks` reached the fallback's init rather than being defaulted away"
+        );
+        assert!(root.join(".logos").join("hooks").is_dir(), "and the managed hooks were written");
+        // The half that stays off: nothing here asked for the `-i` host setup,
+        // so the single-repo MCP entry is absent — which is what makes the
+        // sibling tests' `.mcp.json` assertions mean "no workspace entry"
+        // rather than "no MCP entry, trivially".
+        assert!(!root.join(".mcp.json").exists(), "and only the flags that were given were applied");
     }
 
     /// The fallback inherits FR-IN-01's non-clobber contract for free, because
