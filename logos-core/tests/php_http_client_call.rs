@@ -303,8 +303,9 @@ class Calls {
 /// **Stated over-capture ceiling** — the ledger gate is *file*-grained, so the
 /// negative case above holds only across files. Inside a file that already
 /// references `GuzzleHttp`, a same-shaped collection call with a route-shaped
-/// key still captures — inherited from the Rust, Go, Kotlin and Ruby arms
-/// (Python, TypeScript and, since S-375, Java scope their receivers instead) and
+/// key still captures — inherited from the Rust, Kotlin and Ruby arms
+/// (Python, TypeScript, Java since S-375 and Go since S-402 scope their
+/// receivers instead) and
 /// pinned here rather than left to prose (see `HTTP_METHODS`'s rustdoc).
 #[test]
 fn a_route_shaped_property_get_inside_a_client_file_is_a_stated_ceiling() {

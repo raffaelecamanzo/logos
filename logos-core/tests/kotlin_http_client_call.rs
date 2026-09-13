@@ -497,7 +497,8 @@ class Calls {
 ///
 /// Inherited from the Rust arm. Java carried the identical ceiling on the same
 /// ported query until S-375 ([CR-120]) closed it with a receiver-NAME boundary
-/// rule — so the claim this docstring used to make, that no query can
+/// rule, and Go followed in S-402 — so the claim this docstring used to make,
+/// that no query can
 /// distinguish `perms.get("/admin/users")` from `client.get("/admin/users")`
 /// without receiver typing, is retired. The same rule ports here; until it does,
 /// this test pins the current behaviour so that narrowing it is a deliberate

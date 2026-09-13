@@ -15,9 +15,14 @@
 //! The three shared negative cases are [FR-WS-08]'s "Shared negative-case
 //! fixture contract" (S-340) — referenced, not re-invented:
 //!
-//! - **case 1** (same-shaped non-HTTP receiver call) is per-language and gated by
-//!   the descriptor's `http_client_detectors` row (`plugins/go/plugin.toml`, read
-//!   by `extract::capture_http_client_call_arm`):
+//! - **case 1** (same-shaped non-HTTP receiver call) is per-language. Since S-402
+//!   ([CR-126]) the decision is made on the RECEIVER, by `queries/invocations.scm`'s
+//!   receiver-name boundary rule:
+//!   [`a_request_header_or_query_get_inside_a_net_http_file_is_not_captured`] and
+//!   [`the_receiver_rule_is_a_boundary_rule_over_the_normative_go_row`]. The
+//!   descriptor's `http_client_detectors` row (`plugins/go/plugin.toml`, read by
+//!   `extract::capture_http_client_call_arm`) is a file-grained pre-filter behind
+//!   it, isolated by
 //!   [`a_route_shaped_get_outside_a_net_http_file_is_not_captured`];
 //! - **case 2** (`base-url-runtime`) : [`a_runtime_composed_path_is_not_captured`];
 //! - **case 3** (`path-not-composed`): [`an_absolute_but_non_normalizing_path_is_not_captured`].
@@ -31,6 +36,7 @@
 //! [FR-WS-08]: ../../docs/specs/requirements/FR-WS-08.md
 //! [ADR-54]: ../../docs/specs/architecture/decisions/ADR-54.md
 //! [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+//! [CR-126]: ../../docs/requests/CR-126-go-client-call-candidacy-gate-is-file-grained.md
 #![cfg(feature = "lang-go")]
 
 use std::fs;
@@ -121,9 +127,13 @@ func CreateUser() { http.Post("/users", "application/json", nil) }
     );
 }
 
-/// The same shape on a `*http.Client` receiver (`c.Get("/users")`) captures
+/// The same shape on a `*http.Client` receiver (`client.Get("/users")`) captures
 /// identically — the query anchors on the selector's field, so the free-function
 /// and receiver-method forms are one pattern, not two near-misses.
+///
+/// The receiver is spelled `client` rather than `c` since S-402: the receiver
+/// rule is a NAME rule, and a single letter carries no client token. See
+/// [`a_single_letter_client_receiver_is_a_stated_ceiling`].
 #[test]
 fn a_receiver_method_call_captures_identically_to_the_free_function_form() {
     let facts = extract_go(
@@ -131,7 +141,7 @@ fn a_receiver_method_call_captures_identically_to_the_free_function_form() {
 
 import "net/http"
 
-func ListUsers(c *http.Client) { c.Get("/users") }
+func ListUsers(client *http.Client) { client.Get("/users") }
 "#,
     );
     assert_eq!(client_call_targets(&facts), vec!["GET /users".to_string()]);
@@ -162,7 +172,10 @@ func ListUsers() { http.Get(`/users`) }
 /// its quotes.
 ///
 /// The trailing `client.Do(req)` deliberately contributes nothing: `Do` is not an
-/// HTTP verb and carries neither slot.
+/// HTTP verb and carries neither slot. The receiver is spelled `client` — one the
+/// S-402 rule ADMITS — so the verb filter is what refuses it here, not the
+/// receiver rule; otherwise this fixture would stop proving what it claims, and
+/// `client.Do(req)` is named verbatim in FR-WS-08's normative Go row.
 #[test]
 fn a_constructor_argument_call_takes_its_verb_from_the_first_argument() {
     let facts = extract_go(
@@ -170,9 +183,9 @@ fn a_constructor_argument_call_takes_its_verb_from_the_first_argument() {
 
 import "net/http"
 
-func GetUser(c *http.Client) {
+func GetUser(client *http.Client) {
 	req, _ := http.NewRequest("GET", "/users/{id}", nil)
-	c.Do(req)
+	client.Do(req)
 }
 "#,
     );
@@ -196,9 +209,9 @@ import (
 	"net/http"
 )
 
-func DeleteOrder(ctx context.Context, c *http.Client) {
+func DeleteOrder(ctx context.Context, client *http.Client) {
 	req, _ := http.NewRequestWithContext(ctx, "DELETE", "/orders/{id}", nil)
-	c.Do(req)
+	client.Do(req)
 }
 "#,
     );
@@ -353,10 +366,12 @@ fn an_absolute_but_non_normalizing_path_is_not_captured() {
 import "net/http"
 
 func ListUsers() { http.Get("/v{version}/users") }
+func Probe() { http.Get("/probe") }
 "#,
     );
-    assert!(
-        client_call_targets(&facts).is_empty(),
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /probe".to_string()],
         "a mixed literal/parameter segment is path-not-composed — no reference \
          AND, deliberately, no recorded refusal (that reason needs a non-keyless \
          row, S-374): {:?}",
@@ -366,16 +381,25 @@ func ListUsers() { http.Get("/v{version}/users") }
 
 // ── Shared negative case 1: same-shaped non-HTTP receiver call ──────────────
 
-/// A `/`-shaped-key `.Get(...)` in a file that references **no** Go HTTP-client
-/// package is never scanned for client calls at all, so it can never fabricate a
-/// cross-service edge ([FR-WS-08] shared negative case 1, [NFR-RA-05]).
+/// The file-grained ledger gate, **isolated**. A `/`-shaped-key `.Get(...)` in a
+/// file that references no Go HTTP-client package is never scanned for client
+/// calls at all ([FR-WS-08] shared negative case 1, [NFR-RA-05]).
+///
+/// The receiver is one the QUERY accepts (`client`), so the only thing that can
+/// produce the empty result is `capture_http_client_call_arm`'s
+/// `is_http_client_file` check. Until S-402 this fixture used `perms.Get(…)`,
+/// whose receiver the new rule refuses outright: keeping it would have made the
+/// positive control unreachable and left nothing isolating the gate. Verified by
+/// deleting the gate — the first assertion then fails with `["GET /admin/users"]`.
+/// The TypeScript arm hit the identical problem and fixed it the same way; see
+/// `extract::tests::a_non_client_receiver_call_is_never_captured`.
 #[test]
 fn a_route_shaped_get_outside_a_net_http_file_is_not_captured() {
-    const BODY: &str = r#"type Perms struct{}
+    const BODY: &str = r#"type Cache struct{}
 
-func (p Perms) Get(k string) bool { return false }
+func (c Cache) Get(k string) bool { return false }
 
-func Authorize(p Perms) { p.Get("/admin/users") }
+func Authorize(client Cache) { client.Get("/admin/users") }
 "#;
 
     let facts = extract_go(&format!("package authz\n\n{BODY}"));
@@ -385,21 +409,16 @@ func Authorize(p Perms) { p.Get("/admin/users") }
         client_call_targets(&facts)
     );
 
-    // Positive control, and the ADR-54 ceiling in the same fixture. The source
-    // is byte-identical but for the `net/http` import, so the emptiness above is
-    // attributable to `capture_http_client_call_arm`'s ledger gate and to
-    // nothing else — without this, the test would still pass with the gate
-    // deleted if some other filter happened to reject `p.Get`.
+    // Positive control. The source is byte-identical but for the `net/http`
+    // import, so the emptiness above is attributable to the ledger gate and to
+    // nothing else.
     //
-    // What it captures is the documented ADR-54 accuracy ceiling: the gate is
-    // FILE-grained, so this same incidental call INSIDE a genuine client file
-    // does capture. Under-capture is safe, over-capture is not, and the residual
-    // is stated rather than worked around — the Kotlin and Ruby arms pin the
-    // identical ceiling in
-    // `a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling`.
-    // The Java arm carried it too until S-375 (CR-120) closed it with a
-    // receiver-NAME boundary rule in its own query; Go's anchor carries no such
-    // rule, so Go's residual stands.
+    // That it captures here is the residual the receiver rule does NOT close:
+    // a non-HTTP collaborator that happens to be SPELLED like a client still
+    // passes, inside a genuine client file. That residual is narrow and named,
+    // where the blanket file-grained one S-402 retired was not — the Java arm
+    // states the same shape in `the_fluent_arm_receiver_is_an_unguarded_over_
+    // capture_ceiling`.
     let gated = extract_go(&format!(
         "package authz\n\nimport \"net/http\"\n\nvar _ = http.StatusOK\n\n{BODY}"
     ));
@@ -407,14 +426,192 @@ func Authorize(p Perms) { p.Get("/admin/users") }
         client_call_targets(&gated),
         vec!["GET /admin/users".to_string()],
         "the same source with the client import DOES capture — the ledger gate \
-         is the only difference between these two cases, and the residual is \
-         ADR-54's stated file-grained ceiling"
+         is the only difference between these two cases"
+    );
+}
+
+/// **CR-126's defect, pinned.** The shapes an HTTP gateway writes on every
+/// request path — `r.Header.Get(k)` and `r.URL.Query().Get("idp")` — are refused
+/// **in a file that imports `net/http`**, which is the setting the fixture set
+/// never exercised and the reason the defect survived [S-375].
+///
+/// On the reference estate's one Go member these two shapes plus `mapping.Get`
+/// were **26 of 37** captured sites, none an HTTP call. Neither is stopped by
+/// any other guard: `Get` is a bare HTTP verb, the argument is a lone value, and
+/// the file legitimately imports `net/http` — only the receiver separates them
+/// ([FR-WS-08] AC5, [NFR-RA-05]).
+///
+/// [S-375]: ../../docs/planning/journal.md#s-375-the-client-call-detector-gate-is-receiver-grained-not-file-grained
+#[test]
+fn a_request_header_or_query_get_inside_a_net_http_file_is_not_captured() {
+    let facts = extract_go(
+        r#"package gateway
+
+import "net/http"
+
+func Authorize(w http.ResponseWriter, r *http.Request, mapping Mapping) {
+	if len(r.Header.Get("Authorization")) == 0 {
+		return
+	}
+	idp := r.URL.Query().Get("idp")
+	_ = idp
+	_ = mapping.Get("authorize.claims")
+	http.Get("/probe")
+}
+"#,
+    );
+    // `http.Get` is the positive control: it proves the file WAS scanned, so the
+    // three shapes above are absent because the receiver rule refused them — not
+    // because the ledger gate quietly closed on the whole fixture.
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /probe".to_string()],
+        "a request header, a query parameter and a config lookup are not \
+         outbound calls, and the file was genuinely scanned: {:?}",
+        client_call_targets(&facts)
+    );
+}
+
+/// The receiver rule is a **boundary** rule over [FR-WS-08]'s normative Go row,
+/// not a substring test — the same posture, and the same vocabulary decisions,
+/// as the Java arm's
+/// `the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row`.
+///
+/// Admitted: the package qualifier `http` that `import "net/http"` binds; the
+/// type-derived token `httpClient` as a prefix and `HttpClient`/`HTTPClient` as
+/// a suffix; the stdlib package var `DefaultClient`; and the bare word `client`
+/// WHOLE. The receiver is read as a bare identifier or as the FIELD one selector
+/// level down, so `http.DefaultClient.Get` and `s.client.Get` are both admitted.
+///
+/// Refused, and this is the rule's sharpest line: a bare `Client` SUFFIX
+/// (`cacheClient`, `redisClient`, `zkClient`) and a `client`-PREFIXED
+/// non-client (`clientCache`, `clientRegistry`, `clientStore`). Each clears the
+/// verb and absolute-path filters in ordinary Go, so admitting them reopens
+/// [CR-110]'s fabrication class on the consumer side ([NFR-RA-05]) — the reason
+/// `ff257427` removed the suffix from the Java rule, adopted here.
+///
+/// Both argument shapes are exercised for every receiver, because the query
+/// binds one receiver guard across an `arguments:` alternation: a loop that
+/// drove only the single-argument shape left the content-type arm unpinned, and
+/// deleting the guard from it passed the whole suite.
+///
+/// [CR-110]: ../../docs/requests/CR-110-framework-route-false-positives.md
+#[test]
+fn the_receiver_rule_is_a_boundary_rule_over_the_normative_go_row() {
+    // `{recv}` spelled into BOTH argument shapes the one pattern accepts — path
+    // alone, and path followed by a content-type string.
+    let shapes = |recv: &str| {
+        [
+            format!("{recv}.Get(\"/users\")"),
+            format!("{recv}.Post(\"/users\", \"application/json\", nil)"),
+        ]
+    };
+
+    for recv in [
+        "http",
+        "client",
+        "httpClient",
+        "_httpClient",
+        "httpClientV2",
+        "apiHttpClient",
+        "usersHTTPClient",
+        "DefaultClient",
+        "http.DefaultClient",
+        "s.client",
+    ] {
+        for (i, call) in shapes(recv).iter().enumerate() {
+            let facts = extract_go(&format!(
+                "package client\n\nimport \"net/http\"\n\nfunc Probe() {{ {call} }}\n"
+            ));
+            let verb = if i == 0 { "GET" } else { "POST" };
+            assert_eq!(
+                client_call_references(&facts),
+                vec![format!("{verb} /users")],
+                "`{recv}` names an http.Client value and must be admitted in \
+                 argument shape {i}"
+            );
+        }
+    }
+
+    for recv in [
+        // The bare `Client` suffix — every client protocol in existence.
+        "cacheClient",
+        "redisClient",
+        "zkClient",
+        "kafkaClient",
+        "apiClient",
+        // The generic word is whole-only: the same objects, spelled round the
+        // other way.
+        "clientCache",
+        "clientRegistry",
+        "clientStore",
+        "clientV2",
+        // Boundary near-misses, one character from matching.
+        "clientcache",
+        "routerClientele",
+        "httpclient",
+        // Ordinary collaborators, and the shapes CR-126 measured.
+        "mapping",
+        "perms",
+        "cache",
+        "r.Header",
+    ] {
+        for (i, call) in shapes(recv).iter().enumerate() {
+            let facts = extract_go(&format!(
+                "package client\n\nimport \"net/http\"\n\nfunc Probe() {{ {call} }}\n\nfunc Control() {{ http.Get(\"/probe\") }}\n"
+            ));
+            // `client_call_targets`, not `client_call_references`: a refused
+            // receiver must leave NO keyless refusal row either. Those rows are
+            // exactly what inflated the denominator CR-126 measured, so a helper
+            // that filtered them out would hide the story's own subject.
+            assert_eq!(
+                client_call_targets(&facts),
+                vec!["GET /probe".to_string()],
+                "`{recv}` carries no client token — only the control must \
+                 survive, with no refusal row, in argument shape {i}"
+            );
+        }
+    }
+}
+
+/// A single-letter `*http.Client` receiver (`c.Get("/users")`) is a **stated
+/// under-capture ceiling**, and the reason is that the same letter is Gin's
+/// conventional `*gin.Context` receiver — where `c.Get("user")` is a context
+/// lookup, the very shape this story removes. A name rule cannot separate the
+/// two, so the arm takes the safe direction and refuses both ([ADR-54]).
+///
+/// Under-capture is safe, over-capture is not: a refused genuine call costs one
+/// site, an admitted context lookup fabricates one ([NFR-RA-05]).
+///
+/// [ADR-54]: ../../docs/specs/architecture/decisions/ADR-54.md
+#[test]
+fn a_single_letter_client_receiver_is_a_stated_ceiling() {
+    let facts = extract_go(
+        r#"package client
+
+import "net/http"
+
+func ListUsers(c *http.Client) {
+	c.Get("/users")
+	http.Get("/probe")
+}
+"#,
+    );
+    // Positive control — the file was genuinely scanned.
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /probe".to_string()],
+        "a single-letter receiver is honestly uncaptured, never guessed: {:?}",
+        client_call_targets(&facts)
     );
 }
 
 /// Inside a genuine `net/http` file, a same-shaped call whose method is not an
-/// HTTP verb (a cache `Fetch`, a `client.Do`) is still never captured — the
-/// verb filter narrows the broad anchor.
+/// HTTP verb (a cache `Fetch`) is still never captured — the verb filter narrows
+/// the broad anchor.
+///
+/// The collaborator is spelled `client` on purpose: it clears the receiver rule,
+/// so the verb filter is the **sole** discriminator this fixture exercises.
 #[test]
 fn a_non_verb_method_call_inside_a_client_file_is_not_captured() {
     let facts = extract_go(
@@ -426,8 +623,8 @@ type Cache struct{}
 
 func (c Cache) Fetch(k string) string { return k }
 
-func Warm(cache Cache, c *http.Client) {
-	_ = cache.Fetch("/admin/users")
+func Warm(client Cache) {
+	_ = client.Fetch("/admin/users")
 	http.Get("/health")
 }
 "#,
@@ -658,7 +855,7 @@ fn go_client_calls_bind_go_routes_in_another_member() {
 /// `interpreted_string_literal_content`, while `http.MethodGet` is a
 /// `selector_expression` — no text reaches the table for a row to normalize — so
 /// lifting it is a table PLUS a query pattern, a Go-side decision. Declaring any
-/// row would also opt Go into the table's filter half, costing `http.Get`/`c.Head`
+/// row would also opt Go into the table's filter half, costing `http.Get`/`client.Head`
 /// identity rows the pass-through gives them free.
 ///
 /// Cost of leaving it, measured on `pec-services`' `hermodr-mirror`: 23 of its 24
@@ -680,15 +877,21 @@ fn a_named_constant_verb_is_a_stated_ceiling_not_a_capture() {
 
 import "net/http"
 
-func GetUser(c *http.Client) {
+func GetUser(client *http.Client) {
 	req, _ := http.NewRequest(http.MethodGet, "/users", nil)
-	c.Do(req)
+	client.Do(req)
 }
+
+func Probe() { http.Get("/probe") }
 "#,
     );
-    assert!(
-        client_call_targets(&facts).is_empty(),
-        "a named-constant verb is honestly uncaptured, never guessed: {:?}",
+    // Positive control — without it this assertion would also pass if the arm
+    // never ran at all (mutation H: a detector row that matches nothing).
+    assert_eq!(
+        client_call_targets(&facts),
+        vec!["GET /probe".to_string()],
+        "a named-constant verb is honestly uncaptured, never guessed, and the \
+         file was genuinely scanned: {:?}",
         client_call_targets(&facts)
     );
 }

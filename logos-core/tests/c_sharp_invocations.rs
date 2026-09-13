@@ -461,10 +461,12 @@ fn a_route_shaped_get_outside_a_system_net_http_file_is_not_captured() {
     // nothing else.
     //
     // What it captures is the documented ADR-54 accuracy ceiling, and C#'s is
-    // NARROWER than Go's: Go's residual is any `/`-keyed `.get(...)`, while here
-    // the receiver must expose a method that is itself an
+    // NARROWER than the Rust, Kotlin, Ruby and PHP arms': theirs is any `/`-keyed
+    // `.get(...)`, while here the receiver must expose a method that is itself an
     // `[invocation_methods]` row. `IDistributedCache.GetAsync(key)` is the real
-    // instance of that, which is what this fixture spells.
+    // instance of that, which is what this fixture spells. (Go's was the same
+    // until S-402 narrowed it to a receiver-name rule; its residual is now a
+    // non-HTTP collaborator SPELLED like a client.)
     let gated = extract_cs(&format!("using System.Net.Http;\n\n{BODY}"));
     assert_eq!(
         client_call_targets(&gated),
@@ -477,10 +479,10 @@ fn a_route_shaped_get_outside_a_system_net_http_file_is_not_captured() {
 
 /// Inside a genuine `System.Net.Http` file, a same-shaped call whose method name
 /// is not an `[invocation_methods]` row is still never captured — including a
-/// BARE HTTP verb (`cache.Get("/health")`), which Go can only record as a
-/// ceiling. The table's filter half is what closes it here — Java closes the
-/// same class a third way, with a receiver-name rule (S-375); the two mechanisms
-/// are complementary.
+/// BARE HTTP verb (`cache.Get("/health")`), which the Rust, Kotlin, Ruby and PHP
+/// arms can only record as a ceiling. The table's filter half is what closes it
+/// here — Java (S-375) and Go (S-402) close the same class a third way, with a
+/// receiver-name rule; the two mechanisms are complementary.
 #[test]
 fn a_bare_verb_method_call_inside_a_client_file_is_not_captured() {
     let facts = extract_cs(&client_file(

@@ -446,7 +446,9 @@
 ;     Inherited from the Rust arm. This one IS separable: Java carried the
 ;     identical ceiling until S-375 (CR-120) closed it with a receiver-NAME
 ;     boundary rule over its normative client row — no receiver typing needed —
-;     and that rule ports here, Kotlin's row being "as Java (API-compatible)".
+;     and Go followed in S-402 (CR-126). That rule ports here too, Kotlin's row
+;     being "as Java (API-compatible)", and Kotlin's own `#match? @_recv "^[a-z_]"`
+;     is the pre-S-375 guard S-375 retired — it admits EVERY lower-case receiver.
 ;     Until it is ported this is a backlog item, not a law. Pinned by
 ;     `a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling`.
 ;
