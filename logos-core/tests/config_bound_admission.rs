@@ -380,6 +380,26 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
         a.members_read,
     );
 
+    // Census floors, not equalities: the estate can only grow and a re-clone must
+    // not redden the run.
+    //
+    // **Placed here, with the VOID gates, and the position is the whole point.**
+    // Behind the exact pin below it could not do its job: any corpus collapse it
+    // exists to catch also moves `config_bound` off its recorded value, so the pin
+    // fires first — and the pin's message says to RECORD the new figure, which is
+    // the opposite of the remedy for a broken harness. It survived only in the
+    // contrived case where the reference count fell while the admitted count, the
+    // bucket split and the unresolved count all held exactly.
+    assert!(
+        a.members_read >= 40 && a.references >= 900,
+        "the recorded finding measured 1060 references over 84 members; this run saw {} \
+         over {}. A collapsed corpus is a broken harness, not a new finding: do NOT \
+         record the figures below as a new measurement — find out why the estate \
+         shrank first.",
+        a.references,
+        a.members_read,
+    );
+
     // ── The payload shape AC2's count rests on ──────────────────────────
     assert_eq!(
         a.missing_provenance, 0,
@@ -451,14 +471,4 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
         );
     }
 
-    // Census floors, not equalities: the estate can only grow and a re-clone
-    // must not redden the run. The figures above are pinned exactly; this guards
-    // the order of magnitude the finding was recorded at.
-    assert!(
-        a.members_read >= 40 && a.references >= 900,
-        "the recorded finding measured 1060 references over 84 members; this run saw {} \
-         over {}. A collapsed corpus is a broken harness, not a new finding.",
-        a.references,
-        a.members_read,
-    );
 }
