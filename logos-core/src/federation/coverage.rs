@@ -99,7 +99,8 @@ pub enum UnboundReason {
     ///
     /// **What it does not cover, so the count is not over-read.** A call the
     /// arm's per-language query never matched — a stated capture ceiling, a
-    /// receiver the S-375 rule declines, a language shipping no `invocations`
+    /// receiver a language's receiver rule declines (Java's S-375 rule, Go's
+    /// S-402 one), a language shipping no `invocations`
     /// query — is refused before any site exists, so it carries no reason at all
     /// and is absent from this bucket rather than counted in it. The population
     /// is enumerated once, on `extract::capture_http_client_call_arm`.

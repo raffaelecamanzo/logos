@@ -48,9 +48,16 @@ framework_detectors = ["net::http", "github::com::gin-gonic::gin"]
 # matched at a SEGMENT BOUNDARY (`resolve::matches_detector`), so this row admits
 # `net::http` and `net::http::httptest` while excluding the sibling `net::url` /
 # `net::mail` packages. Naming the root `net` instead would make any `net/url`
-# importer a candidate, where a plain `cache.Get("/admin/users")` clears the verb
-# and static-absolute-path filters and WOULD fabricate a cross-service edge — the
-# gate is what stops it, not those filters (NFR-RA-05, FR-WS-08 negative case 1).
+# importer a candidate.
+#
+# This row is a cheap PRE-FILTER, not the whole of FR-WS-08 negative case 1.
+# Since S-402 (CR-126) the decision that separates `cache.Get("/admin/users")`
+# from a genuine client call is made on the RECEIVER, in
+# `queries/invocations.scm` — read its "Candidacy" header before changing either.
+# A file-grained gate cannot answer a question about a CALL, and in an HTTP
+# gateway every file imports `net/http`, so `r.Header.Get(k)` and
+# `r.URL.Query().Get("idp")` cleared the verb and path filters and were captured:
+# 26 of 37 sites on the reference estate's Go member (NFR-RA-05).
 http_client_detectors = ["net::http"]
 
 [queries]
@@ -59,9 +66,10 @@ references = "queries/references.scm"
 frameworks = "queries/frameworks.scm"
 # Outbound `net/http` client-call arm (S-345, CR-108, FR-WS-08): the
 # verb-as-method-name forms (`http.Get`, `http.Post`) and the
-# verb-as-constructor-argument form (`http.NewRequest("GET", …)`). Its two
-# structural discriminators keep a route REGISTRATION — syntactically the same
-# shape — from being read as an outbound call; see the query header.
+# verb-as-constructor-argument form (`http.NewRequest("GET", …)`). A
+# receiver-NAME boundary rule makes candidacy receiver-grained (S-402, CR-126),
+# and two argument-shape discriminators keep a route REGISTRATION — syntactically
+# the same shape — from being read as an outbound call; see the query header.
 invocations = "queries/invocations.scm"
 # Captured `@fw.route.method` text → HTTP method (S-015). Gin's router verbs
 # name themselves; net/http registrations (`HandleFunc`/`Handle`) and Gin's

@@ -69,9 +69,11 @@
 ; receiver-name heuristic (`c`/`client` vs `app`/`router`) CR-110 is cleaning up
 ; after. `MapGet` has no row, so it never reaches `is_http_method`.
 ;
-; The same pin closes the shape Go and Java can only record as an ADR-54 ceiling:
-; a bare `_cache.Get("/health")` inside a genuine client file passes the bare-verb
-; filter in those languages, but `Get` has no row here, so it is refused. The
+; The same pin closes the shape the Rust, Kotlin, Ruby and PHP arms can only
+; record as an ADR-54 ceiling: a bare `_cache.Get("/health")` inside a genuine
+; client file passes the bare-verb filter in those languages, but `Get` has no row
+; here, so it is refused. Java (S-375) and Go (S-402) close it a third way, with a
+; receiver-NAME boundary rule in their own queries. The
 ; residual C# ceiling is narrower and named: a non-HTTP receiver exposing a method
 ; that IS a row (`IDistributedCache.GetAsync(key)`) inside a `System.Net.Http`
 ; file, and only when its key is a `/`-prefixed literal that normalizes.

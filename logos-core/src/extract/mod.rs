@@ -867,7 +867,8 @@ fn extract_one(
 ///   never matched leaves no site for any pass to judge, so it emits no
 ///   reference *and* surfaces no reason. Every stated capture ceiling is in this
 ///   class: Java's verb-suffixed `RestTemplate` methods and `exchange`, OpenFeign
-///   interfaces, a receiver the S-375 receiver rule declines, a chained receiver,
+///   interfaces, a receiver a language's receiver rule declines (Java's S-375
+///   rule, Go's S-402 one), a chained receiver,
 ///   a language shipping no `invocations` query at all. These are invisible by
 ///   construction and cannot be made visible by a refusal ledger — only by a
 ///   query that matches them. The narrowing is deliberate: recording a refusal
