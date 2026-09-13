@@ -120,8 +120,11 @@
 //! `operand_resolvability.rs`, `config_corpus.rs`, `broker_topic_corpus.rs`,
 //! `coverage_intake_split.rs`, `coverage_headline_baseline.rs`, and this file.
 //!
-//! `coverage_intake_split.rs` arms a revisit "if a fourth measurement arrives".
-//! That trigger fired two files ago and the question is **already settled**, in
+//! `coverage_intake_split.rs` used to arm a revisit "if a fourth measurement
+//! arrives". That trigger had already fired two files before this one, so the
+//! same change that added this file withdrew it there — read that file's docs
+//! for the withdrawal, not for a live trigger. The question is **already
+//! settled**, in
 //! `coverage_headline_baseline.rs`'s module docs, which examined the inherited
 //! "sharing would couple separately-recorded published figures" argument and
 //! **rejected it**: `corpus_root` performs no measurement, so a shared locator
@@ -471,9 +474,11 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
          {RECORDED_ADMITTED} `config-bound` client-call rows on the reference estate \
          (of an accessor denominator of {ACCESSOR_DENOMINATOR}), against AC2's floor of \
          {CRITERION_FLOOR}. This run read {}. If the corpus has been re-indexed or \
-         re-enrolled, or the accessor hop has widened, RECORD the new figure here and in \
-         the artifact — do not bend the pipeline to reproduce this one, and do not relax \
-         the floor.",
+         re-enrolled, or the accessor hop has widened, RECORD the new figure here, in \
+         the artifact beside this file, AND in the `config-bound` table under \
+         \"What this emits on a real estate today\" in docs/howto/commands.md, which \
+         restates this numerator in prose no test reads — do not bend the pipeline to \
+         reproduce this one, and do not relax the floor.",
         a.config_bound,
     );
     assert_eq!(
@@ -489,7 +494,8 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
          shortfall is no longer capture-only; if `bound` moved, the estate's own topology \
          changed. Note that a `config-bound` row is excluded from \
          `resolved_cross_service_edges` whatever its bucket, so `bound: 5` is not a \
-         coverage claim.",
+         coverage claim. The split is restated in docs/howto/commands.md; re-record it \
+         there in the same change.",
     );
     assert_eq!(
         a.config_unresolved, 0,

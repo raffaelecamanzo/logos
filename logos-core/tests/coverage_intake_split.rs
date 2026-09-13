@@ -255,7 +255,9 @@ fn measure_the_intake_split_over_the_reference_workspace_when_one_is_configured(
         "the recorded split is 81 contract-surface / 5 invocation bound rows, measured \
          2026-09-13 over the S-397-generation index. Measured {} / {} over {} references. \
          If the corpus has been re-indexed or re-enrolled again, RECORD the measured \
-         figure — do not bend the classifier to reproduce this one. CR-120's own \
+         figure — here, and in the `by_intake` block in docs/howto/commands.md, which \
+         restates this split in prose no test reads — do not bend the classifier to \
+         reproduce this one. CR-120's own \
          criterion was 81 / 0 and it was met on the 1.4.7 generation; the 5 is S-397 T1's \
          accessor hop and is not a retraction of it.",
         cs.bound,
