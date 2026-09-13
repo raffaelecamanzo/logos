@@ -3234,9 +3234,12 @@ fn a_self_qualified_accessor_reaches_the_ledger_as_the_same_reference() {
 /// spelling reaches it as.
 ///
 /// The caller source differs from the S-398 fixture in the lambda alone, and
-/// the expectation is read from the direct run rather than transcribed, so what
-/// this pins is "the same reference the direct form would" and not a literal
-/// someone typed twice.
+/// the direct spelling is run first as the control the nested runs are compared
+/// against — so a build in which BOTH spellings broke the same way fails on the
+/// control rather than passing silently. The control is itself anchored on the
+/// expected key, which is what makes the comparison mean something; an earlier
+/// draft of this comment claimed the expectation was never transcribed, which
+/// the line below it contradicts.
 ///
 /// Asserted through `extract_files` for the reason
 /// [`an_accessor_operand_reaches_the_ledger_as_its_canonical_configuration_key`]
