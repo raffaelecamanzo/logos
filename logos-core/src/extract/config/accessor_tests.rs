@@ -630,20 +630,29 @@ fn a_self_qualified_receiver_of_the_wrong_type_still_resolves_to_nothing() {
 }
 
 /// **The near misses, one character from the admitted spelling.** The qualifier
-/// is recognised as a whole token followed by a separator, never as a prefix of
-/// the receiver's text — without the separator requirement `thisApi` strips to
-/// `Api`, and without the whole-token requirement any receiver ending in a
-/// declared field name would reduce to it.
+/// is recognised as a **whole token beginning the receiver's text**, never as a
+/// substring of it: without that anchoring, any receiver whose head segment
+/// merely ended with the spelling would reduce.
+///
+/// The test is named for the whole-token rule alone, and deliberately. An
+/// earlier name claimed the separator rule too, and review showed that half
+/// could not fail: `thisApi` is refused by [`simple_identifier`] succeeding one
+/// arm earlier, not by the separator test, so no fixture here reaches it. The
+/// separator rule's own reachability is documented on [`self_qualified`]; the
+/// trap that *is* reachable — an identifier character read as a separator — is
+/// pinned by
+/// [`a_qualified_receiver_the_source_did_not_write_resolves_to_nothing`].
 #[test]
-fn the_self_qualifier_is_a_whole_token_followed_by_a_separator() {
+fn the_self_qualifier_is_a_whole_token() {
     let index = index(&[("Props.java", PROPS)]);
 
     for (field, operand, why) in [
         (
             "private final MailServerConfigurationApi Api;",
             "thisApi.getUriGetArchive()",
-            "no separator: `thisApi` is one identifier naming a receiver this \
-             file declares no type for, not the qualifier plus `Api`",
+            "`thisApi` is one identifier naming a receiver this file declares no \
+             type for — refused by the BARE arm, one hop before the qualifier is \
+             ever considered",
         ),
         (
             "private final MailServerConfigurationApi api;",
@@ -668,9 +677,9 @@ fn the_self_qualifier_is_a_whole_token_followed_by_a_separator() {
         assert_eq!(key_of(&index, &use_site, operand), None, "{operand}: {why}");
     }
 
-    // …and the control: `thisApi`'s refusal above is about the SEPARATOR and not
-    // about `Api` being unresolvable, because the qualified spelling of the very
-    // same field does resolve.
+    // …and the control: the refusals above are about the SPELLING and not about
+    // `Api` being unresolvable, because the qualified spelling of the very same
+    // field does resolve.
     let use_site = "public class Caller {\n\
           private final MailServerConfigurationApi Api;\n\
           void go() { client.get(this.Api.getUriGetArchive()); }\n\

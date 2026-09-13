@@ -838,7 +838,7 @@ fn from_sources_admits_the_same_population_as_build_over_the_same_files() {
 /// difference is worth keeping visible. `binding.rs` names no node kind because
 /// it reads only capture names. `accessor.rs` reads a parse tree directly and so
 /// *could*, but it reads only grammar FIELD names — `name`, `type`, `object`,
-/// `function`, `parameters`, `body` — and none of those six is a node kind in
+/// `parameters`, `body`, `arguments` — and none of those six is a node kind in
 /// either loaded JVM grammar. (`type` is the near miss: `tree-sitter-kotlin-ng`
 /// declares it in `node-types.json` as a supertype, which is not a parser node
 /// kind and so does not reach `node_kind_for_id`. If a grammar bump ever

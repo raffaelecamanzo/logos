@@ -18,12 +18,12 @@
 //!
 //! ```text
 //! restClient.get().uri(this.mailboxApiProperties.getUriGetMailbox())
-//!                      └──┬─┘ └────────┬───────┘
-//!                         │            └─ the FIELD, whose declared type this
-//!                         │               file states — the same fact as above
-//!                         └─ the language's self reference, read from the
-//!                            `[properties]` descriptor's `self_references`
-//!                            row, never named here
+//!                      └┬─┘ └────────┬─────────┘
+//!                       │            └─ the FIELD, whose declared type this
+//!                       │               file states — the same fact as above
+//!                       └─ the language's self reference, read from the
+//!                          `[properties]` descriptor's `self_references`
+//!                          row, never named here
 //! ```
 //!
 //! That second shape needed no new hop: the field's declared type was already in
@@ -355,11 +355,21 @@ fn simple_identifier(text: &str) -> Option<&str> {
 /// reduce, and the asymmetry is the whole justification. Reducing `holder.api`
 /// to `api` resolves against a same-named local — *a different object*, which is
 /// why that refusal stands. A self reference names a field of the **enclosing
-/// class** and can name nothing else, so the reduction resolves against the same
-/// object the source wrote. [`DeclaredTypes`] makes that structural rather than
-/// merely intuitive: a file declaring the name twice under disagreeing types
-/// poisons the entry to [`None`], so the reduction either agrees with the field
-/// or resolves to nothing.
+/// class** and can name nothing else, so the reduction names the same object the
+/// source wrote.
+///
+/// **That is a claim about the source, and it does not on its own survive the
+/// lookup** — a correction review forced, after three reviewers reproduced the
+/// gap. [`DeclaredTypes`] is file-scoped and scope-blind, so the reduced name
+/// can be answered by a local or a parameter rather than by the field; where the
+/// field is *inherited* nothing in the file poisons that shadow. The claim is
+/// made true by the caller, not here: [`BindingView::declared_receiver_type`]
+/// resolves this function's answer through [`DeclaredTypes::field`], which
+/// answers from field positions only. What remains is the file-scope residue
+/// this module already carries elsewhere — a *sibling class* in the same file
+/// declaring the name as its own field answers for it — bounded exactly as the
+/// annotation-element ceiling above is, and no wider than the bare arm's own
+/// scope-blindness.
 ///
 /// The estate's shape reaches this function and only this function — its
 /// declared type was already in [`DeclaredTypes`] (a `private Foo bar;`
@@ -368,17 +378,22 @@ fn simple_identifier(text: &str) -> Option<&str> {
 ///
 /// # A whole token, and a separator after it
 ///
-/// Both requirements were probed with their near miss, because a matcher is only
-/// proved by the case one character from matching:
-///
 /// - **Whole token**, via `strip_prefix`: the qualifier must begin the text, so
 ///   a receiver whose head segment merely *ends* with the spelling (`notthis`)
-///   is not one.
-/// - **At least one separator after it** — `name.len() < rest.len()`. Without
-///   it `thisApi` strips to `Api` and names a field the source never qualified.
-///   A run rather than a single character, so a grammar spelling member access
-///   with a two-character token is not excluded by the shape of this test alone;
-///   the separator's spelling is not read, only its presence.
+///   is not one. Probed with that near miss, which reaches this function.
+/// - **At least one separator after it** — `name.len() < rest.len()`. **No
+///   currently declared vocabulary can reach this test, and the honest reason is
+///   worth writing down rather than a near miss that does not exist.** The
+///   caller tries [`simple_identifier`] first, and a qualifier spelled with
+///   identifier characters (Java's `this` is the only one shipped) followed by
+///   an identifier is *itself* an identifier — so `thisApi` is claimed by that
+///   first arm and never arrives here. The test is retained as the shape's own
+///   invariant for a qualifier that is **not** identifier-legal (`$this`), which
+///   would reach it; it is not retained on the strength of a probe, and this
+///   module deletes guards that cannot fail (see [`simple_identifier`]) rather
+///   than dressing them up. The related trap — an identifier character read as a
+///   separator — is not defensible in text at all and is gated on the tree
+///   instead; see [`BindingView::declared_receiver_type`].
 ///
 /// What survives must still be a single [`simple_identifier`], so `this.a.b`
 /// and `this.get().x` are refused at the same hop every other unknown receiver
@@ -401,9 +416,12 @@ fn self_qualified<'t>(text: &'t str, self_reference: &str) -> Option<&'t str> {
 /// spells a member call positionally (Kotlin does) is not reached by this
 /// function at all; see the module docs' ceiling.
 ///
-/// It makes no judgement about the receiver beyond its existence;
-/// [`simple_identifier`] is where a receiver this module cannot answer for —
-/// qualified, or itself a call — is refused.
+/// It makes no judgement about the receiver beyond its existence.
+/// [`BindingView::declared_receiver_type`] is where a receiver this module
+/// cannot answer for is refused: it accepts a bare identifier, and — since
+/// S-398 — a receiver qualified by the reading language's self reference, and
+/// refuses everything else, a `Holder.INSTANCE` and a receiver that is itself a
+/// call included.
 fn member_call<'t>(node: Node<'t>) -> Option<(Node<'t>, Node<'t>)> {
     Some((
         node.child_by_field_name(OBJECT_FIELD)?,

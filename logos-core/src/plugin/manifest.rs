@@ -494,7 +494,8 @@ pub struct AnchorDescriptor {
 /// the core walk reads only capture names, and each language supplies the
 /// vocabulary its own `properties.scm` captures against.
 ///
-/// Two halves, and the split is what makes the substrate language-agnostic:
+/// Two halves, and the split is what makes the substrate language-agnostic — the
+/// declaration vocabulary, and the use-site vocabulary that now carries two rows:
 ///
 /// - [`annotations`](Self::annotations) names the **binding vocabulary** — the
 ///   annotation the language spells to mark a class as configuration-bound. The
@@ -504,6 +505,9 @@ pub struct AnchorDescriptor {
 ///   from this one.
 /// - [`accessor_prefixes`](Self::accessor_prefixes) names the **accessor
 ///   convention** — how a use site spells a read of one property.
+/// - [`self_references`](Self::self_references) names the **qualifier
+///   convention** — how a use site spells the enclosing instance, when it
+///   qualifies a field read with one.
 ///
 /// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
 /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
@@ -561,13 +565,20 @@ pub struct PropertiesDescriptor {
     /// what every language did before this row existed ([NFR-RA-05]). A
     /// language joins by adding a row, never by loosening a match.
     ///
-    /// What an entry buys is narrow and bounded: a receiver spelled
-    /// `<entry><separator><name>` is read as naming the field `<name>` of the
-    /// enclosing class. It is **not** a general relaxation of the
-    /// qualified-receiver refusal — a `holder.api` receiver stays refused,
-    /// because reducing it would resolve against a same-named local, which is a
-    /// different object. A self reference cannot: it names a field of the
-    /// enclosing class and nothing else.
+    /// What an entry buys is narrow and bounded: a receiver **the grammar parsed
+    /// as more than one node**, spelled `<entry><separator><name>`, is read as
+    /// naming the field `<name>` of the enclosing class — and is then resolved
+    /// against field-position declarations only. Both of those narrowings are
+    /// review corrections, not decoration: without the first, `this$api` (one
+    /// legal Java identifier) split into two; without the second, a same-named
+    /// local answered for an inherited field. See
+    /// [`BindingView::declared_receiver_type`](crate::extract::config::accessor)
+    /// for both.
+    ///
+    /// It is **not** a general relaxation of the qualified-receiver refusal — a
+    /// `holder.api` receiver stays refused, because reducing it would resolve
+    /// against a same-named local, which is a different object. A self reference
+    /// cannot name a different object: it names a field of the enclosing class.
     ///
     /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
     /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
