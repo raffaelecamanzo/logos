@@ -10,8 +10,8 @@
 //! 1. the **MCP tool**, over a live `call_tool` against a real two-member
 //!    workspace, and
 //! 2. the **thick-core read-model assembled exactly as the CLI arm assembles it**
-//!    (`query::edges` + `query::residue` + `query::xservice_callers`), serialized
-//!    the way `cli::Output::print` serializes it.
+//!    (`query::reachability_inputs` + the read-model fn), serialized the way
+//!    `cli::Output::print` serializes it.
 //!
 //! That second half is this crate's established shape for a CLI-vs-MCP parity
 //! test (`coverage_parity.rs`), and it is what the dependency direction permits:
@@ -90,6 +90,7 @@ const ROUTE_SYMBOL: &str = "logos . . . src/`main.rs`/route/`GET /users/{user_id
 /// Both surfaces' `xservice_callers` payloads for the same query, over one
 /// workspace: `(cli, mcp)`.
 async fn both_surfaces(
+    verb: &'static str,
     repo: Option<&str>,
 ) -> (tempfile::TempDir, Value, Value, Client, tokio::task::JoinHandle<()>) {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -110,14 +111,14 @@ async fn both_surfaces(
         let reg = registry("shop", root, members.clone());
         let bridge = ContractBridge::new();
         let (edges, residue) = query::reachability_inputs(&bridge, &reg);
-        serde_json::to_value(query::xservice_callers(
-            &reg,
-            &edges,
-            &residue,
-            ROUTE_SYMBOL,
-            None,
-            repo,
-        ))
+        match verb {
+            "xservice_callers" => serde_json::to_value(query::xservice_callers(
+                &reg, &edges, &residue, ROUTE_SYMBOL, None, repo,
+            )),
+            _ => serde_json::to_value(query::xservice_impact(
+                &reg, &edges, &residue, ROUTE_SYMBOL, None, repo,
+            )),
+        }
         .expect("the read-model serializes")
     };
 
@@ -126,57 +127,65 @@ async fn both_surfaces(
     if let Some(repo) = repo {
         args.insert("repo".to_string(), Value::from(repo));
     }
-    let mcp = call(&client, "xservice_callers", args).await;
+    let mcp = call(&client, verb, args).await;
 
     (tmp, cli, mcp, client, server)
 }
 
 /// **The parity criterion ([CR-125] §4.4): the two surfaces report the same
-/// residue for the same query.**
+/// residue for the same query** — asserted for **both** reachability verbs.
 ///
-/// Asserted as whole-payload equality rather than field-by-field, so a residue
-/// that diverged *and* a neighbouring field that diverged both fail here.
+/// Whole-payload equality rather than field-by-field, so a residue that diverged
+/// *and* a neighbouring field that diverged both fail here.
+///
+/// Both verbs, because the two adapters are separate arms: a mutation that broke
+/// `xservice_impact`'s wiring alone survived all 46 tests of this crate while
+/// `xservice_callers` was the only one compared (Sprint 69 review).
 #[tokio::test]
 async fn cli_and_mcp_report_the_same_residue_for_the_same_query() {
-    let (_tmp, cli, mcp, client, server) = both_surfaces(None).await;
+    for verb in ["xservice_callers", "xservice_impact"] {
+        let (_tmp, cli, mcp, client, server) = both_surfaces(verb, None).await;
 
-    // Guard the guard: a parity assertion over two absent blocks proves nothing,
-    // and over an empty answer it would not be testing the interesting case.
-    assert_eq!(
-        mcp["cross_service"].as_array().map(Vec::len),
-        Some(1),
-        "the fixture must resolve one cross-service caller: {mcp}"
-    );
-    assert_eq!(
-        mcp["unresolved_egress"]["unresolved_sites"], 1,
-        "and must leave one outbound site unresolved: {mcp}"
-    );
+        // Guard the guard: a parity assertion over two absent blocks proves
+        // nothing, and over an empty answer it would not test the case at issue.
+        assert_eq!(
+            mcp["cross_service"].as_array().map(Vec::len),
+            Some(1),
+            "{verb} must resolve one cross-service row: {mcp}"
+        );
+        assert_eq!(
+            mcp["unresolved_egress"]["unresolved_sites"], 1,
+            "{verb} must leave one outbound site unresolved: {mcp}"
+        );
 
-    assert_eq!(
-        cli, mcp,
-        "CLI and MCP `xservice_callers` payloads — residue included — must be \
-         identical for the same query (CR-125 §4.4)"
-    );
+        assert_eq!(
+            cli, mcp,
+            "CLI and MCP `{verb}` payloads — residue included — must be identical \
+             for the same query (CR-125 §4.4)"
+        );
 
-    client.cancel().await.ok();
-    server.abort();
+        client.cancel().await.ok();
+        server.abort();
+    }
 }
 
 /// Parity holds under the scope rule too: `--repo`/`repo` narrows the residue the
-/// same way on both surfaces ([FR-WS-05]).
+/// same way on both surfaces and on both verbs ([FR-WS-05]).
 #[tokio::test]
 async fn the_two_surfaces_scope_the_residue_identically() {
-    let (_tmp, cli, mcp, client, server) = both_surfaces(Some("api")).await;
+    for verb in ["xservice_callers", "xservice_impact"] {
+        let (_tmp, cli, mcp, client, server) = both_surfaces(verb, Some("api")).await;
 
-    assert_eq!(
-        mcp["unresolved_egress"]["scope"], "api",
-        "the residue names the scope it covers: {mcp}"
-    );
-    assert_eq!(mcp["unresolved_egress"]["members_in_scope"], 1);
-    assert_eq!(cli, mcp, "and both surfaces scope it identically");
+        assert_eq!(
+            mcp["unresolved_egress"]["scope"], "api",
+            "{verb}: the residue names the scope it covers: {mcp}"
+        );
+        assert_eq!(mcp["unresolved_egress"]["members_in_scope"], 1);
+        assert_eq!(cli, mcp, "{verb}: both surfaces scope it identically");
 
-    client.cancel().await.ok();
-    server.abort();
+        client.cancel().await.ok();
+        server.abort();
+    }
 }
 
 /// **The shipped tool descriptions explain what the shipped payload carries.**

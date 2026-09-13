@@ -307,15 +307,15 @@ impl EgressResidue {
         // The residue's own half names the members it covers, because `--repo`
         // narrows it and not the resolved count it sits beside.
         let scope = match self.scope.as_deref() {
-            Some(member) => format!("in {member}"),
-            None => "in scope".to_string(),
+            Some(member) => format!(" in {member}"),
+            None => " in scope".to_string(),
         };
         let mut line = format!(
             "{}; {} of {} did not resolve across {} ({})",
             reach.phrase(self.scope.is_some()),
             self.unresolved_sites,
-            plural(self.measured_sites, &format!("captured outbound site {scope}")),
-            plural(self.members_in_scope, "member"),
+            plural(self.measured_sites, "captured outbound site", &scope),
+            plural(self.members_in_scope, "member", ""),
             reasons.join(", "),
         );
         if self.no_provider_in_workspace > 0 {
@@ -333,23 +333,16 @@ impl EgressResidue {
 }
 
 /// `n member` / `n members` — the composed line reads as English at both
-/// arities, including when the noun carries a trailing qualifier
-/// (`"captured outbound site in api"` → `"2 captured outbound sites in api"`),
-/// where the plural `s` belongs on the head word and not at the end.
-fn plural(n: u64, noun: &str) -> String {
-    if n == 1 {
-        return format!("{n} {noun}");
-    }
-    match noun.split_once(' ') {
-        // Multi-word: the head is everything up to the qualifier. The nouns this
-        // composes are all `<adjectives> <head> <qualifier>` with the head last
-        // before the qualifier, so split on the qualifier's preposition.
-        Some(_) => match noun.rsplit_once(" in ") {
-            Some((head, qualifier)) => format!("{n} {head}s in {qualifier}"),
-            None => format!("{n} {noun}s"),
-        },
-        None => format!("{n} {noun}s"),
-    }
+/// arities, with the plural `s` on the head noun and any trailing qualifier
+/// appended after it (`2 captured outbound sites in api`).
+///
+/// The qualifier is a **separate argument** rather than part of `noun`: parsing
+/// it back out of one string meant splitting on `" in "`, which a member whose
+/// own name contains that substring would break. Passing it whole cannot be
+/// wrong.
+fn plural(n: u64, noun: &str, qualifier: &str) -> String {
+    let s = if n == 1 { "" } else { "s" };
+    format!("{n} {noun}{s}{qualifier}")
 }
 
 /// Order a reason tally most-sites-first, ties broken by the wire token
@@ -555,14 +548,16 @@ mod tests {
                 None,
                 AnswerReach {
                     resolved: 1,
-                    noun: "cross-service callers",
+                    ..CALLERS
                 },
             )
             .expect("one unresolved site is a residue");
-        assert!(
-            residue.summary.starts_with("1 resolved cross-service callers; 1 of 2 "),
-            "got {:?}",
-            residue.summary
+        assert_eq!(
+            residue.summary,
+            "1 resolved cross-service caller; 1 of 2 captured outbound sites in \
+             scope did not resolve across 1 member (path-not-composed 1)",
+            "asserted whole, and at arity ONE on the resolved half — the arm a \
+             `starts_with` over a plural fixture left unpinned"
         );
     }
 
@@ -740,6 +735,19 @@ mod tests {
              outbound site in api did not resolve across 1 member \
              (base-url-runtime 1)",
             "the resolved half is workspace-wide; the residue half names `api`"
+        );
+
+        // At arity ONE on the resolved half too — the `1 =>` arm of `phrase`
+        // carries the qualifier as well, and a scoped fixture that only ever
+        // resolves zero leaves it unpinned.
+        let one = residue_from(&refs, true)
+            .beside(Some("api"), AnswerReach { resolved: 1, ..CALLERS })
+            .unwrap();
+        assert_eq!(
+            one.summary,
+            "1 resolved cross-service caller workspace-wide; 1 of 1 captured \
+             outbound site in api did not resolve across 1 member \
+             (base-url-runtime 1)"
         );
 
         // Unscoped, there is one population and the line says `in scope`.

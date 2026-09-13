@@ -1532,6 +1532,101 @@ mod tests {
         );
     }
 
+    /// **The residue slot is a cache, not a recompute-and-store.** The four
+    /// pre-existing cache tests all drive [`ContractBridge::edges`] only, so an
+    /// always-recompute residue would make every serve request re-walk every
+    /// member's contract surface with nothing failing ([NFR-PE-01]).
+    ///
+    /// Asserted on both halves — the read counter *and* `Arc::ptr_eq` — because
+    /// a store that returns a fresh equal value satisfies neither.
+    ///
+    /// [NFR-PE-01]: ../../../docs/specs/requirements/NFR-PE-01.md
+    #[test]
+    fn reachability_inputs_hits_both_caches_without_re_reading_any_member_surface() {
+        reset();
+        set_member("api", 3, vec![op("GET /users/{id}", "local op_get")]);
+        set_member("web", 7, vec![route("GET /users/{id}", "local route_get")]);
+        set_consumers("api", vec![http_call("", "local api_call")]);
+        let reg = registry(&["api", "web"]);
+        let bridge = ContractBridge::new();
+
+        let (edges_a, residue_a) = bridge.reachability_inputs(&reg);
+        let reads = surface_reads();
+        assert!(reads >= 2, "the first call reads each member");
+        assert_eq!(
+            residue_a.members.iter().map(|m| m.unresolved_sites).sum::<u64>(),
+            1,
+            "guard the guard: a residue that is empty proves nothing about caching"
+        );
+
+        let (edges_b, residue_b) = bridge.reachability_inputs(&reg);
+        assert_eq!(
+            surface_reads(),
+            reads,
+            "an unchanged stamp vector re-reads NO member surface"
+        );
+        assert!(Arc::ptr_eq(&edges_a, &edges_b), "the edge set is served, not rebuilt");
+        assert!(
+            Arc::ptr_eq(&residue_a, &residue_b),
+            "and so is the residue — a recompute-then-store would pass the read \
+             counter on a warm coverage walk but not this"
+        );
+
+        // A stamp advance invalidates BOTH, together.
+        bump_stamp("web");
+        let (edges_c, residue_c) = bridge.reachability_inputs(&reg);
+        assert!(surface_reads() > reads, "the advance forces a recompute");
+        assert!(!Arc::ptr_eq(&edges_a, &edges_c));
+        assert!(!Arc::ptr_eq(&residue_a, &residue_c));
+    }
+
+    /// **A residue over a workspace that could not be read in full says so**
+    /// ([FR-WS-16], [NFR-CC-04]) — end to end, through `egress_residue`, rather
+    /// than by handing `residue_from` the flag directly.
+    ///
+    /// `covers_all_members` forwarded as a literal `true` would leave a residue
+    /// over a half-open workspace rendering as a whole one, and the unit test
+    /// that passes the flag in cannot see it.
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn a_residue_over_an_unreadable_member_is_marked_as_covering_fewer_than_all() {
+        reset();
+        set_member("api", 1, Vec::new());
+        set_consumers("api", vec![http_call("", "local api_call")]);
+        // `unreadable` starts but its contract-surface read fails — the degrade
+        // arm, so the coverage walk contributes fewer members than the roster.
+        set_member("unreadable", 1, Vec::new());
+        let reg = registry(&["api", "unreadable"]);
+        let bridge = ContractBridge::new();
+
+        let (_edges, residue) = bridge.reachability_inputs(&reg);
+        assert!(
+            !residue.covers_all_members,
+            "one member's surface could not be read: {residue:?}"
+        );
+        let rendered = residue
+            .beside(None, crate::federation::residue::AnswerReach { resolved: 0, noun: "cross-service caller" })
+            .expect("the api call is unresolved, so there is a residue");
+        assert!(
+            rendered
+                .summary
+                .ends_with("; computed over fewer than all workspace members"),
+            "and the rendered line says so: {:?}",
+            rendered.summary
+        );
+
+        // The whole-workspace case is the control: same fixture, readable member.
+        reset();
+        set_member("api", 1, Vec::new());
+        set_consumers("api", vec![http_call("", "local api_call")]);
+        set_member("web", 1, Vec::new());
+        let reg = registry(&["api", "web"]);
+        let (_edges, residue) = ContractBridge::new().reachability_inputs(&reg);
+        assert!(residue.covers_all_members, "both members read: {residue:?}");
+    }
+
     fn surface_reads() -> usize {
         SURFACE_READS.with(Cell::get)
     }

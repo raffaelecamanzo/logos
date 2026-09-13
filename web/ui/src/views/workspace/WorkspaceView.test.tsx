@@ -516,29 +516,65 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
 
   // ── CR-125 / BR-53: an unresolved egress must not read as an absence ────────
 
+  /** The residue exactly as the API composed it — the single-composed-field
+   *  discipline the `summary` field exists for. Asserted WHOLE, and carrying a
+   *  sentinel clause absent from the numeric fields, so a view that recomposed
+   *  the line locally from `unresolved_sites`/`measured_sites` fails. */
+  const RESIDUE_SUMMARY =
+    "no resolved cross-service impacts; 141 of 146 captured outbound sites in scope did not resolve across 2 members (base-url-runtime 141); 31 more have no provider in this workspace";
+  const RESIDUE = {
+    members_in_scope: 2,
+    measured_sites: 146,
+    unresolved_sites: 141,
+    no_provider_in_workspace: 31,
+    by_reason: [{ reason: "base-url-runtime", sites: 141 }],
+    covers_all_members: true,
+    summary: RESIDUE_SUMMARY,
+  };
+
   it("renders an empty answer over a NON-ZERO residue as unresolved, naming the count", async () => {
-    stubApi({
-      impact: {
-        ...IMPACT_DEGRADED,
-        unresolved_egress: {
-          members_in_scope: 2,
-          measured_sites: 146,
-          unresolved_sites: 141,
-          no_provider_in_workspace: 31,
-          by_reason: [{ reason: "base-url-runtime", sites: 141 }],
-          covers_all_members: true,
-          summary:
-            "no resolved cross-service impacts; 141 of 146 captured outbound sites in scope did not resolve across 2 members (base-url-runtime 141)",
-        },
-      },
-    });
+    stubApi({ impact: { ...IMPACT_DEGRADED, unresolved_egress: RESIDUE } });
     mount();
     await traceSymbol();
 
     // The count IS the answer here: "no cross-service impact" and "141 outbound
-    // sites I could not resolve" must not render alike (CR-125 §2).
-    expect(await screen.findByText(/141 of 146 captured outbound sites/)).toBeInTheDocument();
+    // sites I could not resolve" must not render alike (CR-125 §2). The whole
+    // composed line, so a locally-recomposed substitute cannot pass.
+    expect(await screen.findByText(RESIDUE_SUMMARY)).toBeInTheDocument();
     expect(screen.queryByText(/no cross-service impact —/i)).not.toBeInTheDocument();
+  });
+
+  it("still reports the residue when the answer is NOT empty", async () => {
+    // A partial answer is still partial: the residue rides every reachability
+    // answer, not only the one that resolved nothing (CR-125 §3.2).
+    stubApi({
+      impact: {
+        ...IMPACT_DEGRADED,
+        cross_service: [
+          {
+            via: BINDING,
+            member: "web",
+            impact: {
+              query: "get_user",
+              resolved: { symbol: "w", name: "get_user", kind: "route", file: "m.rs", line: 3 },
+              depth: 2,
+              upstream_label: "Callers",
+              upstream: [],
+              downstream_label: "Calls",
+              downstream: [],
+              docs_label: "Docs",
+              docs: [],
+              suggestions: [],
+              warnings: [],
+            },
+          },
+        ],
+        unresolved_egress: RESIDUE,
+      },
+    });
+    mount();
+    await traceSymbol();
+    expect(await screen.findByText(RESIDUE_SUMMARY)).toBeInTheDocument();
   });
 
   it("leaves the empty state untouched when the residue is ZERO", async () => {
