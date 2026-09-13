@@ -610,11 +610,42 @@ mod tests {
 
     use tempfile::TempDir;
 
-    fn sh_git(cwd: &Path, args: &[&str]) {
-        let out = Command::new("git")
-            .arg("-C")
+    /// A `git` invocation isolated from **the host's** configuration.
+    ///
+    /// Not hygiene — a correctness requirement for every assertion below that
+    /// reads git's verdict. A developer (or CI image) whose global excludes
+    /// file happens to list `.logos.workspace.warm.json` makes
+    /// `the_ignored_pattern_derives_from_the_sidecar_filename` pass *with the
+    /// production write path entirely disabled*: git ignores the file for a
+    /// reason that has nothing to do with the code under test. Demonstrated,
+    /// not hypothesised — forcing the gate false and injecting a matching
+    /// `GIT_CONFIG_GLOBAL` turned that test green.
+    ///
+    /// `core.excludesFile` is pinned as well as the config files, because git's
+    /// default excludes path (`$XDG_CONFIG_HOME/git/ignore`) applies even when
+    /// no config file names it — suppressing the config alone would leave the
+    /// contamination channel open.
+    ///
+    /// `status.showUntrackedFiles` is pinned for the neighbouring reason: a host
+    /// that sets it to `all` expands a collapsed directory line into one line
+    /// per file, failing an exact-string assertion against code that is behaving
+    /// perfectly.
+    fn git_cmd(cwd: &Path) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
             .arg(cwd)
-            .args(["-c", "user.email=test@logos", "-c", "user.name=logos-test"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["-c", "core.excludesFile=/dev/null"])
+            .args(["-c", "status.showUntrackedFiles=normal"])
+            .args(["-c", "init.defaultBranch=main"])
+            .args(["-c", "user.email=test@logos", "-c", "user.name=logos-test"]);
+        cmd
+    }
+
+    fn sh_git(cwd: &Path, args: &[&str]) {
+        let out = git_cmd(cwd)
             .args(args)
             .output()
             .expect("git is on PATH");
@@ -629,21 +660,10 @@ mod tests {
         sh_git(dir, &["commit", "-q", "-m", "init"]);
     }
 
-    /// `git status --porcelain` at `dir`, with untracked display pinned for the
-    /// same reason `sh_git` pins the identity: a host whose gitconfig sets
-    /// `status.showUntrackedFiles=all` expands a collapsed directory line into
-    /// one line per file, failing an exact-string assertion against code that
-    /// is behaving perfectly.
+    /// `git status --porcelain` at `dir`, through the isolated [`git_cmd`].
     fn porcelain(dir: &Path) -> String {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args([
-                "-c",
-                "status.showUntrackedFiles=normal",
-                "status",
-                "--porcelain",
-            ])
+        let out = git_cmd(dir)
+            .args(["status", "--porcelain"])
             .output()
             .expect("git is on PATH");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -969,9 +989,7 @@ mod tests {
 
         // …and inside it the policy still travels while the derived state does not.
         let ignored = |rel: &str| {
-            Command::new("git")
-                .arg("-C")
-                .arg(&member)
+            git_cmd(&member)
                 .args(["check-ignore", "-q", rel])
                 .status()
                 .expect("git is on PATH")
@@ -1074,12 +1092,15 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         init_repo(root);
-        enable(root, "shop", &[]).expect("enables");
+        let report = enable(root, "shop", &[]).expect("enables");
+        // Prove the entry was actually written before asking git anything.
+        // Without this the whole test can pass on a host whose global excludes
+        // file happens to name the sidecar, even with the write path disabled —
+        // git would be ignoring the file for a reason unrelated to this code.
+        assert_eq!(report.root_ignore.action, InitAction::Created);
 
         let ignores = |rel: &str| {
-            Command::new("git")
-                .arg("-C")
-                .arg(root)
+            git_cmd(root)
                 .args(["check-ignore", "-q", rel])
                 .status()
                 .expect("git is on PATH")
