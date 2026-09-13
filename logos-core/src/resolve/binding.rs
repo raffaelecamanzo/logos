@@ -130,10 +130,23 @@ pub enum KeySource {
     /// A getter on a configuration-bound (`@ConfigurationProperties`) bean,
     /// resolved through `PropertiesIndex::bind`
     /// ([`crate::extract::config::binding`], S-381).
+    ///
+    /// **Reachable from the measurement harness only.** The shipped pipeline
+    /// resolves an accessor at capture time (S-397) and records the key it
+    /// resolved to as a placeholder, so such a site arrives here as
+    /// [`Placeholder`](Self::Placeholder). Carrying the distinction through
+    /// would need the stored row to say which of the two produced it, which is
+    /// a surface [CR-122] §3.1 rules out for that story; it is recorded here
+    /// rather than left for a reader to infer from a variant with no producer.
+    ///
+    /// [CR-122]: ../../../docs/requests/CR-122-the-configuration-substrate-reaches-the-product.md
     Properties,
     /// An annotation naming the key at the use site (`@Value("${key}")`).
     ValueAnnotation,
-    /// A `${key}` placeholder written into the operand's own literal.
+    /// A `${key}` placeholder in the operand's recorded path template — written
+    /// there by the source, or put there by the accessor hop that resolved the
+    /// operand to that key (S-397). See [`Properties`](Self::Properties) for why
+    /// the two are not told apart at this grain.
     Placeholder,
     /// Not configuration at all: a literal or same-unit constant the call site
     /// itself proves. Carries the empty key.

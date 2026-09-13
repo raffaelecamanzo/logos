@@ -107,6 +107,23 @@ use super::corpus::{canonical_key, ConfigCorpus};
 /// The capability whose query this module interprets.
 pub const PROPERTIES_CAPABILITY: &str = "properties";
 
+/// The module scope an index built by ingestion uses: **the whole member**.
+///
+/// A member-local store is already one deployable's own configuration, so the
+/// member is the scope — the same reading
+/// [`ConfigLookup::definitions`](crate::resolve::binding::ConfigLookup::definitions)
+/// makes when the federation coverage tier passes it `""`, and the two must
+/// agree or a class would be looked up in one scope and its values read in
+/// another.
+///
+/// What it costs, stated rather than left to be discovered: inside a member that
+/// is itself multi-module, two same-named properties classes in different build
+/// modules collapse into one [`PropertiesIndex::collisions`] entry and every use
+/// site of that name resolves to nothing. That is the conservative direction —
+/// a refusal, never a wrong key — and narrowing it would need the build-module
+/// partition, which a single member's store does not carry.
+pub const MEMBER_SCOPE: &str = "";
+
 /// One configuration-bound class: its prefix and the property names it declares.
 ///
 /// Language-neutral by construction — every field below is filled from a
@@ -252,7 +269,12 @@ impl PropertiesIndex {
     }
 
     /// Index every bound class the registry's binding languages declare across
-    /// the corpus.
+    /// the corpus, **reading each candidate file itself**.
+    ///
+    /// The measurement entry point, and the [`ConfigCorpus::discover`] twin:
+    /// both walk a corpus root. Ingestion — which holds the text already — goes
+    /// through [`from_sources`](Self::from_sources) instead, and the two share
+    /// one selection rule so they cannot disagree about which files bind.
     ///
     /// Which languages bind is the **registry's** answer, not a roster held
     /// here: every loaded plugin declaring the [`PROPERTIES_CAPABILITY`]
@@ -260,41 +282,92 @@ impl PropertiesIndex {
     /// Which plugin owns a file is [`LanguageRegistry::for_path`]'s answer, the
     /// same admission rule the extract pass uses — a second, hand-rolled
     /// extension test here would be a matcher free to disagree with it about
-    /// case, about a leading dot, and about the basename claims.
-    ///
-    /// The candidate selection is then the descriptor's: a file is parsed only
-    /// when its text mentions one of its own plugin's
-    /// [`annotations`](crate::plugin::PropertiesDescriptor::annotations). That
-    /// substring test is a **pre-filter and nothing more** — the query and the
-    /// exact-match vocabulary test decide what actually indexes — so it can only
-    /// save a parse, never admit one.
+    /// case, about a leading dot, and about the basename claims. Both halves of
+    /// that live in [`binder_for`]; the per-file annotation pre-filter lives in
+    /// [`absorb_candidate`](Self::absorb_candidate).
     pub fn build(root: &Path, corpus: &ConfigCorpus, registry: &LanguageRegistry) -> Self {
+        let mut index = Self::over(registry);
+        for rel in corpus.files() {
+            // The binder test runs BEFORE the read, so a corpus roster carrying
+            // every walked file costs one registry lookup per non-binding file
+            // rather than one `read_to_string`.
+            let Some(plugin) = binder_for(registry, rel) else {
+                continue;
+            };
+            let Ok(source) = std::fs::read_to_string(root.join(rel)) else {
+                continue;
+            };
+            let module = corpus.module_of(rel).to_string();
+            index.absorb_candidate(plugin, rel, &module, &source);
+        }
+        index.seal();
+        index
+    }
+
+    /// Index every bound class a set of **already-read** sources declares — the
+    /// whole-index twin of [`build`](Self::build) for a caller that holds the
+    /// text (S-397, [CR-122]).
+    ///
+    /// This is the constructor the extract pass uses, and the distinction from
+    /// [`build`](Self::build) is [FR-WS-19] AC7: `build` opens every candidate
+    /// file itself, which is right for a measurement walk over a corpus root and
+    /// wrong for ingestion, where the pass has already read every file it will
+    /// ever read. Both go through one selection rule ([`binder_for`] plus the
+    /// descriptor's own annotation pre-filter), so the two entry points cannot
+    /// disagree about which files bind.
+    ///
+    /// Every source is absorbed under the **member scope** ([`MEMBER_SCOPE`]):
+    /// see that constant for why a member-local index takes the whole member as
+    /// one scope, and what that costs.
+    ///
+    /// [CR-122]: ../../../../docs/requests/CR-122-the-configuration-substrate-reaches-the-product.md
+    /// [FR-WS-19]: ../../../../docs/specs/requirements/FR-WS-19.md
+    pub fn from_sources<'s>(
+        registry: &LanguageRegistry,
+        sources: impl IntoIterator<Item = (&'s str, &'s str)>,
+    ) -> Self {
+        let mut index = Self::over(registry);
+        for (rel, source) in sources {
+            let Some(plugin) = binder_for(registry, rel) else {
+                continue;
+            };
+            index.absorb_candidate(plugin, rel, MEMBER_SCOPE, source);
+        }
+        index.seal();
+        index
+    }
+
+    /// An empty index knowing the accessor convention of every binding language
+    /// the registry loaded.
+    fn over(registry: &LanguageRegistry) -> Self {
         let binders: Vec<&dyn LanguagePlugin> = registry
             .iter()
             .filter(|p| p.capabilities().iter().any(|c| c == PROPERTIES_CAPABILITY))
             .collect();
-        let mut index = Self::for_plugins(&binders);
-        for rel in corpus.files() {
-            let Some(plugin) = registry.for_path(rel) else {
-                continue;
-            };
-            let Some(descriptor) = plugin.semantics().properties.as_ref() else {
-                continue;
-            };
-            if !plugin.capabilities().iter().any(|c| c == PROPERTIES_CAPABILITY) {
-                continue;
-            }
-            let Ok(source) = std::fs::read_to_string(root.join(rel)) else {
-                continue;
-            };
-            if !descriptor.annotations.iter().any(|a| source.contains(a)) {
-                continue;
-            }
-            let module = corpus.module_of(rel).to_string();
-            index.absorb_source(plugin, rel, &module, &source);
+        Self::for_plugins(&binders)
+    }
+
+    /// Absorb one candidate source, applying the **descriptor's own** selection
+    /// rule: a file is parsed only when its text mentions one of its plugin's
+    /// [`annotations`](crate::plugin::PropertiesDescriptor::annotations).
+    ///
+    /// That substring test is a **pre-filter and nothing more** — the query and
+    /// the exact-match vocabulary test decide what actually indexes — so it can
+    /// only save a parse, never admit one.
+    fn absorb_candidate(
+        &mut self,
+        plugin: &dyn LanguagePlugin,
+        rel: &str,
+        module: &str,
+        source: &str,
+    ) {
+        let Some(descriptor) = plugin.semantics().properties.as_ref() else {
+            return;
+        };
+        if !descriptor.annotations.iter().any(|a| source.contains(a)) {
+            return;
         }
-        index.seal();
-        index
+        self.absorb_source(plugin, rel, module, source);
     }
 
     /// Index one already-read source through its plugin's `properties` query.
@@ -587,6 +660,22 @@ impl PropertiesIndex {
     pub fn is_empty(&self) -> bool {
         self.classes.is_empty()
     }
+}
+
+/// The plugin that binds configuration properties in `rel`, or [`None`] when no
+/// loaded plugin claims the path, the claiming plugin ships no `[properties]`
+/// table, or it does not declare the [`PROPERTIES_CAPABILITY`].
+///
+/// The single admission rule behind both whole-index constructors, so a
+/// measurement walk and an ingestion pass can never index different populations.
+fn binder_for<'r>(registry: &'r LanguageRegistry, rel: &str) -> Option<&'r dyn LanguagePlugin> {
+    let plugin = registry.for_path(rel)?;
+    plugin.semantics().properties.as_ref()?;
+    plugin
+        .capabilities()
+        .iter()
+        .any(|c| c == PROPERTIES_CAPABILITY)
+        .then_some(plugin)
 }
 
 /// One declaration under construction, accumulated across the matches that bind

@@ -89,6 +89,9 @@ use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeKind, RefForm};
 use crate::plugin::{LanguagePlugin, LanguageRegistry};
 use crate::resolve::http_client_call::ClientCallRefusal;
 
+use config::accessor::{BindingView, DeclaredTypes};
+use config::binding::{PropertiesIndex, MEMBER_SCOPE};
+
 use refs::{flatten_use_tree, import_segments, macro_call_refs, split_path_text};
 use symbol::{build_symbol, descriptor_for, path_segments};
 
@@ -301,7 +304,13 @@ struct Decl<'tree> {
 /// [extraction-engine]: ../../../docs/specs/architecture/components/extraction-engine.md
 pub fn extract(input: &FileInput, plugin: &dyn LanguagePlugin, ctx: &SymbolContext) -> Facts {
     let mut parser = Parser::new();
-    extract_one(&mut parser, input, plugin, ctx)
+    // One file cannot answer a cross-file question, so the single-file interface
+    // is given an index that knows no class and therefore binds no accessor
+    // (S-397). That is not a degradation of this entry point: an accessor's
+    // owning class is declared in another file by construction, so a per-file
+    // caller never had the evidence. [`extract_files`] builds the real index
+    // once, over the set the pass is about to read.
+    extract_one(&mut parser, input, plugin, ctx, &PropertiesIndex::default())
 }
 
 /// Extract many files in parallel, one [`tree_sitter::Parser`] per rayon worker.
@@ -310,11 +319,53 @@ pub fn extract(input: &FileInput, plugin: &dyn LanguagePlugin, ctx: &SymbolConte
 /// discovery layer, S-010, is responsible for filtering); the returned vector
 /// preserves the input order of the files that *were* extracted, so the output
 /// is deterministic regardless of the thread count ([NFR-RA-06], [NFR-PE-08]).
+///
+/// # The configuration-binding pre-pass (S-397, [CR-122], [FR-WS-19])
+///
+/// A `@ConfigurationProperties` accessor names a class declared in **another**
+/// file, so the invocation arm cannot resolve one from the file it is looking
+/// at. The member's properties index is therefore built here, once, before the
+/// parallel map — over `inputs`, the text this pass is about to read anyway, so
+/// ingestion opens **no file of its own** ([FR-WS-19] AC7). A member declaring
+/// no bound class produces an empty index, which every consumer short-circuits
+/// on, leaving such a member byte-for-byte unaffected.
+///
+/// It is a *pre-pass* rather than a second phase over the extracted facts
+/// because the resolution needs the parse tree of the **use site**, which exists
+/// only inside `extract_one`. What it costs is one extra parse per file whose
+/// text mentions a binding annotation — 69 files of 7,895 on the reference
+/// estate — and nothing at all for the rest, which are rejected on a substring
+/// test.
+///
+/// ## The index spans `inputs`, which on an incremental sync is the dirty set
+///
+/// Stated rather than left to be discovered. A full walk passes every admitted
+/// file, so every bound class is present and every accessor that can resolve
+/// does. An **incremental** sync passes only the files it re-extracts, so a
+/// caller re-extracted without its properties class sees an index that does not
+/// hold it, and its site records no key — reverting to the keyless
+/// runtime-composed row it carried before this hop existed, until the next full
+/// walk restores it.
+///
+/// That is the conservative direction and not a correctness hole: the failure
+/// mode is *losing* evidence, never inventing it, which is the side of
+/// [NFR-RA-05] this whole chain sits on. Closing it needs the index to outlive
+/// one pass — a stored artefact, or a re-read of the unchanged files — and a
+/// re-read is exactly the file IO [FR-WS-19] AC7 forbids, so it is not done here.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+///
+/// [CR-122]: ../../../docs/requests/CR-122-the-configuration-substrate-reaches-the-product.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 pub fn extract_files(
     inputs: &[FileInput],
     registry: &LanguageRegistry,
     ctx: &SymbolContext,
 ) -> Vec<Facts> {
+    let properties = PropertiesIndex::from_sources(
+        registry,
+        inputs.iter().map(|i| (i.path.as_str(), i.source.as_str())),
+    );
     inputs
         .par_iter()
         // `map_init` runs the init closure once per rayon worker thread, so each
@@ -322,7 +373,7 @@ pub fn extract_files(
         // across the files that worker handles.
         .map_init(Parser::new, |parser, input| {
             let plugin = plugin_for(registry, &input.path)?;
-            Some(extract_one(parser, input, plugin, ctx))
+            Some(extract_one(parser, input, plugin, ctx, &properties))
         })
         // `rayon`'s `collect` preserves input order even through this
         // `Option`-flattening, so the result is deterministic (NFR-RA-06).
@@ -347,6 +398,7 @@ fn extract_one(
     input: &FileInput,
     plugin: &dyn LanguagePlugin,
     ctx: &SymbolContext,
+    properties: &PropertiesIndex,
 ) -> Facts {
     // A documentation grammar (S-033, CR-003) is extracted structurally into a
     // DocFile + nested DocSection tree, not via the code `symbols` query. This
@@ -653,6 +705,7 @@ fn extract_one(
         &decls,
         &symbols,
         file_module.as_ref(),
+        properties,
         &mut facts,
     );
 
@@ -850,6 +903,7 @@ fn capture_http_client_call_arm(
     decls: &[Decl<'_>],
     symbols: &[Option<LogosSymbol>],
     file_module: Option<&LogosSymbol>,
+    properties: &PropertiesIndex,
     facts: &mut Facts,
 ) {
     let Some(inv_query) = plugin.query("invocations") else {
@@ -865,6 +919,18 @@ fn capture_http_client_call_arm(
     if !is_http_client_file {
         return;
     }
+    // The configuration-binding view of this file, built ONLY when the member
+    // declares at least one bound class (S-397). An index over no class can
+    // resolve nothing, so skipping the per-file declared-type walk there is the
+    // whole of what keeps a member with no configuration corpus unaffected —
+    // and it is the common case for every language and repository that ships no
+    // `properties` capability at all.
+    let binding = (!properties.is_empty()).then(|| BindingView {
+        index: properties,
+        types: DeclaredTypes::build(root, source),
+        language: plugin.name(),
+        module: MEMBER_SCOPE,
+    });
     let calls = collect_invocation_sites(
         inv_query,
         root,
@@ -873,6 +939,7 @@ fn capture_http_client_call_arm(
         symbols,
         file_module,
         &plugin.semantics().invocation_methods,
+        binding.as_ref(),
     );
     if calls.is_empty() {
         return;
@@ -1514,8 +1581,11 @@ const DECLARED_METHOD_PREFIX: &str = "invoke.http.method.";
 /// [`is_http_method`] at all — and, for a language that declares one, how a
 /// non-client spelling (`MapGet`) is filtered out before it can. The first
 /// argument becomes the arm's slots — a static string literal
-/// fills the `path` slot ([`PATH_SLOT`](crate::resolve::http_client_call::PATH_SLOT)); any other
-/// shape sets the dynamic-path marker
+/// fills the `path` slot ([`PATH_SLOT`](crate::resolve::http_client_call::PATH_SLOT));
+/// a `@ConfigurationProperties` accessor `binding` resolves fills the same slot
+/// with the `${…}` placeholder naming its canonical key (S-397, [FR-WS-19]), so
+/// it is admitted and resolved exactly as a source-written placeholder is; and
+/// any other shape sets the dynamic-path marker
 /// ([`DYNAMIC_PATH_SLOT`](crate::resolve::http_client_call::DYNAMIC_PATH_SLOT)) so
 /// the arm's normalizer refuses it as base-url-runtime. The sites are funnelled
 /// through the shared [`capture_invocation_refs`](crate::extract::config::capture_invocation_refs)
@@ -1523,8 +1593,10 @@ const DECLARED_METHOD_PREFIX: &str = "invoke.http.method.";
 /// bind-ability is made — that is the normalizer's job ([NFR-RA-05]).
 ///
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[allow(clippy::too_many_arguments)]
 fn collect_invocation_sites(
     query: &Query,
     root: Node<'_>,
@@ -1533,6 +1605,7 @@ fn collect_invocation_sites(
     symbols: &[Option<LogosSymbol>],
     file_module: Option<&LogosSymbol>,
     invocation_methods: &std::collections::BTreeMap<String, String>,
+    binding: Option<&BindingView<'_>>,
 ) -> Vec<CapturedCall> {
     use crate::resolve::http_client_call::{DYNAMIC_PATH_SLOT, METHOD_SLOT, PATH_SLOT};
 
@@ -1642,16 +1715,44 @@ fn collect_invocation_sites(
             Some(path) => {
                 slots.insert(PATH_SLOT.to_string(), path);
             }
-            // Anything else → a runtime-composed path; the marker's presence makes
-            // the normalizer refuse it (base-url-runtime), no target guessed.
-            None => {
-                let raw = arg_node
-                    .utf8_text(source)
-                    .ok()
-                    .map(|t| t.trim().to_string())
-                    .unwrap_or_default();
-                slots.insert(DYNAMIC_PATH_SLOT.to_string(), raw);
-            }
+            // Not a literal — but a `@ConfigurationProperties` accessor names a
+            // key the repository commits, so it is asked before the path is
+            // called runtime-composed (S-397, FR-WS-19). The answer is already a
+            // `${…}` placeholder, which is not a re-spelling of the operand but
+            // the point of the story: a placeholder is the form S-382's
+            // resolution already consumes, so the accessor reaches it by the
+            // same path, through the same `ConfigBound` admission, the same
+            // committed-corpus lookup, the same overlay handling and the same
+            // `config-bound` provenance — no second rule anywhere.
+            //
+            // The key inside it is CANONICAL — relaxed binding applied, so
+            // `mailserver.api.uriGetArchive` and a yaml's
+            // `mailserver.api.uri-get-archive` store as one string. That is the
+            // form the resolution matches on and the form the row's own
+            // provenance already carries (`ConfigBound::key`), so the stored
+            // target names the key the same way every surface downstream does.
+            // The cost, stated: the target is not the source's spelling, so it
+            // is not greppable in the yaml — the provenance's defining sources
+            // are what name the file. `accessor::placeholder` owns both the
+            // spelling and the check that the reader reads it back.
+            None => match binding.and_then(|b| b.placeholder_for(arg_node, source)) {
+                Some(placeholder) => {
+                    slots.insert(PATH_SLOT.to_string(), placeholder);
+                }
+                // Anything else → a runtime-composed path; the marker's presence
+                // makes the normalizer refuse it (base-url-runtime), no target
+                // guessed. An accessor the source does not prove lands here too,
+                // indistinguishable from a site that was never a candidate —
+                // this arm gains no refusal of its own.
+                None => {
+                    let raw = arg_node
+                        .utf8_text(source)
+                        .ok()
+                        .map(|t| t.trim().to_string())
+                        .unwrap_or_default();
+                    slots.insert(DYNAMIC_PATH_SLOT.to_string(), raw);
+                }
+            },
         }
         sites.push(CapturedCall {
             site: crate::extract::config::InvocationSite {

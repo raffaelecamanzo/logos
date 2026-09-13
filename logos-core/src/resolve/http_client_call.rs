@@ -133,8 +133,16 @@ pub(crate) enum ClientCallPath {
     /// A `"METHOD /template"` whose template carries one or more `${…}`
     /// placeholders naming configuration keys. **Not yet a target**: it keys
     /// nothing until [`binding`](super::binding) resolves the placeholders
-    /// against the committed corpus, and it is stored verbatim so the
-    /// resolution reads the same bytes the source commits.
+    /// against the committed corpus.
+    ///
+    /// Two producers, and they differ in exactly one way. A **source-written**
+    /// placeholder is stored verbatim, so the resolution reads the same bytes
+    /// the source commits. An **accessor** the capture arm resolved (S-397) has
+    /// no placeholder in its source at all: the arm records the canonical key it
+    /// resolved to, spelled as a placeholder, so the site reaches this admission
+    /// and everything after it by one path. Either way the *value* is read from
+    /// the committed corpus and never reconstructed — which is the half
+    /// [ADR-64]'s committed-evidence line is about.
     ///
     /// Deliberately **not** required to be absolute. `${orders.base}/orders/{id}`
     /// begins with its configuration prefix, and demanding a leading `/` here
@@ -379,8 +387,10 @@ mod tests {
     }
 
     /// S-382 / AC1. A path literal carrying a `${…}` placeholder is **admitted**
-    /// as config-bound rather than refused as `base-url-runtime`, and its target
-    /// is stored verbatim so the resolution reads the bytes the source commits.
+    /// as config-bound rather than refused as `base-url-runtime`, and a
+    /// source-written one is stored verbatim so the resolution reads the bytes
+    /// the source commits. (S-397 added a second producer of this variant, whose
+    /// placeholder the capture arm spells; see [`ClientCallPath::ConfigBound`].)
     ///
     /// The three shapes that matter are the leading placeholder (the whole route
     /// prefix is configured), the interior one (a configured path segment), and
