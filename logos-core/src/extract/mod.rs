@@ -1717,15 +1717,15 @@ fn collect_invocation_sites(
             }
             // Not a literal — but a `@ConfigurationProperties` accessor names a
             // key the repository commits, so it is asked before the path is
-            // called runtime-composed (S-397, FR-WS-19). The resolved key is
-            // recorded as a `${…}` placeholder, which is not a re-spelling of
-            // the operand but the point of the story: a placeholder is the form
-            // S-382's resolution already consumes, so the accessor reaches it by
-            // the same path, through the same `ConfigBound` admission, the same
+            // called runtime-composed (S-397, FR-WS-19). The answer is already a
+            // `${…}` placeholder, which is not a re-spelling of the operand but
+            // the point of the story: a placeholder is the form S-382's
+            // resolution already consumes, so the accessor reaches it by the
+            // same path, through the same `ConfigBound` admission, the same
             // committed-corpus lookup, the same overlay handling and the same
             // `config-bound` provenance — no second rule anywhere.
             //
-            // The key is CANONICAL — relaxed binding applied, so
+            // The key inside it is CANONICAL — relaxed binding applied, so
             // `mailserver.api.uriGetArchive` and a yaml's
             // `mailserver.api.uri-get-archive` store as one string. That is the
             // form the resolution matches on and the form the row's own
@@ -1733,10 +1733,11 @@ fn collect_invocation_sites(
             // target names the key the same way every surface downstream does.
             // The cost, stated: the target is not the source's spelling, so it
             // is not greppable in the yaml — the provenance's defining sources
-            // are what name the file.
-            None => match binding.and_then(|b| b.key_for(arg_node, source)) {
-                Some(key) => {
-                    slots.insert(PATH_SLOT.to_string(), format!("${{{key}}}"));
+            // are what name the file. `accessor::placeholder` owns both the
+            // spelling and the check that the reader reads it back.
+            None => match binding.and_then(|b| b.placeholder_for(arg_node, source)) {
+                Some(placeholder) => {
+                    slots.insert(PATH_SLOT.to_string(), placeholder);
                 }
                 // Anything else → a runtime-composed path; the marker's presence
                 // makes the normalizer refuse it (base-url-runtime), no target

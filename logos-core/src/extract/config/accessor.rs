@@ -45,6 +45,23 @@
 //! rather than a parser node kind — and the guard's own comment records what to
 //! do if a grammar bump ever changes that.
 //!
+//! # One shape still binds that should not, and no field separates it
+//!
+//! A Java `annotation_type_element_declaration` — the `Props api();` inside an
+//! `@interface` — field-names exactly `name`, `type`, `dimensions` and an
+//! optional `value`. A `formal_parameter` field-names `name`, `type` and
+//! `dimensions`. **With no default clause the two are field-identical**, so a
+//! rule driven by field names cannot tell an annotation element (a callable)
+//! from a parameter (a value binding), and the element registers `api → Props`.
+//!
+//! It is recorded rather than worked around ([ADR-54]): separating them needs a
+//! node-kind or parent-kind test, which is the language-shaped reading
+//! [NFR-MA-01] forbids here. Its reach is narrow and bounded on both sides — the
+//! fabricated name is only ever consulted if a use site *in the same file*
+//! reads through a receiver of that name that the file otherwise never declares,
+//! and any real declaration of it under a different type poisons the entry to
+//! nothing rather than losing to it.
+//!
 //! # Everything unproven resolves to nothing ([NFR-RA-05])
 //!
 //! Each hop below returns [`None`] rather than a guess, and the arm then leaves
@@ -54,6 +71,7 @@
 //! makes wiring it in a widening of what is *captured* and never of what is
 //! *believed*.
 //!
+//! [ADR-54]: ../../../../docs/specs/architecture/decisions/ADR-54.md
 //! [ADR-64]: ../../../../docs/specs/architecture/decisions/ADR-64.md
 //! [FR-WS-19]: ../../../../docs/specs/requirements/FR-WS-19.md
 //! [NFR-MA-01]: ../../../../docs/specs/requirements/NFR-MA-01.md
@@ -75,11 +93,23 @@ const OBJECT_FIELD: &str = "object";
 /// The grammar field naming a call's callee, where the grammar spells it that
 /// way instead of `name`.
 const FUNCTION_FIELD: &str = "function";
-/// The two fields that mark a node as declaring a **callable**. Such a node
-/// carries a `name` and often a `type` (its return type), and binding the two
-/// together would register a method's name as a value of its return type — a
-/// binding no source makes.
-const CALLABLE_FIELDS: [&str; 2] = ["parameters", "body"];
+/// The fields that mark a node as **calling or declaring a callable** rather
+/// than declaring a value. Such a node carries a `name` and can reach a `type`
+/// — its own return type, or its parent's — and binding the two would register
+/// a method's name as a value of that type: a binding no source makes.
+///
+/// `arguments` is here because of a reproduced fabrication, not for symmetry. A
+/// Java `method_invocation` field-names `name`, `object` and `arguments` and
+/// carries no `parameters` or `body`; as the `value` of a `cast_expression`,
+/// whose `type` field the parent hop reads, `(Props) reg.lookup()` registered
+/// `lookup → Props`. End to end that turned a correct refusal into a confident
+/// `config-bound` target on a receiver the file never declares — the arm
+/// *believing* more rather than capturing more, which is the one thing
+/// [NFR-RA-05] forbids. Deleting an unrelated cast elsewhere in the file flipped
+/// the answer back.
+///
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+const CALLABLE_FIELDS: [&str; 3] = ["parameters", "body", "arguments"];
 
 /// Every name this file binds to a declared **simple** type name.
 ///
@@ -227,13 +257,18 @@ pub struct BindingView<'a> {
 }
 
 impl BindingView<'_> {
-    /// The **canonical** configuration key `operand` names, walking
-    /// [FR-WS-19]'s chain — *accessor → field → owning class → annotation
-    /// prefix → canonical key* — or [`None`] at the first hop the source does
-    /// not prove.
+    /// The request path `operand` names, spelled as the `${…}` placeholder that
+    /// carries its **canonical** configuration key — or [`None`] at the first
+    /// hop the source does not prove.
+    ///
+    /// The chain is [FR-WS-19]'s: *accessor → field → owning class → annotation
+    /// prefix → canonical key*. The placeholder spelling is produced here, and
+    /// not by the caller, because the last step below is to check that the
+    /// placeholder **reads back as the key it was built from** — a check that
+    /// only means anything where the two are written together.
     ///
     /// [FR-WS-19]: ../../../../docs/specs/requirements/FR-WS-19.md
-    pub fn key_for(&self, operand: Node<'_>, src: &[u8]) -> Option<String> {
+    pub fn placeholder_for(&self, operand: Node<'_>, src: &[u8]) -> Option<String> {
         let (receiver, callee) = member_call(operand)?;
         let accessor = callee.utf8_text(src).ok()?.trim();
         // The shape question, asked in the READING file's own language, and it
@@ -260,8 +295,34 @@ impl BindingView<'_> {
         // resolution that canonicalises anyway, and recording the canonical form
         // makes the stored operand key byte-identical for two sites that spell
         // the same property differently.
-        Some(canonical_key(&binding.key))
+        placeholder(&canonical_key(&binding.key))
     }
+}
+
+/// `key` as a `${…}` placeholder, but **only if the placeholder reader gets
+/// `key` back out of it** ([NFR-RA-05]).
+///
+/// The key is built from a prefix the annotation spells, and `canonical_key`
+/// lowercases and drops `-`/`_` and touches nothing else — so every other byte
+/// of that literal survives into a string this arm is about to hand to
+/// [`placeholder_keys`](crate::resolve::binding::placeholder_keys). Two of those
+/// bytes are load-bearing to that reader and were reproduced doing damage: it
+/// stops a key at the first `}`, and it reads the first `:` as the inline-
+/// default separator. A prefix of `mail:server.api` therefore yielded the key
+/// `mail` — a *different*, shorter key, which a corpus can perfectly well define,
+/// so the site bound a value it was never entitled to instead of refusing.
+///
+/// Expressed as a round-trip through the real reader rather than as a rejected
+/// character set, so the two can never disagree about what is a placeholder: if
+/// the reader would see anything other than exactly this key, the operand is not
+/// proven and resolves to nothing.
+///
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+fn placeholder(key: &str) -> Option<String> {
+    let spelled = format!("${{{key}}}");
+    (crate::resolve::binding::placeholder_keys(&spelled)
+        .is_some_and(|keys| keys == [key.to_string()]))
+    .then_some(spelled)
 }
 
 #[cfg(all(test, feature = "lang-java"))]

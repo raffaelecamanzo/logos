@@ -10,6 +10,7 @@
 
 use super::*;
 
+use crate::extract::config::binding::MEMBER_SCOPE;
 use crate::plugin::{LanguagePlugin, LanguageRegistry};
 
 /// The loaded registry, built once per test binary.
@@ -55,7 +56,8 @@ fn node_with_text<'t>(root: tree_sitter::Node<'t>, src: &[u8], needle: &str) -> 
     panic!("no node spells {needle:?}");
 }
 
-/// Resolve `operand` (named by its source text) in `use_site`, against `index`.
+/// Resolve `operand` (named by its source text) in `use_site`, against `index`,
+/// returning the `${…}` placeholder the arm would record.
 fn key_of(index: &PropertiesIndex, use_site: &str, operand: &str) -> Option<String> {
     let tree = parse(use_site);
     let src = use_site.as_bytes();
@@ -65,7 +67,7 @@ fn key_of(index: &PropertiesIndex, use_site: &str, operand: &str) -> Option<Stri
         language: java().name(),
         module: "",
     };
-    view.key_for(node_with_text(tree.root_node(), src, operand), src)
+    view.placeholder_for(node_with_text(tree.root_node(), src, operand), src)
 }
 
 /// The properties class every positive case below reads through.
@@ -154,7 +156,7 @@ fn an_accessor_on_an_injected_properties_class_names_its_canonical_key() {
         }";
     assert_eq!(
         key_of(&index, use_site, "api.getUriGetArchive()").as_deref(),
-        Some("mailserver.api.urigetarchive"),
+        Some("${mailserver.api.urigetarchive}"),
     );
 }
 
@@ -292,6 +294,152 @@ fn a_java_use_site_is_judged_by_javas_convention_not_the_declaring_languages() {
     assert_eq!(
         key_of(&index, &use_site.replace("k.compute()", "k.getCompute()"), "k.getCompute()")
             .as_deref(),
-        Some("k.compute"),
+        Some("${k.compute}"),
     );
+}
+
+// ── The two fabrications review reproduced, and the one that stays ──────────
+
+/// **A node that CALLS is not a node that declares.** A Java `method_invocation`
+/// carries `name`, `object` and `arguments` and no `parameters` or `body`, so
+/// before `arguments` joined [`CALLABLE_FIELDS`] the parent hop read the `type`
+/// of an enclosing `cast_expression` and registered the *called method's* name
+/// against it.
+///
+/// The end-to-end harm is in `extract::tests` — a cast anywhere in the file gave
+/// an undeclared receiver a type and turned a refusal into a `config-bound`
+/// target. Pinned here at the unit that produced it, and with the two
+/// non-fabricating shapes beside it so a future widening has to face all three.
+#[test]
+fn a_call_expression_binds_no_name_however_its_result_is_cast() {
+    let source = "public class Caller {\n\
+          void warm(Registry reg) {\n\
+            Object o = (MailServerConfigurationApi) reg.lookup();\n\
+            MailServerConfigurationApi declared = reg.other();\n\
+          }\n\
+        }";
+    let tree = parse(source);
+    let types = DeclaredTypes::build(tree.root_node(), source.as_bytes());
+
+    assert_eq!(
+        types.get("lookup"),
+        None,
+        "the CALLED method's name is not a value of the cast type",
+    );
+    assert_eq!(
+        types.get("other"),
+        None,
+        "…nor of the type its result is assigned to",
+    );
+    assert_eq!(
+        types.get("o"),
+        Some("Object"),
+        "the declarator the cast is assigned to still binds, so the fix narrowed \
+         the fabrication and not the capture",
+    );
+    assert_eq!(types.get("declared"), Some("MailServerConfigurationApi"));
+}
+
+/// The **stated ceiling** the same walk still carries, pinned so it is a known
+/// quantity rather than a surprise: a Java annotation-type element is
+/// field-identical to a parameter, so it binds.
+///
+/// This asserts the ceiling, not an intention — see the module docs for why no
+/// field separates the two and what bounds the reach. The second half is the
+/// bound that matters in practice: a real declaration of the same name under a
+/// different type poisons the entry rather than losing to it.
+#[test]
+fn an_annotation_type_element_still_binds_and_a_real_declaration_poisons_it() {
+    let alone = "public class Caller {\n\
+          @interface Marker { MailServerConfigurationApi api(); }\n\
+        }";
+    let tree = parse(alone);
+    assert_eq!(
+        DeclaredTypes::build(tree.root_node(), alone.as_bytes()).get("api"),
+        Some("MailServerConfigurationApi"),
+        "the stated ceiling: no grammar field tells an annotation element from a \
+         parameter, so it binds",
+    );
+
+    let beside = "public class Caller {\n\
+          @interface Marker { MailServerConfigurationApi api(); }\n\
+          private final SomethingElse api;\n\
+        }";
+    let tree = parse(beside);
+    assert_eq!(
+        DeclaredTypes::build(tree.root_node(), beside.as_bytes()).get("api"),
+        None,
+        "…and a real, disagreeing declaration of that name poisons it to nothing",
+    );
+}
+
+/// **A key the placeholder reader would not read back is not proven.**
+///
+/// `canonical_key` lowercases and drops `-`/`_`; every other byte of the
+/// annotation's prefix literal survives into the string the arm records. Two of
+/// them break the reader: `}` ends the placeholder early, and `:` starts an
+/// inline default. Both truncate to a **shorter key a corpus can define**, so
+/// without the round-trip the site binds a value it never named.
+///
+/// The near misses are one character from the admitted case, which is the only
+/// way to probe a matcher.
+#[test]
+fn a_key_the_placeholder_reader_cannot_read_back_resolves_to_nothing() {
+    let use_site = "public class Caller {\n\
+          private final MailServerConfigurationApi api;\n\
+          void go() { client.get(api.getUriGetArchive()); }\n\
+        }";
+    let props = |prefix: &str| {
+        format!(
+            "@ConfigurationProperties(prefix = \"{prefix}\")\n\
+             public class MailServerConfigurationApi {{ private String uriGetArchive; }}"
+        )
+    };
+
+    for (prefix, why) in [
+        ("mail:server.api", "a colon reads as the inline-default separator"),
+        ("mail}server.api", "a closing brace ends the placeholder early"),
+        ("mail${x}.api", "a nested placeholder is not one key"),
+    ] {
+        let index = index(&[("P.java", &props(prefix))]);
+        assert_eq!(
+            key_of(&index, use_site, "api.getUriGetArchive()"),
+            None,
+            "prefix {prefix:?}: {why}",
+        );
+    }
+
+    // …and the admitted case, so the guard is proved to be narrow rather than
+    // total. A dot and a digit are the characters a real prefix is made of.
+    let index = index(&[("P.java", &props("mail2server.api"))]);
+    assert_eq!(
+        key_of(&index, use_site, "api.getUriGetArchive()").as_deref(),
+        Some("${mail2server.api.urigetarchive}"),
+    );
+}
+
+/// [`MEMBER_SCOPE`] is pinned to the **literal the coverage tier reads with**,
+/// not merely to itself.
+///
+/// `federation::coverage::record_config_bound` builds its resolver as
+/// `Resolver { corpus, module: "" }`. If the index absorbed under any other
+/// scope, a class would be looked up in one scope while its values were read in
+/// another — and every test that spells the scope as `MEMBER_SCOPE` on both
+/// sides would still pass, which is exactly what a mutation to `"member"`
+/// demonstrated.
+#[test]
+fn the_member_scope_is_the_empty_scope_the_coverage_tier_reads_with() {
+    assert_eq!(
+        crate::extract::config::binding::MEMBER_SCOPE,
+        "",
+        "the coverage tier hardcodes `Resolver {{ module: \"\" }}`; these two \
+         literals are one agreement and must be changed together",
+    );
+
+    // The behavioural half: an index built the way ingestion builds it answers a
+    // lookup made the way the coverage tier makes it.
+    let mut index = PropertiesIndex::for_plugins(&[java()]);
+    index.absorb_source(java(), "P.java", MEMBER_SCOPE, PROPS);
+    index.seal();
+    assert!(index.get("MailServerConfigurationApi", "").is_some());
 }

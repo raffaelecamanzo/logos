@@ -3164,26 +3164,32 @@ fn without_the_properties_class_the_same_accessor_records_no_key() {
     let inputs = vec![FileInput::new(ACCESSOR_CALLER_FILE, ACCESSOR_CALLER_SOURCE)];
     let facts = extract_files(&inputs, &reg, &ctx);
 
-    assert!(
-        client_call_targets(&facts, ACCESSOR_CALLER_FILE)
-            .iter()
-            .all(|t| t.is_empty()),
-        "an unresolvable accessor contributes no bind target — only the keyless \
-         refusal row the arm already recorded: {:?}",
+    // `assert_eq!` against the exact one-row expectation, NOT `all(is_empty)`:
+    // `all` over an empty vector is true, so that spelling also passed when the
+    // whole client-call arm was suppressed for this member — which a mutation
+    // demonstrated. The row's PRESENCE is half of what this test is for.
+    assert_eq!(
         client_call_targets(&facts, ACCESSOR_CALLER_FILE),
+        vec![String::new()],
+        "an unresolvable accessor contributes no bind target — and still leaves \
+         the keyless refusal row the arm always recorded",
     );
 }
 
-/// **S-397 AC4, the byte-for-byte half.** The hop changes the client-call row
-/// and **nothing else**: extract the identical caller file in a member that
-/// declares the properties class and in one that does not, and every other fact
-/// is equal.
+/// **The hop changes the client-call row and nothing else**: extract the
+/// identical caller file in a member that declares the properties class and in
+/// one that does not, and every other fact is equal.
 ///
-/// A differential rather than a snapshot, so it says what it means. "A member
-/// with no configuration corpus is byte-for-byte unaffected" is a claim about
-/// the *rest* of extraction — nodes, edges, warnings, the corpus fact, the
-/// non-client references — and a snapshot of one arm could drift with the
-/// fixture while still agreeing with itself.
+/// Scoped deliberately, because an earlier docstring here claimed more than the
+/// test proves. This is a differential between **two arms of the same build**,
+/// so it constrains only what the `!properties.is_empty()` branch does; a change
+/// on the path both arms share cancels out of it, and a mutation that pushed a
+/// warning unconditionally survived. [FR-WS-19] AC7's "a member with no
+/// configuration corpus is byte-for-byte unaffected" is pinned by its sibling
+/// [`without_the_properties_class_the_same_accessor_records_no_key`], which
+/// asserts the exact row such a member emits.
+///
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 #[test]
 #[cfg(feature = "lang-java")]
 fn the_hop_changes_the_client_call_row_and_nothing_else() {
@@ -3231,5 +3237,44 @@ fn the_hop_changes_the_client_call_row_and_nothing_else() {
         client_call_targets(&without, ACCESSOR_CALLER_FILE),
         vec![String::new()],
         "without the class, the same site is the keyless refusal row it always was",
+    );
+}
+
+/// **The fabrication review reproduced, pinned end to end.** A cast anywhere in
+/// the caller must not give an undeclared receiver a type.
+///
+/// This is the harm behind `accessor_tests`'
+/// `a_call_expression_binds_no_name_however_its_result_is_cast`, and it is
+/// asserted here as well as there because the unit test alone would not have
+/// shown what was at stake: `api` is inherited and declared nowhere in this
+/// file, so before the fix one unrelated cast statement was the whole evidence
+/// behind a `config-bound` target.
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_cast_elsewhere_in_the_file_gives_an_undeclared_receiver_no_key() {
+    let reg = registry();
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let caller = "package a;\n\
+        import org.springframework.web.client.RestClient;\n\
+        public class ArchiveClient extends BaseClient {\n\
+        \x20   private RestClient restClient;\n\
+        \x20   void warm(Registry reg) { Object o = (MailServerConfigurationApi) reg.api(); }\n\
+        \x20   String a() { return restClient.get().uri(api.getUriGetArchive()).retrieve().body(String.class); }\n\
+        }\n";
+    let facts = extract_files(
+        &[
+            FileInput::new(ACCESSOR_PROPS_FILE, ACCESSOR_PROPS_SOURCE),
+            FileInput::new(ACCESSOR_CALLER_FILE, caller),
+        ],
+        &reg,
+        &ctx,
+    );
+
+    assert_eq!(
+        client_call_targets(&facts, ACCESSOR_CALLER_FILE),
+        vec![String::new()],
+        "`api` is declared nowhere in this file; a cast of an unrelated call's \
+         result is not a declaration of it, and the site must stay the keyless \
+         refusal row",
     );
 }
