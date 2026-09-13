@@ -47,7 +47,7 @@ use super::bridge::{
     sort_buckets, BridgeEndpoint, BridgeIntake, MemberContracts, PortableKey, ProviderIndex,
     Role,
 };
-use super::registry::{AnswerScope, EngineRegistry, MemberEngine};
+use super::registry::{AnswerScope, MemberEngine};
 
 /// Why one cross-boundary reference did not bind ([FR-WS-05], [ADR-53]).
 ///
@@ -1430,7 +1430,7 @@ where
     // (S-382). A member with no such reference is not read at all; a member whose
     // read fails contributes an empty corpus, so its references refuse as
     // `config-key-missing` rather than aborting the workspace ([ADR-53]).
-    let corpora = member_corpora(answer.registry(), &inv_consumers);
+    let corpora = member_corpora(answer, &inv_consumers);
 
     // Classify the arm-tagged invocation consumers against the same provider index
     // (S-252 HTTP, S-253 gRPC, S-254/S-256 broker). A stored consumer target
@@ -1609,7 +1609,7 @@ impl ConfigLookup for MemberCorpus {
 /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
 /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 fn member_corpora<E>(
-    registry: &EngineRegistry<E>,
+    answer: &AnswerScope<'_, E>,
     consumers: &[(String, super::bridge::InvocationRef)],
 ) -> BTreeMap<String, MemberCorpus>
 where
@@ -1628,12 +1628,19 @@ where
         }
     }
     let mut out = BTreeMap::new();
-    // Only the members that actually name a key are opened. `fan_out` is
-    // deliberately NOT used: it reaches every member of the workspace, and on an
-    // 84-member estate where one service configures its base URL that would open
-    // 83 stores to read nothing ([NFR-PE-10]).
+    // Only the members that actually name a key are opened. The scope's
+    // `fan_out` is deliberately NOT used: it reaches every member of the
+    // workspace, and on an 84-member estate where one service configures its
+    // base URL that would open 83 stores to read nothing ([NFR-PE-10]). Every
+    // member reached here already opened for this answer's invocation-refs walk
+    // — a member that failed to open contributes no consumer — so these are
+    // resident hits, not new attempts against the once-per-answer guarantee.
     for (member, keys) in wanted {
-        match registry.engine_for(&member).and_then(|e| e.config_definitions(&keys)) {
+        match answer
+            .registry()
+            .engine_for(&member)
+            .and_then(|e| e.config_definitions(&keys))
+        {
             Ok(corpus) => {
                 out.insert(member, corpus);
             }
@@ -2197,7 +2204,7 @@ mod tests {
     use anyhow::Result;
 
     use super::super::bridge::ContractNode;
-    use super::super::registry::RegistryMode;
+    use super::super::registry::{EngineRegistry, RegistryMode};
     use super::super::{Federation, Member};
     use crate::model::LogosSymbol;
 
