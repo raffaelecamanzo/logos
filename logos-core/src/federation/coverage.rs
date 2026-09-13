@@ -18,7 +18,7 @@
 //! ([`crate::governance`]) — those operate on a single [`crate::Engine`] and
 //! have no dependency on `federation` at all, so the coverage tier is
 //! structurally incapable of moving the gate. [`cross_service_coverage`] is
-//! reachable only through an [`EngineRegistry`], which itself exists only when
+//! reachable only through an [`EngineRegistry`](super::EngineRegistry), which itself exists only when
 //! a workspace manifest is present ([`Backing::Federated`](super::Backing)) —
 //! the single-root path never constructs one, so this tier is inert with no
 //! manifest ([FR-WS-05]).
