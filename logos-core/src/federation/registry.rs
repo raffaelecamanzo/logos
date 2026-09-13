@@ -426,6 +426,15 @@ pub struct EngineRegistry<E: MemberEngine = Engine> {
     ///
     /// Lock order is always `admission` → `resident`; nothing takes them the
     /// other way round.
+    ///
+    /// A walk adds a **third** mutex, [`AnswerScope`]'s own `state`, which this
+    /// ordering deliberately does not mention because it never participates in
+    /// it: every `state` guard is taken and dropped inside a single statement,
+    /// never held across the [`engine_for`](Self::engine_for) call that acquires
+    /// `admission`. That is what keeps the two-lock order above complete, and it
+    /// is a property of [`open_for_walk`](AnswerScope::open_for_walk)'s
+    /// two-statement shape rather than of anything enforced here — the comment
+    /// there records the hazard.
     admission: Mutex<Admission>,
     /// Engine starts that rebuilt a previously-evicted member. The cost of the
     /// budget, counted so thrash is measurable ([NFR-PE-11]).
