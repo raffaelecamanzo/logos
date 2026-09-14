@@ -128,3 +128,41 @@ This floor is not revised after the run. The constant in the measurement code is
 PARSED from this file rather than compared with a literal written beside it, so
 the constant cannot be edited to clear a run without this declaration being edited
 too — in the file whose whole purpose is to say it must not be.
+
+APPENDED 2026-09-14 — POST-RUN CORRECTION TO THE WORDING OF "THIRD-PARTY"
+--------------------------------------------------------------------------
+
+Appended by HUMAN DECISION at the Sprint 69 review, after the run. Everything
+above this line is the declaration exactly as committed before the measurement,
+and is deliberately UNCHANGED — including the COMMITMENT section, which forbids
+revising it. This section neither moves the floor nor alters the verdict. It
+exists because this file is the artefact a future gate will copy as a template,
+and a correction recorded only in a sprint's implementation notes gets missed.
+
+WHAT IS WRONG. The definition above reads: "THIRD-PARTY means, exactly: consumer
+member != provider member", while citing S-384's split of 11 self-ties and one
+genuine edge as its whole motivation. Those two are inconsistent. S-384's
+self-ties are NOT consumers bound to themselves. Its finding says: "an aggregator
+re-registers the callee's template on its own controller, so two members serve
+it, path-only refuses, and identity binds ... identity's genuine THIRD-PARTY
+contribution, where the tie is between two other members, is ONE edge." The
+discriminator S-384 used is the SERVING SET -- did the consumer itself create the
+ambiguity by claiming the callee's template -- not member identity. Read
+literally, the wording above would score S-384's own headline as 12 genuine
+edges and 0 self-ties, contradicting the sentence that justifies the word.
+
+WHAT IT DID NOT AFFECT. Both readings were measured and printed side by side
+(`Reading::AsDeclared` and `Reading::AsMeasuredByS384`). As declared: 3. As S-384
+defines it: 0. The floor is 16. The finding is FALSIFIED under both readings, by
+a wide margin, and no dependent story is planned under either.
+
+WHAT A FUTURE GATE MUST DO. Any later gate declaring this metric writes S-384's
+definition, not the one above: an edge counts as third-party only where the
+consumer is not itself among the members serving the contested template. A gate
+that inherits the wording above will report self-inflicted ambiguity as genuine
+cross-service discovery, which is the exact misreading S-384's correction exists
+to prevent.
+
+Recorded by: Sprint 69 coordinator, on the user's decision (Option B of three
+offered: append a dated correction rather than rewrite the declaration or re-run
+the measurement).
