@@ -1,11 +1,11 @@
 {
   "artifact": "S-376 / CR-120 post-change coverage baseline for the reference workspace",
   "workspace": "~/source/pec-services (84 members, all read; covers_all_members: true)",
-  "measured_on": "2026-09-13 (re-measured; supersedes the same-day pre-Iteration-1 reading)",
+  "measured_on": "2026-09-14 (the S-403 T1 re-read of the 2026-09-13 Iteration-1 index; supersedes the same-day pre-Iteration-1 reading and the 2026-09-13 S-398 T2 read of the same index)",
   "generations": [
     "2026-09-09 — first, over a 1.4.7 index (the CR-120 acceptance baseline)",
     "2026-09-13 — second, S-397 T2, over logos 1.4.9 + S-397 T1",
-    "2026-09-13 — third (this one), S-398 T2, over logos 1.4.10 + Sprint 69 Iteration 1",
+    "2026-09-13 — third, S-398 T2, over logos 1.4.10 + Sprint 69 Iteration 1",
     "2026-09-14 — fourth (this one), S-403 T1, re-measured over the same Iteration-1 index; the headline counter moves 0 -> 15 and no classification or resolution changes"
   ],
   "measured_by": "logos-core/tests/coverage_headline_baseline.rs, through the same discover -> EngineRegistry(Lazy) -> cross_service_coverage construction `logos workspace status` uses",
