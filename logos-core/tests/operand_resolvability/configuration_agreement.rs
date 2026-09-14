@@ -2310,7 +2310,7 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
          the denominator holding at 96. This run read {s382:?}. Re-measure \
          against the reference workspace before changing this assertion.\n\
          \n\
-         THIS DENOMINATOR IS RESTATED IN FOUR PLACES THIS BINARY CANNOT REACH, and \
+         THIS DENOMINATOR IS RESTATED IN FIVE PLACES THIS BINARY CANNOT REACH, and \
          it has now moved twice (111 -> 108 -> 96). If it moves again, re-record \
          ALL of them in the same change:\n\
          \x20 - `ACCESSOR_DENOMINATOR` in logos-core/tests/config_bound_admission.rs \
@@ -2322,6 +2322,12 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
          logos-core/src/extract/config/corpus.rs, which states it as `0 of 96` — the \
          one PRODUCTION file that restates this denominator, and the one this list \
          did not name until S-398 T2's review added it.\n\
+         \x20 - the Notes of docs/specs/requirements/FR-WS-19.md, amended at the \
+         Sprint 69 review. It is a LIVE Must-priority requirement, not a dated \
+         record, so a stale figure there asserts a product figure the product does \
+         not emit. `docs/specs` is a directory symlink into the separate logos-docs \
+         repository, so no sprint worktree can stage it — the COORDINATOR applies \
+         it from ~/source/logos-docs.\n\
          \n\
          A FOURTH PLACE WAS DELIBERATELY DROPPED FROM THIS LIST: the S-397 T2 figures \
          in docs/planning/sprints/sprint-impl-68.md. They are a DATED record of what \
