@@ -1100,9 +1100,10 @@ pub struct CrossServiceCoverage {
     ///
     /// **The retired `bound_ratio`'s formula, unchanged, under the name of what it
     /// always measured** ([CR-120] §5.2, [FR-WS-05]). It is dominated by
-    /// `contract-surface` intake — on the 84-member reference estate **81 of its 86**
-    /// bound rows are declared-contract matches, the other 5 being the
-    /// `config-bound` client calls S-397 T1's hop admitted — so it reports how far this
+    /// `contract-surface` intake — on the 84-member reference estate **81 of its 96**
+    /// bound rows are declared-contract matches, the other 15 being the
+    /// `config-bound` client calls the accessor hop admitted (it read 81 of 86, the
+    /// other 5, before S-398 T1 reached a qualified receiver) — so it reports how far this
     /// workspace's *declarations* line up with its controllers, and it is **never**
     /// a measure of cross-service coupling. That headline is
     /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges), and

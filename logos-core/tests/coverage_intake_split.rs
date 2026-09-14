@@ -172,14 +172,14 @@ fn corpus_root() -> Option<PathBuf> {
 ///
 /// Three things are checked, and only the first is [CR-120]'s headline:
 ///
-/// 1. the `bound` count splits as **81 contract-surface / 5 invocation**;
+/// 1. the `bound` count splits as **81 contract-surface / 15 invocation**;
 /// 2. every row carries an intake, so the split is auditable from the rows rather
 ///    than taken on trust — the property AC1 adds and the one that makes (1)
 ///    reproducible by a reader with the same `--json`;
 /// 3. the two populations sum to the headline counters, so the split cannot
 ///    under-report what it sits beside.
 ///
-/// **The 81/5 pair is asserted, and a moved corpus fails this harness
+/// **The 81/15 pair is asserted, and a moved corpus fails this harness
 /// deliberately.** Its failure message prints the measured figure and the split
 /// beside it, because the criterion's number is a recorded measurement of a
 /// specific workspace at a specific commit: the remedy for a red run here is to
