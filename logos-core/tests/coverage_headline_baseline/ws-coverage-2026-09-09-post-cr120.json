@@ -65,6 +65,11 @@
       "effect": "The egress DENOMINATOR falls: egress_resolution_measured 155 -> 117, and references 1060 -> 1034. 26 captured `r.Header.Get(k)`-shaped Go non-calls in `hermodr-mirror` stopped being captured (37 rows -> 11), every one of them an `unbound` / `base-url-runtime` row, so no bound row moved. Any egress figure quoted against the pre-correction 155 is quoted against a denominator that no longer exists.",
       "evidence": "sprint-impl-69.md, S-402 T1; measured here on the 2026-09-13 Iteration-1 index"
     },
+    "S-399": {
+      "story": "The accessor hop reaches through a UriBuilder lambda",
+      "status": "pending-reindex",
+      "effect": "PENDING THE RE-INDEX, and the only entry here that is. S-399 merged into Sprint 69 AFTER the 2026-09-13 Iteration-1 index these figures were measured on, so none of its contribution is in the measurement block above. Expected direction and magnitude on the next re-index: THREE further egress sites resolve (by_intake.invocation bound or ambiguous +3, with the no-key residue -3), because its invocations.scm pattern 5 re-points the capture at the operand INSIDE a UriBuilder lambda and three estate sites then present a configuration accessor that resolves. The captured population does NOT move, so the egress denominator is expected to hold at 117: this is a resolution, not a new capture, and it must not be netted with S-398 T1's admission or S-402 T1's population correction. Measured independently by the sprint review on 2026-09-14: the source-derived harness operand_resolvability::configuration_agreement moved 79 -> 82 resolved (no-key 15 -> 12) on merged main and names the same three sites (funnel-aggregator-api MailboxApiRestClient.java:268, mailbox-aggregator-api ReportingApiRestClient.java:110 and :122). The index-derived pin RECORDED_ADMITTED in config_bound_admission.rs still reads 81 and is expected to read ~84 after the re-index."
+    },
     "S-403": {
       "story": "The resolved-edge headline agrees with its payload (this story)",
       "status": "observed",
