@@ -627,10 +627,19 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
          42 `no-provider-in-workspace` rows became `config-key-missing`, the estate's \
          committed sources have stopped defining keys the accessors resolve and the \
          shortfall is no longer capture-only; if `bound` moved, the estate's own topology \
-         changed. Note that a `config-bound` row is excluded from \
-         `resolved_cross_service_edges` whatever its bucket, so `bound: 15` is not a \
-         coverage claim. The split is restated in docs/howto/commands.md; re-record it \
-         there in the same change.",
+         changed. Note that a `config-bound` row REACHES `resolved_cross_service_edges` \
+         when it binds — S-403 T1 removed the exclusion that made the headline a proxy \
+         for the bridge's own edge count (CR-127) — so a move in `bound` moves the \
+         published headline with it. The estate's figures are restated in prose in \
+         SEVEN places outside the baseline artifact, and nothing tests any of them \
+         — re-record them all in the same change, or they go quietly wrong on the \
+         next re-index: docs/howto/commands.md (the worked examples and the \
+         config-bound paragraph), logos-core/src/federation/coverage.rs (the \
+         `by_intake` and `resolved_cross_service_edges` field docs), \
+         logos-core/src/federation/reach.rs (the `resolved_cross_service_edges` \
+         and `spec_conformance_measured` field docs), mcp/src/server.rs (both tool \
+         descriptions), web/src/api_v1.rs (the workspace-status doc) and \
+         web/ui/src/api/types.ts (the `resolved_edges_summary` example).",
     );
     assert_eq!(
         a.config_unresolved, 0,

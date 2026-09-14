@@ -745,6 +745,42 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
     expect(container.textContent).not.toMatch(/bound[ -]ratio/i);
   });
 
+  /** **A NON-ZERO headline renders the server's line, not a recomposed one**
+   *  ([CR-127], [FR-WS-05]).
+   *
+   *  Every other fixture on this surface carries `0`, which is what the server
+   *  could send while the count excluded `config-bound` rows — so the rendering of
+   *  the shape the estate now actually produces was untested. Asserted on rendered
+   *  DOM text, so a view that rebuilt the sentence from the numbers beside it and
+   *  drifted from the CLI and MCP renderings fails here — verified by making
+   *  `WorkspaceView` recompose the line, which fails this test and its
+   *  absent-rate sibling. */
+  it("renders a NON-ZERO resolved-edge headline as the server composed it", async () => {
+    stubApi({
+      coverage: {
+        ...COVERAGE,
+        resolved_cross_service_edges: 15,
+        egress_resolution: 15 / 117,
+        egress_resolution_measured: 117,
+        resolved_edges_summary:
+          "15 resolved cross-service edges; egress resolution 0.128 (15 of 117 egress sites resolved)",
+      } as typeof COVERAGE,
+    });
+    const { container } = mount();
+
+    expect(
+      await screen.findByText(
+        "15 resolved cross-service edges; egress resolution 0.128 (15 of 117 egress sites resolved)",
+      ),
+    ).toBeInTheDocument();
+    expect(scoreBarClassIn(container, /^Resolved cross-service edges/)).toBeTruthy();
+    expect(screen.getByText(/12\.8% of egress sites resolve/)).toBeInTheDocument();
+    // The count in the sentence is not contradicted anywhere on the surface: the
+    // exact string "0 resolved cross-service edges" must be absent, which is the
+    // shipped defect's own rendering (CR-127 §3.1).
+    expect(container.textContent).not.toMatch(/0 resolved cross-service edges/);
+  });
+
   /** An absent egress rate renders "not measured", never a bar — [CR-100]'s rule on
    *  the successor figure, and the state the honest-empty fixture is in. */
   it("renders an ABSENT egress resolution as 'not measured', with no bar", async () => {

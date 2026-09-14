@@ -176,10 +176,22 @@ THE HEADLINE FIGURES THE SAME PAYLOAD CARRIES
   The contract-surface column is byte-identical across the two runs; every cell
   that moved is in the invocation column.
 
-  `resolved_cross_service_edges` IS STILL 0, and that is not a defect in this
-  measurement. A `config-bound` row is deliberately excluded from that headline —
-  the coverage tier resolves the placeholder, but the bridge still keys a
-  consumer on its raw ledger target, so no edge is drawn for it yet.
+  `resolved_cross_service_edges` read 0 at the time of THIS measurement, and that
+  was not a defect in the measurement.
+
+  [SUPERSEDED 2026-09-14 by S-403 T1 / CR-127, later in the same sprint. The
+  clause that stood here explained the 0 by saying a `config-bound` row is
+  "deliberately excluded" from that headline. That exclusion made the headline
+  stand in for a DIFFERENT quantity — the edges the BRIDGE drew — under a name
+  FR-WS-05 defines as resolution, and it sat on only one half of BR-51's composed
+  sentence, which is why the same payload could publish `0 resolved` beside
+  `15 of 117 resolved`. The exclusion is removed: a bound `config-bound` row now
+  reaches the headline, so on this same index the figure is 15, not 0, and the
+  `resolved_cross_service_edges` cell in the table above reads 0 only because it
+  records the pre-S-403 reading. The bridge fact is unchanged and still true — it
+  keys a consumer on its raw ledger target, so no `BridgeEdge` is drawn for such a
+  row — and is now published in its own right as `coverage.bridge_invocation_edges`,
+  which is 0. The measurement above is NOT restated; it is left as recorded.]
 
   The egress denominator fell 155 -> 117, and the -38 decomposes as -26 (S-402's
   smaller population) and -12 (rows S-398 admitted whose resolved template names

@@ -110,6 +110,62 @@ That generation was itself superseded the same day — see the S-398 T2 section
 above, which is the current one.
 
 
+SUPERSEDED AGAIN — 2026-09-13 (S-403 T1), AND THE HEADLINE MOVES OFF ZERO
+------------------------------------------------------------------------
+
+The block above is itself superseded. The estate was re-indexed a SECOND time on
+2026-09-13, from a binary carrying sprint-69 Iteration 1, and the JSON's
+`measurement` block was regenerated over that generation. Three causes, stated
+apart, because only one of them is S-403's and the other two would otherwise be
+credited to it:
+
+        references                      1034   (was 1060)
+        bound / ambiguous / unbound     96 / 169 / 80
+        no_provider_in_workspace         689   (was  677)
+        by_intake invocation      15 / 23 / 79 / 43   (was 5 / 9 / 141 / 31)
+        resolved_cross_service_edges      15   (was    0)
+        egress_resolution              0.128 (15 of 117)  (was 0.032 of 155)
+        spec_conformance_ratio         0.278 (96 of 345)  (was 0.225 of 383)
+
+  * S-402 T1 — THE DENOMINATOR. The Go client-call candidacy gate became
+    receiver-grained, and 26 captured `r.Header.Get(k)`-shaped non-calls in
+    `hermodr-mirror` stopped being captured (37 invocation rows -> 11). All 26
+    were `unbound` / `base-url-runtime`, so no bound row moved and the egress
+    denominator fell 155 -> 117. ANY EGRESS FIGURE QUOTED AGAINST 155 IS QUOTED
+    AGAINST A DENOMINATOR THAT NO LONGER EXISTS.
+
+  * S-398 T1 — THE NUMERATOR. The accessor hop now reaches a receiver behind a
+    field qualifier, which is how this estate writes every accessor, so ten more
+    egress sites resolve: by_intake.invocation.bound 5 -> 15, ambiguous 9 -> 23.
+
+  * S-403 T1 — THE HEADLINE, AND NOTHING ELSE. `resolved_cross_service_edges`
+    0 -> 15. This is a REPORTING CORRECTION. The estate resolved 15 egress sites
+    before this change too; the headline printed 0 beside "15 of 117 egress sites
+    resolved" in the same sentence, because the edge count carried a
+    `config-bound` exclusion that the rate's numerator did not (CR-127 §3.1).
+    Verified by reading the SAME store with and without the change: every other
+    cell above is identical. NO RESOLUTION BEHAVIOUR CHANGED, and this delta must
+    not be mined as a capability gain.
+
+WHAT THE 15 IS NOT. It is not the number of edges the bridge drew. All 15 are
+`config-bound` rows, and the bridge keys a consumer on its RAW ledger target, so
+no `BridgeEdge` exists for any of them: `logos xservice route-providers` over this
+same store returns 81 edges, every one `contract-surface` intake, and 0 of
+`invocation` intake. That is measured, not inferred, and it is the reason S-403 T1
+publishes the bridge's own count separately as `coverage.bridge_invocation_edges`
+on the `workspace reachability` rider — the surface whose `live-via-cross-service`
+promotions rest on it — rather than leaving the headline to stand in for it.
+
+CAUSE OF THE DEFECT, for the record, because CR-127 §3.1 offered two readings and
+BOTH ARE WRONG. The counter was not arithmetically wrong, and it was not counting
+persisted rows (nothing is persisted; ADR-52 forbids it and the count never read
+the store). It was a faithful proxy for a DIFFERENT quantity — edges the bridge
+drew — installed by S-382 and correct for what it counted, under a field name that
+[FR-WS-05] defines as something else. The self-contradiction followed because the
+proxy's extra filter sat on one half of BR-51's composed sentence and not the
+other.
+
+
 1. WHAT WAS MEASURED, AND HOW
 -----------------------------
 

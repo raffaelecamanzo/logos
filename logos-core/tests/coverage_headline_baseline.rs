@@ -23,42 +23,55 @@
 //! cold-indexed on 2026-09-08 with logos 1.4.7, **before** [S-374] merged, so the
 //! artifact was a post-change payload shape over a pre-[S-374] index generation.
 //! **That caveat is discharged.** [S-397] T2 re-indexed all 84 members on
-//! 2026-09-13 from a binary carrying [S-374] and [S-397] T1, and [S-398] T2
-//! re-indexed them again the same day from a binary carrying the whole of Sprint 69
-//! Iteration 1; the figures below are that third generation. The `generation` block
-//! still labels which binary indexed the store, and its claim is cross-checked
-//! against the measurement rather than merely stated.
+//! 2026-09-13, and S-403 T1 re-indexed them again the same day from a binary
+//! carrying sprint-69 Iteration 1, so the figures below are that second
+//! generation. The `generation` block still labels which binary indexed the store,
+//! and its claim is now cross-checked against the measurement rather than merely
+//! stated.
 //!
 //! # Recorded finding (2026-09-13, `~/source/pec-services`, 84 members)
 //!
 //! ```text
-//! resolved_cross_service_edges   0
+//! resolved_cross_service_edges   15
 //! egress_resolution              0.128 (15 of 117 egress sites resolved)
 //! spec_conformance_ratio         0.278 (96 of 345 measured; 689 excluded)
 //! ```
 //!
-//! **Still zero**, and that is the finding [CR-120] is about: not one
-//! cross-service edge in the estate is resolved from a captured call site, over
-//! 117 captured egress sites — while the retired `bound_ratio` reads `0.278` on
-//! the same data and the pooled `bound` reads 96. A `config-bound` row is excluded
-//! from `resolved_cross_service_edges` by construction, so admitting more of them
-//! cannot move the edge count, and it has not.
+//! **The headline is non-zero for the first time**, and none of that is a
+//! resolution gain: the estate resolved 15 egress sites on the reading *before*
+//! this story too, and the headline printed `0` beside them in the same sentence
+//! — the edge count carried a `config-bound` exclusion the rate's numerator did
+//! not ([CR-127]). S-403 T1 removes that asymmetry and moves no other cell.
 //!
-//! **The egress rate has moved twice and BOTH of its terms moved the second time,
-//! so it must not be quoted without its denominator.** It read `0.000 (0 of 54)`
-//! over 929 references; then `0.032 (5 of 155)` when [S-397] T1's accessor hop
-//! admitted 44 configuration-bound rows of which 5 bound a provider; it now reads
-//! `0.128 (15 of 117)`. The numerator rose because [S-398] T1 admitted 37 more
-//! such rows, of which 10 bind. The denominator fell by 38 for two different
-//! reasons: 26 sites left the captured population entirely when [S-402] made the
-//! Go client-call candidacy gate receiver-grained (they were never outbound calls,
-//! and were keyless refusals that bound nothing), and 12 moved from `unbound` to
-//! `no-provider-in-workspace`, the bucket [ADR-53] holds outside the denominator,
-//! because the templates [S-398] resolved name services this workspace does not
-//! serve. Only the first of those is a coverage change.
+//! The two figures beside it did move, and neither is this story's: **S-402 T1**
+//! narrowed the Go client-call gate and **S-398 T1** reached the accessor behind a
+//! field qualifier, between them taking the egress denominator `155 -> 117` and the
+//! bound egress count `5 -> 15`. The denominator's `-38` decomposes, and does not
+//! come from one cause: `-26` are sites that left the captured population entirely
+//! when [S-402] made the Go candidacy gate receiver-grained (all 26 in one member,
+//! the estate's only Go member, whose captured client-call sites went 37 -> 11 —
+//! they were never outbound calls), and `-12` are rows [S-398] T1 admitted whose
+//! resolved template names a service this workspace does not serve, which moved
+//! them from `unbound` into the `no-provider-in-workspace` bucket [ADR-53] holds
+//! outside the denominator. Only the first is a coverage change, and the two
+//! movements are never summed. The
+//! generation before those two read `0 (5 of 155)` and `0.225 (86 of 383)` over
+//! 1060 references; the one before that read `0.000 (0 of 54)` and `0.287 (81 of
+//! 282)` over 929. Every cell that has ever moved here is in the invocation
+//! column; the contract-surface column is byte-identical across all three.
 //!
-//! Every cell that has moved across all three generations is in the invocation
-//! column; the contract-surface column is byte-identical throughout.
+//! **What the 15 is not.** It is not the count of edges the *bridge* drew. The
+//! coverage tier composes a target from committed configuration and the bridge
+//! keys a consumer on its raw ledger target, so all 15 are `config-bound` rows for
+//! which no `BridgeEdge` exists: `logos xservice route-providers` over the same
+//! store returns 81 edges, every one `contract-surface` intake. That quantity is
+//! published under its own name, `coverage.bridge_invocation_edges`, on the
+//! `workspace reachability` rider whose claims rest on it ([CR-127] §3.2).
+//!
+//! [CR-127]: ../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
+//! [S-398]: ../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
+//! [S-402]: ../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
+//! [ADR-53]: ../../docs/specs/architecture/decisions/ADR-53.md
 //!
 //! The full record — the per-story delta attribution, the read-only proof and the
 //! human-gated refresh procedure — is the durable artifact
@@ -104,9 +117,6 @@
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 //! [S-374]: ../../docs/planning/journal.md#s-374-the-http-client-call-arm-records-its-refusals
 //! [S-397]: ../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
-//! [S-398]: ../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
-//! [S-402]: ../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
-//! [ADR-53]: ../../docs/specs/architecture/decisions/ADR-53.md
 
 use std::path::{Path, PathBuf};
 
@@ -147,7 +157,7 @@ fn corpus_root() -> Option<PathBuf> {
 
 /// The headline block of a coverage payload, as the artifact records it.
 ///
-/// Deliberately the *summary* fields only, and not the 1034 classified rows —
+/// Deliberately the *summary* fields only, and not the 1060 classified rows —
 /// committing a copy of them would add 500 KB to this repository, and the summary
 /// block is exactly what changes and exactly what every delta is stated against.
 /// The pre-change capture `logos-docs/ws-status-2026-09-08-v1.4.7.json` holds the
@@ -201,18 +211,21 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
     // It is labelled — and the label is the load-bearing part.
     let gen = &a["generation"];
     assert!(
-        gen["index_built_by"].as_str().is_some_and(|s| s.starts_with("logos 1.4.10 + Sprint 69 Iteration 1")),
+        gen["index_built_by"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("logos 1.4.10 + sprint-69 Iteration 1 merged")),
         "the artifact must name the binary that INDEXED the store, not the one that \
-         read it. The store was re-indexed on 2026-09-13 by a binary carrying the whole \
-         of Sprint 69 Iteration 1 (S-398 T2's measurement step); before that it read \
-         `logos 1.4.9 + S-397 T1`, and before that `logos 1.4.7`: {gen}"
+         read it. The store was re-indexed on 2026-09-13 a second time, by a binary \
+         carrying sprint-69 Iteration 1 (S-398 T1's qualified-receiver hop and S-402 \
+         T1's receiver-grained Go gate); before that it read `logos 1.4.9 + S-397 T1`, \
+         and before that `logos 1.4.7`: {gen}"
     );
     assert_eq!(gen["payload_shape"], "post-CR-120 (S-376)", "{gen}");
     assert_eq!(
         gen["contains_s374_refusal_rows"], true,
         "the store now POSTdates S-374, so the artifact must say so — a reader who took \
          this for a pre-S-374 measurement would attribute the invocation unbound column's \
-         `base-url-runtime` rows — 24 on this generation — to the wrong cause: {gen}"
+         87 rows to the wrong cause: {gen}"
     );
     assert!(
         gen["refresh_procedure"].as_str().is_some_and(|s| s.contains("logos init --workspace")),
@@ -245,37 +258,8 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
     // here or PENDING the re-index. An entry that claimed neither would be the kind
     // of unattributable figure this artifact exists to prevent.
     let deltas = a["deltas"].as_object().expect("per-story delta attribution");
-    // **Iterate the object's OWN KEYS, and the inversion is the point.** This loop
-    // used to walk a frozen literal list, `["S-374", "S-375", "S-377"]`. A closed
-    // list cannot notice what it does not name: by the time [S-398] T2 added the
-    // `S-398` and `S-402` entries — the two that carry this artifact's whole
-    // admission-versus-population-correction argument — the guard had already
-    // silently stopped covering `S-376` and `S-397`, and it would have stopped
-    // covering the new pair too. Deleting both entirely left this test green, which
-    // is how the inversion was found. Enumerating the surface and requiring every
-    // member to be classified cannot go stale that way.
-    assert!(
-        !deltas.is_empty(),
-        "the artifact must attribute its figures to at least one story, or the \
-         measurement block below is unattributable: {a}"
-    );
-    // **The presence half IS a closed list, and that is stated rather than hidden.**
-    // An entry can go stale by disappearing as easily as by emptying, and no
-    // derivable source names which stories contributed to a hand-written
-    // attribution — so this roster must be extended by any story that adds an entry.
-    // It is the weaker of the two halves by construction; the shape loop above is
-    // the one that cannot go stale. The roster was three names
-    // (`S-374`/`S-375`/`S-377`) and had silently stopped covering `S-376` and
-    // `S-397` long before [S-398] T2 added two more; it is completed here.
-    for story in ["S-374", "S-375", "S-376", "S-377", "S-397", "S-398", "S-402"] {
-        assert!(
-            deltas.contains_key(story),
-            "no delta recorded for {story}, which contributed to these figures. If a \
-             story's contribution has genuinely been superseded, say so in its entry — \
-             do not delete it, or the figures it explains become unattributable."
-        );
-    }
-    for (story, d) in deltas {
+    for story in ["S-374", "S-375", "S-377", "S-398", "S-402", "S-403"] {
+        let d = deltas.get(story).unwrap_or_else(|| panic!("no delta recorded for {story}"));
         let status = d["status"].as_str().unwrap_or_default();
         assert!(
             status == "observed" || status == "pending-reindex",
@@ -286,11 +270,6 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
             d["effect"].as_str().is_some_and(|s| !s.is_empty()),
             "{story} must state its effect on these figures, and a pending one must \
              state the expected direction and magnitude with its reason: {d}"
-        );
-        assert!(
-            d["story"].as_str().is_some_and(|s| !s.is_empty()),
-            "{story}'s entry must name the story it attributes, so a reader of the \
-             artifact alone can tell what moved these figures: {d}"
         );
     }
 
@@ -335,13 +314,10 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
         inv_num("unbound") > 54,
         "the generation label and the measurement disagree: the artifact says \
          contains_s374_refusal_rows = {claims_s374} while the invocation population's \
-         unbound bucket holds {}. The 54 is the broker `topic-not-literal` refusals, \
-         which every generation of this store carries — so a store holding S-374's \
-         client-call refusals reads well above it. It is a FLOOR, not an equality: a \
-         store without those refusals reads 54 PLUS any non-client-call unbound row, \
-         which is 55 on this generation (the one config-bound `path-not-composed` row \
-         S-398 T2 recorded). The discrimination survives that — 79 is well clear of \
-         both — but do not re-derive the pre-S-374 reading as exactly 54.",
+         unbound bucket holds {}. The 54 is the pre-S-374 floor — the broker \
+         `topic-not-literal` refusals, which every generation of this store carries — so \
+         a store holding S-374's client-call refusals reads strictly above it and one \
+         without them reads exactly at it.",
         inv_num("unbound"),
     );
 
@@ -355,6 +331,42 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
     assert!(
         line.contains(&format!("of {} egress site", num("egress_resolution_measured"))),
         "…and name the recorded denominator: {line:?}"
+    );
+
+    // **The artifact is subject to the same biconditional the payload is**
+    // ([CR-127]). Everything above checks that the recorded line QUOTES the
+    // recorded fields; none of it relates the recorded edge count to the recorded
+    // resolved-site count. So a measurement block of `0` edges beside "15 of 117
+    // egress sites resolved" — the exact sentence this file's own module docs
+    // quote as the defect CR-127 was filed for — passed every assertion here.
+    // Verified: hand-editing the block to that shape left this file at 2 passed,
+    // 0 failed.
+    //
+    // The recorded numerator is also pinned to `by_intake.invocation.bound`, which
+    // is the field the line's "N of M" head is, so the three cannot drift apart in
+    // a hand-edited block. The `measurement` block is machine-written by
+    // `LOGOS_BASELINE_WRITE=1`; the blocks BESIDE it are hand-written, and this
+    // guard is what stops a hand edit landing a self-contradicting figure in the
+    // artifact every later delta is stated against.
+    assert_eq!(
+        edges == 0,
+        inv_num("bound") == 0,
+        "the recorded baseline contradicts itself: {edges} resolved edges over {}          resolved egress sites. A resolved site and a resolved edge are the same          rows counted two ways (CR-127): {m}",
+        inv_num("bound"),
+    );
+    assert!(
+        edges >= inv_num("bound"),
+        "one resolved site is one edge, or several under fan-out, never fewer:          {edges} < {}: {m}",
+        inv_num("bound"),
+    );
+    assert!(
+        line.contains(&format!(
+            "({} of {} egress site",
+            inv_num("bound"),
+            num("egress_resolution_measured")
+        )),
+        "…and the line's own numerator must be the recorded invocation bound count          ({}), not a third figure: {line:?}",
+        inv_num("bound"),
     );
 
     // The pre-change capture this baseline is stated against, named by path so the

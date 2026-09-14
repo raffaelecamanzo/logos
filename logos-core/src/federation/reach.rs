@@ -192,10 +192,21 @@ pub struct CoverageRider {
     /// [`CrossServiceCoverage::resolved_cross_service_edges`](super::coverage::CrossServiceCoverage::resolved_cross_service_edges)
     /// ([CR-120], [BR-51]).
     ///
-    /// This is the rider's own headline, and it is the figure a reachability
-    /// claim most needs: a promotion to `live-via-cross-service` rests on an edge
-    /// existing, and `0` here says none was resolved from any call site in the
-    /// workspace.
+    /// This is the rider's own headline: `0` here says no call site anywhere in
+    /// the workspace resolved.
+    ///
+    /// # It is NOT the count of roots this view was seeded from ([CR-127])
+    /// The sentence this doc carried until S-403 T1 — *"a promotion to
+    /// `live-via-cross-service` rests on an edge existing"*, said of **this**
+    /// figure — was true only while the two counts happened to coincide. They no
+    /// longer do. This one counts what the coverage tier **resolved**, and the
+    /// coverage tier composes a target from committed configuration
+    /// ([FR-WS-19]); the bridge does not, so it draws no
+    /// [`BridgeEdge`](super::bridge::BridgeEdge) for such a row and the union
+    /// view is seeded from nothing. On the 84-member reference estate this reads
+    /// **15** over **0** seeded invocation edges. The figure a promotion actually
+    /// rests on is
+    /// [`bridge_invocation_edges`](Self::bridge_invocation_edges), beside it.
     ///
     /// It is **not** the whole basis of the view. Contract-surface edges (an
     /// OpenAPI operation matched to a controller route) are extra live roots too,
@@ -205,7 +216,35 @@ pub struct CoverageRider {
     ///
     /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
     /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
     pub resolved_cross_service_edges: u64,
+    /// **The invocation edges this union view was actually seeded from** — the
+    /// number of [`BridgeEdge`](super::bridge::BridgeEdge) values of
+    /// [`Invocation`](super::bridge::BridgeIntake::Invocation) intake in the very
+    /// edge set [`app_wide_reachability`] walked ([CR-127], [FR-WS-04],
+    /// [FR-WS-12]).
+    ///
+    /// **A `live-via-cross-service` promotion rests on this figure, not on
+    /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges).**
+    /// `0` here says the view had no call-site root at all, whatever the coverage
+    /// tier resolved — and the two differ by exactly the `config-bound`
+    /// population, which resolves in the coverage tier and keys to nothing in the
+    /// bridge.
+    ///
+    /// Counted from the edge slice itself rather than inferred from a row's
+    /// provenance. The superseded arrangement inferred it — the headline carried
+    /// a `config-bound` exclusion so that it would stand in for this quantity —
+    /// and a proxy under the wrong name is what [CR-127] was filed for. It is
+    /// **edges**, not the deduplicated provider endpoints
+    /// [`union_roots`] seeds: several consumers calling one route are several
+    /// edges and one root, and [`ReachabilityTally::extra_roots`] already
+    /// publishes the root count.
+    ///
+    /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
+    /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
+    /// [FR-WS-12]: ../../../docs/specs/requirements/FR-WS-12.md
+    pub bridge_invocation_edges: u64,
     /// The rate at which captured egress sites resolved at all, carried verbatim
     /// from
     /// [`CrossServiceCoverage::egress_resolution`](super::coverage::CrossServiceCoverage::egress_resolution),
@@ -284,8 +323,10 @@ pub struct CoverageRider {
     /// [`CrossServiceCoverage::by_intake`](super::coverage::CrossServiceCoverage::by_intake).
     /// The four counts on this rider are still the **pooled** ones, and on the
     /// 84-member reference estate that pool is 81 declared-contract matches and
-    /// **0** resolved call sites. So a reader who concludes anything about
-    /// outbound coupling from `bound` alone will conclude it wrongly.
+    /// 15 resolved call sites (2026-09-13). So a reader who concludes anything
+    /// about outbound coupling from `bound` alone will conclude it wrongly — it
+    /// read 81 and **0** for as long as no call site in the estate resolved, and
+    /// `bound` did not move when that changed.
     ///
     /// S-377 left the placement of the split on this rider to S-376. **Decided:
     /// the eight-way split stays off the rider, and the three-figure headline
@@ -302,9 +343,15 @@ pub struct CoverageRider {
     ///   ratio while omitting the headline would leave this surface saying only
     ///   the thing [CR-120] retired. Three scalars is what that costs.
     ///
-    /// The rider is also the surface with the sharpest claim on the new headline:
-    /// a `live-via-cross-service` promotion rests on an *edge*, and
-    /// `resolved_cross_service_edges: 0` says none came from a call site.
+    /// The rider is also the surface with the sharpest claim on the headline
+    /// family — a `live-via-cross-service` promotion rests on an *edge*. **Which
+    /// figure carries that claim changed in S-403 T1:** it is
+    /// [`bridge_invocation_edges`](Self::bridge_invocation_edges), not
+    /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges),
+    /// because the coverage tier resolves configuration placeholders the bridge
+    /// does not ([CR-127]). Both fields state which of the two they are.
+    ///
+    /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
     ///
     /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
     /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
@@ -334,15 +381,32 @@ pub struct CoverageRider {
 }
 
 impl CoverageRider {
-    /// Fold the 3-state coverage read-model plus the member-read tally into the
-    /// rider ([FR-WS-05]).
-    fn new(coverage: &CrossServiceCoverage, members_read: usize, members_total: usize) -> Self {
+    /// Fold the 3-state coverage read-model, the edge set the view walked, and
+    /// the member-read tally into the rider ([FR-WS-05], [CR-127]).
+    ///
+    /// `edges` is taken rather than a pre-counted number so the rider's
+    /// seeded-edge figure is read from the *same* slice
+    /// [`union_roots`] is, in the same call ([CR-127] §3.2).
+    ///
+    /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
+    fn new(
+        coverage: &CrossServiceCoverage,
+        edges: &[BridgeEdge],
+        members_read: usize,
+        members_total: usize,
+    ) -> Self {
         Self {
             bound: coverage.bound,
             ambiguous: coverage.ambiguous,
             unbound: coverage.unbound,
             no_provider_in_workspace: coverage.no_provider_in_workspace,
             resolved_cross_service_edges: coverage.resolved_cross_service_edges,
+            // The same predicate `union_roots` seeds on, over the same slice, so
+            // the published figure and the walk's basis cannot disagree.
+            bridge_invocation_edges: edges
+                .iter()
+                .filter(|edge| edge.intake.seeds_reachability_root())
+                .count() as u64,
             egress_resolution: coverage.egress_resolution,
             egress_resolution_measured: coverage.egress_resolution_measured,
             spec_conformance_ratio: coverage.spec_conformance_ratio,
@@ -547,7 +611,7 @@ where
     let answer = registry.answer();
     let coverage = cross_service_coverage(&answer);
     let surfaces = read_members(&answer, "reachability surface", |e| e.reachability_surface());
-    let rider = CoverageRider::new(&coverage, surfaces.len(), registry.members().len());
+    let rider = CoverageRider::new(&coverage, edges, surfaces.len(), registry.members().len());
     let roots = union_roots(edges);
 
     let mut members = Vec::with_capacity(surfaces.len());

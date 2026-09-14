@@ -370,6 +370,12 @@ fn the_workspace_status_tool_description_documents_the_resolved_edge_headline() 
         "`coverage.resolved_cross_service_edges`",
         "`coverage.egress_resolution`",
         "`coverage.spec_conformance_ratio`",
+        // S-403/CR-127: the figure a `live-via-cross-service` promotion actually
+        // rests on. It is the sharpest claim this description makes and it was
+        // outside this closed list on arrival — the description could have dropped
+        // it with this guard green, which is the failure mode a closed list has by
+        // construction.
+        "`coverage.bridge_invocation_edges`",
     ] {
         assert!(
             reachability.contains(token),

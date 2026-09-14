@@ -962,9 +962,12 @@ pub struct CrossServiceCoverage {
     /// question no earlier payload could answer: on the reference workspace it
     /// read **0** against a headline `bound` of 81 ([CR-120] §3.1, [NFR-CC-04]),
     /// and since S-397 T1's accessor capture hop reached that estate's index it
-    /// reads **5** against a headline of 86 — five configuration-bound client
-    /// calls, and still no edge, because a `config-bound` row is excluded from
-    /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges).
+    /// reads **15** against a headline of 96 — fifteen configuration-bound client
+    /// calls, and since S-403 T1 that is also what
+    /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges)
+    /// reports, because a `config-bound` row resolved and the headline counts
+    /// resolutions ([CR-127]). It reported **0** against those same rows until
+    /// then.
     ///
     /// Every row carries the discriminator these counts group on
     /// ([`ReferenceCoverage::intake`]), so the split is auditable from
@@ -972,6 +975,7 @@ pub struct CrossServiceCoverage {
     ///
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub by_intake: IntakeSplit,
     /// **The workspace headline** ([FR-WS-05], [CR-120], [BR-51]): how many
@@ -1004,8 +1008,25 @@ pub struct CrossServiceCoverage {
     /// It is therefore **not** [`egress_resolution`](Self::egress_resolution)'s
     /// numerator: that rate is over resolved *sites*. Publishing a count of sites
     /// under the word "edges" would be the same name/meaning mismatch [CR-120]
-    /// exists to remove, so the two are computed separately and each says what it
-    /// counts. They coincide at every arity except fan-out.
+    /// exists to remove, so the two say different things and coincide at every
+    /// arity except fan-out. They are nonetheless counted over **one** population
+    /// by **one** walk — `EgressHeadline` — because two numerators computed
+    /// independently is how this field came to publish `0` beside *"5 of 155
+    /// egress sites resolved"* in the same sentence ([CR-127]).
+    ///
+    /// # What it does NOT count: the edges the bridge drew
+    /// A `config-bound` row — one whose target was composed from committed
+    /// configuration ([FR-WS-19]) — **resolved**, so it is counted here. The
+    /// bridge draws no [`BridgeEdge`](super::bridge::BridgeEdge) for it, because
+    /// `compute_edges` keys a consumer on its RAW ledger target and a `${…}`
+    /// placeholder reduces to no portable key there. On the 84-member reference
+    /// estate that is the whole difference: this field reads **15** and the
+    /// bridge holds **0** invocation edges. The quantity a reachability promotion
+    /// rests on is therefore published under its own name, on the surface that
+    /// rests on it —
+    /// [`CoverageRider::bridge_invocation_edges`](super::reach::CoverageRider::bridge_invocation_edges)
+    /// — rather than being smuggled in here under a name that says *resolved*
+    /// ([CR-127] §3.2).
     ///
     /// Never published without the rate beside it ([BR-51]) — the structural form
     /// of that duty is
@@ -1016,8 +1037,10 @@ pub struct CrossServiceCoverage {
     /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
     /// [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
     /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
     pub resolved_cross_service_edges: u64,
     /// The rate at which captured **egress sites resolve at all**:
     /// `invocation.bound / (invocation.bound + invocation.ambiguous +
@@ -1958,20 +1981,31 @@ impl Tally {
             spec_conformance_ratio,
         );
 
-        // The successor headline ([CR-120], [BR-51]). Its two figures have
-        // different numerators on purpose — resolved *edges* against resolved
-        // *sites* — so each is computed from the thing it names, and they are
-        // composed into one line so neither can be rendered without the other.
-        let egress = self.by_intake.invocation;
-        let egress_denom = egress.bound + egress.ambiguous + egress.unbound;
-        let egress_resolution =
-            (egress_denom > 0).then(|| egress.bound as f64 / egress_denom as f64);
-        let resolved_cross_service_edges = resolved_edges(&self.references);
-        let resolved_edges_summary = summarize_resolved_edges(
-            resolved_cross_service_edges,
-            egress.bound,
-            egress_denom,
-            egress_resolution,
+        // The successor headline ([CR-120], [BR-51], [CR-127]). Its two figures
+        // have different numerators on purpose — resolved *edges* against
+        // resolved *sites* — but they are numerators over the SAME population,
+        // and they are produced by one walk of the rendered rows so that they
+        // cannot be over different ones. Composing them into one line is [BR-51];
+        // deriving them from one value is what stops that line contradicting
+        // itself, which is the whole of [CR-127].
+        let egress = EgressHeadline::from_rows(&self.references);
+        let egress_resolution = egress.rate();
+        let resolved_edges_summary = summarize_resolved_edges(egress);
+        // The two derivations over the same rows must describe them identically:
+        // this walk reads each row's own `CoverageState`, `by_intake` counted the
+        // same value at `record` time. [`Tally::record`] does both in one body, so
+        // the risk this covers is not "a future `record` call site" but a second
+        // filing path that bypasses `record` altogether — and, unlike the unit
+        // fixtures, this fires on the integration harnesses that run over the real
+        // 84-member estate ([CR-120]'s reconcile-against-`references` contract).
+        let invocation = self.by_intake.invocation;
+        debug_assert_eq!(
+            (egress.resolved_sites, egress.measured),
+            (
+                invocation.bound,
+                invocation.bound + invocation.ambiguous + invocation.unbound
+            ),
+            "the row walk and the intake tally must count one population"
         );
 
         CrossServiceCoverage {
@@ -1981,9 +2015,9 @@ impl Tally {
             unbound: total.unbound,
             no_provider_in_workspace: total.no_provider_in_workspace,
             by_intake: self.by_intake,
-            resolved_cross_service_edges,
+            resolved_cross_service_edges: egress.edges,
             egress_resolution,
-            egress_resolution_measured: egress_denom,
+            egress_resolution_measured: egress.measured,
             resolved_edges_summary,
             spec_conformance_ratio,
             spec_conformance_measured: denom,
@@ -1995,13 +2029,105 @@ impl Tally {
     }
 }
 
-/// Count the cross-service edges the bridge resolved from captured invocations —
-/// [`CrossServiceCoverage::resolved_cross_service_edges`] ([CR-120], [FR-WS-10]).
+/// **Both halves of the resolved-edge headline, derived from ONE pass over the
+/// rendered rows** — [`CrossServiceCoverage::resolved_cross_service_edges`] and
+/// the population [`CrossServiceCoverage::egress_resolution`] is computed over
+/// ([FR-WS-05], [CR-120], [CR-127], [BR-51]).
 ///
-/// Read off the rows' own named providers rather than tallied beside them, for
-/// the reason the fan-out case makes concrete: a bound fan-out reference is **one
-/// row and many edges**, and the multiplicity lives in the row's bound set, not in
-/// a counter. Deriving it here means a reader can reconcile this figure against
+/// # Why one type and not three numbers
+/// [BR-51] composes the count and the rate into one sentence precisely so a
+/// surface cannot render one without the other. That duty is worthless if the two
+/// halves of the sentence are computed from **different populations**, which is
+/// exactly what shipped: the edge count carried an extra `config-bound` exclusion
+/// the rate's numerator did not, and the reference estate published *"0 resolved
+/// cross-service edges; egress resolution 0.032 (5 of 155 egress sites
+/// resolved)"* — a sentence contradicting itself over a payload holding five
+/// bound cross-member invocation rows ([CR-127] §3.1).
+///
+/// So the three figures are produced together, by this one walk, and
+/// [`summarize_resolved_edges`] takes **this value** rather than three `u64`s.
+/// Be exact about what that buys, because it is easy to overstate: the two halves
+/// cannot be counted over different populations without editing one loop body,
+/// and the composed line cannot be handed a count from one source beside a
+/// numerator from another. It does **not** make the original defect unspellable —
+/// a filter added inside [`from_rows`](Self::from_rows) would reinstate it, and
+/// what catches that is the invariant test
+/// (`both_halves_of_the_resolved_edge_summary_are_derived_from_one_population`),
+/// not the type.
+///
+/// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+#[derive(Clone, Copy, Default)]
+struct EgressHeadline {
+    /// Resolved cross-service **edges** — the workspace headline.
+    edges: u64,
+    /// Resolved egress **sites** — the rate's numerator. Differs from
+    /// [`edges`](Self::edges) only under fan-out, where one resolved site is
+    /// several edges.
+    resolved_sites: u64,
+    /// The rate's denominator: the captured egress sites, `bound + ambiguous +
+    /// unbound`. `no-provider-in-workspace` sits outside it exactly as it sits
+    /// outside every other ratio here ([ADR-53]).
+    measured: u64,
+}
+
+impl EgressHeadline {
+    /// Walk the rendered rows once, counting the invocation population three ways.
+    ///
+    /// **A row that contributes a resolved site contributes its edges in the same
+    /// arm**, which is what makes "N edges over zero resolved sites" unspellable
+    /// rather than merely absent. The one multiplicity that can return `0` for a
+    /// `Bound` row — a bound row naming neither a provider nor a bound set — is
+    /// `debug_assert`-ed unreachable in [`edge_multiplicity`] and no `Bound` arm of
+    /// [`tier`] can produce it.
+    ///
+    /// The buckets are the ones [`ClassificationCounts::record`] uses, read from the same
+    /// [`CoverageState`] the row publishes, so this walk and `by_intake` cannot
+    /// describe the same rows differently ([`finish`](Tally::finish) asserts they
+    /// do not).
+    ///
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    fn from_rows(references: &[ReferenceCoverage]) -> Self {
+        let mut headline = Self::default();
+        for row in references
+            .iter()
+            .filter(|r| r.intake == BridgeIntake::Invocation)
+        {
+            match &row.state {
+                CoverageState::Bound => {
+                    headline.measured += 1;
+                    headline.resolved_sites += 1;
+                    headline.edges += edge_multiplicity(row);
+                }
+                CoverageState::Unbound {
+                    reason: UnboundReason::NoProviderInWorkspace,
+                } => {}
+                CoverageState::Unbound { .. } => headline.measured += 1,
+            }
+        }
+        headline
+    }
+
+    /// The egress resolution rate, **absent** on a zero denominator rather than a
+    /// fabricated `1.0` ([CR-100]'s rule, restated for this figure by [BR-51]).
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
+    fn rate(self) -> Option<f64> {
+        (self.measured > 0).then(|| self.resolved_sites as f64 / self.measured as f64)
+    }
+}
+
+/// How many cross-service edges one **bound invocation row** accounts for —
+/// [`CrossServiceCoverage::resolved_cross_service_edges`]'s per-row term
+/// ([CR-120], [FR-WS-10]).
+///
+/// Read off the row's own named providers rather than tallied beside it, for the
+/// reason the fan-out case makes concrete: a bound fan-out reference is **one row
+/// and many edges**, and the multiplicity lives in the row's bound set, not in a
+/// counter. Deriving it here means a reader can reconcile the headline against
 /// `references` with the same arithmetic — which is what stops a headline from
 /// being a number nobody can check, the whole subject of [CR-120].
 ///
@@ -2009,75 +2135,87 @@ impl Tally {
 /// wider than [`CANDIDATE_LIMIT`] contributes all of its edges and not the eight
 /// that happen to be listed ([NFR-CC-04]).
 ///
-/// Contract-surface rows are excluded by construction: an OpenAPI operation
-/// matched to a controller route is documentation conformance, not a resolved
-/// call ([ADR-52], [CR-120] §2).
+/// Contract-surface rows never reach here: [`EgressHeadline::from_rows`] filters
+/// the invocation population first, because an OpenAPI operation matched to a
+/// controller route is documentation conformance, not a resolved call ([ADR-52],
+/// [CR-120] §2).
+///
+/// # A `config-bound` row counts, and used to not ([CR-127])
+/// S-382 excluded [`Provenance::ConfigBound`] rows here, on the ground that the
+/// bridge draws no [`BridgeEdge`](super::bridge::BridgeEdge) for one: `compute_edges`
+/// keys a consumer on its RAW ledger target, and a target carrying `${…}` reduces
+/// to no portable key there. That exclusion made this figure a faithful proxy for
+/// *edges the bridge drew* — and the field is not that. [FR-WS-05] makes the
+/// headline the count of **resolved** cross-service edges, and a `config-bound`
+/// row resolved: the coverage tier composed its target from committed
+/// configuration and found exactly one provider in another member, with the key,
+/// the defining sources and the profile set all on the row.
+///
+/// The exclusion also sat on only ONE half of [BR-51]'s sentence — the rate's
+/// numerator never had it — so the two halves counted different populations and
+/// the line contradicted itself ([CR-127] §3.1). The proxy is not lost, it is
+/// **renamed**: the quantity the bridge actually drew is published as
+/// [`CoverageRider::bridge_invocation_edges`](super::reach::CoverageRider::bridge_invocation_edges),
+/// on the surface whose claims rest on it, counted from the edge set itself
+/// rather than inferred from a provenance.
 ///
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+/// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
 /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-fn resolved_edges(references: &[ReferenceCoverage]) -> u64 {
-    references
-        .iter()
-        .filter(|r| {
-            r.intake == BridgeIntake::Invocation && matches!(r.state, CoverageState::Bound)
-        })
-        // **A configuration-bound row is bound here and has no bridge edge yet**
-        // (S-382). This headline counts *edges the bridge drew*, and
-        // `compute_edges` still keys a consumer on its RAW ledger target — a
-        // target carrying `${…}` placeholders reduces to no portable key there,
-        // so no `BridgeEdge` exists for it. The coverage tier resolves the
-        // placeholders and can legitimately answer "bound"; the service map has
-        // drawn nothing. Counting it would report a resolved cross-service edge
-        // that no surface can show and that no `live-via-cross-service`
-        // promotion rests on — the exact flattery [CR-120] retired the
-        // bound-ratio for.
+fn edge_multiplicity(row: &ReferenceCoverage) -> u64 {
+    match (&row.to, &row.candidates) {
+        // An exactly-one discipline: one provider, one edge.
+        (Some(_), _) => 1,
+        // Fan-out: the bridge emits one edge per cross-member subscriber, and
+        // the row names that whole set.
         //
-        // Excluded rather than un-bound: the ROW is correct (a provider was
-        // found for a committed value, which is what [FR-WS-19] asks), and it is
-        // the EDGE that does not exist. Making the two agree is the bridge's
-        // half of the mechanism and is not in this story; until it lands, this
-        // figure under-reports rather than over-reports, which is the direction
-        // this module takes everywhere else.
-        .filter(|r| !matches!(r.provenance, Provenance::ConfigBound { .. }))
-        .map(|r| match (&r.to, &r.candidates) {
-            // An exactly-one discipline: one provider, one edge.
-            (Some(_), _) => 1,
-            // Fan-out: the bridge emits one edge per cross-member subscriber, and
-            // the row names that whole set.
-            //
-            // **The disposition is read, not the bucket.** That is this module's own
-            // published rule ([`ProviderDisposition`], and the MCP tool description
-            // that repeats it), and it is the rule precisely because a set means
-            // opposite things under the two dispositions: `BoundTo` is "all of these
-            // are reached", `TiedBetween` is "none of them is". `tier` never pairs a
-            // tied set with a bound state and `ReferenceCoverage::new` debug-asserts
-            // it — but a `debug_assert` is compiled out of a release build, and this
-            // file is scheduled to receive more `record` call sites. A future one
-            // that got it wrong would add the whole tied set to the headline, which
-            // is the exact direction [CR-120] exists to prevent.
-            (None, Some(c)) if c.disposition == ProviderDisposition::BoundTo => c.total,
-            // A bound row that names nothing it bound to, or names only a set it did
-            // NOT bind: no evidence of an edge, so no edge. Both are structurally
-            // unreachable today — every `Bound` arm of `tier` yields `Sole` or
-            // `Several(BoundTo)` — and both count **zero** rather than one.
-            //
-            // Zero is the honest direction here, and the direction matters enough to
-            // state: for a headline whose whole purpose is to stop a coverage figure
-            // flattering the capability it describes ([CR-120] §2), asserting an edge
-            // from a row carrying no evidence of one is the flattering direction.
-            // Under-counting is the conservative side of a never-fabricate rule
-            // ([NFR-RA-05]); over-counting is not.
-            (None, _) => {
-                debug_assert!(
-                    false,
-                    "a bound row must name the provider or the bound set it reached"
-                );
-                0
-            }
-        })
-        .sum()
+        // **The disposition is read, not the bucket.** That is this module's own
+        // published rule ([`ProviderDisposition`], and the MCP tool description
+        // that repeats it), and it is the rule precisely because a set means
+        // opposite things under the two dispositions: `BoundTo` is "all of these
+        // are reached", `TiedBetween` is "none of them is". `tier` never pairs a
+        // tied set with a bound state and `ReferenceCoverage::new` debug-asserts
+        // it — but a `debug_assert` is compiled out of a release build, and this
+        // file is scheduled to receive more `record` call sites. A future one
+        // that got it wrong would add the whole tied set to the headline, which
+        // is the exact direction [CR-120] exists to prevent.
+        (None, Some(c)) if c.disposition == ProviderDisposition::BoundTo => c.total,
+        // A bound row naming only a set it did NOT bind. `TiedBetween` means
+        // *none* of these providers is reached, so the set is no evidence of an
+        // edge and contributes **zero** — the reading the arm above exists to
+        // refuse, stated here as its own arm rather than folded into the
+        // malformed case below.
+        //
+        // The two were one arm until S-403 T1's review, and the conflation cost a
+        // guard: the shared `debug_assert!` made this shape panic in a dev build,
+        // so the only test that could pin the disposition rule was one that could
+        // not be written. Separating them keeps the assert on the case that is
+        // genuinely malformed and lets `a_tied_set_on_a_bound_row_contributes_no_edge`
+        // exercise this one.
+        //
+        // Zero is the honest direction, and the direction matters enough to state:
+        // for a headline whose whole purpose is to stop a coverage figure
+        // flattering the capability it describes ([CR-120] §2), asserting an edge
+        // from a row carrying no evidence of one is the flattering direction.
+        // Under-counting is the conservative side of a never-fabricate rule
+        // ([NFR-RA-05]); over-counting is not.
+        (None, Some(_)) => 0,
+        // A bound row naming NOTHING — neither a provider nor a set. Structurally
+        // unreachable (every `Bound` arm of `tier` yields `Sole` or
+        // `Several(BoundTo)`) and malformed if it ever occurs, so it keeps the
+        // assert. It counts zero for the same never-fabricate reason.
+        (None, None) => {
+            debug_assert!(
+                false,
+                "a bound row must name the provider or the bound set it reached"
+            );
+            0
+        }
+    }
 }
 
 /// Compose the [`CrossServiceCoverage::spec_conformance_summary`] line: the
@@ -2112,11 +2250,13 @@ fn summarize_spec_conformance(bound: u64, denom: u64, excluded: u64, ratio: Opti
 /// resolution rate in one string, so a surface physically cannot render the count
 /// without the rate ([FR-WS-05], [CR-120]).
 ///
-/// `resolved` is the edge count and `bound_sites` the rate's numerator; they
-/// differ only under fan-out, where one resolved site is several edges. Both are
-/// stated rather than one being derived from the other at a presentation site,
-/// because that derivation is exactly where a figure acquires a meaning it does
-/// not have.
+/// Takes **one** [`EgressHeadline`] — the value whose single walk produced the
+/// edge count, the rate's numerator and its denominator together ([CR-127]). The
+/// count and the numerator differ only under fan-out, where one resolved site is
+/// several edges, and both are stated rather than one being derived from the
+/// other. The rate IS re-derived here, from the same [`EgressHeadline`] rather
+/// than from the published field: [`EgressHeadline::rate`] is a pure function of
+/// the three counts, so the rendered line and `egress_resolution` cannot disagree.
 ///
 /// An absent rate reads "not measured", never `0.000` and never `1.000` — [CR-100]'s
 /// rule, which [BR-51] restates for this figure: no egress site captured is *no
@@ -2126,13 +2266,20 @@ fn summarize_spec_conformance(bound: u64, denom: u64, excluded: u64, ratio: Opti
 /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
 /// [CR-100]: ../../../docs/requests/CR-100-workspace-resource-budget.md
 /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+/// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
-fn summarize_resolved_edges(
-    resolved: u64,
-    bound_sites: u64,
-    egress_denom: u64,
-    rate: Option<f64>,
-) -> String {
+fn summarize_resolved_edges(headline: EgressHeadline) -> String {
+    // ONE parameter, and it is the value both halves were counted into
+    // ([CR-127]). The superseded signature took the count, the rate's numerator
+    // and its denominator as three separate `u64`s, and that is precisely how a
+    // caller came to pass an edge count filtered one way beside a site count
+    // filtered another. This signature cannot be handed two populations.
+    let EgressHeadline {
+        edges: resolved,
+        resolved_sites: bound_sites,
+        measured: egress_denom,
+    } = headline;
+    let rate = headline.rate();
     // Grammatical at arity 1, the idiom [`summarize_candidates`] already uses in
     // this file and for the same reason: this line is rendered verbatim on four
     // surfaces and in the operator manual, so "1 resolved cross-service edges"
@@ -3612,9 +3759,14 @@ mod tests {
         // shape carries no `invocation` rows at all. The live corpus carried 55 on
         // the 2026-09-09 generation, of which 0 bound — 54 broker
         // `topic-not-literal` refusals plus the one workspace-wide
-        // `http-client-call` reference. Since S-397 T1's accessor hop reached that
-        // index (re-measured 2026-09-13) it carries **186** — 5 bound, 9 ambiguous,
-        // 141 unbound, 31 `no-provider-in-workspace`. That last bucket is distinct
+        // `http-client-call` reference. Re-measured on 2026-09-13 over the estate
+        // re-indexed on merged sprint-69 Iteration 1 — S-398 T1's qualified-receiver
+        // hop and S-402 T1's receiver-grained Go gate both in the pipeline — it
+        // carries **160**: 15 bound, 23 ambiguous, 79 unbound, 43
+        // `no-provider-in-workspace`. (The intermediate reading taken before those
+        // two merged was 186 — 5 bound, 9 ambiguous, 141 unbound, 31 no-provider;
+        // S-402 removed 26 captured Go non-calls and S-398 bound ten more sites.)
+        // That last bucket is distinct
         // from `unbound` (the term of art here excludes it, so [CR-120] CRA-02's
         // colloquial "unbound" would mislead in this file). The live figures are
         // measured by
@@ -4350,18 +4502,29 @@ mod tests {
         assert_eq!(cov.no_provider_in_workspace, 0);
     }
 
-    /// A config-bound row is **not** counted in `resolved_cross_service_edges`,
-    /// because the bridge draws no edge for it: `compute_edges` still keys a
-    /// consumer on its RAW ledger target, which carries the unresolved
-    /// placeholders and reduces to no portable key.
+    /// **A config-bound row IS counted in `resolved_cross_service_edges`, and the
+    /// whole summary line says so** ([CR-127], [FR-WS-05]).
     ///
-    /// The row is legitimately `bound`; the edge does not exist. Counting it
-    /// would publish a resolved cross-service edge no surface can show — the
-    /// flattery [CR-120] retired the bound-ratio for.
+    /// This test asserted the opposite until S-403 T1, on S-382's ground that the
+    /// bridge draws no edge for such a row — `compute_edges` keys a consumer on
+    /// its RAW ledger target, which carries the unresolved placeholders. That
+    /// ground is a fact about the **bridge**, and it made this field a proxy for
+    /// *edges the bridge drew* under a name that says *resolved*. Worse, the
+    /// exclusion sat on only one half of [BR-51]'s sentence, so the reference
+    /// estate published *"0 resolved cross-service edges; egress resolution 0.032
+    /// (5 of 155 egress sites resolved)"* — one sentence, two populations
+    /// ([CR-127] §3.1).
     ///
-    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// The row resolved: its target was composed from committed configuration and
+    /// found exactly one provider in another member. The headline counts
+    /// resolutions. What the bridge drew is published, under that name, as
+    /// [`CoverageRider::bridge_invocation_edges`](super::super::reach::CoverageRider::bridge_invocation_edges).
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     #[test]
-    fn a_config_bound_bind_does_not_inflate_the_resolved_edge_headline() {
+    fn a_config_bound_bind_reaches_both_halves_of_the_resolved_edge_headline() {
         reset();
         set_member("orders", vec![route("GET /orders/{id}", "local get_order")]);
         set_member("web", vec![]);
@@ -4372,8 +4535,29 @@ mod tests {
 
         assert_eq!(cov.references[0].state, CoverageState::Bound, "the ROW is bound");
         assert_eq!(
-            cov.resolved_cross_service_edges, 0,
-            "and the EDGE does not exist, so the headline must not claim it"
+            cov.references[0].provenance,
+            Provenance::ConfigBound {
+                bound: match &cov.references[0].provenance {
+                    Provenance::ConfigBound { bound } => bound.clone(),
+                    other => panic!("a committed composition is config-bound, not {other:?}"),
+                }
+            },
+            "the fixture exercises the config-bound path and not some other bind"
+        );
+        assert_eq!(
+            cov.resolved_cross_service_edges, 1,
+            "…so the headline claims it: the coverage tier resolved this target"
+        );
+        assert_eq!(
+            cov.by_intake.invocation.bound, 1,
+            "and the rate's numerator counted the same row all along — that \
+             asymmetry IS the defect (CR-127)"
+        );
+        assert_eq!(
+            cov.resolved_edges_summary,
+            "1 resolved cross-service edge; egress resolution 1.000 \
+             (1 of 1 egress site resolved)",
+            "and the composed line cannot open with a count its own tail contradicts"
         );
     }
 
@@ -6291,7 +6475,7 @@ mod tests {
     }
 
     /// **A sole-provider invocation bind is one resolved edge** — the
-    /// exactly-one arm of [`resolved_edges`], and the dominant real-world shape.
+    /// exactly-one arm of [`edge_multiplicity`], and the dominant real-world shape.
     ///
     /// Written because the fan-out fixture beside it did not reach this branch:
     /// `every_bucket_in_both_populations`'s only bound invocation row is the
@@ -6646,15 +6830,9 @@ mod tests {
         );
 
         // The figure is reconcilable from the rows, which is what makes it
-        // checkable rather than merely reported ([CR-120]'s whole subject).
-        let from_rows: u64 = cov
-            .references
-            .iter()
-            .filter(|r| {
-                r.intake == BridgeIntake::Invocation && matches!(r.state, CoverageState::Bound)
-            })
-            .map(|r| r.candidates.as_ref().map_or(1, |c| c.total))
-            .sum();
+        // checkable rather than merely reported ([CR-120]'s whole subject) — by
+        // the one shared recipe, not a second hand-copy of the production walk.
+        let (from_rows, _, _) = reconcile_from_rows(&cov.references);
         assert_eq!(from_rows, cov.resolved_cross_service_edges);
     }
 
@@ -6707,6 +6885,402 @@ mod tests {
             wire.get("egress_resolution").is_none(),
             "absence reaches the wire as an omitted key, never as a number: {wire}"
         );
+    }
+
+    /// **The reconciliation recipe `docs/howto/commands.md` publishes**, written by
+    /// hand so it does not call the function it audits ([CR-120], [CR-127]).
+    ///
+    /// Returns `(edges, resolved_sites, measured)` over the invocation population.
+    /// Two tests reconcile the published headline against the rendered rows, and
+    /// before S-403 T1's review each carried its own inline copy of this walk —
+    /// two hand-mirrored twins in one file, 280 lines apart, that any change to
+    /// [`edge_multiplicity`] had to find both of.
+    ///
+    /// **It reads `disposition`, and that is the whole point of it being here.**
+    /// Both superseded copies wrote `candidates.map_or(1, |c| c.total)`, which
+    /// agrees with production only on the shapes [`tier`] emits today: it counts a
+    /// `TiedBetween` set as bound edges, where production counts **zero**. So
+    /// deleting production's disposition gate made the twin and the product
+    /// *agree*, and the guard whose comment says it exists to stop a tied set
+    /// reaching the headline — "the exact direction [CR-120] exists to prevent" —
+    /// was pinned by nothing. Proved in review: dropping that gate left the whole
+    /// federation suite green.
+    ///
+    /// Independence is preserved where it matters. This is the manual's rule, not
+    /// a call into [`edge_multiplicity`], so a production walk that starts
+    /// filtering one half of the summary still shows up as a disagreement.
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
+    fn reconcile_from_rows(references: &[ReferenceCoverage]) -> (u64, u64, u64) {
+        let (mut edges, mut sites, mut measured) = (0_u64, 0_u64, 0_u64);
+        for row in references
+            .iter()
+            .filter(|r| r.intake == BridgeIntake::Invocation)
+        {
+            match &row.state {
+                CoverageState::Bound => {
+                    measured += 1;
+                    sites += 1;
+                    edges += match (&row.to, &row.candidates) {
+                        (Some(_), _) => 1,
+                        (None, Some(c)) if c.disposition == ProviderDisposition::BoundTo => c.total,
+                        // A tied set is "none of these is reached", and a row
+                        // naming neither names no evidence of an edge. Both are
+                        // zero, and both are the direction that under-counts.
+                        (None, _) => 0,
+                    };
+                }
+                CoverageState::Unbound {
+                    reason: UnboundReason::NoProviderInWorkspace,
+                } => {}
+                CoverageState::Unbound { .. } => measured += 1,
+            }
+        }
+        (edges, sites, measured)
+    }
+
+    /// A workspace mixing every shape the headline is computed over, in ONE run:
+    /// a `config-bound` bind (the population [CR-127] found excluded from one half
+    /// of the sentence), a literal bind, a broker fan-out (one site, several
+    /// edges), an ambiguous site, an unbound site, and a no-provider site (outside
+    /// the denominator).
+    ///
+    /// Built here rather than reusing [`every_bucket_in_both_populations`] because
+    /// that fixture has no `config-bound` row, and the config-bound row is the
+    /// whole subject.
+    ///
+    /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
+    fn every_egress_shape_at_once() -> CrossServiceCoverage {
+        reset();
+        set_member("orders", vec![route("GET /orders/{id}", "local get_order")]);
+        set_member("users", vec![route("GET /users/{id}", "local get_user")]);
+        set_member("tied_a", vec![route("GET /tied/{id}", "local tied_a")]);
+        set_member("tied_b", vec![route("GET /tied/{other}", "local tied_b")]);
+        set_member("audit", vec![]);
+        set_member("billing", vec![]);
+        set_member("web", vec![]);
+        set_consumers(
+            "web",
+            vec![
+                // config-bound: the target is composed from committed config.
+                http_call("GET ${orders.base}/{id}", "local fetch_order"),
+                // a plain literal bind.
+                http_call("GET /users/{id}", "local fetch_user"),
+                // 2+ providers → ambiguous.
+                http_call("GET /tied/{id}", "local fetch_tied"),
+                // unkeyable → unbound with a reason.
+                http_call("nonsense", "local fetch_nonsense"),
+                // nothing serves it → no-provider-in-workspace, outside the
+                // denominator.
+                http_call("GET /nowhere/{id}", "local fetch_nowhere"),
+                // one publish, two cross-member subscribers → ONE site, TWO edges.
+                broker_publish("orders", "local emitOrder"),
+            ],
+        );
+        commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
+        set_consumers("audit", vec![broker_subscribe("orders", "local onOrderAudit")]);
+        set_consumers("billing", vec![broker_subscribe("orders", "local onOrderBilling")]);
+
+        let cov = cross_service_coverage(
+            &registry(&["orders", "users", "tied_a", "tied_b", "audit", "billing", "web"]).answer(),
+        );
+
+        // **A fixture that stops producing the shapes it claims is a test that
+        // stops testing.** Each of these is one of the three populations the
+        // invariant below distinguishes, and the config-bound row is the one
+        // [CR-127] is about, so a capture or resolution change that quietly
+        // dropped it must fail here rather than pass a weaker invariant.
+        let egress = |predicate: &dyn Fn(&ReferenceCoverage) -> bool| {
+            cov.references
+                .iter()
+                .filter(|r| r.intake == BridgeIntake::Invocation)
+                .filter(|r| predicate(r))
+                .count()
+        };
+        assert_eq!(
+            egress(&|r| matches!(r.state, CoverageState::Bound)
+                && matches!(r.provenance, Provenance::ConfigBound { .. })),
+            1,
+            "the fixture must hold exactly one config-bound bind: {:?}",
+            cov.references
+        );
+        assert_eq!(
+            egress(&|r| matches!(r.state, CoverageState::Bound)
+                && matches!(r.provenance, Provenance::Literal)
+                && r.to.is_some()),
+            1,
+            "…one sole-provider literal bind beside it (the fan-out publish is \
+             literal too, and is counted as the fan-out shape below): {:?}",
+            cov.references
+        );
+        assert_eq!(
+            egress(&|r| matches!(r.state, CoverageState::Bound)
+                && r.candidates.as_ref().is_some_and(|c| c.total > 1)),
+            1,
+            "…and one fan-out row, where a single site is several edges: {:?}",
+            cov.references
+        );
+        for expected in [
+            UnboundReason::Ambiguous,
+            UnboundReason::NoProviderInWorkspace,
+            UnboundReason::PathNotComposed,
+        ] {
+            assert_eq!(
+                egress(&|r| matches!(&r.state, CoverageState::Unbound { reason } if *reason == expected)),
+                1,
+                "…and exactly one unbound row per shape, {expected:?} included — a \
+                 predicate matching ANY unbound reason would pass this loop three \
+                 times over one row: {:?}",
+                cov.references
+            );
+        }
+        cov
+    }
+
+    /// The three figures a `resolved_edges_summary` line states, read back out of
+    /// the rendered sentence — `(edges, resolved_sites, measured)`.
+    ///
+    /// Parsed from the string rather than read off the struct **on purpose**: the
+    /// sentence is what four surfaces publish, and a test that compared struct
+    /// fields to struct fields would pass over a line composed from something
+    /// else entirely.
+    fn figures_in(line: &str) -> (u64, u64, u64) {
+        let (head, tail) = line.split_once("; egress resolution ").unwrap_or_else(|| {
+            panic!("the line must carry the rate beside the count (BR-51): {line:?}")
+        });
+        let edges: u64 = head
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("the line must open with its count: {line:?}"));
+        let inner = tail
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(inner, _)| inner)
+            .unwrap_or_else(|| panic!("the line must state its denominator: {line:?}"));
+        let mut words = inner.split_whitespace();
+        let sites: u64 = words
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("the rate's numerator must be stated: {line:?}"));
+        assert_eq!(words.next(), Some("of"), "…as `N of M`: {line:?}");
+        let measured: u64 = words
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("the rate's denominator must be stated: {line:?}"));
+        (edges, sites, measured)
+    }
+
+    /// **A tied set on a bound row contributes ZERO edges** — the guard
+    /// [`edge_multiplicity`] spends twelve lines defending, and which nothing
+    /// pinned until S-403 T1's review ([CR-120], [NFR-RA-05]).
+    ///
+    /// `tier` never pairs a `TiedBetween` set with a `Bound` state, and
+    /// [`ReferenceCoverage::new`] `debug_assert`s that it cannot — so this row is
+    /// built as a struct literal, deliberately bypassing both. That is the only
+    /// way to exercise the arm at all, and the arm exists precisely for the
+    /// successor `record` call site that gets the pairing wrong: a `debug_assert`
+    /// is compiled out of a release build, and this file is scheduled to receive
+    /// more of them.
+    ///
+    /// **Proved necessary rather than assumed.** Deleting the
+    /// `disposition == BoundTo` guard from [`edge_multiplicity`] left the entire
+    /// federation suite green (420 passed, 0 failed) before this test existed: the
+    /// reconciliation walks that would have caught it were themselves written
+    /// `map_or(1, |c| c.total)`, ignoring disposition, so dropping the guard made
+    /// the product and its own audit agree. A tied set reaching the headline is
+    /// "the exact direction [CR-120] exists to prevent".
+    ///
+    /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn a_tied_set_on_a_bound_row_contributes_no_edge() {
+        let endpoint = |member: &str, symbol: &str| BridgeEndpoint {
+            member: member.to_string(),
+            symbol: LogosSymbol::parse(symbol).unwrap(),
+        };
+        let tied = ProviderCandidates::new(
+            ProviderDisposition::TiedBetween,
+            vec![endpoint("a", "local a"), endpoint("b", "local b")],
+        );
+        assert_eq!(tied.total, 2, "the fixture must carry a set worth over-counting");
+
+        let row = ReferenceCoverage {
+            relation: "route".to_string(),
+            from: endpoint("web", "local fetch"),
+            bucket: CoverageState::Bound.bucket(),
+            state: CoverageState::Bound,
+            to: None,
+            intake: BridgeIntake::Invocation,
+            candidates: Some(tied),
+            provenance: Provenance::Literal,
+        };
+
+        assert_eq!(
+            edge_multiplicity(&row),
+            0,
+            "a `tied-between` set means NONE of its providers is reached, so it is \
+             no evidence of an edge — reading the bucket instead of the disposition \
+             would add the whole tied set to the headline"
+        );
+
+        // …and the same row read through the shared reconciliation recipe, so the
+        // audit path and the product agree on this shape too. Before the review
+        // they did not: the recipe counted `total` here.
+        assert_eq!(
+            reconcile_from_rows(std::slice::from_ref(&row)),
+            (0, 1, 1),
+            "the manual's recipe must reach the same zero — a resolved SITE with no \
+             resolved edge is exactly the shape that must not silently agree"
+        );
+    }
+
+    /// **THE invariant [CR-127] exists to install: both halves of
+    /// `resolved_edges_summary` are derived from ONE population, and the sentence
+    /// cannot contradict itself.**
+    ///
+    /// The shipped defect was not an arithmetic error and not a naming error. The
+    /// edge count carried a `config-bound` exclusion that the rate's numerator did
+    /// not, so the two halves of one sentence counted two different populations
+    /// and the reference estate published *"0 resolved cross-service edges; egress
+    /// resolution 0.032 (5 of 155 egress sites resolved)"* ([CR-127] §3.1). Any
+    /// future filter applied to one half and not the other reproduces it.
+    ///
+    /// So this asserts the property, over every egress shape at once, rather than
+    /// a number:
+    ///
+    /// 1. the three figures in the **rendered sentence** are the three fields the
+    ///    payload publishes — the line is not composed from anything else;
+    /// 2. all three reproduce from a **single** filtered walk of
+    ///    `cov.references`, which is the reader's own reconciliation path and the
+    ///    thing that fails the moment either half acquires its own filter; and
+    /// 3. **`edges == 0` if and only if `resolved_sites == 0`** — the exact
+    ///    self-contradiction that shipped, stated as a biconditional so it fails
+    ///    in either direction.
+    ///
+    /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
+    #[test]
+    fn both_halves_of_the_resolved_edge_summary_are_derived_from_one_population() {
+        for (label, cov) in [
+            ("every egress shape", every_egress_shape_at_once()),
+            ("mixed buckets", every_bucket_in_both_populations()),
+            // The reference estate's own shape, and the one the shipped defect
+            // published as `0`: EVERY bound egress row is config-bound.
+            //
+            // It is in the battery to give assertion (3) a reachable failure. The
+            // three assertions catch different mutations, and only together do
+            // they cover the space: a filter added to `from_rows` alone fails (2)
+            // (the walks disagree); one added to the SITE count as well fails (2b)
+            // (`by_intake` is counted by a different path and does not move); and
+            // one mirrored into `reconcile_from_rows` beside it satisfies both and
+            // still prints "0 edges" over a resolved site *here*, which is (3).
+            // Verified by running each of those three mutations, not argued.
+            ("config-bound only", {
+                reset();
+                set_member("orders", vec![route("GET /orders/{id}", "local get_order")]);
+                set_member("web", vec![]);
+                set_consumers(
+                    "web",
+                    vec![http_call("GET ${orders.base}/{id}", "local fetch_order")],
+                );
+                commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
+                cross_service_coverage(&registry(&["orders", "web"]).answer())
+            }),
+            ("fan-out only", {
+                reset();
+                set_member("api", vec![]);
+                for member in ["web", "audit"] {
+                    set_member(member, vec![]);
+                    set_consumers(
+                        member,
+                        vec![broker_subscribe("orders", &format!("local on_{member}"))],
+                    );
+                }
+                set_consumers("api", vec![broker_publish("orders", "local emitOrder")]);
+                cross_service_coverage(&registry(&["api", "web", "audit"]).answer())
+            }),
+            ("no egress captured", {
+                reset();
+                set_member("api", vec![op("GET /users/{id}", "local op_users")]);
+                set_member("web", vec![route("GET /users/{id}", "local route_users")]);
+                cross_service_coverage(&registry(&["api", "web"]).answer())
+            }),
+            ("empty workspace", {
+                reset();
+                cross_service_coverage(&registry(&[]).answer())
+            }),
+        ] {
+            let (edges, sites, measured) = figures_in(&cov.resolved_edges_summary);
+
+            // (1) The sentence states the payload's own fields.
+            assert_eq!(
+                (edges, measured),
+                (cov.resolved_cross_service_edges, cov.egress_resolution_measured),
+                "{label}: the line must state the fields it summarises, not a \
+                 recomputation of them: {:?}",
+                cov.resolved_edges_summary
+            );
+
+            // (2) The rendered rows reproduce all three, by the recipe the manual
+            // publishes. ONE filter, applied once: the site count and the edge
+            // count are read out of the SAME matched rows, which is what a
+            // second, narrower filter on either half would break.
+            let (rows_edges, rows_sites, rows_measured) = reconcile_from_rows(&cov.references);
+            assert_eq!(
+                (rows_edges, rows_sites, rows_measured),
+                (edges, sites, measured),
+                "{label}: every figure in the line must reconcile against the rows \
+                 the same payload renders (CR-120, CR-127): {:?}",
+                cov.references
+            );
+
+            // (2b) …and against the SECOND, independently maintained population.
+            // `by_intake` is counted at `Tally::record` time from each row's own
+            // state; the figures above are counted by walking the finished rows.
+            // Reconciling against both is what stops this test degenerating into a
+            // restatement of the production walk — a filter added to `from_rows`
+            // AND mirrored into `reconcile_from_rows` still fails here.
+            let inv = cov.by_intake.invocation;
+            assert_eq!(
+                (sites, measured),
+                (inv.bound, inv.bound + inv.ambiguous + inv.unbound),
+                "{label}: the rate's halves must equal the intake tally's invocation \
+                 population, which is counted by a different path: {:?}",
+                cov.by_intake
+            );
+
+            // (3) The biconditional the shipped code violated — the last line of
+            // defence, reached when a mutation has been mirrored into this test's
+            // own audit walk and so satisfies (2) and (2b).
+            assert_eq!(
+                edges == 0,
+                sites == 0,
+                "{label}: a resolved site and a resolved edge are the same rows \
+                 counted two ways — {edges} edges over {sites} resolved sites is \
+                 the sentence contradicting itself (CR-127): {:?}",
+                cov.resolved_edges_summary
+            );
+            assert!(
+                edges >= sites,
+                "{label}: one resolved site is one edge, or several under fan-out, \
+                 never fewer: {edges} < {sites}"
+            );
+
+            // …and the rate is that pair, so a reader who divides the stated
+            // numerator by the stated denominator lands on the published rate.
+            match cov.egress_resolution {
+                Some(rate) => assert!(
+                    (rate - sites as f64 / measured as f64).abs() < f64::EPSILON,
+                    "{label}: the published rate must be the stated fraction: \
+                     {rate} vs {sites}/{measured}"
+                ),
+                None => assert_eq!(
+                    measured, 0,
+                    "{label}: the rate is absent only on a zero denominator (CR-100)"
+                ),
+            }
+        }
     }
 
     /// **[BR-51] on the payload: the resolved-edge count never travels without its
