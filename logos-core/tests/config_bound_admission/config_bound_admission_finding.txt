@@ -86,6 +86,22 @@ things moved here, one of each kind, and they are never netted.
   more than one entry, matching the harness's 2 disagreeing sites); site-level
   identity of the two sets was not independently checked and is not claimed.
 
+  [SUPERSEDED IN PART 2026-09-14 by the Sprint 69 sprint review. The 81-of-81
+  coincidence recorded above is SUSPENDED, and the harness pin quoted above as
+  (96, 79, 2, 15) now reads (96, 82, 2, 12). S-399 merged into this sprint AFTER
+  this measurement was taken; its UriBuilder-lambda pattern re-points the capture
+  at the operand inside the lambda, so three further estate sites present a
+  configuration accessor the harness resolves. The harness's upper bound is
+  therefore 84 (82 agreed-key + 2 overlay-divergent), not 81, and the sentence
+  above that it "did NOT move across either drift" is true only of the two drifts
+  it names. The PRODUCT figure of 81 above is NOT restated and is left as
+  recorded: it reads each member's indexed store, and this estate's index predates
+  S-399, so 81 is what the product emitted on 2026-09-13 and still reproduces
+  today. On the next re-index from merged main the product is expected to read ~84
+  and the agreement to return at 84-of-84 — that re-index writes to the estate and
+  was outside the sprint review's write scope. The divergent split (2) is the half
+  that has held across all three moves.]
+
 
 (b) THE `base-url-runtime` RESIDUE, WITH ITS OWN DENOMINATORS
 -------------------------------------------------------------

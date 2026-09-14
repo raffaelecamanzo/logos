@@ -278,7 +278,9 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
     // attribution — so this roster must be extended by any story that adds an entry.
     // It is the weaker of the two halves by construction; the shape loop below is
     // the one that cannot go stale.
-    for story in ["S-374", "S-375", "S-376", "S-377", "S-397", "S-398", "S-402", "S-403"] {
+    for story in [
+        "S-374", "S-375", "S-376", "S-377", "S-397", "S-398", "S-399", "S-402", "S-403",
+    ] {
         assert!(
             deltas.contains_key(story),
             "no delta recorded for {story}, which contributed to these figures. If a \
