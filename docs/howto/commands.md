@@ -1098,7 +1098,7 @@ Five things worth knowing about these fields:
   |---|---|
   | rows carrying `config-bound` provenance | **81** (was 44) |
   | the accessor denominator (production client-call sites the arm refuses without configuration) | 96 (was 108) |
-  | what the measurement harness proves resolvable on that denominator | 81 (unchanged) |
+  | what the measurement harness proves resolvable on that denominator | 81 on 2026-09-13; **84 on merged `main`** — see the note below |
   | rows carrying `config-unresolved` provenance | 0 |
 
   (The 96 and the 81 are measured and pinned by
@@ -1106,6 +1106,16 @@ Five things worth knowing about these fields:
   this table among the places to re-record if they move; the 81 admitted is pinned
   by `logos-core/tests/config_bound_admission.rs`, and the full dated record with
   both figures and their denominators is the artifact beside it.)
+
+  **The 81-of-81 agreement is suspended, and the reason is known (2026-09-14).**
+  [S-399](../planning/journal.md#s-399-the-accessor-hop-reaches-through-a-uribuilder-lambda)
+  landed later in the same sprint and reaches an accessor composed inside a
+  `UriBuilder` lambda, which admits **three** further sites on this estate. The
+  harness half therefore reads **84** on merged `main` while the product half
+  still reads 81, because the product figure is read from each member's *indexed*
+  store and this estate's index predates that story. A re-index is expected to
+  bring the product to ~84 and restore the agreement at 84-of-84; record whatever
+  it reads rather than bending anything to reproduce 81.
 
   **No floor is asserted on either figure, and none should be read into them.**
   The 81-of-81 agreement is what one estate produced on one date, not a property
