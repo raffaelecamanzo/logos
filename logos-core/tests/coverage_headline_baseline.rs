@@ -224,8 +224,8 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
     assert_eq!(
         gen["contains_s374_refusal_rows"], true,
         "the store now POSTdates S-374, so the artifact must say so — a reader who took \
-         this for a pre-S-374 measurement would attribute the invocation unbound column's \
-         87 rows to the wrong cause: {gen}"
+         this for a pre-S-374 measurement would attribute the invocation arm's \
+         `base-url-runtime` rows — 24 on this generation — to the wrong cause: {gen}"
     );
     assert!(
         gen["refresh_procedure"].as_str().is_some_and(|s| s.contains("logos init --workspace")),
@@ -258,8 +258,35 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
     // here or PENDING the re-index. An entry that claimed neither would be the kind
     // of unattributable figure this artifact exists to prevent.
     let deltas = a["deltas"].as_object().expect("per-story delta attribution");
-    for story in ["S-374", "S-375", "S-377", "S-398", "S-402", "S-403"] {
-        let d = deltas.get(story).unwrap_or_else(|| panic!("no delta recorded for {story}"));
+    // **Iterate the object's OWN KEYS, and the inversion is the point.** This loop
+    // used to walk a frozen literal list, `["S-374", "S-375", "S-377"]`. A closed
+    // list cannot notice what it does not name: by the time [S-398] T2 added the
+    // `S-398` and `S-402` entries — the two that carry this artifact's whole
+    // admission-versus-population-correction argument — the guard had already
+    // silently stopped covering `S-376` and `S-397`, and it would have stopped
+    // covering the new pair too. Deleting both entirely left this test green, which
+    // is how the inversion was found. Enumerating the surface and requiring every
+    // member to be classified cannot go stale that way.
+    assert!(
+        !deltas.is_empty(),
+        "the artifact must attribute its figures to at least one story, or the \
+         measurement block below is unattributable: {a}"
+    );
+    // **The presence half IS a closed list, and that is stated rather than hidden.**
+    // An entry can go stale by disappearing as easily as by emptying, and no
+    // derivable source names which stories contributed to a hand-written
+    // attribution — so this roster must be extended by any story that adds an entry.
+    // It is the weaker of the two halves by construction; the shape loop below is
+    // the one that cannot go stale.
+    for story in ["S-374", "S-375", "S-376", "S-377", "S-397", "S-398", "S-402", "S-403"] {
+        assert!(
+            deltas.contains_key(story),
+            "no delta recorded for {story}, which contributed to these figures. If a \
+             story's contribution has genuinely been superseded, say so in its entry — \
+             do not delete it, or the figures it explains become unattributable."
+        );
+    }
+    for (story, d) in deltas {
         let status = d["status"].as_str().unwrap_or_default();
         assert!(
             status == "observed" || status == "pending-reindex",
@@ -270,6 +297,11 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
             d["effect"].as_str().is_some_and(|s| !s.is_empty()),
             "{story} must state its effect on these figures, and a pending one must \
              state the expected direction and magnitude with its reason: {d}"
+        );
+        assert!(
+            d["story"].as_str().is_some_and(|s| !s.is_empty()),
+            "{story}'s entry must name the story it attributes, so a reader of the \
+             artifact alone can tell what moved these figures: {d}"
         );
     }
 
@@ -314,10 +346,13 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
         inv_num("unbound") > 54,
         "the generation label and the measurement disagree: the artifact says \
          contains_s374_refusal_rows = {claims_s374} while the invocation population's \
-         unbound bucket holds {}. The 54 is the pre-S-374 floor — the broker \
-         `topic-not-literal` refusals, which every generation of this store carries — so \
-         a store holding S-374's client-call refusals reads strictly above it and one \
-         without them reads exactly at it.",
+         unbound bucket holds {}. The 54 is the broker `topic-not-literal` refusals, \
+         which every generation of this store carries — so a store holding S-374's \
+         client-call refusals reads well above it. It is a FLOOR, not an equality: a \
+         store without those refusals reads 54 PLUS any non-client-call unbound row, \
+         which is 55 on this generation (the one config-bound `path-not-composed` row \
+         S-398 T2 recorded). The discrimination survives that — 79 is well clear of \
+         both — but do not re-derive the pre-S-374 reading as exactly 54.",
         inv_num("unbound"),
     );
 

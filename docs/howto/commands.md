@@ -1081,45 +1081,63 @@ Five things worth knowing about these fields:
   overlays commit different values and every one is retained with the profiles
   that prove it, never averaged and never refused.
 
-- **What this emits on a real estate today, measured rather than estimated.** The
-  accessor capture hop is now wired: an `@ConfigurationProperties` accessor
-  expression resolves to its canonical key at index time and reaches the same
-  resolution a `${...}` placeholder already took. On the 84-member reference
-  estate, `logos workspace status --json` emits **44** rows carrying `config-bound`
-  provenance — 5 `bound`, 9 `ambiguous`, 30 `no-provider-in-workspace` — against
-  the **0** the same command emitted before the hop existed. Read that figure with
-  its denominators, because it is **not** full coverage:
+- **What this emits on a real estate today, measured rather than estimated
+  (2026-09-13).** The accessor capture hop is wired and now reaches a *qualified*
+  receiver: an `@ConfigurationProperties` accessor expression — whether written
+  bare or as `this.mailboxApiProperties.getUriGetMailbox()` — resolves to its
+  canonical key at index time and reaches the same resolution a `${...}`
+  placeholder already took. On the 84-member reference estate,
+  `logos workspace status --json` emits **81** rows carrying `config-bound`
+  provenance — 15 `bound`, 23 `ambiguous`, 42 `no-provider-in-workspace` and 1
+  `path-not-composed` — against the **44** the same command emitted before the
+  qualified receiver was admitted, and the **0** it emitted before the hop existed
+  at all. Read that figure with its denominators, because it is **not** full
+  coverage:
 
   | | |
   |---|---|
-  | rows carrying `config-bound` provenance | **44** |
-  | the accessor denominator (production client-call sites the arm refuses without configuration) | 108 |
-  | what the measurement harness proves resolvable on that denominator | 81 |
+  | rows carrying `config-bound` provenance | **81** (was 44) |
+  | the accessor denominator (production client-call sites the arm refuses without configuration) | 96 (was 108) |
+  | what the measurement harness proves resolvable on that denominator | 81 (unchanged) |
   | rows carrying `config-unresolved` provenance | 0 |
 
-  (The 108 and the 81 are measured and pinned by
+  (The 96 and the 81 are measured and pinned by
   `logos-core/tests/operand_resolvability/configuration_agreement.rs`, which names
-  this table among the places to re-record if they move; the 44 is pinned by
-  `logos-core/tests/config_bound_admission.rs`.)
+  this table among the places to re-record if they move; the 81 admitted is pinned
+  by `logos-core/tests/config_bound_admission.rs`, and the full dated record with
+  both figures and their denominators is the artifact beside it.)
 
-  The 37-site gap between 44 and 81 is **one mechanism**: a *qualified receiver*.
-  `this.mailboxConfigurationApi.getUriGetMailbox()` resolves to nothing, on
-  purpose — the extract pass refuses a receiver it cannot see declared in the
-  reading file rather than trimming the expression to its last segment and
-  guessing. A **Kotlin** use site resolves to nothing for a related reason (the
-  grammar field-names neither the receiver nor the callee of a member call), and a
-  chained accessor (`config.getMail().getHost()`) likewise. Each is a refusal, not
-  a wrong answer.
+  **No floor is asserted on either figure, and none should be read into them.**
+  The 81-of-81 agreement is what one estate produced on one date, not a property
+  the product holds: a harness figure measures what is *derivable*, and turning
+  one into a prediction about the product is exactly the error the predecessor
+  story was bitten by.
 
-  Two further gaps are open and stated so the 44 is not read as a ceiling reached:
-  production ingestion reads **no** `.properties` source at all (no plugin
-  descriptor claims the extension), which costs this particular estate nothing —
-  a measured residue of **0 of 108** accessor sites, because it commits its keys
-  in yaml — but would cost an estate that used them; and an accessor-resolved key
-  reports `"source": "placeholder"` rather than a distinct `"properties"` label,
-  so the `--json`, MCP and dashboard surfaces cannot yet tell the two spellings
-  apart. Nothing is mislabelled as *admitted* by that: the provenance, the key,
-  the defining sources and the profile set are all correct.
+  **Two independent things moved between the 44 and the 81, and they are not the
+  same kind of change.** The `config-bound` count rose by exactly **37** — the
+  qualified-receiver sites — and the `base-url-runtime` refusals fell by exactly
+  37 in the same four members, row for row. Separately, the captured
+  invocation-intake population itself fell **186 → 160** because the Go
+  client-call candidacy gate became receiver-grained and stopped capturing 26
+  non-call sites; those 26 were keyless refusals that produced no reference and no
+  edge, so nothing that bound stopped binding. Both show up as "fewer refusals"
+  — the residue falls 87 → 24 — but only the first 37 are a coverage gain. A
+  lower refusal count is not a coverage gain on its own.
+
+  What still resolves to nothing, stated so the 81 is not read as a ceiling
+  reached: a **Kotlin** use site (the grammar field-names neither the receiver nor
+  the callee of a member call), and a chained accessor
+  (`config.getMail().getHost()`). Each is a refusal, not a wrong answer.
+
+  Two further gaps are open: production ingestion reads **no** `.properties`
+  source at all (no plugin descriptor claims the extension), which costs this
+  particular estate nothing — a measured residue of **0 of 96** accessor sites,
+  because it commits its keys in yaml — but would cost an estate that used them;
+  and an accessor-resolved key reports `"source": "placeholder"` rather than a
+  distinct `"properties"` label, so the `--json`, MCP and dashboard surfaces
+  cannot yet tell the two spellings apart. Nothing is mislabelled as *admitted*
+  by that: the provenance, the key, the defining sources and the profile set are
+  all correct.
 
   Note finally what a `config-bound` row **does and does not** reach. It is
   counted in `resolved_cross_service_edges`, because it resolved: the coverage
