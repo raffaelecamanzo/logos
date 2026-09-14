@@ -109,10 +109,16 @@
 //! # What a reader should NOT conclude
 //!
 //! * Not "the pipeline resolves 81 of the estate's couplings". It admits 81 rows
-//!   carrying a resolved, committed value; 15 of them bind a provider, and
-//!   `resolved_cross_service_edges` is **still 0** — a `config-bound` row is
-//!   deliberately excluded from that headline because the bridge still keys a
-//!   consumer on its raw ledger target.
+//!   carrying a resolved, committed value; 15 of them bind a provider, and none
+//!   of them draws a cross-service edge. Those 15 ARE what
+//!   `resolved_cross_service_edges` reads — this measurement was taken while that
+//!   headline still read 0, and the clause that stood here explained the 0 by
+//!   saying a `config-bound` row is excluded from it by construction. [S-403] T1
+//!   ([CR-127]), later in the same sprint, removed that exclusion, so on this same
+//!   index the headline is **15**. The measurement above is left as recorded and
+//!   is not restated. The bridge half is unchanged and is a different quantity: no
+//!   `BridgeEdge` is drawn for such a row, published in its own right as
+//!   `coverage.bridge_invocation_edges`, which is 0.
 //! * Not "egress resolution quadrupled". It reads 0.128 (15 of 117) against 0.032
 //!   (5 of 155), and the denominator moved underneath it for a reason that is not
 //!   a coverage change.
@@ -190,6 +196,7 @@
 //! [Sprint 68]: ../../docs/planning/sprints/sprint-68.md
 //! [CR-122]: ../../docs/requests/CR-122-the-configuration-substrate-reaches-the-product.md
 //! [CR-123]: ../../docs/requests/CR-123-invocation-capture-accepts-the-qualified-receiver.md
+//! [CR-127]: ../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
 //! [FR-WS-19]: ../../docs/specs/requirements/FR-WS-19.md
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 //! [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
@@ -199,6 +206,7 @@
 //! [S-400]: ../../docs/planning/journal.md#s-400-measure-whether-a-runtime-port-identifies-the-callee
 //! [S-401]: ../../docs/planning/journal.md#s-401-a-cross-service-reachability-answer-carries-its-unresolved-residue
 //! [S-402]: ../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
+//! [S-403]: ../../docs/planning/journal.md#s-403-the-resolved-edge-headline-agrees-with-its-payload
 
 use std::path::PathBuf;
 
