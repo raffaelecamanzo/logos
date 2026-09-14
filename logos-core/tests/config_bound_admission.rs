@@ -35,7 +35,19 @@
 //! ```
 //!
 //! So: **81 of 96** accessor-denominator sites, and **81 of 81** of what the
-//! harness proves resolvable on that denominator. **No floor is asserted on this
+//! harness proves resolvable on that denominator — *as measured on 2026-09-13.*
+//!
+//! **The 81-of-81 agreement is SUSPENDED as of 2026-09-14 and is expected to
+//! return at 84-of-84.** [S-399] merged into this same sprint AFTER the reading
+//! above was taken, and its `UriBuilder`-lambda pattern admits three further
+//! sites. The Sprint 69 sprint review re-measured the harness on merged `main`
+//! and it now proves **84** resolvable (82 agreed + 2 divergent), re-recorded in
+//! `operand_resolvability/configuration_agreement.rs`. The product figure below
+//! has NOT moved because this file reads each member's INDEXED store and the
+//! reference estate's index predates [S-399]; a re-index from merged `main` is
+//! expected to read ~84 here too. That re-index writes to the estate, which was
+//! outside the sprint review's write scope, so it is the human gate's step —
+//! and it is the KNOWN reason this pin will move, not an unexplained drift. **No floor is asserted on this
 //! figure and none should be read into it.** [S-397] AC2's floor of 79 is now
 //! exceeded, which is recorded here as an outcome and deliberately *not* re-armed
 //! as a criterion for [S-398]: [Sprint 68] was bitten by an inherited census figure
@@ -88,12 +100,14 @@
 //! declared type rather than on the trim, and the estate moved by exactly the 37
 //! sites the diagnosis named. The prediction and the outcome agree to the site.
 //!
-//! Arithmetic, for a reader who wants to reconstruct it: the harness resolves 79
-//! agreed + 2 divergent = 81 Java sites, and the payload now carries 81
-//! `config-bound` rows of which exactly **2** carry an overlay-divergent key (a
-//! `values` list with more than one entry). The totals and the divergent split both
-//! agree; site-level identity of the two sets was not independently checked and is
-//! not claimed here.
+//! Arithmetic, for a reader who wants to reconstruct it: at the 2026-09-13 reading
+//! the harness resolved 79 agreed + 2 divergent = 81 Java sites, and the payload
+//! carried 81 `config-bound` rows of which exactly **2** carry an overlay-divergent
+//! key (a `values` list with more than one entry). The totals and the divergent
+//! split both agreed; site-level identity of the two sets was not independently
+//! checked and is not claimed here. On merged `main` the harness half of that
+//! arithmetic is now 82 agreed + 2 divergent = 84 ([S-399], above); the divergent
+//! split is the half that has held across all three moves.
 //!
 //! # The `.properties` gap is still open, and still costs this estate nothing
 //!
@@ -203,6 +217,7 @@
 //! [S-392]: ../../docs/planning/journal.md#s-392-measure-the-one-hop-parameter-forwarding-residue
 //! [S-397]: ../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
 //! [S-398]: ../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
+//! [S-399]: ../../docs/planning/journal.md#s-399-the-accessor-hop-reaches-through-a-uribuilder-lambda
 //! [S-400]: ../../docs/planning/journal.md#s-400-measure-whether-a-runtime-port-identifies-the-callee
 //! [S-401]: ../../docs/planning/journal.md#s-401-a-cross-service-reachability-answer-carries-its-unresolved-residue
 //! [S-402]: ../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
@@ -285,6 +300,14 @@ const CRITERION_FLOOR: usize = 79;
 /// Pinned exactly, in both directions. That is a reproduction claim, not a floor:
 /// a run that reads a different number has changed the rule, the binary or the
 /// corpus, and all three need a human.
+///
+/// **One such change is already known and is NOT a mystery to investigate.**
+/// [S-399] merged later in Sprint 69 than the reading this pin records, and admits
+/// three further sites on this estate (`UriBuilder`-lambda-nested accessors). This
+/// pin still reads 81 only because it reads each member's INDEXED store and the
+/// reference estate's index predates [S-399]. On the next re-index from merged
+/// `main` this is expected to read **~84**; record the new figure, as the assertion
+/// message below instructs, rather than treating it as a regression.
 const RECORDED_ADMITTED: usize = 81;
 
 /// The accessor denominator the figure is stated over — the S-382 reading's

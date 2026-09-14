@@ -2270,21 +2270,59 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
     //   counted as newly admitted. The product-side figure moved 44 -> 81 on the
     //   same run; this one did not move at all.
     //
+    // *Third move, re-recorded by the Sprint 69 SPRINT REVIEW on 2026-09-14 over
+    // merged `main`:* this run reads 82 resolved of **96**, 2 divergent, **12**
+    // no-key. This is the first move in which `resolved` itself changed — the two
+    // before it left it untouched and moved only the `no_key` residue — and the
+    // cause is [S-399], merged into this sprint AFTER [S-398] T2 took the reading
+    // above. Its `invocations.scm` pattern 5 re-points `@invoke.http.arg` at the
+    // operand INSIDE a `UriBuilder` lambda, so three sites whose captured operand
+    // was previously the whole lambda (and therefore `no_key`) now present a
+    // configuration accessor this arm resolves. The run prints all three as NEWLY
+    // ADMITTED, and they are [S-399]'s own three measured sites, file and line:
+    //
+    // * `funnel-aggregator-api/.../client/MailboxApiRestClient.java:268`
+    //   — `this.mailboxConfigurationApi.getUriHasFromFreemiumMailbox()`
+    // * `mailbox-aggregator-api/.../client/ReportingApiRestClient.java:110`
+    //   — `reportingApiProperties.getUriActiveOffer()`
+    // * `mailbox-aggregator-api/.../client/ReportingApiRestClient.java:122`
+    //   — `reportingApiProperties.getUriCreateMailboxData()`
+    //
+    // The denominator did NOT move (96), which is the check that this is a
+    // resolution and not a new capture: [S-399] states the captured population is
+    // unchanged, and an unchanged denominator beside a `no_key -> resolved`
+    // transfer of exactly 3 is that claim reproduced here independently.
+    //
+    // **The product side has NOT been re-measured and still reads 81.** The
+    // `RECORDED_ADMITTED` pin in `config_bound_admission.rs` reads each member's
+    // INDEXED store, and the reference estate's index predates [S-399]; this arm
+    // re-derives from source with the current queries, which is why the two now
+    // disagree. The `81 of 81` product-versus-harness agreement [S-398] T2
+    // recorded is therefore SUSPENDED, not refuted: on a re-index from merged
+    // `main` the product is expected to read ~84 and the agreement to return at
+    // 84-of-84. That re-index writes to the estate and was outside the sprint
+    // review's write scope; it is handed to the human gate.
+    //
     // Pinned at what the run produces rather than at what the criterion quotes,
     // because a test asserting 111 would fail on a corpus nothing in this
-    // repository controls; the three figures the criterion is actually *about* —
-    // 79 resolved, 2 divergent, each emitting two profile-labelled values — are
-    // reproduced exactly, and have been across every move.
+    // repository controls. The two figures the criterion is actually *about* that
+    // have held across all three moves are the **2 divergent** sites and their
+    // four profile-labelled values; `resolved` held at 79 across the first two
+    // moves and moved to 82 on the third, for the reason recorded above.
     //
+    // [S-399]: ../../../docs/planning/journal.md#s-399-the-accessor-hop-reaches-through-a-uribuilder-lambda
     // [S-398]: ../../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
     // [S-402]: ../../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
     assert_eq!(
         (s382.denominator, s382.resolved, s382.divergent, s382.no_key),
-        (96, 79, 2, 15),
+        (96, 82, 2, 12),
         "S-382 AC5 names 79 production client-call sites resolved and 2 divergent, over \
          a denominator S-365 recorded as 111 (30 no-key), which drifted to 108 (27 \
          no-key) before S-382 and which S-398 T2 re-recorded as 96 (15 no-key) on \
-         2026-09-13 after S-402 emptied the Go row. This run read {s382:?}. Re-measure \
+         2026-09-13 after S-402 emptied the Go row. The Sprint 69 sprint review \
+         re-recorded the RESOLVED half 79 -> 82 (no-key 15 -> 12) on 2026-09-14 over \
+         merged main, S-399's UriBuilder-lambda pattern being the measured cause and \
+         the denominator holding at 96. This run read {s382:?}. Re-measure \
          against the reference workspace before changing this assertion.\n\
          \n\
          THIS DENOMINATOR IS RESTATED IN FOUR PLACES THIS BINARY CANNOT REACH, and \
