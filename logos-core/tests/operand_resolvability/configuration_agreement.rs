@@ -2271,44 +2271,29 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
     //   same run; this one did not move at all.
     //
     // *Third move, re-recorded by the Sprint 69 SPRINT REVIEW on 2026-09-14 over
-    // merged `main`:* this run reads 82 resolved of **96**, 2 divergent, **12**
-    // no-key. This is the first move in which `resolved` itself changed — the two
-    // before it left it untouched and moved only the `no_key` residue — and the
-    // cause is [S-399], merged into this sprint AFTER [S-398] T2 took the reading
-    // above. Its `invocations.scm` pattern 5 re-points `@invoke.http.arg` at the
-    // operand INSIDE a `UriBuilder` lambda, so three sites whose captured operand
-    // was previously the whole lambda (and therefore `no_key`) now present a
-    // configuration accessor this arm resolves. The run prints all three as NEWLY
-    // ADMITTED, and they are [S-399]'s own three measured sites, file and line:
+    // merged `main`:* 82 resolved of **96**, 2 divergent, **12** no-key. The first
+    // move in which `resolved` itself changed; the two before it moved only the
+    // `no_key` residue. Cause: [S-399], merged AFTER [S-398] T2 took the reading
+    // above, whose `invocations.scm` pattern 5 re-points `@invoke.http.arg` at the
+    // operand INSIDE a `UriBuilder` lambda — so three sites whose captured operand
+    // was the whole lambda (hence `no_key`) now present an accessor this arm
+    // resolves. The run prints all three as NEWLY ADMITTED and they are [S-399]'s
+    // own measured sites: `funnel-aggregator-api` MailboxApiRestClient.java:268,
+    // `mailbox-aggregator-api` ReportingApiRestClient.java:110 and :122. The
+    // denominator did NOT move (96), which is what says this is a resolution and
+    // not a new capture.
     //
-    // * `funnel-aggregator-api/.../client/MailboxApiRestClient.java:268`
-    //   — `this.mailboxConfigurationApi.getUriHasFromFreemiumMailbox()`
-    // * `mailbox-aggregator-api/.../client/ReportingApiRestClient.java:110`
-    //   — `reportingApiProperties.getUriActiveOffer()`
-    // * `mailbox-aggregator-api/.../client/ReportingApiRestClient.java:122`
-    //   — `reportingApiProperties.getUriCreateMailboxData()`
-    //
-    // The denominator did NOT move (96), which is the check that this is a
-    // resolution and not a new capture: [S-399] states the captured population is
-    // unchanged, and an unchanged denominator beside a `no_key -> resolved`
-    // transfer of exactly 3 is that claim reproduced here independently.
-    //
-    // **The product side has NOT been re-measured and still reads 81.** The
-    // `RECORDED_ADMITTED` pin in `config_bound_admission.rs` reads each member's
-    // INDEXED store, and the reference estate's index predates [S-399]; this arm
-    // re-derives from source with the current queries, which is why the two now
-    // disagree. The `81 of 81` product-versus-harness agreement [S-398] T2
-    // recorded is therefore SUSPENDED, not refuted: on a re-index from merged
-    // `main` the product is expected to read ~84 and the agreement to return at
-    // 84-of-84. That re-index writes to the estate and was outside the sprint
-    // review's write scope; it is handed to the human gate.
+    // **The product side still reads 81 and is NOT stale.** `RECORDED_ADMITTED` in
+    // `config_bound_admission.rs` reads each member's INDEXED store and this
+    // estate's index predates [S-399]; this arm re-derives from source. The
+    // `81 of 81` agreement [S-398] T2 recorded is SUSPENDED, not refuted — a
+    // re-index is expected to read ~84 on both sides. That re-index writes to the
+    // estate, outside the sprint review's write scope; it is the human gate's step.
     //
     // Pinned at what the run produces rather than at what the criterion quotes,
     // because a test asserting 111 would fail on a corpus nothing in this
-    // repository controls. The two figures the criterion is actually *about* that
-    // have held across all three moves are the **2 divergent** sites and their
-    // four profile-labelled values; `resolved` held at 79 across the first two
-    // moves and moved to 82 on the third, for the reason recorded above.
+    // repository controls. What has held across all three moves is the **2
+    // divergent** sites and their four profile-labelled values.
     //
     // [S-399]: ../../../docs/planning/journal.md#s-399-the-accessor-hop-reaches-through-a-uribuilder-lambda
     // [S-398]: ../../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
