@@ -841,21 +841,17 @@ pub struct Findings {
     /// Per candidate index, what each second frame proved, under the decisive
     /// reading: the forwarding method looked up, and the outcome.
     pub frame_two_detail: BTreeMap<usize, Vec<String>>,
-    /// Per candidate index, the largest number of `method_declaration`s sharing
-    /// a forwarding method's **bare name** inside the candidate's own build
-    /// module — 1 when the lookup is unambiguous.
+    /// Per candidate index, the largest number of main-tree
+    /// `method_declaration`s sharing a forwarding method's **`(name, arity)`**
+    /// inside the candidate's own build module.
     ///
     /// The honest limit on this measurement, measured rather than argued. Frame
     /// two binds on [`Callee`], `(name, arity)`, because that is all the `Calls`
     /// ledger's target text can express; [CR-131] C2 proposes the rule as "name,
-    /// arity **and receiver-aware**". Where a module declares one
-    /// `sendMessage/3` the two are the same rule. Where it declares several —
-    /// `archive-manager` writes `DelayedMessageKafkaProducer` and
-    /// `ArchiveEventKafkaProducer`, publishing to different topics — this
-    /// harness pools their callers and refuses on the disagreement, while the
-    /// proposed rule would separate them. Every such refusal is therefore a
-    /// floor on what C2 would resolve, never a ceiling, which is the safe
-    /// direction for a gate that passes.
+    /// arity **and receiver-aware**", so wherever several declarations share one
+    /// signature this harness pools their callers and the proposed rule would
+    /// not. See [`Findings::pool_spans_several_overrides`] for what the count
+    /// has to reach before that pooling can actually change an answer.
     ///
     /// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
     pub frame_two_name_declarations: BTreeMap<usize, usize>,
@@ -956,6 +952,95 @@ impl Findings {
             }
         }
         out
+    }
+
+    /// Can frame two's `(name, arity)` pool for this candidate mix the callers
+    /// of **two different overrides**?
+    ///
+    /// Two declarations is NOT enough, and getting that wrong in either
+    /// direction is the whole difficulty. On this estate a module writes a base
+    /// `KafkaProducer.sendMessage/3` plus one subclass override per producer, so
+    /// the count is `1 + overrides`:
+    ///
+    /// * **2** — base plus exactly one override. The only call that targets the
+    ///   base is the override's own `super.sendMessage(…)`, and
+    ///   [`dispatches_past`] already removes it, so every caller left in the
+    ///   pool targets the one override. The pool is unambiguous and a resolution
+    ///   drawn from it is sound.
+    /// * **3 or more** — base plus two or more overrides. The pool spans them,
+    ///   this harness cannot tell their callers apart, and a receiver-aware rule
+    ///   would.
+    ///
+    /// So this is the discriminator that explains BOTH halves of the estate
+    /// result, and [`Findings::refusals_from_an_ambiguous_pool`] and
+    /// [`Findings::resolutions_on_an_unambiguous_pool`] are the two guards read
+    /// off it. A candidate with no forward at all reports 0 and is not
+    /// ambiguous — there is no second frame to pool anything.
+    pub fn pool_spans_several_overrides(&self, i: usize) -> bool {
+        self.frame_two_name_declarations.get(&i).is_some_and(|n| *n >= 3)
+    }
+
+    /// Production candidates REFUSED at two frames whose frame-two pool spans
+    /// several overrides — the refusals attributable to this harness's
+    /// `(name, arity)` binding rather than to the estate.
+    ///
+    /// One definition, read by both the report and the gate's assertion. They
+    /// were two separate spellings of the same three filters, and the finding's
+    /// central caveat rests on the printed row and the asserted number being
+    /// the same quantity — which is exactly the twin this file's discipline
+    /// exists to prevent.
+    pub fn refusals_from_an_ambiguous_pool(&self, arm: Arm, tree: Tree) -> Vec<(usize, usize)> {
+        self.candidates
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                c.arm == arm && c.tree == tree && self.two_frame_residue.contains_key(i)
+            })
+            .filter(|(i, _)| self.pool_spans_several_overrides(*i))
+            .map(|(i, _)| (i, self.frame_two_name_declarations.get(&i).copied().unwrap_or_default()))
+            .collect()
+    }
+
+    /// The symmetric guard, and the one this measurement did not have until the
+    /// review asked for it: production candidates RESOLVED at two frames whose
+    /// frame-two pool is unambiguous.
+    ///
+    /// The pooling argument cuts both ways. A pool that spans several overrides
+    /// can refuse on a disagreement the estate does not write — that is the
+    /// caveat the refusal guard measures — but it can equally **manufacture** a
+    /// resolution, by drawing a value from a caller of a different class's
+    /// same-signature method. A resolution drawn from an unambiguous pool cannot
+    /// be manufactured that way, so this is what licenses reading the headline
+    /// as sound rather than merely as a lower bound.
+    pub fn resolutions_on_an_unambiguous_pool(&self, arm: Arm, tree: Tree) -> Vec<(usize, usize)> {
+        self.candidates
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                c.arm == arm
+                    && c.tree == tree
+                    && self.hops_two_frame_main_only.get(i).is_some_and(Hop::resolved)
+                    && !self.frame_two_chains.get(i).is_none_or(BTreeSet::is_empty)
+            })
+            .filter(|(i, _)| !self.pool_spans_several_overrides(*i))
+            .map(|(i, _)| (i, self.frame_two_name_declarations.get(&i).copied().unwrap_or_default()))
+            .collect()
+    }
+
+    /// Production candidates resolved at two frames whose resolution actually
+    /// went through a second frame — the ones the guard above must cover.
+    pub fn resolutions_through_a_second_frame(&self, arm: Arm, tree: Tree) -> Vec<usize> {
+        self.candidates
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                c.arm == arm
+                    && c.tree == tree
+                    && self.hops_two_frame_main_only.get(i).is_some_and(Hop::resolved)
+                    && !self.frame_two_chains.get(i).is_none_or(BTreeSet::is_empty)
+            })
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// The generality caveat `two_frame_forwarding_floor.txt` declared in
@@ -1119,6 +1204,20 @@ const DECL_QUERY: &str = r"
   name: (identifier) @decl.name)
 ";
 
+/// **S-416.** Every method declaration WITH its parameter list, for the
+/// frame-two signature census.
+///
+/// [`DECL_QUERY`] captures the bare name because S-392's `ambiguous_by_name`
+/// figure is about exactly that: the `Calls` ledger's target text is a name and
+/// nothing else. Frame two binds on `(name, arity)`, so its census has to be
+/// keyed the same way — counting `sendMessage` across every arity would report
+/// an ambiguity the lookup does not actually have.
+const DECL_SIGNATURE_QUERY: &str = r"
+(method_declaration
+  name: (identifier) @decl.name
+  parameters: (formal_parameters) @decl.params)
+";
+
 /// The named children of an argument or parameter list, **minus comments**.
 ///
 /// Tree-sitter counts a comment as a named sibling, so an un-filtered
@@ -1257,13 +1356,22 @@ fn forward_from(argument: Node<'_>, src: &[u8]) -> Option<Forward> {
 
 /// The simple name of the type declaration enclosing `node`.
 ///
-/// `None` for a method outside any named type — an anonymous class body. Such a
-/// method cannot be the target of a `super.m()` written elsewhere, so a `None`
-/// here makes [`dispatches_past`] exclude those `super` calls, which is the
-/// conservative direction.
+/// `None` for a method in an **anonymous** class body — `new Thin() { … }`. An
+/// anonymous class has no name for a `super.m()` written elsewhere to target, so
+/// there is nothing to compare and [`dispatches_past`] keeps such a call site.
+///
+/// The walk therefore has to STOP at an anonymous body rather than pass through
+/// it: a `class_body` whose parent is an `object_creation_expression` is where
+/// the enclosing type ends. Without that stop it kept climbing to the outer
+/// named class, and a `super.m()` inside an anonymous subclass was attributed to
+/// whatever the OUTER class extends — see
+/// [`fixtures::a_super_call_in_an_anonymous_subclass_is_not_attributed_to_the_outer_class`].
 fn enclosing_type_name(node: Node<'_>, src: &[u8]) -> Option<String> {
     let mut current = node.parent();
     while let Some(scope) = current {
+        if anonymous_body(scope) {
+            return None;
+        }
         if matches!(
             scope.kind(),
             "class_declaration" | "enum_declaration" | "record_declaration" | "interface_declaration"
@@ -1278,14 +1386,31 @@ fn enclosing_type_name(node: Node<'_>, src: &[u8]) -> Option<String> {
     None
 }
 
-/// The simple name of the class the type declaration enclosing `node` extends.
+/// `true` for the body of an anonymous class — `new Foo() { … }`.
+fn anonymous_body(node: Node<'_>) -> bool {
+    node.kind() == "class_body"
+        && node.parent().is_some_and(|p| p.kind() == "object_creation_expression")
+}
+
+/// The simple name of the class a `super.m(…)` at `node` dispatches to: what the
+/// enclosing type extends.
 ///
-/// `None` when there is no `extends` clause — in which case a `super.m()` inside
-/// it targets `Object`, which declares none of the methods this measurement
-/// looks up.
+/// For an **anonymous** class the answer is the type being instantiated —
+/// `new Thin() { … void m() { super.m(); } }` dispatches to `Thin` — which is
+/// read off the `object_creation_expression`'s own type, not off the outer
+/// class's `extends`. Climbing past the anonymous body was a real over-exclusion:
+/// it made the receiver rule discard a genuine caller, and discarding callers
+/// RAISES the resolved count, so the mistake was not on the safe side.
+///
+/// `None` when there is no `extends` clause at all — a `super.m()` there targets
+/// `Object`, which declares none of the methods this measurement looks up.
 fn enclosing_superclass_name(node: Node<'_>, src: &[u8]) -> Option<String> {
     let mut current = node.parent();
     while let Some(scope) = current {
+        if anonymous_body(scope) {
+            let created = scope.parent()?.child_by_field_name("type")?;
+            return simple_type_name(created, src);
+        }
         if scope.kind() == "class_declaration" {
             let extends = scope.child_by_field_name("superclass")?;
             let mut cursor = extends.walk();
@@ -1407,6 +1532,18 @@ struct CallsLedger {
 }
 
 impl CallsLedger {
+    /// The files the ledger names as callers of any of `names` — what a
+    /// ledger-driven implementation would actually open. Written once and used
+    /// by both the frame-one targeted pass and the frame-two pass, which had
+    /// the same four-line chain twice.
+    fn files_naming<'a>(&'a self, names: &BTreeSet<String>) -> BTreeSet<&'a str> {
+        names
+            .iter()
+            .filter_map(|n| self.by_name.get(n))
+            .flat_map(|set| set.iter().map(|(file, _)| file.as_str()))
+            .collect()
+    }
+
     fn absorb(&mut self, rel: &str, facts: &extract::Facts) {
         self.files += 1;
         for r in facts.refs.iter().filter(|r| r.kind == EdgeKind::Calls) {
@@ -1805,6 +1942,75 @@ fn record_declarations(
     }
 }
 
+/// **S-416.** How many methods in each build module share a `(name, arity)` —
+/// the signature frame two looks up — counted over the tree the decisive
+/// reading admits.
+///
+/// This is a DECLARATION walk over every source, not a by-product of a call
+/// walk, and the distinction is the whole point. An earlier version read the
+/// census off the files the `Calls` ledger names as CALLERS of a forwarding
+/// method; a method's declaration almost never sits in a file that calls it, so
+/// the count came back 0 for exactly the modules it was supposed to describe.
+///
+/// Keyed on `(module, name, arity)` and restricted to `src/main`, because that
+/// is what frame two binds on under the decisive reading. Keying on the bare
+/// name — S-392's `ambiguous_by_name` — would count `sendMessage/2` against a
+/// `sendMessage/3` lookup, and walking the test tree would count declarations
+/// the main-only reading never admits.
+fn census_declarations(
+    sources: &[&Source],
+    registry: &LanguageRegistry,
+    names: &BTreeSet<String>,
+) -> BTreeMap<(String, String, usize), BTreeSet<String>> {
+    let mut out: BTreeMap<(String, String, usize), BTreeSet<String>> = BTreeMap::new();
+    for source in sources.iter().filter(|s| s.tree == Tree::Main) {
+        let Some(plugin) = registry.for_path(&source.rel) else { continue };
+        let mut parser = Parser::new();
+        if parser.set_language(plugin.language()).is_err() {
+            continue;
+        }
+        let Some(parsed) = parser.parse(&source.text, None) else { continue };
+        let src = source.text.as_bytes();
+        let Ok(query) = Query::new(plugin.language(), DECL_SIGNATURE_QUERY) else { continue };
+        let captures = query.capture_names();
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&query, parsed.root_node(), src);
+        while let Some(m) = matches.next() {
+            let (mut name_node, mut params_node) = (None, None);
+            for cap in m.captures {
+                match captures[cap.index as usize] {
+                    "decl.name" => name_node = Some(cap.node),
+                    "decl.params" => params_node = Some(cap.node),
+                    _ => {}
+                }
+            }
+            let (Some(name_node), Some(params_node)) = (name_node, params_node) else { continue };
+            let Ok(name) = name_node.utf8_text(src) else { continue };
+            if !names.contains(name) {
+                continue;
+            }
+            out.entry((source.module.clone(), name.to_string(), slots(params_node).len()))
+                .or_default()
+                .insert(format!("{}:{}", source.rel, name_node.start_position().row + 1));
+        }
+    }
+    out
+}
+
+/// Whether one observed call site is admitted to a candidate's agreement: same
+/// build module, and — under the main-tree rule — `src/main` only.
+///
+/// The single spelling of the rule [CR-131] §3.2 C1's second relaxation is
+/// about. It is read by [`decide`], which makes the verdict, and by the census
+/// attribution, which names the cause; those were two hand-written copies, and
+/// a third lived in the report. A rule that decides a blocking gate should not
+/// be re-typed for each reader.
+///
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+fn admitted_by(observation: &Observation, candidate: &Candidate, main_only: bool) -> bool {
+    observation.module == candidate.module && (!main_only || observation.tree == Tree::Main)
+}
+
 /// Decide one candidate against the call sites observed for its method.
 ///
 /// The precedence is declared rather than incidental: a missing call site
@@ -1819,11 +2025,8 @@ fn decide(candidate: &Candidate, observed: &[&Observation], main_only: bool) -> 
     if observed.is_empty() {
         return Hop::Refused(Residue::NoCallSites);
     }
-    let in_module: Vec<&&Observation> = observed
-        .iter()
-        .filter(|o| o.module == candidate.module)
-        .filter(|o| !main_only || o.tree == Tree::Main)
-        .collect();
+    let in_module: Vec<&&Observation> =
+        observed.iter().filter(|o| admitted_by(o, candidate, main_only)).collect();
     if in_module.is_empty() {
         return Hop::Refused(Residue::OutOfModuleOnly);
     }
@@ -2061,13 +2264,23 @@ fn two_frame_reason(hop: &Hop, values: &[&ArgValue]) -> Option<TwoFrameResidue> 
         Residue::OutOfModuleOnly => TwoFrameResidue::OutOfModuleAtFrameOne,
         Residue::TwoOrMoreHops => TwoFrameResidue::ThreeOrMoreFrames,
         Residue::Disagree => TwoFrameResidue::DisagreeAtFrameOne,
+        // Four causes at this depth, and the ranking has to span BOTH frames.
+        // Filtering to `FrameTwoRefused` first was wrong: a plain
+        // `Unresolvable` is the frame-ONE Mockito mechanism that
+        // `TwoFrameResidue::UnresolvableOperand` exists to name, it outranks
+        // every frame-two boundary in `census_rank`, and dropping it meant a
+        // candidate blocked by an unresolvable `src/main` operand was reported
+        // as a pure frame-two artefact — which is precisely the story the
+        // "ambiguous pool" caveat rests on, so it must not be able to borrow a
+        // row from frame one.
         Residue::UnresolvableOperand => values
             .iter()
             .filter_map(|v| match v {
-                ArgValue::FrameTwoRefused(t) => Some(t),
+                ArgValue::FrameTwoRefused(t) => Some(t.clone()),
+                ArgValue::Unresolvable(r) => Some(FrameTwoRefusal::Unresolvable(*r)),
                 _ => None,
             })
-            .min_by_key(|t| t.census_rank())
+            .min_by_key(FrameTwoRefusal::census_rank)
             .map_or(TwoFrameResidue::UnresolvableOperand, |t| match t {
                 FrameTwoRefusal::NoCallSite => TwoFrameResidue::NoCallSiteAtFrameTwo,
                 FrameTwoRefusal::OutOfModuleCaller => TwoFrameResidue::OutOfModuleCaller,
@@ -2164,11 +2377,7 @@ fn measure_forwarding(root: &Path) -> Findings {
     // the figure the perf reconciliation should use — and the gap between its
     // observation count and the whole-estate one is a CRA-06 measurement, not a
     // timing artefact.
-    let targets: BTreeSet<&str> = names
-        .iter()
-        .filter_map(|n| ledger.by_name.get(n))
-        .flat_map(|set| set.iter().map(|(file, _)| file.as_str()))
-        .collect();
+    let targets = ledger.files_naming(&names);
     let started = Instant::now();
     let mut targeted = Vec::new();
     let mut ignored = BTreeMap::new();
@@ -2193,11 +2402,7 @@ fn measure_forwarding(root: &Path) -> Findings {
     // rather than a caveat.
     let want2 = wanted_at_frame_two(&f, &observations);
     let names2: BTreeSet<String> = want2.keys().map(|c| c.name.clone()).collect();
-    let targets2: BTreeSet<&str> = names2
-        .iter()
-        .filter_map(|n| ledger.by_name.get(n))
-        .flat_map(|set| set.iter().map(|(file, _)| file.as_str()))
-        .collect();
+    let targets2 = ledger.files_naming(&names2);
     let frame_two_sources: Vec<&&Source> =
         java.iter().filter(|s| targets2.contains(s.rel.as_str())).collect();
 
@@ -2212,23 +2417,18 @@ fn measure_forwarding(root: &Path) -> Findings {
 
     let started = Instant::now();
     let mut scaffolded = Vec::new();
-    let mut frame_two_declarations = BTreeMap::new();
+    let mut ignored2 = BTreeMap::new();
     for s in &frame_two_sources {
-        observe_calls(s, &estate, &want2, &names2, &mut scaffolded, Some(&mut frame_two_declarations));
+        observe_calls(s, &estate, &want2, &names2, &mut scaffolded, Some(&mut ignored2));
     }
     f.cost.frame_two_with_scaffolding = started.elapsed();
 
-    // The ambiguity census frame two is read against is the UNION of the two
-    // walks: the whole-estate one, which covers frame one's names, and the
-    // frame-two one, which covers the forwarding names over the files the ledger
-    // calls them from. On this estate both sets are `sendMessage` and the
-    // whole-estate walk dominates; taking the union means a forwarding method
-    // whose name frame one never wanted is still counted.
-    let mut ambiguity = declarations.clone();
-    for (key, sites) in &frame_two_declarations {
-        ambiguity.entry(key.clone()).or_default().extend(sites.iter().cloned());
-    }
-    decide_at_two_frames_for_every_candidate(&mut f, &observations, &observations2, &ambiguity);
+    // The signature census frame two's attribution is read against. A walk over
+    // every main-tree source for the DECLARATIONS of the forwarding names — not
+    // over the caller files, which is where an earlier version read it and got
+    // 0 for the very modules it describes.
+    let signatures = census_declarations(&java, &registry, &names2);
+    decide_at_two_frames_for_every_candidate(&mut f, &observations, &observations2, &signatures);
 
     f.ledger = answer_the_ledger_question(&f, &ledger, &observations, &targeted, &declarations);
     f
@@ -2240,7 +2440,7 @@ fn decide_at_two_frames_for_every_candidate(
     f: &mut Findings,
     observations: &[Observation],
     frame_two: &[Observation],
-    ambiguity: &BTreeMap<(String, String), BTreeSet<String>>,
+    signatures: &BTreeMap<(String, String, usize), BTreeSet<String>>,
 ) {
     let mut by_callee: BTreeMap<&Callee, Vec<&Observation>> = BTreeMap::new();
     for o in observations {
@@ -2298,6 +2498,14 @@ fn decide_at_two_frames_for_every_candidate(
                 .iter()
                 .filter(|o| o.tree == Tree::Main)
                 .filter_map(|o| o.forwards.get(&c.slot))
+                // Defensive, and unreachable by construction — stated so a
+                // reader does not take it for a live filter. A candidate whose
+                // second frame refused cannot be `Resolved` at all: the refusal
+                // becomes `FrameTwoRefused` or `NeedsAnotherHop` and `decide`
+                // turns it into a refusal, and `two_frame_generality` admits
+                // only resolved candidates. Kept because the map is also read
+                // by `resolutions_through_a_second_frame`, where the intent
+                // "chains that actually carried a value" should be explicit.
                 .filter(|forward| {
                     matches!(second_frame(forward, &c.module, true, &index), FrameTwo::Resolved(_))
                 })
@@ -2343,8 +2551,12 @@ fn decide_at_two_frames_for_every_candidate(
                 .iter()
                 .filter_map(|o| o.forwards.get(&c.slot))
                 .map(|forward| {
-                    ambiguity
-                        .get(&(c.module.clone(), forward.callee.name.clone()))
+                    signatures
+                        .get(&(
+                            c.module.clone(),
+                            forward.callee.name.clone(),
+                            forward.callee.arity,
+                        ))
                         .map_or(0, BTreeSet::len)
                 })
                 .max()
@@ -2352,14 +2564,20 @@ fn decide_at_two_frames_for_every_candidate(
         );
 
         let headline = decide_at_two_frames(c, &observed, false, &index);
-        let decisive = decide_at_two_frames(c, &observed, true, &index);
 
-        // The values the DECISIVE verdict was read off, so `two_frame_reason`
-        // names the cause of the answer `decide` actually gave.
+        // ONE rewrite, and the verdict and the values are read off it together.
+        // They used to be two independent calls with identical arguments, so
+        // "the values the decisive verdict was read off" held only because the
+        // function happens to be deterministic — and the filter picking the
+        // admitted values was a third hand-written copy of `decide`'s own
+        // admission rule, which is the twin this file exists to avoid.
+        // `admitted_by` is now that rule's single spelling.
         let rewritten = rewrite_at_two_frames(c, &observed, true, &index);
-        let values: Vec<&ArgValue> = rewritten
+        let borrowed: Vec<&Observation> = rewritten.iter().collect();
+        let decisive = decide(c, &borrowed, true);
+        let values: Vec<&ArgValue> = borrowed
             .iter()
-            .filter(|o| o.module == c.module && o.tree == Tree::Main)
+            .filter(|o| admitted_by(o, c, true))
             .filter_map(|o| o.values.get(&c.slot))
             .collect();
         if let Some(reason) = two_frame_reason(&decisive, &values) {
@@ -2562,6 +2780,21 @@ fn report_populations(f: &Findings) {
     }
 }
 
+/// One hop outcome, as the reports spell it. Hoisted because the identical
+/// eight-line closure was pasted into both `report_residue` and
+/// `report_two_frame_residue`; it is pure formatting with no measurement
+/// semantics, so the two reports keep their own headings and lose nothing.
+fn describe_hop(hop: Option<&Hop>) -> String {
+    match hop {
+        Some(Hop::Resolved { value, call_sites, caller_files }) => format!(
+            "RESOLVED to {} from {call_sites} site(s) in {caller_files} file(s)",
+            value.label(),
+        ),
+        Some(Hop::Refused(r)) => format!("refused: {}", r.label()),
+        None => "not judged".into(),
+    }
+}
+
 /// [AC2] the residue: what fails, and how much of it is the bound itself.
 fn report_residue(f: &Findings) {
     println!("\n--- AC2: the residue, by reason ---");
@@ -2619,15 +2852,7 @@ fn report_residue(f: &Findings) {
         if c.tree != Tree::Main && !disagrees {
             continue;
         }
-        let describe = |hop: Option<&Hop>| match hop {
-            Some(Hop::Resolved { value, call_sites, caller_files }) => format!(
-                "RESOLVED to {} from {call_sites} site(s) in {caller_files} file(s)",
-                value.label(),
-            ),
-            Some(Hop::Refused(r)) => format!("refused: {}", r.label()),
-            None => "not judged".into(),
-        };
-        let verdict = describe(f.hops.get(&i));
+        let verdict = describe_hop(f.hops.get(&i));
         println!(
             "    [{}/{}] {}:{}  {}({}) slot {} operand `{}`  => {verdict}",
             c.arm.label(),
@@ -2649,7 +2874,7 @@ fn report_residue(f: &Findings) {
         // auditable site by site and the VALUE each would resolve to is
         // measured rather than asserted in prose.
         if f.hops.get(&i) != f.hops_main_only.get(&i) {
-            println!("        main-only reading: {}", describe(f.hops_main_only.get(&i)));
+            println!("        main-only reading: {}", describe_hop(f.hops_main_only.get(&i)));
         }
     }
 }
@@ -2763,21 +2988,16 @@ fn report_two_frame_residue(f: &Findings) {
         println!("    {:>4}  {}", census.get(&reason).copied().unwrap_or_default(), reason.label());
     }
 
-    // The limit on this harness, as a figure. A refusal whose frame-two lookup
-    // binds a name several declarations share is a refusal THIS measurement
-    // makes and the rule CR-131 C2 proposes would not: C2 is receiver-aware,
-    // this is `(name, arity)`. Every such row is a floor on what C2 resolves.
-    let ambiguous: Vec<(usize, usize)> = f
-        .candidates
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.arm == Arm::BrokerPublish && c.tree == Tree::Main)
-        .filter(|(i, _)| f.two_frame_residue.contains_key(i))
-        .filter_map(|(i, _)| Some((i, *f.frame_two_name_declarations.get(&i).filter(|n| **n > 1)?)))
-        .collect();
+    // The limit on this harness, in BOTH directions, as figures. Frame two
+    // binds on `(name, arity)`; CR-131 C2 proposes the rule as receiver-aware.
+    // Where a module declares a base plus SEVERAL overrides of one signature,
+    // this harness pools their callers — which can refuse a disagreement the
+    // estate does not write, AND can manufacture a resolution from a caller of
+    // a different class. Both directions are reported; neither is asserted.
+    let ambiguous = f.refusals_from_an_ambiguous_pool(Arm::BrokerPublish, Tree::Main);
     println!(
-        "\nof the {} production refusals, {} look up a forwarding name their own build \
-         module declares MORE THAN ONCE:",
+        "\nof the {} production refusals, {} look up a signature their own build module \
+         declares 3+ times (a base plus SEVERAL overrides):",
         census.values().sum::<usize>(),
         ambiguous.len(),
     );
@@ -2788,12 +3008,33 @@ fn report_two_frame_residue(f: &Findings) {
             c.file, c.line, c.callee.name, c.module,
         );
     }
+
+    let through_two = f.resolutions_through_a_second_frame(Arm::BrokerPublish, Tree::Main);
+    let sound = f.resolutions_on_an_unambiguous_pool(Arm::BrokerPublish, Tree::Main);
     println!(
-        "    This harness binds frame two on (name, arity) — all the `Calls` ledger's target\n\
-        \x20   text can express. CR-131 C2 proposes the rule as name, arity AND RECEIVER-AWARE,\n\
-        \x20   which would separate these declarations' callers instead of pooling them. Each\n\
-        \x20   row above is therefore a refusal this MEASUREMENT makes and the proposed RULE\n\
-        \x20   would not: the headline is a floor on what C2 would resolve, never a ceiling."
+        "\nand of the {} production sites RESOLVED THROUGH a second frame, {} drew their \
+         value from an UNAMBIGUOUS pool (a base plus exactly one override, so the only \
+         call targeting the base is the override's own `super`, which the receiver rule \
+         already removes):",
+        through_two.len(),
+        sound.len(),
+    );
+    for (i, declarations) in &sound {
+        let c = &f.candidates[*i];
+        println!(
+            "    {}:{}  `{}` is declared {declarations}x in `{}`  => the pool cannot mix",
+            c.file, c.line, c.callee.name, c.module,
+        );
+    }
+    println!(
+        "    Both rows matter and they are NOT the same claim. The refusals above are ones\n\
+        \x20   this MEASUREMENT makes and the proposed RULE would not, so for them the headline\n\
+        \x20   is a floor. The resolutions here are ones the pooling could in principle have\n\
+        \x20   MANUFACTURED — a value drawn from a caller of a different class's same-signature\n\
+        \x20   method — and the figure above is what rules that out, site by site. A resolution\n\
+        \x20   through a second frame on an AMBIGUOUS pool would be unsound and is asserted\n\
+        \x20   not to occur; without that second guard `floor, never a ceiling` would be an\n\
+        \x20   assertion about only half the residue."
     );
 
     println!("\nper-candidate detail, every PRODUCTION broker-publish candidate:");
@@ -2801,21 +3042,13 @@ fn report_two_frame_residue(f: &Findings) {
         if c.arm != Arm::BrokerPublish || c.tree != Tree::Main {
             continue;
         }
-        let describe = |hop: Option<&Hop>| match hop {
-            Some(Hop::Resolved { value, call_sites, caller_files }) => format!(
-                "RESOLVED to {} from {call_sites} site(s) in {caller_files} file(s)",
-                value.label(),
-            ),
-            Some(Hop::Refused(r)) => format!("refused: {}", r.label()),
-            None => "not judged".into(),
-        };
         println!(
             "    {}:{}  {}({}) slot {} operand `{}`",
             c.file, c.line, c.callee.name, c.callee.arity, c.slot, c.operand,
         );
-        println!("        one frame,  main-only: {}", describe(f.hops_main_only.get(&i)));
-        println!("        two frames, every site: {}", describe(f.hops_two_frame.get(&i)));
-        println!("        two frames, main-only:  {}", describe(f.hops_two_frame_main_only.get(&i)));
+        println!("        one frame,  main-only: {}", describe_hop(f.hops_main_only.get(&i)));
+        println!("        two frames, every site: {}", describe_hop(f.hops_two_frame.get(&i)));
+        println!("        two frames, main-only:  {}", describe_hop(f.hops_two_frame_main_only.get(&i)));
         if let Some(reason) = f.two_frame_residue.get(&i) {
             println!("        two-frame reason: {}", reason.label());
         }
@@ -3164,17 +3397,32 @@ fn assert_the_recorded_two_frame_finding(f: &Findings, resolved: usize, named_re
     // binding, which is what makes the headline a floor on C2's rule rather than
     // a ceiling. A run that separates these two numbers has a residue the caveat
     // does not cover.
-    let from_ambiguity = f
-        .candidates
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.arm == Arm::BrokerPublish && c.tree == Tree::Main)
-        .filter(|(i, _)| f.two_frame_residue.contains_key(i))
-        .filter(|(i, _)| f.frame_two_name_declarations.get(i).is_some_and(|n| *n > 1))
-        .count();
+    let from_ambiguity = f.refusals_from_an_ambiguous_pool(Arm::BrokerPublish, Tree::Main).len();
     assert_eq!(
         from_ambiguity, RECORDED_REFUSALS_FROM_NAME_AMBIGUITY,
         "the refusals attributable to the (name, arity) frame-two binding moved from          {RECORDED_REFUSALS_FROM_NAME_AMBIGUITY} to {from_ambiguity}. The recorded finding          reports 8 of 13 as a FLOOR on what CR-131 C2's receiver-aware rule would resolve,          and that reading rests on this equality",
+    );
+    // The OTHER direction, and the one the review had to ask for. Pooling can
+    // manufacture a resolution as well as refuse one, so a headline drawn
+    // partly from second frames is only sound if every one of those second
+    // frames read an unambiguous pool. Without this the "floor, never a
+    // ceiling" sentence would be a claim about half the residue.
+    let through_two = f.resolutions_through_a_second_frame(Arm::BrokerPublish, Tree::Main);
+    let sound = f.resolutions_on_an_unambiguous_pool(Arm::BrokerPublish, Tree::Main);
+    assert_eq!(
+        sound.len(),
+        through_two.len(),
+        "{} of the {} production sites resolved THROUGH a second frame drew their value from \
+         a pool that spans several overrides. Such a resolution can be manufactured from a \
+         caller of a different class's same-signature method, so the headline is not sound \
+         as recorded — re-verify those sites by hand before trusting the verdict.",
+        through_two.len() - sound.len(),
+        through_two.len(),
+    );
+    assert_eq!(
+        through_two.len(),
+        RECORDED_BOUGHT_BY_FRAME_TWO,
+        "the number of sites resolved through a second frame moved from          {RECORDED_BOUGHT_BY_FRAME_TWO}; it is the quantity the soundness guard above covers",
     );
     assert_eq!(
         named_resolved, RECORDED_NAMED_SITES_RESOLVED,
@@ -3212,9 +3460,21 @@ fn assert_the_recorded_two_frame_finding(f: &Findings, resolved: usize, named_re
 /// S-416's own non-vacuity preconditions, V5 and V6, exactly as
 /// `two_frame_forwarding_floor.txt` declared them. Each failure is **VOID**, not
 /// a verdict.
+///
+/// Split into its two halves so each is reachable from a fixture. As one
+/// function it was reachable only under `LOGOS_REF_WORKSPACE`, so CI ran none of
+/// it and the whole body could be deleted with the suite green — the exact gap
+/// this file records as having been found and closed for S-392's V1..V4, and
+/// then reintroduced here.
 fn assert_two_frame_non_vacuous(f: &Findings, named_sites_found: usize) {
-    // V5 — the one-frame readings reproduce S-392 EXACTLY. This is deliberately
-    // an equality: the second frame is an increment over a fixed base.
+    assert_the_one_frame_base_is_unmoved(f, named_sites_found);
+    assert_the_second_frame_did_something(f);
+}
+
+/// **V5** — the one-frame readings reproduce S-392 EXACTLY. Deliberately an
+/// equality: the second frame is an increment over a fixed base, and an
+/// increment over a base that moved is not the quantity CRA-03 asserts.
+fn assert_the_one_frame_base_is_unmoved(f: &Findings, named_sites_found: usize) {
     assert_eq!(
         f.production_publish_resolved(),
         RECORDED_RESOLVED,
@@ -3244,10 +3504,12 @@ fn assert_two_frame_non_vacuous(f: &Findings, named_sites_found: usize) {
          and the reconciliation is the evidence the headline rests on. VOID, not falsified.",
         S392_NAMED_TWO_FRAME_SITES.len(),
     );
+}
 
-    // V6 — the second frame does something. A two-frame reading that equals its
-    // one-frame reading has measured a no-op, and a floor cleared by a no-op is
-    // cleared by the first frame plus an arithmetic accident.
+/// **V6** — the second frame does something. A two-frame reading that equals its
+/// one-frame reading has measured a no-op, and a floor cleared by a no-op is
+/// cleared by the first frame plus an arithmetic accident.
+fn assert_the_second_frame_did_something(f: &Findings) {
     assert!(
         f.bought_by_the_second_frame(Arm::BrokerPublish, Tree::Main, true) > 0,
         "V6: no production candidate resolves at two frames that did not resolve at one, so \
@@ -3357,13 +3619,23 @@ mod fixtures {
     }
 
     /// The production publish candidates and their hop outcomes, in file order.
-    fn production_hops(f: &Findings) -> Vec<Hop> {
+    /// The production broker-publish candidates' outcomes under one reading, in
+    /// file order. The predicate lives here once: `production_hops` and
+    /// `production_two_frame` spelled it twice, so a change to what counts as a
+    /// production candidate would have left the one-frame and two-frame fixture
+    /// suites measuring different populations. `Findings::resolved_in` already
+    /// parameterizes on the map this way.
+    fn production_outcomes(f: &Findings, hops: &BTreeMap<usize, Hop>) -> Vec<Hop> {
         f.candidates
             .iter()
             .enumerate()
             .filter(|(_, c)| c.arm == Arm::BrokerPublish && c.tree == Tree::Main)
-            .map(|(i, _)| f.hops.get(&i).cloned().expect("every candidate is judged"))
+            .map(|(i, _)| hops.get(&i).cloned().expect("every candidate is judged"))
             .collect()
+    }
+
+    fn production_hops(f: &Findings) -> Vec<Hop> {
+        production_outcomes(f, &f.hops)
     }
 
     #[test]
@@ -3464,6 +3736,11 @@ mod fixtures {
             vec![Hop::Refused(Residue::Disagree)],
             "FR-WS-23 AC2: disagreement emits per-site candidates and no edge, never an average",
         );
+        assert_eq!(
+            disagree.1.two_frame_census(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(TwoFrameResidue::DisagreeAtFrameOne, 1)]),
+            "the wrapper's OWN call sites disagree — nothing to do with a second frame",
+        );
     }
 
     #[test]
@@ -3532,6 +3809,11 @@ mod fixtures {
              refused with a reason, not followed",
         );
         assert_eq!(f.beyond_the_bound(Arm::BrokerPublish, Tree::Main), 1);
+        assert_eq!(
+            f.two_frame_census(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(TwoFrameResidue::OutOfModuleAtFrameOne, 1)]),
+            "the boundary is frame ONE's, not frame two's",
+        );
     }
 
     #[test]
@@ -3541,6 +3823,11 @@ mod fixtures {
             ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
         ]);
         assert_eq!(production_hops(&f), vec![Hop::Refused(Residue::NoCallSites)]);
+        assert_eq!(
+            f.two_frame_census(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(TwoFrameResidue::NoCallSiteAtFrameOne, 1)]),
+            "frame ONE found no call site — distinct from the frame-two variant",
+        );
     }
 
     #[test]
@@ -3777,6 +4064,13 @@ mod fixtures {
         ]);
         assert_eq!(f.publish_sites.get(&Tree::Main), Some(&1));
         assert_eq!(production_hops(&f), vec![Hop::Refused(Residue::NotAMethodParameter)]);
+        // …and the two-frame census carries the frame-ONE reason unchanged. A
+        // second frame cannot help a candidate whose operand was never a method
+        // parameter, and the census must say which frame refused it.
+        assert_eq!(
+            f.two_frame_census(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(TwoFrameResidue::NotAMethodParameter, 1)]),
+        );
     }
 
     #[test]
@@ -4079,14 +4373,7 @@ mod fixtures {
     /// The production candidates' TWO-FRAME outcomes under the decisive
     /// reading, in file order — the sibling of [`production_hops`].
     fn production_two_frame(f: &Findings) -> Vec<Hop> {
-        f.candidates
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.arm == Arm::BrokerPublish && c.tree == Tree::Main)
-            .map(|(i, _)| {
-                f.hops_two_frame_main_only.get(&i).cloned().expect("every candidate is judged")
-            })
-            .collect()
+        production_outcomes(f, &f.hops_two_frame_main_only)
     }
 
     #[test]
@@ -4722,6 +5009,225 @@ mod fixtures {
             BTreeSet::from(["svc/send(2)".to_string()]),
             "ONE chain carried a second frame; `other` resolved at the first and contributes \
              no chain",
+        );
+    }
+
+    // ── S-416's non-vacuity guards, which used to run only under the corpus ──
+    //
+    // The same gap this file records for S-392's V1..V4 ("deleting all four
+    // left the suite green"), reintroduced by S-416 and caught by the review's
+    // mutation sweep: the whole body of `assert_two_frame_non_vacuous` could be
+    // replaced by `let _ = (f, named_sites_found);` with 45 of 45 still passing.
+
+    #[test]
+    #[should_panic(expected = "V5")]
+    fn a_run_whose_one_frame_base_moved_is_void_not_falsified() {
+        // V5 is an equality against S-392's recorded figures, so ANY estate
+        // that is not the reference workspace trips it — which is the point:
+        // the two-frame figure is only an increment if the base is the base.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { producer.sendMessage(body, \"orders\"); }"),
+            ),
+        ]);
+        assert_the_one_frame_base_is_unmoved(&f, S392_NAMED_TWO_FRAME_SITES.len());
+    }
+
+    #[test]
+    #[should_panic(expected = "V6")]
+    fn a_second_frame_that_buys_nothing_is_void_not_falsified() {
+        // A wrapper that already resolves at one frame: the two-frame reading
+        // equals the one-frame reading, so the run has measured a no-op. A
+        // floor cleared by a no-op is cleared by the first frame.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { producer.sendMessage(body, \"orders\"); }"),
+            ),
+        ]);
+        assert_eq!(f.production_publish_resolved_two_frame_main_only(), 1, "it resolves…");
+        assert_eq!(
+            f.bought_by_the_second_frame(Arm::BrokerPublish, Tree::Main, true),
+            0,
+            "…but the second frame bought none of it",
+        );
+        assert_the_second_frame_did_something(&f);
+    }
+
+    #[test]
+    fn a_super_call_in_an_anonymous_subclass_is_not_attributed_to_the_outer_class() {
+        // `enclosing_type_name` and `enclosing_superclass_name` walk up through
+        // `node.parent()`. An anonymous class body is
+        // `object_creation_expression -> class_body`, which is NOT one of the
+        // declaration kinds either walk stopped on, so both used to climb past
+        // it to the enclosing NAMED class — and a `super.send(…)` inside
+        // `new Thin() { … }` was attributed to whatever the OUTER class
+        // extends. `dispatches_past` then discarded a real caller, and
+        // discarding callers RAISES the resolved count, so the old doc comment
+        // calling that "the conservative direction" had it backwards.
+        //
+        // Two real callers supplying different topics: the wrapper must refuse.
+        let holder = "package p;\n\
+             public class Holder extends Other {\n\
+             \x20   Thin make() {\n\
+             \x20       return new Thin() {\n\
+             \x20           public void send(Object payload, String topic) {\n\
+             \x20               super.send(payload, \"other-topic\");\n\
+             \x20           }\n\
+             \x20       };\n\
+             \x20   }\n\
+             }\n";
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+            ("svc/src/main/java/Other.java", caller("Other", "  void unused() { }")),
+            ("svc/src/main/java/Holder.java", holder.into()),
+            (
+                "svc/src/main/java/Caller.java",
+                caller("Caller", "  void go() { thin.send(body, \"orders\"); }"),
+            ),
+        ]);
+        assert_eq!(
+            f.production_publish_resolved_two_frame_main_only(),
+            0,
+            "`Thin.send` has two real callers disagreeing on the topic — the anonymous \
+             subclass's `super.send` reaches `Thin`, so it must NOT be discarded. Resolving \
+             here means the receiver rule threw a caller away and inflated the headline.",
+        );
+        assert_eq!(
+            f.two_frame_census(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(TwoFrameResidue::DisagreeingCallers, 1)]),
+        );
+    }
+
+    #[test]
+    fn a_frame_one_unresolvable_operand_outranks_a_frame_two_boundary() {
+        // `two_frame_reason` filtered the blocking values down to
+        // `FrameTwoRefused` before ranking them, so a plain frame-ONE
+        // `Unresolvable` — the Mockito mechanism `UnresolvableOperand` exists
+        // to name — could never win, even though `census_rank` deliberately
+        // ranks it ABOVE every frame-two boundary. The census then reported a
+        // frame-one fault as a pure frame-two artefact, which is exactly the
+        // attribution the "ambiguous pool" caveat rests on.
+        //
+        // Two blockers on one candidate: an admitted `src/main` call site whose
+        // operand resolves to nothing (rank 1), and a forwarder with no caller
+        // at all (rank 3).
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+            (
+                "svc/src/main/java/Unres.java",
+                caller("Unres", "  void go() { producer.sendMessage(body, registry.lookup()); }"),
+            ),
+        ]);
+        assert_eq!(
+            f.two_frame_census(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(TwoFrameResidue::UnresolvableOperand, 1)]),
+            "the frame-ONE unresolvable operand outranks the frame-two `no call site`; \
+             reporting the boundary would hide a cause that is not a pooling artefact",
+        );
+    }
+
+    #[test]
+    fn the_signature_census_counts_declarers_by_name_and_arity_in_the_main_tree() {
+        // The figure the whole "ambiguous pool" attribution is read off, and it
+        // was wrong in both directions before the review. It was a by-product of
+        // a walk over the files the ledger names as CALLERS of a forwarding
+        // method — and a method's declaration is almost never in a file that
+        // calls it — so it read 0 for the very modules it describes. It also
+        // counted the BARE NAME across every arity and both trees, while frame
+        // two binds on `(name, arity)` in `src/main`.
+        //
+        // Here `send` is declared three times in `svc`: `Thin.send/2` (the
+        // forwarder frame two looks up), `Sibling.send/2`, and `Other.send/1` —
+        // plus `Ignored.send/2` in the TEST tree. The lookup key is
+        // `(svc, send, 2)`, so the count must be 2, not 4.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+            (
+                "svc/src/main/java/Sibling.java",
+                caller("Sibling", "  public void send(Object payload, String topic) { }"),
+            ),
+            ("svc/src/main/java/Other.java", caller("Other", "  public void send(String topic) { }")),
+            (
+                "svc/src/test/java/Ignored.java",
+                caller("Ignored", "  public void send(Object payload, String topic) { }"),
+            ),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { thin.send(body, \"orders\"); }"),
+            ),
+        ]);
+        let candidate = f
+            .candidates
+            .iter()
+            .position(|c| c.arm == Arm::BrokerPublish && c.tree == Tree::Main)
+            .expect("one production candidate");
+        assert_eq!(
+            f.frame_two_name_declarations.get(&candidate),
+            Some(&2),
+            "two main-tree declarations of `send/2` — the differing arity and the test-tree \
+             twin must not be counted: {:?}",
+            f.frame_two_name_declarations,
+        );
+        assert!(
+            !f.pool_spans_several_overrides(candidate),
+            "two declarations is a base plus ONE override, which cannot mix",
+        );
+    }
+
+    #[test]
+    fn a_pool_spanning_several_overrides_is_named_on_both_sides() {
+        // The discriminator, and the guard the review had to ask for: pooling
+        // can MANUFACTURE a resolution as well as refuse one. Three same-
+        // signature declarations in the module, so the pool spans two overrides
+        // and a value drawn from it is not attributable to one receiver.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Base.java", base_producer()),
+            ("svc/src/main/java/Alpha.java", override_producer("Alpha")),
+            ("svc/src/main/java/Beta.java", override_producer("Beta")),
+            (
+                "svc/src/main/java/Service.java",
+                caller(
+                    "Service",
+                    "  void a() { alpha.sendMessage(k, body, \"orders\"); }\n\
+                     \x20 void b() { beta.sendMessage(k, body, \"orders\"); }",
+                ),
+            ),
+        ]);
+        let candidate = f
+            .candidates
+            .iter()
+            .position(|c| c.arm == Arm::BrokerPublish && c.tree == Tree::Main)
+            .expect("one production candidate");
+        assert_eq!(f.frame_two_name_declarations.get(&candidate), Some(&3));
+        assert!(
+            f.pool_spans_several_overrides(candidate),
+            "a base plus TWO overrides: the pool mixes their callers",
+        );
+        // It resolves — the two overrides happen to agree — and that is exactly
+        // the case the soundness guard must catch, because the agreement is not
+        // established per receiver.
+        assert_eq!(f.production_publish_resolved_two_frame_main_only(), 1);
+        assert_eq!(
+            f.resolutions_through_a_second_frame(Arm::BrokerPublish, Tree::Main).len(),
+            1,
+        );
+        assert!(
+            f.resolutions_on_an_unambiguous_pool(Arm::BrokerPublish, Tree::Main).is_empty(),
+            "…and it must NOT count as sound: the estate run asserts these two figures are \
+             equal, so a resolution like this one fails the gate rather than passing quietly",
         );
     }
 

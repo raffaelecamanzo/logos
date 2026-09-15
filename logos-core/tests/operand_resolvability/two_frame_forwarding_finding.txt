@@ -69,36 +69,66 @@ THE FIVE REFUSALS, EACH WITH ITS REASON — AND WHY ALL FIVE ARE THIS HARNESS
       0  an admitted call site's argument resolves to nothing
       0  the wrapper's call sites disagree
 
-    deprecated-mailbox-core/manager   `sendMessage` declared 4x in the module
-    pecserver-facade                  `sendMessage` declared 3x in the module
-    archive-manager                   `sendMessage` declared 3x in the module
-    mailbox-manager                   `sendMessage` declared 4x in the module
-    official-log-export-job-manager   `sendMessage` declared 4x in the module
+    deprecated-mailbox-core/manager   `sendMessage/3` declared 4x in the module
+    pecserver-facade                  `sendMessage/3` declared 3x in the module
+    archive-manager                   `sendMessage/3` declared 3x in the module
+    mailbox-manager                   `sendMessage/3` declared 4x in the module
+    official-log-export-job-manager   `sendMessage/3` declared 4x in the module
 
-  ALL FIVE of the five refusals look up a forwarding name their own build
-  module declares more than once. That is measured, per candidate, not argued:
-  the harness counts the declarations and prints the count beside each refusal.
+  ALL FIVE of the five refusals look up a signature their own build module
+  declares THREE OR MORE times. That is measured per candidate, not argued: the
+  harness walks every main-tree source for declarations of the forwarding
+  signature and prints the count beside each refusal.
 
-  This matters for how the verdict is read. This harness binds frame two on
-  (name, arity), because that is all the `Calls` ledger's target text can
-  express. CR-131 C2 proposes the rule as "name, arity AND RECEIVER-AWARE".
-  Where a module declares one `sendMessage/3` the two are the same rule and the
-  site resolves; where it declares three or four — a base `KafkaProducer` plus
-  several sibling subclass overrides publishing to DIFFERENT topics — this
-  harness pools their callers and refuses on the resulting disagreement, while
-  the proposed rule would separate them.
+  Why three and not two is the crux, and getting it wrong in either direction
+  would invalidate the reading. The estate writes a base `KafkaProducer` plus one
+  subclass override per producer, so the count is 1 + overrides:
 
-  So 8 of 13 is a FLOOR on what the rule C2 proposes would resolve, and never a
-  ceiling. A gate that passes on a lower bound passes robustly; the honest
-  statement of what was measured is "at least 8", and the finding does not claim
-  the remaining five are unreachable.
+    * TWO — base plus exactly one override. The only call that targets the base
+      is the override's own `super.sendMessage(…)`, and the receiver rule already
+      removes it, so every caller left in the pool targets the one override. The
+      pool cannot mix.
+    * THREE OR MORE — base plus two or more overrides, publishing to DIFFERENT
+      topics. The pool spans them and this harness cannot tell their callers
+      apart.
 
-  Verified by hand on `archive-manager`, the smallest of the five:
-  `KafkaMessagingService` calls `archiveEventProducer.sendMessage(…,
-  kafkaTopics.getArchiveEvents())` at six sites and
-  `KafkaDelayedMessagingService` calls `delayedMessageProducer.sendMessage(…,
-  delayedMessageKafkaTopics.getDelayedInputMessages())` at one. Two receivers,
-  two topics, one (name, arity).
+  This harness binds frame two on (name, arity), because that is all the `Calls`
+  ledger's target text can express; CR-131 C2 proposes the rule as "name, arity
+  AND RECEIVER-AWARE", which would separate those callers. So for these five,
+  8 of 13 is a FLOOR on what C2 would resolve.
+
+
+AND THE OTHER DIRECTION, WHICH THE REVIEW HAD TO ASK FOR
+
+  Pooling can MANUFACTURE a resolution as well as refuse one: a value drawn from
+  a caller of a different class's same-signature method would be a resolution the
+  estate does not support. The first version of this finding claimed "a floor,
+  never a ceiling" while measuring only the refusal side — an assertion about
+  half the residue, and the half that cannot make the verdict too HIGH.
+
+  Both sites that resolve THROUGH a second frame are now measured, not assumed:
+
+    archive-listener-adapter        `sendMessage/3` declared 2x  => pool cannot mix
+    official-log-export-job-worker  `sendMessage/3` declared 2x  => pool cannot mix
+
+  2 of 2, asserted as an equality. A resolution through a second frame drawn from
+  a pool spanning several overrides would FAIL this gate rather than pass
+  quietly. Confirmed by hand as well: `archive-listener-adapter` declares
+  `sendMessage/3` on `KafkaProducer` and on `ArchiveEventKafkaProducer` only, and
+  its three non-`super` call sites all read
+  `archiveEventKafkaProducer.sendMessage(…, kafkaTopics.getArchiveEvents())`;
+  `official-log-export-job-worker` has the same shape with one call site.
+
+  So the headline is sound where it resolves and a floor where it refuses. Those
+  are two different claims about two disjoint sets of sites, and stating only the
+  first was the error the review caught.
+
+  The refusal side verified by hand too, on `archive-manager`, the smallest of
+  the five: `KafkaMessagingService` calls `archiveEventProducer.sendMessage(…,
+  kafkaTopics.getArchiveEvents())` at six sites and `KafkaDelayedMessagingService`
+  calls `delayedMessageProducer.sendMessage(…,
+  delayedMessageKafkaTopics.getDelayedInputMessages())` at one. Two receivers, two
+  topics, one (name, arity).
 
 
 S-392's SEVEN NAMED TWO-FRAME SITES, RECONCILED BY NAME
@@ -151,6 +181,28 @@ THE RECEIVER RULE, AND WHY THE FIRST TWO RUNS OF THIS HARNESS WERE WRONG
   fails if `simple_type_name` reads the wrong child of a `generic_type` — the
   shape the estate writes as
   `extends KafkaProducer<ArchiveEventKafkaKey, SpecificRecord>`.
+
+  A THIRD instance of the same fault was found at review, in the other
+  direction: both class walks climbed past an ANONYMOUS class body
+  (`object_creation_expression -> class_body`) to the enclosing named class, so a
+  `super.send(…)` inside `new Thin() { … }` was attributed to whatever the OUTER
+  class extends and the real caller was discarded. Discarding callers RAISES the
+  resolved count, so this one was not on the safe side — and the doc comment said
+  it was. Both walks now stop at an anonymous body, `enclosing_superclass_name`
+  reads the instantiated type there, and a fixture pins it. Not reachable on this
+  estate (no anonymous subclass of a producer base writes `super.sendMessage`),
+  so no recorded figure moves; recorded because S-417 would inherit it.
+
+  A fourth, in the evidence rather than the measurement: the signature census
+  that attributes each refusal was read off the files the `Calls` ledger names as
+  CALLERS of a forwarding method. A method's declaration is almost never in a
+  file that calls it, so the count came back 0 for exactly the modules it
+  describes, and it counted the bare NAME across every arity and both trees while
+  frame two binds on (name, arity) in `src/main`. It is now a declaration walk
+  over every main-tree source, keyed on the signature. The five refusals were
+  correctly attributed before and after — the figure was right by luck, because
+  the frame-one whole-estate walk happened to cover the same name — but nothing
+  made it so.
 
 
 NON-VACUITY — "VOID" IS NOT A VERDICT
@@ -221,11 +273,12 @@ WAS THE FLOOR BADLY CHOSEN?
   precisely so that this could be said — re-deriving a floor for a re-proposal
   is how a gate gets quietly lowered to fit what the second attempt can reach.
 
-  The honest summary: the gate passes on a LOWER BOUND (8, with all five
-  refusals attributable to a harness limitation the proposed rule does not
-  share) against a floor carried over unchanged from the measurement that
-  falsified the one-frame version. Both halves matter — a pass by one, and a
-  pass on a figure that can only go up.
+  The honest summary: the gate passes by one, on a figure that is SOUND where it
+  resolves (both second-frame resolutions drawn from pools that cannot mix,
+  asserted) and a LOWER BOUND where it refuses (all five refusals attributable to
+  a harness limitation the proposed rule does not share, asserted), against a
+  floor carried over unchanged from the measurement that falsified the one-frame
+  version.
 
 
 METHOD, AND WHY NO RE-ENROLMENT. Unchanged from S-392: the reference workspace
@@ -240,7 +293,10 @@ WHAT IS NOT MEASURED HERE, stated rather than left to be discovered:
     because only `super` is decidable from the tokens. Binding
     `archiveEventProducer` to `ArchiveEventKafkaProducer` is type binding, which
     this harness does not do. This is the whole of the five-site residue and it
-    is reported as a floor rather than absorbed.
+    is reported as a floor rather than absorbed. Where it could instead have
+    inflated the headline — a resolution drawn from a pool spanning several
+    overrides — the gate asserts it does not occur, so the limitation is bounded
+    in both directions rather than only the convenient one.
   * A THIRD FRAME. Out of scope by construction; the census counts it and
     refuses it. The estate wrote none among the 13 under the final receiver
     rule — the "3+ frames" row is 0.
