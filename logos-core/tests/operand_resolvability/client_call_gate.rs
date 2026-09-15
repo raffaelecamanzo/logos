@@ -580,6 +580,19 @@ impl Outcome {
                  was never exercised"
                     .to_string()
             }
+            // A clean run is subject to the floor exactly as a dirty one is.
+            // "1 of 1 clean" and "0 of 293 clean" are not the same kind of
+            // result, and CLOSES OUT is the terminal verdict — it is the one
+            // that stops a language being looked at again. Ruby measured
+            // exactly one site; had that site's receiver been client-named,
+            // the un-floored arm would have closed Ruby out on a sample of one.
+            Outcome::Measured { sites, .. } if self.is_clean() && total_is_thin(sites.len()) => {
+                format!(
+                    "DOES NOT CLEAR — every captured site is client-named, but too few \
+                     sites ({} < {MATERIALITY_FLOOR}) to tell a rate from an accident",
+                    sites.len(),
+                )
+            }
             _ if self.is_clean() => {
                 "CLOSES OUT — every captured site is on a client-named receiver; \
                  no port is justified here"
@@ -930,7 +943,26 @@ fn neither_an_absent_corpus_nor_an_unexercised_gate_reads_as_clean() {
         sites: Vec::new(),
         recorded: (0, 0),
     };
+    // 12 sites: a literal above the floor, NOT `MATERIALITY_FLOOR` sites.
+    // Deriving the fixture from the constant made the pair hold for every value
+    // of the constant, so raising it to 1000 — which flips the real 293-site run
+    // from CLEARS to "too few sites" — left the suite green.
     let clean = Outcome::Measured {
+        corpus: "/tmp/x".into(),
+        files: 10,
+        gated: 3,
+        sites: (0..12)
+            .map(|i| GateSite {
+                file: "a.rs".into(),
+                line: i,
+                receiver: "client".into(),
+                client_named: true,
+            })
+            .collect(),
+        recorded: (12, 0),
+    };
+    // The same shape below the floor: clean, and still not a closing-out result.
+    let thin_clean = Outcome::Measured {
         corpus: "/tmp/x".into(),
         files: 10,
         gated: 3,
@@ -987,25 +1019,40 @@ fn neither_an_absent_corpus_nor_an_unexercised_gate_reads_as_clean() {
     // was too thin to act on and the verdict line said a port was justified.
     assert!(dirty.verdict().starts_with("DOES NOT CLEAR"), "{}", dirty.verdict());
     assert!(dirty.verdict().contains("too few sites"));
+    // Again a literal, for the reason given at `clean` above.
     let material = Outcome::Measured {
         corpus: "/tmp/x".into(),
         files: 10,
         gated: 3,
-        sites: (0..MATERIALITY_FLOOR)
+        sites: (0..12)
             .map(|i| GateSite {
                 file: "a.rs".into(),
-                line: i as u32,
+                line: i,
                 receiver: "cache".into(),
                 client_named: false,
             })
             .collect(),
-        recorded: (MATERIALITY_FLOOR, 0),
+        recorded: (12, 0),
     };
+    assert!(
+        !total_is_thin(12) && total_is_thin(1),
+        "these fixtures straddle the floor by construction; if MATERIALITY_FLOOR \
+         has moved past 12, move the fixtures deliberately rather than deriving \
+         them from the constant"
+    );
+    // A clean run below the floor does NOT close a language out.
+    assert!(thin_clean.is_clean(), "it is clean by the predicate…");
+    assert!(
+        thin_clean.verdict().starts_with("DOES NOT CLEAR"),
+        "…but one site cannot close a language out: {}",
+        thin_clean.verdict()
+    );
+    assert!(thin_clean.verdict().contains("too few sites"));
     assert!(material.verdict().starts_with("CLEARS"), "{}", material.verdict());
     assert!(material.verdict().contains("port is justified"));
     // No verdict line may carry the run of spaces a mangled line continuation
     // leaves behind — the first run of this module printed five of them.
-    for o in [&unmeasured, &unexercised, &empty, &clean, &dirty, &material] {
+    for o in [&unmeasured, &unexercised, &empty, &clean, &dirty, &material, &thin_clean] {
         assert!(!o.verdict().contains("  "), "double space in: {}", o.verdict());
     }
     assert_eq!(dirty.split(), Some((1, 1)));
