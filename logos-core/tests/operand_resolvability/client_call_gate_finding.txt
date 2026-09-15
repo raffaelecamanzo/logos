@@ -117,6 +117,30 @@ The HTTP-named 175 read correctly on inspection: 152 `client` (axum's
   qualifies one type path, so EVERY segment of it names the same thing. Pinned
   on both edges by `the_receiver_reduction_handles_each_arms_spelling`.
 
+  TWO FURTHER CORRECTIONS CAME OUT OF REVIEW, and neither moved a figure — the
+  whole table above was re-run afterwards and is byte-identical, census
+  included. They are recorded because of WHEN they would have fired, not
+  because of what they changed here:
+
+  1. The cut was taken at the separator's START index, so the `.` inside `?.`
+     and `&.` won and the receiver kept a dangling sigil (`httpClient?`), which
+     defeats both naming rules. Ruby's `&.` was not in the separator set at all,
+     and C#'s `await` was absorbed into the receiver slice. All three land a
+     GENUINE client call in the non-HTTP column — the direction that inflates
+     the share this gate reads. Rust has no safe call and the three languages
+     that do were all GATE-UNEXERCISED, so nothing above moved; the defect
+     would have fired on the first re-measurement THIS DOCUMENT ASKS FOR.
+  2. `LanguageRegistry::load` was given the corpus root, which is also the
+     plugin-override root, so a `.logos/plugins/rust/queries/invocations.scm`
+     inside a corpus silently replaced the query being measured. Demonstrated
+     to turn a 3-site/1-non-HTTP corpus into `0 (0%)` and print `CLOSES OUT`,
+     exit 0, with nothing in the report disclosing it.
+
+  Both were invisible to the suite when they were written: `receiver_of` had no
+  corpus-free test, so replacing its body with `return None` left every test
+  green while a real measurement classified every site non-HTTP. It now runs
+  through each arm's real grammar in plain/safe-called pairs.
+
 
 RUBY — MEASURED, and the corpus decides nothing.
 
@@ -131,9 +155,13 @@ n=1 is not a basis for a port: one site cannot distinguish "this language has
 the defect at Go's rate" from "this corpus has one accident in it". Ruby needs
 a corpus with real Faraday or Net::HTTP client code before its gate clears.
 
-  That judgement is in the harness, not only in this file. `MATERIALITY_FLOOR`
-  (10 sites) is what makes `Outcome::verdict` print DOES NOT CLEAR for ruby
-  rather than "a port is justified", and it is documented there as a judgement
+  That judgement is in the harness, not only in this file, and it applies in
+  BOTH directions: review found the `CLOSES OUT` arm returning before the floor
+  was consulted, so a single client-named site printed the terminal "no port is
+  justified here". Ruby measured exactly one site — had that site's receiver
+  been client-named, the un-floored arm would have closed Ruby out on a sample
+  of one. `MATERIALITY_FLOOR` (10 sites) is what makes `Outcome::verdict` print
+  DOES NOT CLEAR for ruby rather than "a port is justified", and it is documented there as a judgement
   about when a proportion stops carrying information — NOT as an acceptance
   floor. Nothing asserts it, no requirement cites it, and it gates exactly one
   English sentence. The first draft of this module had no floor and printed
