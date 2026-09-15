@@ -1,5 +1,23 @@
 //! **S-392 — the one-hop parameter-forwarding residue** ([CR-121] CRA-05 and
-//! CRA-06, [FR-WS-23], [FR-WS-10], [NFR-CC-04]).
+//! CRA-06, [FR-WS-23], [FR-WS-10], [NFR-CC-04]), **and S-416 — the same residue
+//! at two frames** ([CR-131] CRA-03, cluster C1).
+//!
+//! Two gates live here, over one population and one set of call sites. Read the
+//! S-392 sections below first: they define the population, the classifier and
+//! the one-frame bound, and S-416's figure is an INCREMENT over them, asserted
+//! to reproduce them exactly. The S-416 material starts at
+//! [`TWO_FRAME_DECLARED_FLOOR`] and the second frame itself is the "Pass 3"
+//! section.
+//!
+//! **The two bounds are different and neither is dataflow.** S-392 measures ONE
+//! frame; S-416 measures TWO — positional, intra-module, main-tree, refusing on
+//! disagreement, with no recursion and no fixpoint in either. A third frame is
+//! refused by construction and counted as its own residue. Wherever a sentence
+//! below says "one level" or "one hop" it is describing S-392's bound, which
+//! that story's figures are still stated over; it is not a claim about this
+//! module as a whole. [CR-131] §7 records "the two-frame bound is read as a
+//! licence for general dataflow" as a risk against [ADR-64], so: a pass licenses
+//! two frames on this idiom and nothing wider.
 //!
 //! # The question
 //!
@@ -31,12 +49,19 @@
 //! [`Tree`](super::configuration_agreement::Tree), and the verdict is read off
 //! the production row.
 //!
-//! # The floor, declared before the run
+//! # The floors, each declared before its run
 //!
-//! See [`DECLARED_FLOOR`] and [`ONE_HOP_FLOOR`]. The declaration was written to
-//! `docs/planning/sprints/.pending/S-392-T1-floor.txt` at
+//! S-392: see [`DECLARED_FLOOR`] and [`ONE_HOP_FLOOR`]. The declaration was
+//! written to `docs/planning/sprints/.pending/S-392-T1-floor.txt` at
 //! 2026-09-12T12:33:41Z, before any of this module existed, and is reproduced
 //! here byte-for-byte because that directory is gitignored.
+//!
+//! S-416: see [`TWO_FRAME_DECLARED_FLOOR`] and [`TWO_FRAME_FLOOR`]. That one is
+//! **tracked in the first place** — committed on its own, before any of S-416's
+//! measurement code existed, so the commit carrying it is the timestamp and no
+//! copy step can go wrong. The figure is not re-derived: [CR-131] §3.2 C1 states
+//! it as 7 of 13 "on S-392's own metric", and re-deriving a floor for a
+//! re-proposal is how a gate gets quietly lowered to fit the second attempt.
 //!
 //! # What it does NOT mirror
 //!
@@ -69,6 +94,8 @@
 //!
 //! [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
 //! [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
+//! [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+//! [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
 //! [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
 //! [FR-WS-23]: ../../../docs/specs/requirements/FR-WS-23.md
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
@@ -957,21 +984,32 @@ impl Findings {
         (methods, members, chains)
     }
 
-    /// The candidate whose forwarding call sites include `basename:line` — the
-    /// join S-392's seven named sites are reconciled through. `None` means the
-    /// run cannot see a site S-392 named, which is harness drift and VOID.
-    pub fn candidate_forwarding_at(&self, site: &str) -> Option<usize> {
+    /// The candidate in `module` whose forwarding call sites include
+    /// `basename:line` — the join S-392's seven named sites are reconciled
+    /// through. `None` means the run cannot see a site S-392 named, which is
+    /// harness drift and VOID.
+    ///
+    /// **The module is half the key, and it has to be.** The basename and line
+    /// alone are NOT unique across the estate: two of the seven named sites are
+    /// the byte-identical string `DelayedMessageKafkaProducer.java:23`, in
+    /// `deprecated-mailbox-core/manager` and in `mailbox-manager`. Joining on
+    /// the basename alone made both rows resolve to the FIRST match, so the
+    /// reconciliation printed a `deprecated-mailbox-core/manager` candidate
+    /// under the `mailbox-manager` heading, and — worse — the V5 guard would
+    /// have counted 7 named sites found while only 6 distinct candidates backed
+    /// them. A site that genuinely vanished could then have hidden behind its
+    /// twin, which is precisely the drift V5 exists to catch.
+    pub fn candidate_forwarding_at(&self, module: &str, site: &str) -> Option<usize> {
         self.forwarding_sites.iter().find_map(|(i, sites)| {
-            sites
-                .iter()
-                .any(|s| {
+            (self.candidates.get(*i).is_some_and(|c| c.module == module)
+                && sites.iter().any(|s| {
                     // `file:line [tree]` — join on the basename and line, which
                     // is the whole of what `forwarding_finding.txt` recorded.
                     s.split(" [").next().is_some_and(|fl| {
                         fl.rsplit('/').next().is_some_and(|base| base == site)
                     })
-                })
-                .then_some(*i)
+                }))
+            .then_some(*i)
         })
     }
 
@@ -2825,7 +2863,7 @@ fn report_named_site_reconciliation(f: &Findings) -> (usize, usize) {
     println!("\n--- S-416: S-392's seven named two-frame sites, reconciled by name ---");
     let (mut found, mut resolved) = (0, 0);
     for (module, site) in S392_NAMED_TWO_FRAME_SITES {
-        let Some(i) = f.candidate_forwarding_at(site) else {
+        let Some(i) = f.candidate_forwarding_at(module, site) else {
             println!("    {module:<32} {site:<40} NOT SEEN BY THIS RUN — harness drift");
             continue;
         };
@@ -4432,23 +4470,68 @@ mod fixtures {
             ),
         ]);
         assert_eq!(
-            f.candidate_forwarding_at("Thin.java:4"),
+            f.candidate_forwarding_at("svc", "Thin.java:4"),
             Some(0),
             "the forwarding call site is `svc/src/main/java/Thin.java:4`, joined on its \
              basename: {:?}",
             f.forwarding_sites,
         );
         assert_eq!(
-            f.candidate_forwarding_at("Thin.java:5"),
+            f.candidate_forwarding_at("svc", "Thin.java:5"),
             None,
             "a different LINE in the same file must not match — the line is half the key",
         );
         assert_eq!(
-            f.candidate_forwarding_at("hin.java:4"),
+            f.candidate_forwarding_at("svc", "hin.java:4"),
             None,
             "a suffix of the basename must not match either: `hin.java` is one character \
              from `Thin.java` and is a different file",
         );
+    }
+
+    #[test]
+    fn the_named_site_join_separates_two_modules_writing_the_same_basename() {
+        // The estate really does this: two of S-392's seven named sites are the
+        // byte-identical string `DelayedMessageKafkaProducer.java:23`, one in
+        // `deprecated-mailbox-core/manager` and one in `mailbox-manager`. With
+        // the basename and line as the whole key, BOTH rows resolved to the
+        // first match — the reconciliation printed one member's candidate under
+        // the other's heading, and V5 counted seven sites found while only six
+        // distinct candidates backed them.
+        //
+        // Two modules, the same file name, the same line, different topics.
+        let (_d, f) = estate(&[
+            ("alpha/pom.xml", POM.into()),
+            ("alpha/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("alpha/src/main/java/Thin.java", forwarder("Thin", "send")),
+            (
+                "alpha/src/main/java/Service.java",
+                caller("Service", "  void go() { thin.send(body, \"alpha-orders\"); }"),
+            ),
+            ("beta/pom.xml", POM.into()),
+            ("beta/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("beta/src/main/java/Thin.java", forwarder("Thin", "send")),
+            (
+                "beta/src/main/java/Service.java",
+                caller("Service", "  void go() { thin.send(body, \"beta-orders\"); }"),
+            ),
+        ]);
+        let alpha = f
+            .candidate_forwarding_at("alpha", "Thin.java:4")
+            .expect("alpha's forwarding site is seen");
+        let beta = f
+            .candidate_forwarding_at("beta", "Thin.java:4")
+            .expect("beta's forwarding site is seen");
+        assert_ne!(
+            alpha, beta,
+            "the same basename and line in two modules must reconcile to DIFFERENT candidates; \
+             joining on the basename alone returns the first match for both, which is how a \
+             vanished site hides behind its twin and V5 passes anyway",
+        );
+        assert_eq!(f.candidates[alpha].module, "alpha");
+        assert_eq!(f.candidates[beta].module, "beta");
+        // …and a module that writes no such site must not borrow another's.
+        assert_eq!(f.candidate_forwarding_at("gamma", "Thin.java:4"), None);
     }
 
     /// The estate's actual shape, reduced: an abstract base whose `sendMessage`
