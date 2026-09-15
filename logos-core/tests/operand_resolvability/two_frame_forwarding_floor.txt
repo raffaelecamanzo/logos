@@ -1,0 +1,192 @@
+S-416 T1 — MATERIALITY FLOOR, DECLARED BEFORE THE RUN
+=====================================================
+
+Declared (UTC):  2026-09-15T07:06:00Z
+Declared by:     Dev Session 1.3 (sprint-70, branch sprint-70-I1-S3)
+Story:           S-416 — Measure the two-frame wrapper residue over main-tree call sites
+Gate decides:    CR-131 CRA-03 (cluster C1). Below the floor the finding is recorded as
+                 FALSIFIED with its evidence and date, NO requirement is created —
+                 FR-WS-26 is NOT filed, and FR-WS-23 stays WITHDRAWN IN PLACE as S-392
+                 left it — and S-417 stays UNPLANNED.
+
+This file is TRACKED and committed BEFORE any measurement code for this story exists.
+S-392's floor was declared in `docs/planning/sprints/.pending/`, which is gitignored,
+and had to be copied into the tree afterwards to survive; this one is declared in the
+tree in the first place, so the commit that carries it is itself the timestamp.
+
+Estate under measurement: ~/source/pec-services (LOGOS_REF_WORKSPACE), 84 clones,
+read-only against the estate SOURCE. Nothing under that path is written, indexed,
+re-enrolled or wiped.
+
+
+THE FLOOR
+---------
+
+    >= 7 of the 13 PRODUCTION (src/main) broker publish sites resolve their topic
+       operand with forwarding bounded at TWO CALL FRAMES, WITHIN THE OPERAND'S OWN
+       BUILD MODULE, with call-site agreement taken over src/main CALL SITES ONLY.
+
+That is one reading and one number. The 2x2 grid below is printed in full, but only
+this cell carries the floor:
+
+                         agreement over EVERY      agreement over src/main
+                         in-module call site       call sites only
+    one frame            reported (S-392: 0)       reported (S-392: 6)
+    two frames           reported                  ** THE FLOOR: >= 7 of 13 **
+
+"Resolve at two frames" means, exactly and conjunctively:
+
+  (a) the site's topic operand is a BARE PARAMETER of the enclosing method — the same
+      classifier S-392 used (`resolve_key` returning `Refusal::MethodParameter`), not a
+      literal, not a field, not a composed expression;
+  (b) that method has at least one call site in the SAME BUILD MODULE, in src/main;
+  (c) at each such call site the matching positional argument is EITHER terminal — a
+      literal, or a `${…}`/`@ConfigurationProperties` accessor that FR-WS-19 resolves
+      against committed configuration — OR itself a bare parameter of the method
+      enclosing that call site, in which case ONE further frame is taken: the callers
+      of THAT method, again in the same build module and in src/main, again read
+      positionally;
+  (d) every value so obtained AGREES. Disagreement at either frame emits per-site
+      candidates and NO edge, so a disagreeing site does NOT count toward this floor;
+  (e) NO THIRD FRAME. An argument that is still a bare parameter after two frames is a
+      refusal, named as such, and does NOT count.
+
+Measured two-frame main-only resolved < 7  =>  FALSIFIED.
+Measured two-frame main-only resolved >= 7 =>  the gate holds and S-417 may be planned.
+
+
+WHY 7 — THE SAME NUMBER, ON THE SAME METRIC, AS S-392
+-----------------------------------------------------
+
+The floor is NOT re-derived here, and that is deliberate. CR-131 §3.2 C1 states it as
+"at least 7 of the 13 production publish sites resolve, **on S-392's own metric**",
+and S-392's `forwarding_floor.txt` derived 7 three ways over the same population:
+
+  1. One half of CR-121 §6's own claim — "the 13 production publish sites resolve" —
+     rounded up: 13 / 2 = 6.5 -> 7. The same rule S-384's identity floor applied.
+  2. A strict majority of 13. Below half, the mechanism is the EXCEPTION on this
+     estate and the requirement would be writing a minority idiom into a Should.
+  3. A count of PRODUCTION SITES RESOLVED — not wrappers, not call sites, not members,
+     not agreeing operands — because the site is what becomes a `Producer` node.
+
+Re-deriving a floor for a re-proposal is how a gate gets quietly lowered to fit what
+the second attempt can reach. S-393's closure fixed the re-proposal bar as "the two-hop
+case in scope with its own justification and its own measurement, or a corrected
+call-site rule that excludes test-tree stubs — each measured, not assumed". Both are in
+scope here and both are measured; the BAR does not move because the mechanism did.
+
+What has changed, and is stated openly rather than left for a reader to notice: the
+decisive reading is now the FAVOURABLE one. S-392 reported 0 under the criterion as
+written and 6 under the main-only reading, and its falsification held under BOTH — which
+is why it was robust. This gate rests on a single cell, chosen in advance by CR-131 §3.2
+C1 on the stated ground that a Mockito stub is not a publish. A pass here therefore
+licenses LESS than S-392's failure refuted: it says the two-frame main-only rule clears
+the bar, and says nothing about the rule as S-392 wrote it. The other three cells are
+printed beside it so that a reader can see exactly how much of the result the two
+relaxations bought, one at a time.
+
+
+WHAT IS *NOT* A FLOOR — THE REPORTS
+-----------------------------------
+
+Required for the finding to be adjudicable, and for a falsification to be attributable
+to whichever join broke. NONE of them can clear or fail this gate:
+
+  * THE OTHER THREE CELLS of the grid. One frame / every call site is S-392's headline
+    and is expected to reproduce at 0. One frame / main-only is expected at 6. Two
+    frames / every call site is the strict reading of the new bound. A strong figure in
+    any of them does not clear this floor, and a weak one does not fail it.
+
+  * THE RECONCILIATION OF S-392's SEVEN NAMED TWO-FRAME SITES. S-392 named them, with
+    the src/main call site that decides each:
+
+        archive-listener-adapter         ArchiveEventKafkaProducer.java:16
+        deprecated-mailbox-core/manager  DelayedMessageKafkaProducer.java:23
+        pecserver-facade                 PecServerOperationKafkaProducer.java:23
+        archive-manager                  DelayedMessageKafkaProducer.java:21
+        mailbox-manager                  DelayedMessageKafkaProducer.java:23
+        official-log-export-job-worker   OfficialLogOutcomeKafkaProducer.java:17
+        official-log-export-job-manager  DelayedMessageKafkaProducer.java:19
+
+    Each is reconciled BY NAME against this run: resolved at two frames, or refused with
+    its reason. A site S-392 named that this run does not even see is a harness drift and
+    makes the run VOID, not falsified (V5 below). This reconciliation is EVIDENCE for the
+    headline, not a second headline: the gate is decided by the count of 13, not by how
+    many of the 7 land.
+
+  * THE REFUSAL CENSUS. Every refusal is enumerated with its reason — three or more
+    frames, out-of-module caller, disagreeing callers, no call site, an argument that
+    resolves to nothing. It is the explanation of the headline, not a second headline.
+
+  * THE NAMED MOCKITO EXCLUSIONS. The main-tree rule excludes test-tree call sites from
+    the agreement. Every call site it excludes is PRINTED with its file, line and
+    resolved value — named, never silently dropped. This is what makes "a Mockito stub is
+    not a publish" an auditable claim rather than an assertion: a reader can see exactly
+    which sites the relaxation removed and judge for themselves whether each is a stub.
+    A run that reports a pass without printing them has not reported the pass.
+
+  * THE PARSE-AND-RESOLVE COST, over its denominator, separating timed work from
+    measurement scaffolding. A slow hop is a budget conversation, not a falsification.
+
+  * THE TEST-TREE ARM and the CLIENT-CALL ARM. Reported beside the production figure and
+    never summed with it, for the reason Sprint 65 established: averaging the two trees
+    is how CR-117 looked validated at arm level while being false on the population its
+    criterion was written over.
+
+
+NON-VACUITY PRECONDITIONS — "VOID" IS NOT "FALSIFIED"
+-----------------------------------------------------
+
+A zero produced by a walk that walked nothing reads identically to a zero produced by a
+walk that walked everything. The run is VOID — neither confirming nor falsifying, and
+the gate must be re-run — unless ALL of these hold, each asserted by the harness:
+
+  V1. The walk admits at least 2 estate members, and a non-zero number of Java files
+      and publish-carrying files (S-392's V1/V2).
+  V2. The walk finds AT LEAST 13 production (src/main) publish sites, and the production
+      broker candidate population is EXACTLY 13 — the denominator this floor is stated
+      over (S-392's V3, plus its candidate-count assertion).
+  V3. Every publish site the authority recogniser found is joined to an AST node, and
+      every bare-parameter operand is given a positional slot (S-392's
+      `sites_without_a_node` and `operands_without_a_slot`, both zero).
+  V4. The `Calls` ledger yields a non-zero number of call rows across the estate.
+  V5. THE ONE-FRAME READINGS REPRODUCE S-392 EXACTLY: 0 under the criterion as written
+      and 6 under the main-only reading, with the two-or-more-hop residue at 7 and the
+      test-stub-blocked count at 6. If the one-frame figures have moved, the two-frame
+      figure is not measuring the increment this gate is about, and the run is VOID.
+      This is the single strongest non-vacuity condition available here and it is
+      deliberately an EQUALITY: the second frame is an increment over a fixed base, and
+      an increment over a base that moved is not the quantity CR-131 CRA-03 asserts.
+
+  V6. THE SECOND FRAME DOES SOMETHING. At least one candidate resolves at two frames
+      that did not resolve at one, under the same call-site rule. A two-frame reading
+      that equals its one-frame reading has not measured a second frame; it has measured
+      a no-op, and a floor cleared by a no-op is cleared by the FIRST frame's 6 plus an
+      arithmetic accident. VOID, not a pass.
+
+
+A CAVEAT DECLARED IN ADVANCE, NOT A FLOOR
+-----------------------------------------
+
+S-392 declared it and it applies here with more force, because the second frame reaches
+further into one idiom: if the resolved sites funnel through a SINGLE wrapper method, or
+sit in a SINGLE member, the inference generalises correspondingly less. The harness
+reports the number of DISTINCT wrapper methods, DISTINCT forwarding chains and DISTINCT
+members behind the resolved count, whatever the verdict. Stated here, before the run, so
+it is read as a declared limit on what a PASS licenses — not as a second threshold
+invented afterwards to argue away an inconvenient result. It does not clear or fail the
+gate.
+
+A second caveat, specific to two frames: the bound is POSITIONAL, INTRA-MODULE,
+MAIN-TREE and REFUSES ON DISAGREEMENT. It is not dataflow, it has no fixpoint, and a
+pass here licenses exactly two frames and not three. CR-131 §7 records "the two-frame
+bound is read as a licence for general dataflow" as a risk against ADR-64; the figure
+this run produces must not be cited for any bound other than the one measured.
+
+
+COMMITMENT
+----------
+
+This floor is not revised after the run. If the measurement shows the floor was badly
+chosen, that is stated in the implementation notes with the reasoning, and THIS FILE
+STANDS UNCHANGED.

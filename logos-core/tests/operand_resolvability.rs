@@ -149,6 +149,18 @@
 //! than a framework table, and is named here only so the reader does not have to
 //! decide that for themselves.
 //!
+//! Sprint 70 added one: `forwarding`'s **`super`-dispatch rule** (S-416) —
+//! `dispatches_past`, with `enclosing_superclass_name`, `enclosing_type_name`
+//! and `simple_type_name` behind it. Not a constant or a table this time but a
+//! rule, which is why it is named: it encodes Java's class-hierarchy semantics
+//! (a `super.m(…)` inside `class C extends B` calls `B.m`, and an `extends`
+//! clause may be a `generic_type` or a `scoped_type_identifier`). It is
+//! decidable from the tokens and deliberately stops short of type binding, but
+//! it is language judgement all the same and must not be lifted into
+//! `logos-core/src` — a real arm needing it belongs in the Java plugin.
+//! `is_deploy_path`'s precedent applies: a function is named here when the
+//! reader would otherwise have to decide for themselves.
+//!
 //! This list is **open, not closed**: anything of that kind added to this
 //! harness or its submodules is covered by the same carve-out and the same
 //! prohibition. The fitness function cannot enforce it — it scans

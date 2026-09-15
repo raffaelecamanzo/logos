@@ -1,0 +1,307 @@
+S-416, measured 2026-09-15 against ~/source/pec-services (82 members with source,
+2447 Java files, read-only walk — NOT a re-enrolment). Produced by
+`two_frame_wrapper_residue_over_main_tree_call_sites`; re-run it with
+LOGOS_REF_WORKSPACE set to reproduce every figure below verbatim.
+
+  CR-131 CRA-03 HOLDS. 8 of the 13 production publish sites resolve at TWO
+  FRAMES with call-site agreement taken over `src/main` call sites only,
+  against a floor of 7 declared 2026-09-15T07:06:00Z before any measurement
+  code existed.
+
+  S-417 may be planned. FR-WS-26 is created BY THAT DELIVERY STORY, not here
+  and not at filing — the procedure `cr-requirements-written-at-filing-go-stale`
+  records, and the reason CR-131 §5.1 lists it as proposed rather than created.
+
+
+THE GRID, PRINTED IN FULL — BOTH READINGS, AT ONE FRAME AND AT TWO
+
+  production (src/main) broker publish sites resolved, of 13:
+
+                     every in-module site      src/main sites only
+    one frame                           0                        6
+    two frames                          0                        8   <= the floor
+
+  Only the bottom-right cell carries the floor; CR-131 §3.2 C1 states it over
+  that reading and no other. The other three are printed so that how much each
+  relaxation bought is visible rather than asserted:
+
+    * the MAIN-TREE rule is worth 6 of the 8. It is S-392's own sensitivity
+      figure, unchanged, and its justification is that a Mockito stub is not a
+      publish.
+    * the SECOND FRAME is worth 2 of the 8, and only under the main-tree rule.
+      Under the every-site reading it buys NOTHING: 0 at one frame and 0 at two.
+      The two relaxations are not independent and the finding does not present
+      them as if they were.
+
+  Both one-frame figures reproduce S-392 EXACTLY — 0 and 6, with the
+  two-or-more-hop residue at 7 and the test-stub-blocked count at 6. That
+  equality is non-vacuity condition V5, asserted rather than observed: the
+  second frame is an increment over a fixed base, and an increment over a base
+  that moved is not the quantity CRA-03 asserts.
+
+
+THE EIGHT, NAMED, WITH THE FRAME THAT RESOLVED EACH
+
+  archive-api                      spring.kafka.topics.archiveCommands     1 frame
+  archive-api-logiclens-fork       spring.kafka.topics.archiveCommands     1 frame
+  deprecated-mailbox-core/api      spring.kafka.topics.mailboxCommands     1 frame
+  official-log-export-api          spring.kafka.topics.exportJobsRequests  1 frame
+  mailbox-api                      spring.kafka.topics.mailboxCommands     1 frame
+  archive-feeder                   spring.kafka.topics.archiveEventsQueue  1 frame
+  archive-listener-adapter         spring.kafka.topics.archiveEvents       2 FRAMES
+  official-log-export-job-worker   spring.kafka.topics.exportJobsOutcomes  2 FRAMES
+
+  Every one resolves to a @ConfigurationProperties key, never to a literal —
+  which is the FR-WS-19 hop CR-131 cluster A is separately about, reached
+  through the forwarding hop this story measures.
+
+
+THE FIVE REFUSALS, EACH WITH ITS REASON — AND WHY ALL FIVE ARE THIS HARNESS
+
+  two-frame residue, decisive reading, every reason including the zeros:
+      0  operand is a constructor/lambda parameter
+      0  the wrapper has no call site the reading admits
+      0  every wrapper call site is outside the build module
+      0  three or more frames
+      0  no call site for the forwarding method (frame 2)
+      0  out-of-module caller (frame 2)
+      5  disagreeing callers (frame 2)
+      0  an admitted call site's argument resolves to nothing
+      0  the wrapper's call sites disagree
+
+    deprecated-mailbox-core/manager   `sendMessage/3` declared 4x in the module
+    pecserver-facade                  `sendMessage/3` declared 3x in the module
+    archive-manager                   `sendMessage/3` declared 3x in the module
+    mailbox-manager                   `sendMessage/3` declared 4x in the module
+    official-log-export-job-manager   `sendMessage/3` declared 4x in the module
+
+  ALL FIVE of the five refusals look up a signature their own build module
+  declares THREE OR MORE times. That is measured per candidate, not argued: the
+  harness walks every main-tree source for declarations of the forwarding
+  signature and prints the count beside each refusal.
+
+  Why three and not two is the crux, and getting it wrong in either direction
+  would invalidate the reading. The estate writes a base `KafkaProducer` plus one
+  subclass override per producer, so the count is 1 + overrides:
+
+    * TWO — base plus exactly one override. The only call that targets the base
+      is the override's own `super.sendMessage(…)`, and the receiver rule already
+      removes it, so every caller left in the pool targets the one override. The
+      pool cannot mix.
+    * THREE OR MORE — base plus two or more overrides, publishing to DIFFERENT
+      topics. The pool spans them and this harness cannot tell their callers
+      apart.
+
+  This harness binds frame two on (name, arity), because that is all the `Calls`
+  ledger's target text can express; CR-131 C2 proposes the rule as "name, arity
+  AND RECEIVER-AWARE", which would separate those callers. So for these five,
+  8 of 13 is a FLOOR on what C2 would resolve.
+
+
+AND THE OTHER DIRECTION, WHICH THE REVIEW HAD TO ASK FOR
+
+  Pooling can MANUFACTURE a resolution as well as refuse one: a value drawn from
+  a caller of a different class's same-signature method would be a resolution the
+  estate does not support. The first version of this finding claimed "a floor,
+  never a ceiling" while measuring only the refusal side — an assertion about
+  half the residue, and the half that cannot make the verdict too HIGH.
+
+  Both sites that resolve THROUGH a second frame are now measured, not assumed:
+
+    archive-listener-adapter        `sendMessage/3` declared 2x  => pool cannot mix
+    official-log-export-job-worker  `sendMessage/3` declared 2x  => pool cannot mix
+
+  2 of 2, asserted as an equality. A resolution through a second frame drawn from
+  a pool spanning several overrides would FAIL this gate rather than pass
+  quietly. Confirmed by hand as well: `archive-listener-adapter` declares
+  `sendMessage/3` on `KafkaProducer` and on `ArchiveEventKafkaProducer` only, and
+  its three non-`super` call sites all read
+  `archiveEventKafkaProducer.sendMessage(…, kafkaTopics.getArchiveEvents())`;
+  `official-log-export-job-worker` has the same shape with one call site.
+
+  So the headline is sound where it resolves and a floor where it refuses. Those
+  are two different claims about two disjoint sets of sites, and stating only the
+  first was the error the review caught.
+
+  The refusal side verified by hand too, on `archive-manager`, the smallest of
+  the five: `KafkaMessagingService` calls `archiveEventProducer.sendMessage(…,
+  kafkaTopics.getArchiveEvents())` at six sites and `KafkaDelayedMessagingService`
+  calls `delayedMessageProducer.sendMessage(…,
+  delayedMessageKafkaTopics.getDelayedInputMessages())` at one. Two receivers, two
+  topics, one (name, arity).
+
+
+S-392's SEVEN NAMED TWO-FRAME SITES, RECONCILED BY NAME
+
+  archive-listener-adapter        ArchiveEventKafkaProducer.java:16
+                                  RESOLVED at two frames -> spring.kafka.topics.archiveEvents
+  official-log-export-job-worker  OfficialLogOutcomeKafkaProducer.java:17
+                                  RESOLVED at two frames -> spring.kafka.topics.exportJobsOutcomes
+  deprecated-mailbox-core/manager DelayedMessageKafkaProducer.java:23  refused: disagreeing callers (frame 2)
+  pecserver-facade                PecServerOperationKafkaProducer.java:23  refused: disagreeing callers (frame 2)
+  archive-manager                 DelayedMessageKafkaProducer.java:21  refused: disagreeing callers (frame 2)
+  mailbox-manager                 DelayedMessageKafkaProducer.java:23  refused: disagreeing callers (frame 2)
+  official-log-export-job-manager DelayedMessageKafkaProducer.java:19  refused: disagreeing callers (frame 2)
+
+  7 of 7 seen by this run; 2 resolve. All 7 being SEEN is non-vacuity condition
+  V5: a site the record names and this harness cannot find is drift between the
+  two runs, and the reconciliation is the evidence the headline rests on.
+
+  This is evidence, not a second headline. The gate is decided by the count of
+  13 — 8 — and not by how many of the 7 land. The 2 that land are exactly the
+  two members whose module declares `sendMessage` twice (a base and ONE
+  override); the 5 that do not are the five that declare it three or four times.
+
+
+THE RECEIVER RULE, AND WHY THE FIRST TWO RUNS OF THIS HARNESS WERE WRONG
+
+  Recorded because the numbers this file reports depend on it entirely, and
+  because both faults were found by running the harness against the estate
+  rather than by reading it.
+
+  RUN 1 reported 0 of 13, with all seven named sites refused as "3+ frames".
+  Cause: frame two looks up `ArchiveEventKafkaProducer.sendMessage/3` and finds
+  the `super.sendMessage(…)` line INSIDE that very method, whose argument is
+  that method's own parameter. A method's own body is not a caller of it.
+
+  RUN 2 reported 8 of 13 with five sites refused as "3+ frames". Cause: with two
+  sibling producers in one module, following either one's forward picked up the
+  OTHER's `super.sendMessage(…)` line as a phantom caller.
+
+  Both are one fault: `super.m(…)` written inside `class C extends B` calls
+  `B.m`, and binding on (name, arity) alone cannot see that. The rule now
+  applied — `dispatches_past` — is decidable from the tokens and adds no type
+  inference: a `super` call is a caller of the method frame two is looking up
+  only when that method is declared in the class the call dispatches to. It is
+  the "receiver-aware" CR-131 C2 already specifies.
+
+  The direction that must NOT be over-excluded is pinned too: a three-class
+  chain where `Deep extends Middle<K, V>` forwards through `super` keeps its
+  real caller and refuses for its LENGTH, not for "no call site". That fixture
+  fails if `simple_type_name` reads the wrong child of a `generic_type` — the
+  shape the estate writes as
+  `extends KafkaProducer<ArchiveEventKafkaKey, SpecificRecord>`.
+
+  A THIRD instance of the same fault was found at review, in the other
+  direction: both class walks climbed past an ANONYMOUS class body
+  (`object_creation_expression -> class_body`) to the enclosing named class, so a
+  `super.send(…)` inside `new Thin() { … }` was attributed to whatever the OUTER
+  class extends and the real caller was discarded. Discarding callers RAISES the
+  resolved count, so this one was not on the safe side — and the doc comment said
+  it was. Both walks now stop at an anonymous body, `enclosing_superclass_name`
+  reads the instantiated type there, and a fixture pins it. Not reachable on this
+  estate (no anonymous subclass of a producer base writes `super.sendMessage`),
+  so no recorded figure moves; recorded because S-417 would inherit it.
+
+  A fourth, in the evidence rather than the measurement: the signature census
+  that attributes each refusal was read off the files the `Calls` ledger names as
+  CALLERS of a forwarding method. A method's declaration is almost never in a
+  file that calls it, so the count came back 0 for exactly the modules it
+  describes, and it counted the bare NAME across every arity and both trees while
+  frame two binds on (name, arity) in `src/main`. It is now a declaration walk
+  over every main-tree source, keyed on the signature. The five refusals were
+  correctly attributed before and after — the figure was right by luck, because
+  the frame-one whole-estate walk happened to cover the same name — but nothing
+  made it so.
+
+
+NON-VACUITY — "VOID" IS NOT A VERDICT
+
+  V1-V4 are S-392's and are re-asserted unchanged: 82 members, 2447 Java files,
+  52 files carrying a publish site, 13 production publish candidates (exactly,
+  not at least), 45625 `Calls` rows, every site joined to an AST node, every
+  bare-parameter operand given a positional slot.
+
+  V5. The one-frame readings reproduce S-392 exactly (0 and 6; residue 7; test-
+  blocked 6) and all 7 named sites are seen. ASSERTED.
+
+  V6. The second frame resolves at least one candidate that one frame refused.
+  Measured: 2. A two-frame reading equal to its one-frame reading would have
+  measured a no-op, and a floor cleared by a no-op is cleared by the first
+  frame plus an arithmetic accident. ASSERTED.
+
+
+THE DECLARED GENERALITY CAVEAT
+
+  The resolved sites rest on 8 distinct wrapper methods across 8 distinct
+  members — broad, and not one data point repeated.
+
+  The SECOND FRAME's own contribution rests on 2 forwarding chains:
+  `archive-listener-adapter/sendMessage(3)` and
+  `official-log-export-job-worker/sendMessage(3)`. That is the narrow figure and
+  it is the one this story added. Read beside the headline, not instead of it: a
+  pass licenses the two-frame bound on this idiom — a thin per-repo producer
+  subclass forwarding to a shared base — and nothing wider. It licenses two
+  frames, not three, and it licenses nothing about dataflow.
+
+
+THE MEASURED COST, OVER ITS DENOMINATOR
+
+  frame 2, parse-and-resolve only      112.1 ms   over 58 files, 2 forwarding methods
+  frame 2, with the ambiguity census   150.4 ms   over the same 58 files
+  scaffolding's share                   38.3 ms
+  per forwarding method                 56 063 us over 2 methods
+
+  The scaffolding share is MEASURED, not disclosed in prose: the same pass runs
+  twice, once with the same-name ambiguity census off and once with it on. S-392
+  could only state its equivalent bias in words, and said so.
+
+  The second frame costs 112 ms on top of S-392's 1.2 s targeted first-frame
+  pass, opening 58 files against that pass's 366 — it is a small increment on an
+  84-member estate, single-threaded, in a debug build.
+
+  The same four caveats as S-392 AC5 apply for the same reasons and are not
+  restated as if they were new: IO excluded, debug build, single-threaded,
+  amortised rather than marginal. Queries are still compiled afresh per file, so
+  the figure is an UPPER bound. The bias is against the change request.
+
+
+WAS THE FLOOR BADLY CHOSEN?
+
+  It is not revised after the run and it stands unchanged. The question still
+  deserves an answer rather than a silence.
+
+  The floor is cleared by 1. That is close, and closeness is worth stating
+  plainly rather than rounding away: had the second frame bought 0 instead of 2,
+  the reading would have been 6 and the gate would have FAILED. So this gate
+  turned on the second frame doing something, which is exactly what it was for,
+  and V6 is why "it did something" is asserted rather than inferred from the
+  headline.
+
+  What the result does NOT turn on is the choice of 7. A floor anywhere from 7
+  to 8 is cleared; 9 or above is not. The number was taken unchanged from S-392
+  precisely so that this could be said — re-deriving a floor for a re-proposal
+  is how a gate gets quietly lowered to fit what the second attempt can reach.
+
+  The honest summary: the gate passes by one, on a figure that is SOUND where it
+  resolves (both second-frame resolutions drawn from pools that cannot mix,
+  asserted) and a LOWER BOUND where it refuses (all five refusals attributable to
+  a harness limitation the proposed rule does not share, asserted), against a
+  floor carried over unchanged from the measurement that falsified the one-frame
+  version.
+
+
+METHOD, AND WHY NO RE-ENROLMENT. Unchanged from S-392: the reference workspace
+is ground truth for several measured criteria and re-enrolling it is a
+destructive 84-member operation (sprint-66 §7). This measurement walks the
+corpus read-only through the production `extract::extract` pass and the
+production plugin queries, and touches no `.logos` store. Nothing under
+~/source/pec-services was written.
+
+WHAT IS NOT MEASURED HERE, stated rather than left to be discovered:
+  * A RECEIVER-AWARE FRAME TWO for identifier receivers. Only `super` is read,
+    because only `super` is decidable from the tokens. Binding
+    `archiveEventProducer` to `ArchiveEventKafkaProducer` is type binding, which
+    this harness does not do. This is the whole of the five-site residue and it
+    is reported as a floor rather than absorbed. Where it could instead have
+    inflated the headline — a resolution drawn from a pool spanning several
+    overrides — the gate asserts it does not occur, so the limitation is bounded
+    in both directions rather than only the convenient one.
+  * A THIRD FRAME. Out of scope by construction; the census counts it and
+    refuses it. The estate wrote none among the 13 under the final receiver
+    rule — the "3+ frames" row is 0.
+  * NON-JAVA ARMS, unchanged from S-392: the header publish form is expressible
+    only in Java's grammar.
+  * WHETHER THE EIGHT ARE CORRECT TOPICS. This measures resolvability, not
+    truth. Each resolved value is printed with its key so a reader can check it;
+    none was checked against a running broker.
