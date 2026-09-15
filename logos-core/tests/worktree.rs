@@ -93,6 +93,13 @@ fn add_worktree(tmp: &TempDir, main: &Path) -> PathBuf {
     wt
 }
 
+/// A last-full-index stamp (unix seconds — 2001-09-09T01:46:40Z) planted on the
+/// PRIMARY store so a seeded worktree's own stamp can be told apart from one a
+/// full index in the worktree would have written ([FR-WT-03], [CR-130]). Any
+/// value the system clock cannot currently produce would do; a fixed one keeps
+/// the assertion message readable.
+const PRIMARY_INDEX_STAMP: &str = "1000000000";
+
 /// Does a function named `name` exist in this engine's graph?
 fn has_fn(engine: &Engine, name: &str) -> bool {
     engine
@@ -111,10 +118,28 @@ fn a_worktree_seeds_from_main_and_reflects_its_own_code() {
     let (tmp, main) = repo_fixture();
 
     // Index the primary checkout, then release it (drop = writer torn down).
+    // Overwrite the primary's durable last-full-index stamp with a sentinel the
+    // clock can never produce (2001-09-09): the stamp travels with the seeded
+    // store (CR-130 made it a `project_metadata` row), so reading it back in the
+    // worktree below proves the graph came from main rather than from a full
+    // index the worktree ran itself. Sentinel rather than main's real stamp
+    // because both indexes complete within the same wall-clock second on a
+    // fixture this small, so equality against a real timestamp would hold under
+    // either bootstrap and discriminate nothing.
     {
         let engine = Engine::start(&main).expect("primary engine starts");
         let indexed = engine.index();
         assert!(indexed.files_indexed >= 1, "primary index ran");
+        engine
+            .runtime()
+            .expect("runtime present")
+            .submit_write(|w| {
+                w.set_project_metadata(
+                    logos_core::graph_store::LAST_FULL_INDEX_AT_KEY,
+                    PRIMARY_INDEX_STAMP,
+                )
+            })
+            .expect("the sentinel stamp commits");
     }
     assert!(main.join(".logos/logos.db").exists());
 
@@ -145,17 +170,20 @@ fn a_worktree_seeds_from_main_and_reflects_its_own_code() {
     );
     // `status` reads WITHOUT the auto-index prologue, so a populated graph
     // here proves the seed + diff-reconcile happened at start — and
-    // `last_full_index_at` being empty proves it was O(diff-from-main), not a
-    // full O(repo) index (FR-WT-03).
+    // `last_full_index_at` still reading the primary's sentinel proves it was
+    // O(diff-from-main), not a full O(repo) index (FR-WT-03): a full index here
+    // would have overwritten that row with the current clock.
     let status = engine.status();
     assert!(
         status.indexed,
         "the graph is populated straight from the seed, before any \
          navigation call could auto-index: {status:?}"
     );
-    assert!(
-        status.last_full_index_at.is_none(),
-        "no full index ran — the bootstrap was seed + diff-reconcile"
+    assert_eq!(
+        status.last_full_index_at.as_deref(),
+        Some(PRIMARY_INDEX_STAMP),
+        "no full index ran — the bootstrap was seed + diff-reconcile, so the \
+         stamp is still the one that travelled with the primary's store"
     );
     assert!(
         has_fn(&engine, "seeded_fn"),
@@ -413,6 +441,19 @@ fn a_phase_reported_engine_start_seeds_the_store_and_the_contract_too() {
     {
         let primary = Engine::start(&main).expect("primary engine starts");
         assert!(primary.index().files_indexed >= 1, "primary index ran");
+        // The same sentinel discipline as
+        // `a_worktree_seeds_from_main_and_reflects_its_own_code` — see the note
+        // there for why a real timestamp would not discriminate.
+        primary
+            .runtime()
+            .expect("runtime present")
+            .submit_write(|w| {
+                w.set_project_metadata(
+                    logos_core::graph_store::LAST_FULL_INDEX_AT_KEY,
+                    PRIMARY_INDEX_STAMP,
+                )
+            })
+            .expect("the sentinel stamp commits");
     }
     assert!(
         main.join(".logos/logos.db").is_file(),
@@ -424,9 +465,9 @@ fn a_phase_reported_engine_start_seeds_the_store_and_the_contract_too() {
         Engine::start_with_phase_report(&wt).expect("the phase-reported twin starts");
 
     // The graph seed fired. `status` reads WITHOUT the auto-index prologue, so
-    // a populated graph here proves the seed happened at start, and an empty
-    // `last_full_index_at` proves it was seed + diff-reconcile rather than a
-    // full index — the same discipline
+    // a populated graph here proves the seed happened at start, and a
+    // `last_full_index_at` still holding the primary's sentinel proves it was
+    // seed + diff-reconcile rather than a full index — the same discipline
     // `a_worktree_seeds_from_main_and_reflects_its_own_code` uses, and the
     // reason `has_fn` alone will not do: `has_fn` navigates, navigation runs
     // the FR-IX-07 prologue, and a full index would satisfy it with no seed at
@@ -438,9 +479,11 @@ fn a_phase_reported_engine_start_seeds_the_store_and_the_contract_too() {
         "the twin seeded the worktree store from the primary checkout, before \
          any navigation call could auto-index: {status:?}"
     );
-    assert!(
-        status.last_full_index_at.is_none(),
-        "no full index ran — the twin's bootstrap was seed + diff-reconcile"
+    assert_eq!(
+        status.last_full_index_at.as_deref(),
+        Some(PRIMARY_INDEX_STAMP),
+        "no full index ran — the twin's bootstrap was seed + diff-reconcile, so \
+         the stamp is still the primary's"
     );
     assert!(
         has_fn(&engine, "seeded_fn"),

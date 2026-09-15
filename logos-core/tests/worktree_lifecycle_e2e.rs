@@ -72,6 +72,11 @@ fn abs(root: &Path, rel: &str) -> PathBuf {
     root.join(rel)
 }
 
+/// A last-full-index stamp (unix seconds — 2001-09-09T01:46:40Z) planted on the
+/// PRIMARY store so a seeded worktree's own stamp can be told apart from one a
+/// full index in the worktree would have written ([FR-WT-03], [CR-130]).
+const PRIMARY_INDEX_STAMP: &str = "1000000000";
+
 /// Does a function named `name` exist in this engine's graph?
 fn has_fn(engine: &Engine, name: &str) -> bool {
     engine
@@ -196,6 +201,22 @@ fn worktree_lifecycle_end_to_end_seed_diff_reconcile_session_and_merge_back_pari
         let engine = Engine::start(&main).expect("primary engine starts");
         let indexed = engine.index();
         assert!(indexed.files_indexed >= 1, "primary index ran");
+        // Plant a last-full-index stamp the clock cannot currently produce. The
+        // stamp is a durable `project_metadata` row (CR-130), so it travels with
+        // the seeded store; reading it back below is how step (1) tells a seed
+        // from a full index the worktree ran itself. Main's real stamp would not
+        // do — both indexes land in the same wall-clock second on a fixture this
+        // small.
+        engine
+            .runtime()
+            .expect("runtime present")
+            .submit_write(|w| {
+                w.set_project_metadata(
+                    logos_core::graph_store::LAST_FULL_INDEX_AT_KEY,
+                    PRIMARY_INDEX_STAMP,
+                )
+            })
+            .expect("the sentinel stamp commits");
     }
     assert!(main.join(".logos/logos.db").exists());
 
@@ -214,9 +235,11 @@ fn worktree_lifecycle_end_to_end_seed_diff_reconcile_session_and_merge_back_pari
         "the graph is populated from the seed before any navigation call \
          could auto-index: {status:?}"
     );
-    assert!(
-        status.last_full_index_at.is_none(),
-        "no cold index ran — the bootstrap was seed + diff-reconcile (FR-WT-03)"
+    assert_eq!(
+        status.last_full_index_at.as_deref(),
+        Some(PRIMARY_INDEX_STAMP),
+        "no cold index ran — the bootstrap was seed + diff-reconcile (FR-WT-03), \
+         so the stamp is still the one that travelled with the primary's store"
     );
     assert!(
         has_fn(&engine_wt, "seeded_fn"),

@@ -915,9 +915,12 @@ pub struct StatusInfo {
     pub db_path: String,
     /// Size of the canonical store in bytes (main file + WAL sidecar).
     pub db_size_bytes: u64,
-    /// Unix-seconds timestamp of the last full index run (FR-NV-07).
-    /// In-process for now: populated when this engine ran the index; the
-    /// persisted `project_metadata` column is a later story.
+    /// Unix-seconds timestamp of the last full index that built this graph
+    /// (FR-NV-07, CR-130), read from the durable `project_metadata` record
+    /// (`last_full_index_at`) — so a read-only process that did no indexing
+    /// itself still reports it. `None` when no full index is recorded for the
+    /// project, including a project whose walk admits no file: absent is
+    /// reported as absent, never as `0` (NFR-CC-04).
     pub last_full_index_at: Option<String>,
     /// Unix-seconds timestamp of the last observed store write (file mtime;
     /// best-effort — the persisted `last_sync_at` column is a later story).

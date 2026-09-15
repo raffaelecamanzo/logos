@@ -558,6 +558,213 @@ fn a_source_only_repo_reports_a_present_zero_test_bucket() {
     assert!(total > 0, "the source fixture has physical lines");
 }
 
+// ── CR-130 / FR-NV-07: the durable last-full-index stamp ─────────────────────
+
+/// Read the raw `last_full_index_at` row straight from `project_metadata`, so a
+/// test can tell "the read-model rendered it" from "the pipeline stored it".
+fn stored_stamp(engine: &Engine) -> Option<String> {
+    engine
+        .runtime()
+        .expect("runtime present")
+        .submit_read(|s| s.project_metadata(logos_core::graph_store::LAST_FULL_INDEX_AT_KEY))
+        .expect("read commits")
+}
+
+#[test]
+fn status_reports_the_last_full_index_from_a_process_that_did_no_indexing() {
+    // CR-130 / FR-NV-07: the defect this story closes. The stamp used to live in
+    // an `AtomicU64` on the engine, so only the engine that ran the index could
+    // ever report it — every read-only `status` (and every `workspace status`
+    // member row, which is this same call) reported a fully indexed project as
+    // never indexed. A SECOND engine over the SAME root, which indexes nothing,
+    // is exactly that reader.
+    let tmp = fixture();
+    let recorded = {
+        let engine = indexed_engine(&tmp);
+        let status = engine.status();
+        let stamp = status
+            .last_full_index_at
+            .expect("the indexing process reports its own full index");
+        assert_eq!(
+            stored_stamp(&engine).as_deref(),
+            Some(stamp.as_str()),
+            "what status renders is the durable project_metadata row verbatim"
+        );
+        stamp
+    };
+
+    let reader = Engine::start(tmp.path()).expect("a second engine starts");
+    let status = reader.status();
+    assert_eq!(
+        status.last_full_index_at.as_deref(),
+        Some(recorded.as_str()),
+        "a process that performed no indexing reports the same durable stamp"
+    );
+    // The field is unix seconds as decimal text, and a plausible one — not a
+    // fabricated `0` and not the raw row passed through unvalidated.
+    let secs: u64 = recorded.parse().expect("unix seconds, decimal");
+    assert!(secs > 1_600_000_000, "a real clock reading, not a sentinel");
+    // last_sync_at keeps its own (file-mtime) source — unchanged by CR-130.
+    assert!(
+        status.last_sync_at.is_some(),
+        "last_sync_at still reports the observed store write"
+    );
+}
+
+#[test]
+fn the_last_full_index_stamp_is_absent_until_an_index_builds_a_graph() {
+    // FR-NV-07 / NFR-CC-04: where no full index is recorded the field is absent —
+    // never `0`, never fabricated — and reading `status` does not create it
+    // (ADR-28, no write on read).
+    let tmp = fixture();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let status = engine.status();
+    assert_eq!(
+        status.last_full_index_at, None,
+        "no full index is recorded, so the field is absent"
+    );
+    assert_eq!(
+        stored_stamp(&engine),
+        None,
+        "and nothing was written to record that absence"
+    );
+
+    // Reading status repeatedly, and a no-op sync, still write nothing.
+    let _ = engine.status();
+    let _ = engine.sync(&[]);
+    assert_eq!(
+        stored_stamp(&engine),
+        None,
+        "no write on read: status and a no-op sync never stamp the graph"
+    );
+
+    // A stored `0` is a fabricated 1970 timestamp, not a reading — it must
+    // surface as absent rather than reaching the read-model.
+    engine
+        .runtime()
+        .expect("runtime present")
+        .submit_write(|w| {
+            w.set_project_metadata(logos_core::graph_store::LAST_FULL_INDEX_AT_KEY, "0")
+        })
+        .expect("metadata write commits");
+    assert_eq!(
+        engine.status().last_full_index_at,
+        None,
+        "a stored 0 reads as absent, never as a 1970 timestamp (NFR-CC-04)"
+    );
+
+    // Likewise a torn / non-numeric value: absent, never passed through.
+    engine
+        .runtime()
+        .expect("runtime present")
+        .submit_write(|w| {
+            w.set_project_metadata(
+                logos_core::graph_store::LAST_FULL_INDEX_AT_KEY,
+                "not-a-timestamp",
+            )
+        })
+        .expect("metadata write commits");
+    assert_eq!(
+        engine.status().last_full_index_at,
+        None,
+        "a non-numeric row reads as absent, never as a fabricated timestamp"
+    );
+}
+
+#[test]
+fn a_full_index_that_admits_no_file_leaves_the_stamp_absent() {
+    // The reference-workspace criterion, in miniature: on a cold
+    // `init --workspace` the three source-less members run a full index that
+    // admits nothing and must report `last_full_index_at` ABSENT, while the 81
+    // that carry a graph report it non-null. The stamp dates the graph, not the
+    // command — `status` reports such a member `indexed: false`, and dating an
+    // empty graph would be the same dishonest readout CR-130 removes.
+    let empty = TempDir::new().unwrap();
+    let engine = Engine::start(empty.path()).expect("engine starts");
+
+    let result = engine.index();
+    assert_eq!(
+        result.files_indexed, 0,
+        "the walk admitted nothing — this is the empty-member case"
+    );
+    let status = engine.status();
+    assert!(!status.indexed, "no graph was built");
+    assert_eq!(
+        status.last_full_index_at, None,
+        "an index that built no graph dates no graph"
+    );
+    assert_eq!(
+        stored_stamp(&engine),
+        None,
+        "and nothing was stored — absent is absent, not a stored 0"
+    );
+
+    // The contrast arm, so the test cannot pass by the stamp never being written
+    // at all: the same code path over a repo that DOES admit a file stamps it.
+    let populated = fixture();
+    let engine = indexed_engine(&populated);
+    assert!(
+        engine.status().last_full_index_at.is_some(),
+        "a member carrying a graph reports the stamp non-null"
+    );
+}
+
+#[test]
+fn emptying_a_project_clears_its_last_full_index_stamp() {
+    // The stamp tracks the graph, so it must not outlive one. A re-index whose
+    // walk now admits nothing purges the graph (CR-004 always-purge reconcile);
+    // leaving the old stamp behind would date a graph that no longer exists —
+    // a `status` reading `indexed: false` beside a timestamp.
+    let tmp = fixture();
+    let engine = indexed_engine(&tmp);
+    assert!(
+        stored_stamp(&engine).is_some(),
+        "the first index stamped the graph it built"
+    );
+
+    fs::remove_dir_all(tmp.path().join("src")).expect("remove every source file");
+    let result = engine.index();
+    assert_eq!(result.files_indexed, 0, "the re-index admits nothing");
+
+    assert_eq!(
+        engine.status().last_full_index_at,
+        None,
+        "the emptied graph carries no date"
+    );
+    assert_eq!(
+        stored_stamp(&engine),
+        None,
+        "the stale row was removed, not merely hidden by the read-model"
+    );
+}
+
+#[test]
+fn a_re_index_moves_the_stamp_forward() {
+    // The stamp is the LAST full index, not the first: a second index overwrites
+    // the row rather than keeping the original reading.
+    let tmp = fixture();
+    let engine = indexed_engine(&tmp);
+    let first = stored_stamp(&engine).expect("the first index stamped");
+
+    // The stamp is whole unix seconds, so a same-second re-index is legitimately
+    // equal; sleep past the boundary to observe the overwrite.
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    let _ = engine.index();
+    let second = stored_stamp(&engine).expect("the re-index stamped");
+
+    let (first, second): (u64, u64) = (first.parse().unwrap(), second.parse().unwrap());
+    assert!(
+        second > first,
+        "the re-index moved the stamp forward: {first} -> {second}"
+    );
+    assert_eq!(
+        engine.status().last_full_index_at,
+        Some(second.to_string()),
+        "status reports the latest full index, not the first"
+    );
+}
+
 // ── FR-NV-09 / UAT-NV-08: graceful unknown-symbol handling ───────────────────
 
 #[test]
