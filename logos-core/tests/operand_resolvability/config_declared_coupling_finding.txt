@@ -1,0 +1,268 @@
+S-411 — IS CONFIG-DECLARED COUPLING THERE TO BE REPORTED?  THE RECORDED FINDING
+
+S-411, measured 2026-09-15 against ~/source/pec-services (84 members, read-only
+against the estate SOURCE; the persisted 1.4.11 .logos stores were not read).
+
+  THE PAIR HALF IS FALSIFIED.  THE TOPIC HALF HOLDS.
+
+The two halves come apart, and that is the finding. ADR-65 proposed one intake
+carrying two relations. One of them — `declares-topic(A -> T)` — is there in
+quantity and clears its floor by 30%. The other — `addresses(A -> B)` — lands ONE
+pair below its floor, and does so with a named blind spot in the reader that is
+LARGER than the margin.
+
+Floors, declared 2026-09-15T07:08:24Z BEFORE this code was written: >= 12
+addressed member pairs and >= 10 shared topics, both taken verbatim from CR-131
+section 3.2 B1. The declaration is tracked beside this file in
+config_declared_coupling_floor.txt, and the gate PARSES both figures out of it and
+compares them to the constants, so a constant cannot be edited to clear a future
+run without editing the declaration too.
+
+
+  THE TWO HEADLINES
+
+    addressed member pairs                11   against a floor of 12   FALSIFIED
+    shared topics                         13   against a floor of 10   HOLDS
+
+  Grain: the ORDERED MEMBER PAIR and the TOPIC. NOT the call-site edge S-384 and
+  S-400 counted. CR-131 section 2.2 fixes this: "Cluster B proposes a DIFFERENT
+  relation at a DIFFERENT grain with its OWN metric, not a re-run of either gate."
+  12 here is not comparable with their 16 and must never be read against it.
+
+
+  THE PAIR HALF — WHERE THE POPULATION GOES
+
+    bucket                                         refs      pairs
+    self-tie                                          5          3
+    same-tier identity collision                     75         --
+    label resolves to no member (external)          336         --
+    target member is not runnable                     0          0
+    already matched by path alone                    12          8
+    ADDRESSED PAIR                                   15         11
+
+    by form:        440 URL · 3 bare host beside a port
+    by source set:  243 application config · 200 deploy overlay
+
+  The 11, enumerated. Ten of them are proved by a Helm or Compose overlay; not
+  one is proved by application configuration alone, which is the single most
+  load-bearing fact in this half and the reason CR-131 cluster B2 exists:
+
+    archive-api                     -> mailserver-api             .helm/values.yaml
+    archive-api-logiclens-fork      -> mailserver-api             .helm/values.yaml
+    archive-manager                 -> mailserver-api             .helm/values.yaml
+    e2e-tests                       -> mailbox-api                final-tests/PTPEC-1569/
+    funnel-aggregator-api           -> mailbox-api                .helm/values.yaml
+    funnel-aggregator-api           -> pecserver-facade           .helm/values.yaml
+    funnel-aggregator-api           -> reporting-api              .helm/values.yaml
+    mailbox-aggregator-api          -> official-log-export-api    .helm/values.yaml
+    mailbox-api                     -> pecserver-facade           deploy-svil-bp/values.yaml
+    mailserver-api                  -> archive-listener-adapter   .helm/values.yaml
+    webmail                         -> mailbox-aggregator-api     .helm/values.yaml
+
+  AND THE 11 IS WEAKER THAN IT LOOKS, IN THE DIRECTION THAT MATTERS. One of them,
+  `e2e-tests -> mailbox-api`, is an end-to-end test harness's docker-compose file,
+  not a production deployment. The declaration's "runnable" rule constrains the
+  TARGET and says nothing about the consumer, so it is counted as declared. Under
+  a stricter reading that excludes a test-harness consumer the figure is 10, so
+  the falsification does not turn on that judgement — it only deepens.
+
+  THE 75 COLLISION REFERENCES ARE FIVE LABELS, AND FOUR OF THEM ARE
+  INFRASTRUCTURE. Enumerated by the run: `archive-api` (the fork committing the
+  original's Helm chart name, S-384's case), plus `minio`, `mongodb`,
+  `schema-registry` and `pecserver-mock` -- Compose service keys for shared
+  infrastructure that 19 to 23 members each declare. This is S-384's tier-2
+  finding reproduced at the reference level: "a Compose file names shared
+  infrastructure, not the member". None of the five is a member pair the relation
+  lost, and four of them are not members at all.
+
+  THE 336 NO-MEMBER REFERENCES ARE 34 DISTINCT LABELS, likewise enumerated for
+  adjudication. They are genuinely external -- an Apicurio registry, four MSK
+  broker UUIDs, identity providers, a GitLab -- with one shape worth naming:
+  `api`, referenced by 35 consumers, is a bare first label that no member claims
+  and that FR-WS-20 AC4's exact-match rule correctly refuses rather than
+  resolving to one of the seven members whose artifact id is `api`.
+
+  The eight pairs subtracted as already matched by path alone:
+
+    funnel-aggregator-api -> filters-api        mailbox-aggregator-api -> filters-api
+    funnel-aggregator-api -> notification-api   mailbox-aggregator-api -> mailbox-api
+    notification-adapter  -> notification-api   mailbox-aggregator-api -> notification-api
+                                                mailbox-aggregator-api -> pecserver-facade
+                                                mailbox-aggregator-api -> reporting-api
+
+  Every one of the eight is a pair the invocation intake already binds through
+  FR-CG-09's exactly-one rule, so reporting it again under a new intake adds no
+  coupling a reader cannot already see. S-411's acceptance criterion asks for
+  "the addressed pairs THAT REMAIN", which is why they are subtracted rather than
+  merely printed. Note the shape: seven of the eight belong to two aggregators.
+
+  Addressed pairs by the overlay that proves them:
+
+    .helm 10 · deploy-coll-bp 2 · deploy-svil-bp 1 · deploy-svil-pec-bp 1 ·
+    final-tests/PTPEC-1569 1
+
+  (15 entries over 11 pairs: four of the pairs are proved in more than one overlay.)
+
+
+  THE BLIND SPOT IS BIGGER THAN THE MARGIN, AND THAT IS STATED AT THE HEADLINE
+
+  The declaration fixes the corpus as the SHIPPED `parse_yaml`, deliberately, so
+  the admission rule could not be moved after seeing the answer. That parser binds
+  no scalar under a YAML SEQUENCE — its own doc comment records why, a `routes:`
+  list that once fabricated a `spring.cloud.gateway.routes.uri` key — and the
+  estate's structured gateway upstream table is a sequence.
+
+  Measured, not assumed: 84 `host:`-shaped lines sit inside a sequence item in an
+  admitted deploy file. Judged by the SAME classifier and at the SAME grain, six
+  of those lines would add TWO ordered pairs the headline does not count:
+
+    hermodr-gateway                  -> webmail        (3 overlays)
+    mailbox-aggregate-hermodr-gateway -> mailbox-api   (3 overlays)
+
+  11 + 2 = 13 >= 12.  THE BLIND SPOT COVERS THE GAP.
+
+  So the honest statement of this half is not "the estate does not commit enough
+  member-grain coupling". It is: UNDER THE CORPUS THE DECLARATION FIXED, the
+  estate proves 11, and the distance to the floor is smaller than a limitation of
+  the reader that was named before the run and measured during it. The verdict is
+  FALSIFIED because the declaration is the contract and its COMMITMENT section
+  forbids revising it after a run. What would SETTLE the question is a
+  sequence-reading configuration corpus, measured — not this ceiling, which is an
+  upper bound that admits every line without judging any of them.
+
+
+  THE TOPIC HALF — WHERE THE POPULATION GOES
+
+    captured topic identities (distinct literals)                   13
+      BOTH-SIDES-DECLARED (>= 2 members)                            13
+      one-side-only (1 member)                                       0
+      dangling: placeholder did not resolve                          0
+      dangling: no member commits the value                          0
+
+    declarations by source set: 36 application config · 0 deploy overlay
+    declarations by key shape:  36 through a topic-named key · 0 other
+
+  EVERY captured topic identity on this estate is shared. That is a stronger
+  result than the floor asks for and it has one cause: the estate's convention is
+  `spring.kafka.topics.<k>: <k>` in every member that touches the topic, so a
+  topic that is captured at all is captured at a site whose operand is a
+  placeholder every participant commits.
+
+    archive-commands          3    archive-message-queue      4
+    archive-volume-counters   2    delayed-output-messages    4
+    export-jobs-commands      2    export-jobs-outcomes       2
+    export-jobs-requests      2    mailbox-commands           3
+    mailbox-reporting         2    notifications              4
+    pec-server-commands       3    pec-server-outcomes        3
+    unread-mails-requests     2
+
+  TWO OF THE 36 DECLARATIONS DO NOT COME THROUGH `spring.kafka.topics`, and both
+  are the case CR-131 section 2.1 calls "config-only publishers":
+  `funnel-aggregator-api` names archive-message-queue through `filteraggregate.topic`,
+  and `mailbox-unread-mail-batch` names unread-mails-requests through
+  `spring.kafka.template.default-topic` — Spring Batch's `KafkaItemWriter`, which
+  has no publish call site at all. The relation reaches a producer the invocation
+  and broker intakes structurally cannot.
+
+  THE AS-WRITTEN READING ANSWERS 0, EXACTLY AS THE DECLARATION PREDICTED. Under
+  FR-WS-10's key rule in force a subscribe is keyed by the placeholder literal as
+  written, so the join is `archive-events` against
+  `${spring.kafka.topics.archive-events}` — a configuration VALUE against a
+  configuration REFERENCE. No member commits the placeholder, so the reading
+  cannot return anything but zero. It is printed because the cost of the in-force
+  key rule should be visible, and it is not the gate: the declaration fixed
+  RESOLVED as decisive before the run, on the ground that a topic's identity is
+  the name it carries on the broker.
+
+  WHAT THIS HALF DOES NOT SAY. It does not say the product can see 13 topics
+  today. The captured population is 13 literals from 16 `@KafkaListener`
+  subscribes and ZERO publishes — the estate's 14 Kafka Streams sites and 54
+  header-form publishes are captured as nothing or refused. The relation measured
+  here is what committed configuration proves ABOUT those 13; widening the
+  captured set is cluster A's work (S-408, S-409, S-410), not this gate's.
+
+
+  RECONCILIATION AGAINST S-384 AND S-400
+
+    distinct member labels among deploy target references    11   S-384: 11  exact
+    distinct external labels among the same references       27   S-384: 28
+    members declaring their own `server.port`                30   S-400: 30  exact
+    distinct `server.port` values declared                   27   S-400: 27  exact
+    distinct ports referenced by an application-committed URL 31
+      of which identifying exactly one member                 6   S-400: 5   >=
+
+  The member-label figure and the whole port index reproduce S-384's and S-400's
+  exactly, which is what makes this run a measurement of the same estate rather
+  than of a different one wearing the same words. Two figures differ, and both
+  differences are explained by a population, never by a rule:
+
+  - EXTERNAL LABELS 27 vs S-384's 28. S-384 counted `archive-api` as external
+    because the fork collision leaves it claimed by nobody. This run classifies
+    that label as a SAME-TIER COLLISION, a bucket S-384's census did not carry, so
+    the label moves rather than disappears. 27 + 1 = 28.
+  - UNIQUE PORTS 6 vs S-400's 5. S-400 read the 19 base-url values a RESOLVED
+    CALL SITE reads; this run reads every application-committed URL value, a wider
+    key population over the same source set. S-400's figure is therefore a floor
+    for this one, and the index behind both is byte-identical.
+
+
+  THE WALK COST OF ADMITTING DEPLOY OVERLAYS AND HIDDEN CHART DIRECTORIES
+
+    corpus walk  hidden(true)     18615 files   <- the denominator
+    overlay walk hidden(false)    19875 files
+    extra files the overlay walk visits  1260   (6.8% of the corpus walk)
+    deploy-shaped files read and parsed  3087   5687 KiB
+      of those, inside a hidden directory 509   (16.5% of files read)
+    deploy-shaped files skipped as documentation 92
+
+  THE FILE COUNTS ARE THE COST FIGURE. Admitting hidden directories costs 6.8%
+  more traversal, and the 509 files it reaches inside them are the entire reason
+  the pair half has any deploy evidence at all — every one of the estate's 33
+  Helm charts lives under `.helm/`.
+
+  The seconds are reported by the run and are deliberately NOT quoted here as a
+  budget: the same traversal measured 4.29s, 4.49s and 9.65s across three
+  consecutive runs of this harness on one machine, moving with the page cache
+  alone. Counts reproduce; times do not.
+
+
+  WHAT THIS FINDING DECIDES
+
+  ADR-65 is marked SUPERSEDED IN PLACE and never deleted, with this measurement
+  and its date, following the procedure ADR-64's identity half followed on S-384.
+  NO requirement is created — FR-WS-25 stays proposed in CR-131 section 5.1 and
+  unwritten. S-412, S-413, S-414, S-415 and S-418 stay UNPLANNED.
+
+  The topic half's 13 does not on its own plan a story, and the reason is
+  structural rather than a judgement call: every one of S-412 through S-415 is
+  either the deploy-overlay corpus, the member identity registry, the intake that
+  carries BOTH relations, or the surfaces that render both — so none of them is
+  scoped to the half that cleared. S-418 rides the `addresses` relation directly
+  and is the falsified half. A delivery story scoped to `declares-topic` ALONE
+  does not exist today; creating one is a re-decision of CR-131 section 8, on this
+  evidence, not a consequence of this run.
+
+  WHAT WOULD CHANGE THIS MEASUREMENT, in the order the evidence ranks them:
+
+  1. A sequence-reading configuration corpus. Two of the 84 sequence host lines
+     are pairs the headline misses, which alone clears the floor. This is the one
+     change whose effect is already measured rather than argued.
+  2. Cluster A's capture. 13 captured topic identities is what 16 subscribes and
+     zero publishes yield; S-408/S-409/S-410 widen that population, and the topic
+     half would be re-measured over a larger denominator.
+  3. Nothing else. The identity classifier, the corpus and the join all worked:
+     440 URL-valued and 3 host-valued committed values were read, 75 hit a
+     same-tier collision and 336 named an external, and the runnable guard cost
+     exactly zero pairs on this estate.
+
+  Re-run before re-deciding: nothing here needs to be re-derived by hand.
+
+      LOGOS_REF_WORKSPACE=~/source/pec-services \
+        cargo test -p logos-core --test operand_resolvability \
+        config_declared_coupling -- --nocapture
+
+  The environment variable is not optional. Without it the gate takes its VOID
+  branch, asserts nothing and exits 0 -- a reader following this instruction
+  would get a green run and no measurement. Reported at review, where running
+  the command exactly as it was first written gave "21 passed, 0 failed" with
+  the gate skipped.

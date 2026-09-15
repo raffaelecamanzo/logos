@@ -922,6 +922,19 @@ pub struct BrokerStats {
     /// What the real `brokers.scm` captures today, for the denominator.
     pub publish_literals_today: usize,
     pub subscribe_literals_today: usize,
+    /// The captured topic literals themselves, as the arm keys them — the
+    /// literal's own text, `${…}` placeholders included ([FR-WS-10]'s rule in
+    /// force).
+    ///
+    /// Kept beside the counts, and only beside them, because S-411's gate joins
+    /// a member's committed values against *the identities this arm captures*
+    /// and must read the arm's own output rather than a second reading of the
+    /// same query. Collecting them in this walk is what lets that gate avoid a
+    /// second traversal of the estate; nothing else reads these vectors.
+    ///
+    /// [FR-WS-10]: ../../docs/specs/requirements/FR-WS-10.md
+    pub publish_topic_texts: Vec<String>,
+    pub subscribe_topic_texts: Vec<String>,
     /// Whether the header form is even expressible in this language's grammar.
     pub header_form_supported: bool,
     pub sites: Vec<BrokerSite>,
@@ -948,12 +961,40 @@ pub fn count_broker_captures(
     while let Some(m) = matches.next() {
         for cap in m.captures {
             match names[cap.index as usize] {
-                "broker.publish.topic" => stats.publish_literals_today += 1,
-                "broker.subscribe.topic" => stats.subscribe_literals_today += 1,
+                "broker.publish.topic" => {
+                    stats.publish_literals_today += 1;
+                    stats.publish_topic_texts.push(captured_topic_text(cap.node, src));
+                }
+                "broker.subscribe.topic" => {
+                    stats.subscribe_literals_today += 1;
+                    stats.subscribe_topic_texts.push(captured_topic_text(cap.node, src));
+                }
                 _ => {}
             }
         }
     }
+}
+
+/// The topic a `@broker.*.topic` capture keys, with its string delimiters
+/// removed — the key `broker_topic_key` forms in production **for a topic with
+/// no schema slot, which is every arm shipped today**.
+///
+/// The qualification is not decoration. Production appends `#schema` whenever a
+/// `@broker.*.schema` slot is filled, and no shipped `brokers.scm` fills one, so
+/// the two agree on this corpus and only on it. Production also unquotes one
+/// surrounding pair and then trims, where this trims and then strips every
+/// leading and trailing quote — the two differ on a literal like `"  orders  "`,
+/// which no estate writes. Production's `unquote` is `pub(crate)`, so an
+/// integration test cannot call it; the strip is re-spelled of necessity and the
+/// claim is narrowed to what is actually true.
+///
+/// `static_literal` is not reused here and the difference is deliberate: that
+/// one folds an expression and returns `None` for anything that is not already
+/// a literal, while these captures are `(string_literal)` nodes by
+/// construction, so the only work left is stripping the quotes the grammar
+/// keeps. Trimmed, because a blank literal binds nothing.
+fn captured_topic_text(node: Node<'_>, src: &[u8]) -> String {
+    node.utf8_text(src).unwrap_or_default().trim().trim_matches(['"', '\'']).to_string()
 }
 
 /// Collect and judge every message-header publish site in one file.

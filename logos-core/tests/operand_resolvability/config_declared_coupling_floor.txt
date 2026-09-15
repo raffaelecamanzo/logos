@@ -1,0 +1,303 @@
+S-411 T1 — THE TWO MATERIALITY FLOORS, DECLARED BEFORE THE RUN
+===============================================================
+
+Declared (UTC):  2026-09-15T07:08:24Z
+Declared by:     Dev Session 1.2 (sprint-70, branch sprint-70-I1-S2)
+Story:           S-411 — Measure config-declared coupling over the reference estate
+Gate decides:    CR-131 section 3.2, cluster B. Below EITHER floor the
+                 corresponding half is recorded FALSIFIED with its evidence and
+                 date, ADR-65 is marked SUPERSEDED IN PLACE and never deleted,
+                 NO requirement is created, and S-412, S-413, S-414, S-415 and
+                 S-418 stay UNPLANNED.
+
+Estate under measurement: ~/source/pec-services (LOGOS_REF_WORKSPACE), 84 members,
+read-only against the estate SOURCE. Nothing under that path is written.
+
+This file is committed in this session's FIRST commit, before any measurement code
+exists, so the ordering is auditable in git history rather than asserted. It is
+TRACKED, not written to the gitignored `.pending/` directory — S-384's review
+finding 18, where a gitignored declaration would have vanished at sprint teardown.
+
+
+THE TWO FLOORS
+--------------
+
+    >= 12 ADDRESSED MEMBER PAIRS on the pec-services estate.
+
+    >= 10 SHARED TOPICS on the pec-services estate.
+
+They are independent. Each gates its own half of ADR-65's decision and its own
+delivery stories; one clearing does not carry the other. The addressed-pair floor
+gates the `addresses(A -> B)` relation and with it S-418's narrowing; the
+shared-topic floor gates `declares-topic(A -> T)`. A run that clears one and not
+the other records that half FALSIFIED and says which.
+
+
+"ADDRESSED MEMBER PAIR" MEANS, EXACTLY
+---------------------------------------
+
+One distinct ORDERED pair (A, B) for which ALL of the following hold:
+
+  1. A and B are workspace members — a directory under the estate root holding a
+     `.git` — and A != B.
+
+  2. B is RUNNABLE (defined below).
+
+  3. Some COMMITTED VALUE (defined below) of A is TARGET-VALUED, meaning either
+       (i)  it parses as a URL with a host, by `identity::url_target_or_reason`,
+            the S-384 parser, unchanged; or
+       (ii) it is a bare DNS-name host committed under a key whose last
+            `.`-segment is `host` or `hostname` AND which has a sibling `port`
+            key under the same parent. CR-131 section 3.2 B2: "A bare `host`
+            beside a `port` is a target identity as a URL is."
+
+  4. The FIRST DNS LABEL of that host resolves, through
+     `identity::Corpus::member_for` — the S-384 identity classifier, FR-WS-20
+     AC2 AS WRITTEN, so a same-tier collision resolves to NOTHING rather than to
+     a guess — to exactly member B.
+
+  5. The pair is NOT PATH-ONLY-MATCHED (defined below).
+
+THE GRAIN IS THE ORDERED MEMBER PAIR, and this is fixed here rather than at
+measurement time. Two keys in one member naming one callee are ONE pair; six
+overlays of one member naming one callee are ONE pair. That is the grain
+ADR-65 decision point 1 gives `addresses(A -> B)` and the grain `config_declared_pairs`
+is published at.
+
+It is deliberately NOT the `(consumer, normalized template, provider)` call-site
+edge S-384 and S-400 counted. CR-131 section 2.2 states the reason in its own
+words: "Cluster B proposes a DIFFERENT relation at a DIFFERENT grain with its OWN
+metric, not a re-run of either gate." A member-grain relation has no template in
+it; scoring it at call-site grain would reject it on a unit it does not have.
+The consequence is stated rather than hidden: this floor is NOT comparable with
+S-384's 16 or S-400's 16, and no run may present it as though it were.
+
+
+"RUNNABLE" MEANS, EXACTLY
+--------------------------
+
+B commits, under its own tree and outside a documentation tree
+(`identity::is_documentation`), at least one file the language plugin registry
+claims as a source file. A member that stores only manifests, charts, schemas or
+documents is not runnable and cannot be the B of a pair.
+
+The word is in the floor because ADR-65 decision point 1 and CR-131 section 3.2
+B1 both put it there, and because S-384 measured why it is needed: one member,
+`gen2gen3_devops_utils`, claims 317 of tier 1's 351 labels, and they name
+services of a DIFFERENT estate — fibra, bpm, router, consent-management. So "some
+member claims this label" and "this label names something this estate runs" are
+not the same statement. S-384 could leave that unguarded because its targets came
+only from deploy evidence; this measurement reads the whole committed corpus, a
+wider population, so it cannot.
+
+
+"COMMITTED VALUE" MEANS, EXACTLY
+---------------------------------
+
+A scalar value that the repository COMMITS, in one of two source sets:
+
+  - APPLICATION CONFIGURATION — `application*.{yml,yaml,properties}`, exactly the
+    set the shipped `ConfigCorpus::discover` admits. Reused, not reimplemented:
+    this gate must measure the code that ships.
+
+  - COMMITTED DEPLOY OVERLAYS — the files `identity::deploy_role` recognises
+    (`Chart.yaml`, any `*values*.{yaml,yml}`, `docker-compose*.{yaml,yml}`, and
+    any other YAML that is not itself an application source), read from a walk
+    with `hidden(false)` so the estate's 33 Helm charts under `.helm/` are
+    entered at all.
+
+An UNCOMMITTED value — an environment variable supplied at runtime, a config
+server, a secret store — is NOT a committed value and is refused, unchanged from
+FR-WS-19 AC4 and ADR-64. What is admitted is a literal the repository commits.
+Dockerfile `ENV` and `.env` files are not sources (CR-131 section 3.3, stakeholder
+decision).
+
+A KNOWN UNDER-READ, WRITTEN DOWN BEFORE THE RUN BECAUSE IT BOUNDS THE ANSWER.
+The shipped `parse_yaml` binds no scalar under a YAML SEQUENCE — its own doc
+comment says so, and the skip is deliberate: a `routes:` list once fabricated a
+real-looking `spring.cloud.gateway.routes.uri` key out of a list element. The
+estate's structured gateway upstream table is `proxy.upstreams[].host`, a
+sequence, so every host in it is INVISIBLE to this measurement. That is a limit
+of the reader, not a fact about the estate, and the run reports a textual CEILING
+for it — occurrences of a `host:`-shaped line inside a sequence item in an
+admitted deploy file — as an upper bound on what a sequence-reading corpus would
+add. A ceiling is never an extraction and never counts toward the floor.
+
+
+"PATH-ONLY-MATCHED" MEANS, EXACTLY
+-----------------------------------
+
+The pair (A, B) already appears, at member grain, among the pairs S-384's
+`identity::findings` classifies `PairClass::AlreadyBoundByPath` — a call site in
+A whose normalized route template exactly one member registers, and that member is
+B, so the exactly-one rule of FR-CG-09 reaches B on the path alone and the product
+already reports the coupling through the INVOCATION intake.
+
+Such a pair is reported in its own column and is SUBTRACTED from the headline.
+S-411's acceptance criterion fixes this: the report splits "self-ties, same-tier
+identity collisions, labels resolving to no member, path-only-matched pairs, AND
+THE ADDRESSED PAIRS THAT REMAIN". "That remain" is the operative phrase and it is
+read here, before the run, as subtraction.
+
+A pair S-384 classifies `NetNewAmbiguous` is NOT subtracted: path-only matching
+refuses it, which is the whole reason identity was offered for it.
+
+
+"SHARED TOPIC" MEANS, EXACTLY
+------------------------------
+
+One distinct CAPTURED TOPIC IDENTITY that TWO OR MORE distinct workspace members
+each declare, where a member DECLARES a topic identity T when some committed
+value of that member (same two source sets as above) is exactly equal to T.
+
+The grain is the TOPIC, not the (member, topic) row and not the member pair. 17
+topics each declared by 5 members is 17, not 85 and not 170.
+
+
+"CAPTURED TOPIC IDENTITY" MEANS, EXACTLY
+-----------------------------------------
+
+The identity of a topic that the SHIPPED `brokers.scm` captures at a broker
+publish or subscribe site anywhere in the workspace — `@broker.publish.topic` or
+`@broker.subscribe.topic`, the arm's own output, not a harness re-reading of it.
+Two readings are computed and BOTH are printed:
+
+  AS-WRITTEN — the captured literal's own text. This is FR-WS-10's key rule as it
+    stands in force: "a subscribe is keyed by the placeholder literal as written"
+    (CR-131 section 3.1).
+
+  RESOLVED — the captured literal's own text where that text is not a property
+    placeholder; and where the literal is exactly `${key}` or `${key:default}`,
+    the value the workspace's committed configuration AGREES on for `key`
+    (`Agreement::Agreed`; a key whose sources disagree resolves to nothing).
+
+RESOLVED DECIDES THE GATE. The reason is fixed here rather than after seeing the
+two numbers. ADR-65 decision point 1 says `declares-topic(A -> T)` holds where "a
+committed value in A EQUALS A TOPIC IDENTITY captured anywhere in the workspace",
+and a topic's identity is the name it carries on the broker, not the spelling a
+source file uses to refer to it. The AS-WRITTEN reading joins a configuration
+VALUE against a configuration REFERENCE — `archive-events` against
+`${spring.kafka.topics.archive-events}` — which is a category error that can only
+ever answer zero. A reading structurally incapable of producing a non-zero number
+is not a measurement of anything, and the failure mode is exactly S-400's, where
+a denominator derived from already-parsed references "made the carrying-a-port
+share read 18 of 18 (100%) — a figure structurally incapable of counting its own
+counterexample". AS-WRITTEN is printed so the cost of FR-WS-10's in-force key rule
+is VISIBLE; it is never the gate.
+
+This is NOT a back door to A3. CR-131 cluster A3 re-proposes committed-value
+topic identity as a PRODUCT rule, under S-410, with its own justification. This
+gate consumes the same notion as a MEASUREMENT rule to answer a different
+question — is a member-grain topic relation there to be reported — and its
+answer creates no product behaviour on its own.
+
+
+THE SPLITS — WHAT IS REPORTED APART AND NEVER COUNTS TOWARD A FLOOR
+--------------------------------------------------------------------
+
+Pairs. Every target-valued committed value falls in exactly one bucket:
+
+  - SELF-TIE                        the label resolves to A itself
+  - SAME-TIER IDENTITY COLLISION    two or more members claim the label at its
+                                    first claiming decisive tier, so FR-WS-20 AC2
+                                    resolves it to nothing
+  - NO-MEMBER LABEL                 no member claims it at any decisive tier: an
+                                    external, reported inferred (FR-WS-20 AC5)
+  - TARGET NOT RUNNABLE             it resolves to a member that runs nothing
+  - PATH-ONLY-MATCHED               already bound through the invocation intake
+  - ADDRESSED PAIR                  what remains — THE HEADLINE
+
+Topics. Every captured topic identity falls in exactly one bucket:
+
+  - BOTH-SIDES-DECLARED   >= 2 distinct declaring members — THE HEADLINE
+  - ONE-SIDE-ONLY         exactly 1 declaring member
+  - DANGLING              0 declaring members, split into (a) the placeholder did
+                          not resolve and (b) it resolved but no member commits
+                          the value
+
+"BOTH-SIDES-DECLARED" is named for the picture — a topic two members declare has
+a member at each end of the pipe — and the definition is the count, not a
+direction. `declares-topic` is directionless by construction (ADR-65 decision
+point 1 gives it no producer/consumer role), so this gate counts DECLARING
+MEMBERS and never producers and consumers. A run must not report it as a
+producer→consumer figure; CR-131's census of "27 producer->consumer pairs over 17
+topics" is a DIFFERENT unit and is not this floor.
+
+
+WHY 12 AND 10 — AND WHY NEITHER IS THIS CR'S OWN CENSUS
+--------------------------------------------------------
+
+Both are declared in CR-131 section 3.2 B1, verbatim: "Floors, declared here and
+parsed by the test from a tracked file: 12 addressed pairs and 10 shared topics."
+This file does not invent them; it fixes what their terms mean.
+
+They are NOT the census. CR-131 section 2.1 hand-counts "~23 member pairs" and
+"17 topics with both a producer and a consumer", and ADR-65's Notes state the
+rule that keeps the two apart: "The gate re-derives its floors as a PRODUCT
+PREDICTION — clones, same-tier collisions and out-of-namespace externals
+subtracted — and never from that census (CR-131 CRA-06)."
+
+That subtraction is what the two numbers are. 23 pairs less the fork collision
+that costs `archive-api` every edge, less the aggregator self-ties, less the
+externals, lands near 12; 17 topics less the ones no captured site names lands
+near 10. A floor derived from the census instead would be "a measurement of what
+a permissive reader can derive, dressed as a prediction about the measurement" —
+the defect S-397 carried, where a harness census of 79 became an unreachable
+story criterion, and the one census-figure-as-acceptance-floor rule this project
+now writes down.
+
+Each is above its own coincidence threshold. 12 pairs cannot be one aggregator's
+values file: the estate's two aggregators between them address fewer than 12
+distinct callees. 10 topics cannot be one bounded context: the estate's largest
+single context declares fewer.
+
+THE FLOORS ARE NOT TUNED TO AN EXPECTED YIELD, and that is a deliberate cost. A
+floor chosen after seeing which side of it the answer falls on is not a floor. If
+the run shows 12 or 10 was the wrong number for this relation, that is stated in
+the implementation notes with its reasoning, and THIS FILE STANDS UNCHANGED.
+
+
+WHAT IS *NOT* A FLOOR
+---------------------
+
+Everything else CR-131 section 6 and S-411's acceptance criteria require is a
+REPORT. None of them can clear or fail either gate on its own:
+
+  - the six-way pair split and the three-way topic split above;
+  - the reconciliation against S-384's 11 distinct member labels and against
+    S-400's 5 ports identifying exactly one member;
+  - the walk cost of admitting deploy overlays and hidden chart directories,
+    stated with its denominator;
+  - the sequence-skip ceiling for `proxy.upstreams[].host`;
+  - the AS-WRITTEN topic reading;
+  - the sensitivity of the pair headline to tier-1 claims sourced from raw
+    `kind: Service` manifests — S-384's rule that "a raw manifest under a
+    member's tree is evidence about whatever the manifest describes, not about
+    the member that stores it";
+  - the per-overlay and per-source-set attribution of each pair.
+
+They are required for a falsification to be ADJUDICABLE — they attribute it to
+whichever join broke — but there are exactly two decisive numbers, so neither
+gate can be cleared by substituting a more favourable statistic.
+
+
+A RUN THAT SEES NO ESTATE REPORTS *VOID*, NEVER ZERO
+-----------------------------------------------------
+
+Per NFR-CC-04: where `LOGOS_REF_WORKSPACE` is unset the measurement has not been
+performed, and 0 addressed pairs is not the finding — there is no finding. The
+estate arm reports VOID and asserts nothing about either gate. The classifier
+that decides the gates carries its own always-run coverage, so its rules are
+pinned on every `cargo test` even where the estate is unavailable.
+
+
+COMMITMENT
+----------
+
+Neither floor is revised after the run. The constants in the measurement code are
+PARSED from this file rather than compared with literals written beside them, so
+a constant cannot be edited to clear a run without this declaration being edited
+too — in the file whose whole purpose is to say it must not be.
+
+If a later run disagrees with what is recorded, the procedure is to re-decide
+CR-131 section 8 and ADR-65, not to relax an assertion.
