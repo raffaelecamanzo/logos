@@ -1129,6 +1129,20 @@ func helper(builder *StreamsBuilder, cfg Config) {
 	builder.stream(cfg.Inbound()).to(cfg.Outbound())
 }
 
+// The unexported verb spelling with a LITERAL operand. The `helper` rows above
+// reach the lowercase arm of each `#any-of?` only through the REFUSAL slot, so
+// without this the binding patterns could be narrowed to the exported spelling
+// alone and no test would notice.
+func unexported(builder *StreamsBuilder) {
+	builder.stream("lower-in").to("lower-out")
+}
+
+// A PACKAGE-QUALIFIED receiver type, which is how Go actually imports a type.
+// `bare_type_name` has to strip the `kafka.` qualifier to reach the roster.
+func qualified(builder *kafka.StreamsBuilder) {
+	builder.Stream("qualified-in").To("qualified-out")
+}
+
 // Neither of these is a topology: both receivers are declared as something else.
 func notATopology(reader *Reader, converter Converter) {
 	reader.Stream("orders")
@@ -1139,16 +1153,28 @@ func notATopology(reader *Reader, converter Converter) {
 
         assert_eq!(
             targets(&facts, ArtifactRelation::BrokerSubscribe),
-            vec!["".to_string(), "orders".to_string()],
-            "the exported verb binds, the unexported one refuses its call operand, \
-             and the `Reader` receiver produces neither: {:?}",
+            vec![
+                "".to_string(),
+                "lower-in".to_string(),
+                "orders".to_string(),
+                "qualified-in".to_string()
+            ],
+            "both verb spellings bind a literal, a package-qualified receiver type \
+             normalizes, the call operand refuses, and the `Reader` receiver \
+             produces neither: {:?}",
             facts.refs
         );
         assert_eq!(
             targets(&facts, ArtifactRelation::BrokerPublish),
-            vec!["".to_string(), "shipments".to_string()],
-            "the exported verb binds, the unexported one refuses its call operand, \
-             and the `Converter` receiver produces neither: {:?}",
+            vec![
+                "".to_string(),
+                "lower-out".to_string(),
+                "qualified-out".to_string(),
+                "shipments".to_string()
+            ],
+            "both verb spellings bind a literal, a package-qualified receiver type \
+             normalizes, the call operand refuses, and the `Converter` receiver \
+             produces neither: {:?}",
             facts.refs
         );
         for r in facts
@@ -2816,6 +2842,40 @@ class Injected {
         assert_eq!(
             targets(&facts, ArtifactRelation::BrokerPublish),
             vec!["this-out".to_string()],
+            "the publish half of the same chain likewise resolves: {:?}",
+            facts.refs
+        );
+    }
+
+    /// A **fully-qualified** receiver type normalizes to its bare name. The Go
+    /// half of this lives in `go_capture_tests::the_go_topology_form_is_receiver_gated`
+    /// (`*kafka.StreamsBuilder`, the ordinary Go import shape); this is the Java
+    /// one, where an inline FQN is rarer but legal.
+    ///
+    /// Pinned because `bare_type_name`'s qualifier strip was documented and
+    /// unverified: dropping the `rsplit(['.', ':'])` left the whole suite green,
+    /// so the doc comment's own `*kafka.StreamsBuilder` -> `StreamsBuilder`
+    /// example was a claim about code nothing exercised.
+    #[test]
+    fn a_fully_qualified_receiver_type_normalizes_to_its_bare_name() {
+        let src = r#"
+package com.acme;
+class Qualified {
+    void topo(org.apache.kafka.streams.StreamsBuilder builder) {
+        builder.stream("fqn-in").to("fqn-out");
+    }
+}
+"#;
+        let facts = extract_java(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["fqn-in".to_string()],
+            "an inline FQN receiver type reaches the roster by its last segment: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["fqn-out".to_string()],
             "the publish half of the same chain likewise resolves: {:?}",
             facts.refs
         );
