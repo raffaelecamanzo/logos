@@ -1111,6 +1111,21 @@ fn a_uri_builder_composer_link_that_reaches_the_path_stays_refused_whole() {
             r#"builder -> builder.path("/users").build().normalize()"#,
         ),
         (
+            "a PATH-NEUTRAL-LOOKING call after the terminal. `port(…)` names a \
+             URI component, so the name test alone would admit it — what refuses \
+             it is that `build()` is admitted ONLY as the chain's outermost \
+             link. Past the terminal the builder's contract has stopped \
+             applying, so nothing about the link is proven",
+            r#"builder -> builder.path("/users").build().port(8080)"#,
+        ),
+        (
+            "a second `path(…)` NESTED in a neutral link's argument. Every \
+             CHAINED link here is neutral, so the parent walk admits them all; \
+             what refuses is the exactly-one-path-link scan, which cannot tell \
+             the nested `path(…)` apart from the chain's own",
+            r#"builder -> builder.path("/users").queryParam("q", helper.path("/other")).build()"#,
+        ),
+        (
             "`encode()` names no URI component, so nothing proves it cannot \
              rewrite the path — the rule fails closed",
             r#"builder -> builder.path("/users").encode().build()"#,
@@ -1135,7 +1150,8 @@ fn a_uri_builder_composer_link_that_reaches_the_path_stays_refused_whole() {
             r#"
 public class Calls {{
     private WebClient webClient;
-    Object chained(String segment, Object other) {{
+    private UriBuilder helper;
+    Object chained(String segment, Object other, String q) {{
         return webClient.get().uri({body}).retrieve();
     }}
 }}

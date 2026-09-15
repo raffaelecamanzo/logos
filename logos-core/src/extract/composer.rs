@@ -96,6 +96,12 @@ impl<'t> Composers<'t> {
     /// Returns empty — and runs no pass at all — for a query that declares no
     /// composer captures, which is every language but Java today. The whole cost
     /// of this module for such a language is one `capture_names` scan.
+    ///
+    /// That early return is a **performance** guard, not a correctness one, and
+    /// no test fails without it: a query declaring no composer captures matches
+    /// none, so the pass it skips would have collected nothing anyway. It is
+    /// what keeps the other nine languages' invocation arms from paying for a
+    /// second full query pass per client-gated file.
     pub fn collect(query: &Query, root: Node<'t>, source: &[u8]) -> Self {
         let names = query.capture_names();
         if !names.contains(&COMPOSER_PATH) {
@@ -193,6 +199,21 @@ impl<'t> Composers<'t> {
         // its start offset with every one of its links, so the innermost link is
         // the one that also ends first — equivalently, the only one that starts
         // where the chain starts and is a descendant of all the others.
+        //
+        // **The start-offset test is REDUNDANT against today's query and is kept
+        // as the backstop, which is stated because no test can fail without it.**
+        // Deleting it leaves every fixture green: a path link that is not the
+        // chain's innermost one is called on the link below it, so its receiver
+        // is a `method_invocation` and pattern 5a — which requires
+        // `object: (identifier)` — never binds it in the first place. The test
+        // therefore fires only if that constraint is ever widened, and it costs
+        // two comparisons. Written down rather than removed for the same reason
+        // the query file writes down its vacuously-true predicate: a guard that
+        // silently constrains nothing is a shipped-incident class here.
+        //
+        // The receiver comparison below is NOT redundant — dropping it admits
+        // `builder -> helper.path(…)`, which
+        // `the_uri_builder_composer_rule_is_probed_with_its_near_misses` catches.
         if path_link.link.start_byte() != chain.start {
             return None;
         }
