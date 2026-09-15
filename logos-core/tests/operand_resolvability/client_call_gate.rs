@@ -68,8 +68,12 @@
 //!
 //! # What is asserted, and what is only reported
 //!
-//! Asserted, with no corpus: the classifier's boundary rule on both edges, the
-//! [`Outcome::is_clean`] predicate, and Rust's stated ceiling.
+//! Asserted, with no corpus (eight of the nine tests here): the receiver
+//! reduction — both as a text rule and end-to-end through each arm's real
+//! grammar — and the segment split beneath it; the classifier's boundary rule
+//! on both edges; each arm's plugin name and corpus variable; the
+//! [`Outcome::is_clean`] predicate and the materiality floor the verdict reads;
+//! and Rust's stated ceiling, as a gate-isolating pair.
 //!
 //! Reported without assertion: the per-language counts. They are a property of
 //! the corpora, not of the code, and pinning a corpus figure in an assertion is
@@ -188,9 +192,14 @@ impl Arm {
                 "httpclient", "reqwest", "hyper", "isahc", "ureq", "awc", "surf",
             ],
             // "as Java (API-compatible)" — Spring's three plus the JDK's.
-            Arm::Kotlin => &[
-                "httpclient", "restclient", "resttemplate", "webclient", "okhttp",
-            ],
+            //
+            // `okhttp` was here and is removed: it appears in FR-WS-08's Kotlin
+            // row, in `kotlin/plugin.toml`'s detectors and in Java's nowhere, so
+            // it was an unsourced widening — and a widening ACCEPTS more
+            // receivers, which shrinks the non-HTTP share this module reports
+            // and argues against the very port it gates. (`okHttpClient` still
+            // clears, via the `httpclient` token run.)
+            Arm::Kotlin => &["httpclient", "restclient", "resttemplate", "webclient"],
             // `Net::HTTP`, Faraday.
             Arm::Ruby => &["httpclient", "nethttp", "faraday"],
             // Guzzle.
@@ -637,32 +646,25 @@ impl Outcome {
 /// typo'd path would otherwise read exactly like an honestly absent corpus, and
 /// those are the two states this whole module exists to keep apart.
 fn corpus_for(arm: Arm) -> Option<PathBuf> {
-    let raw = std::env::var(arm.env()).ok()?;
+    let raw = std::env::var(arm.env()).ok();
     // A set-but-blank value is the same class of typo as a mis-spelled path
     // (`export VAR=`, an unexpanded shell variable), so it takes the same loud
-    // path. Returning `None` here told an operator who HAD set the variable to
-    // set it — the one inconsistency in this module's own rule that the two
-    // states must never be confusable.
-    assert!(
-        !raw.trim().is_empty(),
-        "{} is set but blank — refusing to report {arm} unmeasured when the \
-         corpus is merely an empty value",
+    // path rather than the parent's `None`. Returning `None` here told an
+    // operator who HAD set the variable to set it — the one place this module
+    // broke its own rule that the two states must never be confusable.
+    if let Some(raw) = &raw {
+        assert!(
+            !raw.trim().is_empty(),
+            "{} is set but blank — refusing to report {arm} unmeasured when the \
+             corpus is merely an empty value",
+            arm.env(),
+        );
+    }
+    raw?;
+    super::corpus_from_var(
         arm.env(),
-    );
-    let home = std::env::var("HOME").unwrap_or_default();
-    let expanded = match raw.strip_prefix("~/") {
-        Some(rest) => PathBuf::from(&home).join(rest),
-        None if raw == "~" => PathBuf::from(&home),
-        None => PathBuf::from(&raw),
-    };
-    assert!(
-        expanded.is_dir(),
-        "{}={raw} does not resolve to a directory (expanded: {}) — refusing to \
-         report {arm} unmeasured when the corpus is merely mis-spelled",
-        arm.env(),
-        expanded.display(),
-    );
-    Some(expanded)
+        &format!("refusing to report {arm} unmeasured when the corpus is merely mis-spelled"),
+    )
 }
 
 /// Walk `root`, measuring only files whose plugin is `arm`'s.
@@ -1409,7 +1411,7 @@ fn rust_client_call_refusals(source: &str) -> usize {
 /// cannot fail.
 ///
 /// What this pins is **today's behaviour**, not desired behaviour: a
-/// `cache.get("/config/features")` inside a file importing `reqwest` IS
+/// `router.get("/config/features")` inside a file importing `reqwest` IS
 /// captured, and that is an [ADR-54] over-capture ceiling recorded rather than
 /// worked around. A port that narrows Rust to a receiver rule must change this
 /// test, and changing it is the point — it is what makes the narrowing visible.
@@ -1445,8 +1447,9 @@ pub async fn authorize(headers: &HeaderMap, router: &Router, client: &Client) {
 "#;
     let targets = rust_client_call_targets(SOURCE);
     // `client.get` is the positive control: it proves the file WAS scanned, so
-    // `cache.get` appearing beside it is the ledger gate admitting a non-client
-    // receiver — not the whole fixture quietly falling outside the gate.
+    // `router.get` appearing beside it is the ledger gate admitting a
+    // non-client receiver — not the whole fixture quietly falling outside the
+    // gate.
     assert_eq!(
         targets,
         // `dedup_sort_refs` orders the ledger by target, not by line.

@@ -145,6 +145,16 @@
 //! than a framework table, and is named here only so the reader does not have to
 //! decide that for themselves.
 //!
+//! Sprint 70 added two, in `client_call_gate` (S-404): `Arm::whole_names` and
+//! `Arm::token_names`, the five arms' HTTP-client receiver vocabularies. They
+//! are the most framework-specific entries on this list — `reqwest`, `hyper`,
+//! `webclient`, `resttemplate`, `guzzle`, `faraday` are library names — and
+//! each is sourced to that language's own normative row in FR-WS-08 rather than
+//! to a judgement made in the harness. `CALLEE_SEPARATORS` and `receiver_of`'s
+//! text reduction in the same module are NOT of this kind and are named here
+//! only so the next reader does not have to decide that: they are grammar
+//! punctuation, the way `is_deploy_path` is a directory convention.
+//!
 //! This list is **open, not closed**: anything of that kind added to this
 //! harness or its submodules is covered by the same carve-out and the same
 //! prohibition. The fitness function cannot enforce it — it scans
@@ -1350,7 +1360,18 @@ fn strictly_const(nodes: &[Node<'_>], src: &[u8], unit: &Unit<'_>) -> bool {
 /// test run, and a typo'd or un-checked-out corpus path would otherwise report
 /// success while measuring nothing.
 fn corpus_root() -> Option<PathBuf> {
-    let raw = std::env::var("LOGOS_REF_WORKSPACE").ok()?;
+    corpus_from_var("LOGOS_REF_WORKSPACE", "refusing to report a green run that measured nothing")
+}
+
+/// The corpus named by `var`, or `None` when that variable is unset.
+///
+/// One implementation, parameterised by variable name, because S-404's
+/// `client_call_gate` needs the same contract five more times (once per
+/// language) and copying it would put six spellings of "an absent corpus and a
+/// mistyped one are different states" in one test target. `blame` is the clause
+/// naming what the caller is refusing to do.
+fn corpus_from_var(var: &str, blame: &str) -> Option<PathBuf> {
+    let raw = std::env::var(var).ok()?;
     if raw.trim().is_empty() {
         return None;
     }
@@ -1362,8 +1383,7 @@ fn corpus_root() -> Option<PathBuf> {
     };
     assert!(
         expanded.is_dir(),
-        "LOGOS_REF_WORKSPACE={raw} does not resolve to a directory (expanded: {}) — \
-         refusing to report a green run that measured nothing",
+        "{var}={raw} does not resolve to a directory (expanded: {}) — {blame}",
         expanded.display(),
     );
     Some(expanded)
