@@ -316,11 +316,16 @@ pub struct GateResult {
     /// The 0–10000 signal this verdict gated on; `None` = "n/a", reported as such
     /// and never as a zero (ADR-12). **Which absence it means depends on who built
     /// the result**: [`gate`](crate::Engine::gate) computes it fresh, so `None` is
-    /// an empty graph; [`latest_gate`](crate::Engine::latest_gate) reads the last
-    /// *persisted* snapshot, so `None` there means no `scan` has recorded one — the
-    /// far commoner case on a freshly indexed project. A readout gating on this must
-    /// not name the cause without establishing it ([FR-EH-04], [CR-130]).
+    /// an empty production graph. [`latest_gate`](crate::Engine::latest_gate) reads
+    /// the last *persisted* snapshot, where `None` has **two** causes it does not
+    /// distinguish — no snapshot has been recorded at all (no `scan` has run, the far
+    /// commoner case on a freshly indexed project), or a snapshot exists whose
+    /// `aggregate_signal` is itself `None` because nothing was in production scope to
+    /// score ([FR-QM-08]). A readout gating on this must not name a cause this field
+    /// does not establish ([FR-EH-04], [CR-130]); whether a snapshot exists is what
+    /// separates the two, and the evolution series is where a surface can read it.
     ///
+    /// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
     /// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
     /// [CR-130]: ../../../docs/requests/CR-130-a-readout-names-a-remediation-that-cannot-apply.md
     pub signal: Option<u32>,

@@ -1902,8 +1902,12 @@ fn metric_snapshot_from_row(row: LatestMetricSnapshot) -> MetricSnapshot {
 /// read-only dashboard so a GET stays a pure read).
 ///
 /// A never-`scan`-ned store yields a `ScanResult` whose `metrics.empty` is
-/// `true` — the same honest sentinel `scan` returns for an empty graph — so the
-/// view renders the "run `logos scan`" empty state ([NFR-CC-04]), never zeros.
+/// `true` — the same honest sentinel `scan` returns for an empty production graph,
+/// so the flag alone does **not** say which of the two happened. A surface that
+/// names a cause or a next command must separate them first ([FR-EH-04], [CR-130]):
+/// whether any `metric_snapshots` row exists is the distinguishing fact, and the
+/// evolution series carries it. Either way the view renders an honest empty state,
+/// never zeros ([NFR-CC-04]).
 pub(crate) fn latest_scan(engine: &Engine) -> Result<ScanResult> {
     let metrics = latest_metrics(engine)?.unwrap_or(MetricSnapshot {
         empty: true,
