@@ -947,9 +947,10 @@ public class Calls {
 ///
 /// The `terminated` row is the estate's shape — Spring's
 /// `uri(Function<UriBuilder, URI>)` admits no other, so all 13 of the reference
-/// workspace's `.uri(<lambda>)` sites carry the terminal. The `bare` row pins
-/// the alternation's defensive branch; see the composition rule in
-/// `plugins/java/queries/invocations.scm` for why it is kept.
+/// workspace's `.uri(<lambda>)` sites carry the terminal. The `bare` row pins the
+/// defensive branch — since S-405 that is not an alternation at all: the terminal
+/// is simply optional in the reconciliation, not required by it. See the
+/// composition rule in `plugins/java/queries/invocations.scm` for why it is kept.
 ///
 /// The direct form is asserted **in the same call**, from the same fixture
 /// text, rather than written out as a third expected literal — "the same
@@ -1318,6 +1319,10 @@ fn the_uri_builder_composer_rule_is_probed_with_its_near_misses() {
         (
             "a terminal that is not `build`",
             r#"builder -> builder.path("/users").encode()"#,
+        ),
+        (
+            "a chain that OPENS with a path-neutral link, so `path(…)` is not              its innermost one",
+            r#"builder -> builder.queryParam("q", "v").path("/users").build()"#,
         ),
         (
             "a parenthesised lambda parameter",

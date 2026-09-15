@@ -169,9 +169,12 @@ impl<'t> Composers<'t> {
         let chain = composer.byte_range();
         let param = param.utf8_text(source).ok()?.trim();
 
-        // EXACTLY ONE path link in the chain. A second one anywhere inside it —
-        // chained (`path(a).path(b)`) or nested in another link's argument — is
-        // a template composed from two operands, and this arm reads one.
+        // EXACTLY ONE path link inside the chain's range. The case this decides
+        // is the NESTED one — `path("/x").queryParam("q", other.path("/y"))` —
+        // where a second `path(…)` this arm cannot tell apart from the chain's
+        // own lies inside a link's argument; it refuses rather than guess. A
+        // second CHAINED `path(a).path(b)` is already refused below, since a
+        // link naming the path component is never matched path-neutral.
         let mut path_link: Option<PathLink<'t>> = None;
         for candidate in &self.path_links {
             let range = candidate.link.byte_range();

@@ -442,6 +442,17 @@
 ;     not write at all. Pinned by
 ;     `a_uri_builder_composer_link_that_reaches_the_path_stays_refused_whole`
 ;     and `the_uri_builder_composer_rule_is_probed_with_its_near_misses`.
+;   * A `UriBuilder` lambda whose chain does not OPEN with its `path(…)` link —
+;     `builder -> builder.queryParam(…).path(…).build()`. Every link in that
+;     chain is provably path-neutral, so the contract test admits them all; what
+;     refuses it is the separate requirement that the `path(…)` link be the
+;     chain's INNERMOST one (pattern 5a's `object: (identifier)`, and the
+;     start-offset test in `extract::composer`). Under-capture, and zero such
+;     sites on the reference workspace — all 9 of its `src/main` sites are
+;     path-first. Stated as its own entry because the contract-test wording of
+;     the entry above does NOT cover it: a reader of that entry alone would
+;     conclude this shape is admitted. Pinned by
+;     `the_uri_builder_composer_rule_is_probed_with_its_near_misses`.
 ;   * A `UriBuilder` lambda whose parameter is parenthesised or typed
 ;     (`(builder) ->`, `(UriBuilder b) ->`) — pattern 5 constrains `parameters:`
 ;     to a bare `(identifier)`. Zero such sites in the reference workspace.
@@ -506,10 +517,11 @@
 ; `a_lambda_parameter_shadowing_a_bound_field_is_a_stated_over_capture`.
 ;
 ; Both residuals are left as ceilings rather than closed, deliberately. Closing
-; the SHADOWING one structurally would mean splitting pattern 5's operand
+; the SHADOWING one structurally would mean splitting pattern 5a's operand
 ; wildcard into member-call and non-member-call alternatives, so the operand's
-; receiver could be `#not-eq?`'d against the lambda parameter — four branches
-; for a hazard the API already blocks. For the RECEIVER one: pattern 1's inner
+; receiver could be `#not-eq?`'d against the lambda parameter — two branches
+; for a hazard the API already blocks. (It was four while S-399's pattern 5
+; carried two body branches; S-405 moved the operand to 5a, which has one body.) For the RECEIVER one: pattern 1's inner
 ; `object:` is legitimately a `method_invocation`
 ; (`WebClient.create(base).get().uri(…)`) and patterns 2-3's is a class name, so
 ; a receiver rule there would trade this over-capture for new UNDER-capture on
