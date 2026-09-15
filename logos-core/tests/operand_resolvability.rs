@@ -209,6 +209,20 @@ mod forwarding;
 #[path = "operand_resolvability/port_identity.rs"]
 mod port_identity;
 
+/// S-404's per-language client-call gate — its own module, so the five sibling
+/// corpora do not co-edit the file the configuration arm owns. Reads this
+/// module's `gate_admits` and `collect_sites` as the authority on what the
+/// arm's corpus and site set are; adds no predicate of its own to either.
+///
+/// It is the one submodule that does **not** walk `corpus_root()`: CR-128's
+/// gate is about five languages and no single workspace holds them, so each arm
+/// resolves its own corpus. See its module docs.
+///
+/// `#[path]`-attached for the same reason its four siblings are: a plain
+/// `tests/client_call_gate.rs` would become a second cargo test target.
+#[path = "operand_resolvability/client_call_gate.rs"]
+mod client_call_gate;
+
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
 /// printed by it.
