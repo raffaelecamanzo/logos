@@ -723,6 +723,7 @@ fn extract_one(
         &decls,
         &symbols,
         file_module.as_ref(),
+        properties,
         &mut facts,
     );
 
@@ -1047,7 +1048,27 @@ fn capture_http_client_call_arm(
 /// symbol is its innermost enclosing declaration — the same attribution
 /// `collect_refs` uses.
 ///
+/// # The accessor hop, built once and now reaching both arms (S-409, [FR-WS-19])
+///
+/// The [`BindingView`] below is constructed by the **same two lines** as
+/// [`capture_http_client_call_arm`]'s, deliberately and not by coincidence: a
+/// topic operand that reads a `@ConfigurationProperties` getter is the identical
+/// shape a request-path operand takes, and the HTTP arm resolved 81 of its 96
+/// such sites while this arm refused every one of them `topic-not-literal`
+/// ([CR-131] §3.2 A2). Nothing about the mechanism is broker-specific, so nothing
+/// about it is restated here — read [`config::accessor::BindingView::placeholder_for`]
+/// for the chain and [`broker::capture_broker_invocations`] for where the answer
+/// is put.
+///
+/// The `!properties.is_empty()` guard is the whole of what keeps a member with no
+/// configuration-bound class **byte-for-byte unaffected**: an index over no class
+/// resolves nothing, so the per-file `DeclaredTypes` walk is not made at all —
+/// and that is the common case for every repository shipping no `properties`
+/// capability. It is the same guard, for the same reason, the HTTP arm carries.
+///
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
 /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 #[allow(clippy::too_many_arguments)]
 fn capture_broker_invocation_arm(
     plugin: &dyn LanguagePlugin,
@@ -1056,11 +1077,18 @@ fn capture_broker_invocation_arm(
     decls: &[Decl<'_>],
     symbols: &[Option<LogosSymbol>],
     file_module: Option<&LogosSymbol>,
+    properties: &PropertiesIndex,
     facts: &mut Facts,
 ) {
     let Some(broker_query) = plugin.query("brokers") else {
         return;
     };
+    let binding = (!properties.is_empty()).then(|| BindingView {
+        index: properties,
+        types: DeclaredTypes::build(root, source),
+        language: plugin.name(),
+        module: MEMBER_SCOPE,
+    });
     let id_to_idx: HashMap<usize, usize> =
         decls.iter().enumerate().map(|(i, d)| (d.node.id(), i)).collect();
     let enclosing = |node: Node<'_>| -> Option<LogosSymbol> {
@@ -1075,7 +1103,15 @@ fn capture_broker_invocation_arm(
         }
         file_module.cloned()
     };
-    if broker::capture_broker_invocations(broker_query, root, source, enclosing, facts) > 0 {
+    if broker::capture_broker_invocations(
+        broker_query,
+        root,
+        source,
+        enclosing,
+        binding.as_ref(),
+        facts,
+    ) > 0
+    {
         // Broker refs are appended after the code-reference sort; restore the
         // canonical ledger order + dedup so the output stays byte-stable.
         dedup_sort_refs(&mut facts.refs);

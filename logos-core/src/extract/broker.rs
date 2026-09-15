@@ -47,6 +47,38 @@
 //! written; resolving it against committed configuration is [CR-117] §3.2's
 //! canonical-identity rule, downstream of this capture ([CR-107], [FR-WS-10] AC3).
 //!
+//! # The one non-literal operand that binds, and why it is not an exception
+//! **(S-409, 2026-09-15, [FR-WS-19], [CR-131] §3.2 A2)**
+//!
+//! Read the paragraphs above with this correction: "a non-literal operand never
+//! binds" is no longer the whole rule. A topic operand that reads a
+//! `@ConfigurationProperties` getter — `kafkaTopics.getArchiveEvents()`, bare or
+//! self-qualified — resolves to the **canonical `${prefix.key}` placeholder** for
+//! the key its owning class declares, and is then stored exactly as a
+//! source-written placeholder is. So it does not weaken [NFR-RA-05]: nothing is
+//! composed, guessed or read from the operand's source text. The placeholder names
+//! a key the repository *commits*, and every hop of the chain that produced it —
+//! accessor → field → owning class → annotation prefix → canonical key — is proved
+//! from committed source or the operand refuses whole
+//! ([`crate::extract::config::accessor::BindingView::placeholder_for`]).
+//!
+//! It is also not a second mechanism. This is the identical hop the HTTP arm has
+//! resolved request paths with since S-397/S-398 — literally the same
+//! `BindingView`, built by the same two lines one level up — and it reaches this
+//! arm through the **refusal slot**, because every shipped `brokers.scm` narrows
+//! the binding capture to `(string_literal)` and a getter call therefore arrives as
+//! the `(method_invocation)` arm of a slot's enumeration. The arm spends the
+//! `.scm`'s own enumeration rather than widening it; no query changed for S-409.
+//!
+//! What still refuses is everything the chain cannot prove: the nine named
+//! accessor faults of [FR-WS-19] (a nested getter, a method parameter, an unbound
+//! or ambiguous name, a non-getter, an unknown receiver type, a type naming no
+//! bound class, an undeclared property, an unrecognised shape) and every operand
+//! that was never an accessor — a qualified constant, a concatenation. All of them
+//! report through this arm's existing `topic-not-literal` vocabulary, which is the
+//! same collapse the HTTP arm makes into `base-url-runtime`; neither arm carries
+//! the reason to the ledger.
+//!
 //! # A refusal is recorded, not silent ([FR-WS-05], [NFR-CC-04])
 //! A refused topic used to leave *nothing* — no reference, no ledger row, no
 //! coverage entry — so a Spring estate whose topics are all externalised was
@@ -77,6 +109,14 @@
 //! operand, so the arm's honest output there is 54 recorded refusals and zero
 //! producers ([CR-117] §2).
 //!
+//! **That last sentence is S-370's reading and S-409 moved it.** "Non-literal" is
+//! still true of all 54, but non-literal no longer means unkeyable: most of those
+//! operands are accessors, and the hop above resolves them. The current reading is
+//! reported per member, with its denominator and its date, by
+//! `the_reference_workspace_reports_its_resolved_broker_sites_before_and_after_the_hop`
+//! in `logos-core/tests/broker_topic_corpus.rs` — one place, so it cannot go stale
+//! in two.
+//!
 //! [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
 //! [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
 //! [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
@@ -93,6 +133,7 @@ use std::ops::Range;
 
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
+use crate::extract::config::accessor::BindingView;
 use crate::extract::config::refs::{
     capture_invocation_refs, record_refusals, InvocationSite, RefusalCandidate,
 };
@@ -126,12 +167,20 @@ impl Side {
 /// resolver the code-reference collector uses. Returns the number of references
 /// captured (a language without the `brokers` capability never calls this).
 ///
+/// `binding` is the reading file's configuration-binding view (S-409,
+/// [FR-WS-19]) — [`None`] for a member declaring no `@ConfigurationProperties`
+/// class, which is what keeps such a member byte-for-byte unaffected. It is
+/// asked about the **refusal slot's** operand and nowhere else; see the accessor
+/// hop below for why that is the only node it could be asked about.
+///
 /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 pub(super) fn capture_broker_invocations<F>(
     query: &Query,
     root: Node<'_>,
     source: &[u8],
     enclosing: F,
+    binding: Option<&BindingView<'_>>,
     facts: &mut Facts,
 ) -> usize
 where
@@ -213,18 +262,82 @@ where
             }
         }
 
+        // ── THE ACCESSOR HOP (S-409, [FR-WS-19], [CR-131] §3.2 A2) ──────────
+        //
+        // The refusal slot is where it has to happen, and that is a fact about
+        // the queries rather than a choice made here: every shipped `brokers.scm`
+        // narrows `@broker.*.topic` to a `(string_literal)`, so a
+        // `kafkaTopics.getArchiveEvents()` operand never reaches `topic_node` at
+        // all — it arrives as the `(method_invocation)` arm of the slot's own
+        // enumeration, on its way to being reported `topic-not-literal`. Asking
+        // the binding view here is therefore asking it about the ONLY node that
+        // can carry an accessor.
+        //
+        // A resolved accessor takes the SAME two steps a literal takes below —
+        // its range joins `bound`, and it becomes an `InvocationSite` whose
+        // `topic` slot holds the canonical `${prefix.key}` placeholder — so the
+        // site re-enters the existing config-bound path with no second rule
+        // anywhere, and the refusal candidate it would otherwise have raised is
+        // cancelled by `record_refusals`' own site reconcile rather than by a
+        // flag set here. That reconcile is the mechanism the HTTP arm's
+        // `judged_operands` already uses; it is documented once, on
+        // `record_refusals`.
+        //
+        // The range joins `bound` BEFORE the enclosing-symbol lookup, for the
+        // reason the literal arm states about itself: an operand this arm
+        // RESOLVED but could not attribute binds nothing, and reporting its site
+        // `topic-not-literal` would be a wrong reason ([NFR-CC-04]).
+        //
         // The operand's enclosing declaration is resolved here rather than in the
         // recorder: an operand with no attributable declaration is not a
         // candidate at all, which is exactly how it was treated when the
         // attribution lived inside the recorder.
         if let (Some((slot_side, slot_node)), Some(site)) = (slot, site_node) {
-            if let Some(source) = enclosing(slot_node) {
-                candidates.push(RefusalCandidate {
-                    relation: slot_side.relation(),
-                    site: site.byte_range(),
-                    source,
-                    line: slot_node.start_position().row as u32 + 1,
-                });
+            match binding.and_then(|b| b.placeholder_for(slot_node, source)) {
+                Some(placeholder) => {
+                    bound.push((slot_side.relation(), slot_node.byte_range()));
+                    if let Some(source_symbol) = enclosing(slot_node) {
+                        let mut slots = BTreeMap::new();
+                        slots.insert("topic".to_string(), placeholder);
+                        // The same optional schema guard the literal arm applies,
+                        // read from the same match. No shipped `.scm` captures
+                        // `@broker.*.schema` beside a slot, so this composes the
+                        // key identically for a query that does rather than
+                        // leaving one arm of the key behind for the other to
+                        // drift from.
+                        if let Some(schema) = schema_node.and_then(|n| literal_text(n, source)) {
+                            slots.insert("schema".to_string(), schema);
+                        }
+                        let resolved = InvocationSite {
+                            source: source_symbol,
+                            slots,
+                            line: slot_node.start_position().row as u32 + 1,
+                        };
+                        match slot_side {
+                            Side::Publish => publishes.push(resolved),
+                            Side::Subscribe => subscribes.push(resolved),
+                        }
+                    }
+                }
+                // Unresolved — every one of [FR-WS-19]'s nine named accessor
+                // faults, and every operand that was never an accessor, lands
+                // here together and reports through the arm's existing
+                // `topic-not-literal` vocabulary. That collapse is not a loss of
+                // fidelity introduced by this story: it is exactly what the HTTP
+                // arm does with the same nine, which all reach its ledger as one
+                // `base-url-runtime` row. Widening the ledger to carry the reason
+                // is a change to the [FR-WS-05] reason set no acceptance
+                // criterion asks for, on either arm.
+                None => {
+                    if let Some(source) = enclosing(slot_node) {
+                        candidates.push(RefusalCandidate {
+                            relation: slot_side.relation(),
+                            site: site.byte_range(),
+                            source,
+                            line: slot_node.start_position().row as u32 + 1,
+                        });
+                    }
+                }
             }
         }
 
@@ -1328,6 +1441,10 @@ class OrderService {
             tree.root_node(),
             src.as_bytes(),
             |_| Some(symbol.clone()),
+            // No binding view: these guards are about the reconcile and the
+            // receiver gate, not about the accessor hop, and a member with no
+            // `@ConfigurationProperties` class is exactly what `None` models.
+            None,
             &mut facts,
         );
         facts
@@ -2495,10 +2612,17 @@ class Mixed {
 
     /// The estate's real topology shape — a `StreamsBuilder` formal parameter,
     /// a chained `stream(topic, serde) … .to(topic, serde)` — produces one
-    /// subscribe row and one publish row. Both are REFUSALS on this fixture
-    /// because the operand is a `@ConfigurationProperties` accessor, which is
-    /// what all 16 estate sites write and what [S-409] will resolve; what S-408
-    /// owns is that they are reported at all rather than absent ([NFR-CC-04]).
+    /// subscribe row and one publish row. What S-408 owns is that they are
+    /// reported at all rather than absent ([NFR-CC-04]).
+    ///
+    /// Both are REFUSALS **on this fixture**, and since S-409 that is a fact
+    /// about the fixture rather than about the operand: `extract_java` is a
+    /// single-file driver, so the arm receives no `BindingView` and the
+    /// accessor cannot resolve — exactly the `None` arm the production pass
+    /// takes for a member declaring no `@ConfigurationProperties` class. The
+    /// same two sites with the owning class in scope bind their canonical keys,
+    /// which is pinned end to end by
+    /// `extract::tests::an_accessor_topic_reaches_the_ledger_in_every_captured_broker_form`.
     #[test]
     fn the_estate_topology_shape_records_a_subscribe_and_a_publish_refusal() {
         let src = r#"

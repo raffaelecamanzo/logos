@@ -432,13 +432,23 @@
 ;       argument in every Kafka Streams overload of both methods, so the leading
 ;       anchor is the whole of the positional rule.
 ;
-;    WHAT THIS ADMITS ON THE REAL ESTATE: refusals, not edges. All 16 sites pass a
-;    `@ConfigurationProperties` accessor (`kafkaTopics.getArchiveEvents()`) or a
-;    qualified constant (`Topics.INPUT_TOPIC`), so every one reports
-;    `topic-not-literal` until [S-409] threads the accessor hop into this arm —
-;    the same shape the HTTP arm already resolves at 81 of 96 sites. That is the
-;    measured outcome of THIS story, not a defect: 16 honest refusals where there
-;    were 16 silences.
+;    WHAT THIS ADMITS ON THE REAL ESTATE — AMENDED 2026-09-15 (S-409). All 16
+;    sites pass a `@ConfigurationProperties` accessor
+;    (`kafkaTopics.getArchiveEvents()`) or a qualified constant
+;    (`Topics.INPUT_TOPIC`), and none is a literal. At S-408 that meant 16 honest
+;    `topic-not-literal` refusals where there had been 16 silences, which was the
+;    measured outcome of THAT story rather than a defect.
+;
+;    S-409 has since threaded the HTTP arm's `BindingView` into
+;    `extract::broker::capture_broker_invocations`, so the ACCESSOR operands now
+;    resolve to their canonical `${prefix.key}` placeholder and only the qualified
+;    constants still refuse. Nothing in this file changed for that: the accessor
+;    arrives through the `(method_invocation)` arm of the refusal slots' own
+;    enumeration, which is why the hop could be a core change with no query edit.
+;    The estate reading, dated and with its denominator, is in
+;    `the_reference_workspace_reports_its_resolved_broker_sites_before_and_after_the_hop`
+;    (`logos-core/tests/broker_topic_corpus.rs`), which prints it per member —
+;    deliberately not transcribed here, so there is one place it can go stale.
 
 ; Subscribe (topology form), BINDING: the topic operand is a static string literal.
 (method_invocation
