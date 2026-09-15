@@ -89,15 +89,19 @@ function DetailLink({ href, label }: { href: string; label: string }) {
 /** *Quality index* — the BR-34-banded signal + raw figure + PASS/FAIL badge.
  *
  *  The signal comes from the last persisted snapshot, which `scan` writes, so a null
- *  one means no scan has been run — never an empty graph, which this condition does
- *  not establish (FR-EH-04, CR-130). The un-indexed root is already the view's own
- *  single empty state above, so here `status.indexed` holds and `logos scan` is the
- *  step that produces the missing figure. */
+ *  one is never an empty graph — the un-indexed root is already the view's own single
+ *  empty state above, so `status.indexed` holds here (FR-EH-04, CR-130).
+ *
+ *  It states only the absence, not its cause. `OverviewModel` carries no fact that
+ *  separates "no scan has ever run" from "a scan ran and scored nothing in production
+ *  scope" (FR-QM-08) — the health tab has `evolution.snapshots` for that and says
+ *  which it is; this card does not, so it does not guess. `logos scan` is named as the
+ *  step that records a signal, which is what the card reports missing. */
 function QualityCard({ gate }: { gate: GateResult }) {
   return (
     <Card title="Quality index">
       {gate.signal === null ? (
-        <EmptyState message="No scan has been run yet — run" command="logos scan" />
+        <EmptyState message="No quality signal recorded yet — run" command="logos scan" />
       ) : (
         <>
           <div className={styles.heroFigure}>
