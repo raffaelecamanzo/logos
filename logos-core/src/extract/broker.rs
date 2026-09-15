@@ -367,10 +367,27 @@ const TOPOLOGY_RECEIVER_TYPES: [&str; 2] = ["StreamsBuilder", "KStream"];
 /// `streamsBuilder` declarations in `DownsamplerStream` are `StreamsBuilder`, so
 /// the estate is unaffected by the stricter reading.
 ///
-/// **Stated ceilings**, each an under-capture: a receiver that is not a simple
-/// name after the chain walk (a parenthesised expression, a cast, an array
-/// element) is refused; so is a receiver whose type is declared in another file
-/// (an inherited field, an interface-typed injection point).
+/// **Stated ceilings**, each an under-capture, each observed rather than guessed
+/// (the rows are in `a_receiver_whose_type_is_not_written_in_the_file_is_refused`):
+///
+///   - A receiver that is not a simple name after the chain walk — a
+///     parenthesised expression, a cast, an array element.
+///   - A receiver whose type is declared in another file: an inherited field, an
+///     interface-typed injection point.
+///   - **A receiver whose type is INFERRED rather than written.** Java `var b =
+///     new StreamsBuilder()`, Rust `let b = StreamsBuilder::new()`, Go
+///     `b := NewStreamsBuilder()` all bind no `type:` node, so the gate sees no
+///     declaration and refuses. Worth naming separately because it is not
+///     uniformly rare: `:=` is the *normal* way to declare a variable in Go, so
+///     the Go arm's reach is materially narrower than Java's, and
+///     `plugins/go/queries/brokers.scm` says so where a Go reader will find it.
+///   - A chain broken by an intervening operator the walk has no field for —
+///     Rust's `builder.stream(t)?.to(u)`, where the `?` makes the `to` receiver a
+///     `try_expression`. The `stream` half still binds; the `to` half is lost.
+///
+/// Every one errs the same way: nothing captured, so nothing fabricated
+/// ([NFR-RA-05]). Widening any of them is a story with its own measurement, not a
+/// quiet edit here.
 ///
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 /// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
@@ -440,12 +457,42 @@ fn chain_base_name(receiver: Node<'_>, source: &[u8]) -> Option<String> {
 /// The walk is whole-file and scope-blind on purpose: the caller's rule is that
 /// *every* declaration must agree, so a shadowing binding of a different type
 /// refuses the site rather than being resolved to the wrong one.
+///
+/// **A CALLABLE IS NOT A BINDING**, and missing that cost the gate correctness in
+/// both directions. Java's `method_declaration` carries a `type:` field — its
+/// RETURN type — beside a `name:` field, so the rule above read
+/// `private String builder() { … }` as "`builder` is declared `String`".
+/// Measured consequences, both on ordinary Spring code:
+///
+///   - FALSE REFUSAL. `void topo(StreamsBuilder builder)` next to any helper or
+///     getter named `builder()` disagreed with itself under the every-declaration
+///     rule, and the whole topology went silent — captured as nothing, refused as
+///     nothing, the invisible loss [NFR-CC-04] forbids. A getter named after the
+///     field it returns is about as idiomatic as Java gets.
+///   - FALSE ADMISSION. A receiver declared in no binding at all was admitted
+///     because a *method* of that name returned a roster type — exactly the
+///     inherited-field case [`receiver_is_topology`]'s ceilings promise to refuse.
+///
+/// The discriminator is STRUCTURAL, not a list of node kinds: a declaration that
+/// also carries a `parameters:` field declares a callable, and its `type:` is a
+/// return type rather than the type of a binding. That holds across the three
+/// grammars without naming any of them, and it needs no extension when a fourth
+/// ships a brokers query — unlike a kind deny-list, which is the closed selector a
+/// later language silently falls out of. (Go and Rust spell a return type
+/// `result:` / `return_type:` and never reached this, so the bug was Java's alone;
+/// the guard is written once for all of them anyway.) Pinned by
+/// `a_method_named_like_the_receiver_is_not_a_declaration_of_it`.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 fn declared_type_names(root: Node<'_>, name: &str, source: &[u8]) -> Vec<String> {
     let mut found = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         if let Some(ty) = node.child_by_field_name("type") {
-            if binds_name(node, name, source) {
+            // A callable declaration's `type:` is its RETURN type — never the
+            // type of the name it binds. See the note above; this one condition
+            // is the whole guard.
+            if node.child_by_field_name("parameters").is_none() && binds_name(node, name, source) {
                 if let Some(t) = bare_type_name(ty, source) {
                     found.push(t);
                 }
@@ -486,9 +533,19 @@ fn binds_name(node: Node<'_>, name: &str, source: &[u8]) -> bool {
 /// `StreamsBuilder`, `*kafka.StreamsBuilder` → `StreamsBuilder`. A type whose
 /// head is not a name (a slice, a tuple, a function type) yields `None`, which
 /// the caller reads as "declared, but not a roster type" — a refusal.
+///
+/// **A bracket anywhere refuses.** Go's `[]StreamsBuilder` and `map[string]KStream`
+/// and Rust's `[StreamsBuilder; 3]` already fell out as `None` because their head
+/// is empty or `map`; Java's `StreamsBuilder[]` did NOT, because its bracket is a
+/// suffix — so an array of builders was admitted as a builder. A collection of
+/// topology objects is not a topology receiver in any of the three languages, and
+/// refusing on the bracket makes that one rule instead of three accidents.
 fn bare_type_name(ty: Node<'_>, source: &[u8]) -> Option<String> {
     let raw = ty.utf8_text(source).ok()?;
-    let head = raw.split(['<', '(', '[']).next()?;
+    if raw.contains('[') {
+        return None; // an array/slice/map/index type is not a topology receiver
+    }
+    let head = raw.split(['<', '(']).next()?;
     let head = head.trim_matches(|c: char| c == '*' || c == '&' || c.is_whitespace());
     let last_token = head.split_whitespace().last()?;
     let bare = last_token.rsplit(['.', ':']).next()?.trim();
@@ -2483,6 +2540,152 @@ class Shadowed {
                 Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
             )),
             "an ambiguous receiver name refuses rather than guesses: {:?}",
+            facts.refs
+        );
+    }
+
+    /// **A method named like the receiver is not a declaration of it.** Java's
+    /// `method_declaration` carries a `type:` field (its RETURN type) beside a
+    /// `name:` field, so the whole-file declaration walk read a helper named
+    /// `builder()` as a declaration of `builder`. Under the
+    /// every-declaration-must-agree rule that made the topology **silent** —
+    /// captured as nothing AND refused as nothing, the one outcome [NFR-CC-04]
+    /// forbids — and it did so on about the most ordinary Java shape there is, a
+    /// getter named after what it returns.
+    ///
+    /// The same root cause admitted in the other direction: a receiver with no
+    /// binding anywhere, whose name happened to match a method returning a roster
+    /// type, was captured — the inherited-field case the gate's ceilings promise
+    /// to refuse. Both directions are pinned here, because a fix that only
+    /// restored the refusal would leave the false admission standing.
+    #[test]
+    fn a_method_named_like_the_receiver_is_not_a_declaration_of_it() {
+        // (a) a getter of another type must not silence the topology
+        let getter = r#"
+package com.acme;
+class WithGetter {
+    public void topo(StreamsBuilder streamsBuilder) {
+        streamsBuilder.stream("getter-in").to("getter-out");
+    }
+    public String streamsBuilder() { return ""; }
+}
+"#;
+        let facts = extract_java(getter);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["getter-in".to_string()],
+            "a same-named METHOD is not a binding and must not refuse the site: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["getter-out".to_string()],
+            "the publish half likewise survives the same-named method: {:?}",
+            facts.refs
+        );
+
+        // (b) the Spring `@Bean` factory shape, whose return type IS the roster
+        //     type — admitted for the right reason (the parameter), not because
+        //     the factory's return type happens to match.
+        let factory = r#"
+package com.acme;
+class WithFactory {
+    @Bean public StreamsBuilder builder() { return new StreamsBuilder(); }
+    void topo(StreamsBuilder builder) { builder.stream("factory-in").to("factory-out"); }
+}
+"#;
+        let facts = extract_java(factory);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["factory-in".to_string()],
+            "the @Bean factory shape is admitted by its parameter: {:?}",
+            facts.refs
+        );
+
+        // (c) the inverse: NO binding of `builder` anywhere, only a method that
+        //     returns a roster type. The receiver's type is not written in this
+        //     file, so the gate must refuse — silence, not a guess ([NFR-RA-05]).
+        let inherited = r#"
+package com.acme;
+class Inherited extends Base {
+    void topo() { builder.stream("inherited-in").to("inherited-out"); }
+    protected StreamsBuilder builder() { return null; }
+}
+"#;
+        let facts = extract_java(inherited);
+        assert!(
+            facts.refs.iter().all(|r| !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )),
+            "a method's return type is not the receiver's type — refuse, never guess: {:?}",
+            facts.refs
+        );
+    }
+
+    /// The gate's stated ceilings, asserted rather than only described. Each row
+    /// is an UNDER-capture: nothing captured, nothing fabricated ([NFR-RA-05]).
+    /// Pinned so that widening one is a deliberate change with a failing test
+    /// behind it rather than a silent drift in either direction.
+    #[test]
+    fn a_receiver_whose_type_is_not_written_in_the_file_is_refused() {
+        // `var` — the type is inferred, so no `type:` node is bound.
+        let inferred = r#"
+package com.acme;
+class Inferred {
+    void topo() {
+        var builder = new StreamsBuilder();
+        builder.stream("var-in").to("var-out");
+    }
+}
+"#;
+        let facts = extract_java(inferred);
+        assert!(
+            facts.refs.iter().all(|r| !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )),
+            "an inferred (`var`) receiver type is a stated ceiling, refused: {:?}",
+            facts.refs
+        );
+
+        // An ARRAY of builders is not a builder. Java's bracket is a suffix, so
+        // this is the one language where the head-of-type rule did not already
+        // refuse it.
+        let array = r#"
+package com.acme;
+class Arrays {
+    private StreamsBuilder[] builder;
+    void topo() { builder.stream("array-in").to("array-out"); }
+}
+"#;
+        let facts = extract_java(array);
+        assert!(
+            facts.refs.iter().all(|r| !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )),
+            "an array of topology objects is not a topology receiver: {:?}",
+            facts.refs
+        );
+
+        // An explicit local DOES bind — the contrast row, so the two assertions
+        // above cannot both pass by the capture being broken outright.
+        let explicit = r#"
+package com.acme;
+class Explicit {
+    void topo() {
+        StreamsBuilder builder = new StreamsBuilder();
+        builder.stream("explicit-in").to("explicit-out");
+    }
+}
+"#;
+        let facts = extract_java(explicit);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["explicit-in".to_string()],
+            "an explicitly typed local still binds — the ceilings are about \
+             INFERRED types, not about locals: {:?}",
             facts.refs
         );
     }

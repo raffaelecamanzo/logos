@@ -69,6 +69,21 @@
 ; file declares (`func topology(builder *StreamsBuilder)`, `var s KStream`). Read
 ; that function's rustdoc before widening either predicate.
 ;
+; WHAT THE GATE COSTS IN GO SPECIFICALLY, because it is not the same cost it has
+; in Java. The gate reads the receiver's type from a `type:` node the file
+; actually writes, so a receiver whose type is INFERRED is refused. In Java that
+; is `var`, which is a minority spelling; in Go it is `:=`, which is the *normal*
+; way to declare a variable — `builder := NewStreamsBuilder()` binds no type node
+; and its topology is therefore not captured. Only the written forms reach this
+; arm: a parameter (`func topology(builder *StreamsBuilder)`), a `var` spec
+; (`var builder StreamsBuilder`), a struct field, a method receiver. So this arm's
+; reach in idiomatic Go is materially narrower than the Java arm's, and that is a
+; stated ceiling rather than a surprise: it under-captures, fabricating nothing
+; ([NFR-RA-05]). Widening it needs local type inference, which this layer does not
+; have, and a story with its own measurement. Pinned from the Java side by
+; `extract::broker::java_capture_tests::a_receiver_whose_type_is_not_written_in_the_file_is_refused`,
+; whose `var` row is the same mechanism.
+;
 ; BOTH SPELLINGS of each verb are admitted. Go exports by capitalisation, so a
 ; port of the Streams API exports `Stream`/`To`; the lower-case spelling is what
 ; an unexported topology helper inside the same package writes. Admitting both
