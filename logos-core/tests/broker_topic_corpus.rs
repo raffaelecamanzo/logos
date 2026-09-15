@@ -1072,22 +1072,36 @@ impl MemberBrokerReading {
 ///
 /// ```text
 /// S-409 / CR-131 §3.2 A2, measured 2026-09-15 against ~/source/pec-services
-/// (84 members, 87 top-level entries).
+/// (87 top-level entries, 84 enrolled members).
 ///
-/// Per-member figures are printed by the run itself (stderr, `MEMBER  before
-/// resolved/rows  ->  after resolved/rows`); the totals it reported are:
+///   members producing any broker row:        23
+///   broker rows (the denominator):           86   ← unchanged by the hop
+///   rows whose operand resolved, before:     16   of 86
+///   rows whose operand resolved, after:      59   of 86
 ///
-///   members producing any broker row:       (see run output)
-///   broker rows, before:                    (see run output)
-///   rows whose operand resolved, before:    (see run output)
-///   broker rows, after:                     (see run output)
-///   rows whose operand resolved, after:     (see run output)
+/// The 43-row move is the accessor hop and nothing else: the two readings are
+/// the same walk of the same bytes on the same build, differing only in whether
+/// the member's `PropertiesIndex` exists. The 27 rows that still refuse are the
+/// operands the chain cannot prove — a qualified constant (`Topics.INPUT_TOPIC`),
+/// a method parameter (S-417's two-frame wrapper hop, out of scope), and the rest
+/// of FR-WS-19's nine named faults.
 ///
-/// The per-member breakdown is the criterion's deliverable and is reproduced in
-/// the sprint implementation notes with the run's own numbers; it is not
-/// transcribed into this doc comment, because a figure copied into prose beside
-/// the assertion that prints it is the stale-twin failure this module's S-408
-/// sibling keeps an explicit sweep list for.
+/// The per-member breakdown is printed by the run itself (stderr, one line per
+/// member: `MEMBER  before-resolved/rows -> after-resolved/rows`) and reproduced
+/// in the sprint implementation notes. It is deliberately NOT transcribed here:
+/// 23 figures copied into prose beside the assertion that prints them is exactly
+/// the stale-twin failure this module's S-408 sibling keeps an explicit sweep
+/// list for.
+///
+/// WHAT THIS DOES **NOT** MOVE, and why a reader should not go looking for it.
+/// The estate's coverage harnesses — `coverage_headline_baseline`,
+/// `coverage_intake_split`, `config_bound_admission` — read the ENROLLED
+/// `.logos` stores through `federation::discover`, not a fresh extraction, so
+/// none of them can see these 43 rows until the workspace is re-indexed. Their
+/// figures were verified byte-identical on this commit and on its merge base
+/// (2026-09-15): the five estate assertions that were already failing on main
+/// fail with the same numbers here, and this story moves none of them. In
+/// particular the HTTP arm's `config-bound` admitted count reads 84 in both.
 /// ```
 ///
 /// [CR-131]: ../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
