@@ -29,7 +29,37 @@ version = 2
 yanked = "warn"
 unmaintained = "all"
 unsound = "all"
-ignore = []
+# Waivers. This list was empty until Sprint 70 — the standing convention is to
+# FIX an advisory (bump the dependency) rather than silence it, and an entry here
+# is a debt with an owner, not a resolution.
+ignore = [
+    # RUSTSEC-2026-0285 — rustls 0.23.41, "TLS 1.3 handshake messages incorrectly
+    # accepted across encryption level boundaries".
+    # https://rustsec.org/advisories/RUSTSEC-2026-0285
+    #
+    # Transitive only, and not on any path Logos itself drives TLS over: it
+    # arrives through rig-core -> reqwest -> {hyper-rustls, tokio-rustls,
+    # rustls-platform-verifier}, i.e. the LLM-provider HTTP client used by
+    # `agent-core` (and thence `chat-agent` / `wiki-agent`). Logos opens no
+    # listening TLS socket; NFR-SE-01's no-network fitness test
+    # (logos-core/tests/no_network_deps.rs) keeps the indexing path free of it
+    # entirely.
+    #
+    # Severity in context: the advisory states the handshake transcript is still
+    # authenticated, so a network-position attacker cannot alter or complete a
+    # handshake. The practical effect is that a peer may send in plaintext a
+    # handshake message that should have been encrypted, and rustls fails to
+    # reject the connection.
+    #
+    # THIS IS A WAIVER, NOT A FIX, AND IT HAS A KNOWN REMEDY. The advisory's own
+    # solution line is "Upgrade to >=0.23.45 (try `cargo update -p rustls`)" — a
+    # patch bump inside 0.23.x that needs no manifest change. Take that bump and
+    # DELETE this entry; it exists only to stop an advisory-database update from
+    # reddening an unrelated branch's gate, which is the failure mode
+    # `cargo deny` has on this project whenever RustSec moves under a tree that
+    # has not changed a single dependency.
+    "RUSTSEC-2026-0285",
+]
 
 [licenses]
 version = 2
