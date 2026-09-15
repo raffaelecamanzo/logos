@@ -8,10 +8,12 @@
  * (web/src/views/health.rs, frontend-design §4.2): the gate verdict band leads,
  * then the per-metric quality grid + the folded structural drill-downs, then the
  * non-gated pointer to Files & Risk, then the signal-evolution trend — and its
- * honest states (an empty graph's gate is a muted `n/a` naming `logos index`; an
- * ADR-21 metric drop-out is a muted `n/a`, never a zero; no snapshots is an honest
- * empty state). Every read is GET-only — loading the view mutates no store
- * (ADR-28); sorting the tables is client-side over the full dataset.
+ * honest states (a gate and a metric grid with nothing to show name the step that
+ * would produce it — `logos scan` on a populated graph, `logos index` on an empty
+ * one, FR-EH-04/CR-130; an ADR-21 metric drop-out is a muted `n/a`, never a zero;
+ * no snapshots is an honest empty state). Every read is GET-only — loading the
+ * view mutates no store (ADR-28); sorting the tables is client-side over the full
+ * dataset.
  */
 
 import { AsyncResource, fetchHealth, useApiResource } from "../../api/index.ts";
@@ -21,6 +23,7 @@ import type {
   HealthModel,
   Offender,
   ScanResult,
+  StatusInfo,
 } from "../../api/types.ts";
 import {
   Badge,
@@ -61,8 +64,8 @@ export function HealthView() {
 function Health({ data }: { data: HealthModel }) {
   return (
     <div className={styles.view}>
-      <GateBand gate={data.gate} />
-      <MetricsCard scan={data.scan} />
+      <GateBand gate={data.gate} status={data.status} />
+      <MetricsCard scan={data.scan} status={data.status} />
       <Callout label="Non-gated tier" tone="muted">
         <span>
           Per-file commit/churn/risk detail now lives in <a href="/files">Files &amp; Risk</a>.
@@ -73,15 +76,27 @@ function Health({ data }: { data: HealthModel }) {
   );
 }
 
-/** The gate verdict band: PASS (green) / FAIL (red) + current-vs-baseline. An empty
- *  graph has no signal → a muted `n/a` callout naming the producing command. */
-function GateBand({ gate }: { gate: GateResult }) {
+/** The gate verdict band: PASS (green) / FAIL (red) + current-vs-baseline.
+ *
+ *  The verdict compares the **last persisted snapshot** to the baseline, so a null
+ *  signal means no snapshot has been recorded — which `scan` records, not `index`
+ *  (FR-EH-04, CR-130). The two causes are reported apart, each naming the step that
+ *  changes it: nothing indexed at all → `logos index`; a graph indexed but never
+ *  scanned → `logos scan`. The absence is never attributed to an empty graph, which
+ *  `gate.signal === null` does not establish. */
+function GateBand({ gate, status }: { gate: GateResult; status: StatusInfo }) {
   if (gate.signal === null) {
     return (
       <Callout label="Gate" tone="muted">
-        <span>
-          n/a — empty graph; run <code>logos index</code>
-        </span>
+        {status.indexed ? (
+          <span>
+            n/a — no scan has been run for this project; run <code>logos scan</code>
+          </span>
+        ) : (
+          <span>
+            n/a — nothing indexed yet; run <code>logos index</code>
+          </span>
+        )}
       </Callout>
     );
   }
@@ -98,13 +113,19 @@ function GateBand({ gate }: { gate: GateResult }) {
   );
 }
 
-/** The per-metric grid + aggregate, then the folded structural drill-downs. An
- *  empty graph renders the honest empty state, not a grid of zeroed placeholders. */
-function MetricsCard({ scan }: { scan: ScanResult }) {
+/** The per-metric grid + aggregate, then the folded structural drill-downs. With no
+ *  metrics to show, the honest empty state naming the producing step — not a grid of
+ *  zeroed placeholders, and not `logos index`: the metrics are what `scan` persists
+ *  (FR-EH-04, CR-130). A root with nothing indexed is the separate, earlier state. */
+function MetricsCard({ scan, status }: { scan: ScanResult; status: StatusInfo }) {
   if (scan.metrics.empty) {
     return (
       <Card title="Quality signal">
-        <EmptyState message="No metrics yet — run" command="logos index" />
+        {status.indexed ? (
+          <EmptyState message="No scan has been run yet — run" command="logos scan" />
+        ) : (
+          <EmptyState message="Nothing indexed yet — run" command="logos index" />
+        )}
       </Card>
     );
   }

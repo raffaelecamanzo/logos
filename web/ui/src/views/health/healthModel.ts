@@ -64,12 +64,14 @@ export function structuralDetails(scan: ScanResult): MetricDetail[] {
 }
 
 /** The aggregate quality signal: the scan signal, else the snapshot aggregate,
- *  else `null` (an empty graph — rendered as a muted `n/a`, never a zero). */
+ *  else `null` (nothing recorded to report — rendered as a muted `n/a`, never a
+ *  zero, and never described as an empty graph: this cannot tell the two apart,
+ *  FR-EH-04). */
 export function aggregateSignal(scan: ScanResult): number | null {
   return scan.signal ?? scan.metrics.aggregate_signal;
 }
 
-/** Render an optional signal as a figure or the empty-graph `n/a` sentinel. */
+/** Render an optional signal as a figure or the honest `n/a` sentinel. */
 export function optSignal(value: number | null): string {
   return value === null ? "n/a" : String(value);
 }

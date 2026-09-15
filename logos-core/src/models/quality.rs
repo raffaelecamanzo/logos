@@ -313,7 +313,16 @@ pub struct GateResult {
     /// `true` when this run upserted the baseline (`gate --save` /
     /// `session_start`, FR-GV-04).
     pub saved: bool,
-    /// The fresh 0–10000 signal; `None` = "n/a" (empty graph, ADR-12).
+    /// The 0–10000 signal this verdict gated on; `None` = "n/a", reported as such
+    /// and never as a zero (ADR-12). **Which absence it means depends on who built
+    /// the result**: [`gate`](crate::Engine::gate) computes it fresh, so `None` is
+    /// an empty graph; [`latest_gate`](crate::Engine::latest_gate) reads the last
+    /// *persisted* snapshot, so `None` there means no `scan` has recorded one — the
+    /// far commoner case on a freshly indexed project. A readout gating on this must
+    /// not name the cause without establishing it ([FR-EH-04], [CR-130]).
+    ///
+    /// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
+    /// [CR-130]: ../../../docs/requests/CR-130-a-readout-names-a-remediation-that-cannot-apply.md
     pub signal: Option<u32>,
     /// The baseline signal compared against, when one existed.
     pub baseline_signal: Option<u32>,

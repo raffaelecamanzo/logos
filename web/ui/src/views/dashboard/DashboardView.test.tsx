@@ -119,9 +119,33 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     expect(screen.queryByText("Quality index")).not.toBeInTheDocument();
   });
 
+  // FR-EH-04 (CR-130): the Quality index card is gated on `gate.signal`, which the
+  // *scan* produces. The whole view is already gated on `status.indexed`, so inside
+  // it a null signal can only mean no scan has run.
+  it("names `logos scan` on the Quality index card, never `logos index` (FR-EH-04)", async () => {
+    const m = clone();
+    m.gate.signal = null;
+    stub(m);
+    render(<DashboardView />);
+    expect(await screen.findByText(/No scan has been run yet/i)).toBeInTheDocument();
+    expect(screen.getByText("logos scan")).toBeInTheDocument();
+    expect(screen.queryByText(/quality signal yet/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/empty graph/i)).not.toBeInTheDocument();
+  });
+
+  it("names the command that writes the Project Overview, not the one that lists it (FR-EH-04)", async () => {
+    const m = clone();
+    m.overview_page = null;
+    stub(m);
+    render(<DashboardView />);
+    expect(await screen.findByText(/No project overview generated yet/i)).toBeInTheDocument();
+    expect(screen.getByText("logos wiki write overview/project-overview")).toBeInTheDocument();
+    expect(screen.queryByText("logos wiki status")).not.toBeInTheDocument();
+  });
+
   it("renders honest per-widget empty states, never fabricated figures", async () => {
     const m = clone();
-    m.gate.signal = null; // empty graph → no quality signal
+    m.gate.signal = null; // no scan run → no quality signal
     m.coverage.overall_coverage_bp = null; // no coverage ingested
     m.overview_page = null; // not yet generated
     m.stats.calls_total = 0; // no telemetry
@@ -129,7 +153,7 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     stub(m);
     render(<DashboardView />);
 
-    expect(await screen.findByText(/No quality signal yet/i)).toBeInTheDocument();
+    expect(await screen.findByText(/No scan has been run yet/i)).toBeInTheDocument();
     expect(screen.getAllByText(/No coverage ingested/i).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/No project overview generated yet/i)).toBeInTheDocument();
     expect(screen.getByText(/No telemetry yet/i)).toBeInTheDocument();

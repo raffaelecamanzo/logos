@@ -158,16 +158,40 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     expect(screen.getByText(/Showing 1–20 of 30/)).toBeInTheDocument();
   });
 
-  it("renders honest empty states for an empty graph and no snapshots", async () => {
+  // FR-EH-04 (CR-130): the gate and quality cards are gated on scan-derived data,
+  // so on a populated graph their absence means "no scan has run" — never "empty
+  // graph", which their own condition does not establish.
+  it("names `logos scan` when the graph is populated but no scan has run (FR-EH-04)", async () => {
     const m = clone();
+    m.status.indexed = true;
     m.gate.signal = null;
     m.scan.metrics.empty = true;
     m.evolution.snapshots = [];
     stub(m);
     render(<HealthView />);
-    expect(await screen.findByText(/n\/a — empty graph/i)).toBeInTheDocument();
-    expect(screen.getByText(/No metrics yet/i)).toBeInTheDocument();
+    // Gate band + Quality signal card both state the absence they can establish…
+    expect(await screen.findByText(/n\/a — no scan has been run/i)).toBeInTheDocument();
+    expect(screen.getByText(/No scan has been run yet/i)).toBeInTheDocument();
     expect(screen.getByText(/No snapshots yet/i)).toBeInTheDocument();
-    expect(screen.getByText("logos scan")).toBeInTheDocument();
+    // …and all three name the command that produces the missing figure.
+    expect(screen.getAllByText("logos scan").length).toBe(3);
+    // Neither names a step that cannot change what it reports, nor blames the graph.
+    expect(screen.queryByText("logos index")).not.toBeInTheDocument();
+    expect(screen.queryByText(/empty graph/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps a distinct state naming `logos index` for a genuinely empty graph (FR-EH-04)", async () => {
+    const m = clone();
+    m.status.indexed = false;
+    m.gate.signal = null;
+    m.scan.metrics.empty = true;
+    m.evolution.snapshots = [];
+    stub(m);
+    render(<HealthView />);
+    // Both the gate band and the Quality signal card say it, each naming `logos index`.
+    expect(await screen.findByText(/n\/a — nothing indexed yet/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/nothing indexed yet/i).length).toBe(2);
+    expect(screen.getAllByText("logos index").length).toBe(2);
+    expect(screen.queryByText(/no scan has been run/i)).not.toBeInTheDocument();
   });
 });

@@ -86,13 +86,18 @@ function DetailLink({ href, label }: { href: string; label: string }) {
   );
 }
 
-/** *Quality index* — the BR-34-banded signal + raw figure + PASS/FAIL badge. An
- *  empty graph has no signal → honest empty state, never a misleading bar. */
+/** *Quality index* — the BR-34-banded signal + raw figure + PASS/FAIL badge.
+ *
+ *  The signal comes from the last persisted snapshot, which `scan` writes, so a null
+ *  one means no scan has been run — never an empty graph, which this condition does
+ *  not establish (FR-EH-04, CR-130). The un-indexed root is already the view's own
+ *  single empty state above, so here `status.indexed` holds and `logos scan` is the
+ *  step that produces the missing figure. */
 function QualityCard({ gate }: { gate: GateResult }) {
   return (
     <Card title="Quality index">
       {gate.signal === null ? (
-        <EmptyState message="No quality signal yet — run" command="logos index" />
+        <EmptyState message="No scan has been run yet — run" command="logos scan" />
       ) : (
         <>
           <div className={styles.heroFigure}>
@@ -308,14 +313,19 @@ function ActivityCard({ stats }: { stats: StatsInfo }) {
 }
 
 /** *Project Overview* — a prose snippet of the agent wiki page, or an honest
- *  "not yet generated" empty state naming the producing path. */
+ *  "not yet generated" empty state naming the producing command.
+ *
+ *  The page is agent-authored prose the binary never writes itself (ADR-57), and
+ *  `wiki status` is a pure read that only *lists* the work — running it leaves the
+ *  page just as absent. So the state names the write that ends it (FR-EH-04,
+ *  CR-130), which is also the command `wiki status` hands out for this slug. */
 function ProjectOverviewCard({ page }: { page: WikiPage | null }) {
   if (page === null) {
     return (
       <Card title="Project Overview">
         <EmptyState
-          message="No project overview generated yet — it is written off the work-list of"
-          command="logos wiki status"
+          message="No project overview generated yet — an agent writes it with"
+          command="logos wiki write overview/project-overview"
         />
       </Card>
     );
