@@ -1080,28 +1080,45 @@ fn record_loc_rollup(runtime: &Runtime, indexed_loc: u64, test_loc: u64) -> Resu
 /// [`LAST_FULL_INDEX_AT_KEY`], so `status` can report it from **any** process
 /// ([CR-130], [FR-NV-07]).
 ///
-/// `files` is the number of files this index persisted. The stamp tracks the
-/// graph, not the command:
+/// `persisted` is the number of files this index actually loaded and stored
+/// ([`ExtractOutcome::files`]). The stamp dates the **graph**, not the command,
+/// so the three cases are:
 ///
-/// - `files > 0` — a graph was built, so the row is written (unix seconds).
-/// - `files == 0` — the walk admitted nothing and the always-purge reconcile
-///   above left an empty graph, so any earlier row is **removed**. `status`
-///   reports such a project `indexed: false`, and a timestamp beside that would
-///   date a graph that does not exist — the readout dishonesty [CR-130] is
-///   removing, not a second instance of it ([NFR-CC-04]). This is also what makes
-///   the reference workspace's three source-less members report the field absent
-///   while the 81 that carry a graph report it non-null.
+/// - `persisted > 0` — this index built a graph, so the row is written (unix
+///   seconds).
+/// - `persisted == 0` **and the store is empty** — the ordinary zero-admission
+///   case: the walk admitted nothing, the always-purge reconcile above removed
+///   whatever was there, and `status` reports the project `indexed: false`. Any
+///   earlier row is **removed**, because a timestamp beside `indexed: false`
+///   would date a graph that does not exist — the readout dishonesty [CR-130] is
+///   removing, not a second instance of it ([NFR-CC-04], [FR-EH-04]). A
+///   source-less workspace member reports the field absent for this reason.
+/// - `persisted == 0` **but a graph survives** — every admitted candidate failed
+///   to load (unreadable or non-UTF-8; see [`load_files`]), so nothing was
+///   re-stored, but `purge_unadmitted` is keyed on the *discovery* set and those
+///   files are still admitted, leaving the previous graph intact. The row is left
+///   **untouched**: that graph really was built, at the time the row records, and
+///   deleting it would report a populated graph as never indexed — precisely the
+///   [CR-130] symptom. Costs one extra read, and only on this path.
 ///
 /// A clock that cannot be read (a pre-epoch system time) writes nothing rather
 /// than storing `0`: absent is an honest empty state, `0` would be a fabricated
-/// timestamp at 1970-01-01 ([NFR-RA-05]).
+/// timestamp at 1970-01-01 ([FR-EH-04], [NFR-RA-05]).
 ///
 /// [CR-130]: ../../../docs/requests/CR-130-a-readout-names-a-remediation-that-cannot-apply.md
 /// [FR-NV-07]: ../../../docs/specs/requirements/FR-NV-07.md
+/// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-fn record_full_index_at(runtime: &Runtime, files: usize) -> Result<()> {
-    if files == 0 {
+fn record_full_index_at(runtime: &Runtime, persisted: usize) -> Result<()> {
+    if persisted == 0 {
+        // Which of the two zero-persist cases is this? Ask the store, using the
+        // same predicate `navigate::status` derives `indexed` from, so the row
+        // and the readout can never disagree.
+        let counts = runtime.submit_read(|store| store.counts())?;
+        if counts.files > 0 || counts.nodes > 0 {
+            return Ok(());
+        }
         return runtime.submit_write(move |w| w.clear_project_metadata(LAST_FULL_INDEX_AT_KEY));
     }
     let Some(now) = unix_seconds_now() else {

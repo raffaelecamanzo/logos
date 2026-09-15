@@ -353,7 +353,7 @@ fn status_reports_populated_counts_and_the_freshness_contract() {
     assert!(status.db_size_bytes > 0, "the store exists on disk");
     assert!(
         status.last_full_index_at.is_some(),
-        "a full index ran this process (FR-NV-07, UAT-NV-06)"
+        "a full index built this graph and dated it (FR-NV-07, UAT-NV-06)"
     );
     assert!(
         status.last_sync_at.is_some(),
@@ -673,6 +673,73 @@ fn the_last_full_index_stamp_is_absent_until_an_index_builds_a_graph() {
 }
 
 #[test]
+fn status_never_stamps_a_populated_graph_it_finds_undated() {
+    // ADR-28, the arm `the_last_full_index_stamp_is_absent_until_an_index_builds_a_graph`
+    // cannot reach: that test only ever reads an EMPTY graph, so a `status` that
+    // lazily back-fills the row when it finds a populated graph without one would
+    // leave it green. This is that state — a graph, and no stamp — and `status`
+    // must still write nothing.
+    let tmp = fixture();
+    let engine = indexed_engine(&tmp);
+    engine
+        .runtime()
+        .expect("runtime present")
+        .submit_write(|w| {
+            w.clear_project_metadata(logos_core::graph_store::LAST_FULL_INDEX_AT_KEY)
+        })
+        .expect("clearing the stamp commits");
+
+    assert!(engine.status().indexed, "the graph is still populated");
+    let _ = engine.status();
+    let _ = engine.status();
+
+    assert_eq!(
+        stored_stamp(&engine),
+        None,
+        "no write on read: status never back-fills the stamp it finds missing"
+    );
+    assert_eq!(
+        engine.status().last_full_index_at,
+        None,
+        "and it reports the absence rather than inventing a reading"
+    );
+}
+
+#[test]
+fn a_re_index_that_persists_nothing_keeps_the_stamp_of_the_graph_that_survives() {
+    // The stamp dates the graph, and `outcome.files` does not. When every admitted
+    // file fails to LOAD (unreadable or non-UTF-8), nothing is re-persisted — but
+    // `purge_unadmitted` is keyed on the discovery set and those files are still
+    // admitted, so the previous graph stands. Clearing the row there would report
+    // a populated graph as never indexed: the CR-130 symptom, re-created by the
+    // fix for it.
+    let tmp = fixture();
+    let engine = indexed_engine(&tmp);
+    let before = stored_stamp(&engine).expect("the first index stamped");
+
+    // Same paths, same admission — only the contents are now unreadable.
+    for rel in ["src/lib.rs", "src/util.rs"] {
+        fs::write(tmp.path().join(rel), [0xffu8, 0xfe, 0xff]).expect("write invalid UTF-8");
+    }
+    let result = engine.index();
+    assert_eq!(
+        result.files_indexed, 0,
+        "every admitted file failed to load, so none was persisted"
+    );
+
+    let status = engine.status();
+    assert!(
+        status.indexed,
+        "the previous graph survives — nothing was purged: {status:?}"
+    );
+    assert_eq!(
+        status.last_full_index_at.as_deref(),
+        Some(before.as_str()),
+        "the surviving graph keeps the date it was actually built"
+    );
+}
+
+#[test]
 fn a_full_index_that_admits_no_file_leaves_the_stamp_absent() {
     // The reference-workspace criterion, in miniature: on a cold
     // `init --workspace` the three source-less members run a full index that
@@ -684,6 +751,17 @@ fn a_full_index_that_admits_no_file_leaves_the_stamp_absent() {
     let engine = Engine::start(empty.path()).expect("engine starts");
 
     let result = engine.index();
+    // `files_indexed == 0` is ALSO what `degraded_index` returns when the index
+    // errors, so on its own it would let this test pass without ever reaching
+    // `record_full_index_at`. A degrade pushes "index failed: …" onto `warnings`,
+    // so requiring them empty is what pins that the index completed and
+    // deliberately left the stamp absent — and, with it, that clearing an absent
+    // key is the documented no-op rather than an error.
+    assert!(
+        result.warnings.is_empty(),
+        "the index completed; it did not degrade: {:?}",
+        result.warnings
+    );
     assert_eq!(
         result.files_indexed, 0,
         "the walk admitted nothing — this is the empty-member case"
