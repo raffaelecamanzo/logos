@@ -8,7 +8,52 @@
  * DOM, no React — every figure is a projection of a read-model field (NFR-RA-05).
  */
 
-import type { MetricSnapshot, MetricValue, Offender, ScanResult } from "../../api/types.ts";
+import type {
+  EvolutionReport,
+  MetricSnapshot,
+  MetricValue,
+  Offender,
+  ScanResult,
+  StatusInfo,
+} from "../../api/types.ts";
+
+/**
+ * Which absence a null gate signal / empty metric grid actually is.
+ *
+ * `gate.signal === null` and `scan.metrics.empty` are both produced by the metric
+ * snapshot, and a snapshot is absent — or present but unscorable — for three
+ * genuinely different reasons. A readout must name only the one its own condition
+ * establishes ([FR-EH-04], CR-130), so the discriminant is derived once here rather
+ * than re-guessed per card: the gate band and the quality grid gate on *different*
+ * fields and must not disagree about the cause.
+ *
+ * - `unindexed` — the graph holds no file and no node. `logos index` is the step.
+ * - `unscanned` — indexed, but `metric_snapshots` is empty, so no `scan` has ever
+ *   recorded one. `logos scan` is the step.
+ * - `no-production-scope` — indexed AND scanned, but the snapshot scored nothing:
+ *   the production metric graph is empty because every indexed symbol is test
+ *   scope or otherwise excluded ([FR-QM-08]). **No command changes this**, so a
+ *   readout in this state names none.
+ *
+ * [FR-EH-04]: ../../../../docs/specs/requirements/FR-EH-04.md
+ * [FR-QM-08]: ../../../../docs/specs/requirements/FR-QM-08.md
+ */
+export type SignalAbsence = "unindexed" | "unscanned" | "no-production-scope";
+
+/**
+ * Classify the absence behind a null signal or an empty metric grid.
+ *
+ * `status.indexed` is a whole-graph fact (`files > 0 || nodes > 0`, test nodes
+ * included); the metric snapshot's emptiness is a *production*-subgraph fact. The
+ * two are different questions, so `indexed` alone cannot tell `unscanned` from
+ * `no-production-scope` — `evolution.snapshots` supplies the missing bit, being
+ * non-empty exactly when a `metric_snapshots` row exists.
+ */
+export function signalAbsence(status: StatusInfo, evolution: EvolutionReport): SignalAbsence {
+  if (!status.indexed) return "unindexed";
+  if (evolution.snapshots.length === 0) return "unscanned";
+  return "no-production-scope";
+}
 
 /** One row of the quality-signal grid: a metric name and its value, or `null` for
  *  an applicability drop-out (Cohesion/Focus with no applicable construct). */
