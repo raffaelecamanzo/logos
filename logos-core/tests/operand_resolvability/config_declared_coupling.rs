@@ -420,6 +420,26 @@ pub struct Target {
 /// than a bare character-class test: `enabled: true` beside a `port` key would
 /// otherwise be a host label named `true`, and it is the *sibling-port* rule
 /// that puts such a key in scope at all.
+///
+/// # A second under-read, named here because the declaration does not name it
+///
+/// The declaration admits "a bare **DNS-name** host"; requiring a dot or a dash
+/// is stricter than that, and it refuses a single-label in-namespace name —
+/// `bare_host_label("kafka")` and `bare_host_label("webmail")` are both `None`.
+/// Review measured what that costs on the reference estate and the answer is
+/// **nothing**: every `host:`/`hostname:` line committing a dash-free member name
+/// sits either in a documentation or examples tree (dropped by
+/// [`identity::is_documentation`]) or in a Compose file whose sibling is
+/// `ports:`, a sequence, which the sibling-`port` rule refuses anyway. No
+/// addressed pair is lost.
+///
+/// It is recorded because the declaration's KNOWN UNDER-READ section names only
+/// the YAML-sequence skip, and a gate that falsified by one pair owes an
+/// adjudicator every place its reader is narrower than its own definition. The
+/// rule is **not** widened after the run: without a scheme there is nothing but
+/// shape to go on, `changeit` and `true` are shape-valid hosts, and relaxing an
+/// admission rule once the answer is known is what the declaration's COMMITMENT
+/// section forbids.
 pub fn bare_host_label(value: &str) -> Option<String> {
     let host = value.trim();
     // One allow-list, not an allow-list behind a blacklist. An earlier draft
@@ -747,12 +767,29 @@ fn collect_values(
 pub fn sequence_host_lines(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut in_sequence_at: Option<usize> = None;
+    let mut block_scalar_at: Option<usize> = None;
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         let indent = line.len() - line.trim_start().len();
+        // A `|` or `>` block scalar's BODY is text, not YAML, and a line inside
+        // it that happens to read `- host: x` is a string. Counting it would
+        // over-state the ceiling, and over-statement is the dangerous direction
+        // here: the finding's "the blind spot covers the gap" claim is read off
+        // this count, so an inflated ceiling would manufacture doubt about a
+        // falsification rather than record real doubt.
+        if let Some(block) = block_scalar_at {
+            if indent > block {
+                continue;
+            }
+            block_scalar_at = None;
+        }
+        if opens_block_scalar(trimmed) {
+            block_scalar_at = Some(indent);
+            continue;
+        }
         if let Some(seq) = in_sequence_at {
             if indent <= seq && !trimmed.starts_with('-') {
                 in_sequence_at = None;
@@ -773,6 +810,19 @@ pub fn sequence_host_lines(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether a line opens a YAML block scalar (`key: |`, `key: >-`, `key: |2`).
+///
+/// Only the indicator and its optional chomping/indentation modifiers may follow
+/// the `:`; `key: |pipe-value` is a plain scalar that starts with a pipe, not a
+/// block, and the fixture pins both.
+fn opens_block_scalar(trimmed: &str) -> bool {
+    let Some((_, rest)) = trimmed.split_once(':') else { return false };
+    let rest = rest.trim();
+    let Some(indicator) = rest.chars().next() else { return false };
+    (indicator == '|' || indicator == '>')
+        && rest[1..].chars().all(|c| c == '-' || c == '+' || c.is_ascii_digit())
 }
 
 // ── Topics ──────────────────────────────────────────────────────────────────
@@ -1611,7 +1661,7 @@ fn report_walk_cost(j: &Judgement) {
     println!(
         "    those {} lines would add at most {} pair(s) beyond the {} the headline counts.",
         rows.len(),
-        blind.len(),
+        j.blind_spot_pairs_count(),
         j.addressed_pairs(),
     );
     for ((a, b), files) in &blind {
@@ -1621,12 +1671,12 @@ fn report_walk_cost(j: &Judgement) {
         }
     }
     if j.addressed_pairs() < ADDRESSED_PAIR_FLOOR
-        && j.addressed_pairs() + blind.len() >= ADDRESSED_PAIR_FLOOR
+        && j.addressed_pairs() + j.blind_spot_pairs_count() >= ADDRESSED_PAIR_FLOOR
     {
         println!(
             "\n    THE BLIND SPOT COVERS THE GAP. {} + {} >= {ADDRESSED_PAIR_FLOOR}. The pair",
             j.addressed_pairs(),
-            blind.len(),
+            j.blind_spot_pairs_count(),
         );
         println!("    half is FALSIFIED as the declaration defines the corpus, and the margin is");
         println!("    smaller than a NAMED limitation of the reader. That is recorded here at the");
@@ -2177,7 +2227,7 @@ mod fixtures {
         )]
         .into_iter()
         .collect();
-        assert!(host_keys_with_sibling_port(&without_port).is_empty());
+        assert_eq!(host_keys_with_sibling_port(&without_port), Vec::new());
     }
 
     #[test]
@@ -2273,7 +2323,7 @@ mod fixtures {
         ]
         .into_iter()
         .collect();
-        assert!(host_keys_with_sibling_port(&values).is_empty());
+        assert_eq!(host_keys_with_sibling_port(&values), Vec::new());
     }
 
     // ── placeholder_key and the two readings ────────────────────────────────
@@ -2576,6 +2626,40 @@ mod fixtures {
             !parsed.keys().any(|k| k.ends_with("host")),
             "parse_yaml bound a host under a sequence; the ceiling's premise has changed",
         );
+    }
+
+    #[test]
+    fn a_host_inside_a_block_scalar_is_text_and_is_not_counted() {
+        // Over-counting is the DANGEROUS direction: the finding's "the blind
+        // spot covers the gap" claim is read off this ceiling, so an inflated
+        // count would manufacture doubt about a falsification instead of
+        // recording real doubt.
+        let text = "script: |\n  - host: inside-a-string.svc\n  - port: 1\nreal:\n                      upstreams:\n    - host: genuine.svc\n      port: 9000\n";
+        assert_eq!(sequence_host_lines(text), vec!["genuine.svc".to_string()]);
+        // And the indicator forms, with their chomping and indentation
+        // modifiers — `|`, `>-`, `|2` are blocks; `|pipe-value` is not.
+        for indicator in ["|", ">", "|-", ">-", "|+", "|2"] {
+            let t = format!("s: {indicator}\n  - host: in-a-block.svc\n");
+            assert_eq!(sequence_host_lines(&t), Vec::<String>::new(), "indicator {indicator}");
+        }
+        assert_eq!(
+            sequence_host_lines("s: |pipe-value\n- host: real.svc\n"),
+            vec!["real.svc".to_string()],
+            "a plain scalar beginning with a pipe does not open a block",
+        );
+    }
+
+    #[test]
+    fn a_single_label_host_is_refused_and_that_is_a_declared_under_read() {
+        // Stricter than the declaration's "bare DNS-name host". Measured to cost
+        // nothing on the reference estate, and asserted here so the gap between
+        // the declaration and the reader is a fact rather than a remark.
+        for single_label in ["kafka", "postgres", "webmail", "localhost"] {
+            assert_eq!(bare_host_label(single_label), None, "{single_label}");
+        }
+        // What it does admit: anything carrying a dot or a dash.
+        assert_eq!(bare_host_label("webmail.svc").as_deref(), Some("webmail"));
+        assert_eq!(bare_host_label("mailbox-api").as_deref(), Some("mailbox-api"));
     }
 
     #[test]
