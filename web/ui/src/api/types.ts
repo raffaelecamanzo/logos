@@ -268,7 +268,11 @@ export interface GateResult {
   /** Did the run clear the gate? Drives the PASS/FAIL badge. */
   passed: boolean;
   saved: boolean;
-  /** The 0–10000 quality signal, or `null` for an empty graph (no signal yet). */
+  /** The 0–10000 quality signal, or `null` when there is none to report. On the
+   *  read-only verdict the web surface consumes, that means **no snapshot has been
+   *  persisted** — i.e. no `scan` has run — and only secondarily an empty graph
+   *  (FR-EH-04, CR-130). A view gating on it must not attribute the absence to the
+   *  graph; `StatusInfo.indexed` is the field that establishes that. */
   signal: number | null;
   /** The baseline signal the run is compared against, or `null`. */
   baseline_signal: number | null;
@@ -398,7 +402,10 @@ export interface MetricSnapshot {
   edge_count: number;
   function_count: number;
   test_function_count: number;
-  /** True for an empty graph — the metrics grid renders the honest empty state. */
+  /** True when the snapshot carries no metrics — either no `scan` has been persisted
+   *  yet or the scanned graph was empty. The metrics grid renders the honest empty
+   *  state; which of the two causes it names is decided by `StatusInfo.indexed`,
+   *  never by this flag alone (FR-EH-04, CR-130). */
   empty: boolean;
   aggregate_signal: number | null;
 }
@@ -423,7 +430,8 @@ export interface WorstOffenders {
 
 /** The last persisted scan read-model (mirrors `ScanResult`). */
 export interface ScanResult {
-  /** The 0–10000 signal, or `null` for an empty graph. */
+  /** The 0–10000 signal, or `null` when the last persisted snapshot has none —
+   *  no `scan` recorded, or an empty graph (FR-EH-04, CR-130). */
   signal: number | null;
   freshness: string;
   metrics: MetricSnapshot;

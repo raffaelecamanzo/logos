@@ -119,9 +119,36 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     expect(screen.queryByText("Quality index")).not.toBeInTheDocument();
   });
 
+  // FR-EH-04 (CR-130): the Quality index card is gated on `gate.signal`, which the
+  // *scan* produces, so it never names `logos index`. It also never names a CAUSE:
+  // `OverviewModel` cannot separate "never scanned" from "scanned but nothing in
+  // production scope", so the card reports the absence and leaves the why to Health.
+  it("names `logos scan` on the Quality index card, and no cause it cannot establish (FR-EH-04)", async () => {
+    const m = clone();
+    m.gate.signal = null;
+    stub(m);
+    render(<DashboardView />);
+    expect(await screen.findByText(/No quality signal recorded yet/i)).toBeInTheDocument();
+    expect(screen.getByText("logos scan")).toBeInTheDocument();
+    expect(screen.queryByText("logos index")).not.toBeInTheDocument();
+    // Neither of the two causes is asserted, and the graph is never blamed.
+    expect(screen.queryByText(/no scan has been run/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/empty graph/i)).not.toBeInTheDocument();
+  });
+
+  it("names the command that writes the Project Overview, not the one that lists it (FR-EH-04)", async () => {
+    const m = clone();
+    m.overview_page = null;
+    stub(m);
+    render(<DashboardView />);
+    expect(await screen.findByText(/No project overview generated yet/i)).toBeInTheDocument();
+    expect(screen.getByText("logos wiki write overview/project-overview")).toBeInTheDocument();
+    expect(screen.queryByText("logos wiki status")).not.toBeInTheDocument();
+  });
+
   it("renders honest per-widget empty states, never fabricated figures", async () => {
     const m = clone();
-    m.gate.signal = null; // empty graph → no quality signal
+    m.gate.signal = null; // no scan run → no quality signal
     m.coverage.overall_coverage_bp = null; // no coverage ingested
     m.overview_page = null; // not yet generated
     m.stats.calls_total = 0; // no telemetry
@@ -129,7 +156,7 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     stub(m);
     render(<DashboardView />);
 
-    expect(await screen.findByText(/No quality signal yet/i)).toBeInTheDocument();
+    expect(await screen.findByText(/No quality signal recorded yet/i)).toBeInTheDocument();
     expect(screen.getAllByText(/No coverage ingested/i).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/No project overview generated yet/i)).toBeInTheDocument();
     expect(screen.getByText(/No telemetry yet/i)).toBeInTheDocument();

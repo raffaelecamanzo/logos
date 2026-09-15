@@ -8,10 +8,12 @@
  * (web/src/views/health.rs, frontend-design §4.2): the gate verdict band leads,
  * then the per-metric quality grid + the folded structural drill-downs, then the
  * non-gated pointer to Files & Risk, then the signal-evolution trend — and its
- * honest states (an empty graph's gate is a muted `n/a` naming `logos index`; an
- * ADR-21 metric drop-out is a muted `n/a`, never a zero; no snapshots is an honest
- * empty state). Every read is GET-only — loading the view mutates no store
- * (ADR-28); sorting the tables is client-side over the full dataset.
+ * honest states (a gate and a metric grid with nothing to show name the step that
+ * would produce it — `logos scan` on a populated graph, `logos index` on an empty
+ * one, FR-EH-04/CR-130; an ADR-21 metric drop-out is a muted `n/a`, never a zero;
+ * no snapshots is an honest empty state). Every read is GET-only — loading the
+ * view mutates no store (ADR-28); sorting the tables is client-side over the full
+ * dataset.
  */
 
 import { AsyncResource, fetchHealth, useApiResource } from "../../api/index.ts";
@@ -38,9 +40,11 @@ import {
   optDelta,
   optSignal,
   shortSha,
+  signalAbsence,
   structuralDetails,
   type MetricDetail,
   type MetricRow,
+  type SignalAbsence,
 } from "./healthModel.ts";
 import styles from "./Health.module.css";
 
@@ -59,10 +63,14 @@ export function HealthView() {
 
 /** The verdict-first Health page over a loaded health read-model. */
 function Health({ data }: { data: HealthModel }) {
+  // One classification for the whole page: the gate band and the quality grid gate
+  // on different fields (`gate.signal` vs `scan.metrics.empty`) and must not offer
+  // two different explanations for the same absence (FR-EH-04, CR-130).
+  const absence = signalAbsence(data.status, data.evolution);
   return (
     <div className={styles.view}>
-      <GateBand gate={data.gate} />
-      <MetricsCard scan={data.scan} />
+      <GateBand gate={data.gate} absence={absence} />
+      <MetricsCard scan={data.scan} absence={absence} />
       <Callout label="Non-gated tier" tone="muted">
         <span>
           Per-file commit/churn/risk detail now lives in <a href="/files">Files &amp; Risk</a>.
@@ -73,15 +81,17 @@ function Health({ data }: { data: HealthModel }) {
   );
 }
 
-/** The gate verdict band: PASS (green) / FAIL (red) + current-vs-baseline. An empty
- *  graph has no signal → a muted `n/a` callout naming the producing command. */
-function GateBand({ gate }: { gate: GateResult }) {
+/** The gate verdict band: PASS (green) / FAIL (red) + current-vs-baseline.
+ *
+ *  The verdict compares the **last persisted snapshot** to the baseline, so a null
+ *  signal is never an empty graph on its own evidence (FR-EH-04, CR-130) — it is
+ *  whichever of the three absences `signalAbsence` establishes, each naming only a
+ *  step that changes it, and the unscorable case naming none. */
+function GateBand({ gate, absence }: { gate: GateResult; absence: SignalAbsence }) {
   if (gate.signal === null) {
     return (
       <Callout label="Gate" tone="muted">
-        <span>
-          n/a — empty graph; run <code>logos index</code>
-        </span>
+        <span>{gateAbsence(absence)}</span>
       </Callout>
     );
   }
@@ -98,15 +108,50 @@ function GateBand({ gate }: { gate: GateResult }) {
   );
 }
 
-/** The per-metric grid + aggregate, then the folded structural drill-downs. An
- *  empty graph renders the honest empty state, not a grid of zeroed placeholders. */
-function MetricsCard({ scan }: { scan: ScanResult }) {
+/** The gate band's muted body, one per absence — never a grid of zeroed
+ *  placeholders, and never `logos index` for a figure `scan` produces. */
+function gateAbsence(absence: SignalAbsence) {
+  switch (absence) {
+    case "unindexed":
+      return (
+        <>
+          n/a — nothing indexed yet; run <code>logos index</code>
+        </>
+      );
+    case "unscanned":
+      return (
+        <>
+          n/a — no scan has been run for this project; run <code>logos scan</code>
+        </>
+      );
+    // Indexed and scanned, but nothing in production scope to score: no command
+    // changes this, so none is named (FR-EH-04).
+    case "no-production-scope":
+      return <>n/a — the last scan found no production functions to score</>;
+  }
+}
+
+/** The quality grid's honest empty state, one per absence — the same classification
+ *  the gate band renders, so the two cards cannot explain one absence two ways. */
+function metricsAbsence(absence: SignalAbsence) {
+  switch (absence) {
+    case "unindexed":
+      return <EmptyState message="Nothing indexed yet — run" command="logos index" />;
+    case "unscanned":
+      return <EmptyState message="No scan has been run yet — run" command="logos scan" />;
+    case "no-production-scope":
+      return (
+        <EmptyState message="The last scan found no production functions to score — every indexed symbol is test scope (FR-QM-08), so there is no quality signal to report." />
+      );
+  }
+}
+
+/** The per-metric grid + aggregate, then the folded structural drill-downs. With no
+ *  metrics to show, the honest empty state for whichever absence this is — the
+ *  metrics are what `scan` persists, not what `index` builds (FR-EH-04, CR-130). */
+function MetricsCard({ scan, absence }: { scan: ScanResult; absence: SignalAbsence }) {
   if (scan.metrics.empty) {
-    return (
-      <Card title="Quality signal">
-        <EmptyState message="No metrics yet — run" command="logos index" />
-      </Card>
-    );
+    return <Card title="Quality signal">{metricsAbsence(absence)}</Card>;
   }
   const aggregate = aggregateSignal(scan);
   const rows = metricRows(scan.metrics);
