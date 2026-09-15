@@ -1790,12 +1790,21 @@ fn s382_population(m: &super::Measurement) -> impl Iterator<Item = &super::Site>
 /// it. **A census, not a floor** — another Java estate writing RestTemplate or
 /// Feign has none of these sites at all.
 ///
-/// The denominator did NOT move (96) for the fourth time running, so the five
-/// restatements listed in the assertion message below are NOT re-recorded: each
-/// of them states the denominator, and this move did not touch it. The one
-/// exception is the LIVE sentence in FR-WS-19's Notes, which restates this
-/// arm's RESOLVED half (82) rather than its denominator; [S-405] appends the
-/// new reading there rather than rewriting the dated one.
+/// The denominator did NOT move (96) for the fourth time running, so nothing that
+/// restates the DENOMINATOR needed re-recording. Four places restate this arm's
+/// RESOLVED half instead, and every one of them is live rather than dated, so
+/// [S-405] appended the new reading to each rather than rewriting it:
+/// FR-WS-19's Notes; `config_bound_admission.rs`'s module docs and its
+/// `RECORDED_ADMITTED` forward expectation (84-of-84 -> 90-of-90, ~84 -> ~90);
+/// `config_bound_admission/config_bound_admission_finding.txt`; and the
+/// harness-resolvable row of the accessor table in `docs/howto/commands.md`.
+///
+/// **An earlier draft of this paragraph said FR-WS-19 was the ONLY such place,
+/// and that was wrong** — the S-405 review found the other three. The lesson is
+/// the one this repository keeps relearning: when a figure moves, grep every
+/// sibling for the SHAPE of the figure, not for the figure's own name. The five
+/// denominator restatements and these four resolved-half restatements are
+/// different lists, and only the first is enumerated in the assertion message.
 ///
 /// **The product side still reads 81 and is NOT stale.** `RECORDED_ADMITTED` in
 /// `config_bound_admission.rs` reads each member's INDEXED store and this

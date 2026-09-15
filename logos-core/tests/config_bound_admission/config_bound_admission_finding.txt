@@ -102,6 +102,21 @@ things moved here, one of each kind, and they are never netted.
   was outside the sprint review's write scope. The divergent split (2) is the half
   that has held across all three moves.]
 
+  [SUPERSEDED IN PART AGAIN 2026-09-15 by S-405 (sprint-70, CR-129). The harness
+  pin quoted in the note above as (96, 82, 2, 12) now reads (96, 88, 2, 6).
+  CR-129 widened S-399's UriBuilder-lambda pattern from "path(...) and an
+  optional build(...)" to "path(...) and any number of links that provably
+  cannot alter the path template", so the SIX further estate sites that chain a
+  queryParam-family link — the residue S-399 left — present the configuration
+  accessor they always had. The harness's upper bound is therefore 90 (88
+  agreed-key + 2 overlay-divergent), not 84, and the expected post-re-index
+  product reading is ~90, not ~84. Everything else in the 2026-09-14 note stands:
+  the PRODUCT figure of 81 is still NOT restated and still reproduces, for the
+  same reason — this file reads each member's indexed store and the estate's
+  index predates both stories. The denominator has not moved (96) for the fourth
+  consecutive re-record. The divergent split (2) is the half that has held across
+  all four moves. No floor is asserted on any of these figures.]
+
 
 (b) THE `base-url-runtime` RESIDUE, WITH ITS OWN DENOMINATORS
 -------------------------------------------------------------

@@ -1098,7 +1098,7 @@ Five things worth knowing about these fields:
   |---|---|
   | rows carrying `config-bound` provenance | **81** (was 44) |
   | the accessor denominator (production client-call sites the arm refuses without configuration) | 96 (was 108) |
-  | what the measurement harness proves resolvable on that denominator | 81 on 2026-09-13; **84 on merged `main`** — see the note below |
+  | what the measurement harness proves resolvable on that denominator | 81 on 2026-09-13; 84 on merged `main` 2026-09-14; **90 on merged `main` 2026-09-15** — see the note below |
   | rows carrying `config-unresolved` provenance | 0 |
 
   (The 96 and the 81 are measured and pinned by
@@ -1116,6 +1116,17 @@ Five things worth knowing about these fields:
   store and this estate's index predates that story. A re-index is expected to
   bring the product to ~84 and restore the agreement at 84-of-84; record whatever
   it reads rather than bending anything to reproduce 81.
+
+  **Re-measured 2026-09-15: the harness half now reads 90, and the expectation is
+  90-of-90.**
+  [S-405](../planning/journal.md#s-405-a-path-neutral-composer-link-resolves-on-its-path-operand)
+  ([CR-129](../requests/CR-129-path-neutral-composer-link-in-a-uribuilder-lambda.md))
+  widened that same `UriBuilder` rule from "`path(…)` and an optional `build(…)`"
+  to "`path(…)` and any number of links that provably cannot alter the path
+  template", which admits the **six** remaining lambda sites on this estate — the
+  ones that chain a `queryParam`-family link. The paragraph above is the
+  2026-09-14 reading and is left standing as the dated record it is. The product
+  half still reads 81 for the unchanged reason, and the denominator is still 96.
 
   **No floor is asserted on either figure, and none should be read into them.**
   The 81-of-81 agreement is what one estate produced on one date, not a property
