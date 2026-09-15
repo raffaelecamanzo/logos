@@ -209,9 +209,54 @@ impl std::fmt::Display for Arm {
 
 // ── The receiver, and what makes one client-named ───────────────────────────
 
-/// The separators a receiver-method callee can be spelled with, longest first
-/// so `->` and `::` are found before the `-`/`:` inside them never matter.
-const CALLEE_SEPARATORS: [&str; 4] = ["->", "::", "?.", "."];
+/// The separators a receiver-method callee can be spelled with across the five
+/// grammars: PHP's `->` and `?->` (the latter ends in `->`), the path `::`,
+/// Kotlin's and C#'s safe call `?.`, Ruby's safe navigation `&.`, and the plain
+/// `.`.
+///
+/// # The cut is taken at the separator that ENDS last, longest wins a tie
+///
+/// Array order decides nothing — the selection in [`receiver_of`] is what has
+/// to be right, and the naive spelling (`max` over the separator's START index)
+/// is wrong for every separator that has a shorter one as a **suffix**. `.` is a
+/// suffix of `?.` and of `&.`, and it starts one byte LATER, so a start-index
+/// rule cut `httpClient?.get` at the `.` and produced the receiver
+/// `"httpClient?"` — whose trailing `?` then defeated both the whole-name rule
+/// and the token-run rule, classifying a genuine client as non-HTTP.
+///
+/// That mattered in the fail-unsafe direction: a safe-called client landing in
+/// the non-HTTP column **inflates** the over-capture share [CR-128] §6 gates a
+/// port on. It was invisible in the recorded run only because Rust has no safe
+/// call and the three languages that do were all GATE-UNEXERCISED — it would
+/// have fired on the first re-measurement the finding itself asks for.
+///
+/// Pinned by [`the_receiver_reduction_handles_each_arms_spelling`] over all
+/// three spellings, and end-to-end through the real grammars by
+/// [`the_receiver_reduction_runs_over_each_arms_real_grammar`].
+///
+/// [CR-128]: ../../docs/requests/CR-128-client-call-candidacy-gate-siblings-are-file-grained.md
+const CALLEE_SEPARATORS: [&str; 6] = ["->", "::", "?.", "&.", ".", "?->"];
+
+/// The subset of [`CALLEE_SEPARATORS`] that accesses a VALUE on another value,
+/// as opposed to `::`, which qualifies one type path. [`receiver_parts`] splits
+/// on these to find the last access and on `::` within it.
+const VALUE_SEPARATORS: [&str; 5] = ["->", "?->", "?.", "&.", "."];
+
+/// The cut for `callee`: the separator whose END offset is greatest, ties
+/// broken toward the LONGEST separator.
+///
+/// One spelling, used by both [`receiver_of`] and [`receiver_parts`], because
+/// those two disagreed about `?.` in this module's first draft — one keyed on
+/// the start offset and the other on the end — and two readers over one notion
+/// is the hand-mirrored-twin defect the rest of this harness is careful to
+/// avoid. Returns `(start, end)` of the winning separator.
+fn last_separator(callee: &str, separators: &[&str]) -> Option<(usize, usize)> {
+    separators
+        .iter()
+        .filter_map(|sep| callee.rfind(sep).map(|i| (i, i + sep.len(), sep.len())))
+        .max_by_key(|(_, end, len)| (*end, *len))
+        .map(|(start, end, _)| (start, end))
+}
 
 /// The receiver expression of the call whose first argument is `arg`, as source
 /// text, or `None` when the argument has no enclosing call node.
@@ -261,15 +306,40 @@ fn receiver_of<'t>(arg: Node<'t>, src: &'t [u8]) -> Option<String> {
     }
     // Everything before the final separator is the receiver; the segment after
     // it is the verb.
-    let cut = CALLEE_SEPARATORS
-        .iter()
-        .filter_map(|sep| callee.rfind(sep).map(|i| (i, sep.len())))
-        .max_by_key(|(i, _)| *i)?;
-    let receiver = callee[..cut.0].trim();
+    let (cut, _) = last_separator(callee, &CALLEE_SEPARATORS)?;
+    let receiver = strip_leading_keywords(callee[..cut].trim());
     if receiver.is_empty() {
         None
     } else {
         Some(receiver.to_string())
+    }
+}
+
+/// Expression keywords a grammar can leave inside the receiver slice.
+///
+/// tree-sitter-c-sharp gives `await client?.GetAsync("/x")` an
+/// `invocation_expression` spanning the whole **await** expression, so the
+/// byte-slice rule above yields `await client` — and `segments` does not split
+/// on a space, so the whole-name rule never saw `client` and a genuine
+/// `HttpClient` call classified as non-HTTP. (The non-safe-called form is
+/// unaffected: its `invocation_expression` starts at `client`. So the two
+/// spellings of one call disagreed.)
+///
+/// Stripping the leading keyword run is preferred over treating whitespace as a
+/// segment boundary: the latter would also make `client /* c */` classify as a
+/// client, and a receiver carrying a comment is a shape this reduction has
+/// always declared it does not normalise.
+const RECEIVER_KEYWORDS: [&str; 4] = ["await", "return", "yield", "new"];
+
+/// Drop any leading [`RECEIVER_KEYWORDS`] run from a receiver slice.
+fn strip_leading_keywords(receiver: &str) -> &str {
+    let mut out = receiver.trim();
+    loop {
+        let Some((head, rest)) = out.split_once(char::is_whitespace) else { return out };
+        if !RECEIVER_KEYWORDS.contains(&head) {
+            return out;
+        }
+        out = rest.trim_start();
     }
 }
 
@@ -293,11 +363,8 @@ fn receiver_of<'t>(arg: Node<'t>, src: &'t [u8]) -> Option<String> {
 /// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
 /// [S-402]: ../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
 fn receiver_parts(receiver: &str) -> Vec<String> {
-    let value = ["->", "?.", "."]
-        .iter()
-        .filter_map(|sep| receiver.rfind(sep).map(|i| i + sep.len()))
-        .max()
-        .map_or(receiver, |i| &receiver[i..]);
+    let value = last_separator(receiver, &VALUE_SEPARATORS)
+        .map_or(receiver, |(_, end)| &receiver[end..]);
     value
         .split("::")
         .map(|p| p.trim().trim_start_matches(['$', '@', '&', '*']).to_string())
@@ -1021,6 +1088,131 @@ fn the_receiver_reduction_handles_each_arms_spelling() {
     assert!(
         is_client_named(Arm::Rust, "reqwest::Client::new()"),
         "a `::` path names ONE thing, so every segment of it decides"
+    );
+
+    // Safe call / safe navigation. `.` is a SUFFIX of `?.` and `&.` and starts
+    // one byte later, so a cut taken at the separator's START index picks the
+    // `.` and leaves the `?`/`&` dangling on the receiver — which then defeats
+    // both the whole-name and the token-run rule. Three of the five arms spell
+    // their idiomatic call this way.
+    assert_eq!(receiver_parts("httpClient?.get"), ["get"]);
+    for (arm, receiver) in [
+        (Arm::Kotlin, "httpClient?"),
+        (Arm::Kotlin, "restClient?"),
+        (Arm::CSharp, "_httpClient?"),
+        (Arm::Ruby, "@http_client&"),
+    ] {
+        assert!(
+            !is_client_named(arm, receiver),
+            "a dangling safe-call sigil must not be part of the name: {receiver}"
+        );
+    }
+}
+
+/// The receiver reduction, end to end through each arm's **real** grammar and
+/// **real** `invocations.scm` — the half
+/// [`the_receiver_reduction_handles_each_arms_spelling`] does not reach.
+///
+/// [`receiver_of`] had no corpus-free test at all until this one: it was
+/// exercised only through the env-gated corpus walk, so replacing its body with
+/// `return None` left the whole suite green while every site in a real
+/// measurement classified non-HTTP — the module's headline conclusion,
+/// manufactured from a function that returns nothing.
+///
+/// Most cases below are a **pair**: the plain spelling and the safe-called one,
+/// so the operator is provably the only difference between them.
+#[test]
+fn the_receiver_reduction_runs_over_each_arms_real_grammar() {
+    fn receivers(ext: &str, source: &str) -> Vec<String> {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let plugin = registry.for_extension(ext).unwrap_or_else(|| panic!("no {ext} grammar"));
+        let query = plugin.query("invocations").expect("invocations query");
+        let mut parser = Parser::new();
+        parser.set_language(plugin.language()).expect("language");
+        let tree = parser.parse(source, None).expect("parse");
+        let src = source.as_bytes();
+        super::collect_sites(query, tree.root_node(), src, &plugin.semantics().invocation_methods)
+            .into_iter()
+            .map(|(_, arg)| receiver_of(arg, src).unwrap_or_default())
+            .collect()
+    }
+
+    // Rust: a plain receiver, and the `::` path whose LAST segment is `new()`.
+    assert_eq!(
+        receivers("rs", "use reqwest::Client;\nfn f(c: &Client) { let _ = c.get(\"/a\"); }\n"),
+        vec!["c".to_string()],
+    );
+    assert_eq!(
+        receivers(
+            "rs",
+            "use reqwest::Client;\nfn f() { let _ = reqwest::Client::new().get(\"/a\"); }\n",
+        ),
+        vec!["reqwest::Client::new()".to_string()],
+    );
+
+    // Kotlin: `?.` must reduce exactly as `.` does.
+    let kt_plain = receivers("kt", "class A(val httpClient: C) { fun f() { httpClient.get(\"/a\") } }\n");
+    let kt_safe = receivers("kt", "class A(val httpClient: C?) { fun f() { httpClient?.get(\"/a\") } }\n");
+    assert_eq!(
+        kt_plain, kt_safe,
+        "a safe call must reduce to the same receiver as the plain call"
+    );
+    assert!(!kt_plain.is_empty(), "the kotlin fixture captured no site at all");
+    assert!(
+        kt_plain.iter().all(|r| is_client_named(Arm::Kotlin, r)),
+        "kotlin receivers: {kt_plain:?}"
+    );
+
+    // C#: the safe-called form additionally hands back an `invocation_expression`
+    // spanning the whole `await` expression, so the keyword strip is what makes
+    // the two spellings agree.
+    let cs_plain = receivers(
+        "cs",
+        "using System.Net.Http;\nclass A { HttpClient client; async void M() { await client.GetAsync(\"/x\"); } }\n",
+    );
+    let cs_safe = receivers(
+        "cs",
+        "using System.Net.Http;\nclass A { HttpClient client; async void M() { await client?.GetAsync(\"/x\"); } }\n",
+    );
+    assert_eq!(cs_plain, cs_safe, "`await` and `?.` must not change the receiver");
+    assert!(!cs_plain.is_empty(), "the c# fixture captured no site at all");
+    assert!(
+        cs_plain.iter().all(|r| is_client_named(Arm::CSharp, r)),
+        "c# receivers: {cs_plain:?}"
+    );
+
+    // Ruby: `&.` is safe navigation and is a separator like `.`.
+    let rb_plain = receivers(
+        "rb",
+        "require 'net/http'\nclass A\n  def f; @http_client.get(\"/a\"); end\nend\n",
+    );
+    let rb_safe = receivers(
+        "rb",
+        "require 'net/http'\nclass A\n  def f; @http_client&.get(\"/a\"); end\nend\n",
+    );
+    assert_eq!(rb_plain, rb_safe, "safe navigation must reduce like a plain call");
+    assert!(!rb_plain.is_empty(), "the ruby fixture captured no site at all");
+    assert!(
+        rb_plain.iter().all(|r| is_client_named(Arm::Ruby, r)),
+        "ruby receivers: {rb_plain:?}"
+    );
+
+    // PHP: `->` and `?->` both END in `->`, so both already cut correctly. Pinned
+    // so a later change to the separator set cannot quietly break them.
+    let php = receivers(
+        "php",
+        "<?php\nuse GuzzleHttp\\Client;\nclass A { function f() { $this->client->get(\"/a\"); } }\n",
+    );
+    assert!(!php.is_empty(), "the php fixture captured no site at all");
+    assert!(php.iter().all(|r| is_client_named(Arm::Php, r)), "php receivers: {php:?}");
+
+    // The shape the reduction declares it does NOT normalise, pinned as the
+    // stated limit it is rather than left as prose.
+    assert_eq!(
+        receivers("rs", "use reqwest::Client;\nfn f(s: &S) { let _ = s.client().get(\"/a\"); }\n"),
+        vec!["s.client()".to_string()],
+        "a receiver that is itself a call reduces to its own text, per the stated limit"
     );
 }
 
