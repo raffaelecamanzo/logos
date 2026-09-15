@@ -267,7 +267,7 @@ pub fn flat_key(key: &str) -> String {
 /// The two are not the same predicate: `applicationfoo.yaml` is not a
 /// configuration source, so the string test excluded a file nothing else reads
 /// and a `kind: Service` inside it would have been invisible.
-fn deploy_role(rel: &str) -> Option<DeployRole> {
+pub(crate) fn deploy_role(rel: &str) -> Option<DeployRole> {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     let lower = name.to_ascii_lowercase();
     if name == "Chart.yaml" {
@@ -297,7 +297,7 @@ fn deploy_role(rel: &str) -> Option<DeployRole> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeployRole {
+pub(crate) enum DeployRole {
     Chart,
     Values,
     Compose,
@@ -387,7 +387,7 @@ impl Corpus {
     /// Record an identity claim, refusing a label that establishes nothing: an
     /// empty string, or one carrying template syntax a deploy tool would have
     /// substituted (`{{ include "x.fullname" . }}`).
-    fn claim(&mut self, member: &str, tier: Tier, label: &str, evidence: &str) {
+    pub(crate) fn claim(&mut self, member: &str, tier: Tier, label: &str, evidence: &str) {
         let label = label.trim();
         if label.is_empty() || label.contains(['{', '}', '$']) {
             return;
@@ -810,7 +810,7 @@ fn walk_deploy(root: &Path, corpus: &mut Corpus) {
 /// `scan_providers` and `judge` already exclude test source for the same reason
 /// — a controller in `src/test` is not a service this estate deploys — and this
 /// is that rule applied to the deploy walk, which had no source-tree guard.
-fn is_documentation(rel: &str) -> bool {
+pub(crate) fn is_documentation(rel: &str) -> bool {
     let lower = rel.to_ascii_lowercase();
     ["documentation/", "examples/", "tutorial/", "tutorials/", "docs/"]
         .iter()
@@ -823,7 +823,7 @@ fn is_documentation(rel: &str) -> bool {
 /// that produces it.
 ///
 /// [FR-WS-22]: ../../../docs/specs/requirements/FR-WS-22.md
-fn overlay_of(rel: &str, member: &str) -> String {
+pub(crate) fn overlay_of(rel: &str, member: &str) -> String {
     let tail = rel.strip_prefix(member).unwrap_or(rel).trim_start_matches('/');
     match tail.rfind('/') {
         Some(i) => tail[..i].to_string(),

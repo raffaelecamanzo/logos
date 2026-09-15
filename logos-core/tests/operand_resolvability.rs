@@ -209,6 +209,18 @@ mod forwarding;
 #[path = "operand_resolvability/port_identity.rs"]
 mod port_identity;
 
+/// S-411's config-declared coupling gate — its own module, so the member-grain
+/// join does not co-edit the file the deploy-corpus arm owns. Reads `identity`'s
+/// corpus, its URL parser and its pair classification, and this module's
+/// `measurement` for the configuration corpus and the broker arm's captured
+/// topics; its one walk of its own is the deploy-overlay traversal whose cost
+/// the story asks to be measured.
+///
+/// `#[path]`-attached for the same reason its four siblings are: a plain
+/// `tests/config_declared_coupling.rs` would become a second cargo test target.
+#[path = "operand_resolvability/config_declared_coupling.rs"]
+mod config_declared_coupling;
+
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
 /// printed by it.
