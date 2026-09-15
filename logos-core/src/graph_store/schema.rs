@@ -1327,16 +1327,20 @@ CREATE INDEX idx_unresolved_refs_resolved ON unresolved_refs(resolved);
 /// any existing table.
 ///
 /// # The table later stories reach for
-/// Every durable per-project fact added since has landed here as another row
-/// rather than as a column or a table of its own — the monotonic graph revision
+/// Every small **scalar** per-project fact added since has landed here as another
+/// row rather than as a column of its own — the monotonic graph revision
 /// ([`super::GRAPH_REVISION_KEY`], CR-027), the index-time LOC roll-up
 /// ([`crate::perf::INDEXED_LOC_KEY`], [`crate::perf::TEST_LOC_KEY`], CR-085) and
-/// the last-full-index stamp ([`super::LAST_FULL_INDEX_AT_KEY`], [CR-130]). The
-/// last of those is the one this table's own design anticipated: `status` used
-/// to read an in-process `AtomicU64` that only the indexing process could ever
-/// have set, so a read-only `status` reported a fully indexed project as never
-/// indexed. Nothing about the table changed to admit it — a new key was enough,
-/// which is the property the kv shape was chosen for.
+/// the last-full-index stamp ([`super::LAST_FULL_INDEX_AT_KEY`], [CR-130]).
+/// Structured facts still earn their own tables — migration 19's `config_sources`
+/// and `config_values` are not rows here.
+///
+/// The stamp is the one [CR-004] §3.1 named in passing, as the in-memory value
+/// this table could not yet replace: `status` read an in-process `AtomicU64` that
+/// only the indexing process could ever have set, so a read-only `status`
+/// reported a fully indexed project as never indexed. Nothing about the table
+/// changed to admit it — a new key was enough, which is the property the kv shape
+/// was chosen for.
 ///
 /// [CR-004]: ../../../../docs/requests/CR-004-config-change-reconciliation.md
 /// [CR-130]: ../../../../docs/requests/CR-130-a-readout-names-a-remediation-that-cannot-apply.md
