@@ -776,6 +776,32 @@ fn the_reference_workspace_reports_reconciled_publish_sites_when_one_is_configur
 /// assertion is what caught it, which is the whole reason it is an assertion.
 /// ```
 ///
+/// # WHERE ELSE THESE FIGURES ARE WRITTEN DOWN — sweep this list when they move
+///
+/// The assertions below are the ONLY place the estate figures are checked. They
+/// are also restated as prose in five other files, where nothing forces them to
+/// move together, so a changed estate fails here and leaves those silently stale.
+/// When this test fails on a figure, edit every line in this list before calling
+/// it done:
+///
+/// - `logos-core/src/extract/broker.rs` — `TOPOLOGY_RECEIVER_TYPES` rustdoc (the
+///   cross-language collision argument rests on `0 .rs` / `262 .go`), and the
+///   `rust_capture_tests` / `go_capture_tests` topology-fixture doc comments.
+/// - `logos-core/plugins/go/queries/brokers.scm` — the "what the estate does and
+///   does not measure here" header section.
+/// - `logos-core/plugins/go/plugin.toml` — the `capabilities` comment.
+/// - `logos-core/plugins/rust/queries/brokers.scm` — the "no estate evidence"
+///   header section.
+/// - `logos-core/src/plugin/grammars.rs` — the Go `brokers.scm` embedded-query
+///   comment.
+///
+/// The list is here rather than the numbers being deleted from those files on
+/// purpose: each site needs its figure to make its own local argument (a header
+/// that said "see the corpus test" would not let a reader judge the claim it is
+/// making). What that costs is this sweep, and naming the cost is cheaper than
+/// paying it by discovery — this repository has been bitten twice by a stale
+/// hardcoded number whose twin was missed.
+///
 /// [CR-131]: ../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
 /// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 #[test]
