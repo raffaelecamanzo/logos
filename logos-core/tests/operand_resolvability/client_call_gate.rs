@@ -646,7 +646,25 @@ fn corpus_for(arm: Arm) -> Option<PathBuf> {
 
 /// Walk `root`, measuring only files whose plugin is `arm`'s.
 fn measure_arm(arm: Arm, root: &Path) -> Outcome {
-    let registry = LanguageRegistry::load(root).expect("plugin registry loads");
+    // The registry is loaded from a SCRATCH directory, never from `root`.
+    //
+    // `LanguageRegistry::load` takes a *project root* and treats it as the
+    // plugin-override root: a `<root>/.logos/plugins/<lang>/queries/
+    // invocations.scm` shadows the shipped query without a rebuild (FR-PL-04,
+    // FR-PL-05). Loading from the corpus therefore let the corpus supply the
+    // very query being measured. Demonstrated: a shadow narrowing the Rust
+    // receiver to `client` turned a 3-site/1-non-HTTP corpus into
+    // `0 (0%) non-HTTP` and printed `CLOSES OUT — no port is justified here`,
+    // exit 0, with nothing in the report indicating a different query ran —
+    // fabricating the exact conclusion CR-128 §6's gate exists to stop being
+    // reached carelessly.
+    //
+    // This is the same hazard the walker settings below already guard against
+    // (a developer's `~/.gitignore_global` must not move a published figure),
+    // through a different door. The measurement needs only the embedded
+    // grammars, so it takes them the way `rust_client_call_rows` does.
+    let scratch = tempfile::tempdir().expect("tempdir for the plugin registry");
+    let registry = LanguageRegistry::load(scratch.path()).expect("plugin registry loads");
     let symbols = SymbolContext::default();
     let mut files = 0usize;
     let mut gated = 0usize;
