@@ -1719,6 +1719,110 @@ fn s382_population(m: &super::Measurement) -> impl Iterator<Item = &super::Site>
 }
 
 /// Read the production client-call arm of `m` under the S-382 rule.
+///
+/// # The denominator, and every time this reading has moved
+///
+/// Kept here, beside the function that produces the figures, rather than in
+/// the body of the test that asserts them: the history grows by a paragraph
+/// per re-record, and three consecutive sprints have breached
+/// `max_fn_lines` on that one test function because it lived there.
+///
+/// **The denominator has moved TWICE now, for two unrelated reasons, and both
+/// are stated here rather than absorbed into a looser assertion.** S-382 AC5 is
+/// written over S-365's recorded figures — 79 of **111** production client-call
+/// sites, 2 divergent, **30** no-key.
+///
+/// *First move, a corpus drift that predates S-382:* measured on the same
+/// reference workspace at the merge base (2026-09-12, before any S-382 change),
+/// the run already read 79 of **108** / 137 whole-arm. S-365's own guard was
+/// `denominator >= 100`, so a three-site drift was invisible to it by
+/// construction.
+///
+/// *Second move, re-recorded by [S-398] T2 on 2026-09-13 over the re-indexed
+/// estate:* this run reads 79 of **96**, 2 divergent, **15** no-key. Twelve
+/// sites left, and **every one of them left the `no_key` residue** (27 -> 15)
+/// while `resolved` and `divergent` did not move at all. That shape is the
+/// attribution:
+///
+/// * The `java` row of the per-language table is byte-identical across the
+///   move — `denom 94 / new 79 / disagree 2 / no-key 13`, the same 94-site Java
+///   census `config_bound_admission.rs` diffs against. 94 + the 2 python sites
+///   = the 96 read here, so today's population is Java and Python only.
+/// * The `go` row is now `denom 0` (11 sites, all already static literals),
+///   because [S-402] made the Go client-call candidacy gate receiver-grained and
+///   dropped 26 captured non-call sites. Go was the only other language with
+///   client-call sites in this population, so the 12 that left were Go — an
+///   arithmetic reading of two rows whose invariance is measured, not an
+///   independent per-language re-derivation of the pre-change split.
+/// * **No part of the move is [S-398]'s**, and that is structural rather than
+///   lucky: this arm's denominator is "gate-admitted sites whose composition
+///   needs a value the source does not hold", decided by
+///   `is_already_static_literal` on operand KINDS. [S-398] widened what an
+///   operand RESOLVES to and never what kind it is, so a site it admits stays
+///   in this denominator and merely becomes one of the 79 the arm already
+///   counted as newly admitted. The product-side figure moved 44 -> 81 on the
+///   same run; this one did not move at all.
+///
+/// *Third move, re-recorded by the Sprint 69 SPRINT REVIEW on 2026-09-14 over
+/// merged `main`:* 82 resolved of **96**, 2 divergent, **12** no-key. The first
+/// move in which `resolved` itself changed; the two before it moved only the
+/// `no_key` residue. Cause: [S-399], merged AFTER [S-398] T2 took the reading
+/// above, whose `invocations.scm` pattern 5 re-points `@invoke.http.arg` at the
+/// operand INSIDE a `UriBuilder` lambda — so three sites whose captured operand
+/// was the whole lambda (hence `no_key`) now present an accessor this arm
+/// resolves. The run prints all three as NEWLY ADMITTED and they are [S-399]'s
+/// own measured sites: `funnel-aggregator-api` MailboxApiRestClient.java:268,
+/// `mailbox-aggregator-api` ReportingApiRestClient.java:110 and :122. The
+/// denominator did NOT move (96), which is what says this is a resolution and
+/// not a new capture.
+///
+/// *Fourth move, [S-405] on 2026-09-15 (`sprint-70-I1-S5`):* **88** resolved of
+/// **96**, 2 divergent, **6** no-key. Same shape as the third and the same
+/// cause one step further on — [CR-129] widened pattern 5 from "`path(…)` and
+/// an optional `build(…)`" to "`path(…)` and any number of links that provably
+/// cannot alter the path template", so the SIX lambda sites that chain a
+/// `queryParam`-family link now present the accessor they always had. They are
+/// the six the third move left behind, and the run names them:
+/// `mailbox-aggregator-api` OfficialLogExportApiRestClient.java:79,
+/// MailboxApiRestClient.java:87, :187 and :454, ReportingApiRestClient.java:62
+/// and :83. That exhausts the estate's `.uri(<lambda>)` population: 9 of 9
+/// `src/main` sites now resolve, against 3 of 9 before [S-399] and 3 of 9 after
+/// it. **A census, not a floor** — another Java estate writing RestTemplate or
+/// Feign has none of these sites at all.
+///
+/// The denominator did NOT move (96) for the fourth time running, so nothing that
+/// restates the DENOMINATOR needed re-recording. Four places restate this arm's
+/// RESOLVED half instead, and every one of them is live rather than dated, so
+/// [S-405] appended the new reading to each rather than rewriting it:
+/// FR-WS-19's Notes; `config_bound_admission.rs`'s module docs and its
+/// `RECORDED_ADMITTED` forward expectation (84-of-84 -> 90-of-90, ~84 -> ~90);
+/// `config_bound_admission/config_bound_admission_finding.txt`; and the
+/// harness-resolvable row of the accessor table in `docs/howto/commands.md`.
+///
+/// **An earlier draft of this paragraph said FR-WS-19 was the ONLY such place,
+/// and that was wrong** — the S-405 review found the other three. The lesson is
+/// the one this repository keeps relearning: when a figure moves, grep every
+/// sibling for the SHAPE of the figure, not for the figure's own name. The five
+/// denominator restatements and these four resolved-half restatements are
+/// different lists, and only the first is enumerated in the assertion message.
+///
+/// **The product side still reads 81 and is NOT stale.** `RECORDED_ADMITTED` in
+/// `config_bound_admission.rs` reads each member's INDEXED store and this
+/// estate's index predates [S-399]; this arm re-derives from source. The
+/// `81 of 81` agreement [S-398] T2 recorded is SUSPENDED, not refuted — a
+/// re-index is expected to read ~84 on both sides. That re-index writes to the
+/// estate, outside the sprint review's write scope; it is the human gate's step.
+///
+/// Pinned at what the run produces rather than at what the criterion quotes,
+/// because a test asserting 111 would fail on a corpus nothing in this
+/// repository controls. What has held across all three moves is the **2
+/// divergent** sites and their four profile-labelled values.
+///
+/// [S-399]: ../../../docs/planning/journal.md#s-399-the-accessor-hop-reaches-through-a-uribuilder-lambda
+/// [S-405]: ../../../docs/planning/journal.md#s-405-a-path-neutral-composer-link-resolves-on-its-path-operand
+/// [CR-129]: ../../../docs/requests/CR-129-path-neutral-composer-link-in-a-uribuilder-lambda.md
+/// [S-398]: ../../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
+/// [S-402]: ../../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
 pub fn s382_reading(m: &super::Measurement) -> S382Reading {
     let mut out = S382Reading::default();
     for site in s382_population(m) {
@@ -2234,80 +2338,26 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
     // criterion is a reproduction claim: a run that produced different numbers
     // has either changed the rule or changed the corpus, and both need a human.
     let s382 = s382_reading(m);
-    // **The denominator has moved TWICE now, for two unrelated reasons, and both
-    // are stated here rather than absorbed into a looser assertion.** S-382 AC5 is
-    // written over S-365's recorded figures — 79 of **111** production client-call
-    // sites, 2 divergent, **30** no-key.
-    //
-    // *First move, a corpus drift that predates S-382:* measured on the same
-    // reference workspace at the merge base (2026-09-12, before any S-382 change),
-    // the run already read 79 of **108** / 137 whole-arm. S-365's own guard was
-    // `denominator >= 100`, so a three-site drift was invisible to it by
-    // construction.
-    //
-    // *Second move, re-recorded by [S-398] T2 on 2026-09-13 over the re-indexed
-    // estate:* this run reads 79 of **96**, 2 divergent, **15** no-key. Twelve
-    // sites left, and **every one of them left the `no_key` residue** (27 -> 15)
-    // while `resolved` and `divergent` did not move at all. That shape is the
-    // attribution:
-    //
-    // * The `java` row of the per-language table is byte-identical across the
-    //   move — `denom 94 / new 79 / disagree 2 / no-key 13`, the same 94-site Java
-    //   census `config_bound_admission.rs` diffs against. 94 + the 2 python sites
-    //   = the 96 read here, so today's population is Java and Python only.
-    // * The `go` row is now `denom 0` (11 sites, all already static literals),
-    //   because [S-402] made the Go client-call candidacy gate receiver-grained and
-    //   dropped 26 captured non-call sites. Go was the only other language with
-    //   client-call sites in this population, so the 12 that left were Go — an
-    //   arithmetic reading of two rows whose invariance is measured, not an
-    //   independent per-language re-derivation of the pre-change split.
-    // * **No part of the move is [S-398]'s**, and that is structural rather than
-    //   lucky: this arm's denominator is "gate-admitted sites whose composition
-    //   needs a value the source does not hold", decided by
-    //   `is_already_static_literal` on operand KINDS. [S-398] widened what an
-    //   operand RESOLVES to and never what kind it is, so a site it admits stays
-    //   in this denominator and merely becomes one of the 79 the arm already
-    //   counted as newly admitted. The product-side figure moved 44 -> 81 on the
-    //   same run; this one did not move at all.
-    //
-    // *Third move, re-recorded by the Sprint 69 SPRINT REVIEW on 2026-09-14 over
-    // merged `main`:* 82 resolved of **96**, 2 divergent, **12** no-key. The first
-    // move in which `resolved` itself changed; the two before it moved only the
-    // `no_key` residue. Cause: [S-399], merged AFTER [S-398] T2 took the reading
-    // above, whose `invocations.scm` pattern 5 re-points `@invoke.http.arg` at the
-    // operand INSIDE a `UriBuilder` lambda — so three sites whose captured operand
-    // was the whole lambda (hence `no_key`) now present an accessor this arm
-    // resolves. The run prints all three as NEWLY ADMITTED and they are [S-399]'s
-    // own measured sites: `funnel-aggregator-api` MailboxApiRestClient.java:268,
-    // `mailbox-aggregator-api` ReportingApiRestClient.java:110 and :122. The
-    // denominator did NOT move (96), which is what says this is a resolution and
-    // not a new capture.
-    //
-    // **The product side still reads 81 and is NOT stale.** `RECORDED_ADMITTED` in
-    // `config_bound_admission.rs` reads each member's INDEXED store and this
-    // estate's index predates [S-399]; this arm re-derives from source. The
-    // `81 of 81` agreement [S-398] T2 recorded is SUSPENDED, not refuted — a
-    // re-index is expected to read ~84 on both sides. That re-index writes to the
-    // estate, outside the sprint review's write scope; it is the human gate's step.
-    //
-    // Pinned at what the run produces rather than at what the criterion quotes,
-    // because a test asserting 111 would fail on a corpus nothing in this
-    // repository controls. What has held across all three moves is the **2
-    // divergent** sites and their four profile-labelled values.
-    //
-    // [S-399]: ../../../docs/planning/journal.md#s-399-the-accessor-hop-reaches-through-a-uribuilder-lambda
-    // [S-398]: ../../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
-    // [S-402]: ../../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
+    // The reading this asserts has MOVED FOUR TIMES, for four unrelated
+    // reasons. The whole history — what moved, what caused it, and the five
+    // places that restate the denominator — is on `s382_reading`, which is the
+    // function that produces the figures. It lives there rather than here
+    // because this narrative grows by a paragraph every time the estate is
+    // re-recorded, and three consecutive sprints have breached
+    // `max_fn_lines` on this one function for exactly that reason.
     assert_eq!(
         (s382.denominator, s382.resolved, s382.divergent, s382.no_key),
-        (96, 82, 2, 12),
+        (96, 88, 2, 6),
         "S-382 AC5 names 79 production client-call sites resolved and 2 divergent, over \
          a denominator S-365 recorded as 111 (30 no-key), which drifted to 108 (27 \
          no-key) before S-382 and which S-398 T2 re-recorded as 96 (15 no-key) on \
          2026-09-13 after S-402 emptied the Go row. The Sprint 69 sprint review \
          re-recorded the RESOLVED half 79 -> 82 (no-key 15 -> 12) on 2026-09-14 over \
          merged main, S-399's UriBuilder-lambda pattern being the measured cause and \
-         the denominator holding at 96. This run read {s382:?}. Re-measure \
+         the denominator holding at 96. S-405 re-recorded it again 82 -> 88 (no-key \
+         12 -> 6) on 2026-09-15, CR-129's path-neutral composer rule being the \
+         measured cause and the denominator holding at 96 for the fourth time. \
+         This run read {s382:?}. Re-measure \
          against the reference workspace before changing this assertion.\n\
          \n\
          THIS DENOMINATOR IS RESTATED IN FIVE PLACES THIS BINARY CANNOT REACH, and \

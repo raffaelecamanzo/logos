@@ -3330,20 +3330,31 @@ fn a_lambda_nested_accessor_reaches_the_ledger_as_the_same_reference() {
     );
 }
 
-/// **S-399 AC3, end to end on the estate's DOMINANT lambda.** The same nested
-/// accessor, in a lambda that also chains a `queryParam`, emits no reference —
-/// it is refused whole rather than bound on the `path(…)` half it could read
-/// ([NFR-RA-05]).
+/// **S-405 AC2, end to end on the estate's DOMINANT lambda ([CR-129]).** The
+/// same nested accessor, in a lambda that also chains a `queryParam`, resolves
+/// to the same key — the query parameter names the query component and cannot
+/// reach the path template, so it does not make the path "composed from a
+/// non-resolvable operand" ([FR-WS-08] AC2).
 ///
-/// This is the criterion's real cost, and it is asserted on the shape that
-/// carries it: most of the reference workspace's `.uri(<lambda>)` sites chain
-/// at least one `queryParam` — the measured figure is stated once, in the
-/// composition rule in `plugins/java/queries/invocations.scm` — so this
-/// fixture, not the bare `path(…)` one above, is what most of the estate looks
-/// like.
+/// This is the criterion's real value, and it is asserted on the shape that
+/// carries it: most of the reference workspace's `.uri(<lambda>)` sites chain at
+/// least one `queryParam` — the measured figure is stated once, in the
+/// composition rule in `plugins/java/queries/invocations.scm` — so this fixture,
+/// not the bare `path(…)` one above, is what most of the estate looks like.
+///
+/// **S-399 asserted the opposite here and was right at its date.** It refused
+/// every link beyond `build()`, which refused this shape too; [CR-129] read
+/// that back against the requirement and found the product stricter than its
+/// own AC2. The negative control below is what did NOT move: a link the
+/// contract test cannot prove path-neutral still refuses the whole chain, with
+/// the properties class present and the accessor resolvable, so what this test
+/// pins is the contract test and not "chains now bind".
+///
+/// [CR-129]: ../../docs/requests/CR-129-path-neutral-composer-link-in-a-uribuilder-lambda.md
+/// [FR-WS-08]: ../../docs/specs/requirements/FR-WS-08.md
 #[test]
 #[cfg(feature = "lang-java")]
-fn a_lambda_that_chains_a_query_param_binds_nothing_even_with_the_class_present() {
+fn a_lambda_that_chains_a_path_neutral_link_binds_through_it() {
     let reg = registry();
     let ctx = SymbolContext::cargo("logos-core", "0.1.0");
     let chained = ACCESSOR_CALLER_SOURCE.replace(
@@ -3362,10 +3373,33 @@ fn a_lambda_that_chains_a_query_param_binds_nothing_even_with_the_class_present(
     );
     assert_eq!(
         client_call_targets(&facts, ACCESSOR_CALLER_FILE),
+        vec!["GET ${mailserver.api.urigetarchive}".to_string()],
+        "the properties class is present, the accessor is resolvable, and the \
+         one other link in the chain provably cannot alter the path — so the \
+         site binds the key the direct spelling binds",
+    );
+
+    // The negative control, on the SAME fixture and the same class: one link the
+    // contract test cannot prove path-neutral, and the whole chain refuses.
+    // `pathSegment` is chosen because it is the near miss — a real `UriBuilder`
+    // method one prefix away from the link that supplies the path.
+    let reaching = ACCESSOR_CALLER_SOURCE.replace(
+        "uri(api.getUriGetArchive())",
+        "uri(builder -> builder.path(this.api.getUriGetArchive()).pathSegment(\"page\").build(1))",
+    );
+    let refused = extract_files(
+        &[
+            FileInput::new(ACCESSOR_PROPS_FILE, ACCESSOR_PROPS_SOURCE),
+            FileInput::new(ACCESSOR_CALLER_FILE, &reaching),
+        ],
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        client_call_targets(&refused, ACCESSOR_CALLER_FILE),
         vec![String::new()],
-        "the properties class IS present and the accessor IS resolvable, so \
-         what refuses here is the composition alone — the keyless \
-         runtime-composed row, unchanged",
+        "a link that reaches the path template refuses the chain whole — the \
+         keyless runtime-composed row, unchanged (NFR-RA-05)",
     );
 }
 

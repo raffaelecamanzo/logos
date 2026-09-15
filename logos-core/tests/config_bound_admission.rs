@@ -47,8 +47,18 @@
 //! reference estate's index predates [S-399]; a re-index from merged `main` is
 //! expected to read ~84 here too. That re-index writes to the estate, which was
 //! outside the sprint review's write scope, so it is the human gate's step —
-//! and it is the KNOWN reason this pin will move, not an unexplained drift. **No floor is asserted on this
-//! figure and none should be read into it.** [S-397] AC2's floor of 79 is now
+//! and it is the KNOWN reason this pin will move, not an unexplained drift.
+//!
+//! **Re-measured again 2026-09-15 ([S-405]): the expectation is now 90-of-90, not
+//! 84-of-84.** [CR-129]'s path-neutral composer rule admits the SIX further
+//! `UriBuilder`-lambda sites that chain a `queryParam`-family link — the residue
+//! [S-399] left — so the harness now proves **90** resolvable (88 agreed + 2
+//! divergent) on the same denominator of 96. Every figure in the paragraph above
+//! is the 2026-09-14 reading and is left standing as the dated record it is; this
+//! is the live one. The product figure below still has not moved, for the same
+//! reason it did not move for [S-399]: this file reads each member's INDEXED
+//! store, the estate's index predates both, and the re-index is the human gate's
+//! step. **No floor is asserted on this figure and none should be read into it.** [S-397] AC2's floor of 79 is now
 //! exceeded, which is recorded here as an outcome and deliberately *not* re-armed
 //! as a criterion for [S-398]: [Sprint 68] was bitten by an inherited census figure
 //! becoming a story's acceptance floor, and the defect turned out to be the
@@ -106,8 +116,9 @@
 //! key (a `values` list with more than one entry). The totals and the divergent
 //! split both agreed; site-level identity of the two sets was not independently
 //! checked and is not claimed here. On merged `main` the harness half of that
-//! arithmetic is now 82 agreed + 2 divergent = 84 ([S-399], above); the divergent
-//! split is the half that has held across all three moves.
+//! arithmetic is now 88 agreed + 2 divergent = 90 ([S-405], above; it read
+//! 82 + 2 = 84 after [S-399] and 79 + 2 = 81 when this was written); the divergent
+//! split is the half that has held across all four moves.
 //!
 //! # The `.properties` gap is still open, and still costs this estate nothing
 //!
@@ -218,6 +229,8 @@
 //! [S-397]: ../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
 //! [S-398]: ../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
 //! [S-399]: ../../docs/planning/journal.md#s-399-the-accessor-hop-reaches-through-a-uribuilder-lambda
+//! [S-405]: ../../docs/planning/journal.md#s-405-a-path-neutral-composer-link-resolves-on-its-path-operand
+//! [CR-129]: ../../docs/requests/CR-129-path-neutral-composer-link-in-a-uribuilder-lambda.md
 //! [S-400]: ../../docs/planning/journal.md#s-400-measure-whether-a-runtime-port-identifies-the-callee
 //! [S-401]: ../../docs/planning/journal.md#s-401-a-cross-service-reachability-answer-carries-its-unresolved-residue
 //! [S-402]: ../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
@@ -303,11 +316,14 @@ const CRITERION_FLOOR: usize = 79;
 ///
 /// **One such change is already known and is NOT a mystery to investigate.**
 /// [S-399] merged later in Sprint 69 than the reading this pin records, and admits
-/// three further sites on this estate (`UriBuilder`-lambda-nested accessors). This
-/// pin still reads 81 only because it reads each member's INDEXED store and the
-/// reference estate's index predates [S-399]. On the next re-index from merged
-/// `main` this is expected to read **~84**; record the new figure, as the assertion
-/// message below instructs, rather than treating it as a regression.
+/// three further sites on this estate (`UriBuilder`-lambda-nested accessors);
+/// [S-405] then admitted six more in Sprint 70, by widening that same pattern to
+/// any chain whose every other link provably cannot alter the path template
+/// ([CR-129]). This pin still reads 81 only because it reads each member's INDEXED
+/// store and the reference estate's index predates both. On the next re-index from
+/// merged `main` this is expected to read **~90** (81 + 3 + 6); record the new
+/// figure, as the assertion message below instructs, rather than treating it as a
+/// regression.
 const RECORDED_ADMITTED: usize = 81;
 
 /// The accessor denominator the figure is stated over — the S-382 reading's
@@ -318,9 +334,13 @@ const RECORDED_ADMITTED: usize = 81;
 /// harness, so it cannot compute the denominator its own headline is stated over.
 /// The owner is
 /// `operand_resolvability/configuration_agreement.rs`'s
-/// `(s382.denominator, s382.resolved, s382.divergent, s382.no_key) == (96, 79, 2, 15)`
+/// `(s382.denominator, s382.resolved, s382.divergent, s382.no_key) == (96, 88, 2, 6)`
 /// assertion, whose failure message lists this constant among the places to
-/// re-record with it.
+/// re-record with it. (That tuple's LAST THREE fields have moved twice since this
+/// pointer was written — 79/2/15 -> 82/2/12 by [S-399], -> 88/2/6 by [S-405] — and
+/// the pointer was not re-recorded either time. **The denominator, which is the
+/// only field this constant states, has not moved at all.** Corrected here in
+/// passing, 2026-09-15.)
 ///
 /// That pointer is the whole guard, and it is here because the figure has
 /// **already moved twice** (111 -> 108 in silence, then 108 -> 96 when [S-402]

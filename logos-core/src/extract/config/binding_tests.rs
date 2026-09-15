@@ -988,6 +988,14 @@ fn the_interpreter_names_no_jvm_grammar_node_kind() {
     for (file, code) in [
         ("binding.rs", include_str!("binding.rs")),
         ("accessor.rs", include_str!("accessor.rs")),
+        // S-405's byte-range reconciliation for the invocation arm's URI
+        // composer. It is here for the reason the use-site half is: it READS A
+        // PARSE TREE DIRECTLY (`Node::parent`, byte ranges, `utf8_text`), which
+        // is the half that can break this criterion, and its whole contract is
+        // that every method name stays in plugin query data. A closed list
+        // cannot notice what it does not name, so a new parse-tree-reading
+        // module belongs here on arrival rather than after it drifts.
+        ("composer.rs", include_str!("../composer.rs")),
     ] {
         for literal in quoted_identifiers(code) {
             if !jvm_kinds.contains(literal.as_str()) {
