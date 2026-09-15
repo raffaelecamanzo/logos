@@ -638,9 +638,17 @@ impl Outcome {
 /// those are the two states this whole module exists to keep apart.
 fn corpus_for(arm: Arm) -> Option<PathBuf> {
     let raw = std::env::var(arm.env()).ok()?;
-    if raw.trim().is_empty() {
-        return None;
-    }
+    // A set-but-blank value is the same class of typo as a mis-spelled path
+    // (`export VAR=`, an unexpanded shell variable), so it takes the same loud
+    // path. Returning `None` here told an operator who HAD set the variable to
+    // set it — the one inconsistency in this module's own rule that the two
+    // states must never be confusable.
+    assert!(
+        !raw.trim().is_empty(),
+        "{} is set but blank — refusing to report {arm} unmeasured when the \
+         corpus is merely an empty value",
+        arm.env(),
+    );
     let home = std::env::var("HOME").unwrap_or_default();
     let expanded = match raw.strip_prefix("~/") {
         Some(rest) => PathBuf::from(&home).join(rest),
@@ -1118,9 +1126,79 @@ fn segments_split_on_case_underscore_and_digit_boundaries() {
     assert_eq!(segments("HTTPClient"), ["http", "client"]);
     assert_eq!(segments("_http_client"), ["http", "client"]);
     assert_eq!(segments("httpClient2"), ["http", "client", "2"]);
+    // The digit -> alpha direction. `http2Client` does NOT reach it — the camel
+    // boundary splits before the `C` first — so the case has to be the
+    // all-lowercase one, which is how a snake-cased or lowercase name spells it.
+    // Deleting the clause merges `2client` into one segment, and a genuine
+    // client receiver is then refused.
+    assert_eq!(segments("http2client"), ["http", "2", "client"]);
+    assert_eq!(segments("oauth2client"), ["oauth", "2", "client"]);
+    // Kept beside it so the two directions are visibly different cases.
+    assert_eq!(segments("http2Client"), ["http", "2", "client"]);
     assert_eq!(segments("client"), ["client"]);
     assert!(segments("").is_empty());
     assert!(segments("__").is_empty());
+}
+
+/// Each arm's two identity strings resolve: the plugin name to a real plugin,
+/// and the environment variable to this arm's own.
+///
+/// Neither had any coverage. `Arm::Rust => "kotlin"` in `plugin_name` left the
+/// suite green while `measure_arm` walked Kotlin files and reported them under
+/// the `rust` heading — `files > 0` still passes, because the other language's
+/// files are there. That is the defect class this whole module exists to
+/// prevent (a figure that is not what its label says), and it was the one
+/// instance of it with no guard.
+#[test]
+fn each_arms_plugin_name_and_env_var_resolve() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+    // One known extension per arm, resolved through the registry the walk uses,
+    // so a plugin rename upstream fails here rather than silently re-labelling a
+    // measurement.
+    for (arm, ext) in [
+        (Arm::Rust, "rs"),
+        (Arm::Kotlin, "kt"),
+        (Arm::Ruby, "rb"),
+        (Arm::Php, "php"),
+        (Arm::CSharp, "cs"),
+    ] {
+        let plugin = registry
+            .for_extension(ext)
+            .unwrap_or_else(|| panic!("{arm}: no plugin claims `.{ext}`"));
+        assert_eq!(
+            plugin.name(),
+            arm.plugin_name(),
+            "{arm}: `.{ext}` resolves to plugin `{}`, but this arm matches walked \
+             files against `{}` — the walk would measure a different language \
+             under this arm's heading",
+            plugin.name(),
+            arm.plugin_name(),
+        );
+        assert!(
+            plugin.query("invocations").is_some(),
+            "{arm}: the plugin ships no `invocations` query, so this arm can \
+             never measure anything"
+        );
+    }
+    // The env vars are distinct and each names its own arm — a copy-paste
+    // collision would make two arms read one corpus.
+    let vars: Vec<&str> = Arm::ALL.iter().map(|a| a.env()).collect();
+    let unique: std::collections::BTreeSet<&str> = vars.iter().copied().collect();
+    assert_eq!(unique.len(), Arm::ALL.len(), "the five corpus variables collide: {vars:?}");
+    // Named independently here, not derived from `Arm::env`: a prefix check
+    // passes for `LOGOS_CLIENT_CALL_CORPUS_TYPO` too, so it caught nothing. The
+    // second spelling is the whole point — the variable an operator is told to
+    // set has to be the one this arm reads.
+    for (arm, var) in [
+        (Arm::Rust, "LOGOS_CLIENT_CALL_CORPUS_RUST"),
+        (Arm::Kotlin, "LOGOS_CLIENT_CALL_CORPUS_KOTLIN"),
+        (Arm::Ruby, "LOGOS_CLIENT_CALL_CORPUS_RUBY"),
+        (Arm::Php, "LOGOS_CLIENT_CALL_CORPUS_PHP"),
+        (Arm::CSharp, "LOGOS_CLIENT_CALL_CORPUS_CSHARP"),
+    ] {
+        assert_eq!(arm.env(), var, "{arm} reads the wrong corpus variable");
+    }
 }
 
 /// `receiver_of` reduces the five grammars' receiver-method spellings through
