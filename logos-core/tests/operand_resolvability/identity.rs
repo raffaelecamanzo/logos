@@ -230,7 +230,34 @@ impl TargetRef {
 
 /// Overlay prefix marking a target read from application configuration rather
 /// than from deploy evidence.
-const APPLICATION_OVERLAY: &str = "application:";
+pub(crate) const APPLICATION_OVERLAY: &str = "application:";
+
+/// The overlay label of a target read from application configuration.
+///
+/// `pub(crate)` and a function rather than a `format!` at each call site,
+/// because [`TargetRef::is_deploy`] decides deploy-vs-application by testing
+/// this exact prefix. A sibling gate spelling the string itself would emit an
+/// overlay label this module no longer recognises, and no test would fail.
+pub(crate) fn application_overlay(profile: Option<&str>) -> String {
+    format!("{APPLICATION_OVERLAY}{}", profile.unwrap_or("<none>"))
+}
+
+/// Whether a host is an IP literal — an address, not an identity.
+///
+/// `pub(crate)` so a sibling gate reading bare hosts applies THIS rule rather
+/// than a copy of it. `192.168.54.134` would otherwise yield the "first DNS
+/// label" `192` and pad an external census with false entries.
+pub(crate) fn is_ip_literal(host: &str) -> bool {
+    host.split('.').all(|o| !o.is_empty() && o.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// The first DNS label of a host, matched exactly — no suffix stripping
+/// ([FR-WS-20] AC4).
+///
+/// [FR-WS-20]: ../../../docs/specs/requirements/FR-WS-20.md
+pub(crate) fn first_dns_label(host: &str) -> &str {
+    host.split('.').next().unwrap_or(host)
+}
 
 /// Spring equates `MAILBOXAGGREGATE_API_BASEURL`, `mailboxaggregate.api.baseurl`
 /// and `mailbox-aggregate.api.base-url` under relaxed binding. Reducing a key to
@@ -665,10 +692,10 @@ pub fn url_target_or_reason(
     // An IP literal is an address, not an identity: `192.168.54.134` would
     // otherwise yield the "first DNS label" 192 and be reported as a host label
     // no member claims, padding the external census with four false entries.
-    if host.split('.').all(|o| !o.is_empty() && o.chars().all(|c| c.is_ascii_digit())) {
+    if is_ip_literal(host) {
         return Err("IP literal, not a name");
     }
-    let label = host.split('.').next().unwrap_or(host);
+    let label = first_dns_label(host);
     // A templated or placeholder host establishes nothing.
     if label.is_empty() {
         return Err("empty host label");
@@ -1367,10 +1394,7 @@ pub(crate) fn findings(root: &Path) -> &'static Findings {
                         Err(reason) => corpus.unresolvable(reason, v, &source.path),
                         Ok((label, scheme, port)) => corpus.targets.push(TargetRef {
                             member: member.clone(),
-                            overlay: format!(
-                                "{APPLICATION_OVERLAY}{}",
-                                source.profile.as_deref().unwrap_or("<none>")
-                            ),
+                            overlay: application_overlay(source.profile.as_deref()),
                             label,
                             scheme,
                             port,

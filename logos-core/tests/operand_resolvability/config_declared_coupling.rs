@@ -393,7 +393,19 @@ pub struct Target {
     pub overlay: String,
     pub via_key: String,
     pub file: String,
+    /// The committed value itself, printed in the addressed-pair enumeration so
+    /// the headline is adjudicable rather than a bare list of member names
+    /// ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub value: String,
+    /// The port the URL carried, captured at admission.
+    ///
+    /// `port_census` used to re-run `url_target_or_reason` over `value` to get
+    /// this back, parsing every URL twice — the first parse already returned it,
+    /// and `port_identity.rs` deliberately reuses its own parse for the same
+    /// reason.
+    pub port: Option<String>,
 }
 
 /// The first DNS label of a **bare host** value, or `None`.
@@ -424,13 +436,15 @@ pub fn bare_host_label(value: &str) -> Option<String> {
     if !host.contains('.') && !host.contains('-') {
         return None;
     }
-    // An IP literal is an address, not an identity — `identity::url_target_or_reason`
-    // refuses it for the same reason and this is that rule, applied where there
-    // is no scheme to carry it.
-    if host.split('.').all(|o| !o.is_empty() && o.chars().all(|c| c.is_ascii_digit())) {
+    // An IP literal is an address, not an identity. `identity::is_ip_literal` and
+    // `identity::first_dns_label` are CALLED, not restated: they are the same two
+    // rules `url_target_or_reason` applies to a host that arrived with a scheme,
+    // and two copies of a matching rule guarded by two sets of fixtures is how
+    // one of them drifts.
+    if identity::is_ip_literal(host) {
         return None;
     }
-    let label = host.split('.').next().unwrap_or(host);
+    let label = identity::first_dns_label(host);
     (!label.is_empty()).then(|| label.to_string())
 }
 
@@ -444,7 +458,7 @@ pub fn bare_host_label(value: &str) -> Option<String> {
 /// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
 pub fn host_keys_with_sibling_port(
     values: &BTreeMap<String, BTreeSet<String>>,
-) -> Vec<(String, String)> {
+) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     for (key, vals) in values {
         let leaf = key.rsplit('.').next().unwrap_or(key);
@@ -455,9 +469,20 @@ pub fn host_keys_with_sibling_port(
         if !values.contains_key(&format!("{parent}port")) {
             continue;
         }
+        let mut seen: BTreeSet<String> = BTreeSet::new();
         for v in vals {
             if let Some(label) = bare_host_label(v) {
-                out.push((key.clone(), label));
+                // Carries the value the label was derived FROM. The caller used
+                // to re-look-up `values.get(key).iter().next()` — always the
+                // first element of the set — so when one key committed two
+                // hosts, both references were printed as evidence for the first
+                // one's value. Deduped on the label for the same reason: two
+                // values sharing a first DNS label are one identity claim, and a
+                // second identical `Target` inflated the reference census
+                // without adding a pair.
+                if seen.insert(label.clone()) {
+                    out.push((key.clone(), v.clone(), label));
+                }
             }
         }
     }
@@ -635,42 +660,83 @@ fn collect_overlay(
     values: &BTreeMap<String, BTreeSet<String>>,
 ) {
     let overlay = identity::overlay_of(rel, member);
+    collect_values(
+        &Provenance { member, file: rel, overlay: &overlay, source: SourceSet::Deploy },
+        values,
+        &mut out.scalars,
+        &mut out.values,
+    );
+}
+
+/// Where one flattened source's values come from — the four fields that are all
+/// that differ between the two source sets.
+struct Provenance<'a> {
+    member: &'a str,
+    file: &'a str,
+    overlay: &'a str,
+    source: SourceSet,
+}
+
+/// **The admission rule, in one place.** Fold one flattened source's values into
+/// the scalar population and the target population.
+///
+/// One function rather than the two near-identical blocks that stood here — one
+/// for deploy overlays, one for application configuration. The report prints
+/// "by source set: N application config · M deploy overlay" as a breakdown of one
+/// population, so two copies of the admission rule would let that line compare
+/// two different rules while printing one label; and this project has the twin
+/// that then diverges as a named defect class. Returns the number of scalars
+/// admitted, so the application-side census falls out rather than being counted
+/// a second time.
+fn collect_values(
+    at: &Provenance<'_>,
+    values: &BTreeMap<String, BTreeSet<String>>,
+    scalars: &mut Vec<Scalar>,
+    targets: &mut Vec<Target>,
+) -> usize {
+    let mut admitted = 0usize;
     for (key, vals) in values {
         for value in vals {
-            out.scalars.push(Scalar {
-                member: member.to_string(),
+            admitted += 1;
+            scalars.push(Scalar {
+                member: at.member.to_string(),
                 key: key.clone(),
                 value: value.clone(),
-                source: SourceSet::Deploy,
-                file: rel.to_string(),
+                source: at.source,
+                file: at.file.to_string(),
             });
-            if let Ok((label, _, _)) = identity::url_target_or_reason(value) {
-                out.values.push(Target {
-                    member: member.to_string(),
+            if let Ok((label, _, port)) = identity::url_target_or_reason(value) {
+                targets.push(Target {
+                    member: at.member.to_string(),
                     label,
                     form: TargetForm::Url,
-                    source: SourceSet::Deploy,
-                    overlay: overlay.clone(),
+                    source: at.source,
+                    overlay: at.overlay.to_string(),
                     via_key: key.clone(),
-                    file: rel.to_string(),
+                    file: at.file.to_string(),
                     value: value.clone(),
+                    port,
                 });
             }
         }
     }
-    for (key, label) in host_keys_with_sibling_port(values) {
-        let value = values.get(&key).and_then(|v| v.iter().next()).cloned().unwrap_or_default();
-        out.values.push(Target {
-            member: member.to_string(),
+    for (key, value, label) in host_keys_with_sibling_port(values) {
+        targets.push(Target {
+            member: at.member.to_string(),
             label,
             form: TargetForm::HostBesidePort,
-            source: SourceSet::Deploy,
-            overlay: overlay.clone(),
+            source: at.source,
+            overlay: at.overlay.to_string(),
             via_key: key,
-            file: rel.to_string(),
+            file: at.file.to_string(),
             value,
+            // A bare host carries its port in a SIBLING key, never in the value,
+            // so there is nothing to record here. `port_census` reproduces
+            // S-400's population, which is the port of a committed URL.
+            port: None,
         });
     }
+    admitted
 }
 
 /// Lines of the shape `- host: x` or a `host:` key indented inside a sequence
@@ -1057,53 +1123,25 @@ fn judge(root: &Path) -> Judgement {
         .collect();
 
     let mut targets: Vec<Target> = overlays.values.clone();
-    let mut application_scalars = 0usize;
     let mut scalars: Vec<Scalar> = overlays.scalars.clone();
+    let mut application_scalars = 0usize;
     for source in &m.config.sources {
         let member = source.path.split('/').next().unwrap_or("").to_string();
         if !members.contains(&member) {
             continue;
         }
-        let overlay =
-            format!("application:{}", source.profile.as_deref().unwrap_or("<none>"));
-        for (key, values) in &source.values {
-            for value in values {
-                application_scalars += 1;
-                scalars.push(Scalar {
-                    member: member.clone(),
-                    key: key.clone(),
-                    value: value.clone(),
-                    source: SourceSet::Application,
-                    file: source.path.clone(),
-                });
-                if let Ok((label, _, _)) = identity::url_target_or_reason(value) {
-                    targets.push(Target {
-                        member: member.clone(),
-                        label,
-                        form: TargetForm::Url,
-                        source: SourceSet::Application,
-                        overlay: overlay.clone(),
-                        via_key: key.clone(),
-                        file: source.path.clone(),
-                        value: value.clone(),
-                    });
-                }
-            }
-        }
-        for (key, label) in host_keys_with_sibling_port(&source.values) {
-            let value =
-                source.values.get(&key).and_then(|v| v.iter().next()).cloned().unwrap_or_default();
-            targets.push(Target {
-                member: member.clone(),
-                label,
-                form: TargetForm::HostBesidePort,
+        let overlay = identity::application_overlay(source.profile.as_deref());
+        application_scalars += collect_values(
+            &Provenance {
+                member: &member,
+                file: &source.path,
+                overlay: &overlay,
                 source: SourceSet::Application,
-                overlay: overlay.clone(),
-                via_key: key,
-                file: source.path.clone(),
-                value,
-            });
-        }
+            },
+            &source.values,
+            &mut scalars,
+            &mut targets,
+        );
     }
 
     let judged: Vec<JudgedTarget> = targets
@@ -1343,7 +1381,15 @@ fn report_pairs(j: &Judgement) {
                     && t.target.member == a
                     && t.provider.as_deref() == Some(b)
             })
-            .map(|t| format!("{}  [{}]  {}", t.target.via_key, t.target.source.label(), t.target.file))
+            .map(|t| {
+                format!(
+                    "{} = {:?}  [{}]  {}",
+                    t.target.via_key,
+                    t.target.value,
+                    t.target.source.label(),
+                    t.target.file,
+                )
+            })
             .unwrap_or_default();
         println!("      {a} -> {b}    via {via}");
     }
@@ -1492,8 +1538,8 @@ fn port_census(j: &Judgement) -> (usize, usize) {
         if t.target.source != SourceSet::Application {
             continue;
         }
-        if let Ok((_, _, Some(port))) = identity::url_target_or_reason(&t.target.value) {
-            referenced.insert(port);
+        if let Some(port) = &t.target.port {
+            referenced.insert(port.clone());
         }
     }
     let unique = referenced
@@ -2118,7 +2164,11 @@ mod fixtures {
         .collect();
         assert_eq!(
             host_keys_with_sibling_port(&with_port),
-            vec![("proxy.host".to_string(), "mailbox-api".to_string())],
+            vec![(
+                "proxy.host".to_string(),
+                "mailbox-api.svc".to_string(),
+                "mailbox-api".to_string(),
+            )],
         );
 
         let without_port: BTreeMap<String, BTreeSet<String>> = [(
@@ -2128,6 +2178,90 @@ mod fixtures {
         .into_iter()
         .collect();
         assert!(host_keys_with_sibling_port(&without_port).is_empty());
+    }
+
+    #[test]
+    fn each_host_label_carries_the_value_it_came_from() {
+        // One key, two committed hosts. The caller used to re-look-up the key's
+        // first value and attach it to every label, so the second reference was
+        // printed as evidence for the first one's value — and the addressed-pair
+        // enumeration is exactly where that evidence is read.
+        let values: BTreeMap<String, BTreeSet<String>> = [
+            (
+                "proxy.host".to_string(),
+                ["alpha.svc".to_string(), "beta.svc".to_string()].into_iter().collect(),
+            ),
+            ("proxy.port".to_string(), ["9000".to_string()].into_iter().collect()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            host_keys_with_sibling_port(&values),
+            vec![
+                ("proxy.host".to_string(), "alpha.svc".to_string(), "alpha".to_string()),
+                ("proxy.host".to_string(), "beta.svc".to_string(), "beta".to_string()),
+            ],
+        );
+    }
+
+    #[test]
+    fn two_values_sharing_a_first_label_are_one_identity_claim() {
+        // `a.one.svc` and `a.two.svc` both claim the label `a`. Two identical
+        // `Target`s would inflate the reference census without adding a pair.
+        let values: BTreeMap<String, BTreeSet<String>> = [
+            (
+                "proxy.host".to_string(),
+                ["a.one.svc".to_string(), "a.two.svc".to_string()].into_iter().collect(),
+            ),
+            ("proxy.port".to_string(), ["9000".to_string()].into_iter().collect()),
+        ]
+        .into_iter()
+        .collect();
+        let found = host_keys_with_sibling_port(&values);
+        assert_eq!(found.len(), 1, "one label, one claim: {found:?}");
+        assert_eq!(found[0].2, "a");
+    }
+
+    #[test]
+    fn one_admission_rule_serves_both_source_sets() {
+        // The two source sets differ only in provenance. Running the same values
+        // through both must yield the same labels, forms and ports — the twin
+        // that once stood here could have diverged with the report still
+        // printing "by source set" as one breakdown.
+        let values: BTreeMap<String, BTreeSet<String>> = [
+            ("a.base-url".to_string(), ["http://callee.svc:9000/v1".to_string()].into_iter().collect()),
+            ("proxy.host".to_string(), ["other.svc".to_string()].into_iter().collect()),
+            ("proxy.port".to_string(), ["9100".to_string()].into_iter().collect()),
+        ]
+        .into_iter()
+        .collect();
+        let run = |source: SourceSet| {
+            let (mut scalars, mut targets) = (Vec::new(), Vec::new());
+            let admitted = collect_values(
+                &Provenance { member: "agg", file: "agg/f.yml", overlay: "o", source },
+                &values,
+                &mut scalars,
+                &mut targets,
+            );
+            (admitted, targets)
+        };
+        let (app_n, app) = run(SourceSet::Application);
+        let (dep_n, dep) = run(SourceSet::Deploy);
+        assert_eq!(app_n, dep_n, "the same values admit the same scalar count");
+        assert_eq!(app_n, 3, "three committed scalars");
+        let shape = |ts: &[Target]| -> Vec<(String, TargetForm, Option<String>)> {
+            ts.iter().map(|t| (t.label.clone(), t.form, t.port.clone())).collect()
+        };
+        assert_eq!(shape(&app), shape(&dep), "one admission rule, two provenances");
+        assert_eq!(
+            shape(&app),
+            vec![
+                ("callee".to_string(), TargetForm::Url, Some("9000".to_string())),
+                ("other".to_string(), TargetForm::HostBesidePort, None),
+            ],
+        );
+        assert!(app.iter().all(|t| t.source == SourceSet::Application));
+        assert!(dep.iter().all(|t| t.source == SourceSet::Deploy));
     }
 
     #[test]
@@ -2279,6 +2413,7 @@ mod fixtures {
                 via_key: "a.base-url".to_string(),
                 file: format!("{member}/src/main/resources/application.yml"),
                 value: format!("http://{label}:9000"),
+                port: Some("9000".to_string()),
             },
             outcome,
             provider: provider.map(str::to_string),
