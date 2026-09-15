@@ -64,11 +64,9 @@
 //!
 //! It is also not a second mechanism. This is the identical hop the HTTP arm has
 //! resolved request paths with since S-397/S-398 — literally the same
-//! `BindingView`, built by the same two lines one level up — and it reaches this
-//! arm through the **refusal slot**, because every shipped `brokers.scm` narrows
-//! the binding capture to `(string_literal)` and a getter call therefore arrives as
-//! the `(method_invocation)` arm of a slot's enumeration. The arm spends the
-//! `.scm`'s own enumeration rather than widening it; no query changed for S-409.
+//! `BindingView`, built by the same constructor one level up. It is taken at the
+//! **refusal slot**, for a reason stated once, on the branch that takes it; see
+//! "THE ACCESSOR HOP" in [`capture_broker_invocations`].
 //!
 //! What still refuses is everything the chain cannot prove: the nine named
 //! accessor faults of [FR-WS-19] (a nested getter, a method parameter, an unbound
@@ -167,24 +165,28 @@ impl Side {
 /// resolver the code-reference collector uses. Returns the number of references
 /// captured (a language without the `brokers` capability never calls this).
 ///
-/// `binding` is the reading file's configuration-binding view (S-409,
-/// [FR-WS-19]) — [`None`] for a member declaring no `@ConfigurationProperties`
-/// class, which is what keeps such a member byte-for-byte unaffected. It is
-/// asked about the **refusal slot's** operand and nowhere else; see the accessor
-/// hop below for why that is the only node it could be asked about.
+/// `binding` yields the reading file's configuration-binding view (S-409,
+/// [FR-WS-19]), or [`None`] for a member declaring no `@ConfigurationProperties`
+/// class. It is a **closure, not a value**, and deliberately: building the view
+/// walks the file's whole AST, this arm has no detector gate to build it behind,
+/// and it is asked about the **refusal slot's** operand and nowhere else — so a
+/// file carrying no slot must not pay for it. The caller memoises, so the walk
+/// happens at most once however many slots a file has. See the accessor hop below
+/// for why the slot is the only node it could be asked about.
 ///
 /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
 /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
-pub(super) fn capture_broker_invocations<F>(
+pub(super) fn capture_broker_invocations<'b, F, B>(
     query: &Query,
     root: Node<'_>,
     source: &[u8],
     enclosing: F,
-    binding: Option<&BindingView<'_>>,
+    binding: B,
     facts: &mut Facts,
 ) -> usize
 where
     F: Fn(Node<'_>) -> Option<LogosSymbol>,
+    B: Fn() -> Option<&'b BindingView<'b>>,
 {
     let capture_names = query.capture_names();
     let mut publishes: Vec<InvocationSite> = Vec::new();
@@ -293,7 +295,7 @@ where
         // candidate at all, which is exactly how it was treated when the
         // attribution lived inside the recorder.
         if let (Some((slot_side, slot_node)), Some(site)) = (slot, site_node) {
-            match binding.and_then(|b| b.placeholder_for(slot_node, source)) {
+            match binding().and_then(|b| b.placeholder_for(slot_node, source)) {
                 Some(placeholder) => {
                     bound.push((slot_side.relation(), slot_node.byte_range()));
                     if let Some(source_symbol) = enclosing(slot_node) {
@@ -1418,6 +1420,15 @@ class OrderService {
     /// anything either guard does. Every site is attributed to one fixed symbol,
     /// since attribution is not what these tests are about.
     fn capture_with(query_src: &str, src: &str) -> Facts {
+        // No binding view: most guards here are about the reconcile and the
+        // receiver gate, not about the accessor hop, and a member with no
+        // `@ConfigurationProperties` class is exactly what `None` models.
+        capture_with_properties(query_src, src, None)
+    }
+
+    /// [`capture_with`], plus the source of a `@ConfigurationProperties` class the
+    /// member declares — so the accessor hop is live and a slot operand can resolve.
+    fn capture_with_properties(query_src: &str, src: &str, props: Option<&str>) -> Facts {
         let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
         let plugin = registry.for_extension("java").expect("java plugin present");
         let language = plugin.language();
@@ -1436,18 +1447,88 @@ class OrderService {
             warnings: Vec::new(),
             config_source: None,
         };
+        let index = props.map(|p| {
+            crate::extract::config::binding::PropertiesIndex::from_sources(
+                &registry,
+                [("src/main/java/Props.java", p)],
+            )
+        });
+        let view = index.as_ref().map(|index| BindingView {
+            index,
+            types: crate::extract::config::accessor::DeclaredTypes::build(
+                tree.root_node(),
+                src.as_bytes(),
+            ),
+            language: plugin.name(),
+            module: crate::extract::config::binding::MEMBER_SCOPE,
+        });
         capture_broker_invocations(
             &query,
             tree.root_node(),
             src.as_bytes(),
             |_| Some(symbol.clone()),
-            // No binding view: these guards are about the reconcile and the
-            // receiver gate, not about the accessor hop, and a member with no
-            // `@ConfigurationProperties` class is exactly what `None` models.
-            None,
+            || view.as_ref(),
             &mut facts,
         );
         facts
+    }
+
+    /// **The reconcile, on the ACCESSOR side (S-409).** A resolved accessor must
+    /// cancel a refusal candidate raised over the same site by a *second* pattern —
+    /// the job of the `bound.push` in the hop's resolved arm.
+    ///
+    /// This mirrors, deliberately and for the same reason, the literal arm's own
+    /// `a_site_that_bound_a_literal_records_no_refusal_even_when_a_slot_matched_it`:
+    /// no SHIPPED query creates the pair, because one operand is captured by one
+    /// pattern, so a droppable on-disk `brokers.scm` ([FR-PL-04]) is the only thing
+    /// that can. Without this fixture the `bound.push` is dead to every test —
+    /// deleting it left the whole suite and the estate measurement green, which is
+    /// what this test exists to stop.
+    ///
+    /// [FR-PL-04]: ../../../docs/specs/requirements/FR-PL-04.md
+    #[test]
+    fn a_site_whose_accessor_resolved_records_no_refusal_even_when_a_wider_slot_matched_it() {
+        // Two patterns over one call: the inner one slots the accessor operand (and
+        // resolves it), the outer one slots the whole argument list and would refuse
+        // the same site. Only the range containment can tell the site bound.
+        let query = r#"
+(method_invocation
+  name: (identifier) @_m
+  arguments: (argument_list
+    . (method_invocation) @broker.publish.topic.slot) @broker.publish.site
+  (#eq? @_m "send"))
+
+(method_invocation
+  name: (identifier) @_m2
+  arguments: (argument_list) @broker.publish.topic.slot @broker.publish.site
+  (#eq? @_m2 "send"))
+"#;
+        const PROPS: &str = "package a;\n            @ConfigurationProperties(prefix = \"kafka.topics\")\n            public class KafkaTopics { private String archiveEvents; }\n";
+        let src = r#"
+class C {
+    private final KafkaTopics kafkaTopics;
+    void publish() { template.send(kafkaTopics.getArchiveEvents()); }
+}
+"#;
+        let resolved = capture_with_properties(query, src, Some(PROPS));
+        assert_eq!(
+            targets(&resolved, ArtifactRelation::BrokerPublish),
+            vec!["${kafka.topics.archiveevents}".to_string()],
+            "the accessor bound, so the wider slot's candidate is cancelled and the              site records NO keyless row beside the key: {:?}",
+            resolved.refs
+        );
+
+        // The complement, through the SAME query and the SAME source: with no
+        // properties class the accessor resolves nothing, so the site refuses. This
+        // is what makes the assertion above about the cancellation rather than
+        // about the query simply never producing a candidate.
+        let refused = capture_with_properties(query, src, None);
+        assert_eq!(
+            targets(&refused, ArtifactRelation::BrokerPublish),
+            vec![String::new()],
+            "with nothing to resolve, the same two patterns record the refusal: {:?}",
+            refused.refs
+        );
     }
 
     /// **The reconcile, covered.** A `.scm` that points a refusal slot at an
