@@ -604,7 +604,7 @@ public class Calls {
     // `.uri("/users")` spelling emits. What the lambda composes is still what
     // decides: this one composes `path(<literal>).build()` and nothing else, and
     // its chaining siblings stay refused whole
-    // ([`a_uri_builder_lambda_that_chains_past_path_stays_refused_whole`]).
+    // ([`a_uri_builder_composer_link_that_reaches_the_path_stays_refused_whole`]).
     //
     // The other four are untouched, and that is the load-bearing half of this
     // case: a bare variable, a concatenation, a relative literal and a
@@ -1033,61 +1033,108 @@ fn a_uri_builder_lambda_with_an_unresolvable_path_records_its_refusal_unchanged(
     // base. The second is the one the criterion spells that the first does not
     // cover: a concatenation is not a static literal and not an accessor, so it
     // must reach the same refusal by a different route through the dispatch.
+    //
+    // **Each is run twice since S-405: bare, and inside a path-neutral chain.**
+    // [CR-129] §3.3 scopes "which path operands are resolvable" explicitly OUT,
+    // so widening what a chain may carry must not move either row — and the
+    // chained spelling is the one that could have, because it is the spelling
+    // the widening reaches. Two of [S-405]'s four required refusal fixtures are
+    // these chained rows.
+    //
+    // [CR-129]: ../../docs/requests/CR-129-path-neutral-composer-link-in-a-uribuilder-lambda.md
+    // [S-405]: ../../docs/planning/journal.md#s-405-a-path-neutral-composer-link-resolves-on-its-path-operand
     for (label, path_arg) in [("a bare variable", "uri"), ("a composed base", "base + uri")] {
-        assert_eq!(
-            client_call_rows(&format!(
-                r#"
+        for (shape, chain) in [
+            ("passed straight to the terminal", ".build()"),
+            (
+                "composed with a path-neutral link",
+                r#".queryParam("q", uri).build()"#,
+            ),
+        ] {
+            assert_eq!(
+                client_call_rows(&format!(
+                    r#"
 public class Calls {{
     private WebClient webClient;
     private String base;
     Object runtime(String uri) {{
-        return webClient.get().uri(builder -> builder.path({path_arg}).build()).retrieve();
+        return webClient.get().uri(builder -> builder.path({path_arg}){chain}).retrieve();
     }}
 }}
 "#
-            )),
-            (vec![], 1),
-            "{label} proves nothing, so the site stays the one keyless \
-             base-url-runtime row it was"
-        );
+                )),
+                (vec![], 1),
+                "{label}, {shape}: the operand proves nothing, so the site stays \
+                 the one keyless base-url-runtime row it was — a chain the arm \
+                 CAN read end to end still emits nothing when what it reads is \
+                 not a value the repository commits"
+            );
+        }
     }
 }
 
-/// **S-399 AC3.** The composition is not approximated: a lambda that chains
-/// `path(…)` with anything else stays refused **whole**, rather than binding on
-/// its resolvable half ([NFR-RA-05]).
+/// **S-399 AC3, as S-405 narrowed it ([CR-129]).** The composition is still not
+/// approximated: a chain carrying a link the path-neutrality contract test
+/// cannot prove unable to alter the path template stays refused **whole**,
+/// rather than binding on its resolvable half ([NFR-RA-05]).
 ///
-/// The `queryParam` row is first because it is the estate's dominant lambda
-/// shape — see the composition rule in
-/// `plugins/java/queries/invocations.scm`, which carries the measured figure —
-/// so the criterion's cost is paid on the common case, not on a contrived one.
-/// Each row's path argument is a **resolvable** literal, so what is being
-/// pinned is the chain and not the operand.
+/// What moved is which links those are. S-399 refused every link beyond
+/// `build()`, which refused the estate's dominant shape for a `queryParam` that
+/// does not compose the path at all; [CR-129] read that back against
+/// [FR-WS-08] AC2 and found the product stricter than its own requirement. The
+/// rows below are what remains refused — and each row's path argument is a
+/// **resolvable** literal, so what is pinned is the chain and not the operand.
+///
+/// **Two rows are DEFENSIVE and are labelled so.** A second `path(…)` and a
+/// `pathSegment(…)` do **not** occur on the reference estate ([CR-129] §8.4);
+/// they are pinned so a later reader does not mistake them for observed shapes,
+/// and so the boundary is a test rather than a claim. The remaining rows probe
+/// the contract test itself with its near misses — a link naming no component,
+/// a link whose name merely *contains* a component token, and a link naming the
+/// query component **and** the path.
 #[test]
-fn a_uri_builder_lambda_that_chains_past_path_stays_refused_whole() {
+fn a_uri_builder_composer_link_that_reaches_the_path_stays_refused_whole() {
     for (label, body) in [
         (
-            "queryParam",
-            r#"builder -> builder.path("/users").queryParam("q", q).build(id)"#,
-        ),
-        (
-            "queryParams",
-            r#"builder -> builder.path("/users").queryParams(params).build()"#,
-        ),
-        (
-            "a second path segment",
+            "a second `path(…)` — DEFENSIVE, no such site on the reference estate",
             r#"builder -> builder.path("/users").path(segment).build()"#,
         ),
         (
-            "a call after the terminal",
+            "a `pathSegment(…)` — DEFENSIVE, no such site on the reference estate",
+            r#"builder -> builder.path("/users").pathSegment(segment).build()"#,
+        ),
+        (
+            "a call after the terminal: it operates on the `URI` `build()` \
+             returned, not on the builder, and `normalize()` really does rewrite \
+             the path it was handed",
             r#"builder -> builder.path("/users").build().normalize()"#,
+        ),
+        (
+            "`encode()` names no URI component, so nothing proves it cannot \
+             rewrite the path — the rule fails closed",
+            r#"builder -> builder.path("/users").encode().build()"#,
+        ),
+        (
+            "`uri(URI)` resets every component INCLUDING the path while naming \
+             none of them — the case a `[Pp]ath`-absence test would have admitted",
+            r#"builder -> builder.path("/users").uri(other).build()"#,
+        ),
+        (
+            "`support(…)` merely CONTAINS the `port` component token; the \
+             camelCase word boundary is what tells the two apart",
+            r#"builder -> builder.path("/users").support(other).build()"#,
+        ),
+        (
+            "`queryAndPath(…)` names the query component and the path component; \
+             naming the path is disqualifying however else a link is named",
+            r#"builder -> builder.path("/users").queryAndPath(segment).build()"#,
         ),
     ] {
         let body = format!(
             r#"
 public class Calls {{
     private WebClient webClient;
-    Object chained(String q, String id, String segment, Object params) {{
+    Object chained(String segment, Object other) {{
         return webClient.get().uri({body}).retrieve();
     }}
 }}
@@ -1096,10 +1143,151 @@ public class Calls {{
         assert_eq!(
             client_call_rows(&body),
             (vec![], 1),
-            "{label}: the lambda composes more than the one operand the arm can \
-             read, so it is refused whole — never bound on the literal half"
+            "{label}: the chain carries a link the arm cannot prove path-neutral, \
+             so the site is refused whole — never bound on the literal half"
         );
     }
+}
+
+/// **S-405 AC2 ([CR-129]).** A composer chain whose every other link is
+/// path-neutral emits the reference the direct spelling does.
+///
+/// The rows are ordered by what they establish, not by likelihood:
+///
+/// 1. `queryParam` is the estate's dominant lambda shape — 6 of its 9 `src/main`
+///    `.uri(<lambda>)` sites chain at least one ([CR-129] §8.2), so the
+///    criterion is paid on the common case and not on a contrived one.
+/// 2. `queryParamIfPresent` and `queryParams` are the rows that make this a
+///    **contract test and not a whitelist**: the estate writes both, neither was
+///    anticipated when the rule was sketched, and a method-name list would have
+///    shipped refusing them ([CR-129] §8.3, decision 3).
+/// 3. `queryParamIfMissing` and `replaceQueryParam` are methods **nobody has
+///    written** — the first does not exist in Spring at all. They are here
+///    because AC1's real requirement is that a new path-neutral method be
+///    admitted *without editing the rule*, which only a row the rule has never
+///    seen can demonstrate.
+/// 4. `fragment` proves the vocabulary is the URI's components and not "the
+///    query string": a link naming any component other than the path is neutral.
+/// 5. The estate's longest chain — seven links before the terminal — is what a
+///    fixed-depth pattern would have refused for no reason a reader could state.
+/// 6. The unterminated row pins the defensive branch: the terminal is optional
+///    in the reconciliation, not required by it.
+///
+/// The direct form is asserted **in the same call**, from the same fixture text,
+/// rather than written out as an expected literal — "the same reference the
+/// direct form does" is the criterion, so the two are compared.
+#[test]
+fn a_path_neutral_composer_chain_yields_the_reference_the_direct_form_does() {
+    let direct = client_call_rows(
+        r#"
+public class Calls {
+    private WebClient webClient;
+    Object direct(String id) {
+        return webClient.get().uri("/users/{id}").retrieve();
+    }
+}
+"#,
+    );
+    assert_eq!(
+        direct,
+        (vec!["GET /users/{id}".to_string()], 0),
+        "the control: the direct spelling binds and leaves no refusal row"
+    );
+
+    for (label, chain) in [
+        ("queryParam — the estate's dominant shape", r#".queryParam("q", q).build(id)"#),
+        (
+            "queryParamIfPresent — written by the estate, anticipated by nobody",
+            r#".queryParamIfPresent("s", ofNullable(s)).build(id)"#,
+        ),
+        (
+            "queryParams — written by the estate, anticipated by nobody",
+            r#".queryParams(params).build(id)"#,
+        ),
+        (
+            "queryParamIfMissing — a method that does not exist, admitted on \
+             arrival because the rule is a test",
+            r#".queryParamIfMissing("q", q).build(id)"#,
+        ),
+        (
+            "replaceQueryParam — the component named after a prefix rather than \
+             at the start of the name",
+            r#".replaceQueryParam("q", q).build(id)"#,
+        ),
+        (
+            "fragment — a component that is not the query and is not the path",
+            r#".fragment("top").build(id)"#,
+        ),
+        (
+            "the estate's longest chain: seven neutral links before the terminal",
+            r#".queryParam("a", q).queryParam("b", q).queryParam("c", q)
+               .queryParam("d", q).queryParam("e", q).queryParam("f", q)
+               .queryParam("g", q).build()"#,
+        ),
+        (
+            "no terminal at all — the defensive branch, kept for a non-normative \
+             wrapper whose `uri` takes `Function<UriBuilder, UriBuilder>`",
+            r#".queryParam("q", q)"#,
+        ),
+    ] {
+        let composed = client_call_rows(&format!(
+            r#"
+public class Calls {{
+    private WebClient webClient;
+    Object composed(String id, String q, String s, Object params) {{
+        return webClient.get().uri(builder -> builder.path("/users/{{id}}"){chain}).retrieve();
+    }}
+}}
+"#
+        ));
+        assert_eq!(
+            composed, direct,
+            "{label}: every link beside `path(…)` names a URI component that is \
+             not the path, so none of them can alter the template — the chain \
+             emits what the direct spelling emits, and cancels the wider \
+             pattern-1 match's refusal candidate exactly as the unchained form does"
+        );
+    }
+}
+
+/// **S-405 AC2, the provenance half.** The reference a composer chain emits from
+/// a resolvable `@ConfigurationProperties` accessor is the one the direct
+/// spelling emits **and carries the same provenance** — the canonical
+/// `${prefix.key}` placeholder [FR-WS-19] stores, not a second spelling of it.
+///
+/// This is the shape the estate actually writes: all 9 of its `src/main`
+/// `.uri(<lambda>)` sites compose from an accessor, none from a literal. The
+/// literal rows above are the ones that pin the *chain*; this one pins that
+/// nothing about the **operand** moved — [CR-129] §3.3 scopes that explicitly
+/// out, and the accessor reaches the same `ConfigBound` admission through the
+/// same hop it reached before.
+#[test]
+fn a_path_neutral_composer_chain_carries_the_accessor_provenance_unchanged() {
+    let props = "package a;\n@ConfigurationProperties(prefix = \"mailserver.api\")\npublic class MailServerConfigurationApi { private String uriGetArchive; }\n";
+    let unit = |call: &str| {
+        format!(
+            "package com.example;\n{CLIENT_IMPORTS}\n{props}\npublic class Calls {{\n\
+             \x20   private RestClient restClient;\n\
+             \x20   private final MailServerConfigurationApi api;\n\
+             \x20   String a(String q) {{ return restClient.get().uri({call}).retrieve().body(String.class); }}\n\
+             }}\n"
+        )
+    };
+
+    let direct = client_calls_raw(&unit("this.api.getUriGetArchive()"));
+    assert_eq!(
+        direct,
+        ["GET ${mailserver.api.urigetarchive}"],
+        "the control: the direct spelling resolves the accessor to its canonical key"
+    );
+    assert_eq!(
+        client_calls_raw(&unit(
+            r#"b -> b.path(this.api.getUriGetArchive()).queryParam("q", q).build(1)"#
+        )),
+        direct,
+        "the composed spelling resolves the same accessor to the same canonical \
+         key — same reference, same provenance, no second rule"
+    );
 }
 
 /// The composer rule's **near misses**, each one step from matching.

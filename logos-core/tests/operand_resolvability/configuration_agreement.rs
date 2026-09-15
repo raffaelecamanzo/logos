@@ -2283,6 +2283,27 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
     // denominator did NOT move (96), which is what says this is a resolution and
     // not a new capture.
     //
+    // *Fourth move, [S-405] on 2026-09-15 (`sprint-70-I1-S5`):* **88** resolved of
+    // **96**, 2 divergent, **6** no-key. Same shape as the third and the same
+    // cause one step further on — [CR-129] widened pattern 5 from "`path(…)` and
+    // an optional `build(…)`" to "`path(…)` and any number of links that provably
+    // cannot alter the path template", so the SIX lambda sites that chain a
+    // `queryParam`-family link now present the accessor they always had. They are
+    // the six the third move left behind, and the run names them:
+    // `mailbox-aggregator-api` OfficialLogExportApiRestClient.java:79,
+    // MailboxApiRestClient.java:87, :187 and :454, ReportingApiRestClient.java:62
+    // and :83. That exhausts the estate's `.uri(<lambda>)` population: 9 of 9
+    // `src/main` sites now resolve, against 3 of 9 before [S-399] and 3 of 9 after
+    // it. **A census, not a floor** — another Java estate writing RestTemplate or
+    // Feign has none of these sites at all.
+    //
+    // The denominator did NOT move (96) for the fourth time running, so the five
+    // restatements listed in the assertion message below are NOT re-recorded: each
+    // of them states the denominator, and this move did not touch it. The one
+    // exception is the LIVE sentence in FR-WS-19's Notes, which restates this
+    // arm's RESOLVED half (82) rather than its denominator; [S-405] appends the
+    // new reading there rather than rewriting the dated one.
+    //
     // **The product side still reads 81 and is NOT stale.** `RECORDED_ADMITTED` in
     // `config_bound_admission.rs` reads each member's INDEXED store and this
     // estate's index predates [S-399]; this arm re-derives from source. The
@@ -2296,18 +2317,23 @@ fn measure_configuration_agreement_over_the_reference_workspace() {
     // divergent** sites and their four profile-labelled values.
     //
     // [S-399]: ../../../docs/planning/journal.md#s-399-the-accessor-hop-reaches-through-a-uribuilder-lambda
+    // [S-405]: ../../../docs/planning/journal.md#s-405-a-path-neutral-composer-link-resolves-on-its-path-operand
+    // [CR-129]: ../../../docs/requests/CR-129-path-neutral-composer-link-in-a-uribuilder-lambda.md
     // [S-398]: ../../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
     // [S-402]: ../../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
     assert_eq!(
         (s382.denominator, s382.resolved, s382.divergent, s382.no_key),
-        (96, 82, 2, 12),
+        (96, 88, 2, 6),
         "S-382 AC5 names 79 production client-call sites resolved and 2 divergent, over \
          a denominator S-365 recorded as 111 (30 no-key), which drifted to 108 (27 \
          no-key) before S-382 and which S-398 T2 re-recorded as 96 (15 no-key) on \
          2026-09-13 after S-402 emptied the Go row. The Sprint 69 sprint review \
          re-recorded the RESOLVED half 79 -> 82 (no-key 15 -> 12) on 2026-09-14 over \
          merged main, S-399's UriBuilder-lambda pattern being the measured cause and \
-         the denominator holding at 96. This run read {s382:?}. Re-measure \
+         the denominator holding at 96. S-405 re-recorded it again 82 -> 88 (no-key \
+         12 -> 6) on 2026-09-15, CR-129's path-neutral composer rule being the \
+         measured cause and the denominator holding at 96 for the fourth time. \
+         This run read {s382:?}. Re-measure \
          against the reference workspace before changing this assertion.\n\
          \n\
          THIS DENOMINATOR IS RESTATED IN FIVE PLACES THIS BINARY CANNOT REACH, and \

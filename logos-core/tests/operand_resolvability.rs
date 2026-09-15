@@ -73,12 +73,16 @@
 //! and exactly **1** to a same-unit constant — `JSESSIONID_COOKIE_NAME`, a
 //! cookie name, not a path.
 //!
-//! S-399 moved 3 of those 9 lambdas out of `other`: the arm now reads the
-//! operand inside a lambda composing `path(<one operand>)` and an optional
-//! `build(…)`, so such a site classifies from that operand and the remaining 6
-//! — which chain a `queryParam` — stay `other`. The figure predates the change
-//! and the table is not re-run here; the conclusion above is untouched, since
-//! constant folding still admits nothing either way.
+//! S-399 moved 3 of those 9 lambdas out of `other`: the arm reads the operand
+//! inside a lambda composing `path(<one operand>)` and an optional `build(…)`,
+//! so such a site classifies from that operand. S-405 ([CR-129]) then moved the
+//! remaining 6 — the `queryParam`-family chains — by widening what a chain may
+//! carry to any link that provably cannot alter the path template. The figures
+//! predate both changes and the table is not re-run here; the conclusion above
+//! is untouched, since constant folding still admits nothing either way (all 9
+//! compose from a configuration value that is not in the code at all).
+//!
+//! [CR-129]: ../../docs/requests/CR-129-path-neutral-composer-link-in-a-uribuilder-lambda.md
 //!
 //! Go's 6 same-unit constants are likewise not paths: they are HTTP **header
 //! names** (`Origin`, `AccessControlRequestMethod`, `HeaderXForwardedHost`)
@@ -877,16 +881,30 @@ fn is_http_method(name: &str) -> bool {
 ///
 /// The corpus this was measured on contains **zero** `URI.create(…)` sites in
 /// Java and Kotlin (counted 2026-09-13), so on `pec-services` the rule moves
-/// only the lambda shape: the 3 `.uri(builder -> builder.path(<accessor>)…)`
+/// only the lambda shape: the `.uri(builder -> builder.path(<accessor>)…)`
 /// sites pattern 5 admits are classified from the accessor rather than from the
 /// lambda. The module header's Sprint-64 table predates that and is not re-run
 /// here.
+///
+/// # The composer operand is the arm's own rule, CALLED rather than re-derived
+///
+/// S-405 widened pattern 5 from a fixed lambda body to an arbitrary-length
+/// path-neutral chain ([CR-129]), which no single query match can hold: the
+/// verb link and the composed operand sit an unknown number of links apart. The
+/// reconciliation that joins them is `extract::composer`, and this harness
+/// CALLS it rather than mirroring it — the same reason
+/// [`gate_admits`] has one spelling. A second copy would quietly
+/// disagree about which sites the arm considers, and this function's output is
+/// the denominator of two published measurements.
+///
+/// [CR-129]: ../../docs/requests/CR-129-path-neutral-composer-link-in-a-uribuilder-lambda.md
 fn collect_sites<'t>(
     query: &Query,
     root: Node<'t>,
     src: &'t [u8],
     invocation_methods: &BTreeMap<String, String>,
 ) -> Vec<(u32, Node<'t>)> {
+    let composers = extract::composer::Composers::collect(query, root, src);
     let names = query.capture_names();
     let mut sites = Vec::new();
     let mut cursor = QueryCursor::new();
@@ -895,10 +913,14 @@ fn collect_sites<'t>(
         let mut method_node = None;
         let mut declared = None;
         let mut arg_node = None;
+        let mut composer_node = None;
+        let mut composer_receiver = None;
         for cap in m.captures {
             match names[cap.index as usize] {
                 "invoke.http.method" => method_node = Some(cap.node),
                 "invoke.http.arg" => arg_node = Some(cap.node),
+                extract::composer::COMPOSER => composer_node = Some(cap.node),
+                extract::composer::COMPOSER_RECEIVER => composer_receiver = Some(cap.node),
                 other => {
                     if let Some(verb) = other.strip_prefix(DECLARED_METHOD_PREFIX) {
                         declared.get_or_insert((verb, cap.node));
@@ -906,7 +928,18 @@ fn collect_sites<'t>(
                 }
             }
         }
-        let Some(arg_node) = arg_node else { continue };
+        let arg_node = match arg_node {
+            Some(node) => node,
+            None => match (composer_node, composer_receiver) {
+                (Some(chain), Some(receiver)) => {
+                    match composers.operand(chain, receiver, src) {
+                        Some(node) => node,
+                        None => continue,
+                    }
+                }
+                _ => continue,
+            },
+        };
         let method = match method_node {
             Some(node) => {
                 let Ok(text) = node.utf8_text(src) else { continue };
@@ -2288,17 +2321,22 @@ fn two_calls_sharing_one_verb_anchor_stay_two_sites() {
 }
 
 /// A `uriBuilder -> …` lambda — 9 of the corpus's Java sites — is classified
-/// from whatever the arm can actually read inside it, which S-399 changed.
+/// from whatever the arm can actually read inside it, which S-399 changed and
+/// S-405 widened.
 ///
 /// Before S-399 the whole lambda was the captured operand and every one of the
-/// 9 was `Other`. Pattern 5 now binds the operand **inside** a lambda composing
-/// `path(<one operand>)` and an optional `build(…)`, so such a lambda is
-/// classified from that operand — while a lambda composing anything more stays
-/// captured whole and stays `Other`, which is the half that still covers 6 of
-/// the corpus's 9 (counted 2026-09-13).
+/// 9 was `Other`. Pattern 5 binds the operand **inside** the lambda, so such a
+/// lambda is classified from that operand; S-405 then widened *which* chains
+/// qualify from "`path(…)` and an optional `build(…)`" to "`path(…)` and any
+/// number of links that provably cannot alter the path template" ([CR-129]),
+/// which is what the second row below is. On the corpus that is the remaining 6
+/// of the 9 (counted 2026-09-13), all of them `queryParam`-family chains.
 ///
-/// Both rows are asserted, because the pair is the rule: the first alone would
-/// also pass if pattern 5 had swallowed every lambda.
+/// All three rows are asserted, because the set is the rule: the first two alone
+/// would also pass if the composer had swallowed every lambda, and the third is
+/// what says it did not.
+///
+/// [CR-129]: ../../docs/requests/CR-129-path-neutral-composer-link-in-a-uribuilder-lambda.md
 #[cfg(feature = "lang-java")]
 #[test]
 fn a_uri_builder_lambda_is_classified_from_what_the_arm_reads_inside_it() {
@@ -2309,15 +2347,27 @@ fn a_uri_builder_lambda_is_classified_from_what_the_arm_reads_inside_it() {
         "pattern 5 binds the `path(…)` operand, so the site is that literal"
     );
 
-    let refused = java(
+    let neutral = java(
         "",
         "builder -> builder.path(\"/x\").queryParam(\"q\", q).build()",
     );
     assert_eq!(
+        neutral.kinds,
+        vec![OperandKind::Literal],
+        "the query parameter names a component the path template does not \
+         contain, so the chain is read through to the same literal — the harness \
+         counts the arm's corpus because it CALLS the arm's own composer rule"
+    );
+
+    let refused = java(
+        "",
+        "builder -> builder.path(\"/x\").pathSegment(\"y\").build()",
+    );
+    assert_eq!(
         refused.kinds,
         vec![OperandKind::Other],
-        "a chained lambda is captured whole and stays unreadable — NFR-RA-05, \
-         never bound on its resolvable half"
+        "a link that reaches the path template leaves the lambda captured whole \
+         and unreadable — NFR-RA-05, never bound on its resolvable half"
     );
 }
 

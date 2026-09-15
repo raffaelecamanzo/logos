@@ -15,10 +15,14 @@
 ;                         accessor naming a committed key (S-397/S-398); a bare
 ;                         variable or a concatenation is refused as
 ;                         `base-url-runtime` (never approximately matched,
-;                         NFR-RA-05). A `UriBuilder` LAMBDA is bound to the
-;                         operand INSIDE it by pattern 5, and stays refused
-;                         whole when the lambda composes more than that pattern
-;                         admits (S-399).
+;                         NFR-RA-05). A `UriBuilder` LAMBDA composes its path
+;                         rather than passing one, so it binds no operand of its
+;                         own: patterns 5/5a-5c declare the composer vocabulary
+;                         and `extract::composer` reconciles them into the
+;                         operand INSIDE the lambda, which then fills this slot
+;                         (S-399, S-405). A chain carrying a link that cannot be
+;                         proven unable to alter the path template stays refused
+;                         whole (CR-129).
 ;
 ; ── The fluent-chain decision (S-341, the shape Kotlin/Ruby/PHP/C# consume) ───
 ;
@@ -218,10 +222,12 @@
 ;    Pattern 1 already matches these calls and sees the whole lambda, which is
 ;    not an operand anything can read — so the site is refused as
 ;    `base-url-runtime`. This pattern matches the SAME call a second time and
-;    binds `@invoke.http.arg` to the operand INSIDE the lambda, which the
-;    generic dispatch then judges exactly as it judges a direct `.uri(<operand>)`
-;    argument: a static literal fills the path slot, a `@ConfigurationProperties`
-;    accessor resolves to its canonical key, and anything else refuses.
+;    hands the lambda's body to `extract::composer`, which reconciles it against
+;    patterns 5a-5c below and yields the operand INSIDE the lambda. The generic
+;    dispatch then judges that operand exactly as it judges a direct
+;    `.uri(<operand>)` argument: a static literal fills the path slot, a
+;    `@ConfigurationProperties` accessor resolves to its canonical key, and
+;    anything else refuses.
 ;
 ;    The two matches do not double-count, and the mechanism is not new here:
 ;    `record_refusals` cancels a refusal candidate when a RESOLVED operand of the
@@ -234,56 +240,116 @@
 ;    NUMBERED 5 rather than inserted beside patterns 1-3 it belongs with: the
 ;    numbering is referenced by prose in this file and in
 ;    `logos-core/tests/java_http_client_call.rs`, and append-only numbering
-;    keeps those references true rather than requiring a sweep.
+;    keeps those references true rather than requiring a sweep. S-405's three
+;    vocabulary patterns are 5a-5c for the same reason: they are this pattern's
+;    parts, not four independent shapes, and a reader who follows a reference to
+;    "pattern 5" should land on all of them.
 ;
-; ── What the lambda is allowed to compose (NFR-RA-05) ────────────────────────
+; ── What the lambda is allowed to compose (NFR-RA-05, CR-129) ────────────────
 ;
-;    `path(<one operand>)`, on the lambda's OWN parameter, optionally followed
-;    by `build(…)` — and nothing else. Everything about that sentence is a
-;    constraint the pattern spells, because the alternative is approximating a
-;    composition:
+;    `path(<one operand>)` on the lambda's OWN parameter, composed with links
+;    that PROVABLY CANNOT ALTER THE PATH TEMPLATE, and optionally terminated by
+;    `build(…)`.
+;
+;    S-399 shipped the narrower reading — `path(<one operand>)` and nothing
+;    beyond `build()` — and CR-129 clarified it against the requirement it
+;    implements. FR-WS-08 AC2 refuses a path "composed from a NON-RESOLVABLE
+;    operand", and a query parameter does not compose the path at all, so
+;    refusing the site on its account was stricter than FR-WS-08 asks. It cost
+;    the estate's dominant lambda shape: 6 of the 9 `src/main` `.uri(<lambda>)`
+;    sites on the reference workspace chain at least one `queryParam`-family
+;    link (counted 2026-09-14, CR-129 §8.2 — a CENSUS of one estate, never a
+;    floor).
+;
+; ── The path-neutrality contract test (CR-129 AC1) ───────────────────────────
+;
+;    A link is path-neutral IFF IT NAMES A URI COMPONENT THAT IS NOT THE PATH.
+;    That is a TEST, not a list of admitted method names, and the difference is
+;    the whole of CR-129's first criterion — a method-name whitelist is the
+;    over-capture shape CR-110 established, and it would already have shipped
+;    with a hole:
+;
+;      * The vocabulary pattern 5b spells is RFC 3986's COMPONENT set — scheme,
+;        userInfo, host, port, query, fragment. That is the URI grammar, not
+;        Spring's API surface. `UriBuilder` names every component mutator after
+;        the component it mutates, and a link naming the query component cannot
+;        reach the path component: they are disjoint parts of one URI. This is
+;        FR-CG-09's template — what a provider route is matched on — and it is
+;        what "path-neutral" is defined against.
+;      * THE ESTATE IS WHY THIS IS A TEST. It composes with `queryParam`,
+;        `queryParamIfPresent` AND `queryParams`; the last two were not
+;        anticipated when the rule was sketched (CR-129 §8.3, decision 3), and a
+;        whitelist would have refused them. All three name the query component
+;        on arrival, as would a `queryParamIfMissing` nobody has written yet.
+;      * A link naming NO component — `encode()`, `normalize()`,
+;        `cloneBuilder()`, `toUriString()` — is NOT proven neutral and refuses.
+;        The rule fails CLOSED: what it cannot prove, it refuses (NFR-RA-05).
+;      * `uri(URI)` is why the test is the component vocabulary and NOT "the
+;        name does not contain `path`". That method resets every component
+;        INCLUDING the path while naming none of them, so a `[Pp]ath`-absence
+;        test would have admitted it; here it names no component and refuses.
+;      * The `[Pp]ath` guard in 5b is a SECOND, redundant test, kept because a
+;        link naming the path component is never neutral however else it is
+;        named (`queryAndPath`). It is redundant against today's vocabulary and
+;        is what stays true if that vocabulary is ever widened.
+;
+;    Everything S-399 constrained about the path link itself is UNCHANGED, and
+;    CR-129 §3.3 puts it explicitly out of scope — which operands are resolvable
+;    does not move:
 ;
 ;      * `@_lb_path` is `#eq?`-matched, never prefix-matched, so `pathSegment(…)`
 ;        — a real `UriBuilder` method taking a runtime segment — is not read as
-;        `path`.
+;        `path`. It is refused twice over: it binds no operand here, and it is
+;        not path-neutral there.
 ;      * The `path` argument list is anchored on BOTH ends, so a two-argument
-;        `path(a, b)` binds nothing. Spring's `UriBuilder` declares no such
-;        overload today, so this is the droppable-query guard (FR-PL-04) and a
-;        guard against a same-named method on some other builder — not a probe
-;        of a shape the estate writes.
-;      * `@_lb_recv` must be the `@_lb_param` the lambda declares, so a `path(…)`
-;        call on some other object that merely happens to sit in this position is
-;        not read as the builder's.
-;      * `build` is the only admitted terminal. It expands the template
-;        variables, which the direct `.uri(template, a, b)` spelling passes as
-;        trailing arguments pattern 1 also ignores — so admitting it emits the
-;        SAME reference, not a wider one. `@_lb_build` is bound ONLY by the
-;        second alternation branch, so `(#eq? @_lb_build "build")` is vacuously
-;        true when the first matched — tree-sitter satisfies a text predicate
-;        over a capture with no nodes. That vacuity is what lets the bare body
-;        match at all, and it is written down because a predicate that silently
-;        constrains nothing is a shipped-incident class in this repo's queries.
+;        `path(a, b)` and a zero-argument `path()` bind nothing. Spring's
+;        `UriBuilder` declares no such overload today, so this is the
+;        droppable-query guard (FR-PL-04) and a guard against a same-named
+;        method on some other builder — not a probe of a shape the estate writes.
+;      * `@invoke.http.composer.anchor` must be the `@invoke.http.composer
+;        .receiver` the lambda declares, so a `path(…)` call on some other
+;        object that merely happens to sit in this position is not read as the
+;        builder's.
+;      * `build` is the only admitted terminal, and only as the chain's
+;        OUTERMOST link. It expands the template variables, which the direct
+;        `.uri(template, a, b)` spelling passes as trailing arguments pattern 1
+;        also ignores — so admitting it emits the SAME reference, not a wider
+;        one. A call AFTER it operates on what it returned — a `URI`, not the
+;        builder — so the builder's contract proves nothing about it, and
+;        `build().normalize()` really does rewrite the path it was handed.
+;      * A SECOND `path(…)` anywhere inside the chain refuses it: a template
+;        composed from two operands is a composition this arm has not read, and
+;        it reads one (NFR-RA-05).
 ;
-;    Everything else stays REFUSED WHOLE rather than binding on its resolvable
-;    half. `queryParam(…)`/`queryParams(…)` are the ones that cost the most —
-;    8 of the 13 `.uri(<lambda>)` sites in the reference workspace chain at least
-;    one (counted 2026-09-13) — and they are refused on the same rule, not
-;    exempted: a chain the arm reads only part of is a composition it has not
-;    proven (NFR-RA-05).
+; ── Why FOUR patterns and a byte-range reconciliation ────────────────────────
 ;
-;    ONE pattern, not two, following pattern 4's convention: the bare
-;    `path(…)` body and the `path(…).build(…)` body are a node alternation
-;    binding ONE `@invoke.http.arg`, so the shapes cannot drift apart.
+;    A composer chain is arbitrarily long — 4 links at the estate's shortest
+;    chained site and 9 at its longest — and a tree-sitter pattern's nesting is
+;    FIXED. No single pattern can hold both the call's verb link and an operand
+;    buried under an unknown number of links, so the four below each declare one
+;    part of the vocabulary and `extract::composer` reconciles their matches by
+;    byte range: the chain's links are exactly the nodes sharing its start
+;    offset, and every one of them between the path link and the root must have
+;    been matched as neutral (or, for the root alone, as the terminal). A link
+;    NO pattern classified is a link nothing proved harmless, so the chain
+;    refuses — the reconciliation fails closed, which is what keeps the rule
+;    inside NFR-RA-05.
 ;
-;    The bare body is DEFENSIVE, and pattern 4's two receiver spellings are not
-;    — the difference is worth stating so a later author does not read it as an
-;    estate shape. Spring's overload is `uri(Function<UriBuilder, URI>)` and
-;    `UriBuilder.path(String)` returns `UriBuilder`, so `builder ->
+;    The alternative was hand-unrolling the chain to a fixed depth in the
+;    pattern itself. That is a bounded rule wearing a general one's clothes: it
+;    would refuse the estate's 9-link site for no reason a reader could state,
+;    and each depth is a hand-written copy free to drift from its siblings —
+;    which is the hazard S-399 wrote its "ONE pattern, not two" note against,
+;    reached by a different road.
+;
+;    The bare (unterminated) composer body is DEFENSIVE and pattern 4's two
+;    receiver spellings are not — worth stating so a later author does not read
+;    it as an estate shape. Spring's overload is `uri(Function<UriBuilder, URI>)`
+;    and `UriBuilder.path(String)` returns `UriBuilder`, so `builder ->
 ;    builder.path(x)` does not compile against it: all 13 `.uri(<lambda>)` sites
 ;    on the reference workspace carry the terminal, and that is the API, not the
-;    corpus. The branch is kept for a non-normative wrapper whose `uri` takes
-;    `Function<UriBuilder, UriBuilder>`, costs one alternation branch, and is
-;    pinned by the `bare` row of
+;    corpus. It costs nothing here — the terminal is simply optional in the
+;    reconciliation — and is pinned by the `bare` row of
 ;    `a_uri_builder_lambda_yields_the_reference_the_direct_form_does`.
 ;
 ;    Stated ceiling: `parameters:` is constrained to a bare `(identifier)`, so a
@@ -298,24 +364,46 @@
   arguments: (argument_list
     .
     (lambda_expression
-      parameters: (identifier) @_lb_param
-      body: [
-        (method_invocation
-          object: (identifier) @_lb_recv
-          name: (identifier) @_lb_path
-          arguments: (argument_list . (_) @invoke.http.arg .))
-        (method_invocation
-          object: (method_invocation
-            object: (identifier) @_lb_recv
-            name: (identifier) @_lb_path
-            arguments: (argument_list . (_) @invoke.http.arg .))
-          name: (identifier) @_lb_build
-          arguments: (argument_list))
-      ]))
-  (#eq? @_uri_lambda "uri")
-  (#eq? @_lb_path "path")
-  (#eq? @_lb_build "build")
-  (#eq? @_lb_recv @_lb_param))
+      parameters: (identifier) @invoke.http.composer.receiver
+      body: (method_invocation) @invoke.http.composer))
+  (#eq? @_uri_lambda "uri"))
+
+; 5a. The composer's PATH LINK — the one link whose operand reaches the path
+;     template, and the only node in the chain this arm reads an operand from.
+;     Matched wherever it occurs; the reconciliation is what decides whether it
+;     is INSIDE a composer, and whether it is that composer's innermost link.
+((method_invocation
+   object: (identifier) @invoke.http.composer.anchor
+   name: (identifier) @_lb_path
+   arguments: (argument_list . (_) @invoke.http.composer.operand .))
+ @invoke.http.composer.path
+ (#eq? @_lb_path "path"))
+
+; 5b. A PATH-NEUTRAL link — the contract test, stated above. `object:` is
+;     constrained to a `method_invocation` because a link of a fluent chain is
+;     always called on the link below it, which narrows this from "every
+;     component-shaped call in the file" to "every chained one".
+;
+;     The two alternations are one rule read at a camelCase word boundary: a
+;     component names itself either at the start of the method name (`queryParam`,
+;     `port`) or capitalised after a prefix (`replaceQueryParam`). Spelling the
+;     boundary is what keeps `support()` from reading as the `port` component —
+;     the near miss this predicate was probed with.
+((method_invocation
+   object: (method_invocation)
+   name: (identifier) @_lb_neutral)
+ @invoke.http.composer.neutral
+ (#match? @_lb_neutral "^(scheme|userInfo|host|port|query|fragment)([A-Z][A-Za-z0-9_$]*)?$|^[a-z][A-Za-z0-9_$]*(Scheme|UserInfo|Host|Port|Query|Fragment)([A-Z][A-Za-z0-9_$]*)?$")
+ (#not-match? @_lb_neutral "[Pp]ath"))
+
+; 5c. The composer's TERMINAL. Admitted by the reconciliation only as the
+;     chain's outermost link, for the reason given above.
+((method_invocation
+   object: (method_invocation)
+   name: (identifier) @_lb_build
+   arguments: (argument_list))
+ @invoke.http.composer.terminal
+ (#eq? @_lb_build "build"))
 
 ; ── Stated coverage ceilings (ADR-54: recorded, never worked around) ─────────
 ;
@@ -343,16 +431,17 @@
 ;     `the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row`, each as
 ;     the positive control alone rather than as zero.
 ;   * OkHttp and Apache HttpClient — outside FR-WS-08's normative Java row.
-;   * A `UriBuilder` lambda that composes MORE than `path(<one operand>)` and an
-;     optional `build(…)` — `queryParam(…)`, a second path segment, a call after
-;     the terminal, or a terminal that is not `build` (S-399). Refused whole,
-;     never bound on the resolvable half (NFR-RA-05). This is the most expensive
-;     ceiling in the list on the reference workspace; the `queryParam` figure is
-;     in the composition rule above, stated once. Pinned by
-;     `a_uri_builder_lambda_that_chains_past_path_stays_refused_whole` for the
-;     first three and by
-;     `the_uri_builder_composer_rule_is_probed_with_its_near_misses` for the
-;     non-`build` terminal.
+;   * A `UriBuilder` lambda carrying a link the path-neutrality contract test
+;     cannot prove unable to alter the path template — a second `path(…)`, a
+;     `pathSegment(…)`, a call after the terminal, a terminal that is not
+;     `build`, or any link naming no URI component at all (S-399, narrowed to
+;     this by S-405/CR-129). Refused whole, never bound on the resolvable half
+;     (NFR-RA-05). This WAS the most expensive ceiling in the list on the
+;     reference workspace — 6 of its 9 `src/main` sites — and S-405 admitted
+;     that population; what remains here is the residue, which the estate does
+;     not write at all. Pinned by
+;     `a_uri_builder_composer_link_that_reaches_the_path_stays_refused_whole`
+;     and `the_uri_builder_composer_rule_is_probed_with_its_near_misses`.
 ;   * A `UriBuilder` lambda whose parameter is parenthesised or typed
 ;     (`(builder) ->`, `(UriBuilder b) ->`) — pattern 5 constrains `parameters:`
 ;     to a bare `(identifier)`. Zero such sites in the reference workspace.

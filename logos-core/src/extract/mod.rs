@@ -59,6 +59,12 @@ pub(crate) mod refs;
 // FR-WS-10): runs a grammar's optional `brokers` query and funnels topic-keyed
 // sites through the generic `capture_invocation_refs` interpreter.
 mod broker;
+// The path-neutral composer contract test (S-405, CR-129, FR-WS-08 AC2): the
+// byte-range reconciliation that lets a plugin query declare an arbitrary-length
+// fluent URI-composer chain, which a fixed-nesting tree-sitter pattern cannot.
+// PUBLIC because the reference-workspace operand-resolvability harness must
+// count the arm's corpus with the arm's own rule rather than a second copy of it.
+pub mod composer;
 mod shape;
 // Extraction-time test-marker evidence (S-027, FR-EX-06): the per-function
 // `test_evidence` flag captured while the AST is in hand — the input the
@@ -1594,11 +1600,19 @@ const DECLARED_METHOD_PREFIX: &str = "invoke.http.method.";
 /// it is admitted and resolved exactly as a source-written placeholder is; and
 /// any other shape sets the dynamic-path marker
 /// ([`DYNAMIC_PATH_SLOT`](crate::resolve::http_client_call::DYNAMIC_PATH_SLOT)) so
-/// the arm's normalizer refuses it as base-url-runtime. The sites are funnelled
+/// the arm's normalizer refuses it as base-url-runtime. A shape whose path is
+/// composed in a fluent URI-**composer** chain instead of passed directly binds
+/// no operand in its own match — the chain is arbitrarily long and a pattern's
+/// nesting is not — and reaches the same three outcomes through
+/// [`composer::Composers`], which reconciles the query's per-link matches by
+/// byte range and hands back the composed operand only when every link the chain
+/// carries beside the path one is provably path-neutral (S-405, [CR-129]).
+/// The sites are funnelled
 /// through the shared [`capture_invocation_refs`](crate::extract::config::capture_invocation_refs)
 /// interpreter by the caller; no reference is emitted here, and no judgment of
 /// bind-ability is made — that is the normalizer's job ([NFR-RA-05]).
 ///
+/// [CR-129]: ../../../docs/requests/CR-129-path-neutral-composer-link-in-a-uribuilder-lambda.md
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
 /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
@@ -1636,6 +1650,13 @@ fn collect_invocation_sites(
         file_module.cloned()
     };
 
+    // The composer vocabulary this file's query matched (S-405, CR-129) — empty,
+    // and unwalked, for a query declaring none. Collected before the site loop
+    // because a composer's links are reconciled across MATCHES: the chain is
+    // arbitrarily long, so no single pattern can hold both the call's verb and
+    // the operand buried in it.
+    let composers = composer::Composers::collect(query, root, source);
+
     let capture_names = query.capture_names();
     let mut sites = Vec::new();
     let mut cursor = QueryCursor::new();
@@ -1644,11 +1665,15 @@ fn collect_invocation_sites(
         let mut method_node = None;
         let mut declared_method = None;
         let mut arg_node = None;
+        let mut composer_node = None;
+        let mut composer_receiver = None;
         for cap in m.captures {
             let name = capture_names[cap.index as usize];
             match name {
                 "invoke.http.method" => method_node = Some(cap.node),
                 "invoke.http.arg" => arg_node = Some(cap.node),
+                composer::COMPOSER => composer_node = Some(cap.node),
+                composer::COMPOSER_RECEIVER => composer_receiver = Some(cap.node),
                 // `@invoke.http.method.<verb>` — the verb declared by the
                 // capture name for a shape that spells no verb in its source.
                 // The node is kept alongside the verb purely for attribution
@@ -1664,8 +1689,23 @@ fn collect_invocation_sites(
                 }
             }
         }
-        let Some(arg_node) = arg_node else {
-            continue;
+        // A site binds its operand directly, or — for a composer match — through
+        // the reconciliation, which hands back the operand the chain composes
+        // its path from ONLY when every other link in it is provably
+        // path-neutral. A composer it declines yields no site here at all, so
+        // the call keeps the wider match's `base-url-runtime` candidate and
+        // records exactly the row it recorded before (S-405, CR-129).
+        let arg_node = match arg_node {
+            Some(node) => node,
+            None => match (composer_node, composer_receiver) {
+                (Some(chain), Some(receiver)) => {
+                    match composers.operand(chain, receiver, source) {
+                        Some(node) => node,
+                        None => continue,
+                    }
+                }
+                _ => continue,
+            },
         };
         // A verb read from the source always wins over a name-declared one, so a
         // query that binds both can never downgrade a spelled-out `POST` to the
