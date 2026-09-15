@@ -149,7 +149,7 @@
 //! than a framework table, and is named here only so the reader does not have to
 //! decide that for themselves.
 //!
-//! Sprint 70 added one: `forwarding`'s **`super`-dispatch rule** (S-416) —
+//! Sprint 70 added two more. `forwarding`'s **`super`-dispatch rule** (S-416) —
 //! `dispatches_past`, with `enclosing_superclass_name`, `enclosing_type_name`
 //! and `simple_type_name` behind it. Not a constant or a table this time but a
 //! rule, which is why it is named: it encodes Java's class-hierarchy semantics
@@ -160,6 +160,16 @@
 //! `logos-core/src` — a real arm needing it belongs in the Java plugin.
 //! `is_deploy_path`'s precedent applies: a function is named here when the
 //! reader would otherwise have to decide for themselves.
+//!
+//! And, in `client_call_gate` (S-404): `Arm::whole_names` and
+//! `Arm::token_names`, the five arms' HTTP-client receiver vocabularies. They
+//! are the most framework-specific entries on this list — `reqwest`, `hyper`,
+//! `webclient`, `resttemplate`, `guzzle`, `faraday` are library names — and
+//! each is sourced to that language's own normative row in FR-WS-08 rather than
+//! to a judgement made in the harness. `CALLEE_SEPARATORS` and `receiver_of`'s
+//! text reduction in the same module are NOT of this kind and are named here
+//! only so the next reader does not have to decide that: they are grammar
+//! punctuation, the way `is_deploy_path` is a directory convention.
 //!
 //! This list is **open, not closed**: anything of that kind added to this
 //! harness or its submodules is covered by the same carve-out and the same
@@ -236,6 +246,20 @@ mod port_identity;
 /// `tests/config_declared_coupling.rs` would become a second cargo test target.
 #[path = "operand_resolvability/config_declared_coupling.rs"]
 mod config_declared_coupling;
+
+/// S-404's per-language client-call gate — its own module, so the five sibling
+/// corpora do not co-edit the file the configuration arm owns. Reads this
+/// module's `gate_admits` and `collect_sites` as the authority on what the
+/// arm's corpus and site set are; adds no predicate of its own to either.
+///
+/// It is the one submodule that does **not** walk `corpus_root()`: CR-128's
+/// gate is about five languages and no single workspace holds them, so each arm
+/// resolves its own corpus. See its module docs.
+///
+/// `#[path]`-attached for the same reason its four siblings are: a plain
+/// `tests/client_call_gate.rs` would become a second cargo test target.
+#[path = "operand_resolvability/client_call_gate.rs"]
+mod client_call_gate;
 
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
@@ -1385,7 +1409,18 @@ fn strictly_const(nodes: &[Node<'_>], src: &[u8], unit: &Unit<'_>) -> bool {
 /// test run, and a typo'd or un-checked-out corpus path would otherwise report
 /// success while measuring nothing.
 fn corpus_root() -> Option<PathBuf> {
-    let raw = std::env::var("LOGOS_REF_WORKSPACE").ok()?;
+    corpus_from_var("LOGOS_REF_WORKSPACE", "refusing to report a green run that measured nothing")
+}
+
+/// The corpus named by `var`, or `None` when that variable is unset.
+///
+/// One implementation, parameterised by variable name, because S-404's
+/// `client_call_gate` needs the same contract five more times (once per
+/// language) and copying it would put six spellings of "an absent corpus and a
+/// mistyped one are different states" in one test target. `blame` is the clause
+/// naming what the caller is refusing to do.
+fn corpus_from_var(var: &str, blame: &str) -> Option<PathBuf> {
+    let raw = std::env::var(var).ok()?;
     if raw.trim().is_empty() {
         return None;
     }
@@ -1397,8 +1432,7 @@ fn corpus_root() -> Option<PathBuf> {
     };
     assert!(
         expanded.is_dir(),
-        "LOGOS_REF_WORKSPACE={raw} does not resolve to a directory (expanded: {}) — \
-         refusing to report a green run that measured nothing",
+        "{var}={raw} does not resolve to a directory (expanded: {}) — {blame}",
         expanded.display(),
     );
     Some(expanded)

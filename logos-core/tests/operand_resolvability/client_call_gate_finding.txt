@@ -1,0 +1,277 @@
+S-404, measured 2026-09-15. Produced by `client_call_gate::
+measure_the_sibling_client_call_gates`; re-run it with the five
+LOGOS_CLIENT_CALL_CORPUS_* variables set to the corpora named below to
+reproduce the table.
+
+  CR-128 §6's blocking gate clears for ONE of the five languages. `rust` is
+  measured and the over-capture is MATERIAL. `ruby` is measured, and its
+  corpus is too thin to decide anything (n=1). `kotlin`, `php` and `c-sharp`
+  are GATE-UNEXERCISED: a corpus was walked for each, and not one file in it
+  imports that language's client package, so the arm was never asked the
+  question. None of those three is clean.
+
+GRAIN. One captured client-call SITE: a query match that clears the arm's own
+verb gate (`invocation_methods`) and its one-row-per-call containment rule,
+inside a file the FR-FW-04 ledger gate admits. That is the arm's corpus, not a
+grep's — the same `gate_admits` and `collect_sites` the S-355 and S-392
+measurements are computed over, called rather than copied. It is the same grain
+S-402 reported Go's 37 -> 11 at.
+
+  language  status              files  gated  sites  non-HTTP  refs/refu
+  rust      MEASURED            17367     85    293 118 ( 40%)    69/130
+  kotlin    GATE-UNEXERCISED       10      0      0        n/a      -/-
+  ruby      MEASURED              210      1      1   1 (100%)     0/1
+  php       GATE-UNEXERCISED      161      0      0        n/a      -/-
+  c-sharp   GATE-UNEXERCISED       12      0      0        n/a      -/-
+
+  CORPORA, named per CR-128 §6 criterion 2, as the exact on-disk paths the run
+  was given (the Go module cache spells `MirrexOne` as `!mirrex!one`):
+
+    rust     ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f
+    kotlin   ~/go/pkg/mod/github.com/!mirrex!one/unqueryvet@v1.5.4/extensions/goland
+    ruby     /Library/Ruby
+    php      ~/source/pec-services
+    c-sharp  ~/source/confluent-dev
+
+  "non-HTTP" is the share of SITES whose RECEIVER fails that language's
+  client-name boundary rule — the same rule shape a port would apply, which is
+  what makes it the right predicate for deciding whether a port is worth
+  filing. It is a name rule and therefore a proxy; the receiver census the test
+  prints beside it is the evidence, and the readings below are taken from it.
+
+  "refs/refu" is what the arm actually WROTE over the same corpus, read from
+  the production `extract` pass: `http-client-call` references and keyless
+  S-374 refusal rows. The two harms of a file-grained gate are different sizes
+  and a site count alone conflates them — a non-HTTP site whose argument is an
+  absolute-path literal becomes a FABRICATED REFERENCE (NFR-RA-05); one whose
+  argument is anything else becomes a REFUSAL ROW, inflating the
+  `base-url-runtime` denominator every egress figure is computed over
+  (FR-WS-05) without inventing an edge. Row counts are below site counts
+  because `dedup_sort_refs` collapses per declaration.
+
+  THE FILE DENOMINATOR IS NOT STABLE for rust, and this is not a defect in the
+  measurement. `~/.cargo/registry/src` is a live build cache: it read 17351
+  files early in this session and 17367 an hour later, because building this
+  very repository unpacked more crates into it. Site counts, the census and
+  every figure below were IDENTICAL across both runs. The denominator is
+  reported as what the final run saw; a re-run on another machine will differ
+  in that column and should not be read as disagreement.
+
+
+RUST — the gate is FILE-GRAINED and the over-capture is MATERIAL.
+
+118 of 293 sites (40%) are on a receiver no client-name rule accepts. Read
+against the source, the census decomposes as:
+
+  UNAMBIGUOUSLY NOT AN HTTP CALL — 99 sites (34% of the denominator):
+    54  header maps        `headers` (13), `response.headers()` (18),
+                           `response .headers()` (15), `init_resp .headers()`
+                           (4), `resp.headers()` (2), `self .headers()` (2)
+    11  struct field bags  `metadata .additional_fields` (9),
+                           `m.additional_fields` (2)
+     6  parsed JSON        `json_body`
+     5  query/route params `params`
+     4  bare locals        `v`
+     4  pool internals     `inner.connecting` (2), `inner.idle_conns` (2)
+     4  guarded state      `self.0.read().await` (2),
+                           `self.states.read().await` (2)
+     3  route registration `get(root)`, `get(|| async {})`,
+                           `get(|_: Request| async { "users#index" })` — the
+                           receiver is axum's MethodRouter, mid-chain
+     2  JSON values        `j`
+     2  named stores       `self.state_store`
+     1  router HashMap     `router` — `matchit-0.7.3/examples/hyper.rs:38`,
+                           a `HashMap<Method, Router>` lookup
+     1  claims map         `claims`
+     1  decoded token      `decode_jwt_claims(token)`
+     1  a plain map        `map`
+
+  AMBIGUOUS — 19 sites: `self` (7), `store` (6), `inner` (2), `sessions` (2),
+  `self.inner` (2). At least two of the `self` sites ARE genuine outbound
+  calls — `rmcp-1.7.0/src/transport/common/reqwest/streamable_http_client.rs:98`
+  is `self.delete(uri)` inside an `impl … for reqwest::Client`, so `self` there
+  IS the client. A receiver-NAME rule cannot see that, and refusing it is the
+  same stated under-capture ceiling Go accepted for its single-letter receiver.
+  These 19 are counted in the 118 and excluded from the 99; the honest figure
+  is a range, and both ends are stated.
+
+  So: AT LEAST 99 of 293 (34%), AT MOST 118 of 293 (40%).
+
+The three shapes that dominate are the same three S-402 found in Go. `headers`
+and `response.headers()` are `r.Header.Get(k)` in another language; `router`
+and `map` are `mapping.Get("authorize.claims")`. The mechanism transferred; the
+magnitude did too, at 40% against Go's 70% — lower, as CR-128 §7 predicted it
+would be outside a gateway, and still material.
+
+The HTTP-named 175 read correctly on inspection: 152 `client` (axum's
+`TestClient`, reqwest handles), 8 `http`, 5 `self.client`, 4 `self
+.http_client`, 3 `http_client`, 3 `reqwest::Client::new()`.
+
+  A CORRECTION MADE DURING THIS MEASUREMENT, recorded because it moved a
+  figure. The first run classified `reqwest::Client::new().get(…)` as
+  non-HTTP: the reducer took the receiver's last segment, and that is `new()`.
+  Three genuine reqwest calls sat in the non-HTTP column, and the headline read
+  121 (41%) instead of 118 (40%). The fix distinguishes the two separator
+  classes — a `.` accesses a value on another value, so only the LAST one names
+  the receiver (`client.headers()` is a header map, not a client), while a `::`
+  qualifies one type path, so EVERY segment of it names the same thing. Pinned
+  on both edges by `the_receiver_reduction_handles_each_arms_spelling`.
+
+  TWO FURTHER CORRECTIONS CAME OUT OF REVIEW, and neither moved a figure — the
+  whole table above was re-run afterwards and is byte-identical, census
+  included. They are recorded because of WHEN they would have fired, not
+  because of what they changed here:
+
+  1. The cut was taken at the separator's START index, so the `.` inside `?.`
+     and `&.` won and the receiver kept a dangling sigil (`httpClient?`), which
+     defeats both naming rules. Ruby's `&.` was not in the separator set at all,
+     and C#'s `await` was absorbed into the receiver slice. All three land a
+     GENUINE client call in the non-HTTP column — the direction that inflates
+     the share this gate reads. Rust has no safe call and the three languages
+     that do were all GATE-UNEXERCISED, so nothing above moved; the defect
+     would have fired on the first re-measurement THIS DOCUMENT ASKS FOR.
+  2. `LanguageRegistry::load` was given the corpus root, which is also the
+     plugin-override root, so a `.logos/plugins/rust/queries/invocations.scm`
+     inside a corpus silently replaced the query being measured. Demonstrated
+     to turn a 3-site/1-non-HTTP corpus into `0 (0%)` and print `CLOSES OUT`,
+     exit 0, with nothing in the report disclosing it.
+
+  Both were invisible to the suite when they were written: `receiver_of` had no
+  corpus-free test, so replacing its body with `return None` left every test
+  green while a real measurement classified every site non-HTTP. It now runs
+  through each arm's real grammar in plain/safe-called pairs.
+
+
+RUBY — MEASURED, and the corpus decides nothing.
+
+210 files, ONE admitted by the ledger gate, ONE captured site:
+
+  Gems/2.6.0/gems/xmlrpc-0.3.0/lib/xmlrpc/client.rb:540 — `pairs.delete(cookie.name)`
+
+`pairs` is a Hash built four lines above; `delete` is `Hash#delete`. It is a
+real instance of the defect, in a file that genuinely `require`s `net/http`,
+and it wrote a refusal row (0 references, 1 refusal). So ruby is NOT clean. But
+n=1 is not a basis for a port: one site cannot distinguish "this language has
+the defect at Go's rate" from "this corpus has one accident in it". Ruby needs
+a corpus with real Faraday or Net::HTTP client code before its gate clears.
+
+  That judgement is in the harness, not only in this file, and it applies in
+  BOTH directions: review found the `CLOSES OUT` arm returning before the floor
+  was consulted, so a single client-named site printed the terminal "no port is
+  justified here". Ruby measured exactly one site — had that site's receiver
+  been client-named, the un-floored arm would have closed Ruby out on a sample
+  of one. `MATERIALITY_FLOOR` (10 sites) is what makes `Outcome::verdict` print
+  DOES NOT CLEAR for ruby rather than "a port is justified", and it is documented there as a judgement
+  about when a proportion stops carrying information — NOT as an acceptance
+  floor. Nothing asserts it, no requirement cites it, and it gates exactly one
+  English sentence. The first draft of this module had no floor and printed
+  "CLEARS — 1 of 1 captured sites ... a receiver-rule port is justified" for
+  ruby while this file said the opposite; the floor and its fixture exist
+  because of that contradiction.
+
+
+KOTLIN, PHP, C-SHARP — GATE-UNEXERCISED, which is not clean.
+
+Each had a corpus, each corpus was walked, and in each the ledger gate admitted
+ZERO files:
+
+  kotlin   10 files, 0 gated   the only Kotlin source on this machine: an
+                               IntelliJ plugin, which imports no HTTP client
+  php     161 files, 0 gated   the reference estate's PHP files import no
+                               Guzzle — independently visible as php's `0`
+                               gated column in `client_call_refusal_finding.txt`
+  c-sharp  12 files, 0 gated   Kafka producer/consumer samples; no
+                               `using System.Net.Http` anywhere in them
+
+This is the distinction CR-128's decision log insists on, one step further
+along than it states it. Its rule is that a MISSING corpus is not a zero. A
+PRESENT corpus whose ledger gate admits nothing is not a zero either: the arm
+considered no file, so the run says nothing whatever about the receiver. The
+harness encodes this rather than leaving it to a report writer —
+`Outcome::GateUnexercised` is a distinct variant and `Outcome::is_clean`
+returns false for it, pinned by
+`neither_an_absent_corpus_nor_an_unexercised_gate_reads_as_clean`, which runs
+with no corpus at all.
+
+A machine-availability note, so the three zeros are not re-derived later as
+evidence of anything: this was measured on one developer machine. `kotlin` had
+8 `.kt` and 2 `.kts` files on the entire filesystem, `c-sharp` 14 `.cs`, and
+the only PHP is the reference estate's. These are not small corpora for these
+languages; they are the absence of a corpus for these languages, dressed as
+one.
+
+
+S-402'S TRAP, IN THESE FIGURES.
+
+CR-128 §4.4: "a fixture whose receiver the new rule refuses stops testing the
+ledger gate, because its positive control becomes unreachable." A
+gate-isolating fixture works by showing that the same source captures WITH the
+client import and not without it. If a later receiver rule refuses that
+fixture's receiver, both halves go silent together and the fixture keeps
+passing while testing nothing.
+
+It bears on this table in a way a reader cannot see from the numbers: EVERY one
+of the 118 non-HTTP-named rust sites is a site a receiver rule would refuse,
+and any of them may be serving somewhere as a positive control. The census is
+therefore an input to a port, not only its justification — a port reads it to
+find which receivers stay ACCEPTED, and re-points its gate-isolating fixture at
+one of those. On this corpus the receivers that stay accepted are `client`
+(152), `http` (8), `self.client` (5), `self .http_client` (4), `http_client`
+(3) and `reqwest::Client::new()` (3).
+
+Rust's own new pin is written against the trap. Its positive control is the
+bare word `client` — the one receiver spelling both shipped receiver rules
+(Java's S-375, Go's S-402) accept WHOLE — so when a port lands, the control
+survives and the ceiling half is what moves. This was verified, not assumed: a
+prototype receiver rule (`#match? @_recv "^(client|http|http_client)$"`) was
+applied to `rust/queries/invocations.scm` and the pin failed with
+`left: ["GET /api/orders"] right: ["GET /api/orders", "GET /config/features"]`
+— the ceiling gone, the control standing. The two halves are two tests
+(`a_non_client_receiver_call_inside_a_reqwest_file_is_a_stated_ceiling` and
+`a_route_shaped_get_outside_a_reqwest_file_is_not_captured`) rather than one,
+so a rule that silenced both would show as one failing and one passing rather
+than as a green run.
+
+The pin's fixtures use the shapes the census actually found, per CR-128 §6:
+`headers.get("content-type")` is the single largest bucket (54 of 99) and
+`router.get("/config/features")` is the `HashMap` lookup at
+`matchit-0.7.3/examples/hyper.rs:38`. They pin the two harms separately — the
+router lookup becomes a fabricated REFERENCE because its argument is an
+absolute-path literal, the header lookup a REFUSAL ROW because its argument is
+not.
+
+
+WHAT IS FILED, AND WHAT IS NOT.
+
+CR-128 §6 criterion 1 is a blocking gate: nothing below it is built for a
+language that does not clear it. Per language, from the measurement and from
+nothing else:
+
+  rust      CLEARS. 40% of captured sites on receivers no client rule accepts,
+            99 of them unambiguously not HTTP calls, producing 69 references
+            and 130 refusal rows over the corpus. A receiver-rule port is
+            justified and should be filed.
+  ruby      DOES NOT CLEAR — measured, n=1. Re-measure on a corpus with real
+            client code before filing anything.
+  kotlin    DOES NOT CLEAR — gate unexercised, no corpus.
+  php       DOES NOT CLEAR — gate unexercised, no corpus.
+  c-sharp   DOES NOT CLEAR — gate unexercised, no corpus.
+
+No port story is written here for the four that do not clear, and no
+requirement is written for any of them. CR-128 §5.1 wrote none at filing for
+exactly this reason: a CR that pre-writes a requirement leaves the
+specification mandating an unbuilt capability when its blocking measurement
+closes it out, which is the failure CR-113 left in five live locations. The
+delivery story writes down what it built.
+
+Note for whoever files rust's port: its expected site-count drop is NOT 118.
+The 19 ambiguous sites include genuine calls a name rule would newly refuse, so
+the drop is bounded below by 99 and above by 118, and the surviving count must
+be re-enumerated after the change rather than predicted — S-375's "genuine
+count does not fall" criterion, re-applied. Record the drop as a precision
+correction per CR-110, as S-402 did at 37 -> 11.
+
+`rust` gains its stated-ceiling pin regardless of any of this, per CR-128 §6's
+sixth criterion — it is the only one of the six arms with no pin at all, and an
+unpinned ceiling is prose, which cannot fail. That pin is in this module and
+does not depend on a corpus.
