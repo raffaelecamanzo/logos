@@ -11,6 +11,28 @@
 //! the `@broker.publish.topic` / `@broker.subscribe.topic` (and optional
 //! `@broker.*.schema`) captures — with no new Rust plumbing ([NFR-MA-01]).
 //!
+//! **Amended 2026-09-15 (S-408, [CR-131] §3.2 A1): one bounded exception, and why
+//! it is not a per-language one.** The Kafka Streams topology form added a
+//! `@broker.*.receiver` capture and a RECEIVER GATE in Rust ([`receiver_is_topology`]
+//! and its helpers below), so "no new Rust plumbing" is no longer literally true
+//! of this arm and the sentence above must not be read as if it were. It could
+//! not be pure data: the gate has to relate a call site to a typed declaration
+//! elsewhere in the file, and a tree-sitter pattern matches within one bounded
+//! subtree — `#eq?`/`#match?` compare captures of the SAME match and cannot reach
+//! a second, independently-located one. That is the same reason
+//! [`crate::extract::composer`] and `extract::config::accessor` are generic Rust
+//! rather than query data.
+//!
+//! What the claim's *spirit* still holds is the part that matters for
+//! [NFR-MA-01]: the gate contains **no per-language branching**. It dispatches on
+//! grammar field names the three grammars share (`object`/`value`/`operand`/
+//! `function` for a receiver, `type`/`name`/`pattern`/`declarator` for a
+//! declaration), never on a language id, so a fourth language shipping a
+//! `brokers.scm` still costs no core change. The one genuinely framework-specific
+//! datum is [`TOPOLOGY_RECEIVER_TYPES`], and whether it belongs here or in a
+//! plugin descriptor beside `http_client_detectors` is recorded as an open review
+//! question on that constant rather than settled silently here.
+//!
 //! # Never fabricate a dynamic topic ([NFR-RA-05])
 //! A site's topic is normalized by [`broker_topic_key`]: a captured static topic
 //! (optionally guarded by a message-schema FQN) yields a stable key; a site with
@@ -146,6 +168,7 @@ where
         let mut schema_node: Option<Node<'_>> = None;
         let mut slot: Option<(Side, Node<'_>)> = None;
         let mut site_node: Option<Node<'_>> = None;
+        let mut receiver_node: Option<Node<'_>> = None;
         for cap in m.captures {
             match capture_names[cap.index as usize] {
                 "broker.publish.topic" => {
@@ -166,7 +189,27 @@ where
                 "broker.publish.topic.slot" => slot = Some((Side::Publish, cap.node)),
                 "broker.subscribe.topic.slot" => slot = Some((Side::Subscribe, cap.node)),
                 "broker.publish.site" | "broker.subscribe.site" => site_node = Some(cap.node),
+                // The RECEIVER GATE's carrier (S-408, [CR-131] §3.2 A1). A
+                // pattern that captures it is asking for the whole match to be
+                // discarded — binding and refusal alike — unless the receiver is
+                // a stream-topology receiver. A pattern that does NOT capture it
+                // is ungated, which is every pattern that shipped before S-408.
+                "broker.publish.receiver" | "broker.subscribe.receiver" => {
+                    receiver_node = Some(cap.node)
+                }
                 _ => {}
+            }
+        }
+
+        // The gate runs BEFORE the refusal candidate is built: a `to(…)` outside
+        // a topology chain must be silent, not refused. Recording it would
+        // manufacture a coverage denominator out of every unrelated `to(…)` call
+        // in the tree — the exact failure the Rust query header declines refusal
+        // slots over, and the reason this arm can key on a verb this common at
+        // all.
+        if let Some(receiver) = receiver_node {
+            if !receiver_is_topology(receiver, root, source) {
+                continue;
             }
         }
 
@@ -283,6 +326,286 @@ fn broker_topic_key(slots: &BTreeMap<String, String>) -> Option<String> {
         Some(schema) if !schema.is_empty() => Some(format!("{topic}#{schema}")),
         _ => Some(topic.to_string()),
     }
+}
+
+/// The receiver type names that make a `stream(…)` / `to(…)` call a **stream
+/// topology link** rather than one of the many unrelated calls that share those
+/// two method names (S-408, [CR-131] §3.2 A1).
+///
+/// The roster is Kafka Streams' own topology types and nothing else, because the
+/// gate's whole job is to separate `builder.stream(t)` from `orders.stream()` and
+/// `chain.to(t)` from `converter.to(t)`:
+///
+/// - `StreamsBuilder` — the source of every topology. 8 of the 8 `stream(…)`
+///   receivers on the 84-member reference estate are a `StreamsBuilder`, all of
+///   them a declared formal parameter (`public void kStream(StreamsBuilder b)`)
+///   or a local (`StreamsBuilder builder = new StreamsBuilder()`).
+/// - `KStream` — what a topology link returns, so it is what a `to(…)` chain
+///   bottoms out on when the stream is held in a binding rather than chained in
+///   one expression (`KStream<K,V> lines = builder.stream(t); lines.…to(u)`, 1 of
+///   the 8 estate `to(…)` sites).
+///
+/// `KTable` is deliberately absent: it has no `to(…)` and it is reached by
+/// `builder.table(…)`, a verb this arm does not capture, so admitting it would
+/// widen the gate for a shape nothing here recognises.
+///
+/// The roster is shared by every language rather than declared per plugin, and
+/// that is a decision with a stated cost: these are **library** type names, not
+/// language keywords, so a Go or Rust type that happens to be called `KStream`
+/// would be admitted by the Java roster entry. Measured rather than assumed: the
+/// reference estate has 0 `.rs` files and 262 `.go` files, and over all 262 the
+/// gated Go arm produces 0 broker rows — so on the one real cross-language corpus
+/// available the collision risk is observed at zero, not argued to be
+/// (`tests/broker_topic_corpus.rs`, 2026-09-15). The alternative — a per-manifest
+/// roster — buys nothing until a second ecosystem ships a differently-named
+/// topology type, and would put a capture rule in a descriptor that carries none
+/// of the arm's other capture rules.
+///
+/// **OPEN REVIEW QUESTION (S-408 review, 2026-09-15) — deliberately not settled
+/// here.** This constant is the one genuinely framework-specific datum the
+/// receiver gate carries, and the architecture review argued it belongs in a
+/// plugin descriptor rather than in core, citing [CR-131] §3.1 ("which method on
+/// which receiver is a publish [stays] in plugin descriptors and queries") and the
+/// repository's own precedent for exactly this shape: `http_client_detectors`
+/// (CR-108) and the `[properties]` table's `accessor_prefixes` (CR-121), both
+/// rosters interpreted generically by core but supplied per language in
+/// `plugin.toml`.
+///
+/// The counter-argument is the one stated above — this roster is IDENTICAL across
+/// all three languages, where `http_client_detectors` genuinely differs per
+/// language (`net::http` for Go), so moving it would put three copies of one list
+/// in three descriptors, which is the drift hazard `plugin-registry.md` warns
+/// about in the same breath. Both readings are defensible and the choice changes a
+/// descriptor contract (a new manifest field, `deny_unknown_fields`, three
+/// `plugin.toml` edits), so it is a design decision for a human rather than
+/// something this story settles by picking one. Recorded here, next to the code it
+/// is about, so the next reader finds the question rather than re-deriving it.
+///
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+const TOPOLOGY_RECEIVER_TYPES: [&str; 2] = ["StreamsBuilder", "KStream"];
+
+/// Whether `receiver` — the object a gated `stream(…)` / `to(…)` call is invoked
+/// on — is a stream-topology receiver (S-408, [CR-131] §3.2 A1).
+///
+/// This is the **receiver gate**, and it is what lets the arm key on two method
+/// names as common as `stream` and `to` at all. Without it a `to(…)` pattern
+/// records a broker publish for every `Duration.to(…)` and `converter.to(…)` in
+/// an arbitrary codebase — the manufacture-a-denominator failure the Rust
+/// `brokers.scm` header already declines refusal slots over, and the same one
+/// S-402 fixed on the HTTP arm by making candidacy receiver-grained.
+///
+/// It is **per-file pure and type-name based**, the same shape as
+/// [`crate::extract::rust_dyn_receiver_trait`]: no cross-file type resolution, no
+/// import graph. There is exactly ONE admission: the receiver is a simple name
+/// the file declares, and *every* typed declaration of that name in the file
+/// carries a roster type.
+///
+/// It requires **every** declaration rather than any, so a same-named binding of
+/// another type makes the site UNDER-capture instead of over-capture
+/// ([NFR-RA-05] — never fabricate is the half that matters). All four `builder`
+/// declarations in the estate's `PunctuatorsPocStream` and all three
+/// `streamsBuilder` declarations in `DownsamplerStream` are `StreamsBuilder`, so
+/// the estate is unaffected by the stricter reading.
+///
+/// **A RECEIVER SPELLED LIKE A TYPE IS NOT A TYPE**, and an earlier draft of this
+/// gate thought otherwise. It carried a second admission — "the receiver names a
+/// topology type directly", meant for a type-qualified call like
+/// `StreamsBuilder.stream(t)` — which tested the receiver's *text* against the
+/// roster before consulting any declaration. That is not a weaker check, it is a
+/// wrong one, and it manufactured exactly the over-capture this gate exists to
+/// prevent. Measured, all four admitted and none is a topology:
+///
+/// ```text
+///   Go    func KStream(s string) *Logger …  KStream("cfg").To("t")   → publish
+///   Go    func StreamsBuilder(…) *Logger …  StreamsBuilder(c).Stream(t) → subscribe
+///   Java  any unrelated class `KStream`  …  KStream.to("t")          → publish
+///   Go    func f(KStream Helper)         …  KStream.To("t")          → publish
+/// ```
+///
+/// The last row is the one that settles it: the receiver is a parameter
+/// **explicitly declared `Helper`**, and the name test fired first, so a correct
+/// refusal was overridden by a spelling coincidence. What the clause was written
+/// for — Java's `StreamsBuilder.stream(t)` — is not a Kafka Streams idiom at all
+/// (`stream` is an instance method), so it bought nothing real in exchange. The
+/// gate now resolves a declared type or refuses, full stop. Pinned by
+/// `a_receiver_spelled_like_a_topology_type_is_not_one`.
+///
+/// **Stated ceilings**, each an under-capture, each observed rather than guessed
+/// (the rows are in `a_receiver_whose_type_is_not_written_in_the_file_is_refused`):
+///
+///   - A receiver that is not a simple name after the chain walk — a
+///     parenthesised expression, a cast, an array element.
+///   - A receiver whose type is declared in another file: an inherited field, an
+///     interface-typed injection point.
+///   - **A receiver whose type is INFERRED rather than written.** Java `var b =
+///     new StreamsBuilder()`, Rust `let b = StreamsBuilder::new()`, Go
+///     `b := NewStreamsBuilder()` all bind no `type:` node, so the gate sees no
+///     declaration and refuses. Worth naming separately because it is not
+///     uniformly rare: `:=` is the *normal* way to declare a variable in Go, so
+///     the Go arm's reach is materially narrower than Java's, and
+///     `plugins/go/queries/brokers.scm` says so where a Go reader will find it.
+///   - A chain broken by an intervening operator the walk has no field for —
+///     Rust's `builder.stream(t)?.to(u)`, where the `?` makes the `to` receiver a
+///     `try_expression`. The `stream` half still binds; the `to` half is lost.
+///
+/// Every one errs the same way: nothing captured, so nothing fabricated
+/// ([NFR-RA-05]). Widening any of them is a story with its own measurement, not a
+/// quiet edit here.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+fn receiver_is_topology(receiver: Node<'_>, root: Node<'_>, source: &[u8]) -> bool {
+    let Some(name) = chain_base_name(receiver, source) else {
+        return false;
+    };
+    let declared = declared_type_names(root, &name, source);
+    !declared.is_empty()
+        && declared
+            .iter()
+            .all(|t| TOPOLOGY_RECEIVER_TYPES.contains(&t.as_str()))
+}
+
+/// The simple name a receiver chain bottoms out on, walking down the
+/// receiver-of-the-receiver edge until a bare name is reached.
+///
+/// `streamsBuilder.stream(t).filter(f).transform(g)` — the receiver of the
+/// estate's `.to(…)` — walks to `streamsBuilder`. A `this.`/`self.` qualifier
+/// names the FIELD rather than the receiver object, so `this.builder.stream(t)`
+/// walks to `builder`; without that arm the walk would bottom out on the `this`
+/// node and refuse the ordinary Spring injected-field shape.
+///
+/// The descent is by **field name**, covering the three grammars this arm ships
+/// queries for: Java `method_invocation`/`field_access` (`object`), Rust
+/// `call_expression` (`function`) and `field_expression` (`value`), Go
+/// `call_expression` (`function`) and `selector_expression` (`operand`).
+fn chain_base_name(receiver: Node<'_>, source: &[u8]) -> Option<String> {
+    const RECEIVER_FIELDS: [&str; 4] = ["object", "value", "operand", "function"];
+    let mut node = receiver;
+    // Bounded so a malformed tree can never spin: no real receiver chain is
+    // anywhere near this deep, and the bound is a refusal, not a panic.
+    for _ in 0..64 {
+        if matches!(node.kind(), "identifier" | "field_identifier" | "type_identifier") {
+            return node.utf8_text(source).ok().map(str::to_string);
+        }
+        let next = RECEIVER_FIELDS
+            .iter()
+            .find_map(|f| node.child_by_field_name(f))?;
+        node = if matches!(next.kind(), "this" | "self") {
+            node.child_by_field_name("field")
+                .or_else(|| node.child_by_field_name("name"))?
+        } else {
+            next
+        };
+    }
+    None
+}
+
+/// Every type name the file declares for the binding `name`, normalized to a
+/// bare type name.
+///
+/// A declaration is any node that carries a `type:` field child AND binds `name`
+/// — which is one rule across the three grammars rather than a per-language
+/// enumeration: Java `formal_parameter`/`local_variable_declaration`/
+/// `field_declaration`, Rust `parameter`/`let_declaration`, Go
+/// `parameter_declaration`/`var_spec` all spell the type under `type:` and the
+/// bound name under `name:`, `pattern:` or a `declarator:`'s own `name:`.
+///
+/// The walk is whole-file and scope-blind on purpose: the caller's rule is that
+/// *every* declaration must agree, so a shadowing binding of a different type
+/// refuses the site rather than being resolved to the wrong one.
+///
+/// **A CALLABLE IS NOT A BINDING**, and missing that cost the gate correctness in
+/// both directions. Java's `method_declaration` carries a `type:` field — its
+/// RETURN type — beside a `name:` field, so the rule above read
+/// `private String builder() { … }` as "`builder` is declared `String`".
+/// Measured consequences, both on ordinary Spring code:
+///
+///   - FALSE REFUSAL. `void topo(StreamsBuilder builder)` next to any helper or
+///     getter named `builder()` disagreed with itself under the every-declaration
+///     rule, and the whole topology went silent — captured as nothing, refused as
+///     nothing, the invisible loss [NFR-CC-04] forbids. A getter named after the
+///     field it returns is about as idiomatic as Java gets.
+///   - FALSE ADMISSION. A receiver declared in no binding at all was admitted
+///     because a *method* of that name returned a roster type — exactly the
+///     inherited-field case [`receiver_is_topology`]'s ceilings promise to refuse.
+///
+/// The discriminator is STRUCTURAL, not a list of node kinds: a declaration that
+/// also carries a `parameters:` field declares a callable, and its `type:` is a
+/// return type rather than the type of a binding. That holds across the three
+/// grammars without naming any of them, and it needs no extension when a fourth
+/// ships a brokers query — unlike a kind deny-list, which is the closed selector a
+/// later language silently falls out of. (Go and Rust spell a return type
+/// `result:` / `return_type:` and never reached this, so the bug was Java's alone;
+/// the guard is written once for all of them anyway.) Pinned by
+/// `a_method_named_like_the_receiver_is_not_a_declaration_of_it`.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn declared_type_names(root: Node<'_>, name: &str, source: &[u8]) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if let Some(ty) = node.child_by_field_name("type") {
+            // A callable declaration's `type:` is its RETURN type — never the
+            // type of the name it binds. See the note above; this one condition
+            // is the whole guard.
+            if node.child_by_field_name("parameters").is_none() && binds_name(node, name, source) {
+                if let Some(t) = bare_type_name(ty, source) {
+                    found.push(t);
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    found
+}
+
+/// Whether a declaration node binds `name`, by any of the three spellings the
+/// shipped grammars use for the declared name: a `name:` field (Java
+/// `formal_parameter`, Go `parameter_declaration`/`var_spec` — both of which may
+/// carry several), a `pattern:` field (Rust), or a `declarator:`'s own `name:`
+/// (Java `local_variable_declaration` / `field_declaration`).
+fn binds_name(node: Node<'_>, name: &str, source: &[u8]) -> bool {
+    let text_is = |n: Node<'_>| n.utf8_text(source).map(|t| t == name).unwrap_or(false);
+    let mut cursor = node.walk();
+    for field in ["name", "pattern"] {
+        if node.children_by_field_name(field, &mut cursor).any(text_is) {
+            return true;
+        }
+    }
+    let declarators: Vec<Node<'_>> = node.children_by_field_name("declarator", &mut cursor).collect();
+    declarators
+        .iter()
+        .filter_map(|d| d.child_by_field_name("name"))
+        .any(text_is)
+}
+
+/// A declared type node's **bare** type name: generics, pointer/reference
+/// sigils, `mut`/`dyn` qualifiers and any package or module qualifier removed.
+///
+/// `KStream<String, VolumeCounters>` → `KStream`, `&mut StreamsBuilder` →
+/// `StreamsBuilder`, `*kafka.StreamsBuilder` → `StreamsBuilder`. A type whose
+/// head is not a name (a slice, a tuple, a function type) yields `None`, which
+/// the caller reads as "declared, but not a roster type" — a refusal.
+///
+/// **A bracket anywhere refuses.** Go's `[]StreamsBuilder` and `map[string]KStream`
+/// and Rust's `[StreamsBuilder; 3]` already fell out as `None` because their head
+/// is empty or `map`; Java's `StreamsBuilder[]` did NOT, because its bracket is a
+/// suffix — so an array of builders was admitted as a builder. A collection of
+/// topology objects is not a topology receiver in any of the three languages, and
+/// refusing on the bracket makes that one rule instead of three accidents.
+fn bare_type_name(ty: Node<'_>, source: &[u8]) -> Option<String> {
+    let raw = ty.utf8_text(source).ok()?;
+    if raw.contains('[') {
+        return None; // an array/slice/map/index type is not a topology receiver
+    }
+    let head = raw.split(['<', '(']).next()?;
+    let head = head.trim_matches(|c: char| c == '*' || c == '&' || c.is_whitespace());
+    let last_token = head.split_whitespace().last()?;
+    let bare = last_token.rsplit(['.', ':']).next()?.trim();
+    (!bare.is_empty()).then(|| bare.to_string())
 }
 
 /// The literal text of a captured string-literal node with one surrounding pair
@@ -613,6 +936,255 @@ fn consume(consumer: &Consumer) {
             assert!(
                 r.source.as_str().contains("consume"),
                 "the slice subscribe is sourced from its handler fn: {}",
+                r.source.as_str()
+            );
+        }
+    }
+
+    /// The `self.`-qualified receiver — the Rust twin of
+    /// `java_capture_tests::a_this_qualified_receiver_walks_to_its_field`, and
+    /// the other half of the one [`chain_base_name`] branch no estate source
+    /// exercises. A struct field's declared type is what the gate reads.
+    #[test]
+    fn a_self_qualified_receiver_walks_to_its_field() {
+        let src = r#"
+struct Topology { builder: StreamsBuilder }
+
+impl Topology {
+    fn run(&mut self) {
+        self.builder.stream("self-in").to("self-out");
+    }
+}
+"#;
+        let facts = extract_rust(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["self-in".to_string()],
+            "`self.builder` names the FIELD, not the `self` node: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["self-out".to_string()],
+            "the publish half of the same chain likewise resolves: {:?}",
+            facts.refs
+        );
+    }
+
+    /// The receiver-gated topology form (S-408, [CR-131] §3.2 A1), pinned by
+    /// FIXTURE and by fixture alone: Kafka Streams is a JVM library, this
+    /// workspace has no Rust broker corpus, and the 84-member reference estate
+    /// contains 0 `.rs` files (re-measured 2026-09-15 and asserted in
+    /// `tests/broker_topic_corpus.rs`). A `0` for this arm in any estate report is
+    /// *unexercised*, never *zero captured*. The Go arm's position is different —
+    /// the estate carries 262 real `.go` files, so its over-capture half IS
+    /// measured; this one has nothing.
+    ///
+    /// Three rows, one per thing that can go wrong: a literal operand binds, a
+    /// non-literal operand records a refusal (the slots this file ships only for
+    /// the gated patterns), and the same two verbs on a non-topology receiver are
+    /// silent — captured as nothing AND refused as nothing.
+    #[test]
+    fn the_rust_topology_form_is_receiver_gated() {
+        let src = r#"
+fn topology(builder: &StreamsBuilder) {
+    builder.stream("orders").to("shipments");
+}
+
+fn dynamic(builder: &StreamsBuilder, cfg: &Config) {
+    builder.stream(cfg.inbound()).to(cfg.outbound());
+}
+
+// Neither of these is a topology: `reader` and `converter` are declared, and
+// declared as something else. One rename away from matching, which is what
+// makes them a near miss rather than unrelated code.
+fn not_a_topology(reader: &Reader, converter: &Converter) {
+    reader.stream("orders");
+    converter.to("shipments");
+}
+"#;
+        let facts = extract_rust(src);
+
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["".to_string(), "orders".to_string()],
+            "one bound subscribe topic and one recorded refusal, and nothing from \
+             the `Reader` receiver: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["".to_string(), "shipments".to_string()],
+            "one bound publish topic and one recorded refusal, and nothing from \
+             the `Converter` receiver: {:?}",
+            facts.refs
+        );
+        // The refusals are attributed to the topology fn, never to the near-miss
+        // one — the check that would catch the gate leaking into the wrong site.
+        for r in facts
+            .refs
+            .iter()
+            .filter(|r| r.target.is_empty() && r.relation.is_some())
+        {
+            assert!(
+                r.source.as_str().contains("dynamic"),
+                "a refusal belongs to the gated site that produced it: {}",
+                r.source.as_str()
+            );
+        }
+    }
+}
+
+// Go's whole broker arm is the receiver-gated topology form (S-408); the
+// language gained the `brokers` capability for it. Runs only when the Go grammar
+// is compiled in.
+#[cfg(all(test, feature = "lang-go"))]
+mod go_capture_tests {
+    use super::*;
+    use crate::extract::{extract, FileInput, SymbolContext};
+    use crate::plugin::LanguageRegistry;
+
+    fn extract_go(src: &str) -> Facts {
+        let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+        let plugin = registry.for_extension("go").expect("go plugin present");
+        extract(&FileInput::new("svc.go", src), plugin, &SymbolContext::default())
+    }
+
+    fn targets(facts: &Facts, relation: ArtifactRelation) -> Vec<String> {
+        let mut t: Vec<String> = facts
+            .refs
+            .iter()
+            .filter(|r| r.relation == Some(relation))
+            .map(|r| r.target.clone())
+            .collect();
+        t.sort();
+        t
+    }
+
+    /// **A receiver spelled like a topology type is not one.** Two near misses,
+    /// each one character from nothing: a Go *function* and a Go *parameter* that
+    /// merely share a name with a roster type.
+    ///
+    /// The `Helper` row settles the gate's design. That receiver is explicitly
+    /// declared as another type, and an earlier draft captured it anyway — the
+    /// name test fired before the declaration was ever consulted, so a correct
+    /// refusal was overridden by a spelling coincidence. Go is where this bites
+    /// hardest: a package-level `func KStream(...)` is ordinary Go, and every one
+    /// of its call sites would have become a broker row.
+    #[test]
+    fn a_receiver_spelled_like_a_topology_type_is_not_one() {
+        let by_function = r#"
+package p
+func KStream(s string) *Logger { return nil }
+func run() { KStream("cfg").To("not-a-topic") }
+"#;
+        let facts = extract_go(by_function);
+        assert!(
+            facts.refs.iter().all(|r| !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )),
+            "a function sharing a roster name is not a topology receiver: {:?}",
+            facts.refs
+        );
+
+        let by_parameter = r#"
+package p
+func run(KStream Helper) { KStream.To("not-a-topic") }
+"#;
+        let facts = extract_go(by_parameter);
+        assert!(
+            facts.refs.iter().all(|r| !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )),
+            "an explicit `Helper` declaration outranks a name that looks like a \
+             roster type — the declaration decides, never the spelling: {:?}",
+            facts.refs
+        );
+    }
+
+    /// The receiver-gated topology form. CAPTURE is fixture-only — the estate
+    /// writes no Kafka Streams topology in Go — but OVER-capture is measured on a
+    /// real corpus: the estate's one Go member is 262 `.go` files and the gated
+    /// arm produces 0 broker rows over all of them
+    /// (`tests/broker_topic_corpus.rs`, 2026-09-15). So "0" for this arm means two
+    /// different things on the two halves and must never be reported as one.
+    ///
+    /// The exported spelling (`Stream`/`To`, what a Go port of the Streams API
+    /// exports) and the unexported one (`stream`/`to`, an in-package helper) are
+    /// both admitted, and both only behind the gate — the pointer-typed parameter
+    /// `*StreamsBuilder` is what `bare_type_name` has to strip to reach the
+    /// roster.
+    #[test]
+    fn the_go_topology_form_is_receiver_gated() {
+        let src = r#"
+package stream
+
+func Topology(builder *StreamsBuilder) {
+	builder.Stream("orders").To("shipments")
+}
+
+func helper(builder *StreamsBuilder, cfg Config) {
+	builder.stream(cfg.Inbound()).to(cfg.Outbound())
+}
+
+// The unexported verb spelling with a LITERAL operand. The `helper` rows above
+// reach the lowercase arm of each `#any-of?` only through the REFUSAL slot, so
+// without this the binding patterns could be narrowed to the exported spelling
+// alone and no test would notice.
+func unexported(builder *StreamsBuilder) {
+	builder.stream("lower-in").to("lower-out")
+}
+
+// A PACKAGE-QUALIFIED receiver type, which is how Go actually imports a type.
+// `bare_type_name` has to strip the `kafka.` qualifier to reach the roster.
+func qualified(builder *kafka.StreamsBuilder) {
+	builder.Stream("qualified-in").To("qualified-out")
+}
+
+// Neither of these is a topology: both receivers are declared as something else.
+func notATopology(reader *Reader, converter Converter) {
+	reader.Stream("orders")
+	converter.To("shipments")
+}
+"#;
+        let facts = extract_go(src);
+
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec![
+                "".to_string(),
+                "lower-in".to_string(),
+                "orders".to_string(),
+                "qualified-in".to_string()
+            ],
+            "both verb spellings bind a literal, a package-qualified receiver type \
+             normalizes, the call operand refuses, and the `Reader` receiver \
+             produces neither: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec![
+                "".to_string(),
+                "lower-out".to_string(),
+                "qualified-out".to_string(),
+                "shipments".to_string()
+            ],
+            "both verb spellings bind a literal, a package-qualified receiver type \
+             normalizes, the call operand refuses, and the `Converter` receiver \
+             produces neither: {:?}",
+            facts.refs
+        );
+        for r in facts
+            .refs
+            .iter()
+            .filter(|r| r.target.is_empty() && r.relation.is_some())
+        {
+            assert!(
+                r.source.as_str().contains("helper"),
+                "a refusal belongs to the gated site that produced it: {}",
                 r.source.as_str()
             );
         }
@@ -1885,6 +2457,547 @@ class Mixed {
             sources.iter().any(|s| s.contains("byArgument"))
                 && sources.iter().any(|s| s.contains("byHeader")),
             "each form is attributed to its own publishing method: {sources:?}"
+        );
+    }
+
+    // ── The Kafka Streams topology form (S-408, CR-131 §3.2 A1) ─────────────
+    //
+    // The arm's first RECEIVER-GATED form. Everything before it is recognised by
+    // a name no ordinary code writes — an annotation, `KafkaHeaders.TOPIC`, a
+    // broker template verb — while `stream` and `to` are two of the most common
+    // method names in Java. So these tests come in pairs: one that the estate's
+    // real shape is admitted, and one that the same verb on an unrelated
+    // receiver is silent.
+
+    /// Helper: true when a file produced no broker row of either role — the
+    /// "captured as nothing AND refused as nothing" state the receiver gate is
+    /// supposed to leave a non-topology site in.
+    fn no_broker_rows(facts: &Facts) -> bool {
+        facts.refs.iter().all(|r| {
+            !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )
+        })
+    }
+
+    /// Helper: the 1-based lines of the keyless (refused) rows of one relation.
+    fn refusal_lines(facts: &Facts, relation: ArtifactRelation) -> Vec<u32> {
+        let mut lines: Vec<u32> = facts
+            .refs
+            .iter()
+            .filter(|r| r.relation == Some(relation) && r.target.is_empty())
+            .map(|r| r.line)
+            .collect();
+        lines.sort_unstable();
+        lines
+    }
+
+    /// The estate's real topology shape — a `StreamsBuilder` formal parameter,
+    /// a chained `stream(topic, serde) … .to(topic, serde)` — produces one
+    /// subscribe row and one publish row. Both are REFUSALS on this fixture
+    /// because the operand is a `@ConfigurationProperties` accessor, which is
+    /// what all 16 estate sites write and what [S-409] will resolve; what S-408
+    /// owns is that they are reported at all rather than absent ([NFR-CC-04]).
+    #[test]
+    fn the_estate_topology_shape_records_a_subscribe_and_a_publish_refusal() {
+        let src = r#"
+package com.acme;
+class ArchiveEventStream {
+    private final KafkaTopics kafkaTopics;
+
+    @Autowired
+    public void kStream(StreamsBuilder streamsBuilder) {
+        streamsBuilder
+                .stream(kafkaTopics.getArchiveEvents(), buildConsumeSerdeConfig())
+                .filter((key, payload) -> true)
+                .transform(this::getTransformer)
+                .to(kafkaTopics.getArchiveReporting(), buildProduceSerdeConfig());
+    }
+}
+"#;
+        let facts = extract_java(src);
+
+        assert_eq!(
+            refusal_lines(&facts, ArtifactRelation::BrokerSubscribe).len(),
+            1,
+            "the `stream(accessor, serde)` link records exactly one subscribe refusal: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            refusal_lines(&facts, ArtifactRelation::BrokerPublish).len(),
+            1,
+            "the `to(accessor, serde)` link records exactly one publish refusal: {:?}",
+            facts.refs
+        );
+        // Nothing was fabricated: an accessor operand binds no topic.
+        assert!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe)
+                .iter()
+                .all(String::is_empty),
+            "a non-literal operand binds nothing ([NFR-RA-05]): {:?}",
+            facts.refs
+        );
+        // Attribution is the topology method, not the file module.
+        let sub = facts
+            .refs
+            .iter()
+            .find(|r| r.relation == Some(ArtifactRelation::BrokerSubscribe))
+            .expect("a subscribe row exists");
+        assert!(
+            sub.source.as_str().contains("kStream"),
+            "the topology link is attributed to its own method: {}",
+            sub.source.as_str()
+        );
+    }
+
+    /// A literal operand BINDS on both roles, keyed by the literal's own text —
+    /// the same grammatical-shape rule the annotation and header forms apply,
+    /// and the same non-rule about the characters it carries ([FR-WS-10] AC3).
+    #[test]
+    fn a_literal_topology_operand_binds_on_both_roles() {
+        let src = r#"
+package com.acme;
+class LiteralTopology {
+    public void build(StreamsBuilder streamsBuilder) {
+        streamsBuilder
+                .stream("${spring.kafka.topics.orders}")
+                .to("shipments");
+    }
+}
+"#;
+        let facts = extract_java(src);
+
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["${spring.kafka.topics.orders}".to_string()],
+            "a placeholder literal binds as written: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["shipments".to_string()],
+            "the topology publish binds its literal: {:?}",
+            facts.refs
+        );
+        // A bound site records no refusal — the reconcile, not luck.
+        assert!(
+            refusal_lines(&facts, ArtifactRelation::BrokerSubscribe).is_empty()
+                && refusal_lines(&facts, ArtifactRelation::BrokerPublish).is_empty(),
+            "a site that bound a literal records no refusal: {:?}",
+            facts.refs
+        );
+    }
+
+    /// **The receiver gate, inverted.** A `stream(…)` on a non-Streams receiver
+    /// and a `to(…)` outside a topology chain are captured as nothing AND
+    /// refused as nothing — silence, not a manufactured coverage denominator.
+    ///
+    /// Each row sits one declaration away from matching: change `Repository` to
+    /// `StreamsBuilder` and `Converter` to `KStream` and both are admitted, which
+    /// is what makes this a near-miss test rather than an unrelated-code test.
+    #[test]
+    fn a_stream_or_to_on_a_non_topology_receiver_is_neither_captured_nor_refused() {
+        let src = r#"
+package com.acme;
+class NotATopology {
+    public void notASubscribe(Repository repository, Converter converter) {
+        repository.stream("orders");
+        converter.to("shipments");
+        repository.stream(someProperties.getName());
+        converter.to(Topics.OUTPUT);
+    }
+}
+"#;
+        let facts = extract_java(src);
+
+        let broker: Vec<_> = facts
+            .refs
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.relation,
+                    Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+                )
+            })
+            .collect();
+        assert!(
+            broker.is_empty(),
+            "a non-topology receiver produces neither a binding nor a refusal: {broker:?}"
+        );
+    }
+
+    /// `Collection.stream()` is excluded by ARITY, before the receiver gate is
+    /// ever consulted — the patterns require a first argument. Stated as its own
+    /// test because "the gate excludes it" is the plausible-sounding wrong
+    /// reason: a `List` receiver would fail the gate too, but the query never
+    /// gets that far.
+    #[test]
+    fn the_zero_argument_stream_form_is_excluded_by_arity() {
+        let src = r#"
+package com.acme;
+class Collections {
+    public void iterate(java.util.List<String> orders) {
+        orders.stream().forEach(System.out::println);
+    }
+}
+"#;
+        let facts = extract_java(src);
+        assert!(
+            facts.refs.iter().all(|r| !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )),
+            "a 0-arity `.stream()` matches no topology pattern: {:?}",
+            facts.refs
+        );
+    }
+
+    /// The `to(…)` chain walk reaches the `StreamsBuilder` at the bottom of a
+    /// multi-link chain, and reaches a `KStream` binding when the stream is held
+    /// in a local rather than chained — the estate writes both (7 members the
+    /// first way, `punctuators-poc` the second).
+    #[test]
+    fn the_receiver_gate_walks_a_chain_and_a_kstream_binding() {
+        let src = r#"
+package com.acme;
+class TwoShapes {
+    private void chained(StreamsBuilder builder) {
+        builder.stream("in").mapValues(v -> v).filter((k, v) -> true).to("chained-out");
+    }
+
+    private void viaBinding(StreamsBuilder builder) {
+        KStream<String, String> lines = builder.stream("in-2");
+        lines.process(() -> null).to("binding-out");
+    }
+}
+"#;
+        let facts = extract_java(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["binding-out".to_string(), "chained-out".to_string()],
+            "both a chained receiver and a KStream-typed binding pass the gate: {:?}",
+            facts.refs
+        );
+    }
+
+    /// A same-named binding of another type in the same file makes the site
+    /// **under**-capture, never mis-capture: the gate requires EVERY declaration
+    /// of the receiver name to be a topology type ([NFR-RA-05]). Pinned because
+    /// the natural reading — "any declaration admits" — is the over-capturing
+    /// one, and the two differ by a single word in `receiver_is_topology`.
+    #[test]
+    fn a_shadowing_declaration_of_another_type_refuses_the_site() {
+        let src = r#"
+package com.acme;
+class Shadowed {
+    private void topology(StreamsBuilder builder) {
+        builder.stream("in").to("out");
+    }
+
+    private void unrelated(StringBuilder builder) {
+        builder.append("x");
+    }
+}
+"#;
+        let facts = extract_java(src);
+        assert!(
+            facts.refs.iter().all(|r| !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )),
+            "an ambiguous receiver name refuses rather than guesses: {:?}",
+            facts.refs
+        );
+    }
+
+    /// **A method named like the receiver is not a declaration of it.** Java's
+    /// `method_declaration` carries a `type:` field (its RETURN type) beside a
+    /// `name:` field, so the whole-file declaration walk read a helper named
+    /// `builder()` as a declaration of `builder`. Under the
+    /// every-declaration-must-agree rule that made the topology **silent** —
+    /// captured as nothing AND refused as nothing, the one outcome [NFR-CC-04]
+    /// forbids — and it did so on about the most ordinary Java shape there is, a
+    /// getter named after what it returns.
+    ///
+    /// The same root cause admitted in the other direction: a receiver with no
+    /// binding anywhere, whose name happened to match a method returning a roster
+    /// type, was captured — the inherited-field case the gate's ceilings promise
+    /// to refuse. Both directions are pinned here, because a fix that only
+    /// restored the refusal would leave the false admission standing.
+    #[test]
+    fn a_method_named_like_the_receiver_is_not_a_declaration_of_it() {
+        // (a) a getter of another type must not silence the topology
+        let getter = r#"
+package com.acme;
+class WithGetter {
+    public void topo(StreamsBuilder streamsBuilder) {
+        streamsBuilder.stream("getter-in").to("getter-out");
+    }
+    public String streamsBuilder() { return ""; }
+}
+"#;
+        let facts = extract_java(getter);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["getter-in".to_string()],
+            "a same-named METHOD is not a binding and must not refuse the site: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["getter-out".to_string()],
+            "the publish half likewise survives the same-named method: {:?}",
+            facts.refs
+        );
+
+        // (b) the Spring `@Bean` factory shape, whose return type IS the roster
+        //     type — admitted for the right reason (the parameter), not because
+        //     the factory's return type happens to match.
+        let factory = r#"
+package com.acme;
+class WithFactory {
+    @Bean public StreamsBuilder builder() { return new StreamsBuilder(); }
+    void topo(StreamsBuilder builder) { builder.stream("factory-in").to("factory-out"); }
+}
+"#;
+        let facts = extract_java(factory);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["factory-in".to_string()],
+            "the @Bean factory shape is admitted by its parameter: {:?}",
+            facts.refs
+        );
+
+        // (c) the inverse: NO binding of `builder` anywhere, only a method that
+        //     returns a roster type. The receiver's type is not written in this
+        //     file, so the gate must refuse — silence, not a guess ([NFR-RA-05]).
+        let inherited = r#"
+package com.acme;
+class Inherited extends Base {
+    void topo() { builder.stream("inherited-in").to("inherited-out"); }
+    protected StreamsBuilder builder() { return null; }
+}
+"#;
+        let facts = extract_java(inherited);
+        assert!(
+            facts.refs.iter().all(|r| !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )),
+            "a method's return type is not the receiver's type — refuse, never guess: {:?}",
+            facts.refs
+        );
+    }
+
+    /// **A receiver spelled like a topology type is not one** (Java half; the Go
+    /// half, including the row that settles the design, is
+    /// `go_capture_tests::a_receiver_spelled_like_a_topology_type_is_not_one`).
+    ///
+    /// An earlier draft of the gate carried a second admission that tested the
+    /// receiver's *text* against the roster before consulting any declaration, so
+    /// any class merely SHARING a name with a roster type had its calls captured.
+    /// A name is not evidence of a type.
+    #[test]
+    fn a_receiver_spelled_like_a_topology_type_is_not_one() {
+        let java_class = r#"
+package com.acme;
+class UsesUnrelatedClass {
+    void run() { KStream.to("not-a-topic"); }
+}
+"#;
+        let facts = extract_java(java_class);
+        assert!(
+            no_broker_rows(&facts),
+            "a bare class name that matches the roster declares nothing here: {:?}",
+            facts.refs
+        );
+    }
+
+    /// The `this.`-qualified receiver — the ordinary Spring injected-field shape,
+    /// and the one branch of [`chain_base_name`] that the estate does not write.
+    /// The estate injects its `StreamsBuilder` as a method parameter, so without
+    /// this fixture the `this`/`self` arm rests on a docstring claim and nothing
+    /// else; its Rust twin is
+    /// `rust_capture_tests::a_self_qualified_receiver_walks_to_its_field`.
+    #[test]
+    fn a_this_qualified_receiver_walks_to_its_field() {
+        let src = r#"
+package com.acme;
+class Injected {
+    private final StreamsBuilder builder = new StreamsBuilder();
+
+    public void topo() {
+        this.builder.stream("this-in").to("this-out");
+    }
+}
+"#;
+        let facts = extract_java(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["this-in".to_string()],
+            "`this.builder` names the FIELD, not the `this` node: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["this-out".to_string()],
+            "the publish half of the same chain likewise resolves: {:?}",
+            facts.refs
+        );
+    }
+
+    /// A **fully-qualified** receiver type normalizes to its bare name. The Go
+    /// half of this lives in `go_capture_tests::the_go_topology_form_is_receiver_gated`
+    /// (`*kafka.StreamsBuilder`, the ordinary Go import shape); this is the Java
+    /// one, where an inline FQN is rarer but legal.
+    ///
+    /// Pinned because `bare_type_name`'s qualifier strip was documented and
+    /// unverified: dropping the `rsplit(['.', ':'])` left the whole suite green,
+    /// so the doc comment's own `*kafka.StreamsBuilder` -> `StreamsBuilder`
+    /// example was a claim about code nothing exercised.
+    #[test]
+    fn a_fully_qualified_receiver_type_normalizes_to_its_bare_name() {
+        let src = r#"
+package com.acme;
+class Qualified {
+    void topo(org.apache.kafka.streams.StreamsBuilder builder) {
+        builder.stream("fqn-in").to("fqn-out");
+    }
+}
+"#;
+        let facts = extract_java(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["fqn-in".to_string()],
+            "an inline FQN receiver type reaches the roster by its last segment: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["fqn-out".to_string()],
+            "the publish half of the same chain likewise resolves: {:?}",
+            facts.refs
+        );
+    }
+
+    /// The gate's stated ceilings, asserted rather than only described. Each row
+    /// is an UNDER-capture: nothing captured, nothing fabricated ([NFR-RA-05]).
+    /// Pinned so that widening one is a deliberate change with a failing test
+    /// behind it rather than a silent drift in either direction.
+    #[test]
+    fn a_receiver_whose_type_is_not_written_in_the_file_is_refused() {
+        // `var` — the type is inferred, so no `type:` node is bound.
+        let inferred = r#"
+package com.acme;
+class Inferred {
+    void topo() {
+        var builder = new StreamsBuilder();
+        builder.stream("var-in").to("var-out");
+    }
+}
+"#;
+        let facts = extract_java(inferred);
+        assert!(
+            facts.refs.iter().all(|r| !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )),
+            "an inferred (`var`) receiver type is a stated ceiling, refused: {:?}",
+            facts.refs
+        );
+
+        // An ARRAY of builders is not a builder. Java's bracket is a suffix, so
+        // this is the one language where the head-of-type rule did not already
+        // refuse it.
+        let array = r#"
+package com.acme;
+class Arrays {
+    private StreamsBuilder[] builder;
+    void topo() { builder.stream("array-in").to("array-out"); }
+}
+"#;
+        let facts = extract_java(array);
+        assert!(
+            facts.refs.iter().all(|r| !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )),
+            "an array of topology objects is not a topology receiver: {:?}",
+            facts.refs
+        );
+
+        // An explicit local DOES bind — the contrast row, so the two assertions
+        // above cannot both pass by the capture being broken outright.
+        let explicit = r#"
+package com.acme;
+class Explicit {
+    void topo() {
+        StreamsBuilder builder = new StreamsBuilder();
+        builder.stream("explicit-in").to("explicit-out");
+    }
+}
+"#;
+        let facts = extract_java(explicit);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["explicit-in".to_string()],
+            "an explicitly typed local still binds — the ceilings are about \
+             INFERRED types, not about locals: {:?}",
+            facts.refs
+        );
+    }
+
+    /// Every pre-S-408 form still behaves exactly as it did: the annotation
+    /// subscribe, the array form, the template-send publish and the header-form
+    /// publish (bound and refused). The receiver gate is opt-in per pattern, so a
+    /// pattern that captures no `@broker.*.receiver` is ungated — this is the
+    /// assertion that says so, over the shapes the estate actually writes.
+    #[test]
+    fn the_pre_existing_annotation_and_header_forms_are_unmoved_by_the_receiver_gate() {
+        let src = r#"
+package com.acme;
+class Mixed {
+    private KafkaTemplate<String, String> kafkaTemplate;
+    private static final String TOPIC = "dynamic";
+
+    @KafkaListener(topics = {"orders", "shipments"})
+    public void onOrder(String msg) {}
+
+    @KafkaListener(topics = TOPIC)
+    public void onDynamic(String msg) {}
+
+    public void byArgument(String payload) {
+        kafkaTemplate.send("argument-topic", payload);
+    }
+
+    public void byHeader(String payload, String topic) {
+        Message<String> bound = MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, "header-topic")
+                .build();
+        Message<String> refused = MessageBuilder.withPayload(payload)
+                .setHeader(KafkaHeaders.TOPIC, topic)
+                .build();
+    }
+}
+"#;
+        let facts = extract_java(src);
+
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["".to_string(), "orders".to_string(), "shipments".to_string()],
+            "the array form binds both topics and the constant form refuses: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec![
+                "".to_string(),
+                "argument-topic".to_string(),
+                "header-topic".to_string()
+            ],
+            "the argument and header publish forms bind, the parameter operand refuses: {:?}",
+            facts.refs
         );
     }
 }
