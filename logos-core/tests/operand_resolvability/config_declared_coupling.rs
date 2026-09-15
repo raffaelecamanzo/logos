@@ -169,6 +169,48 @@ pub const RECORDED_SHARED_TOPICS_AS_WRITTEN: usize = 0;
 /// [S-384]: ../../../docs/planning/journal.md#s-384-measure-service-identity-resolvability-across-the-deploy-corpus
 pub const RECORDED_PATH_ONLY_PAIRS: usize = 8;
 
+/// `(through a topic-named key, through some other key)` — the accidental-match
+/// guard for the topic half.
+///
+/// Pinned, like every figure below it, because review proved they were not.
+/// Seven adjudication figures were mutated at once and the estate gate still
+/// reported **green**: the key-shape split printed `0 topic-named · 36 other`,
+/// i.e. that every declaration might be an accidental value match — the exact
+/// red flag this split exists to raise — while the verdict below it read
+/// FALSIFIED/HOLDS unchanged. The declaration calls these figures "required for
+/// a falsification to be ADJUDICABLE"; a figure an adjudicator leans on must not
+/// be freely corruptible under a green gate.
+pub const RECORDED_DECLARATION_KEY_SPLIT: (usize, usize) = (36, 0);
+
+/// `(application config, deploy overlay)` — which source set proves each
+/// `declares-topic` row. The estate's answer is that the topic half is proved
+/// **entirely** by application configuration, which is a load-bearing fact: it
+/// is why the topic half needs no deploy-overlay corpus while the pair half
+/// does.
+pub const RECORDED_DECLARATION_SOURCE_SPLIT: (usize, usize) = (36, 0);
+
+/// Ports identifying exactly one member, in THIS run's wider population.
+///
+/// An equality beside the `>= S400_UNIQUE_PORTS` floor, not instead of it. The
+/// floor alone cannot fail upward: review inflated the count to 8 by relaxing
+/// `owners.len() == 1` to `!owners.is_empty()` and the estate run stayed green,
+/// because 8 >= 5. The floor states the monotonicity argument against S-400;
+/// this equality states what was actually measured.
+pub const RECORDED_UNIQUE_PORTS: usize = 6;
+
+/// Files each traversal visits — the walk-cost figures the declaration requires
+/// "with its denominator", and the only ones of them that reproduce.
+///
+/// The seconds do not reproduce (4.29s / 4.49s / 9.65s for one traversal across
+/// three runs) and are deliberately NOT pinned. The counts are deterministic, so
+/// they are: review reversed the corpus arm's `hidden(true)` and the run printed
+/// `22032 files` under a label still reading `hidden(true)` — a report lying
+/// about its own configuration — green.
+pub const RECORDED_CORPUS_ENTRIES: usize = 18615;
+
+/// Entries the overlay walk visits that the corpus walk does not.
+pub const RECORDED_EXTRA_ENTRIES: usize = 1260;
+
 const _: () = {
     assert!(
         RECORDED_ADDRESSED_PAIRS < ADDRESSED_PAIR_FLOOR,
@@ -876,10 +918,20 @@ impl Judgement {
     /// Which source set proves each `declares-topic` row — a relation the estate
     /// only commits in deploy overlays would carry a different delivery cost from
     /// one its application configuration already proves.
+    ///
+    /// Taken over the **both-sides-declared** population, the same one
+    /// [`declaration_key_split`] uses. The two are printed as consecutive
+    /// "declarations by …" lines, so a reader reads them as one breakdown of one
+    /// population; this function once looped over every captured topic instead,
+    /// and the two totals would have disagreed silently on any estate with a
+    /// one-side-only topic. Today's has none, which is why only a fixture could
+    /// find it.
+    ///
+    /// [`declaration_key_split`]: Judgement::declaration_key_split
     pub fn declaration_source_split(&self) -> (usize, usize) {
         let mut app = 0;
         let mut deploy = 0;
-        for t in &self.topics_resolved {
+        for t in self.topics(TopicOutcome::BothSidesDeclared) {
             for (_, _, source) in &t.by_source {
                 match source {
                     SourceSet::Application => app += 1,
@@ -1560,6 +1612,58 @@ fn measure_config_declared_coupling_over_the_reference_workspace() {
 
     assert_the_recorded_verdict(j);
     assert_the_recorded_reconciliation(j);
+    assert_the_recorded_adjudication_figures(j);
+}
+
+/// The figures the declaration calls "required for a falsification to be
+/// ADJUDICABLE", pinned.
+///
+/// They decide nothing on their own — the gate has exactly two decisive numbers
+/// and this function asserts neither. They are pinned because an adjudicator
+/// reads them to attribute a falsification to the join that broke, and review
+/// demonstrated, with a green estate run, that all seven could be inverted at
+/// once without a single assertion firing.
+///
+/// Equalities on the counts, nothing on the seconds: the counts are
+/// deterministic and the seconds move 2x with the page cache.
+fn assert_the_recorded_adjudication_figures(j: &Judgement) {
+    assert_eq!(
+        j.declaration_key_split(),
+        RECORDED_DECLARATION_KEY_SPLIT,
+        "the topic half's key-shape split moved from {RECORDED_DECLARATION_KEY_SPLIT:?} to \
+         {:?}. The second element is declarations reached through a key that does NOT name a \
+         topic: if it has grown, the topic headline may be counting accidental value matches \
+         and the finding's claim that all 36 come through a topic-named key is no longer true.",
+        j.declaration_key_split(),
+    );
+    assert_eq!(
+        j.declaration_source_split(),
+        RECORDED_DECLARATION_SOURCE_SPLIT,
+        "the topic half's source-set split moved from {RECORDED_DECLARATION_SOURCE_SPLIT:?} to \
+         {:?}; the finding states the topic half is proved entirely by application \
+         configuration",
+        j.declaration_source_split(),
+    );
+    let (_, unique) = port_census(j);
+    assert_eq!(
+        unique, RECORDED_UNIQUE_PORTS,
+        "ports identifying exactly one member moved from the recorded \
+         {RECORDED_UNIQUE_PORTS} to {unique}. The `>= S400_UNIQUE_PORTS` floor beside this \
+         cannot catch an INCREASE, which is how a relaxed one-owner test passed review's \
+         mutation run green.",
+    );
+    assert_eq!(
+        j.cost.corpus_entries, RECORDED_CORPUS_ENTRIES,
+        "the corpus walk's denominator moved from {RECORDED_CORPUS_ENTRIES} to {}; every \
+         walk-cost percentage is read against it",
+        j.cost.corpus_entries,
+    );
+    assert_eq!(
+        j.cost.extra_entries(),
+        RECORDED_EXTRA_ENTRIES,
+        "the extra entries the overlay walk visits moved from {RECORDED_EXTRA_ENTRIES} to {}",
+        j.cost.extra_entries(),
+    );
 }
 
 /// The recorded finding, pinned. S-411 measured the pair half FALSIFIED and the
@@ -2122,6 +2226,168 @@ mod fixtures {
         let judged = judge_topics(&captured, &scalars, TopicReading::Resolved);
         assert_eq!(judged[0].outcome, TopicOutcome::OneSideOnly);
         assert_eq!(judged[0].evidence.len(), 1);
+    }
+
+    // ── the reported figures an adjudicator reads ───────────────────────────
+    //
+    // Review mutated all of these and the ESTATE run still reported green,
+    // because nothing asserted them. They are pinned on the estate now, and
+    // pinned here too so the rules survive in CI, where the estate arm skips.
+
+    fn judged(member: &str, label: &str, outcome: PairOutcome, provider: Option<&str>) -> JudgedTarget {
+        JudgedTarget {
+            target: Target {
+                member: member.to_string(),
+                label: label.to_string(),
+                form: TargetForm::Url,
+                source: SourceSet::Application,
+                overlay: "application:<none>".to_string(),
+                via_key: "a.base-url".to_string(),
+                file: format!("{member}/src/main/resources/application.yml"),
+                value: format!("http://{label}:9000"),
+            },
+            outcome,
+            provider: provider.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn pairs_are_distinct_ordered_member_pairs_and_references_are_not() {
+        // The two grains the report prints side by side. Three references over
+        // two distinct pairs: a bucket that counted references as pairs would
+        // answer 3, and the floor is read at pair grain.
+        let j = Judgement {
+            targets: vec![
+                judged("agg", "callee", PairOutcome::Addressed, Some("callee")),
+                judged("agg", "callee", PairOutcome::Addressed, Some("callee")),
+                judged("agg", "other", PairOutcome::Addressed, Some("other")),
+                judged("agg", "self", PairOutcome::SelfTie, Some("agg")),
+            ],
+            ..probe_judgement()
+        };
+        assert_eq!(j.pairs(PairOutcome::Addressed).len(), 2, "distinct ordered pairs");
+        assert_eq!(j.references(PairOutcome::Addressed), 3, "target-valued references");
+        // The bucket filter is load-bearing: a self-tie must not reach the
+        // addressed bucket by either count.
+        assert_eq!(j.pairs(PairOutcome::SelfTie).len(), 1);
+        assert_eq!(j.references(PairOutcome::SelfTie), 1);
+    }
+
+    #[test]
+    fn the_blind_spot_is_counted_at_pair_grain_not_row_grain() {
+        // Exactly the shape the estate produced: two pairs over six rows,
+        // because each pair is proved in three overlays. The finding's
+        // "11 + 2 >= 12" argument is read off the PAIR count.
+        let rows: BTreeSet<(String, String, String)> = [
+            ("gw", "web", "gw/deploy-coll/values.yaml"),
+            ("gw", "web", "gw/deploy-svil/values.yaml"),
+            ("gw", "web", "gw/deploy-config/values.yaml"),
+            ("agg", "api", "agg/deploy-coll/values.yaml"),
+            ("agg", "api", "agg/deploy-svil/values.yaml"),
+            ("agg", "api", "agg/deploy-config/values.yaml"),
+        ]
+        .into_iter()
+        .map(|(a, b, f)| (a.to_string(), b.to_string(), f.to_string()))
+        .collect();
+        let j = Judgement { blind_spot: rows, ..probe_judgement() };
+        assert_eq!(j.blind_spot.len(), 6, "rows, one per overlay");
+        assert_eq!(j.blind_spot_pairs_count(), 2, "pairs, the grain the floor is read at");
+    }
+
+    #[test]
+    fn the_two_topic_splits_are_taken_over_the_same_population() {
+        // They are printed as consecutive "declarations by …" lines, so a
+        // reader adds them up. Taken over different populations they would
+        // silently disagree — invisible on an estate whose one-side-only bucket
+        // is empty, which is exactly today's.
+        let captured = vec![
+            CapturedTopic {
+                as_written: "shared".to_string(),
+                resolved: Some("shared".to_string()),
+                publishes: 1,
+                subscribes: 1,
+            },
+            CapturedTopic {
+                as_written: "lonely".to_string(),
+                resolved: Some("lonely".to_string()),
+                publishes: 0,
+                subscribes: 1,
+            },
+        ];
+        let scalars = [
+            scalar("a", "spring.kafka.topics.shared", "shared"),
+            scalar("b", "spring.kafka.topics.shared", "shared"),
+            scalar("c", "some.other.key", "lonely"),
+        ];
+        let j = Judgement {
+            topics_resolved: judge_topics(&captured, &scalars, TopicReading::Resolved),
+            ..probe_judgement()
+        };
+        assert_eq!(j.topics(TopicOutcome::OneSideOnly).len(), 1, "the population that differs");
+        assert_eq!(j.declaration_source_split(), (2, 0));
+        assert_eq!(j.declaration_key_split(), (2, 0));
+    }
+
+    #[test]
+    fn a_declaration_through_a_key_that_does_not_name_a_topic_is_counted_apart() {
+        // The accidental-match guard: the join is on a VALUE, so a key that
+        // merely happens to carry a topic-shaped string must be visible.
+        let captured = vec![CapturedTopic {
+            as_written: "orders".to_string(),
+            resolved: Some("orders".to_string()),
+            publishes: 1,
+            subscribes: 1,
+        }];
+        let scalars = [
+            scalar("a", "spring.kafka.topics.orders", "orders"),
+            scalar("b", "some.unrelated.label", "orders"),
+        ];
+        let j = Judgement {
+            topics_resolved: judge_topics(&captured, &scalars, TopicReading::Resolved),
+            ..probe_judgement()
+        };
+        assert_eq!(j.declaration_key_split(), (1, 1), "one topic-named key, one not");
+    }
+
+    #[test]
+    fn a_port_two_members_claim_identifies_neither() {
+        // S-400's rule, mirrored: `owners.len() == 1`, not `!owners.is_empty()`.
+        // Relaxing it inflates the count, and the `>= S400_UNIQUE_PORTS` floor
+        // beside the equality cannot catch an increase.
+        let owners = |port: &str, members: &[&str]| {
+            (port.to_string(), members.iter().map(|m| (*m).to_string()).collect())
+        };
+        let j = Judgement {
+            targets: vec![
+                judged("agg", "alpha", PairOutcome::Addressed, Some("alpha")),
+                judged("agg", "beta", PairOutcome::Addressed, Some("beta")),
+            ],
+            port_owners: [owners("9000", &["alpha"]), owners("9001", &["beta", "gamma"])]
+                .into_iter()
+                .collect(),
+            ..probe_judgement()
+        };
+        // Both targets carry `http://<label>:9000` from `judged`, so only 9000
+        // is referenced; it has exactly one owner.
+        assert_eq!(port_census(&j), (1, 1));
+
+        let tied = Judgement {
+            port_owners: [owners("9000", &["alpha", "delta"])].into_iter().collect(),
+            ..j
+        };
+        assert_eq!(port_census(&tied), (1, 0), "two claimants identify neither");
+    }
+
+    #[test]
+    fn the_walk_cost_denominator_and_its_percentage_are_what_they_claim() {
+        let cost = WalkCost { corpus_entries: 4, overlay_entries: 10, ..WalkCost::default() };
+        assert_eq!(cost.extra_entries(), 6, "what the overlay walk visits and the corpus does not");
+        // Saturating, because an overlay walk can never visit fewer — but a
+        // reversed subtraction must not read as a silent zero.
+        let inverted = WalkCost { corpus_entries: 10, overlay_entries: 4, ..WalkCost::default() };
+        assert_eq!(inverted.extra_entries(), 0);
+        assert!((pct(1, 4) - 25.0).abs() < f64::EPSILON, "pct is a percentage, not a ratio");
+        assert!((pct(1, 0) - 0.0).abs() < f64::EPSILON, "no denominator, no percentage");
     }
 
     // ── the sequence ceiling ────────────────────────────────────────────────
