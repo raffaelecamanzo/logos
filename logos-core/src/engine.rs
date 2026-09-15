@@ -3316,7 +3316,6 @@ impl Engine {
             ),
         }
     }
-
 }
 
 /// Log a pipeline failure and degrade to an [`IndexResult`] carrying the reason,
