@@ -1666,14 +1666,14 @@ fn collect_invocation_sites(
         let mut declared_method = None;
         let mut arg_node = None;
         let mut composer_node = None;
-        let mut composer_receiver = None;
+        let mut composer_param = None;
         for cap in m.captures {
             let name = capture_names[cap.index as usize];
             match name {
                 "invoke.http.method" => method_node = Some(cap.node),
                 "invoke.http.arg" => arg_node = Some(cap.node),
                 composer::COMPOSER => composer_node = Some(cap.node),
-                composer::COMPOSER_RECEIVER => composer_receiver = Some(cap.node),
+                composer::COMPOSER_PARAM => composer_param = Some(cap.node),
                 // `@invoke.http.method.<verb>` — the verb declared by the
                 // capture name for a shape that spells no verb in its source.
                 // The node is kept alongside the verb purely for attribution
@@ -1695,17 +1695,9 @@ fn collect_invocation_sites(
         // path-neutral. A composer it declines yields no site here at all, so
         // the call keeps the wider match's `base-url-runtime` candidate and
         // records exactly the row it recorded before (S-405, CR-129).
-        let arg_node = match arg_node {
-            Some(node) => node,
-            None => match (composer_node, composer_receiver) {
-                (Some(chain), Some(receiver)) => {
-                    match composers.operand(chain, receiver, source) {
-                        Some(node) => node,
-                        None => continue,
-                    }
-                }
-                _ => continue,
-            },
+        let Some(arg_node) = composers.site_operand(arg_node, composer_node, composer_param, source)
+        else {
+            continue;
         };
         // A verb read from the source always wins over a name-declared one, so a
         // query that binds both can never downgrade a spelled-out `POST` to the

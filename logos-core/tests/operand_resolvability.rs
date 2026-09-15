@@ -914,13 +914,13 @@ fn collect_sites<'t>(
         let mut declared = None;
         let mut arg_node = None;
         let mut composer_node = None;
-        let mut composer_receiver = None;
+        let mut composer_param = None;
         for cap in m.captures {
             match names[cap.index as usize] {
                 "invoke.http.method" => method_node = Some(cap.node),
                 "invoke.http.arg" => arg_node = Some(cap.node),
                 extract::composer::COMPOSER => composer_node = Some(cap.node),
-                extract::composer::COMPOSER_RECEIVER => composer_receiver = Some(cap.node),
+                extract::composer::COMPOSER_PARAM => composer_param = Some(cap.node),
                 other => {
                     if let Some(verb) = other.strip_prefix(DECLARED_METHOD_PREFIX) {
                         declared.get_or_insert((verb, cap.node));
@@ -928,17 +928,9 @@ fn collect_sites<'t>(
                 }
             }
         }
-        let arg_node = match arg_node {
-            Some(node) => node,
-            None => match (composer_node, composer_receiver) {
-                (Some(chain), Some(receiver)) => {
-                    match composers.operand(chain, receiver, src) {
-                        Some(node) => node,
-                        None => continue,
-                    }
-                }
-                _ => continue,
-            },
+        let Some(arg_node) = composers.site_operand(arg_node, composer_node, composer_param, src)
+        else {
+            continue;
         };
         let method = match method_node {
             Some(node) => {

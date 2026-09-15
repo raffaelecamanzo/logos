@@ -56,12 +56,13 @@ use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 pub const COMPOSER: &str = "invoke.http.composer";
 /// The name the composer's innermost receiver must be — a lambda's own
 /// parameter, so a `path(…)` call on some other object in the same expression is
-/// not read as the builder's.
-pub const COMPOSER_RECEIVER: &str = "invoke.http.composer.receiver";
+/// not read as the builder's. Compared against [`COMPOSER_RECEIVER`].
+pub const COMPOSER_PARAM: &str = "invoke.http.composer.param";
 /// The whole link that supplies the path template.
 const COMPOSER_PATH: &str = "invoke.http.composer.path";
-/// That link's receiver, compared against [`COMPOSER_RECEIVER`].
-const COMPOSER_ANCHOR: &str = "invoke.http.composer.anchor";
+/// That link's own receiver — the node that must BE the lambda's
+/// [`COMPOSER_PARAM`], which is what makes the `path(…)` call the builder's.
+const COMPOSER_RECEIVER: &str = "invoke.http.composer.receiver";
 /// That link's single argument — the operand the arm judges exactly as it judges
 /// a directly-passed one.
 const COMPOSER_OPERAND: &str = "invoke.http.composer.operand";
@@ -74,7 +75,7 @@ const COMPOSER_TERMINAL: &str = "invoke.http.composer.terminal";
 #[derive(Debug, Clone, Copy)]
 struct PathLink<'t> {
     link: Node<'t>,
-    anchor: Node<'t>,
+    receiver: Node<'t>,
     operand: Node<'t>,
 }
 
@@ -95,7 +96,7 @@ impl<'t> Composers<'t> {
     /// Returns empty — and runs no pass at all — for a query that declares no
     /// composer captures, which is every language but Java today. The whole cost
     /// of this module for such a language is one `capture_names` scan.
-    pub fn collect(query: &Query, root: Node<'t>, source: &'t [u8]) -> Self {
+    pub fn collect(query: &Query, root: Node<'t>, source: &[u8]) -> Self {
         let names = query.capture_names();
         if !names.contains(&COMPOSER_PATH) {
             return Self::default();
@@ -104,26 +105,50 @@ impl<'t> Composers<'t> {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(query, root, source);
         while let Some(m) = matches.next() {
-            let (mut link, mut anchor, mut operand) = (None, None, None);
+            let (mut link, mut receiver, mut operand) = (None, None, None);
             for cap in m.captures {
                 match names[cap.index as usize] {
                     COMPOSER_PATH => link = Some(cap.node),
-                    COMPOSER_ANCHOR => anchor = Some(cap.node),
+                    COMPOSER_RECEIVER => receiver = Some(cap.node),
                     COMPOSER_OPERAND => operand = Some(cap.node),
                     COMPOSER_NEUTRAL => found.neutral.push(cap.node.byte_range()),
                     COMPOSER_TERMINAL => found.terminal.push(cap.node.byte_range()),
                     _ => {}
                 }
             }
-            if let (Some(link), Some(anchor), Some(operand)) = (link, anchor, operand) {
+            if let (Some(link), Some(receiver), Some(operand)) = (link, receiver, operand) {
                 found.path_links.push(PathLink {
                     link,
-                    anchor,
+                    receiver,
                     operand,
                 });
             }
         }
         found
+    }
+
+    /// The path operand of ONE captured site: the directly-bound one when the
+    /// match carried it, else the composed one.
+    ///
+    /// The precedence — direct wins; a composer is consulted only when BOTH its
+    /// captures are bound; a declining composer yields no site at all — is the
+    /// arm's rule, and it lives here so that the production loop
+    /// (`extract::collect_invocation_sites`) and the reference-workspace
+    /// harness (`tests/operand_resolvability.rs::collect_sites`) cannot come to
+    /// disagree about which sites the arm considers. That harness's output is
+    /// the denominator of two published measurements, so a second copy of this
+    /// rule is the hand-mirrored twin this module was made `pub` to avoid.
+    pub fn site_operand(
+        &self,
+        direct: Option<Node<'t>>,
+        composer: Option<Node<'t>>,
+        param: Option<Node<'t>>,
+        source: &[u8],
+    ) -> Option<Node<'t>> {
+        match direct {
+            Some(node) => Some(node),
+            None => self.path_operand(composer?, param?, source),
+        }
     }
 
     /// The operand `composer` composes its path from, or `None` when the chain
@@ -135,14 +160,14 @@ impl<'t> Composers<'t> {
     /// looked at ([FR-WS-05]).
     ///
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
-    pub fn operand(
+    pub fn path_operand(
         &self,
         composer: Node<'t>,
-        receiver: Node<'t>,
+        param: Node<'t>,
         source: &[u8],
     ) -> Option<Node<'t>> {
         let chain = composer.byte_range();
-        let receiver = receiver.utf8_text(source).ok()?.trim();
+        let param = param.utf8_text(source).ok()?.trim();
 
         // EXACTLY ONE path link in the chain. A second one anywhere inside it —
         // chained (`path(a).path(b)`) or nested in another link's argument — is
@@ -168,7 +193,7 @@ impl<'t> Composers<'t> {
         if path_link.link.start_byte() != chain.start {
             return None;
         }
-        if path_link.anchor.utf8_text(source).ok()?.trim() != receiver {
+        if path_link.receiver.utf8_text(source).ok()?.trim() != param {
             return None;
         }
 

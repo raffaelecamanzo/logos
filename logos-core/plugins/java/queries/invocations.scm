@@ -306,8 +306,8 @@
 ;        `UriBuilder` declares no such overload today, so this is the
 ;        droppable-query guard (FR-PL-04) and a guard against a same-named
 ;        method on some other builder — not a probe of a shape the estate writes.
-;      * `@invoke.http.composer.anchor` must be the `@invoke.http.composer
-;        .receiver` the lambda declares, so a `path(…)` call on some other
+;      * `@invoke.http.composer.receiver` must be the `@invoke.http.composer
+;        .param` the lambda declares, so a `path(…)` call on some other
 ;        object that merely happens to sit in this position is not read as the
 ;        builder's.
 ;      * `build` is the only admitted terminal, and only as the chain's
@@ -364,7 +364,7 @@
   arguments: (argument_list
     .
     (lambda_expression
-      parameters: (identifier) @invoke.http.composer.receiver
+      parameters: (identifier) @invoke.http.composer.param
       body: (method_invocation) @invoke.http.composer))
   (#eq? @_uri_lambda "uri"))
 
@@ -373,7 +373,7 @@
 ;     Matched wherever it occurs; the reconciliation is what decides whether it
 ;     is INSIDE a composer, and whether it is that composer's innermost link.
 ((method_invocation
-   object: (identifier) @invoke.http.composer.anchor
+   object: (identifier) @invoke.http.composer.receiver
    name: (identifier) @_lb_path
    arguments: (argument_list . (_) @invoke.http.composer.operand .))
  @invoke.http.composer.path
