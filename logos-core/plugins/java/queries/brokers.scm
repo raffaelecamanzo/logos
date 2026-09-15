@@ -385,3 +385,104 @@
   (#any-of? @_pub_hdr_slot_m "setHeader" "setHeaderIfAbsent")
   (#eq? @_pub_hdr_slot_obj "KafkaHeaders")
   (#eq? @_pub_hdr_slot_key "TOPIC"))
+
+; ── Subscribe / Publish: the KAFKA STREAMS TOPOLOGY form (S-408, [CR-131] §3.2
+;    A1). A topology link is a broker site on both roles at once:
+;
+;      @Autowired
+;      public void kStream(StreamsBuilder streamsBuilder) {
+;          streamsBuilder
+;                  .stream(kafkaTopics.getArchiveEvents(), buildConsumeSerdeConfig())
+;                  .filter(…)
+;                  .transform(…)
+;                  .to(kafkaTopics.getArchiveReporting(), buildProduceSerdeConfig());
+;      }
+;
+;    `stream(<operand>)` consumes and `to(<operand>)` produces. Neither is an
+;    annotation nor a header, so before S-408 the arm matched neither — measured
+;    on the 84-member reference estate, **16 sites across 8 files** (7 members
+;    write the 14 sites [CR-131] §2.1 counted; `punctuators-poc` writes the other
+;    two) were not refused but ABSENT, the invisible loss [NFR-CC-04] forbids. The
+;    dated figures and the after-count are in
+;    `logos-core/tests/broker_topic_corpus.rs`.
+;
+;    RECOGNISED BY THE RECEIVER, NEVER BY THE VERB. `stream` and `to` are two of
+;    the most common method names in Java — `orders.stream()`, `Duration.to(…)`,
+;    `converter.to(…)` — so a bare name predicate here is precisely the
+;    manufacture-a-denominator failure the Rust `brokers.scm` declines refusal
+;    slots over, and the one S-402 removed from the Go HTTP arm by making
+;    candidacy receiver-grained. Each pattern therefore captures
+;    `@broker.*.receiver`, and `extract::broker::receiver_is_topology` admits the
+;    match only when that receiver's chain bottoms out on a `StreamsBuilder` or
+;    `KStream` binding the same file declares. The gate is where the reasoning
+;    lives; read its rustdoc before widening either predicate.
+;
+;    Two narrowing decisions, both measured against the estate:
+;
+;    1. **A first argument is REQUIRED** (the leading `.`), which is what excludes
+;       `Collection.stream()`. That form is 0-arity, so arity alone refuses it and
+;       the receiver gate is never consulted — worth stating because "the gate
+;       excludes `list.stream()`" is the plausible-sounding wrong reason, and a
+;       `List` receiver would in fact fail the gate too.
+;
+;    2. **No trailing anchor.** Both estate spellings occur: 14 sites pass a
+;       serde config as a second argument (`stream(topic, Consumed.with(…))`,
+;       `to(topic, Produced.with(…))`) and 2 pass the topic alone. Anchoring the
+;       argument list closed would capture 2 of 16. The topic is the FIRST
+;       argument in every Kafka Streams overload of both methods, so the leading
+;       anchor is the whole of the positional rule.
+;
+;    WHAT THIS ADMITS ON THE REAL ESTATE: refusals, not edges. All 16 sites pass a
+;    `@ConfigurationProperties` accessor (`kafkaTopics.getArchiveEvents()`) or a
+;    qualified constant (`Topics.INPUT_TOPIC`), so every one reports
+;    `topic-not-literal` until [S-409] threads the accessor hop into this arm —
+;    the same shape the HTTP arm already resolves at 81 of 96 sites. That is the
+;    measured outcome of THIS story, not a defect: 16 honest refusals where there
+;    were 16 silences.
+
+; Subscribe (topology form), BINDING: the topic operand is a static string literal.
+(method_invocation
+  object: (_) @broker.subscribe.receiver
+  name: (identifier) @_st_sub_m
+  arguments: (argument_list
+    . (string_literal) @broker.subscribe.topic)
+  (#eq? @_st_sub_m "stream"))
+
+; Subscribe (topology form), REFUSAL slot. The operand shapes are ENUMERATED and
+; not a `(_)` wildcard, for the reason the subscribe-annotation slots record: a
+; wildcard competes with the literal pattern above at the same `argument_list`
+; position and measurably cost the literal patterns their matches when it was
+; tried there. The site — the dedup grain, one refusal per site — is the call's
+; own `argument_list`.
+(method_invocation
+  object: (_) @broker.subscribe.receiver
+  name: (identifier) @_st_sub_slot_m
+  arguments: (argument_list
+    . [
+      (identifier)
+      (field_access)
+      (binary_expression)
+      (method_invocation)
+    ] @broker.subscribe.topic.slot) @broker.subscribe.site
+  (#eq? @_st_sub_slot_m "stream"))
+
+; Publish (topology form), BINDING: the topic operand is a static string literal.
+(method_invocation
+  object: (_) @broker.publish.receiver
+  name: (identifier) @_st_pub_m
+  arguments: (argument_list
+    . (string_literal) @broker.publish.topic)
+  (#eq? @_st_pub_m "to"))
+
+; Publish (topology form), REFUSAL slot — same enumeration, same site grain.
+(method_invocation
+  object: (_) @broker.publish.receiver
+  name: (identifier) @_st_pub_slot_m
+  arguments: (argument_list
+    . [
+      (identifier)
+      (field_access)
+      (binary_expression)
+      (method_invocation)
+    ] @broker.publish.topic.slot) @broker.publish.site
+  (#eq? @_st_pub_slot_m "to"))

@@ -140,3 +140,96 @@
   arguments: (arguments
     . (string_literal) @broker.publish.topic)
   (#any-of? @_pub_m "publish" "send"))
+
+; ── Subscribe / Publish: the RECEIVER-GATED TOPOLOGY form (S-408, [CR-131] §3.2
+;    A1). `stream(<operand>)` consumes, `to(<operand>)` produces, and the match is
+;    admitted only when `extract::broker::receiver_is_topology` finds the
+;    receiver's chain bottoming out on a `StreamsBuilder`/`KStream` binding the
+;    same file declares.
+;
+;    NO ESTATE EVIDENCE, AND THE ARM IS UNEXERCISED — NOT ZERO. Stated first
+;    because it is the thing most easily misread. Kafka Streams is a JVM library
+;    with no first-party Rust client, and the 84-member reference workspace
+;    contains **0** `.rs` files (measured 2026-09-07, re-checked 2026-09-15). So
+;    these two patterns are pinned by FIXTURE ONLY
+;    (`extract::broker::rust_capture_tests::the_rust_topology_form_is_receiver_gated`)
+;    and the corpus report must read their arm as *unexercised*: a `0` here is the
+;    absence of Rust source, never a capture that found nothing. They ship on
+;    [CR-131] §10's stakeholder decision — "Streams patterns for Java, Rust and
+;    Go", taken with the evidence-first concern recorded in the same row — so that
+;    a Rust topology written against a port of the Streams API is not silent on
+;    the day one appears.
+;
+;    WHAT THE GATE CHANGES FOR THIS FILE'S OWN AUDIT NOTE. The S-370 audit above
+;    declines an rdkafka `FutureRecord::to("orders")` builder pattern on the
+;    ground that a `to("literal")` pattern "keys on one of the most common method
+;    names in Rust with no receiver typing". That prerequisite now EXISTS — the
+;    receiver gate is exactly the missing piece — so the ground for that decision
+;    has moved. What has not moved is the other half of it: there is still no Rust
+;    broker corpus to measure the false-positive rate against, and
+;    `FutureRecord::to` is a type-qualified associated function rather than a
+;    topology chain, so it needs its own pattern and its own evidence. Recorded
+;    here rather than acted on, so the next story finds the reasoning instead of
+;    re-deriving it.
+;
+;    REFUSAL SLOTS SHIP HERE, and only here. Decision (2) of the audit above
+;    declines `@broker.*.topic.slot` for this file's other patterns because they
+;    key on bare method verbs with no receiver typing, so a slot would record a
+;    refusal for every `channel.send(x)` in an arbitrary codebase. That reasoning
+;    is unchanged and those patterns still carry no slot. These two do, because
+;    the receiver gate makes their site identifiable as a broker site before any
+;    refusal is recorded — the same thing `KafkaHeaders.TOPIC` does for the Java
+;    header form.
+
+; Subscribe (topology form), BINDING.
+(call_expression
+  function: (field_expression
+    value: (_) @broker.subscribe.receiver
+    field: (field_identifier) @_st_sub_m)
+  arguments: (arguments
+    . (string_literal) @broker.subscribe.topic)
+  (#eq? @_st_sub_m "stream"))
+
+; Subscribe (topology form), REFUSAL slot. The operand shapes are ENUMERATED and
+; never a `(_)` wildcard — the Java query's measurement (a wildcard competes with
+; the literal pattern at the same argument position and cost it its matches) is
+; the reason, and the enumeration makes the question moot here too. The five
+; shapes are the non-literal operands a Rust topic operand is idiomatically
+; written as: a binding, a path constant, a field, a call, a concatenation.
+(call_expression
+  function: (field_expression
+    value: (_) @broker.subscribe.receiver
+    field: (field_identifier) @_st_sub_slot_m)
+  arguments: (arguments
+    . [
+      (identifier)
+      (scoped_identifier)
+      (field_expression)
+      (call_expression)
+      (binary_expression)
+    ] @broker.subscribe.topic.slot) @broker.subscribe.site
+  (#eq? @_st_sub_slot_m "stream"))
+
+; Publish (topology form), BINDING.
+(call_expression
+  function: (field_expression
+    value: (_) @broker.publish.receiver
+    field: (field_identifier) @_st_pub_m)
+  arguments: (arguments
+    . (string_literal) @broker.publish.topic)
+  (#eq? @_st_pub_m "to"))
+
+; Publish (topology form), REFUSAL slot — same enumeration, same site grain.
+(call_expression
+  function: (field_expression
+    value: (_) @broker.publish.receiver
+    field: (field_identifier) @_st_pub_slot_m)
+  arguments: (arguments
+    . [
+      (identifier)
+      (scoped_identifier)
+      (field_expression)
+      (call_expression)
+      (binary_expression)
+    ] @broker.publish.topic.slot) @broker.publish.site
+  (#eq? @_st_pub_slot_m "to"))

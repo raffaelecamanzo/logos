@@ -408,6 +408,17 @@ fn go_entry() -> GrammarEntry {
                 label: "go/queries/invocations.scm",
                 source: include_str!("../../plugins/go/queries/invocations.scm"),
             },
+            // The receiver-gated Kafka Streams topology form (S-408,
+            // [CR-131] §3.2 A1). Go's whole broker arm — deliberately not the
+            // Rust file's bare-verb patterns. Its CAPTURE half is fixture-pinned;
+            // its OVER-capture half is measured, at 0 broker rows over the
+            // reference estate's 262 real `.go` files. The query header says why
+            // the two halves must not be reported as one number.
+            EmbeddedQuery {
+                relative_path: "queries/brokers.scm",
+                label: "go/queries/brokers.scm",
+                source: include_str!("../../plugins/go/queries/brokers.scm"),
+            },
         ],
     }
 }

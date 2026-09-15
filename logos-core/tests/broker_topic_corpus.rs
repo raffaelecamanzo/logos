@@ -76,6 +76,35 @@
 //! half of the arm — not accepted as noise.
 //! ```
 //!
+//! ## Appendix, 2026-09-15 (S-408): the subscribe refusal figure has moved 0 → 8
+//!
+//! The finding above stays as recorded — it was correct for the capture that
+//! existed on 2026-09-07 and its `0` is not edited. What changed is the arm, not
+//! the corpus.
+//!
+//! S-408 added the Kafka Streams topology form, whose `stream(<operand>)`
+//! subscribe carries a refusal slot. The estate's 8 topology files each write one
+//! `stream(…)` with a `@ConfigurationProperties` accessor or a qualified constant
+//! operand, so the S-339 walk — whose file filter is the broad "declares Kafka
+//! wiring" marker, not `@KafkaListener` — now counts **8** recorded
+//! `topic-not-literal` subscribe refusals where it counted 0.
+//!
+//! Read the two figures this way:
+//!
+//!   - The `0` is still the right figure for the population the finding is ABOUT:
+//!     the 16 `@KafkaListener` files, every one of which writes a placeholder
+//!     literal and none of which writes a constant. That is unchanged and is
+//!     re-asserted by the same test.
+//!   - The `8` is a different population — topology sites, a form that did not
+//!     exist in the arm when the finding was written — and its own denominator is
+//!     16 of 16 in
+//!     `the_reference_workspace_leaves_no_streams_topology_site_silent_when_one_is_configured`.
+//!
+//! The consequence for the sentence "the refusal-recording half of this story has
+//! no real-corpus evidence" is that it is now false for the ARM and still true for
+//! S-339's own population. The arm's refusal path gained real-corpus evidence
+//! twice since: 54 header-form refusals (S-370) and these 16 topology ones.
+//!
 //! [CR-107]: ../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
 //! [`extract`]: logos_core::extract::extract
 
@@ -669,4 +698,297 @@ fn the_reference_workspace_reports_reconciled_publish_sites_when_one_is_configur
             "a captured topic key is a literal's text, never an operand's source: {key:?}"
         );
     }
+}
+
+/// **S-408 / [CR-131] §3.2 A1's corpus criterion.** Walks the reference workspace
+/// and asserts the one thing the criterion asks for: **no Kafka Streams topology
+/// site under `src/main` is silent** — each produces either a bound topic or a
+/// recorded `topic-not-literal` refusal ([NFR-CC-04]).
+///
+/// The figures are reported with their denominator and dated. **No floor is
+/// asserted on them**, deliberately and per the criterion: a count of what a
+/// capture admits on one estate is a measurement, not a product prediction, and
+/// [S-397]'s lesson (a census figure promoted to an acceptance floor, then missed
+/// by the product at 44 against a harness's 79) is exactly what an assertion of
+/// `>= 14` here would repeat. What IS asserted is the invariant — `silent == 0` —
+/// plus the corpus identity, so a changed capture cannot be mistaken for a
+/// changed corpus.
+///
+/// # Recorded finding
+///
+/// ```text
+/// S-408 / CR-131 §3.2 A1, measured 2026-09-15 against ~/source/pec-services
+/// (84 members).
+///
+///   files declaring a Kafka Streams topology:            8   (all 8 in src/main,
+///                                                            across 8 members)
+///   textual `.stream(` / `.to(` sites in them:          16   (8 + 8)
+///   recognised topology sites (captured + refused):     16   ← 16 of 16
+///   captured topology topic keys:                        0
+///   recorded `topic-not-literal` topology refusals:     16
+///   topology files that are silent:                      0   ← the NFR-CC-04 claim
+///
+/// BEFORE this story the same walk recognised 0 of the 16 and recorded 0
+/// refusals: the arm matched annotations and the `KafkaHeaders.TOPIC` header and
+/// nothing else, so the estate's entire asynchronous topology mass was ABSENT —
+/// not refused. Reproduce it by deleting the four topology patterns from
+/// `plugins/java/queries/brokers.scm` and re-running; the `silent` assertion
+/// below then fails naming all 8 files.
+///
+/// CAPTURED IS 0, AND THAT IS THE EXPECTED OUTCOME OF THIS STORY, not a defect.
+/// All 16 operands are non-literal — 14 are a `@ConfigurationProperties` accessor
+/// (`kafkaTopics.getArchiveEvents()`), 2 are a qualified constant
+/// (`Topics.INPUT_TOPIC`) — so recognition alone binds no topic and promotes no
+/// Producer/Consumer. S-408 delivers the 16 honest refusals; resolving the
+/// accessor operand is S-409, which threads into this arm the same BindingView
+/// the HTTP arm already resolves 81 of 96 sites with.
+///
+/// MEMBER COUNT: 8 here against CR-131 §2.1's 14 sites over 7 members. The
+/// difference is `punctuators-poc`, a proof-of-concept module the CR's census did
+/// not count; it writes the 2 remaining sites and is the only member using the
+/// `KStream`-typed-binding shape rather than one chained expression. Both
+/// spellings are captured, which is why the total is 16 and not 14 — stated so
+/// the two figures are reconcilable rather than read as a discrepancy.
+///
+/// RUST IS UNEXERCISED; GO IS EXERCISED, AND FOR THE OTHER HALF.
+///
+///   rust: 0 .rs files                                → UNEXERCISED
+///   go:   262 .go files (1 member, hermodr-mirror)
+///         textual `Stream(`/`To(`/`stream(`/`to(`:  0
+///         broker rows the Go arm produced:          0   ← 0 of 262, no false positive
+///
+/// The Rust arm is measured by nothing here and its evidence is fixture-only. The
+/// Go arm is NOT: the estate carries a 262-file Go member, which is a real corpus
+/// for the half that a fixture cannot answer — whether patterns keyed on verbs as
+/// common as `To` and `Stream` over-capture on ordinary code. Receiver-gated, they
+/// produce 0 rows over all 262 files. That is the measurement the Rust
+/// `brokers.scm` header says it lacks for its own bare-verb patterns, and it is
+/// why the gate, not the verb, is what makes this arm shippable.
+///
+/// It is NOT evidence that the Go arm CAPTURES correctly — the corpus writes no
+/// topology to capture, so that half stays fixture-only
+/// (`extract::broker::go_capture_tests::the_go_topology_form_is_receiver_gated`,
+/// and `…::rust_capture_tests::the_rust_topology_form_is_receiver_gated` for Rust).
+///
+/// This paragraph is the second thing this measurement corrected in its own first
+/// run: it was written asserting `(rust, go) == (0, 0)` files, and the estate
+/// answered 262 Go files. The claim "unexercised" was assumed, not measured — the
+/// assertion is what caught it, which is the whole reason it is an assertion.
+/// ```
+///
+/// [CR-131]: ../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[test]
+fn the_reference_workspace_leaves_no_streams_topology_site_silent_when_one_is_configured() {
+    let Some(root) = corpus_root() else {
+        eprintln!(
+            "SKIPPED: set LOGOS_REF_WORKSPACE=<path to the reference workspace> to run the \
+             S-408 Kafka Streams topology corpus measurement (this test's docs carry the \
+             recorded finding it reproduces)."
+        );
+        return;
+    };
+
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    let java = registry.for_extension("java").expect("java plugin present");
+    let go = registry.for_extension("go").expect("go plugin present");
+
+    // Textual markers, derived independently of the capture so the reconciliation
+    // is a join and not a tautology.
+    let mut topology_files: BTreeSet<String> = BTreeSet::new();
+    let mut main_topology_files: BTreeSet<String> = BTreeSet::new();
+    let mut main_topology_members: BTreeSet<String> = BTreeSet::new();
+    let mut textual_sites = 0usize;
+    let mut main_sites = 0usize;
+    // The two sibling-language arms this story also ships. Counted, not assumed —
+    // and counting them is what caught the claim that both were unexercised: Rust
+    // is (0 `.rs` files), Go is NOT (262 `.go` files, one member). The Go arm is
+    // therefore run over every Go file and its broker rows counted, which turns an
+    // untestable "unexercised" into a real no-false-positive measurement.
+    let mut rust_files = 0usize;
+    let mut go_files = 0usize;
+    let mut go_textual_sites = 0usize;
+    let mut go_broker_rows = 0usize;
+    // What the arm says.
+    let mut captured: BTreeMap<String, usize> = BTreeMap::new();
+    let mut refusals: BTreeMap<String, usize> = BTreeMap::new();
+    let mut captured_keys: BTreeSet<String> = BTreeSet::new();
+
+    for entry in corpus_walker(&root).flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let extension = path.extension().and_then(|e| e.to_str());
+        if !matches!(extension, Some("rs") | Some("go") | Some("java")) {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(&root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().to_string();
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if extension == Some("rs") {
+            rust_files += 1;
+            continue;
+        }
+        if extension == Some("go") {
+            go_files += 1;
+            go_textual_sites += source.matches(".Stream(").count()
+                + source.matches(".To(").count()
+                + source.matches(".stream(").count()
+                + source.matches(".to(").count();
+            let facts = extract(&FileInput::new(&rel, &source), go, &SymbolContext::default());
+            go_broker_rows += facts
+                .refs
+                .iter()
+                .filter(|r| {
+                    matches!(
+                        r.relation,
+                        Some(ArtifactRelation::BrokerPublish)
+                            | Some(ArtifactRelation::BrokerSubscribe)
+                    )
+                })
+                .count();
+            continue;
+        }
+        // A topology file names `StreamsBuilder` AND writes at least one link. The
+        // type name alone admits the `KafkaConfiguration` beans that configure the
+        // factory without declaring any topology — 6 such files on this estate, and
+        // counting them would put files with 0 sites into the `silent` denominator
+        // and fail this test for the wrong reason.
+        let sites_here = source.matches(".stream(").count() + source.matches(".to(").count();
+        if !source.contains("StreamsBuilder") || sites_here == 0 {
+            continue;
+        }
+        topology_files.insert(rel.clone());
+        textual_sites += sites_here;
+        if rel.contains("/src/main/") {
+            main_topology_files.insert(rel.clone());
+            main_sites += sites_here;
+            if let Some(member) = rel.split('/').next() {
+                main_topology_members.insert(member.to_string());
+            }
+        }
+
+        let facts = extract(&FileInput::new(&rel, &source), java, &SymbolContext::default());
+        for reference in &facts.refs {
+            if !matches!(
+                reference.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            ) {
+                continue;
+            }
+            if reference.target.is_empty() {
+                *refusals.entry(rel.clone()).or_default() += 1;
+            } else {
+                *captured.entry(rel.clone()).or_default() += 1;
+                captured_keys.insert(reference.target.clone());
+            }
+        }
+    }
+
+    let captured_total: usize = captured.values().sum();
+    let refused_total: usize = refusals.values().sum();
+    let silent: Vec<&String> = topology_files
+        .iter()
+        .filter(|f| !captured.contains_key(*f) && !refusals.contains_key(*f))
+        .collect();
+
+    eprintln!(
+        "S-408 corpus: root={}\n  \
+         files declaring a Kafka Streams topology: {} ({} in src/main across {} members)\n  \
+         textual `.stream(`/`.to(` sites in them: {textual_sites} ({main_sites} in src/main)\n  \
+         captured topology topic keys: {captured_total}\n  \
+         recorded topic-not-literal topology refusals: {refused_total} across {} files\n  \
+         topology files that are silent: {}\n  \
+         sibling-language arms: rust {rust_files} .rs files (0 = UNEXERCISED, never \
+         zero captured); go {go_files} .go files writing {go_textual_sites} textual \
+         `Stream(`/`To(` site(s) → {go_broker_rows} broker row(s)",
+        root.display(),
+        topology_files.len(),
+        main_topology_files.len(),
+        main_topology_members.len(),
+        refusals.len(),
+        silent.len(),
+    );
+
+    // (0) The corpus is the one the finding was recorded against. Asserted so a
+    //     changed capture cannot be mistaken for a changed corpus, and vice versa.
+    assert!(
+        !topology_files.is_empty(),
+        "the reference workspace at {} declares no Kafka Streams topology — this is \
+         not the corpus the recorded finding was measured against, so a green run \
+         here would report a measurement that did not happen",
+        root.display(),
+    );
+
+    // (1) THE CRITERION: no topology site is silent. Every file that writes a
+    //     link either bound a topic or recorded a refusal ([NFR-CC-04]). This is
+    //     the assertion; the counts above are reported, never floored.
+    assert!(
+        silent.is_empty(),
+        "{} file(s) declare a Kafka Streams topology but neither captured a topic \
+         nor recorded a refusal — silence is the defect: {silent:?}",
+        silent.len(),
+    );
+
+    // (2) Site-grained, not just file-grained: the arm recognises as many sites as
+    //     the text writes. A file-grained check passes while half a file's links go
+    //     missing, which is precisely the shape of the gap this story closes.
+    assert_eq!(
+        captured_total + refused_total,
+        textual_sites,
+        "the arm recognised {} of {textual_sites} textual topology sites — \
+         captured {captured_total}, refused {refused_total}",
+        captured_total + refused_total,
+    );
+
+    // (3) Never fabricated: a captured key is a literal's own text, never an
+    //     operand's source. `captured_keys` is EMPTY on this estate (all 16
+    //     operands are accessors or qualified constants), so this guards a future
+    //     over-eager key rule rather than measuring a live population — stated so a
+    //     reader does not mistake a passing assertion for an exercised one.
+    for key in &captured_keys {
+        assert!(
+            !key.contains('(') && !key.contains('+'),
+            "a captured topology topic key is a literal's text, never an operand's \
+             source: {key:?}"
+        );
+    }
+
+    // (4a) RUST: the arm is unexercised, and that is asserted rather than assumed.
+    //      The day the corpus gains a `.rs` file, the word "unexercised" in this
+    //      module's recorded finding and in `plugins/rust/queries/brokers.scm`
+    //      stops being true and must be re-measured rather than carried forward.
+    assert_eq!(
+        rust_files, 0,
+        "the recorded finding states the Rust topology arm is UNEXERCISED on this \
+         corpus; it now contains {rust_files} .rs file(s), so that word is stale"
+    );
+
+    // (4b) GO: the arm IS exercised — 262 files, one member — and what it measures
+    //      is the absence of FALSE POSITIVES. This assertion is the reason the Go
+    //      patterns can key on verbs as common as `To`/`Stream` at all: over a real
+    //      262-file Go corpus that writes no Kafka Streams topology, the
+    //      receiver-gated arm produces zero broker rows. Without the gate the same
+    //      corpus is a manufactured coverage denominator.
+    //
+    //      It is NOT evidence that the Go arm captures correctly — the corpus
+    //      writes no topology to capture. That half is fixture-only, and the
+    //      recorded finding says so.
+    assert!(
+        go_files > 0,
+        "the recorded finding measures the Go arm's false-positive rate over {go_files} \
+         Go files; with none, that figure is unexercised and must not be reported as \
+         a measured zero"
+    );
+    assert_eq!(
+        go_broker_rows, 0,
+        "the receiver-gated Go arm produced {go_broker_rows} broker row(s) over \
+         {go_files} Go files that write no Kafka Streams topology ({go_textual_sites} \
+         textual `Stream(`/`To(` site(s)) — every one is a false positive"
+    );
 }
