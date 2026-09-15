@@ -131,6 +131,86 @@ pub const ONE_HOP_FLOOR: usize = 7;
 /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
 pub const PRODUCTION_PUBLISH_SITES: usize = 13;
 
+// ── S-416: the two-frame reading ────────────────────────────────────────────
+
+/// **The two-frame floor, as declared before the run** — [CR-131] §3.2 C1's
+/// blocking gate.
+///
+/// Unlike [`DECLARED_FLOOR`], which had to be copied into the tree because
+/// `.pending/` is gitignored, this declaration is **tracked from the start**:
+/// it was committed on its own, before any of S-416's measurement code existed,
+/// so the commit that carries it is itself the timestamp.
+/// [`fixtures::the_two_frame_floor_is_the_one_declared_before_the_run`] parses
+/// the figure out of this text and compares it to [`TWO_FRAME_FLOOR`].
+///
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+pub const TWO_FRAME_DECLARED_FLOOR: &str = include_str!("two_frame_forwarding_floor.txt");
+
+/// The materiality floor for the two-frame reading: **7 of the 13** production
+/// publish sites, on S-392's own metric.
+///
+/// The number is **not re-derived**. [CR-131] §3.2 C1 states it as "at least 7
+/// of the 13 production publish sites resolve, *on S-392's own metric*", and
+/// [`ONE_HOP_FLOOR`] already carries the three derivations. Re-deriving a floor
+/// for a re-proposal is how a gate gets quietly lowered to fit what the second
+/// attempt can reach — see `two_frame_forwarding_floor.txt`.
+///
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+pub const TWO_FRAME_FLOOR: usize = 7;
+
+/// S-392's seven named two-frame sites, reproduced from `forwarding_finding.txt`
+/// verbatim: the module, and the `src/main` call site that decides each.
+///
+/// The reconciliation AC is stated over these by NAME, so they are a constant
+/// and not a prose paragraph: a site S-392 named that this run cannot even see
+/// is harness drift, and the run is VOID rather than falsifying. The join key is
+/// the file's **basename and line**, which is how the finding wrote them and the
+/// only part of the path that file records.
+/// S-416's recorded verdict, reproduced by the run and printed by it.
+pub const TWO_FRAME_RECORDED_FINDING: &str = include_str!("two_frame_forwarding_finding.txt");
+
+/// The decisive figure: production publish sites resolved at two frames with
+/// agreement over `src/main` call sites only. **Above [`TWO_FRAME_FLOOR`].**
+pub const RECORDED_TWO_FRAME_MAIN_ONLY: usize = 8;
+
+/// The same at two frames with every in-module call site admitted. Zero: the
+/// second frame buys nothing without the main-tree rule, and the two relaxations
+/// are reported as the dependent pair they are rather than as two independent
+/// gains.
+pub const RECORDED_TWO_FRAME_ALL_SITES: usize = 0;
+
+/// What the SECOND FRAME itself bought under the decisive reading — resolved at
+/// two frames, refused at one. The gate would have failed at 6 without it, so
+/// this is the quantity the verdict actually turns on.
+pub const RECORDED_BOUGHT_BY_FRAME_TWO: usize = 2;
+
+/// How many of S-392's seven named two-frame sites resolve. Evidence for the
+/// headline, never a second headline.
+pub const RECORDED_NAMED_SITES_RESOLVED: usize = 2;
+
+/// Production refusals at two frames, and how many of them look up a forwarding
+/// name their own build module declares more than once.
+///
+/// The two being **equal** is the finding's central caveat: every refusal is
+/// attributable to this harness binding frame two on `(name, arity)` rather than
+/// to the estate, so the headline is a floor on what [CR-131] C2's
+/// receiver-aware rule would resolve. If a future run separates them, the caveat
+/// no longer covers the residue and the finding must be re-read.
+///
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+pub const RECORDED_TWO_FRAME_REFUSALS: usize = 5;
+pub const RECORDED_REFUSALS_FROM_NAME_AMBIGUITY: usize = 5;
+
+pub const S392_NAMED_TWO_FRAME_SITES: [(&str, &str); 7] = [
+    ("archive-listener-adapter", "ArchiveEventKafkaProducer.java:16"),
+    ("deprecated-mailbox-core/manager", "DelayedMessageKafkaProducer.java:23"),
+    ("pecserver-facade", "PecServerOperationKafkaProducer.java:23"),
+    ("archive-manager", "DelayedMessageKafkaProducer.java:21"),
+    ("mailbox-manager", "DelayedMessageKafkaProducer.java:23"),
+    ("official-log-export-job-worker", "OfficialLogOutcomeKafkaProducer.java:17"),
+    ("official-log-export-job-manager", "DelayedMessageKafkaProducer.java:19"),
+];
+
 /// The plugin whose expression shapes this module reads. A literal here and
 /// nowhere in `logos-core`, for the reason the parent module's carve-out gives.
 const JAVA: &str = "java";
@@ -193,6 +273,16 @@ pub enum ArgValue {
     NeedsAnotherHop,
     /// Some other refusal — reported with its reason rather than bucketed.
     Unresolvable(Refusal),
+    /// **S-416 only.** The argument was a bare parameter of the caller, the
+    /// second frame was taken, and it refused — with a reason that is not "the
+    /// argument is a parameter again". That case maps to
+    /// [`NeedsAnotherHop`](ArgValue::NeedsAnotherHop) instead, so that [`decide`]
+    /// applies exactly one precedence at either depth and the hop-count refusal
+    /// keeps outranking an unresolvable operand at two frames as it does at one.
+    ///
+    /// Frame one never produces this variant, which is why adding it cannot move
+    /// a single S-392 figure.
+    FrameTwoRefused(FrameTwoRefusal),
 }
 
 impl ArgValue {
@@ -202,7 +292,7 @@ impl ArgValue {
         match self {
             Self::Literal(text) => Some(format!("lit:{text}")),
             Self::Key(key) => Some(format!("key:{key}")),
-            Self::NeedsAnotherHop | Self::Unresolvable(_) => None,
+            Self::NeedsAnotherHop | Self::Unresolvable(_) | Self::FrameTwoRefused(_) => None,
         }
     }
 
@@ -212,8 +302,191 @@ impl ArgValue {
             Self::Key(key) => format!("config key {key}"),
             Self::NeedsAnotherHop => "a parameter of the caller (two or more hops)".into(),
             Self::Unresolvable(r) => format!("unresolvable: {}", r.label()),
+            Self::FrameTwoRefused(t) => format!("second frame refused: {}", t.label()),
         }
     }
+}
+
+/// Where an argument that is itself a bare parameter comes from: the method
+/// enclosing the call site, and the positional slot the parameter occupies in
+/// **that** method's own signature.
+///
+/// This is the only new piece of arithmetic S-416 adds, and it is the same
+/// arithmetic [`push_candidate`] already does for a publish site's operand —
+/// [`declaring_scope`] then [`parameter_slot`], both reused rather than
+/// re-spelled. A second frame is therefore the first frame applied once more to
+/// a target the first frame named, not a new mechanism.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Forward {
+    /// The method enclosing the call site — the thing whose callers frame two
+    /// reads.
+    pub callee: Callee,
+    /// The slot the forwarded parameter occupies in that method's signature.
+    pub slot: usize,
+    /// The class that declares it.
+    ///
+    /// [`Callee`] is all the `Calls` ledger's target text can express, and on
+    /// this estate it is **ambiguous by construction**: S-392 recorded 7 wanted
+    /// names declared twice inside one build module, every one of them "a base
+    /// `KafkaProducer.sendMessage/3` together with a subclass override of the
+    /// same signature". At one frame that ambiguity changed no verdict and
+    /// S-392 checked all seven by hand. At two frames it is decisive, so frame
+    /// two needs to know *which class* declares the method it is looking up —
+    /// see [`dispatches_past`].
+    pub declaring_class: String,
+}
+
+/// What the **second** frame proved about one forwarded argument.
+///
+/// Each variant is a distinct, countable fault, for the reason [`Residue`]'s
+/// are: [NFR-CC-04] wants a diagnosis and not a bucket. `Residue` itself is
+/// deliberately left alone — it is S-392's published vocabulary, its `ALL`
+/// drives a census the recorded finding reproduces row for row, and widening it
+/// would silently add a row to a table that is durable evidence.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameTwo {
+    /// The forwarding method's own callers agreed on one terminal value.
+    Resolved(ArgValue),
+    /// They did not, for a named reason.
+    Refused(FrameTwoRefusal),
+}
+
+impl FrameTwo {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Resolved(v) => format!("resolved to {}", v.label()),
+            Self::Refused(r) => r.label(),
+        }
+    }
+}
+
+/// Why a second frame refused.
+///
+/// Split from [`FrameTwo`] rather than folded into it so that a refusal cannot
+/// carry a value: [`ArgValue::FrameTwoRefused`] takes one of these, and the type
+/// therefore says outright that a refused frame contributes nothing to the
+/// agreement. (It also breaks the `ArgValue` <-> `FrameTwo` cycle, which is how
+/// the split came to be noticed.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameTwoRefusal {
+    /// The argument is a bare parameter **again**: three or more frames, beyond
+    /// the bound [CR-131] §3.2 C1 declares. This is the residue the two-frame
+    /// bound turns on, exactly as [`Residue::TwoOrMoreHops`] is the one the
+    /// one-frame bound turned on.
+    ///
+    /// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+    ThreeOrMoreFrames,
+    /// The forwarding method is called nowhere the reading admits: nowhere at
+    /// all, or — under the main-tree rule — only from the test tree.
+    NoCallSite,
+    /// Call sites exist, and every one of them is outside the build module the
+    /// hop is fixed inside.
+    OutOfModuleCaller,
+    /// The forwarding method's callers resolve, and disagree. Emits per-site
+    /// candidates and no edge, never an average.
+    DisagreeingCallers,
+    /// A caller's argument resolves to nothing at all — on this estate, a
+    /// `Mockito.any()`.
+    Unresolvable(Refusal),
+    /// The forwarded argument could not be attributed to a method parameter slot
+    /// at all: a `Foo::bar` method reference, which supplies no argument, or a
+    /// constructor or lambda parameter, which is not a method call site. There
+    /// is nothing to follow, so there is no second frame to take.
+    NotFollowable,
+}
+
+impl FrameTwoRefusal {
+    pub fn label(&self) -> String {
+        match self {
+            Self::ThreeOrMoreFrames => "the caller's caller passes a parameter (3+ frames)".into(),
+            Self::NoCallSite => "the forwarding method has no call site the reading admits".into(),
+            Self::OutOfModuleCaller => "every caller of the forwarding method is out of module".into(),
+            Self::DisagreeingCallers => "the forwarding method's callers disagree".into(),
+            Self::Unresolvable(r) => format!("a caller's argument resolves to nothing: {}", r.label()),
+            Self::NotFollowable => "nothing to follow (method reference, or not a method)".into(),
+        }
+    }
+
+    /// The order the **census** attributes a refusal in when more than one
+    /// second frame blocked one candidate.
+    ///
+    /// This is a REPORTING rule and deliberately not a `derive(Ord)`: the
+    /// decision itself is [`decide`]'s and lives in exactly one place. This
+    /// says which of several blocking frames gets named in the census row, and
+    /// it follows `decide`'s precedence so that the reason printed is the reason
+    /// the verdict rests on — hop count first, then an operand that resolves to
+    /// nothing, then a boundary, then a disagreement.
+    fn census_rank(&self) -> u8 {
+        match self {
+            Self::ThreeOrMoreFrames => 0,
+            Self::Unresolvable(_) => 1,
+            Self::NotFollowable => 2,
+            Self::NoCallSite => 3,
+            Self::OutOfModuleCaller => 4,
+            Self::DisagreeingCallers => 5,
+        }
+    }
+}
+
+/// Why a candidate did not resolve **at two frames**.
+///
+/// The first three variants are frame-one faults a second frame cannot help;
+/// the next four are frame-two faults. They are kept apart because the whole
+/// point of the gate is to say what the second frame bought, and a census that
+/// pooled "no call site at frame one" with "no call site at frame two" could not
+/// say it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TwoFrameResidue {
+    /// Frame one: the operand is a constructor or lambda parameter.
+    NotAMethodParameter,
+    /// Frame one: the wrapper is called nowhere the reading admits.
+    NoCallSiteAtFrameOne,
+    /// Frame one: every call site of the wrapper is outside its build module.
+    OutOfModuleAtFrameOne,
+    /// Frame two: the argument is a bare parameter again.
+    ThreeOrMoreFrames,
+    /// Frame two: the forwarding method is called nowhere the reading admits.
+    NoCallSiteAtFrameTwo,
+    /// Frame two: every caller of the forwarding method is out of module.
+    OutOfModuleCaller,
+    /// Frame two: the forwarding method's callers disagree.
+    DisagreeingCallers,
+    /// Either frame: an admitted call site's argument resolves to nothing. On
+    /// this estate this is the Mockito-stub mechanism, and the main-tree rule is
+    /// what removes it.
+    UnresolvableOperand,
+    /// Frame one: the wrapper's own call sites disagree, after both frames.
+    DisagreeAtFrameOne,
+}
+
+impl TwoFrameResidue {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotAMethodParameter => "operand is a constructor/lambda parameter",
+            Self::NoCallSiteAtFrameOne => "the wrapper has no call site the reading admits",
+            Self::OutOfModuleAtFrameOne => "every wrapper call site is outside the build module",
+            Self::ThreeOrMoreFrames => "three or more frames",
+            Self::NoCallSiteAtFrameTwo => "no call site for the forwarding method (frame 2)",
+            Self::OutOfModuleCaller => "out-of-module caller (frame 2)",
+            Self::DisagreeingCallers => "disagreeing callers (frame 2)",
+            Self::UnresolvableOperand => "an admitted call site's argument resolves to nothing",
+            Self::DisagreeAtFrameOne => "the wrapper's call sites disagree",
+        }
+    }
+
+    pub const ALL: [Self; 9] = [
+        Self::NotAMethodParameter,
+        Self::NoCallSiteAtFrameOne,
+        Self::OutOfModuleAtFrameOne,
+        Self::ThreeOrMoreFrames,
+        Self::NoCallSiteAtFrameTwo,
+        Self::OutOfModuleCaller,
+        Self::DisagreeingCallers,
+        Self::UnresolvableOperand,
+        Self::DisagreeAtFrameOne,
+    ];
 }
 
 /// Why a candidate did **not** resolve at one hop. Each variant is a distinct,
@@ -347,6 +620,29 @@ struct Observation {
     declaration: Option<String>,
     /// The resolved value at each slot this measurement asked about.
     values: BTreeMap<usize, ArgValue>,
+    /// **S-416.** For each slot whose value is
+    /// [`ArgValue::NeedsAnotherHop`], what the second frame would have to look
+    /// up: the method enclosing this call site, and the slot the forwarded
+    /// parameter occupies in it.
+    ///
+    /// Absent when the argument is a parameter of something that is not a
+    /// method (a constructor, a lambda) and for a method reference, which
+    /// supplies no argument at all — both are [`FrameTwo::NotFollowable`].
+    forwards: BTreeMap<usize, Forward>,
+    /// **S-416.** The call's receiver is the `super` keyword.
+    ///
+    /// The only piece of receiver information this measurement reads, and it is
+    /// read because it is the one thing decidable from the tokens alone: a
+    /// `super.m(...)` inside `class C extends B` calls `B.m`, whatever else in
+    /// the module happens to declare an `m` of the same arity. Anything more —
+    /// which class an identifier receiver's declared type names — is type
+    /// binding, which this harness does not do and does not claim.
+    receiver_is_super: bool,
+    /// For such a call, the simple name of the class it dispatches to: the one
+    /// its enclosing class `extends`. `None` when there is no `extends` clause,
+    /// in which case the call reaches `Object` and none of the methods this
+    /// measurement looks up.
+    super_dispatches_to: Option<String>,
     /// A `Foo::bar` method reference rather than an invocation.
     ///
     /// It counts toward the AGREEMENT — [FR-WS-23] AC1 says every call site —
@@ -428,6 +724,22 @@ pub struct Cost {
     pub targeted_files: usize,
     /// Java files the whole-estate pass parsed.
     pub estate_files: usize,
+    /// **S-416.** The second frame's own pass, over the files the `Calls` ledger
+    /// names as callers of a forwarding method, with the same-name ambiguity
+    /// census **switched off** — so this figure is parse-and-resolve and nothing
+    /// else.
+    pub frame_two: Duration,
+    /// The same pass with the census switched back on. The difference between
+    /// the two is the measurement scaffolding's share, MEASURED rather than
+    /// disclosed in prose — which is what [CR-131] C1's cost criterion asks for.
+    ///
+    /// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+    pub frame_two_with_scaffolding: Duration,
+    /// Files parsed in the second frame's pass — its denominator.
+    pub frame_two_files: usize,
+    /// Distinct forwarding methods the second frame had to look up — the other
+    /// denominator the per-unit figure can be stated over.
+    pub frame_two_callees: usize,
 }
 
 impl Cost {
@@ -479,6 +791,62 @@ pub struct Findings {
     /// sensitivity: does admitting test call sites into the agreement change
     /// the verdict?
     pub hops_main_only: BTreeMap<usize, Hop>,
+    /// **S-416.** The same candidates at TWO frames, every in-module call site
+    /// admitted to the agreement — the strict reading of the new bound.
+    pub hops_two_frame: BTreeMap<usize, Hop>,
+    /// **S-416, the decisive cell.** Two frames, with agreement taken over
+    /// `src/main` call sites only. [CR-131] §3.2 C1 states the floor over this
+    /// reading and no other; the other three cells are reported beside it so a
+    /// reader can see what each of the two relaxations bought.
+    ///
+    /// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+    pub hops_two_frame_main_only: BTreeMap<usize, Hop>,
+    /// Per candidate index, the two-frame refusal reason under the decisive
+    /// reading — the enumeration [CR-131] C1 asks for by name.
+    ///
+    /// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+    pub two_frame_residue: BTreeMap<usize, TwoFrameResidue>,
+    /// Per candidate index, the in-module first-frame call sites that FORWARD a
+    /// parameter, as `file:line [tree]` — untruncated, because this is the list
+    /// S-392's seven named sites are reconciled against and a truncated join key
+    /// is a silent miss.
+    pub forwarding_sites: BTreeMap<usize, Vec<String>>,
+    /// Per candidate index, what each second frame proved, under the decisive
+    /// reading: the forwarding method looked up, and the outcome.
+    pub frame_two_detail: BTreeMap<usize, Vec<String>>,
+    /// Per candidate index, the largest number of `method_declaration`s sharing
+    /// a forwarding method's **bare name** inside the candidate's own build
+    /// module — 1 when the lookup is unambiguous.
+    ///
+    /// The honest limit on this measurement, measured rather than argued. Frame
+    /// two binds on [`Callee`], `(name, arity)`, because that is all the `Calls`
+    /// ledger's target text can express; [CR-131] C2 proposes the rule as "name,
+    /// arity **and receiver-aware**". Where a module declares one
+    /// `sendMessage/3` the two are the same rule. Where it declares several —
+    /// `archive-manager` writes `DelayedMessageKafkaProducer` and
+    /// `ArchiveEventKafkaProducer`, publishing to different topics — this
+    /// harness pools their callers and refuses on the disagreement, while the
+    /// proposed rule would separate them. Every such refusal is therefore a
+    /// floor on what C2 would resolve, never a ceiling, which is the safe
+    /// direction for a gate that passes.
+    ///
+    /// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+    pub frame_two_name_declarations: BTreeMap<usize, usize>,
+    /// Per candidate index, the forwarding methods whose SECOND frame resolved,
+    /// as `module/name(arity)` — the chains behind the two-frame yield, for the
+    /// generality caveat declared before the run.
+    pub frame_two_chains: BTreeMap<usize, BTreeSet<String>>,
+    /// Per candidate index, the in-module call sites the **main-tree rule
+    /// excluded** from the agreement, with what each one's argument resolved to.
+    ///
+    /// On this estate these are the Mockito stubs. [CR-131] §3.2 C1's whole
+    /// justification for the main-only reading is "a Mockito stub is not a
+    /// publish", and a relaxation that silently drops sites cannot be audited:
+    /// every site it removes is printed, named, so a reader can judge for
+    /// themselves whether each really is a stub.
+    ///
+    /// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+    pub excluded_by_main_tree: BTreeMap<usize, Vec<String>>,
     pub ledger: LedgerAnswer,
     pub cost: Cost,
     /// Per candidate index, the in-module call sites the hop read, as
@@ -511,6 +879,100 @@ impl Findings {
     /// The same figure under the main-only reading.
     pub fn production_publish_resolved_main_only(&self) -> usize {
         self.resolved_in(Arm::BrokerPublish, Tree::Main, &self.hops_main_only)
+    }
+
+    /// **S-416's decisive number**: production publish sites resolved at two
+    /// frames with agreement over `src/main` call sites only.
+    pub fn production_publish_resolved_two_frame_main_only(&self) -> usize {
+        self.resolved_in(Arm::BrokerPublish, Tree::Main, &self.hops_two_frame_main_only)
+    }
+
+    /// Two frames, every in-module call site admitted — the strict reading.
+    pub fn production_publish_resolved_two_frame(&self) -> usize {
+        self.resolved_in(Arm::BrokerPublish, Tree::Main, &self.hops_two_frame)
+    }
+
+    /// The candidates the SECOND FRAME actually bought, under one reading:
+    /// resolved at two frames and refused at one. Non-vacuity V6 is stated over
+    /// this — a two-frame reading that equals its one-frame reading has measured
+    /// a no-op, and a floor cleared by a no-op is cleared by the first frame.
+    pub fn bought_by_the_second_frame(&self, arm: Arm, tree: Tree, main_only: bool) -> usize {
+        let (one, two) = if main_only {
+            (&self.hops_main_only, &self.hops_two_frame_main_only)
+        } else {
+            (&self.hops, &self.hops_two_frame)
+        };
+        self.candidates
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                c.arm == arm
+                    && c.tree == tree
+                    && two.get(i).is_some_and(Hop::resolved)
+                    && !one.get(i).is_some_and(Hop::resolved)
+            })
+            .count()
+    }
+
+    /// The two-frame residue census for one arm and tree, under the decisive
+    /// reading — every refusal with its own reason ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub fn two_frame_census(&self, arm: Arm, tree: Tree) -> BTreeMap<TwoFrameResidue, usize> {
+        let mut out = BTreeMap::new();
+        for (i, c) in self.candidates.iter().enumerate() {
+            if c.arm != arm || c.tree != tree {
+                continue;
+            }
+            if let Some(reason) = self.two_frame_residue.get(&i) {
+                *out.entry(*reason).or_default() += 1;
+            }
+        }
+        out
+    }
+
+    /// The generality caveat `two_frame_forwarding_floor.txt` declared in
+    /// advance, over the decisive reading: the distinct wrapper methods, the
+    /// distinct members, and the distinct forwarding chains a SECOND frame
+    /// actually resolved through.
+    ///
+    /// Reported whatever the verdict, because it was declared whatever the
+    /// verdict — a pass resting on one wrapper method or one member licenses
+    /// little, and that has to be visible beside the number rather than
+    /// discovered afterwards.
+    pub fn two_frame_generality(&self) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
+        let (mut methods, mut members, mut chains) =
+            (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+        for (i, c) in self.candidates.iter().enumerate() {
+            if c.arm != Arm::BrokerPublish || c.tree != Tree::Main {
+                continue;
+            }
+            if !self.hops_two_frame_main_only.get(&i).is_some_and(Hop::resolved) {
+                continue;
+            }
+            methods.insert(format!("{}/{}", c.module, c.callee.name));
+            members.insert(c.member.clone());
+            chains.extend(self.frame_two_chains.get(&i).into_iter().flatten().cloned());
+        }
+        (methods, members, chains)
+    }
+
+    /// The candidate whose forwarding call sites include `basename:line` — the
+    /// join S-392's seven named sites are reconciled through. `None` means the
+    /// run cannot see a site S-392 named, which is harness drift and VOID.
+    pub fn candidate_forwarding_at(&self, site: &str) -> Option<usize> {
+        self.forwarding_sites.iter().find_map(|(i, sites)| {
+            sites
+                .iter()
+                .any(|s| {
+                    // `file:line [tree]` — join on the basename and line, which
+                    // is the whole of what `forwarding_finding.txt` recorded.
+                    s.split(" [").next().is_some_and(|fl| {
+                        fl.rsplit('/').next().is_some_and(|base| base == site)
+                    })
+                })
+                .then_some(*i)
+        })
     }
 
     /// Candidates that resolve when only `src/main` call sites are admitted to
@@ -726,6 +1188,99 @@ fn arg_value(node: Node<'_>, src: &[u8], unit: &Unit<'_>, resolver: Judge<'_>) -
             Some(text) => ArgValue::Literal(text),
             None => ArgValue::Unresolvable(other),
         },
+    }
+}
+
+/// **S-416.** The second frame's lookup target for one forwarded argument.
+///
+/// Every step is one the first frame already takes, called on a different node:
+/// [`operand_name`] for the identifier, [`declaring_scope`] for the declaration
+/// that binds it, [`parameter_slot`] for its position. The only rule this
+/// function adds is the one [`Candidate`] already applies to a publish site's
+/// own operand — a constructor or lambda scope is **not** a method call site, so
+/// there is nothing to follow and the second frame refuses.
+///
+/// `None` therefore means exactly [`FrameTwo::NotFollowable`], and the caller
+/// spells it that way rather than dropping the site.
+fn forward_from(argument: Node<'_>, src: &[u8]) -> Option<Forward> {
+    let name = operand_name(argument, src)?;
+    let scope = declaring_scope(argument, &name, src)?;
+    if scope.kind() != "method_declaration" {
+        return None;
+    }
+    let (slot, arity) = parameter_slot(scope, &name, src)?;
+    let method = scope.child_by_field_name("name")?.utf8_text(src).ok()?.to_string();
+    Some(Forward {
+        callee: Callee { name: method, arity },
+        slot,
+        declaring_class: enclosing_type_name(scope, src)?,
+    })
+}
+
+/// The simple name of the type declaration enclosing `node`.
+///
+/// `None` for a method outside any named type — an anonymous class body. Such a
+/// method cannot be the target of a `super.m()` written elsewhere, so a `None`
+/// here makes [`dispatches_past`] exclude those `super` calls, which is the
+/// conservative direction.
+fn enclosing_type_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut current = node.parent();
+    while let Some(scope) = current {
+        if matches!(
+            scope.kind(),
+            "class_declaration" | "enum_declaration" | "record_declaration" | "interface_declaration"
+        ) {
+            return scope
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(src).ok())
+                .map(str::to_string);
+        }
+        current = scope.parent();
+    }
+    None
+}
+
+/// The simple name of the class the type declaration enclosing `node` extends.
+///
+/// `None` when there is no `extends` clause — in which case a `super.m()` inside
+/// it targets `Object`, which declares none of the methods this measurement
+/// looks up.
+fn enclosing_superclass_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut current = node.parent();
+    while let Some(scope) = current {
+        if scope.kind() == "class_declaration" {
+            let extends = scope.child_by_field_name("superclass")?;
+            let mut cursor = extends.walk();
+            let first = extends.named_children(&mut cursor).next();
+            drop(cursor);
+            return first.and_then(|t| simple_type_name(t, src));
+        }
+        current = scope.parent();
+    }
+    None
+}
+
+/// A type node's simple name, through the two wrappers Java's grammar puts
+/// around one in an `extends` clause: `Foo<K, V>` is a `generic_type` whose
+/// first named child is the identifier, and `a.b.Foo` is a
+/// `scoped_type_identifier` whose LAST is.
+///
+/// Both shapes appear on the estate — `extends KafkaProducer<ArchiveEventKafkaKey,
+/// SpecificRecord>` is the generic one — and reading the wrong child yields
+/// `None`, which silently over-excludes. The near miss is pinned by
+/// [`fixtures::a_super_call_reaching_its_own_superclass_is_a_caller`].
+fn simple_type_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "type_identifier" | "identifier" => node.utf8_text(src).ok().map(str::to_string),
+        "generic_type" | "scoped_type_identifier" => {
+            let mut cursor = node.walk();
+            let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+            drop(cursor);
+            let pick =
+                if node.kind() == "generic_type" { children.first() } else { children.last() };
+            pick.and_then(|n| simple_type_name(*n, src))
+        }
+        _ => None,
     }
 }
 
@@ -1048,13 +1603,20 @@ fn wanted(f: &Findings) -> BTreeMap<Callee, BTreeSet<usize>> {
 
 /// Parse one file and record every call site of a wanted method, with the
 /// argument at each wanted slot already resolved.
+///
+/// `declarations` is the same-name ambiguity census — **measurement
+/// scaffolding**, not work a real implementation would do. It is an `Option` so
+/// that S-416's cost criterion can separate the two by running the same pass
+/// twice, once with it and once without, rather than disclosing the bias in
+/// prose. S-392's two passes both pass `Some`, so neither of its recorded cost
+/// figures moves.
 fn observe_calls(
     source: &Source,
     estate: &Estate<'_>,
     want: &BTreeMap<Callee, BTreeSet<usize>>,
     names: &BTreeSet<String>,
     out: &mut Vec<Observation>,
-    declarations: &mut BTreeMap<(String, String), BTreeSet<String>>,
+    declarations: Option<&mut BTreeMap<(String, String), BTreeSet<String>>>,
 ) {
     let Some(plugin) = estate.registry.for_path(&source.rel) else { return };
     let mut parser = Parser::new();
@@ -1066,7 +1628,9 @@ fn observe_calls(
     let unit = Unit::build(parsed.root_node(), src);
     let resolver = estate.resolver(&source.module);
 
-    record_declarations(plugin, parsed.root_node(), src, source, names, declarations);
+    if let Some(declarations) = declarations {
+        record_declarations(plugin, parsed.root_node(), src, source, names, declarations);
+    }
 
     let Ok(query) = Query::new(plugin.language(), CALL_QUERY) else { return };
     let captures = query.capture_names();
@@ -1096,10 +1660,25 @@ fn observe_calls(
         let arguments = slots(args_node);
         let callee = Callee { name: name.to_string(), arity: arguments.len() };
         let Some(wanted_slots) = want.get(&callee) else { continue };
-        let values = wanted_slots
+        let values: BTreeMap<usize, ArgValue> = wanted_slots
             .iter()
             .filter_map(|s| Some((*s, arg_value(*arguments.get(*s)?, src, &unit, resolver))))
             .collect();
+        // S-416: where each forwarded argument came FROM, recorded at the same
+        // time the value is read because that is the only point at which the
+        // argument's AST node is in hand. Frame one does not use this; it
+        // records it so frame two has a target to look up.
+        let forwards = values
+            .iter()
+            .filter(|(_, v)| **v == ArgValue::NeedsAnotherHop)
+            .filter_map(|(s, _)| Some((*s, forward_from(*arguments.get(*s)?, src)?)))
+            .collect();
+        let receiver_is_super = name_node
+            .parent()
+            .and_then(|call| call.child_by_field_name("object"))
+            .is_some_and(|object| object.kind() == "super");
+        let super_dispatches_to =
+            receiver_is_super.then(|| enclosing_superclass_name(name_node, src)).flatten();
         out.push(Observation {
             callee,
             module: source.module.clone(),
@@ -1108,6 +1687,9 @@ fn observe_calls(
             line: name_node.start_position().row as u32 + 1,
             declaration: enclosing_declaration(name_node, src),
             values,
+            forwards,
+            receiver_is_super,
+            super_dispatches_to,
             is_reference: false,
         });
     }
@@ -1144,6 +1726,14 @@ fn observe_reference(
             line: reference.start_position().row as u32 + 1,
             declaration: enclosing_declaration(reference, src),
             values: wanted_slots.iter().map(|s| (*s, ArgValue::NeedsAnotherHop)).collect(),
+            // A reference supplies no argument, so there is no forwarded
+            // parameter to attribute and no second frame to take: frame two
+            // records it as `NotFollowable` rather than following it.
+            forwards: BTreeMap::new(),
+            // `Foo::bar` has a qualifier, never the `super` keyword in the
+            // position `method_invocation` puts a receiver.
+            receiver_is_super: false,
+            super_dispatches_to: None,
             is_reference: true,
         });
     }
@@ -1214,7 +1804,13 @@ fn decide(candidate: &Candidate, observed: &[&Observation], main_only: bool) -> 
     if values.iter().any(|v| **v == ArgValue::NeedsAnotherHop) {
         return Hop::Refused(Residue::TwoOrMoreHops);
     }
-    if values.iter().any(|v| matches!(v, ArgValue::Unresolvable(_))) {
+    // `FrameTwoRefused` rides with `Unresolvable` deliberately: at two frames a
+    // refused second frame is an admitted call site whose argument did not
+    // resolve, which is the same fault at a different depth. The one exception
+    // is `FrameTwo::ThreeOrMoreFrames`, which `rewrite_at_two_frames` maps to
+    // `NeedsAnotherHop` above so the hop-count refusal keeps outranking it —
+    // one precedence, declared once, applied at either depth.
+    if values.iter().any(|v| matches!(v, ArgValue::Unresolvable(_) | ArgValue::FrameTwoRefused(_))) {
         return Hop::Refused(Residue::UnresolvableOperand);
     }
     let identities: BTreeSet<String> = values.iter().filter_map(|v| v.identity()).collect();
@@ -1227,6 +1823,220 @@ fn decide(candidate: &Candidate, observed: &[&Observation], main_only: bool) -> 
         call_sites: in_module.len(),
         caller_files: files.len(),
     }
+}
+
+// ── Pass 3: the second frame (S-416) ────────────────────────────────────────
+//
+// [CR-131] §3.2 C1 bounds forwarding at TWO frames. The second frame is the
+// first frame applied once more, to a target the first frame named: nothing in
+// this section re-decides what a publish site is, what a bare parameter is, or
+// how call sites agree. `observe_calls` does the looking and `decide` does the
+// deciding, both unchanged; this section only says WHICH methods frame two must
+// look up and how a refused second frame is spelled as an argument value.
+//
+// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+
+/// The methods the SECOND frame must look up, and the slots it must read.
+///
+/// Read off the first frame's own observations, so a method reaches this set
+/// only because a real in-module call site of a real candidate forwarded a real
+/// parameter into it. It is not a re-scan of the estate for "methods that look
+/// like wrappers" — that would be a second population, and the floor is stated
+/// over one.
+fn wanted_at_frame_two(
+    f: &Findings,
+    observations: &[Observation],
+) -> BTreeMap<Callee, BTreeSet<usize>> {
+    let mut out: BTreeMap<Callee, BTreeSet<usize>> = BTreeMap::new();
+    for c in f.candidates.iter().filter(|c| c.blocked.is_none()) {
+        for o in observations.iter().filter(|o| o.callee == c.callee && o.module == c.module) {
+            if let Some(forward) = o.forwards.get(&c.slot) {
+                out.entry(forward.callee.clone()).or_default().insert(forward.slot);
+            }
+        }
+    }
+    out
+}
+
+/// A call site that is **not** a caller of the method frame two is looking up,
+/// although its name and arity match — [CR-131] C2's "receiver-aware".
+///
+/// One shape, decidable from the tokens rather than from a type: a
+/// `super.m(...)` written inside `class C extends B` calls **`B.m`**. It is a
+/// caller of the method frame two is looking up only when that method is
+/// declared in `B` — never when it is declared in `C` itself, and never when it
+/// is declared in a SIBLING subclass of `B`.
+///
+/// This is not a nicety, and both halves were found by running the harness
+/// against the estate rather than by reading it. [`Callee`] is `(name, arity)`,
+/// all the `Calls` ledger's target text can express, and S-392 recorded 7 wanted
+/// names declared twice inside one build module, every pair "a base
+/// `KafkaProducer.sendMessage/3` together with a subclass override of the same
+/// signature". Without this rule:
+///
+/// * frame two looks up `ArchiveEventKafkaProducer.sendMessage/3`, finds the
+///   `super.sendMessage(...)` line **inside that very method**, reads its
+///   argument — the method's own parameter — and reports THREE frames. The first
+///   run reported 0 of 13 and every one of S-392's seven named sites as 3+
+///   frames, entirely from this;
+/// * with two sibling producers in one module — `archive-manager` writes
+///   `DelayedMessageKafkaProducer` and `ArchiveEventKafkaProducer`, both
+///   `extends KafkaProducer` and both overriding `sendMessage/3` — following
+///   either one's forward picks up the OTHER's `super.sendMessage(...)` line as
+///   a phantom caller. The second run reported 8 of 13 with five sites still
+///   refusing, entirely from this.
+///
+/// Neither conjunct is a proxy for a type, and each case that must NOT be
+/// excluded stays in: a genuinely recursive `m()` or `this.m()` inside `m` has
+/// no `super` receiver, and the legitimate `D.send` -> `super.send` -> `C.send`
+/// chain has `super_dispatches_to == Some("C")`, which is exactly the method
+/// being looked up.
+///
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+fn dispatches_past(observation: &Observation, forward: &Forward) -> bool {
+    observation.receiver_is_super
+        && observation.super_dispatches_to.as_deref() != Some(forward.declaring_class.as_str())
+}
+
+/// Take one second frame: what do the forwarding method's own callers supply?
+///
+/// The filters are the first frame's, restated for the second: the same build
+/// module, and — under the main-tree rule — `src/main` call sites only, plus the
+/// receiver rule [`dispatches_past`] states. The precedence is the first frame's
+/// too, in the same order [`decide`] applies it, because a disagreement between
+/// two sites one of which forwards again is not yet known to be a disagreement.
+fn second_frame(
+    forward: &Forward,
+    module: &str,
+    main_only: bool,
+    index: &BTreeMap<Callee, Vec<&Observation>>,
+) -> FrameTwo {
+    use FrameTwoRefusal as R;
+    let Some(all) = index.get(&forward.callee) else { return FrameTwo::Refused(R::NoCallSite) };
+    let sites: Vec<&Observation> =
+        all.iter().copied().filter(|o| !dispatches_past(o, forward)).collect();
+    let in_module: Vec<&Observation> =
+        sites.iter().copied().filter(|o| o.module == module).collect();
+    if in_module.is_empty() {
+        // Call sites exist and none is in the module: a boundary, not an
+        // absence. The two are different faults and the census keeps them apart.
+        return FrameTwo::Refused(if sites.is_empty() { R::NoCallSite } else { R::OutOfModuleCaller });
+    }
+    let admitted: Vec<&Observation> =
+        in_module.iter().copied().filter(|o| !main_only || o.tree == Tree::Main).collect();
+    if admitted.is_empty() {
+        // Every caller is in the module and every one is in the test tree. The
+        // main-tree rule removed them all, so there is no call site this reading
+        // admits — reported as such, and the removed sites are named by
+        // `Findings::excluded_by_main_tree`.
+        return FrameTwo::Refused(R::NoCallSite);
+    }
+    let values: Vec<&ArgValue> =
+        admitted.iter().filter_map(|o| o.values.get(&forward.slot)).collect();
+    if values.len() < admitted.len() {
+        return FrameTwo::Refused(R::NotFollowable);
+    }
+    if values.iter().any(|v| **v == ArgValue::NeedsAnotherHop) {
+        return FrameTwo::Refused(R::ThreeOrMoreFrames);
+    }
+    if let Some(ArgValue::Unresolvable(r)) =
+        values.iter().find(|v| matches!(v, ArgValue::Unresolvable(_)))
+    {
+        return FrameTwo::Refused(R::Unresolvable(*r));
+    }
+    let identities: BTreeSet<String> = values.iter().filter_map(|v| v.identity()).collect();
+    if identities.len() != 1 {
+        return FrameTwo::Refused(R::DisagreeingCallers);
+    }
+    FrameTwo::Resolved((*values[0]).clone())
+}
+
+/// One candidate's first-frame call sites, with every forwarded argument
+/// replaced by what the second frame proved about it.
+///
+/// The result is fed straight to [`decide`], which is why the two readings share
+/// one agreement rule rather than two spellings of it. The mapping is the whole
+/// of the trick:
+///
+/// * a second frame that resolved becomes its terminal value, so the call site
+///   now agrees (or disagrees) like any other;
+/// * [`FrameTwo::ThreeOrMoreFrames`] becomes [`ArgValue::NeedsAnotherHop`], so
+///   `decide` refuses with `Residue::TwoOrMoreHops` — which at this depth reads
+///   "three or more frames", and the census spells it that way;
+/// * every other refusal becomes [`ArgValue::FrameTwoRefused`], which `decide`
+///   treats exactly as it treats an unresolvable operand.
+fn rewrite_at_two_frames(
+    candidate: &Candidate,
+    observed: &[&Observation],
+    main_only: bool,
+    index: &BTreeMap<Callee, Vec<&Observation>>,
+) -> Vec<Observation> {
+    observed
+        .iter()
+        .map(|o| {
+            let mut next = (*o).clone();
+            if next.values.get(&candidate.slot) != Some(&ArgValue::NeedsAnotherHop) {
+                return next;
+            }
+            let replacement = match o.forwards.get(&candidate.slot) {
+                None => ArgValue::FrameTwoRefused(FrameTwoRefusal::NotFollowable),
+                Some(forward) => match second_frame(forward, &o.module, main_only, index) {
+                    FrameTwo::Resolved(value) => value,
+                    FrameTwo::Refused(FrameTwoRefusal::ThreeOrMoreFrames) => {
+                        ArgValue::NeedsAnotherHop
+                    }
+                    FrameTwo::Refused(other) => ArgValue::FrameTwoRefused(other),
+                },
+            };
+            next.values.insert(candidate.slot, replacement);
+            next
+        })
+        .collect()
+}
+
+/// Decide one candidate at two frames, under one call-site reading.
+fn decide_at_two_frames(
+    candidate: &Candidate,
+    observed: &[&Observation],
+    main_only: bool,
+    index: &BTreeMap<Callee, Vec<&Observation>>,
+) -> Hop {
+    let rewritten = rewrite_at_two_frames(candidate, observed, main_only, index);
+    let borrowed: Vec<&Observation> = rewritten.iter().collect();
+    decide(candidate, &borrowed, main_only)
+}
+
+/// Name the two-frame refusal, from the verdict [`decide`] returned and the
+/// values it read.
+///
+/// The verdict is never recomputed here — that would be a second precedence to
+/// keep in step. This maps `decide`'s own answer onto the two-frame vocabulary,
+/// and only in the one case where `decide`'s vocabulary is coarser than the
+/// census needs (`UnresolvableOperand`, which at two frames has four causes)
+/// does it look at the values, picking the cause by
+/// [`FrameTwo::census_rank`].
+fn two_frame_reason(hop: &Hop, values: &[&ArgValue]) -> Option<TwoFrameResidue> {
+    let residue = hop.residue()?;
+    Some(match residue {
+        Residue::NotAMethodParameter => TwoFrameResidue::NotAMethodParameter,
+        Residue::NoCallSites => TwoFrameResidue::NoCallSiteAtFrameOne,
+        Residue::OutOfModuleOnly => TwoFrameResidue::OutOfModuleAtFrameOne,
+        Residue::TwoOrMoreHops => TwoFrameResidue::ThreeOrMoreFrames,
+        Residue::Disagree => TwoFrameResidue::DisagreeAtFrameOne,
+        Residue::UnresolvableOperand => values
+            .iter()
+            .filter_map(|v| match v {
+                ArgValue::FrameTwoRefused(t) => Some(t),
+                _ => None,
+            })
+            .min_by_key(|t| t.census_rank())
+            .map_or(TwoFrameResidue::UnresolvableOperand, |t| match t {
+                FrameTwoRefusal::NoCallSite => TwoFrameResidue::NoCallSiteAtFrameTwo,
+                FrameTwoRefusal::OutOfModuleCaller => TwoFrameResidue::OutOfModuleCaller,
+                FrameTwoRefusal::DisagreeingCallers => TwoFrameResidue::DisagreeingCallers,
+                _ => TwoFrameResidue::UnresolvableOperand,
+            }),
+    })
 }
 
 // ── The measurement ─────────────────────────────────────────────────────────
@@ -1306,7 +2116,7 @@ fn measure_forwarding(root: &Path) -> Findings {
     let started = Instant::now();
     let mut observations = Vec::new();
     for s in &java {
-        observe_calls(s, &estate, &want, &names, &mut observations, &mut declarations);
+        observe_calls(s, &estate, &want, &names, &mut observations, Some(&mut declarations));
     }
     f.cost.hop_whole_estate = started.elapsed();
     f.cost.estate_files = java.len();
@@ -1327,14 +2137,209 @@ fn measure_forwarding(root: &Path) -> Findings {
     let mut targeted_files = 0;
     for s in java.iter().filter(|s| targets.contains(s.rel.as_str())) {
         targeted_files += 1;
-        observe_calls(s, &estate, &want, &names, &mut targeted, &mut ignored);
+        observe_calls(s, &estate, &want, &names, &mut targeted, Some(&mut ignored));
     }
     f.cost.hop_targeted = started.elapsed();
     f.cost.targeted_files = targeted_files;
 
     decide_every_candidate(&mut f, &observations);
+
+    // ── The second frame (S-416) ──
+    //
+    // Driven off the first frame's observations, so the population is the one
+    // the floor is stated over and not a second scan of the estate. The pass is
+    // restricted to the files the `Calls` ledger names as callers of a
+    // forwarding method — what a real implementation would open — and run
+    // TWICE: once with the ambiguity census off, which is the parse-and-resolve
+    // figure, and once with it on, so the scaffolding's share is a measurement
+    // rather than a caveat.
+    let want2 = wanted_at_frame_two(&f, &observations);
+    let names2: BTreeSet<String> = want2.keys().map(|c| c.name.clone()).collect();
+    let targets2: BTreeSet<&str> = names2
+        .iter()
+        .filter_map(|n| ledger.by_name.get(n))
+        .flat_map(|set| set.iter().map(|(file, _)| file.as_str()))
+        .collect();
+    let frame_two_sources: Vec<&&Source> =
+        java.iter().filter(|s| targets2.contains(s.rel.as_str())).collect();
+
+    let started = Instant::now();
+    let mut observations2 = Vec::new();
+    for s in &frame_two_sources {
+        observe_calls(s, &estate, &want2, &names2, &mut observations2, None);
+    }
+    f.cost.frame_two = started.elapsed();
+    f.cost.frame_two_files = frame_two_sources.len();
+    f.cost.frame_two_callees = want2.len();
+
+    let started = Instant::now();
+    let mut scaffolded = Vec::new();
+    let mut frame_two_declarations = BTreeMap::new();
+    for s in &frame_two_sources {
+        observe_calls(s, &estate, &want2, &names2, &mut scaffolded, Some(&mut frame_two_declarations));
+    }
+    f.cost.frame_two_with_scaffolding = started.elapsed();
+
+    // The ambiguity census frame two is read against is the UNION of the two
+    // walks: the whole-estate one, which covers frame one's names, and the
+    // frame-two one, which covers the forwarding names over the files the ledger
+    // calls them from. On this estate both sets are `sendMessage` and the
+    // whole-estate walk dominates; taking the union means a forwarding method
+    // whose name frame one never wanted is still counted.
+    let mut ambiguity = declarations.clone();
+    for (key, sites) in &frame_two_declarations {
+        ambiguity.entry(key.clone()).or_default().extend(sites.iter().cloned());
+    }
+    decide_at_two_frames_for_every_candidate(&mut f, &observations, &observations2, &ambiguity);
+
     f.ledger = answer_the_ledger_question(&f, &ledger, &observations, &targeted, &declarations);
     f
+}
+
+/// Run [`decide_at_two_frames`] for every candidate under both call-site
+/// readings, and record the evidence each verdict rests on.
+fn decide_at_two_frames_for_every_candidate(
+    f: &mut Findings,
+    observations: &[Observation],
+    frame_two: &[Observation],
+    ambiguity: &BTreeMap<(String, String), BTreeSet<String>>,
+) {
+    let mut by_callee: BTreeMap<&Callee, Vec<&Observation>> = BTreeMap::new();
+    for o in observations {
+        by_callee.entry(&o.callee).or_default().push(o);
+    }
+    let mut index: BTreeMap<Callee, Vec<&Observation>> = BTreeMap::new();
+    for o in frame_two {
+        index.entry(o.callee.clone()).or_default().push(o);
+    }
+
+    let mut two_frame = BTreeMap::new();
+    let mut two_frame_main_only = BTreeMap::new();
+    let mut reasons = BTreeMap::new();
+    let mut forwarding = BTreeMap::new();
+    let mut detail = BTreeMap::new();
+    let mut excluded = BTreeMap::new();
+    let mut declarations = BTreeMap::new();
+    let mut chains = BTreeMap::new();
+
+    for (i, c) in f.candidates.iter().enumerate() {
+        let observed = by_callee.get(&c.callee).cloned().unwrap_or_default();
+        let in_module: Vec<&&Observation> =
+            observed.iter().filter(|o| o.module == c.module).collect();
+
+        // The join key for S-392's seven named sites: every in-module call site
+        // that forwards a parameter, untruncated.
+        forwarding.insert(
+            i,
+            in_module
+                .iter()
+                .filter(|o| o.values.get(&c.slot) == Some(&ArgValue::NeedsAnotherHop))
+                .map(|o| format!("{}:{} [{}]", o.file, o.line, o.tree.label()))
+                .collect::<Vec<_>>(),
+        );
+
+        // Every in-module call site the main-tree rule removes, NAMED with what
+        // its argument resolved to. CR-131 C1 justifies the main-only reading on
+        // "a Mockito stub is not a publish"; this is what makes that auditable.
+        excluded.insert(
+            i,
+            in_module
+                .iter()
+                .filter(|o| o.tree != Tree::Main)
+                .filter_map(|o| {
+                    let value = o.values.get(&c.slot)?;
+                    Some(format!("{}:{} [{}] {}", o.file, o.line, o.tree.label(), value.label()))
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        // The chains a second frame actually carried, for the generality caveat.
+        chains.insert(
+            i,
+            in_module
+                .iter()
+                .filter(|o| o.tree == Tree::Main)
+                .filter_map(|o| o.forwards.get(&c.slot))
+                .filter(|forward| {
+                    matches!(second_frame(forward, &c.module, true, &index), FrameTwo::Resolved(_))
+                })
+                .map(|forward| {
+                    format!("{}/{}({})", c.module, forward.callee.name, forward.callee.arity)
+                })
+                .collect::<BTreeSet<_>>(),
+        );
+
+        // What each second frame proved, under the DECISIVE reading.
+        detail.insert(
+            i,
+            in_module
+                .iter()
+                .filter(|o| o.tree == Tree::Main)
+                .filter(|o| o.values.get(&c.slot) == Some(&ArgValue::NeedsAnotherHop))
+                .map(|o| match o.forwards.get(&c.slot) {
+                    None => format!(
+                        "{}:{} => {}",
+                        o.file,
+                        o.line,
+                        FrameTwoRefusal::NotFollowable.label()
+                    ),
+                    Some(forward) => format!(
+                        "{}:{} forwards slot {} of {}({}) => {}",
+                        o.file,
+                        o.line,
+                        forward.slot,
+                        forward.callee.name,
+                        forward.callee.arity,
+                        second_frame(forward, &o.module, true, &index).label(),
+                    ),
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        // How ambiguous the second frame's lookup is, in this candidate's own
+        // module: the most declarations any forwarding method's bare name has.
+        // 1 means `(name, arity)` and "receiver-aware" are the same rule here.
+        declarations.insert(
+            i,
+            in_module
+                .iter()
+                .filter_map(|o| o.forwards.get(&c.slot))
+                .map(|forward| {
+                    ambiguity
+                        .get(&(c.module.clone(), forward.callee.name.clone()))
+                        .map_or(0, BTreeSet::len)
+                })
+                .max()
+                .unwrap_or_default(),
+        );
+
+        let headline = decide_at_two_frames(c, &observed, false, &index);
+        let decisive = decide_at_two_frames(c, &observed, true, &index);
+
+        // The values the DECISIVE verdict was read off, so `two_frame_reason`
+        // names the cause of the answer `decide` actually gave.
+        let rewritten = rewrite_at_two_frames(c, &observed, true, &index);
+        let values: Vec<&ArgValue> = rewritten
+            .iter()
+            .filter(|o| o.module == c.module && o.tree == Tree::Main)
+            .filter_map(|o| o.values.get(&c.slot))
+            .collect();
+        if let Some(reason) = two_frame_reason(&decisive, &values) {
+            reasons.insert(i, reason);
+        }
+
+        two_frame.insert(i, headline);
+        two_frame_main_only.insert(i, decisive);
+    }
+
+    f.hops_two_frame = two_frame;
+    f.hops_two_frame_main_only = two_frame_main_only;
+    f.two_frame_residue = reasons;
+    f.forwarding_sites = forwarding;
+    f.frame_two_detail = detail;
+    f.excluded_by_main_tree = excluded;
+    f.frame_two_name_declarations = declarations;
+    f.frame_two_chains = chains;
 }
 
 /// Run [`decide`] for every candidate under both call-site readings, and record
@@ -1671,6 +2676,225 @@ fn report_generality(f: &Findings) {
     );
 }
 
+// ── S-416's report ──────────────────────────────────────────────────────────
+
+/// The 2x2 grid [CR-131] §3.2 C1 asks to be printed in full: every in-module
+/// call site vs `src/main` call sites only, at one frame and at two.
+///
+/// Only the bottom-right cell carries the floor. The other three are printed so
+/// a reader can see exactly how much of the result each of the two relaxations
+/// bought — one frame to two, and every call site to main-tree only — instead of
+/// being handed one number and a claim about where it came from.
+///
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+fn report_two_frame_grid(f: &Findings) {
+    let n = f.candidates_in(Arm::BrokerPublish, Tree::Main);
+    println!("\n--- S-416: the two readings, at one frame and at two ---");
+    println!("production (src/main) broker publish sites resolved, of {n}:\n");
+    println!("{:<14} {:>24} {:>24}", "", "every in-module site", "src/main sites only");
+    println!(
+        "{:<14} {:>24} {:>24}",
+        "one frame",
+        f.production_publish_resolved(),
+        f.production_publish_resolved_main_only(),
+    );
+    println!(
+        "{:<14} {:>24} {:>24}  <= THE FLOOR IS ON THIS CELL",
+        "two frames",
+        f.production_publish_resolved_two_frame(),
+        f.production_publish_resolved_two_frame_main_only(),
+    );
+    println!(
+        "\nthe second frame's own contribution — resolved at two frames and refused at one:\n\
+        \x20   {} under the every-site reading, {} under the main-only reading",
+        f.bought_by_the_second_frame(Arm::BrokerPublish, Tree::Main, false),
+        f.bought_by_the_second_frame(Arm::BrokerPublish, Tree::Main, true),
+    );
+}
+
+/// Every two-frame refusal, with its own reason — [CR-131] C1's enumeration.
+///
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+fn report_two_frame_residue(f: &Findings) {
+    println!("\n--- S-416: the two-frame residue, by reason (decisive reading) ---");
+    let census = f.two_frame_census(Arm::BrokerPublish, Tree::Main);
+    // Every reason, zeros included, on the arm and tree carrying the floor —
+    // the rule `report_residue` applies for the same purpose: a suppressed row
+    // hides one of the quantities the criterion names.
+    for reason in TwoFrameResidue::ALL {
+        println!("    {:>4}  {}", census.get(&reason).copied().unwrap_or_default(), reason.label());
+    }
+
+    // The limit on this harness, as a figure. A refusal whose frame-two lookup
+    // binds a name several declarations share is a refusal THIS measurement
+    // makes and the rule CR-131 C2 proposes would not: C2 is receiver-aware,
+    // this is `(name, arity)`. Every such row is a floor on what C2 resolves.
+    let ambiguous: Vec<(usize, usize)> = f
+        .candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.arm == Arm::BrokerPublish && c.tree == Tree::Main)
+        .filter(|(i, _)| f.two_frame_residue.contains_key(i))
+        .filter_map(|(i, _)| Some((i, *f.frame_two_name_declarations.get(&i).filter(|n| **n > 1)?)))
+        .collect();
+    println!(
+        "\nof the {} production refusals, {} look up a forwarding name their own build \
+         module declares MORE THAN ONCE:",
+        census.values().sum::<usize>(),
+        ambiguous.len(),
+    );
+    for (i, declarations) in &ambiguous {
+        let c = &f.candidates[*i];
+        println!(
+            "    {}:{}  `{}` is declared {declarations}x in `{}`",
+            c.file, c.line, c.callee.name, c.module,
+        );
+    }
+    println!(
+        "    This harness binds frame two on (name, arity) — all the `Calls` ledger's target\n\
+        \x20   text can express. CR-131 C2 proposes the rule as name, arity AND RECEIVER-AWARE,\n\
+        \x20   which would separate these declarations' callers instead of pooling them. Each\n\
+        \x20   row above is therefore a refusal this MEASUREMENT makes and the proposed RULE\n\
+        \x20   would not: the headline is a floor on what C2 would resolve, never a ceiling."
+    );
+
+    println!("\nper-candidate detail, every PRODUCTION broker-publish candidate:");
+    for (i, c) in f.candidates.iter().enumerate() {
+        if c.arm != Arm::BrokerPublish || c.tree != Tree::Main {
+            continue;
+        }
+        let describe = |hop: Option<&Hop>| match hop {
+            Some(Hop::Resolved { value, call_sites, caller_files }) => format!(
+                "RESOLVED to {} from {call_sites} site(s) in {caller_files} file(s)",
+                value.label(),
+            ),
+            Some(Hop::Refused(r)) => format!("refused: {}", r.label()),
+            None => "not judged".into(),
+        };
+        println!(
+            "    {}:{}  {}({}) slot {} operand `{}`",
+            c.file, c.line, c.callee.name, c.callee.arity, c.slot, c.operand,
+        );
+        println!("        one frame,  main-only: {}", describe(f.hops_main_only.get(&i)));
+        println!("        two frames, every site: {}", describe(f.hops_two_frame.get(&i)));
+        println!("        two frames, main-only:  {}", describe(f.hops_two_frame_main_only.get(&i)));
+        if let Some(reason) = f.two_frame_residue.get(&i) {
+            println!("        two-frame reason: {}", reason.label());
+        }
+        for line in f.frame_two_detail.get(&i).into_iter().flatten() {
+            println!("        frame 2: {line}");
+        }
+        // The relaxation, made auditable. Never a count on its own: the sites
+        // the main-tree rule removes are the entire justification for reading
+        // agreement over src/main, so they are named.
+        for line in f.excluded_by_main_tree.get(&i).into_iter().flatten() {
+            println!("        EXCLUDED by the main-tree rule: {line}");
+        }
+    }
+}
+
+/// The generality caveat `two_frame_forwarding_floor.txt` declared in advance,
+/// reported whatever the verdict — so a PASS is read for what it licenses.
+fn report_two_frame_generality(f: &Findings) {
+    let (methods, members, chains) = f.two_frame_generality();
+    println!("\n--- S-416: the declared generality caveat, over the decisive reading ---");
+    println!(
+        "    the resolved production publish sites rest on {} distinct wrapper method(s) \
+         across {} member(s).",
+        methods.len(),
+        members.len(),
+    );
+    println!(
+        "    {} distinct forwarding chain(s) carried a SECOND frame: {:?}",
+        chains.len(),
+        chains,
+    );
+    println!(
+        "    The second figure is the one this story added, and it is the narrow one: read it \n\
+        \x20   beside the headline, not instead of it. A two-frame yield resting on a handful of\n\
+        \x20   chains licenses the bound on those chains and no more."
+    );
+}
+
+/// S-392's seven named two-frame sites, reconciled BY NAME against this run.
+///
+/// Evidence for the headline, never a second headline: the gate is decided by
+/// the count of 13. A named site this run cannot see at all is harness drift and
+/// makes the run VOID — asserted separately, in [`assert_two_frame_non_vacuous`].
+fn report_named_site_reconciliation(f: &Findings) -> (usize, usize) {
+    println!("\n--- S-416: S-392's seven named two-frame sites, reconciled by name ---");
+    let (mut found, mut resolved) = (0, 0);
+    for (module, site) in S392_NAMED_TWO_FRAME_SITES {
+        let Some(i) = f.candidate_forwarding_at(site) else {
+            println!("    {module:<32} {site:<40} NOT SEEN BY THIS RUN — harness drift");
+            continue;
+        };
+        found += 1;
+        let hop = f.hops_two_frame_main_only.get(&i);
+        let verdict = match hop {
+            Some(Hop::Resolved { value, .. }) => {
+                resolved += 1;
+                format!("RESOLVED at two frames to {}", value.label())
+            }
+            Some(Hop::Refused(_)) => match f.two_frame_residue.get(&i) {
+                Some(reason) => format!("refused: {}", reason.label()),
+                None => "refused".into(),
+            },
+            None => "not judged".into(),
+        };
+        let candidate = &f.candidates[i];
+        println!("    {module:<32} {site:<40} {verdict}");
+        println!("        candidate: {}:{}", candidate.file, candidate.line);
+    }
+    println!(
+        "\n    {found} of {} named sites seen by this run; {resolved} resolve at two frames \
+         under the decisive reading.",
+        S392_NAMED_TWO_FRAME_SITES.len(),
+    );
+    (found, resolved)
+}
+
+/// [CR-131] C1's cost criterion: the parse-and-resolve figure over its
+/// denominator, with the measurement scaffolding separated by MEASUREMENT.
+///
+/// S-392 disclosed its scaffolding bias in prose ("they run the same-name
+/// ambiguity census inside the timer even though it is measurement
+/// scaffolding"). Here the same pass is run twice, with the census off and on,
+/// so the share is a number.
+///
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+fn report_frame_two_cost(f: &Findings) {
+    let c = &f.cost;
+    println!("\n--- S-416: the second frame's measured cost ---");
+    println!(
+        "    frame 2, parse-and-resolve only     {:>8.1?}  over {} files, {} forwarding method(s)",
+        c.frame_two, c.frame_two_files, c.frame_two_callees,
+    );
+    println!(
+        "    frame 2, with the ambiguity census  {:>8.1?}  over the same {} files",
+        c.frame_two_with_scaffolding, c.frame_two_files,
+    );
+    println!(
+        "    scaffolding's share                 {:>8.1?}  — measured, not disclosed in prose",
+        c.frame_two_with_scaffolding.saturating_sub(c.frame_two),
+    );
+    println!(
+        "    per forwarding method (parse-and-resolve)  {:>8} us  over {} method(s)",
+        if c.frame_two_callees == 0 {
+            0
+        } else {
+            c.frame_two.as_micros() / c.frame_two_callees as u128
+        },
+        c.frame_two_callees,
+    );
+    println!(
+        "    Same four caveats as AC5 above and for the same reasons: IO excluded, debug \n\
+         \x20   build, single-threaded, amortised rather than marginal. The queries are still\n\
+         \x20   compiled afresh per file, so this remains an UPPER bound — the bias is against\n\
+         \x20   the change request, which is the safe direction."
+    );
+}
+
 // ── The gate ────────────────────────────────────────────────────────────────
 
 /// The blocking measurement gate for [CR-121] CRA-05.
@@ -1807,6 +3031,190 @@ fn assert_the_recorded_finding(f: &Findings, resolved: usize) {
         "AC3's recorded answer is that the ledger answers the DIRECTION and never the          OPERAND. This run answers direction={}, operand={} — CRA-06 has changed and the          cost of S-393 with it.",
         f.ledger.answers_the_direction(),
         f.ledger.answers_the_operand(),
+    );
+}
+
+/// **S-416 — [CR-131] §3.2 C1's blocking measurement gate.**
+///
+/// The floor is declared in `two_frame_forwarding_floor.txt`, committed on its
+/// own before any of this story's measurement code existed, and is stated over
+/// exactly one cell of the grid this test prints: **two frames, agreement taken
+/// over `src/main` call sites only, >= 7 of the 13 production publish sites**.
+/// The other three cells are printed beside it and carry no floor.
+///
+/// Skips without `LOGOS_REF_WORKSPACE`, like its S-392 sibling; the fixtures
+/// below pin every branch it exercises, corpus or no corpus.
+///
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+#[test]
+fn two_frame_wrapper_residue_over_main_tree_call_sites() {
+    let Some(root) = super::corpus_root() else {
+        eprintln!(
+            "SKIPPED: set LOGOS_REF_WORKSPACE=<path to the reference workspace> to run the \
+             S-416 two-frame gate (see two_frame_forwarding_floor.txt for the declared \
+             floor and two_frame_forwarding_finding.txt for the recorded finding)."
+        );
+        return;
+    };
+    let f = findings(&root);
+    report_two_frame_grid(f);
+    report_two_frame_residue(f);
+    report_two_frame_generality(f);
+    let (found, named_resolved) = report_named_site_reconciliation(f);
+    report_frame_two_cost(f);
+
+    // S-392's guards first: this measurement is an INCREMENT over that one, and
+    // an increment over a base that moved is not the quantity CRA-03 asserts.
+    assert_non_vacuous(f, &root);
+    assert_two_frame_non_vacuous(f, found);
+
+    let resolved = f.production_publish_resolved_two_frame_main_only();
+    let holds = resolved >= TWO_FRAME_FLOOR;
+    println!(
+        "\nVERDICT: {resolved} of {} production publish sites resolve at TWO FRAMES with \
+         agreement over `src/main` call sites only, against a floor of {TWO_FRAME_FLOOR} \
+         declared before the run  =>  {}",
+        f.candidates_in(Arm::BrokerPublish, Tree::Main),
+        if holds { "HOLDS" } else { "FALSIFIED" },
+    );
+    println!(
+        "    ({named_resolved} of S-392's {} named two-frame sites resolve — evidence for the \
+         headline, not a second headline.)",
+        S392_NAMED_TWO_FRAME_SITES.len(),
+    );
+    if !holds {
+        println!(
+            "    CR-131 CRA-03 is FALSIFIED. No requirement is created — FR-WS-26 is not \
+             filed and FR-WS-23 stays WITHDRAWN IN PLACE — and S-417 stays UNPLANNED."
+        );
+    }
+    println!("\n--- recorded finding ---\n{TWO_FRAME_RECORDED_FINDING}");
+    assert_the_recorded_two_frame_finding(f, resolved, named_resolved);
+}
+
+/// The recorded verdict, as assertions rather than as a printed table: without
+/// them a regression that flipped the finding would still pass, and the finding
+/// is what decides whether [S-417] is planned.
+///
+/// [S-417]: ../../../docs/planning/journal.md#s-417-a-parameter-passed-topic-operand-resolves-through-its-wrappers-callers-within-two-frames
+fn assert_the_recorded_two_frame_finding(f: &Findings, resolved: usize, named_resolved: usize) {
+    assert!(
+        resolved >= TWO_FRAME_FLOOR,
+        "S-416's recorded finding is that {RECORDED_TWO_FRAME_MAIN_ONLY} of 13 production          publish sites resolve at two frames over main-tree call sites, at or above the floor          of {TWO_FRAME_FLOOR} declared before the run; this run found {resolved}. If that is          real, CR-131 CRA-03 has fallen: re-decide CR-131 §8, and S-417 and FR-WS-26 go back          to unplanned — do not relax this assertion.",
+    );
+    assert_eq!(
+        resolved, RECORDED_TWO_FRAME_MAIN_ONLY,
+        "the headline figure moved from the recorded {RECORDED_TWO_FRAME_MAIN_ONLY} to          {resolved} without the finding being re-recorded",
+    );
+    assert_eq!(
+        f.production_publish_resolved_two_frame(),
+        RECORDED_TWO_FRAME_ALL_SITES,
+        "the every-site two-frame reading moved from {RECORDED_TWO_FRAME_ALL_SITES}. The          finding rests on the two relaxations being DEPENDENT — the second frame buys nothing          without the main-tree rule — and that is the half a reader is most likely to take on          trust",
+    );
+    assert_eq!(
+        f.bought_by_the_second_frame(Arm::BrokerPublish, Tree::Main, true),
+        RECORDED_BOUGHT_BY_FRAME_TWO,
+        "the second frame's own contribution moved from {RECORDED_BOUGHT_BY_FRAME_TWO}. The          gate clears its floor by exactly this much: at 0 the reading is 6 and CRA-03 fails",
+    );
+    assert_eq!(
+        f.two_frame_census(Arm::BrokerPublish, Tree::Main).values().sum::<usize>(),
+        RECORDED_TWO_FRAME_REFUSALS,
+        "the two-frame refusal count moved from {RECORDED_TWO_FRAME_REFUSALS}",
+    );
+    // The finding's central caveat, pinned as an EQUALITY rather than as prose:
+    // every refusal is attributable to this harness's `(name, arity)` frame-two
+    // binding, which is what makes the headline a floor on C2's rule rather than
+    // a ceiling. A run that separates these two numbers has a residue the caveat
+    // does not cover.
+    let from_ambiguity = f
+        .candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.arm == Arm::BrokerPublish && c.tree == Tree::Main)
+        .filter(|(i, _)| f.two_frame_residue.contains_key(i))
+        .filter(|(i, _)| f.frame_two_name_declarations.get(i).is_some_and(|n| *n > 1))
+        .count();
+    assert_eq!(
+        from_ambiguity, RECORDED_REFUSALS_FROM_NAME_AMBIGUITY,
+        "the refusals attributable to the (name, arity) frame-two binding moved from          {RECORDED_REFUSALS_FROM_NAME_AMBIGUITY} to {from_ambiguity}. The recorded finding          reports 8 of 13 as a FLOOR on what CR-131 C2's receiver-aware rule would resolve,          and that reading rests on this equality",
+    );
+    assert_eq!(
+        named_resolved, RECORDED_NAMED_SITES_RESOLVED,
+        "the number of S-392's seven named sites that resolve moved from          {RECORDED_NAMED_SITES_RESOLVED}",
+    );
+    const {
+        assert!(
+            RECORDED_TWO_FRAME_MAIN_ONLY >= TWO_FRAME_FLOOR,
+            "the recorded headline must itself be at or above the floor, or the finding is not \
+             a pass at all",
+        );
+        assert!(
+            RECORDED_TWO_FRAME_MAIN_ONLY <= PRODUCTION_PUBLISH_SITES,
+            "the recorded headline cannot exceed the population it is stated over",
+        );
+        assert!(
+            RECORDED_TWO_FRAME_MAIN_ONLY - RECORDED_BOUGHT_BY_FRAME_TWO
+                == RECORDED_RESOLVED_MAIN_ONLY,
+            "the two-frame headline must be S-392's one-frame main-only figure plus what the \
+             second frame bought, or one of the three is not measuring what it says",
+        );
+        assert!(
+            RECORDED_TWO_FRAME_MAIN_ONLY + RECORDED_TWO_FRAME_REFUSALS
+                == PRODUCTION_PUBLISH_SITES,
+            "resolved and refused must partition the population, or a candidate went unjudged",
+        );
+        assert!(
+            RECORDED_REFUSALS_FROM_NAME_AMBIGUITY == RECORDED_TWO_FRAME_REFUSALS,
+            "the recorded finding states EVERY refusal as attributable to the (name, arity) \
+             binding; if that stops being true the 'floor, never a ceiling' reading goes with it",
+        );
+    }
+}
+
+/// S-416's own non-vacuity preconditions, V5 and V6, exactly as
+/// `two_frame_forwarding_floor.txt` declared them. Each failure is **VOID**, not
+/// a verdict.
+fn assert_two_frame_non_vacuous(f: &Findings, named_sites_found: usize) {
+    // V5 — the one-frame readings reproduce S-392 EXACTLY. This is deliberately
+    // an equality: the second frame is an increment over a fixed base.
+    assert_eq!(
+        f.production_publish_resolved(),
+        RECORDED_RESOLVED,
+        "V5: S-392's headline one-frame figure was {RECORDED_RESOLVED} and this run reads \
+         {}. The base moved, so the two-frame figure is not the increment CRA-03 asserts. \
+         VOID, not falsified.",
+        f.production_publish_resolved(),
+    );
+    assert_eq!(
+        f.production_publish_resolved_main_only(),
+        RECORDED_RESOLVED_MAIN_ONLY,
+        "V5: S-392's one-frame main-only figure was {RECORDED_RESOLVED_MAIN_ONLY} and this \
+         run reads {}. VOID, not falsified.",
+        f.production_publish_resolved_main_only(),
+    );
+    assert_eq!(
+        f.residue(Arm::BrokerPublish, Tree::Main).get(&Residue::TwoOrMoreHops).copied(),
+        Some(RECORDED_TWO_OR_MORE_HOPS),
+        "V5: S-392 measured {RECORDED_TWO_OR_MORE_HOPS} sites two or more hops away — the \
+         population this story's second frame exists to reach. VOID, not falsified.",
+    );
+    assert_eq!(
+        named_sites_found,
+        S392_NAMED_TWO_FRAME_SITES.len(),
+        "V5: this run sees {named_sites_found} of S-392's {} NAMED two-frame call sites. A \
+         site the record names and the harness cannot find is drift between the two runs, \
+         and the reconciliation is the evidence the headline rests on. VOID, not falsified.",
+        S392_NAMED_TWO_FRAME_SITES.len(),
+    );
+
+    // V6 — the second frame does something. A two-frame reading that equals its
+    // one-frame reading has measured a no-op, and a floor cleared by a no-op is
+    // cleared by the first frame plus an arithmetic accident.
+    assert!(
+        f.bought_by_the_second_frame(Arm::BrokerPublish, Tree::Main, true) > 0,
+        "V6: no production candidate resolves at two frames that did not resolve at one, so \
+         the second frame changed nothing and this run has not measured one. VOID, not \
+         falsified.",
     );
 }
 
@@ -2606,6 +4014,653 @@ mod fixtures {
             f.operands_without_a_slot, 0,
             "excluded by the classifier, not dropped by the slot arithmetic — so the two \
              agree, which is the only thing this counter exists to check",
+        );
+    }
+
+    // ── S-416: the second frame ──────────────────────────────────────────────
+    //
+    // The corpus gate skips without the estate, so without these the two-frame
+    // reading would pin nothing in CI — and its number is what decides whether
+    // S-417 is planned at all. Each builds a throwaway estate and runs the SAME
+    // `measure_forwarding` entry point the corpus run uses.
+
+    /// A thin wrapper that forwards its own `topic` parameter to the real
+    /// producer: the shape S-392 named seven times on the estate, and the only
+    /// shape the second frame exists for.
+    fn forwarder(class: &str, method: &str) -> String {
+        format!(
+            "package p;\n\
+             public class {class} {{\n\
+             \x20   public void {method}(Object payload, String topic) {{\n\
+             \x20       producer.sendMessage(payload, topic);\n\
+             \x20   }}\n\
+             }}\n"
+        )
+    }
+
+    /// The production candidates' TWO-FRAME outcomes under the decisive
+    /// reading, in file order — the sibling of [`production_hops`].
+    fn production_two_frame(f: &Findings) -> Vec<Hop> {
+        f.candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.arm == Arm::BrokerPublish && c.tree == Tree::Main)
+            .map(|(i, _)| {
+                f.hops_two_frame_main_only.get(&i).cloned().expect("every candidate is judged")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_two_frame_floor_is_the_one_declared_before_the_run() {
+        // Reads the DECLARATION, not the constant — the shape S-384 had to
+        // replace, and which `the_floor_is_the_one_declared_before_the_run`
+        // already applies to S-392's floor.
+        let declared: usize = TWO_FRAME_DECLARED_FLOOR
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(">= ")?.split_whitespace().next()?.parse().ok())
+            .expect("the declaration states its floor as a `>= NN …` line");
+        assert_eq!(
+            declared, TWO_FRAME_FLOOR,
+            "TWO_FRAME_FLOOR is {TWO_FRAME_FLOOR} but the floor declared before the run was \
+             {declared}. The declaration is the record: change the constant only by \
+             re-deciding CR-131 §3.2, never to make a run clear it.",
+        );
+        assert!(
+            TWO_FRAME_DECLARED_FLOOR.contains("2026-09-15T07:06:00Z"),
+            "the declaration must carry the UTC timestamp that makes it a floor rather than \
+             a post-hoc rationalisation",
+        );
+        assert!(
+            TWO_FRAME_DECLARED_FLOOR.contains(&PRODUCTION_PUBLISH_SITES.to_string()),
+            "the declaration must name the enumerated production population the floor is \
+             stated over",
+        );
+        // The floor file names all seven sites the reconciliation AC is stated
+        // over, so the constant and the declaration cannot drift apart.
+        for (_, site) in S392_NAMED_TWO_FRAME_SITES {
+            assert!(
+                TWO_FRAME_DECLARED_FLOOR.contains(site),
+                "the declaration must name `{site}`, one of S-392's seven two-frame sites \
+                 the reconciliation is stated over",
+            );
+        }
+    }
+
+    #[test]
+    fn the_recorded_finding_states_the_figures_the_constants_pin() {
+        // The finding file is prose and the constants are code, and prose that
+        // was true when it was written is the single most common review finding
+        // in this project. This makes the tie mechanical: the verdict, the
+        // headline, the floor and the date must all appear in the text the gate
+        // prints as its evidence.
+        for needle in [
+            "CR-131 CRA-03 HOLDS",
+            "2026-09-15T07:06:00Z",
+            &format!("{RECORDED_TWO_FRAME_MAIN_ONLY} of the 13 production publish sites"),
+            &format!("floor of {TWO_FRAME_FLOOR}"),
+        ] {
+            assert!(
+                TWO_FRAME_RECORDED_FINDING.contains(needle),
+                "the recorded finding must state `{needle}` — it is the evidence the gate \
+                 prints, and a figure it does not carry is a figure nobody can check",
+            );
+        }
+        // The grid, whose four cells are the criterion CR-131 C1 states. Every
+        // one appears in the finding's own table.
+        for row in [
+            format!("    one frame                           {RECORDED_RESOLVED}"),
+            format!("    two frames                          {RECORDED_TWO_FRAME_ALL_SITES}"),
+        ] {
+            assert!(
+                TWO_FRAME_RECORDED_FINDING.contains(&row),
+                "the recorded finding's grid must carry the row `{row}`",
+            );
+        }
+    }
+
+    #[test]
+    fn two_frames_resolve_what_one_frame_refuses() {
+        // The whole point of the story, as a fixture: the wrapper's only call
+        // site forwards a parameter (S-392's `Residue::TwoOrMoreHops`), and the
+        // forwarder's own caller supplies the literal.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { thin.send(body, \"orders\"); }"),
+            ),
+        ]);
+        assert_eq!(
+            production_hops(&f),
+            vec![Hop::Refused(Residue::TwoOrMoreHops)],
+            "one frame must still refuse — S-392's reading is the base this is an increment \
+             over, and a change that moved it would make the increment meaningless",
+        );
+        assert_eq!(
+            production_two_frame(&f),
+            vec![Hop::Resolved {
+                value: ArgValue::Literal("orders".into()),
+                call_sites: 1,
+                caller_files: 1,
+            }],
+        );
+        assert_eq!(f.bought_by_the_second_frame(Arm::BrokerPublish, Tree::Main, true), 1);
+        assert_eq!(f.two_frame_census(Arm::BrokerPublish, Tree::Main), BTreeMap::new());
+    }
+
+    #[test]
+    fn three_frames_refuse_and_are_named_as_three() {
+        // The bound. A third forwarding layer is where CR-131 C1 stops, and the
+        // refusal must say so rather than reporting the generic hop residue —
+        // `Residue::TwoOrMoreHops` reads "two or more" and at this depth that
+        // sentence is wrong.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+            (
+                "svc/src/main/java/Thinner.java",
+                "package p;\n\
+                 public class Thinner {\n\
+                 \x20   public void relay(Object payload, String topic) { thin.send(payload, topic); }\n\
+                 }\n"
+                    .to_string(),
+            ),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { thinner.relay(body, \"orders\"); }"),
+            ),
+        ]);
+        assert_eq!(production_two_frame(&f), vec![Hop::Refused(Residue::TwoOrMoreHops)]);
+        assert_eq!(
+            f.two_frame_census(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(TwoFrameResidue::ThreeOrMoreFrames, 1)]),
+            "the census must say THREE frames, not `two or more`",
+        );
+        assert_eq!(f.bought_by_the_second_frame(Arm::BrokerPublish, Tree::Main, true), 0);
+    }
+
+    #[test]
+    fn an_out_of_module_caller_at_the_second_frame_refuses() {
+        // The module bound, one frame deeper. The forwarder is in the module and
+        // its own caller is not, so the second frame must refuse at the boundary
+        // rather than reach across it.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+            ("other/pom.xml", POM.into()),
+            (
+                "other/src/main/java/Service.java",
+                caller("Service", "  void go() { thin.send(body, \"orders\"); }"),
+            ),
+        ]);
+        assert_eq!(production_two_frame(&f), vec![Hop::Refused(Residue::UnresolvableOperand)]);
+        assert_eq!(
+            f.two_frame_census(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(TwoFrameResidue::OutOfModuleCaller, 1)]),
+            "an out-of-module CALLER at frame two is its own reason, never pooled with an \
+             operand that resolves to nothing",
+        );
+    }
+
+    #[test]
+    fn disagreeing_callers_at_the_second_frame_refuse() {
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+            (
+                "svc/src/main/java/Service.java",
+                caller(
+                    "Service",
+                    "  void a() { thin.send(body, \"orders\"); }\n\
+                     \x20 void b() { thin.send(body, \"shipments\"); }",
+                ),
+            ),
+        ]);
+        assert_eq!(production_two_frame(&f), vec![Hop::Refused(Residue::UnresolvableOperand)]);
+        assert_eq!(
+            f.two_frame_census(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(TwoFrameResidue::DisagreeingCallers, 1)]),
+            "CR-131 C1 refuses on disagreement at either frame; it never averages",
+        );
+    }
+
+    #[test]
+    fn a_forwarding_method_nothing_calls_refuses_at_the_second_frame() {
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+        ]);
+        assert_eq!(production_two_frame(&f), vec![Hop::Refused(Residue::UnresolvableOperand)]);
+        assert_eq!(
+            f.two_frame_census(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(TwoFrameResidue::NoCallSiteAtFrameTwo, 1)]),
+        );
+    }
+
+    #[test]
+    fn a_mockito_stub_blocks_the_every_site_reading_and_is_named_by_the_main_only_one() {
+        // The estate's dominant shape, and the one CR-131 C1's second relaxation
+        // is entirely about: the build module contains the test tree, and the
+        // test tree stubs the wrapper. Under the every-site reading the stub
+        // refuses the whole method; under the main-tree rule it is removed — and
+        // it must be NAMED when it is, or the relaxation cannot be audited.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { thin.send(body, \"orders\"); }"),
+            ),
+            (
+                "svc/src/test/java/ServiceTest.java",
+                caller(
+                    "ServiceTest",
+                    "  void stub() { doNothing().when(producer).sendMessage(any(), any()); }",
+                ),
+            ),
+        ]);
+        assert_eq!(
+            f.production_publish_resolved_two_frame(),
+            0,
+            "every-site reading: the Mockito stub is a call site whose operand resolves to \
+             nothing, so it refuses the method",
+        );
+        assert_eq!(
+            f.production_publish_resolved_two_frame_main_only(),
+            1,
+            "main-only reading: a stub is not a publish",
+        );
+        let named: Vec<&String> = f.excluded_by_main_tree.values().flatten().collect();
+        assert_eq!(
+            named.len(),
+            1,
+            "the site the main-tree rule removed must be NAMED, not silently dropped — it is \
+             the entire justification for the relaxation. Named: {named:?}",
+        );
+        assert!(
+            named[0].contains("ServiceTest.java:3") && named[0].contains("[test]"),
+            "the named exclusion must carry the file, the line and the tree: {named:?}",
+        );
+        assert!(
+            named[0].contains("unresolvable"),
+            "…and what its argument resolved to, so a reader can judge whether it is a stub: \
+             {named:?}",
+        );
+    }
+
+    #[test]
+    fn the_main_tree_rule_applies_at_the_second_frame_too() {
+        // The sibling of the fixture above, one frame deeper, and the gap the
+        // mutation sweep found: there the stub called the WRAPPER, so only
+        // frame one's tree filter was exercised and frame two's could be
+        // deleted with the suite staying green. Here the stub calls the
+        // FORWARDING method, so the relaxation has to be applied again at the
+        // second frame or the whole candidate refuses.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { thin.send(body, \"orders\"); }"),
+            ),
+            (
+                "svc/src/test/java/ThinTest.java",
+                caller("ThinTest", "  void stub() { doNothing().when(thin).send(any(), any()); }"),
+            ),
+        ]);
+        assert_eq!(
+            f.production_publish_resolved_two_frame(),
+            0,
+            "every-site reading: the stub is a call site of the FORWARDING method whose \
+             operand resolves to nothing, so the second frame refuses",
+        );
+        assert_eq!(
+            f.production_publish_resolved_two_frame_main_only(),
+            1,
+            "main-only reading: the second frame must apply the main-tree rule as well as \
+             the first",
+        );
+    }
+
+    #[test]
+    fn the_second_frame_never_resolves_fewer_than_the_first() {
+        // Monotonicity, on the shape where it could plausibly break: a wrapper
+        // that already resolves at one frame must not be DE-resolved by the
+        // rewrite, which touches only the values that said `NeedsAnotherHop`.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { producer.sendMessage(body, \"orders\"); }"),
+            ),
+        ]);
+        assert_eq!(f.production_publish_resolved_main_only(), 1);
+        assert_eq!(f.production_publish_resolved_two_frame_main_only(), 1);
+        assert_eq!(f.production_publish_resolved(), 1);
+        assert_eq!(f.production_publish_resolved_two_frame(), 1);
+        assert_eq!(
+            f.bought_by_the_second_frame(Arm::BrokerPublish, Tree::Main, true),
+            0,
+            "nothing was bought: it already resolved at one frame",
+        );
+    }
+
+    #[test]
+    fn three_frames_outrank_a_second_frame_disagreement_they_would_explain() {
+        // The precedence, one frame deeper than
+        // `the_second_hop_outranks_a_disagreement_it_would_otherwise_explain`
+        // asserts it. Three callers of the forwarder: two disagreeing literals
+        // and one that forwards again. All three are load-bearing — with only
+        // one resolved identity there is no disagreement for the frame count to
+        // outrank, and the sibling fixture records that exact mistake.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+            (
+                "svc/src/main/java/Service.java",
+                caller(
+                    "Service",
+                    "  void a() { thin.send(body, \"orders\"); }\n\
+                     \x20 void b() { thin.send(body, \"shipments\"); }\n\
+                     \x20 void c(String t) { thin.send(body, t); }",
+                ),
+            ),
+        ]);
+        assert_eq!(
+            f.two_frame_census(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(TwoFrameResidue::ThreeOrMoreFrames, 1)]),
+            "two callers DO disagree here, and the frame count must still outrank it",
+        );
+    }
+
+    #[test]
+    fn a_constructor_parameter_at_the_second_frame_is_not_followed() {
+        // `forward_from` refuses a non-method declaring scope, the same boundary
+        // `push_candidate` applies to a publish site's own operand. A
+        // constructor's argument slot is a different call shape and this
+        // measurement does not claim it.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            (
+                "svc/src/main/java/Thin.java",
+                "package p;\n\
+                 public class Thin {\n\
+                 \x20   public Thin(Object payload, String topic) { producer.sendMessage(payload, topic); }\n\
+                 }\n"
+                    .to_string(),
+            ),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { new Thin(body, \"orders\"); }"),
+            ),
+        ]);
+        assert_eq!(production_two_frame(&f), vec![Hop::Refused(Residue::UnresolvableOperand)]);
+        assert_eq!(
+            f.two_frame_census(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(TwoFrameResidue::UnresolvableOperand, 1)]),
+            "a constructor parameter is not followable, and the census says so rather than \
+             claiming the second frame found no call site",
+        );
+    }
+
+    #[test]
+    fn the_named_site_join_reads_the_basename_and_line() {
+        // The reconciliation's join key, on an estate small enough to read by
+        // hand. The recorded finding writes `DelayedMessageKafkaProducer.java:23`
+        // and nothing else, so the join must match a BASENAME — and must not
+        // match a different line in the same file, which is the near miss a
+        // substring test would admit.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { thin.send(body, \"orders\"); }"),
+            ),
+        ]);
+        assert_eq!(
+            f.candidate_forwarding_at("Thin.java:4"),
+            Some(0),
+            "the forwarding call site is `svc/src/main/java/Thin.java:4`, joined on its \
+             basename: {:?}",
+            f.forwarding_sites,
+        );
+        assert_eq!(
+            f.candidate_forwarding_at("Thin.java:5"),
+            None,
+            "a different LINE in the same file must not match — the line is half the key",
+        );
+        assert_eq!(
+            f.candidate_forwarding_at("hin.java:4"),
+            None,
+            "a suffix of the basename must not match either: `hin.java` is one character \
+             from `Thin.java` and is a different file",
+        );
+    }
+
+    /// The estate's actual shape, reduced: an abstract base whose `sendMessage`
+    /// carries the publish site, and thin subclass overrides that forward their
+    /// own parameter through `super`. `extends Base<K, V>` is written generic
+    /// because the estate writes it generic and a `generic_type` is the wrapper
+    /// `simple_type_name` has to see through.
+    fn base_producer() -> String {
+        "package p;\n\
+         import org.springframework.kafka.support.KafkaHeaders;\n\
+         public abstract class Base<K, V> {\n\
+         \x20   public void sendMessage(K kafkaKey, V payload, String topic) {\n\
+         \x20       Message m = MessageBuilder.withPayload(payload)\n\
+         \x20           .setHeader(KafkaHeaders.TOPIC, topic)\n\
+         \x20           .build();\n\
+         \x20       kafkaTemplate.send(m);\n\
+         \x20   }\n\
+         }\n"
+            .to_string()
+    }
+
+    fn override_producer(class: &str) -> String {
+        format!(
+            "package p;\n\
+             public class {class} extends Base<Key, Payload> {{\n\
+             \x20   public void sendMessage(Key kafkaKey, Payload payload, String topic) {{\n\
+             \x20       super.sendMessage(kafkaKey, payload, topic);\n\
+             \x20   }}\n\
+             }}\n"
+        )
+    }
+
+    #[test]
+    fn a_super_call_is_not_a_caller_of_the_override_that_writes_it() {
+        // The defect the first corpus run had, as a fixture. `Callee` is
+        // `(name, arity)`, so frame two's lookup of `Alpha.sendMessage/3` finds
+        // the `super.sendMessage(...)` line INSIDE `Alpha.sendMessage` — whose
+        // argument is that method's own parameter. Reading it reports THREE
+        // frames for a site that resolves in two.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Base.java", base_producer()),
+            ("svc/src/main/java/Alpha.java", override_producer("Alpha")),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { alpha.sendMessage(k, body, \"orders\"); }"),
+            ),
+        ]);
+        assert_eq!(
+            production_hops(&f),
+            vec![Hop::Refused(Residue::TwoOrMoreHops)],
+            "one frame refuses: `Alpha.java`'s `super` forward is one of the two in-module \
+             call sites and it passes a parameter",
+        );
+        assert_eq!(
+            production_two_frame(&f),
+            vec![Hop::Resolved {
+                value: ArgValue::Literal("orders".into()),
+                call_sites: 2,
+                caller_files: 2,
+            }],
+            "two frames resolve — a `super.m()` inside `m` is a call of the SUPERCLASS's \
+             `m`, never of itself, so it is not a caller at frame two. TWO sites, because \
+             frame ONE binds on (name, arity) and `Service`'s call of the OVERRIDE matches \
+             the base's signature too; both reach the same literal, so they agree",
+        );
+    }
+
+    #[test]
+    fn a_super_call_in_a_sibling_override_is_not_a_caller_either() {
+        // The second half, and the one a self-call rule alone does NOT catch:
+        // `archive-manager` writes two producers extending one base, and the
+        // `super.sendMessage(...)` inside Beta is not a caller of Alpha's
+        // override. Reading it reports three frames for both.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Base.java", base_producer()),
+            ("svc/src/main/java/Alpha.java", override_producer("Alpha")),
+            ("svc/src/main/java/Beta.java", override_producer("Beta")),
+            (
+                "svc/src/main/java/Service.java",
+                caller(
+                    "Service",
+                    "  void a() { alpha.sendMessage(k, body, \"orders\"); }\n\
+                     \x20 void b() { beta.sendMessage(k, body, \"orders\"); }",
+                ),
+            ),
+        ]);
+        assert_eq!(
+            production_two_frame(&f),
+            vec![Hop::Resolved {
+                value: ArgValue::Literal("orders".into()),
+                call_sites: 4,
+                caller_files: 3,
+            }],
+            "neither sibling's `super` line is a caller of the other's override, so both \
+             forwards resolve. FOUR sites in THREE files: the two `super` forwards plus the \
+             two `Service` calls that frame one's (name, arity) binding also admits",
+        );
+    }
+
+    #[test]
+    fn a_super_call_reaching_its_own_superclass_is_a_caller() {
+        // The direction the rule must NOT over-exclude, and the one that fails
+        // if `simple_type_name` reads the wrong child of a `generic_type`: then
+        // `super_dispatches_to` is `None` for every call, every `super` site is
+        // excluded, and this three-class chain loses its real caller.
+        //
+        // Deep extends Middle extends Base. `Deep.sendMessage` forwards through
+        // `super`, so it IS a caller of `Middle.sendMessage` and frame two must
+        // read it.
+        //
+        // `Middle` is declared GENERIC and `Deep extends Middle<Key, Payload>`
+        // deliberately: that `extends` clause is a `generic_type`, so the only
+        // way to learn that Deep's `super` reaches Middle is to read the FIRST
+        // named child through it. Reading the last yields the `type_arguments`
+        // node, `simple_type_name` returns `None`, Deep's real `super` call is
+        // discarded, and the chain silently reports "no call site" instead of
+        // its true length. The estate writes exactly this shape —
+        // `extends KafkaProducer<ArchiveEventKafkaKey, SpecificRecord>`.
+        let middle = "package p;\n\
+             public class Middle<K, V> extends Base<K, V> {\n\
+             \x20   public void sendMessage(K kafkaKey, V payload, String topic) {\n\
+             \x20       super.sendMessage(kafkaKey, payload, topic);\n\
+             \x20   }\n\
+             }\n";
+        let deep = "package p;\n\
+             public class Deep extends Middle<Key, Payload> {\n\
+             \x20   public void sendMessage(Key kafkaKey, Payload payload, String topic) {\n\
+             \x20       super.sendMessage(kafkaKey, payload, topic);\n\
+             \x20   }\n\
+             }\n";
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Base.java", base_producer()),
+            ("svc/src/main/java/Middle.java", middle.into()),
+            ("svc/src/main/java/Deep.java", deep.into()),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { deep.sendMessage(k, body, \"orders\"); }"),
+            ),
+        ]);
+        // Three frames: Base <- Middle <- Deep <- Service. Two frames reach
+        // Deep's parameter and stop, which is the bound doing its job — but it
+        // must stop at THREE FRAMES, not at "no call site", because the latter
+        // is what an over-excluding receiver rule produces.
+        assert_eq!(
+            f.two_frame_census(Arm::BrokerPublish, Tree::Main),
+            BTreeMap::from([(TwoFrameResidue::ThreeOrMoreFrames, 1)]),
+            "the chain must be seen and refused for its LENGTH. `no call site at frame 2` \
+             here would mean the receiver rule discarded Deep's real `super` call",
+        );
+    }
+
+    #[test]
+    fn the_generality_caveat_counts_the_chains_a_second_frame_carried() {
+        // Promised in the floor file BEFORE the run — "the harness reports the
+        // number of distinct wrapper methods, distinct forwarding chains and
+        // distinct members behind the resolved count, whatever the verdict".
+        // A promised report no test can see disappear is the weakest kind, which
+        // is the note `one_agreeing_call_site_resolves_the_topic` already makes
+        // about S-392's version of this caveat.
+        //
+        // Two candidates: one resolves THROUGH a forwarding chain, one resolves
+        // at the first frame. The chain count must be 1, not 2 — it counts what
+        // the SECOND frame carried, not what resolved.
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { thin.send(body, \"orders\"); }"),
+            ),
+            ("other/pom.xml", POM.into()),
+            ("other/src/main/java/Direct.java", producer("publish", "Object payload, String topic")),
+            (
+                "other/src/main/java/Caller.java",
+                caller("Caller", "  void go() { direct.publish(body, \"shipments\"); }"),
+            ),
+        ]);
+        assert_eq!(f.production_publish_resolved_two_frame_main_only(), 2);
+        let (methods, members, chains) = f.two_frame_generality();
+        assert_eq!(methods.len(), 2, "two distinct wrapper methods: {methods:?}");
+        assert_eq!(members, BTreeSet::from(["other".to_string(), "svc".to_string()]));
+        assert_eq!(
+            chains,
+            BTreeSet::from(["svc/send(2)".to_string()]),
+            "ONE chain carried a second frame; `other` resolved at the first and contributes \
+             no chain",
+        );
+    }
+
+    #[test]
+    fn the_frame_two_cost_is_reported_over_its_own_denominators() {
+        let (_d, f) = estate(&[
+            ("svc/pom.xml", POM.into()),
+            ("svc/src/main/java/Producer.java", producer("sendMessage", "Object payload, String topic")),
+            ("svc/src/main/java/Thin.java", forwarder("Thin", "send")),
+            (
+                "svc/src/main/java/Service.java",
+                caller("Service", "  void go() { thin.send(body, \"orders\"); }"),
+            ),
+        ]);
+        assert_eq!(
+            f.cost.frame_two_callees, 1,
+            "one forwarding method — `send(2)` — is the second frame's lookup denominator",
+        );
+        assert!(
+            f.cost.frame_two_files > 0,
+            "the second frame must have opened the file the ledger names as a caller of the \
+             forwarding method; a zero denominator reports a cost over nothing",
         );
     }
 
