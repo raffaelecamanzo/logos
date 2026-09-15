@@ -11,6 +11,28 @@
 //! the `@broker.publish.topic` / `@broker.subscribe.topic` (and optional
 //! `@broker.*.schema`) captures — with no new Rust plumbing ([NFR-MA-01]).
 //!
+//! **Amended 2026-09-15 (S-408, [CR-131] §3.2 A1): one bounded exception, and why
+//! it is not a per-language one.** The Kafka Streams topology form added a
+//! `@broker.*.receiver` capture and a RECEIVER GATE in Rust ([`receiver_is_topology`]
+//! and its helpers below), so "no new Rust plumbing" is no longer literally true
+//! of this arm and the sentence above must not be read as if it were. It could
+//! not be pure data: the gate has to relate a call site to a typed declaration
+//! elsewhere in the file, and a tree-sitter pattern matches within one bounded
+//! subtree — `#eq?`/`#match?` compare captures of the SAME match and cannot reach
+//! a second, independently-located one. That is the same reason
+//! [`crate::extract::composer`] and `extract::config::accessor` are generic Rust
+//! rather than query data.
+//!
+//! What the claim's *spirit* still holds is the part that matters for
+//! [NFR-MA-01]: the gate contains **no per-language branching**. It dispatches on
+//! grammar field names the three grammars share (`object`/`value`/`operand`/
+//! `function` for a receiver, `type`/`name`/`pattern`/`declarator` for a
+//! declaration), never on a language id, so a fourth language shipping a
+//! `brokers.scm` still costs no core change. The one genuinely framework-specific
+//! datum is [`TOPOLOGY_RECEIVER_TYPES`], and whether it belongs here or in a
+//! plugin descriptor beside `http_client_detectors` is recorded as an open review
+//! question on that constant rather than settled silently here.
+//!
 //! # Never fabricate a dynamic topic ([NFR-RA-05])
 //! A site's topic is normalized by [`broker_topic_key`]: a captured static topic
 //! (optionally guarded by a message-schema FQN) yields a stable key; a site with
@@ -186,7 +208,7 @@ where
         // slots over, and the reason this arm can key on a verb this common at
         // all.
         if let Some(receiver) = receiver_node {
-            if !receiver_is_topology(receiver, source) {
+            if !receiver_is_topology(receiver, root, source) {
                 continue;
             }
         }
@@ -339,6 +361,26 @@ fn broker_topic_key(slots: &BTreeMap<String, String>) -> Option<String> {
 /// topology type, and would put a capture rule in a descriptor that carries none
 /// of the arm's other capture rules.
 ///
+/// **OPEN REVIEW QUESTION (S-408 review, 2026-09-15) — deliberately not settled
+/// here.** This constant is the one genuinely framework-specific datum the
+/// receiver gate carries, and the architecture review argued it belongs in a
+/// plugin descriptor rather than in core, citing [CR-131] §3.1 ("which method on
+/// which receiver is a publish [stays] in plugin descriptors and queries") and the
+/// repository's own precedent for exactly this shape: `http_client_detectors`
+/// (CR-108) and the `[properties]` table's `accessor_prefixes` (CR-121), both
+/// rosters interpreted generically by core but supplied per language in
+/// `plugin.toml`.
+///
+/// The counter-argument is the one stated above — this roster is IDENTICAL across
+/// all three languages, where `http_client_detectors` genuinely differs per
+/// language (`net::http` for Go), so moving it would put three copies of one list
+/// in three descriptors, which is the drift hazard `plugin-registry.md` warns
+/// about in the same breath. Both readings are defensible and the choice changes a
+/// descriptor contract (a new manifest field, `deny_unknown_fields`, three
+/// `plugin.toml` edits), so it is a design decision for a human rather than
+/// something this story settles by picking one. Recorded here, next to the code it
+/// is about, so the next reader finds the question rather than re-deriving it.
+///
 /// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
 const TOPOLOGY_RECEIVER_TYPES: [&str; 2] = ["StreamsBuilder", "KStream"];
 
@@ -354,18 +396,39 @@ const TOPOLOGY_RECEIVER_TYPES: [&str; 2] = ["StreamsBuilder", "KStream"];
 ///
 /// It is **per-file pure and type-name based**, the same shape as
 /// [`crate::extract::rust_dyn_receiver_trait`]: no cross-file type resolution, no
-/// import graph. Two admissions, in order:
+/// import graph. There is exactly ONE admission: the receiver is a simple name
+/// the file declares, and *every* typed declaration of that name in the file
+/// carries a roster type.
 ///
-/// 1. **The receiver names a topology type directly** — a type-qualified call.
-/// 2. **The receiver is a simple name the file declares**, and *every* typed
-///    declaration of that name in the file carries a roster type.
-///
-/// Clause 2 requires **every** declaration rather than any, so a same-named
-/// binding of another type makes the site UNDER-capture instead of over-capture
+/// It requires **every** declaration rather than any, so a same-named binding of
+/// another type makes the site UNDER-capture instead of over-capture
 /// ([NFR-RA-05] — never fabricate is the half that matters). All four `builder`
 /// declarations in the estate's `PunctuatorsPocStream` and all three
 /// `streamsBuilder` declarations in `DownsamplerStream` are `StreamsBuilder`, so
 /// the estate is unaffected by the stricter reading.
+///
+/// **A RECEIVER SPELLED LIKE A TYPE IS NOT A TYPE**, and an earlier draft of this
+/// gate thought otherwise. It carried a second admission — "the receiver names a
+/// topology type directly", meant for a type-qualified call like
+/// `StreamsBuilder.stream(t)` — which tested the receiver's *text* against the
+/// roster before consulting any declaration. That is not a weaker check, it is a
+/// wrong one, and it manufactured exactly the over-capture this gate exists to
+/// prevent. Measured, all four admitted and none is a topology:
+///
+/// ```text
+///   Go    func KStream(s string) *Logger …  KStream("cfg").To("t")   → publish
+///   Go    func StreamsBuilder(…) *Logger …  StreamsBuilder(c).Stream(t) → subscribe
+///   Java  any unrelated class `KStream`  …  KStream.to("t")          → publish
+///   Go    func f(KStream Helper)         …  KStream.To("t")          → publish
+/// ```
+///
+/// The last row is the one that settles it: the receiver is a parameter
+/// **explicitly declared `Helper`**, and the name test fired first, so a correct
+/// refusal was overridden by a spelling coincidence. What the clause was written
+/// for — Java's `StreamsBuilder.stream(t)` — is not a Kafka Streams idiom at all
+/// (`stream` is an instance method), so it bought nothing real in exchange. The
+/// gate now resolves a declared type or refuses, full stop. Pinned by
+/// `a_receiver_spelled_like_a_topology_type_is_not_one`.
 ///
 /// **Stated ceilings**, each an under-capture, each observed rather than guessed
 /// (the rows are in `a_receiver_whose_type_is_not_written_in_the_file_is_refused`):
@@ -391,17 +454,10 @@ const TOPOLOGY_RECEIVER_TYPES: [&str; 2] = ["StreamsBuilder", "KStream"];
 ///
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 /// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
-fn receiver_is_topology(receiver: Node<'_>, source: &[u8]) -> bool {
+fn receiver_is_topology(receiver: Node<'_>, root: Node<'_>, source: &[u8]) -> bool {
     let Some(name) = chain_base_name(receiver, source) else {
         return false;
     };
-    if TOPOLOGY_RECEIVER_TYPES.contains(&name.as_str()) {
-        return true; // a type-qualified receiver names its own type
-    }
-    let mut root = receiver;
-    while let Some(parent) = root.parent() {
-        root = parent;
-    }
     let declared = declared_type_names(root, &name, source);
     !declared.is_empty()
         && declared
@@ -885,6 +941,36 @@ fn consume(consumer: &Consumer) {
         }
     }
 
+    /// The `self.`-qualified receiver — the Rust twin of
+    /// `java_capture_tests::a_this_qualified_receiver_walks_to_its_field`, and
+    /// the other half of the one [`chain_base_name`] branch no estate source
+    /// exercises. A struct field's declared type is what the gate reads.
+    #[test]
+    fn a_self_qualified_receiver_walks_to_its_field() {
+        let src = r#"
+struct Topology { builder: StreamsBuilder }
+
+impl Topology {
+    fn run(&mut self) {
+        self.builder.stream("self-in").to("self-out");
+    }
+}
+"#;
+        let facts = extract_rust(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["self-in".to_string()],
+            "`self.builder` names the FIELD, not the `self` node: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["self-out".to_string()],
+            "the publish half of the same chain likewise resolves: {:?}",
+            facts.refs
+        );
+    }
+
     /// The receiver-gated topology form (S-408, [CR-131] §3.2 A1), pinned by
     /// FIXTURE and by fixture alone: Kafka Streams is a JVM library, this
     /// workspace has no Rust broker corpus, and the 84-member reference estate
@@ -973,6 +1059,49 @@ mod go_capture_tests {
             .collect();
         t.sort();
         t
+    }
+
+    /// **A receiver spelled like a topology type is not one.** Two near misses,
+    /// each one character from nothing: a Go *function* and a Go *parameter* that
+    /// merely share a name with a roster type.
+    ///
+    /// The `Helper` row settles the gate's design. That receiver is explicitly
+    /// declared as another type, and an earlier draft captured it anyway — the
+    /// name test fired before the declaration was ever consulted, so a correct
+    /// refusal was overridden by a spelling coincidence. Go is where this bites
+    /// hardest: a package-level `func KStream(...)` is ordinary Go, and every one
+    /// of its call sites would have become a broker row.
+    #[test]
+    fn a_receiver_spelled_like_a_topology_type_is_not_one() {
+        let by_function = r#"
+package p
+func KStream(s string) *Logger { return nil }
+func run() { KStream("cfg").To("not-a-topic") }
+"#;
+        let facts = extract_go(by_function);
+        assert!(
+            facts.refs.iter().all(|r| !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )),
+            "a function sharing a roster name is not a topology receiver: {:?}",
+            facts.refs
+        );
+
+        let by_parameter = r#"
+package p
+func run(KStream Helper) { KStream.To("not-a-topic") }
+"#;
+        let facts = extract_go(by_parameter);
+        assert!(
+            facts.refs.iter().all(|r| !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )),
+            "an explicit `Helper` declaration outranks a name that looks like a \
+             roster type — the declaration decides, never the spelling: {:?}",
+            facts.refs
+        );
     }
 
     /// The receiver-gated topology form. CAPTURE is fixture-only — the estate
@@ -2314,6 +2443,18 @@ class Mixed {
     // real shape is admitted, and one that the same verb on an unrelated
     // receiver is silent.
 
+    /// Helper: true when a file produced no broker row of either role — the
+    /// "captured as nothing AND refused as nothing" state the receiver gate is
+    /// supposed to leave a non-topology site in.
+    fn no_broker_rows(facts: &Facts) -> bool {
+        facts.refs.iter().all(|r| {
+            !matches!(
+                r.relation,
+                Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+            )
+        })
+    }
+
     /// Helper: the 1-based lines of the keyless (refused) rows of one relation.
     fn refusal_lines(facts: &Facts, relation: ArtifactRelation) -> Vec<u32> {
         let mut lines: Vec<u32> = facts
@@ -2619,6 +2760,63 @@ class Inherited extends Base {
                 Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
             )),
             "a method's return type is not the receiver's type — refuse, never guess: {:?}",
+            facts.refs
+        );
+    }
+
+    /// **A receiver spelled like a topology type is not one** (Java half; the Go
+    /// half, including the row that settles the design, is
+    /// `go_capture_tests::a_receiver_spelled_like_a_topology_type_is_not_one`).
+    ///
+    /// An earlier draft of the gate carried a second admission that tested the
+    /// receiver's *text* against the roster before consulting any declaration, so
+    /// any class merely SHARING a name with a roster type had its calls captured.
+    /// A name is not evidence of a type.
+    #[test]
+    fn a_receiver_spelled_like_a_topology_type_is_not_one() {
+        let java_class = r#"
+package com.acme;
+class UsesUnrelatedClass {
+    void run() { KStream.to("not-a-topic"); }
+}
+"#;
+        let facts = extract_java(java_class);
+        assert!(
+            no_broker_rows(&facts),
+            "a bare class name that matches the roster declares nothing here: {:?}",
+            facts.refs
+        );
+    }
+
+    /// The `this.`-qualified receiver — the ordinary Spring injected-field shape,
+    /// and the one branch of [`chain_base_name`] that the estate does not write.
+    /// The estate injects its `StreamsBuilder` as a method parameter, so without
+    /// this fixture the `this`/`self` arm rests on a docstring claim and nothing
+    /// else; its Rust twin is
+    /// `rust_capture_tests::a_self_qualified_receiver_walks_to_its_field`.
+    #[test]
+    fn a_this_qualified_receiver_walks_to_its_field() {
+        let src = r#"
+package com.acme;
+class Injected {
+    private final StreamsBuilder builder = new StreamsBuilder();
+
+    public void topo() {
+        this.builder.stream("this-in").to("this-out");
+    }
+}
+"#;
+        let facts = extract_java(src);
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerSubscribe),
+            vec!["this-in".to_string()],
+            "`this.builder` names the FIELD, not the `this` node: {:?}",
+            facts.refs
+        );
+        assert_eq!(
+            targets(&facts, ArtifactRelation::BrokerPublish),
+            vec!["this-out".to_string()],
+            "the publish half of the same chain likewise resolves: {:?}",
             facts.refs
         );
     }
