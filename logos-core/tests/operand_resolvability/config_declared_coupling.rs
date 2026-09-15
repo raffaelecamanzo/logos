@@ -842,9 +842,31 @@ impl Judgement {
         self.targets.iter().filter(|t| t.outcome == outcome).count()
     }
 
-    /// **The figure the topic gate is read off.**
+    /// **The figure the topic gate is read off** — distinct topic IDENTITIES
+    /// two or more members declare.
+    ///
+    /// Deduped on the identity, never on the captured literal, because the
+    /// declaration fixes the unit: *"The grain is the TOPIC, not the (member,
+    /// topic) row and not the member pair."* `topics_resolved` carries one row
+    /// per distinct captured LITERAL, and two literals can resolve to one
+    /// identity — `${spring.kafka.topics.orders}` and a bare `orders` name the
+    /// same topic — so counting rows would report one topic twice.
+    ///
+    /// It changes nothing on today's estate, where each of the 13 identities is
+    /// captured under exactly one literal, and that is precisely why it was
+    /// worth fixing now: the population this gate measures is the one [S-408],
+    /// [S-409] and [S-410] set out to WIDEN, and a second spelling of an
+    /// already-captured topic is the first thing that widening introduces.
+    ///
+    /// [S-408]: ../../../docs/planning/journal.md#s-408-a-kafka-streams-topology-link-is-a-broker-publish-or-subscribe-site
+    /// [S-409]: ../../../docs/planning/journal.md#s-409-the-accessor-hop-reaches-the-broker-arm
+    /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
     pub fn shared_topics(&self) -> usize {
-        self.topics(TopicOutcome::BothSidesDeclared).len()
+        self.topics(TopicOutcome::BothSidesDeclared)
+            .iter()
+            .filter_map(|t| t.identity.as_deref())
+            .collect::<BTreeSet<_>>()
+            .len()
     }
 
     pub fn topics(&self, outcome: TopicOutcome) -> Vec<&JudgedTopic> {
@@ -920,11 +942,18 @@ impl Judgement {
         (topic_shaped, other)
     }
 
+    /// The AS-WRITTEN reading's answer, at the SAME grain as [`shared_topics`]:
+    /// the two are printed side by side, so counting them in different units
+    /// would make the comparison meaningless.
+    ///
+    /// [`shared_topics`]: Judgement::shared_topics
     pub fn shared_topics_as_written(&self) -> usize {
         self.topics_as_written
             .iter()
             .filter(|t| t.outcome == TopicOutcome::BothSidesDeclared)
-            .count()
+            .filter_map(|t| t.identity.as_deref())
+            .collect::<BTreeSet<_>>()
+            .len()
     }
 }
 
@@ -1703,6 +1732,27 @@ mod fixtures {
         names.iter().map(|n| (*n).to_string()).collect()
     }
 
+    /// An empty [`Judgement`] a fixture fills one field of, so a rule about one
+    /// reported figure can be pinned without an estate.
+    fn probe_judgement() -> Judgement {
+        Judgement {
+            members: BTreeSet::new(),
+            runnable: BTreeSet::new(),
+            targets: Vec::new(),
+            topics_resolved: Vec::new(),
+            topics_as_written: Vec::new(),
+            cost: WalkCost::default(),
+            sequence_host_ceiling: Vec::new(),
+            path_only: BTreeSet::new(),
+            application_scalars: 0,
+            deploy_scalars: 0,
+            deploy_member_labels: BTreeSet::new(),
+            deploy_external_labels: BTreeSet::new(),
+            port_owners: BTreeMap::new(),
+            blind_spot: BTreeSet::new(),
+        }
+    }
+
     // ── The floors are the declared ones ────────────────────────────────────
 
     #[test]
@@ -1711,18 +1761,38 @@ mod fixtures {
         // `ADDRESSED_PAIR_FLOOR == 12` would compare a value with the literal
         // written a few hundred lines above it, which no mutation can falsify
         // and which says nothing about what was declared before the run.
-        // Anchored on the line that names each METRIC, so a declaration gaining
-        // an earlier `>= n` line cannot silently redefine either floor.
+        //
+        // Requires the metric's floor line to be UNIQUE, and that is the whole
+        // guard. An earlier version took the FIRST line that both named the
+        // metric and began `>= `, under a comment claiming that a later `>= n`
+        // line could not silently redefine a floor. It could — review mutated
+        // the declaration to read
+        //
+        //     >= 12 ADDRESSED MEMBER PAIRS was the pilot illustration, superseded below.
+        //     >= 20 ADDRESSED MEMBER PAIRS on the pec-services estate.
+        //
+        // and this test still certified the constant 12 against a declaration
+        // that said 20. That is the one failure this file exists to make
+        // impossible, because every other assertion here trusts the floor it
+        // parses. Two matching lines is now itself the failure, so a declaration
+        // cannot carry a second reading of its own floor at all.
         let declared = |metric: &str| -> usize {
-            DECLARED_FLOOR
+            let hits: Vec<usize> = DECLARED_FLOOR
                 .lines()
                 .filter(|l| l.contains(metric))
-                .find_map(|l| {
+                .filter_map(|l| {
                     l.trim().strip_prefix(">= ")?.split_whitespace().next()?.parse().ok()
                 })
-                .unwrap_or_else(|| {
-                    panic!("the declaration states its floor as a `>= NN {metric}` line")
-                })
+                .collect();
+            assert_eq!(
+                hits.len(),
+                1,
+                "the declaration must state the floor for `{metric}` on exactly ONE \
+                 `>= NN {metric}` line; found {} ({hits:?}). A declaration that states its \
+                 own floor twice has no floor.",
+                hits.len(),
+            );
+            hits[0]
         };
         assert_eq!(
             declared("ADDRESSED MEMBER PAIRS"),
@@ -2000,6 +2070,39 @@ mod fixtures {
         // declaration fixes, and it is asserted rather than described.
         let as_written = judge_topics(&captured, &scalars, TopicReading::AsWritten);
         assert_eq!(as_written[0].outcome, TopicOutcome::DanglingNoDeclarer);
+    }
+
+    #[test]
+    fn two_literals_resolving_to_one_identity_are_one_shared_topic() {
+        // The grain the declaration fixes: "The grain is the TOPIC, not the
+        // (member, topic) row and not the member pair." Counting captured
+        // LITERALS here would answer 2 — and would do so silently, because on
+        // today's estate each identity has exactly one literal and the two
+        // counts coincide.
+        let captured = vec![
+            CapturedTopic {
+                as_written: "${spring.kafka.topics.orders}".to_string(),
+                resolved: Some("orders-v1".to_string()),
+                publishes: 0,
+                subscribes: 1,
+            },
+            CapturedTopic {
+                as_written: "orders-v1".to_string(),
+                resolved: Some("orders-v1".to_string()),
+                publishes: 1,
+                subscribes: 0,
+            },
+        ];
+        let scalars = [
+            scalar("a", "spring.kafka.topics.orders", "orders-v1"),
+            scalar("b", "spring.kafka.topics.orders", "orders-v1"),
+        ];
+        let j = Judgement {
+            topics_resolved: judge_topics(&captured, &scalars, TopicReading::Resolved),
+            ..probe_judgement()
+        };
+        assert_eq!(j.topics(TopicOutcome::BothSidesDeclared).len(), 2, "two captured literals");
+        assert_eq!(j.shared_topics(), 1, "but ONE topic identity, which is the declared grain");
     }
 
     #[test]
