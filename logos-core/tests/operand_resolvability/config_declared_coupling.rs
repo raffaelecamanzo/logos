@@ -995,6 +995,10 @@ pub struct Judgement {
     ///
     /// [S-400]: ../../../docs/planning/journal.md#s-400-measure-whether-a-runtime-port-identifies-the-callee
     pub port_owners: BTreeMap<String, BTreeSet<String>>,
+    /// Members claiming each label at a decisive tier, for the collision
+    /// enumeration. Built once beside the label censuses rather than re-walked
+    /// per label.
+    pub claimants: BTreeMap<String, BTreeSet<String>>,
     /// The bounded sequence blind spot, as `(consumer, provider, file)` rows.
     /// Computed once at judgement time, where the identity corpus is in scope.
     pub blind_spot: BTreeSet<(String, String, String)>,
@@ -1104,6 +1108,16 @@ impl Judgement {
             })
             .filter(|(a, b, _)| !already.contains(&(a.as_str(), b.as_str())))
             .collect()
+    }
+
+    /// The members claiming one label at a decisive tier — what a same-tier
+    /// collision is MADE of, so the enumeration can name the members whose
+    /// claims cancelled rather than only the label that lost.
+    pub fn claims_at_label(&self, label: &str) -> BTreeSet<&str> {
+        self.claimants
+            .get(label)
+            .map(|c| c.iter().map(String::as_str).collect())
+            .unwrap_or_default()
     }
 
     /// The blind spot at PAIR grain — the same unit the floor is read at. The
@@ -1227,6 +1241,11 @@ fn judge(root: &Path) -> Judgement {
         .map(|t| t.label.clone())
         .collect();
 
+    let mut claimants: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for claim in s384.corpus.claims.iter().filter(|c| c.tier.is_decisive()) {
+        claimants.entry(claim.label.clone()).or_default().insert(claim.member.clone());
+    }
+
     let mut port_owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for source in &m.config.sources {
         let member = source.path.split('/').next().unwrap_or("").to_string();
@@ -1254,6 +1273,7 @@ fn judge(root: &Path) -> Judgement {
         deploy_member_labels,
         deploy_external_labels,
         port_owners,
+        claimants,
         blind_spot: BTreeSet::new(),
     };
     out.blind_spot = out.blind_spot_pairs(&s384.corpus);
@@ -1443,6 +1463,7 @@ fn report_pairs(j: &Judgement) {
             .unwrap_or_default();
         println!("      {a} -> {b}    via {via}");
     }
+    report_unresolved_labels(j);
     println!(
         "\n    the path-only-matched pairs subtracted from the headline ({} pairs the \n             invocation intake binds by path alone, of which {} are named by a committed value):",
         j.path_only.len(),
@@ -1452,6 +1473,52 @@ fn report_pairs(j: &Judgement) {
         println!("      {a} -> {b}");
     }
     report_pairs_by_overlay(j);
+}
+
+/// The two buckets that resolve to no member, ENUMERATED.
+///
+/// [S-411]'s acceptance criterion asks for same-tier collisions "enumerated" and
+/// for labels resolving to no member "enumerated for human adjudication, with
+/// the out-of-namespace externals named". A count cannot be adjudicated: a
+/// reader cannot tell 27 genuine third-party systems from 27 members the
+/// identity join failed to recognise, and those two readings of one number lead
+/// to opposite decisions about [ADR-65].
+///
+/// [ADR-65]: ../../../docs/specs/architecture/decisions/ADR-65.md
+/// [S-411]: ../../../docs/planning/journal.md#s-411-measure-config-declared-coupling-over-the-reference-estate
+fn report_unresolved_labels(j: &Judgement) {
+    let distinct = |outcome: PairOutcome| -> BTreeMap<&str, BTreeSet<&str>> {
+        let mut out: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for t in j.targets.iter().filter(|t| t.outcome == outcome) {
+            out.entry(t.target.label.as_str()).or_default().insert(t.target.member.as_str());
+        }
+        out
+    };
+
+    let collisions = distinct(PairOutcome::SameTierCollision);
+    println!(
+        "\n    the same-tier identity collisions, enumerated ({} distinct label(s)):",
+        collisions.len(),
+    );
+    println!("    FR-WS-20 AC2 resolves each to NOTHING rather than to a guess.");
+    for (label, consumers) in &collisions {
+        println!(
+            "      {label:<30} claimed by {:?}\n          referenced by {:?}",
+            j.claims_at_label(label),
+            consumers,
+        );
+    }
+
+    let externals = distinct(PairOutcome::NoMemberLabel);
+    println!(
+        "\n    the labels resolving to NO member, enumerated ({} distinct):",
+        externals.len(),
+    );
+    println!("    Each is an INFERRED external, so FR-WS-20 AC5's declared half has nothing");
+    println!("    to measure: no workspace manifest on this estate declares one.");
+    for (label, consumers) in &externals {
+        println!("      {label:<44} referenced by {} consumer(s)", consumers.len());
+    }
 }
 
 /// Per-overlay attribution of the addressed pairs — a pair proved only in one
@@ -1985,6 +2052,7 @@ mod fixtures {
             deploy_member_labels: BTreeSet::new(),
             deploy_external_labels: BTreeSet::new(),
             port_owners: BTreeMap::new(),
+            claimants: BTreeMap::new(),
             blind_spot: BTreeSet::new(),
         }
     }

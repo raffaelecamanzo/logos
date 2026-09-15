@@ -66,6 +66,22 @@ run without editing the declaration too.
   a stricter reading that excludes a test-harness consumer the figure is 10, so
   the falsification does not turn on that judgement — it only deepens.
 
+  THE 75 COLLISION REFERENCES ARE FIVE LABELS, AND FOUR OF THEM ARE
+  INFRASTRUCTURE. Enumerated by the run: `archive-api` (the fork committing the
+  original's Helm chart name, S-384's case), plus `minio`, `mongodb`,
+  `schema-registry` and `pecserver-mock` -- Compose service keys for shared
+  infrastructure that 19 to 23 members each declare. This is S-384's tier-2
+  finding reproduced at the reference level: "a Compose file names shared
+  infrastructure, not the member". None of the five is a member pair the relation
+  lost, and four of them are not members at all.
+
+  THE 336 NO-MEMBER REFERENCES ARE 34 DISTINCT LABELS, likewise enumerated for
+  adjudication. They are genuinely external -- an Apicurio registry, four MSK
+  broker UUIDs, identity providers, a GitLab -- with one shape worth naming:
+  `api`, referenced by 35 consumers, is a bare first label that no member claims
+  and that FR-WS-20 AC4's exact-match rule correctly refuses rather than
+  resolving to one of the seven members whose artifact id is `api`.
+
   The eight pairs subtracted as already matched by path alone:
 
     funnel-aggregator-api -> filters-api        mailbox-aggregator-api -> filters-api
@@ -241,5 +257,12 @@ run without editing the declaration too.
 
   Re-run before re-deciding: nothing here needs to be re-derived by hand.
 
-      cargo test -p logos-core --test operand_resolvability \
+      LOGOS_REF_WORKSPACE=~/source/pec-services \
+        cargo test -p logos-core --test operand_resolvability \
         config_declared_coupling -- --nocapture
+
+  The environment variable is not optional. Without it the gate takes its VOID
+  branch, asserts nothing and exits 0 -- a reader following this instruction
+  would get a green run and no measurement. Reported at review, where running
+  the command exactly as it was first written gave "21 passed, 0 failed" with
+  the gate skipped.
