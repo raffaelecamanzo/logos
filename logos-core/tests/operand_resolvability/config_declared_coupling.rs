@@ -3,13 +3,17 @@
 //! justify building [ADR-65]'s third intake?
 //!
 //! Two independent floors, both declared in [`config_declared_coupling_floor.txt`]
-//! **before this module existed** and both **parsed** out of that declaration by
-//! [`the_floors_are_the_ones_declared_before_the_run`] rather than compared with a
-//! literal written beside them:
+//! **before this module existed**. The constants are [`ADDRESSED_PAIR_FLOOR`] and
+//! [`SHARED_TOPIC_FLOOR`]; neither figure is restated here, because a number
+//! written in a module header is not guarded by anything and would outlive a
+//! re-decision of [CR-131] §8 that moved the constants.
+//! [`the_floors_are_the_ones_declared_before_the_run`] parses each floor out of
+//! the declaration and compares it to its constant, so the constant cannot be
+//! edited to clear a run without the declaration being edited too.
 //!
-//!   - **>= 12 addressed member pairs** — ordered `(A, B)` pairs where a value A
+//!   - **addressed member pairs** — ordered `(A, B)` pairs where a value A
 //!     commits names a host whose first DNS label identifies a runnable member B.
-//!   - **>= 10 shared topics** — topic identities the broker arm captures that two
+//!   - **shared topics** — topic identities the broker arm captures that two
 //!     or more members each name in a committed value.
 //!
 //! Below either floor, that half is recorded FALSIFIED with its evidence and its
@@ -29,8 +33,9 @@
 //! module never presents it as though it were.
 //!
 //! What the two gates *are* comparable on is their inputs, so both are reconciled
-//! explicitly: [S-384]'s **11 distinct member labels** and [S-400]'s **5 ports
-//! identifying exactly one member** are re-derived here from the same corpus and
+//! explicitly: [S-384]'s distinct member labels ([`S384_MEMBER_LABELS`]) and
+//! [S-400]'s ports identifying exactly one member ([`S400_UNIQUE_PORTS`], with
+//! its whole `server.port` index) are re-derived here from the same corpus and
 //! asserted, because a run whose target census silently drifted from theirs would
 //! be measuring a different estate while printing the same words.
 //!
@@ -497,12 +502,18 @@ impl WalkCost {
 /// of collecting them.
 #[derive(Default)]
 pub struct DeployCorpus {
-    /// member -> (canonical key, value, overlay, file) for every scalar the
-    /// admitted deploy files commit.
+    /// Every **target-valued** committed value the admitted deploy files carry —
+    /// the subset whose value parses as a URL or as a bare host beside a port.
+    ///
+    /// Not every scalar: that is [`DeployCorpus::scalars`] below, and the two
+    /// differ by three orders of magnitude on the reference estate (443 target-
+    /// valued against ~50k scalars).
     pub values: Vec<Target>,
-    /// Every committed scalar, as `(member, value)` — the join population for the
-    /// topic half. A `Vec` of rows rather than a map, because the topic half
-    /// needs the via-key for adjudication and the pair half needs the file.
+    /// Every committed scalar, with its key, file and source set — the join
+    /// population for the topic half.
+    ///
+    /// A `Vec` of rows rather than a `(member, value)` map, because the topic
+    /// half needs the via-key for adjudication and the pair half needs the file.
     pub scalars: Vec<Scalar>,
     pub cost: WalkCost,
     /// A textual **ceiling**, never an extraction: `host:`-shaped lines inside a
@@ -846,10 +857,21 @@ pub struct Judgement {
     /// Application-config scalars, kept for the census denominators.
     pub application_scalars: usize,
     pub deploy_scalars: usize,
-    /// Distinct ports a consumer references, and how many name exactly one
-    /// member — [S-400]'s reconciliation, re-derived from this run's own targets.
+    /// Distinct host labels among the DEPLOY target references that resolve to a
+    /// member, and those that resolve to no member — [S-384]'s reconciliation,
+    /// re-derived from this run's own corpus.
     ///
-    /// [S-400]: ../../../docs/planning/journal.md#s-400-measure-whether-a-runtime-port-identifies-the-callee
+    /// [S-384] recorded 11 member labels and 28 external ones. This run reads 11
+    /// and 27, and the one that moved did not vanish: `archive-api` is claimed by
+    /// the fork at the same tier, so it lands in this module's SAME-TIER
+    /// COLLISION bucket — a bucket [S-384]'s census did not carry — rather than
+    /// among the externals. 27 + 1 = 28.
+    ///
+    /// The PORT half of the reconciliation is [`port_owners`] and
+    /// [`port_census`], not these two.
+    ///
+    /// [`port_owners`]: Judgement::port_owners
+    /// [S-384]: ../../../docs/planning/journal.md#s-384-measure-service-identity-resolvability-across-the-deploy-corpus
     pub deploy_member_labels: BTreeSet<String>,
     pub deploy_external_labels: BTreeSet<String>,
     /// `server.port` value -> the members declaring it, as [S-400] built its
@@ -968,16 +990,21 @@ impl Judgement {
             .collect()
     }
 
-    /// Declarations reached through a key whose last segment names a topic, and
-    /// those reached through any other key — the accidental-match guard for the
-    /// topic half, where the join is on a VALUE and a key that happens to carry
-    /// a topic-shaped string would be indistinguishable without it.
     /// The blind spot at PAIR grain — the same unit the floor is read at. The
     /// row set carries one entry per overlay, so its length is not this figure.
     pub fn blind_spot_pairs_count(&self) -> usize {
         self.blind_spot.iter().map(|(a, b, _)| (a, b)).collect::<BTreeSet<_>>().len()
     }
 
+    /// Declarations reached through a key whose last segment names a topic, and
+    /// those reached through any other key — the accidental-match guard for the
+    /// topic half, where the join is on a VALUE and a key that happens to carry
+    /// a topic-shaped string would be indistinguishable without it.
+    ///
+    /// Taken over the same both-sides-declared population as
+    /// [`declaration_source_split`].
+    ///
+    /// [`declaration_source_split`]: Judgement::declaration_source_split
     pub fn declaration_key_split(&self) -> (usize, usize) {
         let mut topic_shaped = 0;
         let mut other = 0;
@@ -1720,10 +1747,19 @@ fn assert_the_recorded_verdict(j: &Judgement) {
 /// printed: a run whose target census had silently drifted from [S-384]'s and
 /// [S-400]'s would be measuring a different estate while printing the same words.
 ///
-/// Equalities, not floors, and deliberately: these are reproductions of two
-/// recorded measurements over the same corpus. If the estate grows they move, and
-/// when they move the comparison is void and has to be re-recorded rather than
-/// quietly widened.
+/// Three equalities and one deliberate floor. The equalities — [S-384]'s member
+/// labels and [S-400]'s whole `server.port` index — are reproductions of two
+/// recorded measurements over the same corpus, so if the estate grows they move,
+/// the comparison is void, and it has to be re-recorded rather than quietly
+/// widened. The floor is `unique >= S400_UNIQUE_PORTS`, and it is a floor because
+/// this run's referenced-port population is WIDER than [S-400]'s: a superset
+/// cannot resolve fewer ports, so equality would be the wrong assertion. What it
+/// was actually measured at is pinned separately, as `RECORDED_UNIQUE_PORTS`.
+///
+/// The blind-spot assertion below is neither, and is here rather than in
+/// [`assert_the_recorded_verdict`] because it is the margin argument's evidence:
+/// the finding's claim that the falsification's margin is smaller than the
+/// reader's own blind spot is read off it.
 ///
 /// [S-384]: ../../../docs/planning/journal.md#s-384-measure-service-identity-resolvability-across-the-deploy-corpus
 /// [S-400]: ../../../docs/planning/journal.md#s-400-measure-whether-a-runtime-port-identifies-the-callee
@@ -2048,12 +2084,10 @@ mod fixtures {
 
     #[test]
     fn a_bare_host_that_is_not_a_name_establishes_nothing() {
-        // Each of these sits one step from matching, and each would fabricate a
-        // host label if the rule were a bare character class.
         // Every one of these sits one character from matching, and each probes a
         // different clause: a bare word, a word with no dot or dash, a number, an
-        // IP literal, a template, a URL, an email, an authority with a port, and
-        // the empty string.
+        // IP literal, a template, a URL, an email, an authority with a port, an
+        // embedded space, and the empty string.
         for near_miss in [
             "true",
             "changeit",

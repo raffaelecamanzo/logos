@@ -976,7 +976,17 @@ pub fn count_broker_captures(
 }
 
 /// The topic a `@broker.*.topic` capture keys, with its string delimiters
-/// removed — the key `broker_topic_key` forms in production.
+/// removed — the key `broker_topic_key` forms in production **for a topic with
+/// no schema slot, which is every arm shipped today**.
+///
+/// The qualification is not decoration. Production appends `#schema` whenever a
+/// `@broker.*.schema` slot is filled, and no shipped `brokers.scm` fills one, so
+/// the two agree on this corpus and only on it. Production also unquotes one
+/// surrounding pair and then trims, where this trims and then strips every
+/// leading and trailing quote — the two differ on a literal like `"  orders  "`,
+/// which no estate writes. Production's `unquote` is `pub(crate)`, so an
+/// integration test cannot call it; the strip is re-spelled of necessity and the
+/// claim is narrowed to what is actually true.
 ///
 /// `static_literal` is not reused here and the difference is deliberate: that
 /// one folds an expression and returns `None` for anything that is not already
