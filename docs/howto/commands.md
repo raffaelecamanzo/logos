@@ -341,6 +341,15 @@ it across processes to detect a stale cache), and the freshness posture
 (navigation serves the latest committed snapshot; it never reconciles per
 call).
 
+`last_full_index_at` is read from a durable `project_metadata` record, not an
+in-process counter — a separate, read-only `status`/`workspace status`
+invocation reports the timestamp of the last full index a *different* process
+ran, rather than always printing `null`. It dates the **graph**, not the
+command: a `sync` that persists no files but leaves an existing graph in place
+does not clear it, so it is not confused with `last_sync_at` (unchanged,
+already durable). Where no full index has ever completed the field is
+reported **absent** — never `0`, never fabricated.
+
 The read-model also carries a source/test **lines-of-code roll-up**:
 `total_line_count`, `source_line_count`, and `test_line_count` (with
 `total == source + test`). Like `indexed_loc`, the roll-up is computed at
@@ -885,7 +894,22 @@ migration (schema version 17) admits `Topic` / `Producer` / `Consumer` nodes and
 subscribe on the same topic across members, and the coupling renders as an
 explicit topic hop (`A → topic → B`) in the workspace service map rather than an
 opaque line. A per-repo topic is visible before any cross-repo match; a graph
-with no broker topics is byte-for-byte unaffected by the migration. **Migration
+with no broker topics is byte-for-byte unaffected by the migration.
+
+The broker arm also recognises a **Kafka Streams topology** — a
+`builder.stream(<topic>)…to(<topic>)` chain against a `StreamsBuilder`/`KStream`
+receiver (Java, Rust and Go) — as a subscribe/publish pair, alongside the
+existing annotation and header-based forms. A topic operand that is a
+`@ConfigurationProperties` accessor (bare or qualified, e.g.
+`kafkaTopics.getArchiveEvents()`) resolves through the same accessor hop the
+HTTP client-call arm uses, and the resolved topic is keyed by its **committed
+configured value** rather than the placeholder as written — so a subscribe
+declared `${spring.kafka.topics.x}` and a Streams publish resolving to the same
+committed value bind across members even though their source text differs.
+Where no committed source defines the key, or the operand does not resolve,
+the site carries the existing refusal vocabulary (`topic-not-literal`,
+`config-key-missing`, `config-placeholder-value`) rather than a fabricated
+topic. **Migration
 17 is forward-only and irreversible** — a store opened by a Sprint-57-or-later
 binary advances `PRAGMA user_version` 16 → 17 and cannot be reopened by an older
 binary.
@@ -896,8 +920,9 @@ binary.
 logos workspace status [--json]
 ```
 
-Per-member freshness (each member's index/sync state) plus the **3-state
-cross-service coverage summary** — every cross-boundary reference classified
+Per-member freshness (each member's index/sync state, including the durable
+`last_full_index_at` described under [`status`](#status) above) plus the
+**3-state cross-service coverage summary** — every cross-boundary reference classified
 `bound` / `ambiguous` / `unbound`, each unbound one carrying a reason
 (`no-provider-in-workspace`, `path-not-composed`, `base-url-runtime`,
 `ambiguous`, `topic-not-literal`, `config-key-missing`,
