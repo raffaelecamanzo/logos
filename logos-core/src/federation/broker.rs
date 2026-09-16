@@ -138,9 +138,12 @@ pub enum TopicIdentity {
     /// text and no configuration was read.
     Literal,
     /// The committed sources prove the operand's value.
+    ///
+    /// The keys are deliberately **not** repeated here: each entry of `bound`
+    /// carries its own canonical `key`, so a second list would be a copy that
+    /// can go stale. [`Unresolved`](Self::Unresolved) has no such carrier and
+    /// therefore does name its keys.
     Committed {
-        /// The canonical configuration keys the operand names, in source order.
-        keys: Vec<String>,
         /// One topic identity per profile-distinct committed composition,
         /// sorted and de-duplicated. Two entries mean the overlays disagree and
         /// **both** are retained — the site binds under each ([FR-WS-19] AC2).
@@ -203,7 +206,6 @@ pub fn topic_identity(target: &str, corpus: &dyn ConfigLookup) -> TopicIdentity 
                 };
             }
             TopicIdentity::Committed {
-                keys,
                 topics: topics.into_iter().collect(),
                 bound: resolved.bound,
             }
@@ -240,7 +242,7 @@ pub(super) fn identify(
     let (as_written, role) = classify(relation, target)?;
     match topic_identity(target, corpus) {
         TopicIdentity::Literal => Some((vec![as_written], role, Provenance::Literal)),
-        TopicIdentity::Committed { keys: _, topics, bound } => Some((
+        TopicIdentity::Committed { topics, bound } => Some((
             topics.into_iter().map(PortableKey::broker).collect(),
             role,
             Provenance::ConfigBound { bound },
@@ -545,6 +547,155 @@ mod tests {
         assert!(
             edges.is_empty(),
             "an indirection is not a topic identity — nothing may meet on it: {edges:?}"
+        );
+    }
+
+    /// The **never-fabricate** rule one layer up ([NFR-RA-05], [CR-107]): a
+    /// committed value that is blank, or blank once trimmed, is no more a topic
+    /// identity than an absent one.
+    ///
+    /// Pinned because the consequence is not obvious and is severe. Without the
+    /// blank filter, two members that commit **different** keys to blank values
+    /// are filed under one empty topic and fan out a real cross-service edge —
+    /// a coupling asserted between two services on the strength of two empty
+    /// strings. The site must instead fall back to its placeholder-as-written key
+    /// under the existing [`ValueRefusal::MissingKey`].
+    ///
+    /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn a_blank_committed_value_is_no_topic_and_never_meets_another_blank() {
+        let mut corpora = BTreeMap::new();
+        // Two DIFFERENT keys, both committed blank — one empty, one whitespace.
+        commits(&mut corpora, "api", "spring.kafka.topics.orders", &[(None, "")]);
+        commits(&mut corpora, "worker", "spring.kafka.topics.inbound", &[(None, "   ")]);
+
+        let edges = broker_edges(
+            [
+                pubc("${spring.kafka.topics.orders}", "api", "local emit"),
+                subc("${spring.kafka.topics.inbound}", "worker", "local on_order"),
+            ],
+            &corpora,
+        );
+        assert!(
+            edges.is_empty(),
+            "two blank committed values are not one topic — and are not a topic \
+             at all: {edges:?}"
+        );
+
+        // …and the site keeps its as-written key, under the existing refusal.
+        let empty = MemberCorpus::new();
+        let corpus = corpora.get("api").unwrap_or(&empty);
+        assert_eq!(
+            topic_identity("${spring.kafka.topics.orders}", corpus),
+            TopicIdentity::Unresolved {
+                keys: vec!["spring.kafka.topics.orders".to_string()],
+                refusal: ValueRefusal::MissingKey,
+            },
+            "a blank committed value admits nothing, under the existing reason"
+        );
+    }
+
+    /// A committed value is **trimmed** before it becomes a topic identity, and
+    /// that is load-bearing in both directions.
+    ///
+    /// A YAML block scalar or a trailing space makes `"orders "` a different
+    /// namespace from `"orders"` — the exact class of silent miss this story
+    /// exists to close — and it is the trim, not the blank filter, that turns a
+    /// whitespace-only value into nothing.
+    #[test]
+    fn a_committed_value_is_trimmed_before_it_becomes_a_topic() {
+        let mut corpora = BTreeMap::new();
+        // The publisher's yaml carries a trailing space; the subscriber's does not.
+        commits(&mut corpora, "api", "t.out", &[(None, "orders ")]);
+        commits(&mut corpora, "worker", "t.in", &[(None, "orders")]);
+
+        let edges = broker_edges(
+            [
+                pubc("${t.out}", "api", "local emit"),
+                subc("${t.in}", "worker", "local on_order"),
+            ],
+            &corpora,
+        );
+        assert_eq!(
+            edges.len(),
+            1,
+            "a padded committed value is the same topic as an unpadded one: {edges:?}"
+        );
+    }
+
+    /// The `#`-guard rides the **resolved** value ([FR-WS-10] acceptance 2).
+    ///
+    /// Every pre-[S-410] schema-guard fixture uses literal operands, so nothing
+    /// pinned the guard once the topic half became a placeholder. Losing it there
+    /// would silently bind a schema-guarded publish to an unguarded subscribe —
+    /// the bind [FR-WS-10] says must not happen, reappearing through the one door
+    /// this story opened.
+    ///
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    #[test]
+    fn a_schema_guard_rides_the_resolved_value() {
+        let mut corpora = BTreeMap::new();
+        commits(&mut corpora, "api", "t.out", &[(None, "orders")]);
+
+        // The guarded publish must NOT reach a subscriber on the bare topic.
+        let unguarded = broker_edges(
+            [
+                pubc("${t.out}#com.acme.OrderCreated", "api", "local emit"),
+                subc("orders", "billing", "local on_any"),
+            ],
+            &corpora,
+        );
+        assert!(
+            unguarded.is_empty(),
+            "the guard survives resolution, so a guarded publish does not reach an \
+             unguarded subscribe: {unguarded:?}"
+        );
+
+        // …and the matching-FQN subscriber still binds, on the committed value.
+        let guarded = broker_edges(
+            [
+                pubc("${t.out}#com.acme.OrderCreated", "api", "local emit"),
+                subc("orders#com.acme.OrderCreated", "billing", "local on_created"),
+            ],
+            &corpora,
+        );
+        assert_eq!(guarded.len(), 1, "the matching-FQN pair binds: {guarded:?}");
+        assert_eq!(guarded[0].to.symbol.as_str(), "local on_created");
+    }
+
+    /// A **relay** — one declaration that subscribes to a topic and re-publishes
+    /// on it — keeps both of its sides through the de-duplication.
+    ///
+    /// The role term in `broker_edges`' dedup key is what makes that true, and
+    /// nothing on this side pinned it (the promotion pass's twin hazard has been
+    /// pinned since CR-080 by `site_symbol`'s role namespace). Without it the
+    /// relay's publish and subscribe collapse to one endpoint and a real
+    /// downstream coupling silently disappears.
+    #[test]
+    fn a_relay_keeps_both_of_its_sides_through_the_dedup() {
+        let edges = broker_edges(
+            [
+                pubc("orders", "api", "local emit"),
+                // One declaration, both roles, one topic.
+                subc("orders", "hub", "local relay"),
+                pubc("orders", "hub", "local relay"),
+                subc("orders", "sink", "local on_order"),
+            ],
+            &literal_only(),
+        );
+        let pairs: Vec<(&str, &str)> = edges
+            .iter()
+            .map(|e| (e.from.member.as_str(), e.to.member.as_str()))
+            .collect();
+        assert!(
+            pairs.contains(&("hub", "sink")),
+            "the relay's PUBLISH side survives the dedup — its subscribe must not \
+             swallow it: {pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("api", "hub")),
+            "the relay's SUBSCRIBE side survives too: {pairs:?}"
         );
     }
 

@@ -119,7 +119,7 @@ use logos_core::federation::broker::{topic_identity, TopicIdentity};
 use logos_core::graph_store::ConfigDefinition;
 use logos_core::model::ArtifactRelation;
 use logos_core::plugin::LanguageRegistry;
-use logos_core::resolve::binding::{placeholder_keys, ConfigLookup};
+use logos_core::resolve::binding::placeholder_keys;
 
 /// The reference workspace, or `None` when none is configured — the same
 /// `LOGOS_REF_WORKSPACE` contract the S-355/S-365 measurements read.
@@ -1386,16 +1386,16 @@ fn the_reference_workspace_reports_its_resolved_broker_sites_before_and_after_th
 /// The flattener is the **shipped** one
 /// ([`source_facts`](logos_core::extract::config::corpus::source_facts)), so the
 /// keys and values here are the ones an index would write.
+///
+/// A plain alias and **not** a newtype, because this is the same concrete type as
+/// `federation::bridge::MemberCorpus` and logos-core already ships
+/// `impl ConfigLookup for` it. A wrapper here would have re-derived that impl by
+/// hand — a hand-mirrored twin of shipped behaviour, which is exactly the drift
+/// this harness exists to avoid. (The sibling newtypes in
+/// `operand_resolvability/configuration_agreement.rs` and `perf_envelope.rs` wrap
+/// `ConfigCorpus` and `Runtime`, foreign shapes with no such impl, so they
+/// genuinely need one.)
 type HarnessCorpus = BTreeMap<String, Vec<ConfigDefinition>>;
-
-impl ConfigLookup for HarnessCorpusLookup<'_> {
-    fn definitions(&self, key: &str, _module: &str) -> Vec<ConfigDefinition> {
-        self.0.get(key).cloned().unwrap_or_default()
-    }
-}
-
-/// A newtype only because the blanket lookup impl must live in this crate.
-struct HarnessCorpusLookup<'a>(&'a HarnessCorpus);
 
 /// One captured broker site, with the topic identity (or identities) the shipped
 /// rule gives it against its own member's committed configuration.
@@ -1612,9 +1612,8 @@ fn the_reference_workspace_reports_its_topic_identities_before_and_after_the_com
     for (member, member_sites) in &sites {
         let corpus = member_corpus(&root, member);
         corpus_keys.insert(member.clone(), corpus.len());
-        let lookup = HarnessCorpusLookup(&corpus);
         for (is_publish, symbol, operand) in member_sites {
-            let (topics, admitted) = match topic_identity(operand, &lookup) {
+            let (topics, admitted) = match topic_identity(operand, &corpus) {
                 TopicIdentity::Committed { topics, .. } => (topics, true),
                 // A literal keys as written, and so does an operand the corpus
                 // proves nothing for — [FR-WS-10]'s rule in force, preserved by
@@ -1764,6 +1763,54 @@ fn the_reference_workspace_reports_its_topic_identities_before_and_after_the_com
          is not the corpus this measurement is about",
         root.display(),
     );
+
+    // (0b) THE CAPABILITY ACTUALLY RAN, asserted as a DIRECTION and never as a
+    //      number — the census-figure-as-acceptance-floor trap [S-397] recorded.
+    //
+    //      It exists because every other assertion here is invariant under the
+    //      whole story being switched off: with `topic_identity` stubbed to
+    //      `Literal`, `after == before`, `gained` and `lost` are empty, nothing is
+    //      admitted and therefore nothing can be fabricated — and this test
+    //      reported green while printing `13 -> 13`. Demonstrated, not supposed.
+    assert!(
+        !gained.is_empty(),
+        "the committed-value identity bound no cross-member pair this estate's \
+         stored operands did not already bind ({} -> {} edges over {} keyed \
+         site(s)). Either the capability regressed, or this corpus stopped \
+         committing its topic keys — the per-topic table above says which",
+        before.len(),
+        after.len(),
+        sites_total,
+    );
+
+    // (0c) The QUALITATIVE claim [ADR-64]'s 2026-09-15 amendment makes, which is
+    //      the reason this story exists: the pair it names as reproducing the
+    //      spelling gap meets AFTER and did not meet BEFORE. A property of the
+    //      rule rather than of this estate's size, so it is an assertion and not
+    //      a floor — though it is still estate-shaped, which is why it names the
+    //      members rather than counting them.
+    let names = |set: &BTreeSet<Edge>, topic: &str, from: &str, to: &str| {
+        set.iter().any(|e| {
+            e.topic == topic && e.from_member == from && e.to_member == to
+        })
+    };
+    const GAP_TOPIC: &str = "archive-volume-counters";
+    const GAP_FROM: &str = "reporting-archive-data-downsampler";
+    const GAP_TO: &str = "reporting-archive-data-projector";
+    if by_member.contains_key(GAP_FROM) && by_member.contains_key(GAP_TO) {
+        assert!(
+            names(&after, GAP_TOPIC, GAP_FROM, GAP_TO),
+            "the pair ADR-64's 2026-09-15 amendment names as the reproduction of \
+             the canonical/verbatim spelling gap does not meet on `{GAP_TOPIC}` \
+             even after the committed value is read"
+        );
+        assert!(
+            !names(&before, GAP_TOPIC, GAP_FROM, GAP_TO),
+            "that pair meets on the stored operand's exact bytes, so this corpus no \
+             longer reproduces the gap the amendment recorded — re-record the \
+             finding rather than relaxing this assertion"
+        );
+    }
 
     // (1) NEVER FABRICATE ([NFR-RA-05]): no admitted identity is itself a
     //     placeholder, and none is blank. A `${…}` identity on the AFTER side
