@@ -1318,16 +1318,32 @@ CREATE INDEX idx_unresolved_refs_resolved ON unresolved_refs(resolved);
 /// [ADR-20], [FR-SY-07]).
 ///
 /// A single additive table holding small, durable per-project facts as
-/// `(key, value)` text pairs. Its first (and currently only) inhabitant is the
-/// `config_fingerprint` row: a deterministic hash of the admission-relevant
-/// configuration ([`crate::config::Config::admission_fingerprint`]) recorded at
-/// the last full reconciliation, so the pipeline can detect that the admission
-/// policy has changed and purge now-unadmitted files exactly once per change.
-/// This is the durable record the in-memory `last_full_index_at` could never be
-/// ([CR-004] §3.1). Forward-only and standalone: no data migration, no rebuild,
-/// no FK to any existing table.
+/// `(key, value)` text pairs. Its first inhabitant is the `config_fingerprint`
+/// row: a deterministic hash of the admission-relevant configuration
+/// ([`crate::config::Config::admission_fingerprint`]) recorded at the last full
+/// reconciliation, so the pipeline can detect that the admission policy has
+/// changed and purge now-unadmitted files exactly once per change ([CR-004]
+/// §3.1). Forward-only and standalone: no data migration, no rebuild, no FK to
+/// any existing table.
+///
+/// # The table later stories reach for
+/// Every small **scalar** per-project fact added since has landed here as another
+/// row rather than as a column of its own — the monotonic graph revision
+/// ([`super::GRAPH_REVISION_KEY`], CR-027), the index-time LOC roll-up
+/// ([`crate::perf::INDEXED_LOC_KEY`], [`crate::perf::TEST_LOC_KEY`], CR-085) and
+/// the last-full-index stamp ([`super::LAST_FULL_INDEX_AT_KEY`], [CR-130]).
+/// Structured facts still earn their own tables — migration 19's `config_sources`
+/// and `config_values` are not rows here.
+///
+/// The stamp is the one [CR-004] §3.1 named in passing, as the in-memory value
+/// this table could not yet replace: `status` read an in-process `AtomicU64` that
+/// only the indexing process could ever have set, so a read-only `status`
+/// reported a fully indexed project as never indexed. Nothing about the table
+/// changed to admit it — a new key was enough, which is the property the kv shape
+/// was chosen for.
 ///
 /// [CR-004]: ../../../../docs/requests/CR-004-config-change-reconciliation.md
+/// [CR-130]: ../../../../docs/requests/CR-130-a-readout-names-a-remediation-that-cannot-apply.md
 /// [ADR-20]: ../../../../docs/specs/architecture/decisions/ADR-20.md
 /// [FR-SY-07]: ../../../../docs/specs/requirements/FR-SY-07.md
 const MIGRATION_15: &str = "\

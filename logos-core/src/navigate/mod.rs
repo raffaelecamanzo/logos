@@ -1774,22 +1774,43 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
         (a, b) => a.or(b),
     };
 
-    // The physical-LOC metadata (NFR-PE-09 advisory + the CR-085/FR-IX-12
-    // source/test roll-up): read BOTH keys in one store access so `status` can
-    // never straddle two index generations. A full index commits both keys in a
-    // single write batch (`record_loc_rollup`); two separate reads could land one
-    // key before that commit and the other after, mixing generations and breaking
-    // the `total = source + test` invariant. One `submit_read` on one connection
-    // closes that window. A pure read — `status` never writes on read (ADR-28).
+    // The durable index-time metadata: the NFR-PE-09 advisory and the
+    // CR-085/FR-IX-12 source/test roll-up, plus the CR-130/FR-NV-07
+    // last-full-index stamp.
+    //
+    // Read the ROLL-UP'S TWO KEYS in one store access so `status` can never
+    // straddle two index generations: a full index commits both in a single write
+    // batch (`record_loc_rollup`), so two separate reads could land one key before
+    // that commit and the other after, mixing generations and breaking the
+    // `total = source + test` invariant. One `submit_read` on one connection
+    // closes that window.
+    //
+    // The stamp joins the same read for cost, NOT for atomicity — it has no
+    // straddle guarantee to offer. `record_full_index_at` commits its own batch,
+    // exactly as `advance_graph_revision` does, so the stamp can lag the counts by
+    // one batch while an index is mid-flight. Reading it here rather than in a
+    // second `submit_read` simply saves a connection round-trip.
+    //
+    // A pure read either way — `status` never writes on read (ADR-28).
     let mut warnings = Vec::new();
-    let (indexed_loc, test_loc) = runtime.submit_read(|store| {
+    let (indexed_loc, test_loc, full_index_at) = runtime.submit_read(|store| {
         Ok((
             store.project_metadata(crate::perf::INDEXED_LOC_KEY)?,
             store.project_metadata(crate::perf::TEST_LOC_KEY)?,
+            store.project_metadata(crate::graph_store::LAST_FULL_INDEX_AT_KEY)?,
         ))
     })?;
     let indexed_loc = indexed_loc.and_then(|raw| raw.parse::<u64>().ok());
     let test_loc = test_loc.and_then(|raw| raw.parse::<u64>().ok());
+    // CR-130 / FR-NV-07: the last full index, from the durable record rather than
+    // an in-process clock the reporting process may never have set. Parsed and
+    // re-rendered rather than passed through, so a torn or non-numeric value
+    // reads as absent instead of reaching the read-model as a fabricated
+    // timestamp; `0` is rejected for the same reason (NFR-CC-04, NFR-RA-05).
+    let last_full_index_at = full_index_at
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(|secs| secs.to_string());
 
     // The beyond-envelope advisory (NFR-PE-09): `index` recorded the LOC it
     // ingested; if the repo materially exceeds the performance envelope, repeat
@@ -1855,7 +1876,7 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
         edge_count: counts.edges,
         db_path: db_path.display().to_string(),
         db_size_bytes: size,
-        last_full_index_at: engine.last_full_index_at().map(|secs| secs.to_string()),
+        last_full_index_at,
         last_sync_at: mtime.map(|secs| secs.to_string()),
         graph_revision,
         refs_total: counts.refs_total,

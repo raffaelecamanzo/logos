@@ -101,6 +101,36 @@ pub struct ConfigDefinition {
 /// [FR-SY-09]: ../../../docs/specs/requirements/FR-SY-09.md
 pub const GRAPH_REVISION_KEY: &str = "graph_revision";
 
+/// The `project_metadata` key under which the wall-clock time of the last full
+/// [`index`](crate::pipeline::index) that built a graph is stored ([CR-130],
+/// [FR-NV-07], [FR-IX-12]).
+///
+/// Unix seconds, decimal, as text. The durable successor to the in-process
+/// `AtomicU64` the [`status`](crate::Engine::status) read-model used to read:
+/// that counter could only ever be set by the process that did the indexing, so
+/// every read-only `status` / `workspace status` reported `null` on a fully
+/// indexed project ([CR-130] §2.2). Written by the index pipeline beside the
+/// [FR-IX-12] LOC roll-up (see [`crate::perf::INDEXED_LOC_KEY`]) and read back by
+/// `status` — a pure read, never a write on read ([ADR-28]).
+///
+/// # Presence means "a graph was built", not "`index` ran"
+/// The row is written when a full index persists at least one file, and removed
+/// when a full index leaves the store empty; a full index that persists nothing
+/// over a graph that still stands leaves the row alone (`record_full_index_at` in
+/// [`crate::pipeline`] carries the three cases). Presence therefore agrees with
+/// [`StatusInfo::indexed`](crate::models::navigation::StatusInfo::indexed)
+/// rather than with the bare fact that the command ran: a member whose walk
+/// admits nothing reports an empty graph, and dating an empty graph would be the
+/// same class of dishonest readout [CR-130] exists to remove ([NFR-CC-04]).
+/// Absent is reported as absent — never `0`, never fabricated.
+///
+/// [CR-130]: ../../../docs/requests/CR-130-a-readout-names-a-remediation-that-cannot-apply.md
+/// [FR-NV-07]: ../../../docs/specs/requirements/FR-NV-07.md
+/// [FR-IX-12]: ../../../docs/specs/requirements/FR-IX-12.md
+/// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+pub const LAST_FULL_INDEX_AT_KEY: &str = "last_full_index_at";
+
 /// A row read back from the `nodes` table, mapped to model types.
 ///
 /// `kind` is recovered via [`NodeKind::try_from`] and `symbol` via
@@ -3080,6 +3110,32 @@ impl BatchWriter<'_> {
                 rusqlite::params![key, value],
             )
             .context("recording project_metadata value")?;
+        Ok(())
+    }
+
+    /// Remove a durable `project_metadata` key, if present ([CR-130]).
+    ///
+    /// The deleting twin of [`set_project_metadata`](Self::set_project_metadata),
+    /// for a fact that can stop being true of a graph. Its one caller is the
+    /// index pipeline's [`LAST_FULL_INDEX_AT_KEY`] stamp: a full index that
+    /// leaves the store empty has no graph to date, and a timestamp left behind
+    /// would date a graph that no longer exists — the readout-honesty failure
+    /// [CR-130] removes ([NFR-CC-04]). Idempotent: deleting an absent key is a
+    /// no-op, not an error, which is what lets that caller clear unconditionally
+    /// without first probing for the row.
+    ///
+    /// [CR-130]: ../../../docs/requests/CR-130-a-readout-names-a-remediation-that-cannot-apply.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    ///
+    /// # Errors
+    /// Returns an error on I/O failure.
+    pub fn clear_project_metadata(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM project_metadata WHERE key = ?1",
+                rusqlite::params![key],
+            )
+            .context("clearing project_metadata value")?;
         Ok(())
     }
 

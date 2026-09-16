@@ -74,6 +74,7 @@ use crate::config::{self, BindingPolicy, Config, ConfigGlobs, DocGlobs};
 use crate::extract::{extract_files, Facts, FileInput, SymbolContext};
 use crate::graph_store::{
     BatchWriter, NewConfigSource, NewNode, NewUnresolvedRef, CONFIG_FINGERPRINT_KEY,
+    LAST_FULL_INDEX_AT_KEY,
 };
 use crate::model::{EdgeKind, NodeId, RefForm};
 use crate::models::pipeline::{
@@ -252,6 +253,12 @@ pub fn index(
     if let Some(advisory) = crate::perf::envelope_advisory(indexed_loc) {
         warnings.push(advisory);
     }
+
+    // Date the graph this index just built (CR-130, FR-NV-07): a durable
+    // `project_metadata` row, so a later read-only `status` — which does no
+    // indexing and therefore could never set an in-process clock — still reports
+    // when the project was last fully indexed.
+    record_full_index_at(runtime, outcome.files)?;
 
     // FR-SY-09 / ADR-32: a completed index always rebuilds the graph, so it
     // always advances the persisted revision — done last (after every pass
@@ -1067,6 +1074,82 @@ fn record_loc_rollup(runtime: &Runtime, indexed_loc: u64, test_loc: u64) -> Resu
         w.set_project_metadata(crate::perf::INDEXED_LOC_KEY, &total)?;
         w.set_project_metadata(crate::perf::TEST_LOC_KEY, &test)
     })
+}
+
+/// Record the wall-clock completion time of this full index under
+/// [`LAST_FULL_INDEX_AT_KEY`], so `status` can report it from **any** process
+/// ([CR-130], [FR-NV-07]).
+///
+/// `persisted` is the number of files this index actually loaded and stored
+/// ([`ExtractOutcome::files`]). The stamp dates the **graph**, not the command,
+/// so the three cases are:
+///
+/// - `persisted > 0` — this index built a graph, so the row is written (unix
+///   seconds).
+/// - `persisted == 0` **and the store is empty** — the ordinary zero-admission
+///   case: the walk admitted nothing, the always-purge reconcile above removed
+///   whatever was there, and `status` reports the project `indexed: false`. Any
+///   earlier row is **removed**, because a timestamp beside `indexed: false`
+///   would date a graph that does not exist — the readout dishonesty [CR-130] is
+///   removing, not a second instance of it ([NFR-CC-04], [FR-EH-04]). A
+///   source-less workspace member reports the field absent for this reason.
+/// - `persisted == 0` **but a graph survives** — every admitted candidate failed
+///   to load (unreadable or non-UTF-8; see [`load_files`]), so nothing was
+///   re-stored, but `purge_unadmitted` is keyed on the *discovery* set and those
+///   files are still admitted, leaving the previous graph intact. The row is left
+///   **untouched**: that graph really was built, at the time the row records, and
+///   deleting it would report a populated graph as never indexed — precisely the
+///   [CR-130] symptom. Costs one extra read, and only on this path.
+///
+/// A clock that cannot be read (a pre-epoch system time) writes nothing rather
+/// than storing `0`: absent is an honest empty state, `0` would be a fabricated
+/// timestamp at 1970-01-01 ([FR-EH-04], [NFR-RA-05]).
+///
+/// [CR-130]: ../../../docs/requests/CR-130-a-readout-names-a-remediation-that-cannot-apply.md
+/// [FR-NV-07]: ../../../docs/specs/requirements/FR-NV-07.md
+/// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn record_full_index_at(runtime: &Runtime, persisted: usize) -> Result<()> {
+    if persisted == 0 {
+        // Which of the two zero-persist cases is this? Ask the store, using the
+        // same predicate `navigate::status` derives `indexed` from, so the row
+        // and the readout can never disagree.
+        let counts = runtime.submit_read(|store| store.counts())?;
+        if counts.files > 0 || counts.nodes > 0 {
+            return Ok(());
+        }
+        return runtime.submit_write(move |w| w.clear_project_metadata(LAST_FULL_INDEX_AT_KEY));
+    }
+    let Some(now) = unix_seconds_now() else {
+        tracing::warn!(
+            "system clock is before the unix epoch; leaving last_full_index_at absent \
+             rather than recording a fabricated timestamp (NFR-RA-05)"
+        );
+        return Ok(());
+    };
+    let now = now.to_string();
+    runtime.submit_write(move |w| w.set_project_metadata(LAST_FULL_INDEX_AT_KEY, &now))
+}
+
+/// Wall-clock now as whole unix seconds, or `None` when the system clock sits
+/// before the epoch — the one reading [`record_full_index_at`] refuses to store.
+///
+/// The crate's other unix-seconds helpers (`observability::stats::now_unix`,
+/// `observability::layer::now_unix`, `governance::unix_now`) return `i64` and
+/// `unwrap_or(0)`, which is right for the bookkeeping columns they feed: nothing
+/// renders them. This one is deliberately **not** that shape — its value reaches
+/// a user-facing read-model, where a `0` is not a missing reading but a
+/// fabricated 1970 timestamp, which [FR-NV-07] forbids. Hence `Option`, and
+/// hence a different name from its siblings rather than a same-named twin with
+/// different semantics.
+///
+/// [FR-NV-07]: ../../../docs/specs/requirements/FR-NV-07.md
+fn unix_seconds_now() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 /// Advance the persisted monotonic graph revision after a completed `index` or a

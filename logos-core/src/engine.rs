@@ -81,11 +81,6 @@ pub struct Engine {
     /// **zero** extra reads — the per-call freshness contract stays
     /// "never reconcile" ([FR-RC-05], [ADR-11]).
     nav_prologue_done: AtomicBool,
-    /// Unix-seconds timestamp of the last **full index** completed by this
-    /// engine (`0` = none this process) — the `last_full_index_at` half of
-    /// the [FR-NV-07] status read-model. In-process only until the persisted
-    /// `project_metadata` column lands with a later story.
-    last_full_index_at: AtomicU64,
     /// The governance engine's in-process state ([S-020]): the compiled
     /// `rules.toml` cache (globs compiled once per content change, [FR-GV-01])
     /// and the last `scan` parameters `rescan` replays.
@@ -240,7 +235,6 @@ impl Engine {
             hydration: HydrationCache::default(),
             sync_stamp: AtomicU64::new(SyncStamp::INITIAL.0),
             nav_prologue_done: AtomicBool::new(false),
-            last_full_index_at: AtomicU64::new(0),
             governance: crate::governance::GovernanceState::default(),
             native_wiki: std::sync::Mutex::new(None),
         }
@@ -503,7 +497,6 @@ impl Engine {
             hydration: HydrationCache::new(hydration),
             sync_stamp: AtomicU64::new(SyncStamp::INITIAL.0),
             nav_prologue_done: AtomicBool::new(false),
-            last_full_index_at: AtomicU64::new(0),
             governance: crate::governance::GovernanceState::default(),
             native_wiki: std::sync::Mutex::new(None),
         };
@@ -684,7 +677,6 @@ impl Engine {
             hydration: HydrationCache::new(HydrationConfig::default()),
             sync_stamp: AtomicU64::new(SyncStamp::INITIAL.0),
             nav_prologue_done: AtomicBool::new(false),
-            last_full_index_at: AtomicU64::new(0),
             governance: crate::governance::GovernanceState::default(),
             native_wiki: std::sync::Mutex::new(None),
         };
@@ -3070,12 +3062,11 @@ impl Engine {
         let (runtime, registry, config) = self.pipeline_ctx()?;
         let outcome = crate::pipeline::reconcile(runtime, registry, &self.root, &config)?;
         // The reconcile may have written; invalidate hydrated views so the
-        // score sees the fresh graph (ADR-04). A full-index degrade also
-        // stamps the FR-NV-07 clock.
+        // score sees the fresh graph (ADR-04). The FR-NV-07 last-full-index
+        // stamp is not touched here: a full-index degrade reaches it through
+        // `pipeline::index`, which writes the durable `project_metadata` row
+        // itself (CR-130).
         self.advance_sync_stamp();
-        if outcome.full_index {
-            self.record_full_index();
-        }
         Ok(outcome)
     }
 
@@ -3205,7 +3196,6 @@ impl Engine {
         // Invalidate the hydration cache so the next hydrate() reflects the new
         // graph state ([ADR-04], [ADR-05], [S-009]).
         self.advance_sync_stamp();
-        self.record_full_index();
         // FR-WS-02 root-scope note (CR-119): a root carrying a workspace
         // manifest is one project among N — `index` here builds only the root,
         // never the members (BR-44, NFR-PE-06 forbid a member fan-out from this
@@ -3286,7 +3276,6 @@ impl Engine {
         let result = crate::pipeline::ensure_indexed(runtime, registry, &self.root, &config)?;
         if result.is_some() {
             self.advance_sync_stamp();
-            self.record_full_index();
         }
         Ok(result)
     }
@@ -3325,26 +3314,6 @@ impl Engine {
                 "navigation-prologue config-change purge failed; the next governance \
                  reconcile (ADR-11) will catch up: {err:#}"
             ),
-        }
-    }
-
-    /// Stamp the in-process `last_full_index_at` clock ([FR-NV-07]) after a
-    /// completed full index.
-    fn record_full_index(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        self.last_full_index_at.store(now, Ordering::Release);
-    }
-
-    /// Unix-seconds timestamp of the last full index this engine completed,
-    /// or `None` if none ran this process (the persisted column is a later
-    /// story — see the field docs).
-    pub(crate) fn last_full_index_at(&self) -> Option<u64> {
-        match self.last_full_index_at.load(Ordering::Acquire) {
-            0 => None,
-            secs => Some(secs),
         }
     }
 }
