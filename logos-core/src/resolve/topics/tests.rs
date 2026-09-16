@@ -386,3 +386,99 @@ fn the_pass_owns_only_its_own_three_edge_kinds() {
         );
     }
 }
+
+/// [S-410] AC3, on the population [S-408] and [S-409] created: a **resolved**
+/// Kafka Streams site — one whose `stream(…)`/`to(…)` operand was a
+/// `@ConfigurationProperties` accessor and which [S-409] therefore stored as the
+/// canonical `${prefix.key}` placeholder — promotes its `Producer`/`Consumer`
+/// node and its `Publishes`/`Subscribes` edge, exactly as the header and
+/// annotation forms always have.
+///
+/// This pass reads the ledger's `payload` and `target` and nothing else, so it is
+/// deliberately blind to which *form* captured a site; that is precisely the
+/// claim under test, and it is what discharges [S-410] AC3's *"resolved Streams
+/// **or header-form** publish"* with one fixture rather than two: a resolved
+/// header-form publish is byte-identical to the `to(…)` row below — the same
+/// relation, the same canonical `${prefix.key}` target — so a second fixture
+/// would differ only in its variable name. A **refused** Streams site leaves a keyless row and
+/// promotes nothing — the never-fabricate half, re-pinned here on this form
+/// because a fabricated `Topic` named `${…}` is exactly what a careless
+/// placeholder rule would produce ([NFR-RA-05]).
+///
+/// The promoted topic is keyed by the **stored operand**, not by the committed
+/// value: [S-410] moves topic identity to the committed value in the
+/// *federation* join, where the two members' corpora are in scope. This pass is
+/// per-repo and pre-federation, and [FR-WS-11]'s repo-scoped topic identity is
+/// untouched by that story — see the [S-410] implementation notes.
+///
+/// [FR-WS-11]: ../../../../docs/specs/requirements/FR-WS-11.md
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+/// [S-408]: ../../../../docs/planning/journal.md#s-408-a-kafka-streams-topology-link-is-a-broker-publish-or-subscribe-site
+/// [S-409]: ../../../../docs/planning/journal.md#s-409-the-accessor-hop-reaches-the-broker-arm
+/// [S-410]: ../../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+#[test]
+fn a_resolved_streams_site_promotes_its_producer_and_consumer_and_a_refused_one_promotes_nothing() {
+    let to = decl(1, "buildTopology");
+    let stream = decl(2, "readTopology");
+    let refused = decl(3, "dynamicTopology");
+    let desired = promote(
+        &[
+            // `…​.to(kafkaTopics.getArchiveEvents())`, resolved by S-409.
+            publish(&to, "${spring.kafka.topics.archiveevents}", 31),
+            // `builder.stream(kafkaTopics.getArchiveVolumeCounters())`.
+            subscribe(&stream, "${spring.kafka.topics.archivevolumecounters}", 44),
+            // `builder.stream(topicFor(x))` — refused `topic-not-literal`.
+            subscribe(&refused, "", 57),
+        ],
+        &[to.clone(), stream.clone(), refused.clone()],
+    );
+
+    assert_eq!(
+        names_of(&desired, NodeKind::Producer),
+        ["${spring.kafka.topics.archiveevents}"],
+        "the resolved `to(…)` publish promotes a Producer"
+    );
+    assert_eq!(
+        names_of(&desired, NodeKind::Consumer),
+        ["${spring.kafka.topics.archivevolumecounters}"],
+        "the resolved `stream(…)` subscribe promotes a Consumer, and the refused \
+         one promotes nothing"
+    );
+    let producer = only(&desired, NodeKind::Producer);
+    let consumer = only(&desired, NodeKind::Consumer);
+    let topic_symbol = |name: &str| {
+        desired
+            .values()
+            .find(|d| d.kind == NodeKind::Topic && d.name == name)
+            .unwrap_or_else(|| panic!("no Topic named {name}"))
+            .symbol
+            .as_str()
+            .to_string()
+    };
+    let published = topic_symbol("${spring.kafka.topics.archiveevents}");
+    let subscribed = topic_symbol("${spring.kafka.topics.archivevolumecounters}");
+    assert!(
+        producer
+            .edges
+            .iter()
+            .any(|e| matches!(e, DesiredEdge::Publishes(t) if *t == published)),
+        "the Producer carries its Publishes edge: {:?}",
+        producer.edges
+    );
+    assert!(
+        consumer
+            .edges
+            .iter()
+            .any(|e| matches!(e, DesiredEdge::Subscribes(t) if *t == subscribed)),
+        "the Consumer carries its Subscribes edge: {:?}",
+        consumer.edges
+    );
+    assert_eq!(
+        names_of(&desired, NodeKind::Topic),
+        [
+            "${spring.kafka.topics.archiveevents}",
+            "${spring.kafka.topics.archivevolumecounters}"
+        ],
+        "two topics, and no third fabricated from the keyless row"
+    );
+}

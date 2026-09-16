@@ -36,16 +36,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{BridgeNamespace, BridgeRole, MatchDiscipline, NodeKind};
-use std::collections::BTreeMap;
-
-use crate::graph_store::ConfigDefinition;
-use crate::resolve::binding::{placeholder_keys, ConfigLookup, Provenance, Resolver, ValueRefusal};
+use crate::resolve::binding::{Provenance, ResolvedTemplate, Resolver, ValueRefusal};
 use crate::resolve::http_client_call::ClientCallRefusal;
 
 use super::bridge::{
-    bucket_candidates, classify, consumer_portable_key, index_provider, read_members,
-    sort_buckets, BridgeEndpoint, BridgeIntake, MemberContracts, PortableKey, ProviderIndex,
-    Role,
+    bucket_candidates, classify, config_bound_keys, consumer_portable_key, index_provider,
+    member_corpora, read_members, sort_buckets, BridgeEndpoint, BridgeIntake, MemberContracts,
+    MemberCorpus, PortableKey, ProviderIndex, Role,
 };
 use super::registry::{AnswerScope, MemberEngine};
 
@@ -1310,31 +1307,6 @@ where
 {
     let mut providers: ProviderIndex = ProviderIndex::new();
     let mut consumer_refs: Vec<(String, String, crate::model::LogosSymbol)> = Vec::new();
-    // Arm-tagged invocation consumers (HTTP client calls, S-252, and later arms):
-    // `(member, consumer)` pairs read from each member's ledger, classified below
-    // through the same provider index as the contract-surface consumers.
-    let mut inv_consumers: Vec<(String, super::bridge::InvocationRef)> = Vec::new();
-    // Provider-role ledger rows that do not reduce to a portable key. They index no
-    // provider, but they are captured sites and are reported — the broker arm's
-    // recorded `topic-not-literal` refusals arrive here ([CR-107], [NFR-CC-04]).
-    let mut unkeyable_providers: Vec<(String, super::bridge::InvocationRef)> = Vec::new();
-    // Ledger endpoints already filed, so one endpoint is filed once — the collapse
-    // `broker_edges` performs before its own fan-out ([NFR-RA-05]).
-    //
-    // Keyed on `(key, is_provider, member, symbol)`, which is
-    // [`super::broker::broker_edges`]'s own dedup key **including the role**.
-    // Before S-376 this set covered the provider arm only, and the consumer arm
-    // went uncollapsed: a publish endpoint captured twice on one topic (two ledger
-    // rows differing in `form`) produced two bound rows where the bridge emits one
-    // edge per subscriber from *one* publish. That inflated the pooled `bound` —
-    // already wrong, but invisible — and S-376 promoted it into a published
-    // headline, where `resolved_cross_service_edges` would report 2xN against the
-    // bridge's N and break the reconcile-against-`references` contract that field
-    // states ([NFR-RA-05], [CR-118]). The comment below already claimed this tier
-    // applied "the SAME collapse"; it now does.
-    let mut ledger_endpoints: std::collections::HashSet<(PortableKey, bool, String, String)> =
-        std::collections::HashSet::new();
-
     let surfaces = read_members(answer, "contract surface", |e| e.contract_surface());
     // The members that actually contributed — the numerator of the coverage
     // marker below. A member whose engine failed to start or whose surface read
@@ -1355,101 +1327,25 @@ where
                         member: member.clone(),
                         symbol: node.symbol.clone(),
                     },
+                    // A DECLARED endpoint is written in the member's own source
+                    // or spec; no configuration is read for it on any path.
+                    Provenance::Literal,
                 );
             }
         }
     }
     // Arm-tagged ledger refs from each member (HTTP client calls, gRPC stub calls,
-    // broker publishes **and subscribes**) — degrade-don't-abort via the same
-    // `read_members` the bridge uses ([ADR-53]). Read through the **same seam** the
-    // bridge reads (`invocation_refs`, both roles), then split by the arm's own
-    // `bridge_role` — so the coverage tier and the bridge see one ledger, not two.
-    //
-    // Indexing the **provider**-role rows is what keeps this tier honest after S-256
-    // ([FR-WS-11]): a broker subscribe has no contract-surface node behind it, so a
-    // provider index built from `contract_surface` alone contains no broker provider
-    // at all — and every publish, *including the ones the bridge now binds*, would be
-    // reported `no-provider-in-workspace`. The service map would draw the coupling
-    // while the coverage board next to it denied that any provider existed
-    // ([NFR-CC-04]). The bridge's own contract says it: "one classifier, no drift
-    // between 'why did this bind' and 'why didn't this bind'".
-    //
-    // [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
-    // [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    for (member, refs) in read_members(answer, "invocation references", |e| e.invocation_refs()) {
-        for reference in refs {
-            match reference.relation.bridge_role() {
-                Some(BridgeRole::Consumer) => {
-                    // The consumer half of the same collapse. A consumer row that
-                    // does not reduce to a portable key is still a captured site and
-                    // is reported (the tier classifies it below), so an unkeyable row
-                    // bypasses the dedup rather than being dropped here — dropping it
-                    // would lose the refusal the broker arm files.
-                    if let Some(key) =
-                        consumer_portable_key(reference.relation, &reference.target)
-                    {
-                        if !ledger_endpoints.insert((
-                            key,
-                            false,
-                            member.clone(),
-                            reference.symbol.as_str().to_string(),
-                        )) {
-                            continue; // a repeat of this exact endpoint on this key
-                        }
-                    }
-                    inv_consumers.push((member.clone(), reference));
-                }
-                Some(BridgeRole::Provider) => {
-                    // A ledger-only provider (a broker subscribe) keys on exactly the
-                    // string its consumer side keys on, so the two meet in this index
-                    // the same way they meet in the bridge's.
-                    let Some(key) = consumer_portable_key(reference.relation, &reference.target)
-                    else {
-                        // An unkeyable provider contributes no provider — but it is a
-                        // captured site, so it is *reported* rather than dropped. This
-                        // is where the broker arm's recorded refusal (a keyless
-                        // `@KafkaListener(topics = TOPIC)` row) becomes a
-                        // `topic-not-literal` coverage row: the listener side is the
-                        // provider role, so before [CR-107] it fell out of the tier
-                        // here and the loss was invisible ([NFR-CC-04]).
-                        unkeyable_providers.push((member.clone(), reference));
-                        continue;
-                    };
-                    // One endpoint per (key, member, symbol) — the SAME collapse
-                    // [`super::broker::broker_edges`] applies before its fan-out, and
-                    // for the same reason: a ledger can hold two rows for one endpoint
-                    // (they differ in `form`, which is outside the ledger's effective
-                    // identity — `idx_unresolved_refs_identity` over
-                    // `(source_symbol, target, form, kind, COALESCE(payload, ''))`
-                    // since migration 18, so `payload` is *inside* it, unlike what
-                    // this comment claimed before [CR-107] reviewed it), and the
-                    // fan-out treats each as a separate provider. The bridge de-duplicates, so before [CR-118]
-                    // this tier could differ only in a boolean nobody could see. Now
-                    // the set is NAMED and COUNTED, so a duplicate would report "3
-                    // bound providers (fan-out)" beside two bridge edges — a
-                    // fabricated count ([NFR-RA-05]) and exactly the classifier drift
-                    // this module exists to prevent.
-                    if !ledger_endpoints.insert((
-                        key.clone(),
-                        true,
-                        member.clone(),
-                        reference.symbol.as_str().to_string(),
-                    )) {
-                        continue; // a repeat of this exact endpoint on this key
-                    }
-                    index_provider(
-                        &mut providers,
-                        key,
-                        BridgeEndpoint {
-                            member: member.clone(),
-                            symbol: reference.symbol,
-                        },
-                    );
-                }
-                None => {} // not an invocation arm — not this tier's business
-            }
-        }
-    }
+    // broker publishes **and subscribes**) — read through the **same seam** the
+    // bridge reads (`invocation_refs`, both roles) and split by the arm's own
+    // `bridge_role`, so the coverage tier and the bridge see one ledger, not two.
+    // [`split_ledger_refs`] does the walk and says why each half is shaped as it
+    // is; it extends `providers` with the ledger-only ones.
+    let LedgerSplit {
+        consumers: inv_consumers,
+        unkeyable_providers,
+        corpora,
+    } = split_ledger_refs(answer, &mut providers);
+    let no_corpus = MemberCorpus::new();
 
     sort_buckets(&mut providers);
 
@@ -1498,13 +1394,6 @@ where
         }
     }
 
-    // The committed configuration each member's configuration-bound references
-    // need, read ONCE per member over the keys those references actually name
-    // (S-382). A member with no such reference is not read at all; a member whose
-    // read fails contributes an empty corpus, so its references refuse as
-    // `config-key-missing` rather than aborting the workspace ([ADR-53]).
-    let corpora = member_corpora(answer, &inv_consumers);
-
     // Classify the arm-tagged invocation consumers against the same provider index
     // (S-252 HTTP, S-253 gRPC, S-254/S-256 broker). A stored consumer target
     // normalizes by construction (the arm's normalizer refused the rest before the
@@ -1519,25 +1408,43 @@ where
     // it under `path-not-composed` — a reason that means *the template would not
     // normalize*, which is exactly what is not yet known about it.
     for (member, consumer) in inv_consumers {
+        let corpus = corpora.get(&member).unwrap_or(&no_corpus);
+        // **The broker arm first, because its rule is not the HTTP arm's.**
+        //
+        // Until [S-410] this tier resolved the HTTP arm alone, and the comment
+        // here named [ADR-64]'s own boundary as the reason — *"this decision does
+        // not resolve broker topics against configuration, and must not be read
+        // as doing so"*. That boundary was narrowed by [ADR-64]'s 2026-09-15
+        // amendment and lifted, for the accessor-operand population, by
+        // [FR-WS-10]'s re-proposed committed-value criterion.
+        //
+        // What did **not** move is what happens when the corpus proves nothing.
+        // An HTTP row whose keys refuse is reported unbound; a broker one keeps
+        // its **placeholder-as-written** key, because [FR-WS-10]'s rule in force
+        // says a placeholder is a literal like any other and the re-proposed
+        // criterion preserves it in as many words. So the broker arm gets its own
+        // recorder rather than a flag on the HTTP one — the two reach the same
+        // `tier` over the same provider index, and differ only where the
+        // requirements differ.
+        if consumer.relation.bridge_namespace() == Some(BridgeNamespace::BrokerTopic) {
+            let from =
+                BridgeEndpoint { member: member.clone(), symbol: consumer.symbol.clone() };
+            record_broker(&mut tally, &providers, from, &consumer, corpus);
+            continue;
+        }
         // A configuration-bound target: resolve it, then classify every
         // composition its committed profiles prove.
-        //
-        // **The HTTP arm only, and that is [ADR-64]'s own boundary rather than a
-        // scoping convenience.** The decision states it outright: *"This decision
-        // does not resolve broker topics against configuration, and must not be
-        // read as doing so."* A broker topic literal is keyed by its own text
-        // exactly as written and **a placeholder is a literal like any other**
-        // ([FR-WS-10]) — `"${spring.kafka.topics.orders}"` is a topic identity,
-        // and resolving it here would silently revive the canonical-topic-identity
-        // criterion [FR-WS-10] WITHDREW on measurement. The mechanism generalises
-        // cleanly and the temptation is obvious, which is exactly why the guard is
-        // `config_bound_keys` — one predicate, shared with the corpus read, and
-        // not a comment.
         if let Some(keys) = config_bound_keys(&consumer) {
-            let empty = BTreeMap::new();
-            let corpus = corpora.get(&member).unwrap_or(&empty);
             let from = BridgeEndpoint { member: member.clone(), symbol: consumer.symbol.clone() };
-            record_config_bound(&mut tally, &providers, from, &consumer, &keys, corpus);
+            let resolved = Resolver { corpus, module: "" }
+                .resolve_template(&consumer.target)
+                // `config_bound_keys` already said the target carries a
+                // placeholder, so `None` here is unreachable; it is mapped to the
+                // same refusal the empty corpus produces rather than unwrapped,
+                // because a panic in a read-model is never the right answer to a
+                // disagreement between two scans.
+                .unwrap_or(Err(ValueRefusal::MissingKey));
+            record_config_bound(&mut tally, &providers, from, &consumer, &keys, resolved);
             continue;
         }
 
@@ -1621,136 +1528,19 @@ where
     tally.finish(members_read, answer.registry().members().len())
 }
 
-/// A member's committed configuration, as the coverage tier reads it: canonical
-/// key → every definition of it (S-382, [FR-WS-19]).
-type MemberCorpus = BTreeMap<String, Vec<ConfigDefinition>>;
-
-/// The configuration keys a reference names, or [`None`] if it names none —
-/// **the single predicate for "is this a configuration-bound reference?"**
-/// (S-382, [ADR-64]).
-///
-/// One helper, two callers, because the two used to ask the question separately
-/// and had already drifted: the classification loop tested the arm's namespace
-/// and [`member_corpora`] did not, so a member whose only placeholders were
-/// **broker topics** had its store opened to read a corpus that was then never
-/// consulted — defeating the [NFR-PE-10] economy `member_corpora`'s own doc
-/// claims, and doing it in the one place [ADR-64]'s broker carve-out was
-/// supposed to hold.
-///
-/// The arm test is on the **relation**, not on its namespace. The guard admits a
-/// site and the body then classifies it as an HTTP client call, so asking about
-/// the namespace and answering about the relation is one drift away from filing
-/// a second Http-namespace arm under this one's discipline.
-///
-/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
-/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
-fn config_bound_keys(reference: &super::bridge::InvocationRef) -> Option<Vec<String>> {
-    (reference.relation == crate::model::ArtifactRelation::HttpClientCall)
-        .then(|| placeholder_keys(&reference.target))
-        .flatten()
-}
-
-impl ConfigLookup for MemberCorpus {
-    /// `module` is ignored, and the reason is [ADR-64]'s rather than a
-    /// simplification: this map IS one member's own store, so the member is the
-    /// reading scope already. A narrower one would need the build-module
-    /// partition, which a single member's store does not carry — see
-    /// [`ConfigLookup::definitions`]. The resolver below passes `""` to match.
-    ///
-    /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
-    fn definitions(&self, key: &str, _module: &str) -> Vec<ConfigDefinition> {
-        self.get(key).cloned().unwrap_or_default()
-    }
-}
-
-/// Read, per member, the committed definitions of every configuration key its own
-/// invocation references name (S-382, [ADR-64]).
-///
-/// **Scoped to the member, which is the whole of the committed-evidence line's
-/// second part.** [ADR-64] admits a value that is *within reach of the reading
-/// module*, so a key is looked up in the member that reads it and nowhere else: a
-/// workspace-wide lookup would let one service's `application.yml` supply
-/// another's base URL, which is a search of the estate rather than a name lookup.
-///
-/// One read per member holding at least one such reference, over that member's
-/// whole key set — never one read per call site. A member whose read fails is
-/// **absent** from the map and its references then refuse as
-/// `config-key-missing`: degrade-don't-abort, exactly as every other per-member
-/// read in this tier ([ADR-53]).
-///
-/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
-/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
-/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
-fn member_corpora<E>(
-    answer: &AnswerScope<'_, E>,
-    consumers: &[(String, super::bridge::InvocationRef)],
-) -> BTreeMap<String, MemberCorpus>
-where
-    E: MemberEngine + MemberContracts,
-{
-    let mut wanted: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (member, consumer) in consumers {
-        let Some(keys) = config_bound_keys(consumer) else {
-            continue;
-        };
-        let entry = wanted.entry(member.clone()).or_default();
-        for key in keys {
-            if !entry.contains(&key) {
-                entry.push(key);
-            }
-        }
-    }
-    let mut out = BTreeMap::new();
-    // Only the members that actually name a key are opened. The scope's
-    // `fan_out` is deliberately NOT used: it reaches every member of the
-    // workspace, and on an 84-member estate where one service configures its
-    // base URL that would open 83 stores to read nothing ([NFR-PE-10]).
-    //
-    // Every member reached here already opened for this answer's invocation-refs
-    // walk — a member that failed to open contributes no consumer — so this can
-    // never add an attempt for a *broken* member, which is what the
-    // once-per-answer guarantee ([FR-WS-16] AC5) is about.
-    //
-    // It is NOT, however, always a resident hit, and an earlier wording here
-    // said it was. `engine_for` bypasses `AnswerScope::open_for_walk` and goes
-    // straight to admission, which evicts to `max_resident_members()` before
-    // every build; that budget is derived from the host's descriptor limit and
-    // is routinely far below an 84-member roster. A member that named a key
-    // early in the roster has therefore usually been evicted by the time this
-    // runs, and is rebuilt — a real engine start, counted in `engine_starts()`
-    // and `reconstructions()`. The cost is bounded (one rebuild per member that
-    // names a key, not per row) and correctly ledgered, but it is a cost, and
-    // S-397 T1 is what moved this path from dormant to live: before that hop the
-    // estate emitted zero `config-bound` rows, so `wanted` was always empty.
-    // `tests/workspace_connection_budget.rs` cannot see it either — its fixture
-    // never indexes, so `wanted` is empty there too and the `engine_starts()`
-    // equality it pins against `WALKS_PER_STATUS` omits this term. Recorded for
-    // the sprint-68 review rather than silently re-justified.
-    for (member, keys) in wanted {
-        match answer
-            .registry()
-            .engine_for(&member)
-            .and_then(|e| e.config_definitions(&keys))
-        {
-            Ok(corpus) => {
-                out.insert(member, corpus);
-            }
-            Err(err) => tracing::warn!(
-                member = %member,
-                "reading a workspace member's configuration definitions failed; \
-                 its configuration-bound references refuse rather than guess: {err:#}"
-            ),
-        }
-    }
-    out
-}
-
-/// Classify one **configuration-bound** invocation reference (S-382, [ADR-64],
-/// [FR-WS-19], [NFR-CC-04]).
+/// Classify one **configuration-bound HTTP** invocation reference (S-382,
+/// [ADR-64], [FR-WS-19], [NFR-CC-04]).
 ///
 /// The row is bound iff *some* composition its committed profiles prove names a
 /// provider; it carries `config-bound` provenance either way, so a reader can
 /// always name the keys, the defining sources and the profile sets behind it.
+///
+/// `resolved` is the caller's already-taken [`Resolver::resolve_template`]
+/// outcome, so the operand is resolved once per row rather than here and again
+/// in whatever decided to call this. The broker arm has its own recorder,
+/// [`record_broker`], for the reasons stated there.
+///
+/// [`Resolver::resolve_template`]: crate::resolve::binding::Resolver::resolve_template
 ///
 /// **One row per reference, not one per profile.** A call site is one site
 /// however many overlays its key has, and emitting a row per profile would
@@ -1770,7 +1560,11 @@ where
 ///   portable key — the estate's own dominant idiom, since
 ///   `base-url: https://orders:8080` composes an absolute URL and `route_key`
 ///   takes only a rooted path. That is the HTTP arm's own refusal, so it is
-///   reported under the arm's own word via [`unkeyable_reason`]. Filing it as
+///   reported under the arm's own word — via `composed_refusal`, the arm's rule
+///   for a template composed *after* the ledger, and deliberately NOT via
+///   [`unkeyable_reason`]'s stored-target convention; the branch below says why.
+///   (This paragraph named `unkeyable_reason` until 2026-09-16, contradicting the
+///   comment on the branch it describes.) Filing it as
 ///   `no-provider-in-workspace` moved the site **out of** the
 ///   `spec_conformance_ratio` and `egress_resolution` denominators ([ADR-53]
 ///   holds that bucket outside them), so a site that used to read `0 of 1 egress
@@ -1792,18 +1586,9 @@ fn record_config_bound(
     from: BridgeEndpoint,
     consumer: &super::bridge::InvocationRef,
     keys: &[String],
-    corpus: &MemberCorpus,
+    resolved: Result<ResolvedTemplate, ValueRefusal>,
 ) {
     let relation = arm_relation(consumer.relation);
-    let resolver = Resolver { corpus, module: "" };
-    let resolved = match resolver.resolve_template(&consumer.target) {
-        // `config_bound_keys` already said the target carries a placeholder, so
-        // `None` here is unreachable; it is mapped to the same refusal the empty
-        // corpus produces rather than unwrapped, because a panic in a read-model
-        // is never the right answer to a disagreement between two scans.
-        None => Err(ValueRefusal::MissingKey),
-        Some(outcome) => outcome,
-    };
     let resolved = match resolved {
         Ok(resolved) => resolved,
         Err(refusal) => {
@@ -1849,24 +1634,14 @@ fn record_config_bound(
     // Failing a bound one, the first classification stands, and "first" is
     // deterministic because `candidates` is ordered by the composed template
     // ([NFR-RA-06]).
-    let mut keyed = false;
-    let mut classified = resolved.candidates.iter().filter_map(|candidate| {
-        let key = consumer_portable_key(consumer.relation, &candidate.template)?;
-        keyed = true;
-        tier(&key, &from.member, providers)
-    });
-    let first = classified.next();
-    let decided = match first {
-        Some((CoverageState::Bound, evidence)) => Some((CoverageState::Bound, evidence)),
-        first => classified
-            .find(|(state, _)| matches!(state, CoverageState::Bound))
-            .or(first),
-    };
-    // `classified` is lazy, so `keyed` is only complete once it is exhausted —
-    // `decided` above stops at the first bound candidate. Draining the rest
-    // costs a `route_key` per remaining composition and is what makes the
-    // keyed/unkeyed distinction below true rather than approximately true.
-    classified.for_each(drop);
+    let (decided, keyed) = decide_over_candidates(
+        resolved
+            .candidates
+            .iter()
+            .map(|candidate| consumer_portable_key(consumer.relation, &candidate.template)),
+        &from.member,
+        providers,
+    );
 
     match decided {
         Some((state, evidence)) => tally.record(relation, from, state, provenance(evidence)),
@@ -1895,6 +1670,392 @@ fn record_config_bound(
                         crate::resolve::http_client_call::composed_refusal(&c.template)
                     })
                     .map_or(UnboundReason::PathNotComposed, UnboundReason::from),
+            },
+            provenance(ProviderEvidence::Unnamed),
+        ),
+    }
+}
+
+/// Decide **one** coverage row over the several candidate keys a single site can
+/// reduce to, and say whether any of them keyed at all.
+///
+/// One site is one row however many keys it names — the rule
+/// [`record_config_bound`] states as *"one row per reference, not one per
+/// profile"* — so the candidates are reduced here rather than tallied. Shared by
+/// the HTTP configuration-bound recorder and the broker one ([S-410]) because
+/// the reduction is the same in both and a hand-mirrored second copy is exactly
+/// how the two would drift.
+///
+/// `candidates` yields `None` for a composition that does not reduce to a
+/// portable key; the returned flag is `true` iff at least one yielded `Some`.
+///
+/// A **bound** candidate decides the row wherever it sits in the order. Taking
+/// the first candidate that merely *classifies* would make a profile-divergent
+/// site bind or not bind by which overlay happened to sort first — the
+/// default-profile guess [ADR-64] refuses, wearing a different hat — and on the
+/// estate this targets the profiled overlays are the ones that vary hosts, so
+/// that ordering is arbitrary in exactly the cases that matter.
+///
+/// Failing a bound one, the first classification stands, and "first" is
+/// deterministic because every caller's candidate order is ([NFR-RA-06]).
+///
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+/// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+fn decide_over_candidates(
+    candidates: impl Iterator<Item = Option<PortableKey>>,
+    member: &str,
+    providers: &ProviderIndex,
+) -> (Option<(CoverageState, ProviderEvidence)>, bool) {
+    let mut keyed = false;
+    let mut classified = candidates.filter_map(|key| {
+        let key = key?;
+        keyed = true;
+        tier(&key, member, providers)
+    });
+    let first = classified.next();
+    let decided = match first {
+        Some((CoverageState::Bound, evidence)) => Some((CoverageState::Bound, evidence)),
+        first => classified
+            .find(|(state, _)| matches!(state, CoverageState::Bound))
+            .or(first),
+    };
+    // `classified` is lazy, so `keyed` is only complete once it is exhausted —
+    // `decided` above stops at the first bound candidate. Draining the rest
+    // costs one `tier` per remaining candidate and is what makes the
+    // keyed/unkeyed distinction true rather than approximately true.
+    classified.for_each(drop);
+    (decided, keyed)
+}
+
+/// What one walk of the workspace's **arm-tagged invocation references** yields:
+/// the consumer worklist, the provider-role rows that do not key, and the
+/// committed configuration behind them ([FR-WS-05], [ADR-53]).
+///
+/// The keyed provider-role rows are not here because they go straight into the
+/// caller's [`ProviderIndex`], which this walk extends in place: the
+/// contract-surface providers are already in it, and a broker subscribe has to
+/// land in the *same* index for a publish to find it.
+struct LedgerSplit {
+    /// `(member, consumer)` pairs, classified by the caller against the provider
+    /// index the walk just finished extending.
+    consumers: Vec<(String, super::bridge::InvocationRef)>,
+    /// Provider-role rows that do not reduce to a portable key. They index no
+    /// provider, but they are captured sites and are reported — the broker arm's
+    /// recorded `topic-not-literal` refusals arrive here ([CR-107], [NFR-CC-04]).
+    unkeyable_providers: Vec<(String, super::bridge::InvocationRef)>,
+    /// Each member's committed configuration, read once, over the keys its own
+    /// references name. The caller needs it again to classify the consumers.
+    corpora: std::collections::BTreeMap<String, MemberCorpus>,
+}
+
+/// Walk every member's `unresolved_refs` ledger once and split it by arm role,
+/// extending `providers` with the ledger-only providers a broker subscribe
+/// contributes (S-252, S-253, S-254/S-256, [S-410]).
+///
+/// Extracted from [`cross_service_coverage`] rather than inlined, because that
+/// function is the tier's whole shape and this is one self-contained phase of
+/// it; the split also keeps `ledger_endpoints` — a de-duplication set no later
+/// phase may touch — genuinely local to the walk that owns it.
+///
+/// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+fn split_ledger_refs<E>(
+    answer: &AnswerScope<'_, E>,
+    providers: &mut ProviderIndex,
+) -> LedgerSplit
+where
+    E: MemberEngine + MemberContracts,
+{
+    let mut consumers: Vec<(String, super::bridge::InvocationRef)> = Vec::new();
+    let mut unkeyable_providers: Vec<(String, super::bridge::InvocationRef)> = Vec::new();
+    // Ledger endpoints already filed, so one endpoint is filed once — the collapse
+    // `broker_edges` performs before its own fan-out ([NFR-RA-05]).
+    //
+    // Keyed on `(key, is_provider, member, symbol)`, which is
+    // [`super::broker::broker_edges`]'s own dedup key **including the role**.
+    // Before S-376 this set covered the provider arm only, and the consumer arm
+    // went uncollapsed: a publish endpoint captured twice on one topic (two ledger
+    // rows differing in `form`) produced two bound rows where the bridge emits one
+    // edge per subscriber from *one* publish. That inflated the pooled `bound` —
+    // already wrong, but invisible — and S-376 promoted it into a published
+    // headline, where `resolved_cross_service_edges` would report 2xN against the
+    // bridge's N and break the reconcile-against-`references` contract that field
+    // states ([NFR-RA-05], [CR-118]). The comment below already claimed this tier
+    // applied "the SAME collapse"; it now does.
+    let mut ledger_endpoints: std::collections::HashSet<(PortableKey, bool, String, String)> =
+        std::collections::HashSet::new();
+    // Arm-tagged ledger refs from each member (HTTP client calls, gRPC stub calls,
+    // broker publishes **and subscribes**) — degrade-don't-abort via the same
+    // `read_members` the bridge uses ([ADR-53]). Read through the **same seam** the
+    // bridge reads (`invocation_refs`, both roles), then split by the arm's own
+    // `bridge_role` — so the coverage tier and the bridge see one ledger, not two.
+    //
+    // Indexing the **provider**-role rows is what keeps this tier honest after S-256
+    // ([FR-WS-11]): a broker subscribe has no contract-surface node behind it, so a
+    // provider index built from `contract_surface` alone contains no broker provider
+    // at all — and every publish, *including the ones the bridge now binds*, would be
+    // reported `no-provider-in-workspace`. The service map would draw the coupling
+    // while the coverage board next to it denied that any provider existed
+    // ([NFR-CC-04]). The bridge's own contract says it: "one classifier, no drift
+    // between 'why did this bind' and 'why didn't this bind'".
+    //
+    // [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
+    // [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    //
+    // Read into a buffer first, because since [S-410] the broker arm's operands
+    // are keyed by their **committed value** and that value is not known until
+    // each member's configuration corpus has been read — which in turn cannot
+    // happen until every key the member's references name is known. One read per
+    // member, before any key is built ([NFR-PE-10]).
+    let inv_refs: Vec<(String, super::bridge::InvocationRef)> =
+        read_members(answer, "invocation references", |e| e.invocation_refs())
+            .into_iter()
+            .flat_map(|(member, refs)| {
+                refs.into_iter().map(move |reference| (member.clone(), reference))
+            })
+            .collect();
+    // The committed configuration each member's configuration-bound references
+    // need, read ONCE per member over the keys those references actually name
+    // (S-382, and every broker operand since [S-410]). A member with no such
+    // reference is not read at all; a member whose read fails contributes an
+    // empty corpus, so its references refuse as `config-key-missing` rather than
+    // aborting the workspace ([ADR-53]).
+    let corpora = member_corpora(answer, &inv_refs);
+    let no_corpus = MemberCorpus::new();
+
+    for (member, reference) in &inv_refs {
+        let member = member.clone();
+        let reference = reference.clone();
+        let corpus = corpora.get(&member).unwrap_or(&no_corpus);
+        match reference.relation.bridge_role() {
+            Some(BridgeRole::Consumer) => {
+                // The consumer half of the same collapse. A consumer row that
+                // does not reduce to a portable key is still a captured site and
+                // is reported (the tier classifies it below), so an unkeyable row
+                // bypasses the dedup rather than being dropped here — dropping it
+                // would lose the refusal the broker arm files.
+                //
+                // A broker consumer can reduce to **more than one** key, when
+                // its key's overlays commit different values ([S-410]); it is
+                // a repeat only when every one of them has been seen before.
+                let (keys, _value) = arm_identity(&reference, corpus);
+                if !keys.is_empty() {
+                    // `|=`, and a loop rather than `any`: EVERY key is
+                    // inserted. A short-circuiting reduction would leave a
+                    // site that resolves under two overlays filed under only
+                    // the first, and the second overlay would then admit a
+                    // duplicate row the next time the same endpoint appeared.
+                    let mut fresh = false;
+                    for key in keys {
+                        fresh |= ledger_endpoints.insert((
+                            key,
+                            false,
+                            member.clone(),
+                            reference.symbol.as_str().to_string(),
+                        ));
+                    }
+                    if !fresh {
+                        continue; // a repeat of this exact endpoint on these keys
+                    }
+                }
+                consumers.push((member.clone(), reference));
+            }
+            Some(BridgeRole::Provider) => {
+                // A ledger-only provider (a broker subscribe) keys on exactly the
+                // string its consumer side keys on, so the two meet in this index
+                // the same way they meet in the bridge's — including, since
+                // [S-410], when that string is a **committed value** the two
+                // sides reached from differently-spelled configuration keys.
+                let (keys, value) = arm_identity(&reference, corpus);
+                if keys.is_empty() {
+                    // An unkeyable provider contributes no provider — but it is a
+                    // captured site, so it is *reported* rather than dropped. This
+                    // is where the broker arm's recorded refusal (a keyless
+                    // `@KafkaListener(topics = TOPIC)` row) becomes a
+                    // `topic-not-literal` coverage row: the listener side is the
+                    // provider role, so before [CR-107] it fell out of the tier
+                    // here and the loss was invisible ([NFR-CC-04]).
+                    unkeyable_providers.push((member.clone(), reference));
+                    continue;
+                }
+                // One endpoint per (key, member, symbol) — the SAME collapse
+                // [`super::broker::broker_edges`] applies before its fan-out, and
+                // for the same reason: a ledger can hold two rows for one endpoint
+                // (they differ in `form`, which is outside the ledger's effective
+                // identity — `idx_unresolved_refs_identity` over
+                // `(source_symbol, target, form, kind, COALESCE(payload, ''))`
+                // since migration 18, so `payload` is *inside* it, unlike what
+                // this comment claimed before [CR-107] reviewed it), and the
+                // fan-out treats each as a separate provider. The bridge de-duplicates, so before [CR-118]
+                // this tier could differ only in a boolean nobody could see. Now
+                // the set is NAMED and COUNTED, so a duplicate would report "3
+                // bound providers (fan-out)" beside two bridge edges — a
+                // fabricated count ([NFR-RA-05]) and exactly the classifier drift
+                // this module exists to prevent.
+                //
+                // A subscribe whose key's overlays disagree is indexed under
+                // **each** committed value, exactly as the bridge fans it out
+                // under each ([S-410], [FR-WS-19] AC2).
+                for key in keys {
+                    if !ledger_endpoints.insert((
+                        key.clone(),
+                        true,
+                        member.clone(),
+                        reference.symbol.as_str().to_string(),
+                    )) {
+                        continue; // a repeat of this exact endpoint on this key
+                    }
+                    index_provider(
+                        providers,
+                        key,
+                        BridgeEndpoint {
+                            member: member.clone(),
+                            symbol: reference.symbol.clone(),
+                        },
+                        value.clone(),
+                    );
+                }
+            }
+            None => {} // not an invocation arm — not this tier's business
+        }
+    }
+
+
+    LedgerSplit {
+        consumers,
+        unkeyable_providers,
+        corpora,
+    }
+}
+
+/// Every portable key one **arm-tagged invocation reference** meets on, under
+/// this tier's own committed-value rules, and what proved them — an empty key
+/// list when the reference does not key at all.
+///
+/// The broker arm resolves its operand against the member's committed
+/// configuration ([S-410]); every other arm keys its stored target verbatim, as
+/// it always has and with `Literal` provenance. Both the provider index and the
+/// consumer de-duplication read this one function, so the index a publish is
+/// looked up in and the set a subscribe was filed under are built from the same
+/// rule ([ADR-52]).
+///
+/// Keys and provenance come back **together** rather than from two functions,
+/// because they are two halves of one resolution: asking for them separately
+/// resolved the same operand twice and left room for the pair to disagree.
+///
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+/// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+fn arm_identity(
+    reference: &super::bridge::InvocationRef,
+    corpus: &MemberCorpus,
+) -> (Vec<PortableKey>, Provenance) {
+    if reference.relation.bridge_namespace() == Some(BridgeNamespace::BrokerTopic) {
+        return super::broker::identify(reference.relation, &reference.target, corpus)
+            .map_or((Vec::new(), Provenance::Literal), |(keys, _role, value)| {
+                (keys, value)
+            });
+    }
+    (
+        consumer_portable_key(reference.relation, &reference.target)
+            .into_iter()
+            .collect(),
+        Provenance::Literal,
+    )
+}
+
+/// Classify one **broker** invocation consumer — a publish — under the
+/// committed-value topic identity ([S-410], [FR-WS-10] as re-proposed
+/// 2026-09-15, [FR-WS-19], [NFR-CC-04]).
+///
+/// The broker twin of [`record_config_bound`], and the three ways it differs
+/// from that function are the three ways [FR-WS-10] differs from [ADR-64]'s
+/// HTTP rule — none of them is a stylistic choice:
+///
+/// 1. **A refused operand is not an unbound row.** Where an HTTP target whose
+///    keys the corpus refuses is reported `Unbound`, a broker one keeps its
+///    **placeholder-as-written** key and is classified on it, exactly as it was
+///    before this story. [FR-WS-10]'s re-proposed criterion says so in as many
+///    words — *a literal that resolves to nothing keeps the
+///    placeholder-as-written key* — and its rule in force says why: a
+///    placeholder is a literal like any other. The refusal is not swallowed: it
+///    rides on the row as [`Provenance::ConfigUnresolved`], naming the key and
+///    the existing reason, so the row never reads as an ordinary literal.
+/// 2. **Nothing-keyed is the arm's own word, not a composed-template verdict.**
+///    A composed topic is a topic; there is no `route_key` for it to fail. The
+///    branch survives only for a keyless row — the arm's recorded
+///    `topic-not-literal` refusal ([CR-107]) — which [`super::broker::classify`]
+///    declines before any resolution happens.
+/// 3. **Several keys mean several overlays, not several templates.** A key whose
+///    overlays commit different values yields one identity per overlay and the
+///    site is classified under each, the bound one deciding the row
+///    ([FR-WS-19] AC2). That reduction is [`decide_over_candidates`]'s, shared
+///    with the HTTP recorder.
+///
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+/// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+/// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+fn record_broker(
+    tally: &mut Tally,
+    providers: &ProviderIndex,
+    from: BridgeEndpoint,
+    consumer: &super::bridge::InvocationRef,
+    corpus: &MemberCorpus,
+) {
+    let relation = arm_relation(consumer.relation);
+    let Some((keys, _role, value)) =
+        super::broker::identify(consumer.relation, &consumer.target, corpus)
+    else {
+        // A keyless row: the arm's recorded `topic-not-literal` refusal
+        // ([CR-107]). Reported under the arm's own word, with `Literal`
+        // provenance because no configuration was read for it — there was no key
+        // to read one with.
+        tally.record(
+            relation,
+            from,
+            CoverageState::Unbound {
+                reason: unkeyable_reason(consumer.relation, &consumer.target),
+            },
+            RowProvenance {
+                providers: ProviderEvidence::Unnamed,
+                intake: BridgeIntake::Invocation,
+                value: Provenance::Literal,
+            },
+        );
+        return;
+    };
+
+    let provenance = |providers| RowProvenance {
+        providers,
+        intake: BridgeIntake::Invocation,
+        value: value.clone(),
+    };
+    let (decided, keyed) = decide_over_candidates(
+        keys.into_iter().map(Some),
+        &from.member,
+        providers,
+    );
+
+    match decided {
+        Some((state, evidence)) => tally.record(relation, from, state, provenance(evidence)),
+        // Every identity resolved to a sole provider inside this member: an
+        // intra-repo fan-out the per-repo graph already owns, and not a
+        // cross-boundary reference. The literal path emits no row for it either.
+        None if keyed => {}
+        // Unreachable: `identify` yields at least one non-blank key or `None`,
+        // and `None` returned above. Reported rather than unwrapped, under the
+        // arm's own word, because a read-model answers a disagreement between
+        // two scans with a row and never with a panic.
+        None => tally.record(
+            relation,
+            from,
+            CoverageState::Unbound {
+                reason: unkeyable_reason(consumer.relation, &consumer.target),
             },
             provenance(ProviderEvidence::Unnamed),
         ),
@@ -2356,14 +2517,14 @@ fn tier(
         MatchDiscipline::ExactlyOne => match candidates.as_slice() {
             // A sole same-member provider is intra-repo — not a cross-boundary
             // reference (unchanged from the pre-S-256 tier).
-            [only] if only.member == member => None,
+            [only] if only.endpoint.member == member => None,
             [only] => Some((
                 CoverageState::Bound,
                 // The provider was in hand the whole time: `bucket_candidates`
                 // returns the narrowed bucket and discards nothing, so naming the
                 // bound end costs one clone and no re-computation ([CR-118]
                 // CRA-01, confirmed here rather than assumed).
-                ProviderEvidence::Sole((*only).clone()),
+                ProviderEvidence::Sole(only.endpoint.clone()),
             )),
             // Two or more surviving candidates for one key: the sole-provider rule
             // fails, so the bridge fabricates no edge and this is honestly
@@ -2380,7 +2541,7 @@ fn tier(
                 },
                 ProviderEvidence::Several(
                     ProviderDisposition::TiedBetween,
-                    candidates.iter().map(|e| (*e).clone()).collect(),
+                    candidates.iter().map(|c| c.endpoint.clone()).collect(),
                 ),
             )),
         },
@@ -2396,8 +2557,8 @@ fn tier(
         MatchDiscipline::FanOut => {
             let bound: Vec<BridgeEndpoint> = candidates
                 .iter()
-                .filter(|p| p.member != member)
-                .map(|p| (*p).clone())
+                .filter(|p| p.endpoint.member != member)
+                .map(|p| p.endpoint.clone())
                 .collect();
             (!bound.is_empty()).then_some((
                 CoverageState::Bound,
@@ -2456,7 +2617,7 @@ mod tests {
             c.borrow_mut().entry(member.to_string()).or_default().insert(
                 crate::extract::config::corpus::canonical_key(key),
                 defs.iter()
-                    .map(|(path, profile, value)| ConfigDefinition {
+                    .map(|(path, profile, value)| crate::graph_store::ConfigDefinition {
                         path: (*path).to_string(),
                         profile: profile.map(str::to_string),
                         value: (*value).to_string(),
@@ -4577,19 +4738,105 @@ mod tests {
         );
     }
 
-    /// [ADR-64]'s explicit carve-out: **this decision does not resolve broker
-    /// topics against configuration**. A topic literal is keyed by its own text
-    /// exactly as written, and a placeholder is a literal like any other
-    /// ([FR-WS-10]) — resolving it here would silently revive the
-    /// canonical-topic-identity criterion [FR-WS-10] withdrew on measurement.
+    // ── S-410: topic identity is the committed configured value ──────────────
+    //
+    // `a_broker_topic_placeholder_is_never_resolved_against_configuration` stood
+    // at this point until 2026-09-16. It pinned [ADR-64]'s carve-out — *"this
+    // decision does not resolve broker topics against configuration"* — which
+    // that decision's own 2026-09-15 amendment narrowed and which [FR-WS-10]'s
+    // re-proposed committed-value criterion then lifted for the operands that
+    // resolve to a key. It is replaced rather than deleted quietly: the half of
+    // it that is STILL the rule (a placeholder the corpus proves nothing for is
+    // a literal like any other) is re-pinned below by
+    // `a_broker_topic_placeholder_no_source_commits_keeps_its_as_written_key`,
+    // and the half it pinned that is no longer the rule is now the subject of
+    // `a_publish_and_a_subscribe_spelling_one_property_differently_meet_on_the_committed_value`.
+
+    /// [FR-WS-10]'s re-proposed criterion, and the reason [S-410] exists: a
+    /// subscribe keyed by a placeholder **as written** and a publish whose
+    /// accessor was stored in the **canonical** relaxed-binding spelling name one
+    /// configuration property, are not byte-equal, and therefore did not meet
+    /// before this story ([ADR-64]'s 2026-09-15 amendment records the gap and the
+    /// estate pair that shows it).
     ///
-    /// The guard is a namespace test rather than a comment because the mechanism
-    /// generalises cleanly and the temptation is obvious.
+    /// They meet here because neither placeholder is the identity: the committed
+    /// **value** is, and both spellings canonicalise to one key that commits it.
     ///
     /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
     /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
     #[test]
-    fn a_broker_topic_placeholder_is_never_resolved_against_configuration() {
+    fn a_publish_and_a_subscribe_spelling_one_property_differently_meet_on_the_committed_value() {
+        reset();
+        // The publisher's operand was an accessor, stored canonically by S-409.
+        set_consumers(
+            "downsampler",
+            vec![broker_publish(
+                "${spring.kafka.topics.archivevolumecounters}",
+                "local emit_counters",
+            )],
+        );
+        // The subscriber wrote its placeholder by hand, hyphenated.
+        set_consumers(
+            "projector",
+            vec![broker_subscribe(
+                "${spring.kafka.topics.archive-volume-counters}",
+                "local on_counters",
+            )],
+        );
+        for member in ["downsampler", "projector"] {
+            commit_config(
+                member,
+                "spring.kafka.topics.archive-volume-counters",
+                &[("application.yml", None, "archive.volume.counters.v1")],
+            );
+        }
+
+        let cov = cross_service_coverage(&registry(&["downsampler", "projector"]).answer());
+
+        assert_eq!(
+            cov.bound, 1,
+            "the two spellings of one property meet on its committed value: {:?}",
+            cov.references
+        );
+        let row = cov
+            .references
+            .iter()
+            .find(|r| r.from.symbol.as_str() == "local emit_counters")
+            .expect("the publish has a coverage row");
+        let bound = match &row.provenance {
+            Provenance::ConfigBound { bound } => bound,
+            other => panic!("an admitted topic carries config-bound provenance, not {other:?}"),
+        };
+        // FR-WS-19 AC6: key, defining sources and profile set, all nameable.
+        assert_eq!(
+            bound.iter().map(|b| b.key.as_str()).collect::<Vec<_>>(),
+            ["spring.kafka.topics.archivevolumecounters"],
+            "the canonical key is named"
+        );
+        assert_eq!(
+            bound[0].values[0].sources,
+            ["application.yml"],
+            "the defining source is named"
+        );
+        assert!(
+            bound[0].profiles().is_empty() && bound[0].values[0].unprofiled,
+            "the profile set is stated, and the unprofiled source is stated as such"
+        );
+    }
+
+    /// The half of the withdrawn carve-out that is **still the rule**: a
+    /// placeholder no committed source defines is a literal like any other, so it
+    /// keeps its as-written key and binds on it. No topic is fabricated for it,
+    /// and the refusal is not swallowed — it rides on the row as
+    /// `config-unresolved`, naming the key and the existing reason ([FR-WS-10],
+    /// [NFR-RA-05], [NFR-CC-04]).
+    ///
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn a_broker_topic_placeholder_no_source_commits_keeps_its_as_written_key() {
         reset();
         set_consumers(
             "api",
@@ -4599,19 +4846,157 @@ mod tests {
             "worker",
             vec![broker_subscribe("${spring.kafka.topics.orders}", "local on_order")],
         );
-        // Committed, and deliberately ignored: the topic is its own identity.
-        commit_config(
-            "api",
-            "spring.kafka.topics.orders",
-            &[("application.yml", None, "orders-v1")],
-        );
+        // Nothing is committed anywhere in the workspace.
 
         let cov = cross_service_coverage(&registry(&["api", "worker"]).answer());
 
-        assert_eq!(cov.bound, 1, "the placeholder keys and binds as the literal it is");
+        assert_eq!(
+            cov.bound, 1,
+            "the placeholder keys and binds as the literal it is: {:?}",
+            cov.references
+        );
+        let row = &cov.references[0];
+        assert_eq!(
+            row.provenance,
+            Provenance::ConfigUnresolved {
+                keys: vec!["spring.kafka.topics.orders".to_string()],
+                refusal: ValueRefusal::MissingKey,
+            },
+            "the row names the key it could not resolve, under the EXISTING reason \
+             vocabulary — it never reads as an ordinary observed literal"
+        );
+    }
+
+    /// A committed value that is itself a `${…}` indirection proves an
+    /// indirection, not a value: nothing is admitted, no topic is fabricated, and
+    /// the site keeps its as-written key under the existing
+    /// `placeholder-value` refusal ([ADR-64] decision point 3, [NFR-RA-05]).
+    ///
+    /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn a_committed_topic_value_that_is_itself_a_placeholder_admits_no_topic() {
+        reset();
+        set_consumers(
+            "api",
+            vec![broker_publish("${spring.kafka.topics.orders}", "local emit_order")],
+        );
+        commit_config(
+            "api",
+            "spring.kafka.topics.orders",
+            &[("application.yml", None, "${another.key}")],
+        );
+
+        let cov = cross_service_coverage(&registry(&["api"]).answer());
+
+        let row = &cov.references[0];
+        assert_eq!(
+            row.provenance,
+            Provenance::ConfigUnresolved {
+                keys: vec!["spring.kafka.topics.orders".to_string()],
+                refusal: ValueRefusal::PlaceholderValue,
+            },
+            "an indirection is not a value, and `${{another.key}}` is never a topic"
+        );
+        assert!(
+            !cov.references
+                .iter()
+                .any(|r| format!("{:?}", r).contains("another.key")
+                    && matches!(r.provenance, Provenance::ConfigBound { .. })),
+            "nothing admitted a fabricated topic: {:?}",
+            cov.references
+        );
+    }
+
+    /// Overlay disagreement is **not** a refusal ([FR-WS-19] AC2): a key two
+    /// profiles commit differently yields one profile-tagged value per overlay,
+    /// and the site binds under each. Here the publisher's `prod` overlay meets
+    /// one subscriber and its `staging` overlay another — both are real bindings
+    /// and neither overlay is preferred.
+    ///
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    #[test]
+    fn a_topic_key_whose_overlays_disagree_binds_under_each_of_them() {
+        reset();
+        set_consumers(
+            "api",
+            vec![broker_publish("${spring.kafka.topics.orders}", "local emit_order")],
+        );
+        commit_config(
+            "api",
+            "spring.kafka.topics.orders",
+            &[
+                ("application-prod.yml", Some("prod"), "orders-prod"),
+                ("application-staging.yml", Some("staging"), "orders-staging"),
+            ],
+        );
+        set_consumers("prod-worker", vec![broker_subscribe("orders-prod", "local on_prod")]);
+        set_consumers(
+            "staging-worker",
+            vec![broker_subscribe("orders-staging", "local on_staging")],
+        );
+
+        let cov = cross_service_coverage(
+            &registry(&["api", "prod-worker", "staging-worker"]).answer(),
+        );
+
+        let row = cov
+            .references
+            .iter()
+            .find(|r| r.from.symbol.as_str() == "local emit_order")
+            .expect("the publish has a coverage row");
+        assert_eq!(row.state, CoverageState::Bound, "some overlay binds: {row:?}");
+        let bound = match &row.provenance {
+            Provenance::ConfigBound { bound } => bound,
+            other => panic!("a divergent key still admits, as config-bound, not {other:?}"),
+        };
+        assert_eq!(
+            bound[0].values.iter().map(|v| v.value.as_str()).collect::<Vec<_>>(),
+            ["orders-prod", "orders-staging"],
+            "every overlay's value is retained, none is preferred and none dropped"
+        );
+        assert_eq!(
+            bound[0].profiles(),
+            ["prod", "staging"],
+            "each value is tagged with the profile that proves it"
+        );
+        // ONE row for one site, however many overlays — and the site is indexed
+        // under BOTH identities, which is what the bridge fans out on.
+        assert_eq!(
+            cov.references
+                .iter()
+                .filter(|r| r.from.symbol.as_str() == "local emit_order")
+                .count(),
+            1,
+            "a call site is one site however many overlays its key has"
+        );
+    }
+
+    /// A workspace whose broker operands carry no placeholder at all reads
+    /// **byte for byte** as it did before [S-410]: no member store is opened for
+    /// configuration, every row is `literal`, and the bind is the one the literal
+    /// topic always produced.
+    ///
+    /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+    #[test]
+    fn a_workspace_whose_topics_are_plain_literals_is_unaffected() {
+        reset();
+        set_consumers("api", vec![broker_publish("orders", "local emit_order")]);
+        set_consumers("worker", vec![broker_subscribe("orders", "local on_order")]);
+        // Committed, and genuinely irrelevant. BOTH near misses are committed on
+        // purpose: a key whose VALUE is the literal topic, and a key whose NAME
+        // is it. An over-reaching rule that read a bare operand as a key would
+        // rewrite `orders` to `orders-v9` here and this test would catch it.
+        commit_config("api", "spring.kafka.topics.orders", &[("application.yml", None, "orders")]);
+        commit_config("api", "orders", &[("application.yml", None, "orders-v9")]);
+
+        let cov = cross_service_coverage(&registry(&["api", "worker"]).answer());
+
+        assert_eq!(cov.bound, 1, "the literal topic binds exactly as it always did");
         assert!(
             cov.references.iter().all(|r| r.provenance == Provenance::Literal),
-            "no broker row is ever read from configuration: {:?}",
+            "an operand that names no configuration key reads nothing from \
+             configuration: {:?}",
             cov.references
         );
     }

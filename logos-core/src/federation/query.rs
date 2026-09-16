@@ -747,6 +747,8 @@ mod tests {
             from: endpoint(from_member, from_symbol),
             to: endpoint(to_member, to_symbol),
             intake: crate::federation::bridge::BridgeIntake::Invocation,
+            from_value: crate::resolve::binding::Provenance::Literal,
+            to_value: crate::resolve::binding::Provenance::Literal,
         }
     }
 

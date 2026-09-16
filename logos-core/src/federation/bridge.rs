@@ -45,17 +45,18 @@
 //! [ADR-13]: ../../../docs/specs/architecture/decisions/ADR-13.md
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::graph_store::{EdgeRow, NodeRow};
+use crate::graph_store::{ConfigDefinition, EdgeRow, NodeRow};
 use crate::model::{
     ArtifactRelation, BridgeNamespace, BridgeRole, EdgeKind, LogosSymbol, MatchDiscipline, NodeId,
     NodeKind,
 };
+use crate::resolve::binding::{placeholder_keys, ConfigLookup, Provenance};
 use crate::resolve::route_method::preferred_candidates;
 use crate::resolve::route_template::route_key;
 
@@ -158,6 +159,30 @@ pub struct BridgeEdge {
     /// serialized unchanged, so `xservice route-providers` stays
     /// backward-compatible.
     pub intake: BridgeIntake,
+    /// Whether the **consumer** end's target was observed at the call site or
+    /// admitted from that member's committed configuration ([S-410],
+    /// [FR-WS-19] AC6, [NFR-CC-04]).
+    ///
+    /// `Literal` for every arm that reads its target verbatim — which is every
+    /// arm but the broker one today. A broker publish whose operand resolves to
+    /// a committed key carries `ConfigBound`, naming the key, its defining
+    /// sources and its profile set; one whose keys the corpus refuses carries
+    /// `ConfigUnresolved`, naming the key and the refusal.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub from_value: Provenance,
+    /// The same, for the **provider** end.
+    ///
+    /// Two fields rather than one merged list, and the split is the honesty
+    /// rather than ergonomics: on a broker fan-out edge each end names its
+    /// *own* configuration key, and the two members routinely spell one
+    /// property differently — which is precisely why they could not meet before
+    /// [S-410]. A single merged `Vec<ConfigBound>` would carry both keys with
+    /// nothing saying which member proved which, so a reader could not tell the
+    /// publisher's evidence from the subscriber's ([NFR-CC-04]).
+    ///
+    /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+    pub to_value: Provenance,
 }
 
 /// A contract-surface node read from one member — the minimal view the bridge
@@ -679,6 +704,19 @@ pub(super) struct ProviderCandidate {
     pub(super) endpoint: BridgeEndpoint,
     /// The provider's method facet, mirroring [`PortableKey::method`].
     pub(super) method: Option<String>,
+    /// Whether the key this provider is filed under was read verbatim from its
+    /// own declaration or admitted from its member's committed configuration
+    /// ([S-410]) — carried here so a bound edge can name the **provider** end's
+    /// evidence, which is nameable from no other surface (a provider-role row
+    /// emits no coverage reference of its own).
+    ///
+    /// Declared **after** `method` so the derived [`Ord`] above is unchanged:
+    /// two candidates still sort by `(endpoint, method)` and reach this field
+    /// only when both are equal, which the per-`(key, role, member, symbol)`
+    /// de-duplication already excludes.
+    ///
+    /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+    pub(super) value: Provenance,
 }
 
 /// Providers indexed for matching: each [`BucketKey`] to the candidates filed
@@ -859,6 +897,157 @@ pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) ->
         BridgeNamespace::BrokerTopic if target.trim().is_empty() => None,
         BridgeNamespace::BrokerTopic => Some(PortableKey::broker(target.to_string())),
     }
+}
+
+/// A member's committed configuration as the federation tiers read it: canonical
+/// key → every definition of it (S-382, [FR-WS-19]).
+pub(super) type MemberCorpus = BTreeMap<String, Vec<ConfigDefinition>>;
+
+impl ConfigLookup for MemberCorpus {
+    /// `module` is ignored, and the reason is [ADR-64]'s rather than a
+    /// simplification: this map IS one member's own store, so the member is the
+    /// reading scope already. A narrower one would need the build-module
+    /// partition, which a single member's store does not carry — see
+    /// [`ConfigLookup::definitions`]. Every resolver here passes `""` to match.
+    ///
+    /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+    fn definitions(&self, key: &str, _module: &str) -> Vec<ConfigDefinition> {
+        self.get(key).cloned().unwrap_or_default()
+    }
+}
+
+/// The configuration keys a reference names, or [`None`] if it names none —
+/// **the single predicate for "is this a configuration-bound reference?"**
+/// (S-382, [ADR-64], extended to the broker arm by [S-410]).
+///
+/// One helper, two callers — [`member_corpora`] below and the coverage tier's
+/// classification loop — because the two used to ask the question separately and
+/// had already drifted once: the classification loop tested the arm's namespace
+/// and the corpus read did not, so a member whose only placeholders were
+/// **broker topics** had its store opened to read a corpus that was then never
+/// consulted.
+///
+/// The arm test is on the **relation**, not on its namespace. The guard admits a
+/// site and each body then classifies it on its own arm, so asking about the
+/// namespace and answering about the relation is one drift away from filing a
+/// second Http-namespace arm under the HTTP arm's discipline.
+///
+/// # The broker carve-out this predicate used to hold is gone, deliberately
+///
+/// Until [S-410] this admitted [`HttpClientCall`](ArtifactRelation::HttpClientCall)
+/// **only**, and its own doc named [ADR-64]'s boundary as the reason:
+/// *"this decision does not resolve broker topics against configuration, and
+/// must not be read as doing so"*. That boundary was narrowed by [ADR-64]'s
+/// 2026-09-15 amendment and then lifted for the accessor-operand population by
+/// [FR-WS-10]'s re-proposed criterion, which [S-410] delivers. What the broker
+/// arm does with the keys is **not** the HTTP arm's rule, though, and the
+/// difference is load-bearing: a broker operand the corpus refuses keeps its
+/// placeholder-as-written key ([`super::broker::TopicIdentity::Unresolved`]),
+/// where an HTTP one is reported unbound. This predicate answers *"does it name
+/// a key"*; it does not decide what happens next.
+///
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+/// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+/// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+pub(super) fn config_bound_keys(reference: &InvocationRef) -> Option<Vec<String>> {
+    matches!(
+        reference.relation,
+        ArtifactRelation::HttpClientCall
+            | ArtifactRelation::BrokerPublish
+            | ArtifactRelation::BrokerSubscribe
+    )
+    .then(|| placeholder_keys(&reference.target))
+    .flatten()
+}
+
+/// Read, per member, the committed definitions of every configuration key its
+/// own invocation references name (S-382, [ADR-64]).
+///
+/// **Scoped to the member, which is the whole of the committed-evidence line's
+/// second part.** [ADR-64] admits a value that is *within reach of the reading
+/// module*, so a key is looked up in the member that reads it and nowhere else:
+/// a workspace-wide lookup would let one service's `application.yml` supply
+/// another's base URL — or another's topic — which is a search of the estate
+/// rather than a name lookup.
+///
+/// One read per member holding at least one such reference, over that member's
+/// whole key set — never one read per call site. A member whose read fails is
+/// **absent** from the map and its references then resolve against nothing:
+/// degrade-don't-abort, exactly as every other per-member read in this module
+/// ([ADR-53]).
+///
+/// `consumers` is whatever slice the caller wants resolved, and callers pass
+/// **only the arms they will consult**: the bridge passes its broker references
+/// alone, because reading an HTTP key it does not resolve would open a member
+/// store to produce nothing ([NFR-PE-10]).
+///
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+pub(super) fn member_corpora<E>(
+    answer: &AnswerScope<'_, E>,
+    consumers: &[(String, InvocationRef)],
+) -> BTreeMap<String, MemberCorpus>
+where
+    E: MemberEngine + MemberContracts,
+{
+    let mut wanted: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (member, consumer) in consumers {
+        let Some(keys) = config_bound_keys(consumer) else {
+            continue;
+        };
+        let entry = wanted.entry(member.clone()).or_default();
+        for key in keys {
+            if !entry.contains(&key) {
+                entry.push(key);
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    // Only the members that actually name a key are opened. The scope's
+    // `fan_out` is deliberately NOT used: it reaches every member of the
+    // workspace, and on an 84-member estate where one service configures its
+    // base URL that would open 83 stores to read nothing ([NFR-PE-10]).
+    //
+    // Every member reached here already opened for this answer's invocation-refs
+    // walk — a member that failed to open contributes no consumer — so this can
+    // never add an attempt for a *broken* member, which is what the
+    // once-per-answer guarantee ([FR-WS-16] AC5) is about.
+    //
+    // It is NOT, however, always a resident hit, and an earlier wording here
+    // said it was. `engine_for` bypasses `AnswerScope::open_for_walk` and goes
+    // straight to admission, which evicts to `max_resident_members()` before
+    // every build; that budget is derived from the host's descriptor limit and
+    // is routinely far below an 84-member roster. A member that named a key
+    // early in the roster has therefore usually been evicted by the time this
+    // runs, and is rebuilt — a real engine start, counted in `engine_starts()`
+    // and `reconstructions()`. The cost is bounded (one rebuild per member that
+    // names a key, not per row) and correctly ledgered, but it is a cost, and
+    // S-397 T1 is what moved this path from dormant to live: before that hop the
+    // estate emitted zero `config-bound` rows, so `wanted` was always empty.
+    // `tests/workspace_connection_budget.rs` cannot see it either — its fixture
+    // never indexes, so `wanted` is empty there too and the `engine_starts()`
+    // equality it pins against `WALKS_PER_STATUS` omits this term. Recorded for
+    // the sprint-68 review rather than silently re-justified.
+    for (member, keys) in wanted {
+        match answer
+            .registry()
+            .engine_for(&member)
+            .and_then(|e| e.config_definitions(&keys))
+        {
+            Ok(corpus) => {
+                out.insert(member, corpus);
+            }
+            Err(err) => tracing::warn!(
+                member = %member,
+                "reading a workspace member's configuration definitions failed; \
+                 its configuration-bound references refuse rather than guess: {err:#}"
+            ),
+        }
+    }
+    out
 }
 
 /// The in-memory cross-service contract bridge over a workspace's members
@@ -1142,7 +1331,7 @@ where
     E: MemberEngine + MemberContracts,
 {
     let mut providers: ProviderIndex = ProviderIndex::new();
-    let mut consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake)> = Vec::new();
+    let mut consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake, Provenance)> = Vec::new();
 
     for (member, surface) in read_members(answer, "contract surface", |e| e.contract_surface()) {
         for node in surface {
@@ -1154,12 +1343,22 @@ where
                 symbol: node.symbol,
             };
             match role {
-                Role::Provider => index_provider(&mut providers, key, endpoint),
+                // A DECLARED endpoint is written in the member's own source or
+                // spec; no configuration is read for it on any path, so its
+                // value provenance is `Literal` by construction.
+                Role::Provider => {
+                    index_provider(&mut providers, key, endpoint, Provenance::Literal)
+                }
                 // A contract-surface consumer is a *declared* endpoint (an OpenAPI
                 // operation) — it describes a contract, it does not call one, so its
                 // edge is contract-surface intake and never seeds a reachability
                 // root ([CR-083]).
-                Role::Consumer => consumers.push((key, endpoint, BridgeIntake::ContractSurface)),
+                Role::Consumer => consumers.push((
+                    key,
+                    endpoint,
+                    BridgeIntake::ContractSurface,
+                    Provenance::Literal,
+                )),
             }
         }
     }
@@ -1183,20 +1382,20 @@ where
     // — instead of *also* pushing its publishes into `consumers` below — is what
     // keeps a publish from being counted twice, once through each intake
     // ([FR-WS-10], [FR-WS-11]).
-    let mut broker_candidates: Vec<super::broker::BrokerCandidate> = Vec::new();
+    //
+    // Since [S-410] the broker arm's operands are also **resolved against each
+    // member's committed configuration** before they are keyed, so a topic
+    // identity is the committed value wherever one is committed ([FR-WS-10]'s
+    // re-proposed criterion). That is why its references are buffered as
+    // `InvocationRef`s here rather than reduced to candidates in place: the keys
+    // they name have to be known before any member store is opened, so one read
+    // per member serves every one of its broker sites.
+    let mut broker_refs: Vec<(String, InvocationRef)> = Vec::new();
     for (member, refs) in read_members(answer, "invocation references", |e| e.invocation_refs()) {
         for reference in refs {
-            let endpoint = BridgeEndpoint {
-                member: member.clone(),
-                symbol: reference.symbol,
-            };
             match reference.relation.bridge_namespace() {
                 Some(BridgeNamespace::BrokerTopic) => {
-                    broker_candidates.push(super::broker::BrokerCandidate {
-                        relation: reference.relation,
-                        key: reference.target,
-                        endpoint,
-                    });
+                    broker_refs.push((member.clone(), reference));
                 }
                 // Every other arm feeds the loop's consumer index directly; its
                 // providers are contract-surface nodes, already indexed above.
@@ -1204,6 +1403,10 @@ where
                     if reference.relation.bridge_role() != Some(BridgeRole::Consumer) {
                         continue;
                     }
+                    let endpoint = BridgeEndpoint {
+                        member: member.clone(),
+                        symbol: reference.symbol,
+                    };
                     let Some(key) = consumer_portable_key(reference.relation, &reference.target)
                     else {
                         continue; // an unkeyable / not-yet-registered arm contributes nothing
@@ -1211,16 +1414,39 @@ where
                     // A ledger reference is a captured call site ([FR-WS-08]/
                     // [FR-WS-09]) — an invocation edge that seeds a reachability
                     // root ([CR-083]).
-                    consumers.push((key, endpoint, BridgeIntake::Invocation));
+                    //
+                    // `Literal` even for an HTTP target carrying `${…}`: this
+                    // loop reads the stored target verbatim and nothing here
+                    // resolves it, so claiming otherwise would be the over-read
+                    // [ADR-64] forbids. The HTTP arm's configuration-bound
+                    // resolution lives in the coverage tier alone
+                    // (`record_config_bound`) and is untouched by [S-410].
+                    consumers.push((key, endpoint, BridgeIntake::Invocation, Provenance::Literal));
                 }
             }
         }
     }
 
+    // One read per member that names a configuration key in a broker operand,
+    // and none at all for a workspace whose broker operands are all literals —
+    // which is what keeps a workspace with no broker topics byte-for-byte
+    // unaffected by this story ([NFR-PE-10]).
+    let corpora = member_corpora(answer, &broker_refs);
+    let broker_candidates = broker_refs.into_iter().map(|(member, reference)| {
+        super::broker::BrokerCandidate {
+            relation: reference.relation,
+            key: reference.target,
+            endpoint: BridgeEndpoint {
+                member,
+                symbol: reference.symbol,
+            },
+        }
+    });
+
     let mut edges = match_indexed(providers, consumers);
     // The broker arm's cross-member fan-out: one publish binds every subscribe on
     // the same topic identity, across members ([FR-WS-10], [FR-WS-11]).
-    edges.extend(super::broker::broker_edges(broker_candidates));
+    edges.extend(super::broker::broker_edges(broker_candidates, &corpora));
     // Re-sort the union: each half is sorted, their concatenation is not
     // ([NFR-RA-06]).
     edges.sort();
@@ -1241,12 +1467,13 @@ pub(super) fn index_provider(
     providers: &mut ProviderIndex,
     key: PortableKey,
     endpoint: BridgeEndpoint,
+    value: Provenance,
 ) {
     let PortableKey { bucket, method } = key;
     providers
         .entry(bucket)
         .or_default()
-        .push(ProviderCandidate { endpoint, method });
+        .push(ProviderCandidate { endpoint, method, value });
 }
 
 /// Put every bucket in a deterministic order, regardless of the member fan-out
@@ -1269,6 +1496,14 @@ pub(super) fn sort_buckets(providers: &mut ProviderIndex) {
 /// provider serves every verb, and an exact-method provider of the same template
 /// is the sole candidate beside a wildcard one ([CR-109], [FR-CG-09]).
 ///
+/// Returns the whole [`ProviderCandidate`], not its endpoint alone, so a caller
+/// that binds one can also name **how that provider's own key was proved** —
+/// the [`value`](ProviderCandidate::value) an edge carries as its
+/// [`to_value`](BridgeEdge::to_value) ([S-410]). Callers that want only the
+/// endpoint read `.endpoint`.
+///
+/// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+///
 /// An **empty** result covers both "no such bucket" and "a bucket holding
 /// nothing that serves this method": the same answer, deliberately, because that
 /// is exactly what a `(method, template)`-keyed index used to report for a method
@@ -1286,12 +1521,12 @@ pub(super) fn sort_buckets(providers: &mut ProviderIndex) {
 pub(super) fn bucket_candidates<'a>(
     providers: &'a ProviderIndex,
     key: &PortableKey,
-) -> Vec<&'a BridgeEndpoint> {
+) -> Vec<&'a ProviderCandidate> {
     let Some(bucket) = providers.get(&key.bucket) else {
         return Vec::new();
     };
     preferred_candidates(
-        bucket.iter().map(|c| (c.method.as_deref(), &c.endpoint)),
+        bucket.iter().map(|c| (c.method.as_deref(), c)),
         key.method.as_deref(),
     )
 }
@@ -1323,16 +1558,17 @@ pub(super) fn bucket_candidates<'a>(
 /// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
 pub(super) fn match_indexed(
     mut providers: ProviderIndex,
-    consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake)>,
+    consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake, Provenance)>,
 ) -> Vec<BridgeEdge> {
     sort_buckets(&mut providers);
 
     let mut edges = Vec::new();
     // The intake rides with each consumer so the emitted edge records *how* the
     // binding was captured — an invocation call site vs a declared contract
-    // surface ([CR-083]). The match discipline is unchanged; only the edge's
-    // provenance is carried through.
-    for (key, consumer, intake) in consumers {
+    // surface ([CR-083]). The value provenance rides beside it, so the edge also
+    // records *what proved the key* at each end ([S-410]). The match discipline
+    // is unchanged; only the edge's provenance is carried through.
+    for (key, consumer, intake, from_value) in consumers {
         // No bucket, or a bucket holding nothing that serves this consumer's
         // method, both mean the same thing: no provider of this endpoint anywhere
         // in the workspace, so no edge.
@@ -1347,14 +1583,16 @@ pub(super) fn match_indexed(
                 // A sole provider in the consumer's *own* member is an intra-repo
                 // fact the per-repo graph owns; the bridge only emits cross-member
                 // links.
-                if only.member == consumer.member {
+                if only.endpoint.member == consumer.member {
                     continue;
                 }
                 edges.push(BridgeEdge {
                     relation: key.relation().to_string(),
                     from: consumer,
-                    to: (*only).clone(),
+                    to: only.endpoint.clone(),
                     intake,
+                    from_value,
+                    to_value: only.value.clone(),
                 });
             }
             MatchDiscipline::FanOut => {
@@ -1363,14 +1601,16 @@ pub(super) fn match_indexed(
                 // same-member subscriber is the intra-repo fan-out, owned by the
                 // per-repo graph.
                 for provider in candidates {
-                    if provider.member == consumer.member {
+                    if provider.endpoint.member == consumer.member {
                         continue;
                     }
                     edges.push(BridgeEdge {
                         relation: key.relation().to_string(),
                         from: consumer.clone(),
-                        to: (*provider).clone(),
+                        to: provider.endpoint.clone(),
                         intake,
+                        from_value: from_value.clone(),
+                        to_value: provider.value.clone(),
                     });
                 }
             }
@@ -2096,13 +2336,16 @@ mod tests {
     ) -> Vec<BridgeEdge> {
         let mut index: ProviderIndex = ProviderIndex::new();
         for (key, endpoint) in providers {
-            index_provider(&mut index, key.clone(), endpoint.clone());
+            index_provider(&mut index, key.clone(), endpoint.clone(), Provenance::Literal);
         }
         // These match-core tests model invocation-arm consumers (gRPC/broker call
-        // sites); the intake does not change the match discipline they exercise.
+        // sites); neither the intake nor the value provenance changes the match
+        // discipline they exercise.
         let tagged = consumers
             .into_iter()
-            .map(|(key, endpoint)| (key, endpoint, BridgeIntake::Invocation))
+            .map(|(key, endpoint)| {
+                (key, endpoint, BridgeIntake::Invocation, Provenance::Literal)
+            })
             .collect();
         match_indexed(index, tagged)
     }
@@ -2183,7 +2426,12 @@ mod tests {
         let key = pkey(BridgeNamespace::Grpc, "pkg.Svc/Method");
         let edges = match_indexed(
             HashMap::new(),
-            vec![(key, ep("api", "local stub"), BridgeIntake::Invocation)],
+            vec![(
+                key,
+                ep("api", "local stub"),
+                BridgeIntake::Invocation,
+                Provenance::Literal,
+            )],
         );
         assert!(edges.is_empty(), "no provider anywhere → no edge: {edges:?}");
     }
@@ -2984,6 +3232,8 @@ mod tests {
             from: ep("api", "local op_get"),
             to: ep("web", "local route_get"),
             intake: BridgeIntake::ContractSurface,
+            from_value: Provenance::Literal,
+            to_value: Provenance::Literal,
         };
         let value = serde_json::to_value(&edge).unwrap();
 
@@ -2994,16 +3244,21 @@ mod tests {
         assert_eq!(value["to"]["member"], "web");
         assert_eq!(value["to"]["symbol"], "local route_get");
 
-        // The additive field, with its stable wire spelling.
+        // The additive fields, with their stable wire spellings.
         assert_eq!(value["intake"], "contract-surface");
         assert_eq!(
             serde_json::to_value(BridgeIntake::Invocation).unwrap(),
             "invocation",
             "the invocation spelling is part of the wire contract"
         );
+        // [S-410]'s pair. Internally tagged, so a consumer switches on one key
+        // rather than inferring from a nullable sibling — the shape
+        // `Provenance` already publishes on a coverage row.
+        assert_eq!(value["from_value"]["provenance"], "literal");
+        assert_eq!(value["to_value"]["provenance"], "literal");
 
-        // Exactly the prior three keys plus the one additive key — nothing else
-        // leaked onto the wire.
+        // Exactly the prior three keys plus the three additive ones — nothing
+        // else leaked onto the wire.
         let mut keys: Vec<&str> = value
             .as_object()
             .expect("a bridge edge serializes to a JSON object")
@@ -3011,6 +3266,9 @@ mod tests {
             .map(String::as_str)
             .collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["from", "intake", "relation", "to"]);
+        assert_eq!(
+            keys,
+            ["from", "from_value", "intake", "relation", "to", "to_value"]
+        );
     }
 }

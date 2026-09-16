@@ -147,6 +147,8 @@ fn edge_with_intake(member: &str, symbol: &str, intake: BridgeIntake) -> BridgeE
             symbol: sym(symbol),
         },
         intake,
+        from_value: crate::resolve::binding::Provenance::Literal,
+        to_value: crate::resolve::binding::Provenance::Literal,
     }
 }
 

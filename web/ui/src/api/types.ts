@@ -1018,6 +1018,17 @@ export interface BridgeEdge {
   /** The intake discriminator (CR-083). Optional: an additive wire field the
    *  service map does not read — it renders all bridge edges regardless. */
   intake?: BridgeIntake;
+  /** What proved the CONSUMER end's key: read verbatim at the call site, or
+   *  admitted from that member's committed configuration (S-410, FR-WS-19 AC6).
+   *  Optional for the same reason `intake` is — additive, and no view reads it
+   *  yet. `literal` for every arm but the broker one today. */
+  from_value?: ValueProvenance;
+  /** The same, for the PROVIDER end. Two fields rather than one merged list:
+   *  on a broker fan-out edge each end names its own configuration key, and the
+   *  two members routinely spell one property differently — which is exactly why
+   *  they could not meet before S-410. A merged list would carry both keys with
+   *  nothing saying which member proved which. */
+  to_value?: ValueProvenance;
 }
 
 /** Why a cross-boundary reference did not bind (mirrors `UnboundReason`, ADR-53). */

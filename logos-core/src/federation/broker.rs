@@ -43,13 +43,16 @@
 // then it was proven only by this module's tests, mirroring how S-251 shipped
 // `capture_invocation_refs` ahead of its arm callers.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::model::{ArtifactRelation, BridgeNamespace};
+use crate::resolve::binding::{
+    placeholder_keys, ConfigBound, ConfigLookup, Provenance, Resolver, ValueRefusal,
+};
 
 use super::bridge::{
-    index_provider, match_indexed, BridgeEdge, BridgeEndpoint, BridgeIntake, PortableKey,
-    ProviderIndex, Role,
+    index_provider, match_indexed, BridgeEdge, BridgeEndpoint, BridgeIntake, MemberCorpus,
+    PortableKey, ProviderIndex, Role,
 };
 
 /// One captured broker reference promoted to a bridge candidate: which side it
@@ -96,6 +99,160 @@ pub(super) fn classify(relation: ArtifactRelation, topic_key: &str) -> Option<(P
     Some((PortableKey::broker(topic_key.to_string()), role))
 }
 
+/// What committed configuration proves about a broker site's topic operand —
+/// the **committed-value topic identity** ([FR-WS-10] as re-proposed 2026-09-15,
+/// [CR-131] §3.2 A3, delivered by [S-410]).
+///
+/// The three variants are the whole rule, and the third is the half a reader is
+/// most likely to get wrong:
+///
+/// - [`Literal`](Self::Literal) — the operand carries no `${…}` at all, so no
+///   configuration is read for it. Unchanged from every release before [S-410]:
+///   *a topic literal is keyed by its own text, exactly as written.*
+/// - [`Committed`](Self::Committed) — the operand names configuration keys and
+///   the committed sources prove a value for them. **That value is the topic
+///   identity**, one per profile-distinct composition, so a subscribe spelled
+///   `${spring.kafka.topics.archive-volume-counters}` and a publish whose
+///   accessor resolved to the canonical `${spring.kafka.topics.archivevolumecounters}`
+///   meet — they resolve to one committed value even though the two placeholder
+///   spellings are not byte-equal. Closing that spelling gap is what [ADR-64]'s
+///   2026-09-15 amendment handed this story, and it is closed **at the value**,
+///   never by rewriting how a literal row is stored.
+/// - [`Unresolved`](Self::Unresolved) — the operand names keys and the sources
+///   prove nothing (or prove only a further indirection). **No topic is
+///   fabricated** ([NFR-RA-05]), and the site keeps the placeholder-as-written
+///   key it had before [S-410]: [FR-WS-10]'s re-proposed criterion says so
+///   outright — *a literal that resolves to nothing keeps the
+///   placeholder-as-written key*. The refusal still travels, as
+///   [`Provenance::ConfigUnresolved`], so the row names the key and the existing
+///   reason rather than reading as an ordinary literal.
+///
+/// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+/// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TopicIdentity {
+    /// No `${…}` placeholder in the operand: the topic is the operand's own
+    /// text and no configuration was read.
+    Literal,
+    /// The committed sources prove the operand's value.
+    Committed {
+        /// The canonical configuration keys the operand names, in source order.
+        keys: Vec<String>,
+        /// One topic identity per profile-distinct committed composition,
+        /// sorted and de-duplicated. Two entries mean the overlays disagree and
+        /// **both** are retained — the site binds under each ([FR-WS-19] AC2).
+        ///
+        /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+        topics: Vec<String>,
+        /// The provenance of each key: defining sources and profile set.
+        bound: Vec<ConfigBound>,
+    },
+    /// The operand names keys and the committed sources admit no value.
+    Unresolved {
+        /// The canonical configuration keys the operand names, in source order.
+        keys: Vec<String>,
+        /// Why they admitted nothing — the **existing** value-refusal
+        /// vocabulary, never a reason minted for this arm.
+        refusal: ValueRefusal,
+    },
+}
+
+/// Resolve one broker site's topic operand against `corpus` — the member's own
+/// committed configuration ([ADR-64]'s within-reach rule is the caller's, which
+/// reads one member's corpus and no other's).
+///
+/// `target` is the arm-normalized topic key as the ledger stores it: a topic
+/// name, optionally `#`-guarded by a message-schema FQN. A guard is carried
+/// through the substitution untouched, so `${x}#com.acme.Foo` resolves its topic
+/// half and keeps guarding on the same FQN.
+///
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+pub fn topic_identity(target: &str, corpus: &dyn ConfigLookup) -> TopicIdentity {
+    let Some(keys) = placeholder_keys(target) else {
+        return TopicIdentity::Literal;
+    };
+    let resolver = Resolver { corpus, module: "" };
+    match resolver.resolve_template(target) {
+        // `placeholder_keys` above already said the target carries a placeholder,
+        // so `resolve_template` cannot answer `None` here. Mapped to the literal
+        // rule rather than unwrapped: a panic in a read-model is never the right
+        // answer to a disagreement between two scans (the same choice
+        // `record_config_bound` makes for the identical impossibility).
+        None => TopicIdentity::Literal,
+        Some(Err(refusal)) => TopicIdentity::Unresolved { keys, refusal },
+        Some(Ok(resolved)) => {
+            let topics: BTreeSet<String> = resolved
+                .candidates
+                .iter()
+                .map(|candidate| candidate.template.trim().to_string())
+                .filter(|topic| !topic.is_empty())
+                .collect();
+            if topics.is_empty() {
+                // Every committed composition is blank. A blank string is no more
+                // a topic identity than an absent one — the same test `classify`
+                // applies to a keyless row — so nothing is admitted and the site
+                // falls back to its placeholder-as-written key. Reported under
+                // the refusal an empty corpus gives, because that is what the
+                // sources proved: no value.
+                return TopicIdentity::Unresolved {
+                    keys,
+                    refusal: ValueRefusal::MissingKey,
+                };
+            }
+            TopicIdentity::Committed {
+                keys,
+                topics: topics.into_iter().collect(),
+                bound: resolved.bound,
+            }
+        }
+    }
+}
+
+/// Reduce a broker relation + its stored topic operand to **every** portable key
+/// the site meets on, its role, and the provenance of the value behind those
+/// keys ([S-410]).
+///
+/// The committed-value twin of [`classify`], and the single place the
+/// committed-value rule is applied: the bridge's fan-out ([`broker_edges`]) and
+/// the coverage read-model both call it, so "why did this bind" and "why didn't
+/// this bind" cannot drift the way they could if each resolved its own operands
+/// ([ADR-52]).
+///
+/// **A `Vec` of keys, not one key**, because overlays are allowed to disagree: a
+/// key two profiles commit differently yields one identity per overlay and the
+/// site is indexed — or fans out — under each of them ([FR-WS-19] AC2). A
+/// literal, and an operand the corpus refuses, both yield exactly one.
+///
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+/// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+pub(super) fn identify(
+    relation: ArtifactRelation,
+    target: &str,
+    corpus: &dyn ConfigLookup,
+) -> Option<(Vec<PortableKey>, Role, Provenance)> {
+    // `classify` first, so every refusal it already makes — a non-broker
+    // relation, a keyless row — is made in exactly one place and nothing below
+    // can re-admit one.
+    let (as_written, role) = classify(relation, target)?;
+    match topic_identity(target, corpus) {
+        TopicIdentity::Literal => Some((vec![as_written], role, Provenance::Literal)),
+        TopicIdentity::Committed { keys: _, topics, bound } => Some((
+            topics.into_iter().map(PortableKey::broker).collect(),
+            role,
+            Provenance::ConfigBound { bound },
+        )),
+        TopicIdentity::Unresolved { keys, refusal } => Some((
+            vec![as_written],
+            role,
+            Provenance::ConfigUnresolved { keys, refusal },
+        )),
+    }
+}
+
 /// Fan out captured broker candidates into cross-service edges through the
 /// **unchanged** namespace-generic match loop (S-254, [FR-WS-10]).
 ///
@@ -105,35 +262,67 @@ pub(super) fn classify(relation: ArtifactRelation, topic_key: &str) -> Option<(P
 /// `(key, role, member, symbol)` first, because the loop does not de-duplicate
 /// fan-out edges (see the module docs). Non-broker candidates are ignored.
 ///
+/// # Topic identity is the committed value where one is committed ([S-410])
+///
+/// `corpora` holds, per member, that member's own committed configuration — and
+/// **only** the members that name a configuration key, so a workspace whose
+/// broker operands are all literals hands an empty map here and is resolved
+/// against nothing. Each candidate is reduced through [`identify`], so a site
+/// whose operand names a committed key is filed under the **value** rather than
+/// under the placeholder that names it, and two members spelling one property
+/// differently still meet. A site with no placeholder, and one whose keys the
+/// corpus refuses, are both filed under their operand exactly as before.
+///
+/// A candidate can therefore yield **more than one** key — one per overlay that
+/// commits a distinct value — and it is de-duplicated, indexed and fanned out
+/// under each of them independently ([FR-WS-19] AC2).
+///
 /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+/// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
 pub(super) fn broker_edges(
     candidates: impl IntoIterator<Item = BrokerCandidate>,
+    corpora: &BTreeMap<String, MemberCorpus>,
 ) -> Vec<BridgeEdge> {
     let mut providers: ProviderIndex = ProviderIndex::new();
     // A publish/subscribe is a captured call site ([FR-WS-10]): every broker edge
     // is invocation intake, so it seeds an app-wide reachability root ([CR-083]).
-    let mut consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake)> = Vec::new();
+    let mut consumers: Vec<(PortableKey, BridgeEndpoint, BridgeIntake, Provenance)> = Vec::new();
     // One endpoint per (key, role, member, symbol): the fan-out loop emits an
     // edge per pair, so a duplicated endpoint here would duplicate the edge.
     let mut seen: HashSet<(PortableKey, bool, String, String)> = HashSet::new();
+    // A member that named no configuration key is absent from `corpora` and
+    // resolves against nothing — never against another member's configuration,
+    // which is [ADR-64]'s within-reach rule.
+    let empty = MemberCorpus::new();
 
     for cand in candidates {
-        let Some((key, role)) = classify(cand.relation, &cand.key) else {
+        let corpus = corpora.get(&cand.endpoint.member).unwrap_or(&empty);
+        let Some((keys, role, value)) = identify(cand.relation, &cand.key, corpus) else {
             continue;
         };
         let is_provider = matches!(role, Role::Provider);
-        let dedup_key = (
-            key.clone(),
-            is_provider,
-            cand.endpoint.member.clone(),
-            cand.endpoint.symbol.as_str().to_string(),
-        );
-        if !seen.insert(dedup_key) {
-            continue; // a repeat of this exact endpoint on this topic — drop it
-        }
-        match role {
-            Role::Provider => index_provider(&mut providers, key, cand.endpoint),
-            Role::Consumer => consumers.push((key, cand.endpoint, BridgeIntake::Invocation)),
+        for key in keys {
+            let dedup_key = (
+                key.clone(),
+                is_provider,
+                cand.endpoint.member.clone(),
+                cand.endpoint.symbol.as_str().to_string(),
+            );
+            if !seen.insert(dedup_key) {
+                continue; // a repeat of this exact endpoint on this topic — drop it
+            }
+            match role {
+                Role::Provider => {
+                    index_provider(&mut providers, key, cand.endpoint.clone(), value.clone())
+                }
+                Role::Consumer => consumers.push((
+                    key,
+                    cand.endpoint.clone(),
+                    BridgeIntake::Invocation,
+                    value.clone(),
+                )),
+            }
         }
     }
 
@@ -159,8 +348,237 @@ mod tests {
     fn pubc(key: &str, member: &str, symbol: &str) -> BrokerCandidate {
         cand(ArtifactRelation::BrokerPublish, key, member, symbol)
     }
+    /// A workspace whose members commit no configuration at all: every operand
+    /// is then keyed exactly as written, which is the pre-[S-410] behaviour every
+    /// test below this line was written against and still pins.
+    fn literal_only() -> BTreeMap<String, MemberCorpus> {
+        BTreeMap::new()
+    }
+
     fn subc(key: &str, member: &str, symbol: &str) -> BrokerCandidate {
         cand(ArtifactRelation::BrokerSubscribe, key, member, symbol)
+    }
+
+    /// `member` commits `key` (in any spelling) to one value per `(profile,
+    /// value)` pair, in `application.yml` / `application-<profile>.yml`.
+    fn commits(
+        corpora: &mut BTreeMap<String, MemberCorpus>,
+        member: &str,
+        key: &str,
+        values: &[(Option<&str>, &str)],
+    ) {
+        corpora.entry(member.to_string()).or_default().insert(
+            crate::extract::config::corpus::canonical_key(key),
+            values
+                .iter()
+                .map(|(profile, value)| crate::graph_store::ConfigDefinition {
+                    path: profile
+                        .map_or("application.yml".to_string(), |p| {
+                            format!("application-{p}.yml")
+                        }),
+                    profile: profile.map(str::to_string),
+                    value: (*value).to_string(),
+                })
+                .collect(),
+        );
+    }
+
+    /// [S-410] / [FR-WS-10]'s re-proposed criterion, at the **edge**: a subscribe
+    /// keyed by a hand-written placeholder and a publish whose accessor was
+    /// stored in the canonical relaxed-binding spelling fan out across members,
+    /// because the topic identity is neither spelling — it is the committed
+    /// value both resolve to.
+    ///
+    /// The two operands here are the exact pair [ADR-64]'s 2026-09-15 amendment
+    /// records as *not* meeting byte-equal on the reference estate.
+    ///
+    /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+    #[test]
+    fn two_spellings_of_one_property_fan_out_on_the_committed_value() {
+        let mut corpora = BTreeMap::new();
+        for member in ["downsampler", "projector"] {
+            commits(
+                &mut corpora,
+                member,
+                "spring.kafka.topics.archive-volume-counters",
+                &[(None, "archive.volume.counters.v1")],
+            );
+        }
+
+        // Byte-unequal operands: the accessor hop stores the canonical spelling,
+        // a source-written literal keeps its hyphens.
+        let candidates = vec![
+            pubc(
+                "${spring.kafka.topics.archivevolumecounters}",
+                "downsampler",
+                "local emit_counters",
+            ),
+            subc(
+                "${spring.kafka.topics.archive-volume-counters}",
+                "projector",
+                "local on_counters",
+            ),
+        ];
+
+        assert!(
+            broker_edges(candidates.clone(), &literal_only()).is_empty(),
+            "BEFORE: with nothing committed the two spellings are two namespaces \
+             and do not meet — the gap ADR-64's amendment recorded"
+        );
+
+        let edges = broker_edges(candidates, &corpora);
+        assert_eq!(edges.len(), 1, "AFTER: they meet on the committed value: {edges:?}");
+        assert_eq!(edges[0].from.member, "downsampler");
+        assert_eq!(edges[0].to.member, "projector");
+        // FR-WS-19 AC6: BOTH ends name their own key, sources and profile set —
+        // which is why the edge carries two provenance fields and not one.
+        for (side, value) in [("from", &edges[0].from_value), ("to", &edges[0].to_value)] {
+            let Provenance::ConfigBound { bound } = value else {
+                panic!("the {side} end was admitted from configuration, not {value:?}");
+            };
+            assert_eq!(bound.len(), 1, "{side}");
+            assert_eq!(
+                bound[0].key, "spring.kafka.topics.archivevolumecounters",
+                "{side} names its canonical key"
+            );
+            assert_eq!(bound[0].values[0].value, "archive.volume.counters.v1", "{side}");
+            assert_eq!(bound[0].values[0].sources, ["application.yml"], "{side}");
+        }
+    }
+
+    /// A key whose overlays disagree yields **one identity per overlay** and the
+    /// site fans out under each of them — never one averaged or default-profile
+    /// winner ([FR-WS-19] AC2, [ADR-64] decision point 3).
+    ///
+    /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    #[test]
+    fn a_key_whose_overlays_disagree_fans_out_under_each_overlay() {
+        let mut corpora = BTreeMap::new();
+        commits(
+            &mut corpora,
+            "api",
+            "spring.kafka.topics.orders",
+            &[(Some("prod"), "orders-prod"), (Some("staging"), "orders-staging")],
+        );
+
+        let edges = broker_edges(
+            [
+                pubc("${spring.kafka.topics.orders}", "api", "local emit"),
+                subc("orders-prod", "prod-worker", "local on_prod"),
+                subc("orders-staging", "staging-worker", "local on_staging"),
+                subc("orders-dev", "dev-worker", "local on_dev"),
+            ],
+            &corpora,
+        );
+
+        let reached: Vec<&str> = edges.iter().map(|e| e.to.member.as_str()).collect();
+        assert_eq!(
+            reached,
+            ["prod-worker", "staging-worker"],
+            "one publish binds under BOTH overlays, and under no third value \
+             nothing commits: {edges:?}"
+        );
+        let Provenance::ConfigBound { bound } = &edges[0].from_value else {
+            panic!("a divergent key still admits: {:?}", edges[0].from_value);
+        };
+        assert_eq!(
+            bound[0].values.iter().map(|v| v.value.as_str()).collect::<Vec<_>>(),
+            ["orders-prod", "orders-staging"],
+            "every overlay's value is retained, each tagged with its profile"
+        );
+        assert_eq!(bound[0].profiles(), ["prod", "staging"]);
+    }
+
+    /// The **never-fabricate** half ([NFR-RA-05]). An operand whose key no
+    /// committed source defines, and one whose committed value is itself a
+    /// `${…}` indirection, are both admitted as *nothing*: the site keeps the
+    /// placeholder-as-written key [FR-WS-10]'s rule in force gives it, and the
+    /// refusal travels as `config-unresolved` rather than being swallowed.
+    ///
+    /// The near miss this pins is the one that matters: neither refusal may
+    /// produce an edge keyed on the *indirection* — `${another.key}` is not a
+    /// topic two members can meet on.
+    ///
+    /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn a_refused_key_admits_no_topic_and_keeps_its_as_written_key() {
+        // (a) No committed source defines it. The two sides still meet, on the
+        //     placeholder they both wrote — exactly as they did before S-410.
+        let edges = broker_edges(
+            [
+                pubc("${spring.kafka.topics.orders}", "api", "local emit"),
+                subc("${spring.kafka.topics.orders}", "worker", "local on_order"),
+            ],
+            &literal_only(),
+        );
+        assert_eq!(edges.len(), 1, "the as-written key still binds: {edges:?}");
+        assert_eq!(
+            edges[0].from_value,
+            Provenance::ConfigUnresolved {
+                keys: vec!["spring.kafka.topics.orders".to_string()],
+                refusal: ValueRefusal::MissingKey,
+            },
+            "the edge names the key it could not resolve, under the existing reason"
+        );
+
+        // (b) The committed value is itself a placeholder. Nothing is admitted,
+        //     and in particular NOT the indirection: a subscriber that literally
+        //     names `${another.key}` must not meet this publish.
+        let mut corpora = BTreeMap::new();
+        commits(
+            &mut corpora,
+            "api",
+            "spring.kafka.topics.orders",
+            &[(None, "${another.key}")],
+        );
+        let edges = broker_edges(
+            [
+                pubc("${spring.kafka.topics.orders}", "api", "local emit"),
+                subc("${another.key}", "worker", "local on_order"),
+            ],
+            &corpora,
+        );
+        assert!(
+            edges.is_empty(),
+            "an indirection is not a topic identity — nothing may meet on it: {edges:?}"
+        );
+    }
+
+    /// A workspace whose broker operands are plain literals is **byte for byte**
+    /// what it was before [S-410], whatever its members commit: an operand that
+    /// names no configuration key reads nothing from configuration.
+    ///
+    /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+    #[test]
+    fn a_literal_topic_is_never_resolved_however_much_is_committed() {
+        let mut corpora = BTreeMap::new();
+        // A committed key whose VALUE is the literal topic, and a committed key
+        // whose NAME is it. Neither may touch a literal operand.
+        commits(&mut corpora, "api", "orders", &[(None, "orders-v9")]);
+        commits(&mut corpora, "api", "spring.kafka.topics.orders", &[(None, "orders")]);
+
+        let with_corpus = broker_edges(
+            [
+                pubc("orders", "api", "local emit"),
+                subc("orders", "worker", "local on_order"),
+            ],
+            &corpora,
+        );
+        let without = broker_edges(
+            [
+                pubc("orders", "api", "local emit"),
+                subc("orders", "worker", "local on_order"),
+            ],
+            &literal_only(),
+        );
+        assert_eq!(with_corpus, without, "a literal operand is unaffected by any corpus");
+        assert_eq!(with_corpus.len(), 1);
+        assert_eq!(with_corpus[0].from_value, Provenance::Literal);
+        assert_eq!(with_corpus[0].to_value, Provenance::Literal);
     }
 
     /// The classifier maps the arm's relations onto the fan-out `BrokerTopic`
@@ -215,7 +633,7 @@ mod tests {
                 pubc("", "api", "local emitDynamic"),
                 subc("", "billing", "local onDynamic"),
                 subc("   ", "ship", "local onBlank"),
-            ])
+            ], &literal_only())
             .is_empty(),
             "a refused topic is reported, never matched"
         );
@@ -226,7 +644,7 @@ mod tests {
             pubc("", "api", "local emitDynamic"),
             subc("orders", "billing", "local sub_bill"),
             subc("", "billing", "local onDynamic"),
-        ]);
+        ], &literal_only());
         assert_eq!(edges.len(), 1, "only the keyed pair binds: {edges:?}");
         assert_eq!(edges[0].from.symbol.as_str(), "local pub_orders");
         assert_eq!(edges[0].to.symbol.as_str(), "local sub_bill");
@@ -242,7 +660,7 @@ mod tests {
             subc("orders", "billing", "local sub_bill"),
             subc("orders", "ship", "local sub_ship"),
             subc("orders", "api", "local sub_local"), // same member — intra-repo
-        ]);
+        ], &literal_only());
 
         assert_eq!(
             edges.len(),
@@ -271,7 +689,7 @@ mod tests {
         let diff = broker_edges([
             pubc("orders#com.acme.OrderCreated", "api", "local pub"),
             subc("orders#com.acme.OrderUpdated", "billing", "local sub"),
-        ]);
+        ], &literal_only());
         assert!(
             diff.is_empty(),
             "a differing schema FQN keeps the topics apart — no bind: {diff:?}"
@@ -280,7 +698,7 @@ mod tests {
         let same = broker_edges([
             pubc("orders#com.acme.OrderCreated", "api", "local pub"),
             subc("orders#com.acme.OrderCreated", "billing", "local sub"),
-        ]);
+        ], &literal_only());
         assert_eq!(same.len(), 1, "the matching-FQN pair binds: {same:?}");
         assert_eq!(same[0].to.member, "billing");
     }
@@ -296,7 +714,7 @@ mod tests {
             pubc("orders", "api", "local pub"), // same publish captured twice
             subc("orders", "billing", "local sub"),
             subc("orders", "billing", "local sub"), // same subscribe captured twice
-        ]);
+        ], &literal_only());
         assert_eq!(
             edges.len(),
             1,
@@ -314,7 +732,7 @@ mod tests {
         let edges = broker_edges([
             pubc("orders", "api", "local pub_local"),
             subc("orders", "api", "local sub_local"),
-        ]);
+        ], &literal_only());
         assert!(
             edges.is_empty(),
             "an in-repo publish→subscribe pair is owned by the local graph: {edges:?}"
