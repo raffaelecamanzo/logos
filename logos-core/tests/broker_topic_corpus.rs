@@ -1458,6 +1458,179 @@ fn member_corpus(root: &std::path::Path, member: &str) -> HarnessCorpus {
     corpus
 }
 
+/// Print the whole S-410 estate report — the per-member and per-topic tables and
+/// the edge deltas — and hand back the `(gained, lost)` edge sets the assertions
+/// then judge.
+///
+/// A separate function because the report is genuinely long and the test that
+/// owns it is subject to `max_fn_lines`; printing and asserting are also two
+/// different jobs, and keeping the assertions in the test keeps them visible at
+/// the end of it rather than buried in the middle of a wall of `eprintln!`.
+fn report_topic_identities<'a>(
+    root: &std::path::Path,
+    identities: &BTreeMap<String, Vec<SiteIdentity>>,
+    refused_rows: &BTreeMap<String, usize>,
+    corpus_keys: &BTreeMap<String, usize>,
+    before: &'a BTreeSet<Edge>,
+    after: &'a BTreeSet<Edge>,
+) -> (Vec<&'a Edge>, Vec<&'a Edge>) {
+    eprintln!("S-410 corpus (measured 2026-09-16): root={}", root.display());
+    eprintln!(
+        "  Producer/Consumer nodes per member, BEFORE (keyed on the stored operand) \
+         and AFTER (keyed on the committed value), at the promotion pass's own \
+         grain — one per (declaration, role, topic). The two columns are computed \
+         from the two key sets independently rather than asserted equal, because \
+         'this story does not move them' is a claim a report should EVIDENCE and \
+         not merely state. `keys` is the size of the member's committed corpus.\n    \
+         {:<40} {:>13} {:>13} {:>8} {:>6}",
+        "member", "producers b/a", "consumers b/a", "refused", "keys"
+    );
+    // A node's identity at this grain is `(declaration, role, topic)`, so the
+    // count is over the DISTINCT triples each key set produces — not over sites.
+    // A site resolving to two overlay values is two topics and therefore two
+    // nodes AFTER, and one BEFORE; counting sites would hide exactly that.
+    let node_count = |rows: &[SiteIdentity], publish: bool, committed: bool| -> usize {
+        rows.iter()
+            .filter(|s| s.is_publish == publish)
+            .flat_map(|s| {
+                let keys: &[String] = if committed {
+                    &s.topics
+                } else {
+                    std::slice::from_ref(&s.operand)
+                };
+                keys.iter().map(move |k| (s.declaration.as_str(), k.as_str()))
+            })
+            .collect::<BTreeSet<_>>()
+            .len()
+    };
+    let mut producers_total = (0usize, 0usize);
+    let mut consumers_total = (0usize, 0usize);
+    let mut node_counts_moved: Vec<String> = Vec::new();
+    for (member, rows) in identities {
+        let p = (node_count(rows, true, false), node_count(rows, true, true));
+        let c = (node_count(rows, false, false), node_count(rows, false, true));
+        producers_total = (producers_total.0 + p.0, producers_total.1 + p.1);
+        consumers_total = (consumers_total.0 + c.0, consumers_total.1 + c.1);
+        if p.0 != p.1 || c.0 != c.1 {
+            node_counts_moved.push(format!(
+                "{member} producers {}->{} consumers {}->{}",
+                p.0, p.1, c.0, c.1
+            ));
+        }
+        eprintln!(
+            "    {member:<40} {:>6}/{:<6} {:>6}/{:<6} {:>8} {:>6}",
+            p.0,
+            p.1,
+            c.0,
+            c.1,
+            refused_rows.get(member).copied().unwrap_or(0),
+            corpus_keys.get(member).copied().unwrap_or(0),
+        );
+    }
+    eprintln!(
+        "    (members whose node count MOVED across the two key sets: {})",
+        if node_counts_moved.is_empty() {
+            "none".to_string()
+        } else {
+            node_counts_moved.join(" · ")
+        }
+    );
+    let sites_total: usize = identities.values().map(Vec::len).sum();
+    let refused_total: usize = refused_rows.values().sum();
+    // The member denominator is stated precisely, because the obvious reading of
+    // it disagrees with the one ADR-64's amendment and
+    // `…_before_and_after_the_hop` carry. Those count members writing a broker
+    // ROW (23 on this estate, refusal-only members included); this table lists
+    // only members with at least one KEYED site, because a member whose every row
+    // is refused has no identity to resolve. The two are different populations,
+    // not a moved figure.
+    let refusal_only = refused_rows.keys().filter(|m| !identities.contains_key(*m)).count();
+    eprintln!(
+        "  TOTAL over {} member(s) writing a KEYED broker site (+{refusal_only} more \
+         writing only refusals = {} writing any broker row, the denominator ADR-64's \
+         amendment and the S-409 hop table use): producers {}->{}, consumers \
+         {}->{}, over {sites_total} keyed site(s) of {} row(s) ({refused_total} \
+         refused)",
+        identities.len(),
+        identities.len() + refusal_only,
+        producers_total.0,
+        producers_total.1,
+        consumers_total.0,
+        consumers_total.1,
+        sites_total + refused_total,
+    );
+
+    let admitted: usize = identities.values().flatten().filter(|s| s.admitted).count();
+    eprintln!(
+        "  TOPIC IDENTITY, of the {sites_total} keyed site(s):\n    \
+         …admitted a committed value (config-bound):        {admitted}\n    \
+         …kept the operand as written (literal / unresolved): {}",
+        sites_total - admitted,
+    );
+
+    eprintln!(
+        "  CROSS-MEMBER BRIDGE EDGES (publish endpoint -> subscribe endpoint, \
+         cross-member only — the grain `broker_edges` emits):\n    \
+         BEFORE, keyed on the stored operand's exact bytes: {}\n    \
+         AFTER,  keyed on the committed value where one is committed: {}",
+        before.len(),
+        after.len(),
+    );
+    let gained: Vec<&Edge> = after.difference(before).collect();
+    let lost: Vec<&Edge> = before.difference(after).collect();
+    eprintln!(
+        "    gained {} · lost {} · per topic:",
+        gained.len(),
+        lost.len()
+    );
+    let mut per_topic: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for e in &gained {
+        per_topic.entry(e.topic.as_str()).or_default().0 += 1;
+    }
+    for e in &lost {
+        per_topic.entry(e.topic.as_str()).or_default().1 += 1;
+    }
+    for (topic, (up, down)) in &per_topic {
+        eprintln!("      {topic:<64} +{up} -{down}");
+    }
+
+    // PER TOPIC, the other half of the same criterion: how many producers and
+    // consumers each identity carries, on both sides of the re-keying. A BEFORE
+    // topic is an operand as stored; an AFTER topic is a committed value. They
+    // are deliberately listed in ONE table keyed by topic string, so the
+    // `${…archiveevents}` row and the `archive-events` row sit together and a
+    // reader can see the re-keying rather than infer it from two tables.
+    let mut topic_nodes: BTreeMap<&str, [usize; 4]> = BTreeMap::new();
+    for rows in identities.values() {
+        for site in rows {
+            let slot = usize::from(!site.is_publish);
+            topic_nodes.entry(site.operand.as_str()).or_default()[slot] += 1;
+            for topic in &site.topics {
+                topic_nodes.entry(topic.as_str()).or_default()[2 + slot] += 1;
+            }
+        }
+    }
+    eprintln!(
+        "  PER TOPIC — producers/consumers, BEFORE (the stored operand) then AFTER \
+         (the committed value); a topic with a figure on only one side is one the \
+         re-keying moved:\n      {:<64} {:>13} {:>13}",
+        "topic", "producers b/a", "consumers b/a"
+    );
+    for (topic, [pb, cb, pa, ca]) in &topic_nodes {
+        eprintln!("      {topic:<64} {pb:>6}/{pa:<6} {cb:>6}/{ca:<6}");
+    }
+    for (label, set) in [("GAINED", &gained), ("LOST  ", &lost)] {
+        for e in set.iter().take(20) {
+            eprintln!(
+                "      {label} {} : {}/{} -> {}/{}",
+                e.topic, e.from_member, e.from, e.to_member, e.to
+            );
+        }
+    }
+
+    (gained, lost)
+}
+
 /// **S-410's estate measurement**, reported and never floored: what the
 /// committed-value topic identity does to `Producer` nodes, `Consumer` nodes and
 /// cross-member bridge edges, per member and per topic, with denominators.
@@ -1670,90 +1843,14 @@ fn the_reference_workspace_reports_its_topic_identities_before_and_after_the_com
     let before = edges(false);
     let after = edges(true);
 
-    eprintln!("S-410 corpus (measured 2026-09-16): root={}", root.display());
-    eprintln!(
-        "  Producer/Consumer nodes per member, at the promotion pass's own grain \
-         (one per (declaration, role, topic)); the pass keys on the STORED operand \
-         and this story does not move it, so these are reported, not expected to \
-         change. `keys` is the size of the member's committed corpus.\n    \
-         {:<44} {:>9} {:>9} {:>8} {:>6}",
-        "member", "producers", "consumers", "refused", "keys"
+    let (gained, lost) = report_topic_identities(
+        &root,
+        &identities,
+        &refused_rows,
+        &corpus_keys,
+        &before,
+        &after,
     );
-    let mut producers_total = 0usize;
-    let mut consumers_total = 0usize;
-    for (member, rows) in &identities {
-        let producers = rows.iter().filter(|s| s.is_publish).count();
-        let consumers = rows.len() - producers;
-        producers_total += producers;
-        consumers_total += consumers;
-        eprintln!(
-            "    {member:<44} {producers:>9} {consumers:>9} {:>8} {:>6}",
-            refused_rows.get(member).copied().unwrap_or(0),
-            corpus_keys.get(member).copied().unwrap_or(0),
-        );
-    }
-    let sites_total: usize = identities.values().map(Vec::len).sum();
-    let refused_total: usize = refused_rows.values().sum();
-    // The member denominator is stated precisely, because the obvious reading of
-    // it disagrees with the one ADR-64's amendment and
-    // `…_before_and_after_the_hop` carry. Those count members writing a broker
-    // ROW (23 on this estate, refusal-only members included); this table lists
-    // only members with at least one KEYED site, because a member whose every row
-    // is refused has no identity to resolve. The two are different populations,
-    // not a moved figure.
-    let refusal_only = refused_rows.keys().filter(|m| !identities.contains_key(*m)).count();
-    eprintln!(
-        "  TOTAL over {} member(s) writing a KEYED broker site (+{refusal_only} more \
-         writing only refusals = {} writing any broker row, the denominator ADR-64's \
-         amendment and the S-409 hop table use): {producers_total} producer(s) + \
-         {consumers_total} consumer(s) = {sites_total} keyed site(s), of {} row(s) \
-         ({refused_total} refused)",
-        identities.len(),
-        identities.len() + refusal_only,
-        sites_total + refused_total,
-    );
-
-    let admitted: usize = identities.values().flatten().filter(|s| s.admitted).count();
-    eprintln!(
-        "  TOPIC IDENTITY, of the {sites_total} keyed site(s):\n    \
-         …admitted a committed value (config-bound):        {admitted}\n    \
-         …kept the operand as written (literal / unresolved): {}",
-        sites_total - admitted,
-    );
-
-    eprintln!(
-        "  CROSS-MEMBER BRIDGE EDGES (publish endpoint -> subscribe endpoint, \
-         cross-member only — the grain `broker_edges` emits):\n    \
-         BEFORE, keyed on the stored operand's exact bytes: {}\n    \
-         AFTER,  keyed on the committed value where one is committed: {}",
-        before.len(),
-        after.len(),
-    );
-    let gained: Vec<&Edge> = after.difference(&before).collect();
-    let lost: Vec<&Edge> = before.difference(&after).collect();
-    eprintln!(
-        "    gained {} · lost {} · per topic:",
-        gained.len(),
-        lost.len()
-    );
-    let mut per_topic: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
-    for e in &gained {
-        per_topic.entry(e.topic.as_str()).or_default().0 += 1;
-    }
-    for e in &lost {
-        per_topic.entry(e.topic.as_str()).or_default().1 += 1;
-    }
-    for (topic, (up, down)) in &per_topic {
-        eprintln!("      {topic:<64} +{up} -{down}");
-    }
-    for (label, set) in [("GAINED", &gained), ("LOST  ", &lost)] {
-        for e in set.iter().take(20) {
-            eprintln!(
-                "      {label} {} : {}/{} -> {}/{}",
-                e.topic, e.from_member, e.from, e.to_member, e.to
-            );
-        }
-    }
 
     // (0) The corpus is the one the finding was measured against. Asserted so a
     //     green run cannot report a measurement that did not happen.
@@ -1780,7 +1877,7 @@ fn the_reference_workspace_reports_its_topic_identities_before_and_after_the_com
          committing its topic keys — the per-topic table above says which",
         before.len(),
         after.len(),
-        sites_total,
+        identities.values().map(Vec::len).sum::<usize>(),
     );
 
     // (0c) The QUALITATIVE claim [ADR-64]'s 2026-09-15 amendment makes, which is
