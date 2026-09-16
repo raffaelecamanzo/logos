@@ -1649,7 +1649,25 @@ fn report_topic_identities<'a>(
 ///     committed configuration is keyed by that committed **value**; one whose
 ///     keys the corpus proves nothing for keeps its operand as written
 ///     ([FR-WS-10]'s rule in force). Both are decided by the shipped
-///     [`topic_identity`], so this harness cannot drift from the product.
+///     [`topic_identity`], so the *identity* half cannot drift from the product.
+///
+/// # The edge counts are harness-derived, and that is a real limitation
+///
+/// The identity half runs through shipped code; the **fan-out join** does not.
+/// `federation::broker::broker_edges` is `pub(super)`, so the cross-member pairing
+/// below is re-implemented here: same direction (publish → subscribe), same
+/// cross-member exclusion, same `#`-guard behaviour (the guard rides inside the
+/// key string), and de-duplication equivalent because [`Edge`] carries the topic.
+/// No behavioural difference between the two is known — but nothing *prevents*
+/// one, and this project has been bitten by exactly that shape before: [S-397]'s
+/// harness proved 79 sites where the product admitted 44. So read the edge
+/// figures as **"what the shipped identity rule implies under a faithful join"**,
+/// not as "what `ContractBridge::edges` returned". The per-member and per-topic
+/// node counts above have no such caveat — they are pure `topic_identity`.
+///
+/// Closing it properly means widening `broker_edges`' visibility to drive it from
+/// here, which is a change to the federation module's surface that no S-410
+/// criterion asks for; recorded rather than taken.
 ///
 /// `Producer`/`Consumer` are counted at the grain the promotion pass promotes
 /// them — one per `(declaration symbol, role, topic)` — and that grain is
