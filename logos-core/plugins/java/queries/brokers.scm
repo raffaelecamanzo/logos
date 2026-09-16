@@ -42,6 +42,17 @@
 ; the refusal so it reaches the [FR-WS-05] coverage payload as `topic-not-literal`,
 ; once per site.
 ;
+; ONE EXCEPTION, ADDED 2026-09-15 (S-409, [FR-WS-19], [CR-131] §3.2 A2). Read the
+; rule above with this correction, because it is the rule and not the example that
+; a reader takes away: an operand that is a resolvable `@ConfigurationProperties`
+; ACCESSOR — `kafkaTopics.getArchiveEvents()`, bare or `this.`-qualified — now
+; BINDS, to the canonical `${prefix.key}` placeholder of the property it reads.
+; Everything else in that list still refuses, `config.topic()` included (it names
+; no declared bound class). The hop is `extract::broker`'s, not this file's — see
+; its "THE ACCESSOR HOP" comment — and it needed no pattern change here, because
+; the `(method_invocation)` arm of the refusal slots below already carries the
+; shape.
+;
 ; The array and multi-attribute forms never report a refusal, and it is worth being
 ; exact about why: NOT because the interpreter cancels their candidate, but because
 ; they never produce one. The slot patterns below enumerate non-literal operand
@@ -123,9 +134,16 @@
 
 ; ── Subscribe REFUSAL slots: a listener whose topic operand is one of the
 ;    NON-LITERAL shapes below. The interpreter records a `topic-not-literal`
-;    refusal for a site that captured no `@broker.subscribe.topic`, so the
-;    patterns above decide what binds and these decide only what is *reported*
-;    when nothing did ([FR-WS-05], [NFR-CC-04]). The site capture is the dedup
+;    refusal for a site that captured no `@broker.subscribe.topic`.
+;
+;    A SLOT IS NO LONGER REPORT-ONLY (amended 2026-09-15, S-409). This header
+;    used to say the patterns above decide what binds and these decide only what
+;    is *reported* when nothing did. Since the accessor hop, a slot operand that
+;    resolves as a `@ConfigurationProperties` accessor BINDS its canonical
+;    `${prefix.key}` — so a `.slot` capture is an admission path, not only a
+;    reporting one, and a query author adding one must expect it to bind. What is
+;    unchanged is that everything the hop cannot prove still reports here
+;    ([FR-WS-05], [NFR-CC-04]). The site capture is the dedup
 ;    grain — one attribute (or one single-value argument list) is one site, so an
 ;    array of five literals and a five-attribute annotation each refuse at most
 ;    once.
@@ -299,17 +317,21 @@
 ;      (KafkaHeaders.TOPIC, k.get())   → (argument_list (field_access …) (method_invocation object: (identifier) name: (identifier) arguments: (argument_list)))
 ;      (KafkaHeaders.TOPIC, P + "o")   → (argument_list (field_access …) (binary_expression left: (identifier) right: (string_literal …)))
 ;
-;    WHAT THIS ADMITS ON THE REAL ESTATE: nothing. S-365 measured that **none** of
-;    the 54 header-form sites carries a literal topic — 19 pass an identifier (16 of
-;    them a method parameter) and 35 read a `@ConfigurationProperties` getter — so
-;    recognition alone binds no topic and promotes no `Producer` node. That is the
-;    measured outcome, not a defect: what this story delivers is the 54 honest
-;    `topic-not-literal` refusals, so a producer-bearing estate stops reading like
-;    one with no producer at all ([NFR-CC-04]). Keying a configuration-bound operand
-;    against committed configuration is [CR-117] §3.2's canonical-identity rule
-;    (S-371), and S-365 measured that even WITH it 0 of the 13 src/main sites would
-;    be admitted on this corpus — all 38 arm-level admits are IT test classes.
-;    Whether that rule is worth building is a journal question, not this file's.
+;    WHAT THIS ADMITS ON THE REAL ESTATE — AMENDED 2026-09-15 (S-409). S-365
+;    measured that **none** of the 54 header-form sites carries a literal topic — 19
+;    pass an identifier (16 of them a method parameter) and 35 read a
+;    `@ConfigurationProperties` getter. At S-370 that meant recognition alone bound
+;    no topic and promoted no `Producer` node, and what the story delivered was the
+;    54 honest `topic-not-literal` refusals, so a producer-bearing estate stopped
+;    reading like one with no producer at all ([NFR-CC-04]).
+;
+;    Since S-409 the 35 GETTER operands resolve, through the accessor hop in
+;    `extract::broker`; the 19 identifiers still refuse. "None carries a literal" is
+;    still true and no longer implies "none binds". The current estate reading, per
+;    member and with its denominator, is printed by
+;    `the_reference_workspace_reports_its_resolved_broker_sites_before_and_after_the_hop`
+;    (`logos-core/tests/broker_topic_corpus.rs`) — one home for the figure, rather
+;    than a number transcribed into three headers that then move apart.
 
 ; Publish (header form), BINDING: the topic operand is a static string literal.
 ; Keyed by the literal's own text, `${…}` placeholders included — the same
@@ -432,13 +454,23 @@
 ;       argument in every Kafka Streams overload of both methods, so the leading
 ;       anchor is the whole of the positional rule.
 ;
-;    WHAT THIS ADMITS ON THE REAL ESTATE: refusals, not edges. All 16 sites pass a
-;    `@ConfigurationProperties` accessor (`kafkaTopics.getArchiveEvents()`) or a
-;    qualified constant (`Topics.INPUT_TOPIC`), so every one reports
-;    `topic-not-literal` until [S-409] threads the accessor hop into this arm —
-;    the same shape the HTTP arm already resolves at 81 of 96 sites. That is the
-;    measured outcome of THIS story, not a defect: 16 honest refusals where there
-;    were 16 silences.
+;    WHAT THIS ADMITS ON THE REAL ESTATE — AMENDED 2026-09-15 (S-409). All 16
+;    sites pass a `@ConfigurationProperties` accessor
+;    (`kafkaTopics.getArchiveEvents()`) or a qualified constant
+;    (`Topics.INPUT_TOPIC`), and none is a literal. At S-408 that meant 16 honest
+;    `topic-not-literal` refusals where there had been 16 silences, which was the
+;    measured outcome of THAT story rather than a defect.
+;
+;    S-409 has since threaded the HTTP arm's `BindingView` into
+;    `extract::broker::capture_broker_invocations`, so the ACCESSOR operands now
+;    resolve to their canonical `${prefix.key}` placeholder and only the qualified
+;    constants still refuse. Nothing in this file changed for that: the accessor
+;    arrives through the `(method_invocation)` arm of the refusal slots' own
+;    enumeration, which is why the hop could be a core change with no query edit.
+;    The estate reading, dated and with its denominator, is in
+;    `the_reference_workspace_reports_its_resolved_broker_sites_before_and_after_the_hop`
+;    (`logos-core/tests/broker_topic_corpus.rs`), which prints it per member —
+;    deliberately not transcribed here, so there is one place it can go stale.
 
 ; Subscribe (topology form), BINDING: the topic operand is a static string literal.
 (method_invocation

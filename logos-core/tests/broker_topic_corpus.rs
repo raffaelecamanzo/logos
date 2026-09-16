@@ -113,7 +113,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use logos_core::extract::{extract, FileInput, SymbolContext};
+use logos_core::extract::config::corpus::canonical_key;
+use logos_core::extract::{extract, extract_files, FileInput, SymbolContext};
+use logos_core::resolve::binding::placeholder_keys;
 use logos_core::model::ArtifactRelation;
 use logos_core::plugin::LanguageRegistry;
 
@@ -1016,5 +1018,357 @@ fn the_reference_workspace_leaves_no_streams_topology_site_silent_when_one_is_co
         "the receiver-gated Go arm produced {go_broker_rows} broker row(s) over \
          {go_files} Go files that write no Kafka Streams topology ({go_textual_sites} \
          textual `Stream(`/`To(` site(s)) — every one is a false positive"
+    );
+}
+
+/// One member's broker-arm reading, before and after the accessor hop.
+#[derive(Default, Clone, Copy)]
+struct MemberBrokerReading {
+    /// Rows whose target is a key — a literal topic, or (after) a resolved
+    /// accessor's canonical `${prefix.key}` placeholder.
+    resolved: usize,
+    /// Keyless rows — the arm's recorded `topic-not-literal` refusals.
+    refused: usize,
+}
+
+impl MemberBrokerReading {
+    /// The denominator every figure below is reported against: the broker rows
+    /// this member's files produce at all.
+    fn rows(self) -> usize {
+        self.resolved + self.refused
+    }
+}
+
+/// **S-409 / [CR-131] §3.2 A2's corpus criterion.** Walks the reference
+/// workspace member by member and reports, **per member with its denominator**,
+/// how many broker sites resolve their topic operand to a key before and after
+/// the accessor hop reaches this arm ([FR-WS-19]).
+///
+/// # What "before" and "after" are, precisely
+///
+/// Both are readings of **this** build; neither re-runs an old binary. They
+/// differ by exactly the one input S-409 threads in — the member's
+/// `PropertiesIndex`:
+///
+/// - **before** — [`extract`], the single-file driver, whose index is empty.
+///   That is a faithful model of the pre-S-409 binary *for broker rows*, and the
+///   reason is structural rather than an approximation:
+///   `capture_broker_invocation_arm` took no `properties` argument at all, so a
+///   member-scoped index and an empty one produced byte-identical broker output.
+/// - **after** — [`extract_files`] over the member's whole Java file set, which
+///   is what the pipeline actually calls and what builds the index a
+///   `@ConfigurationProperties` accessor needs (its owning class is never in the
+///   file that reads it).
+///
+/// # No floor is asserted on any figure here
+///
+/// Deliberately, and for the reason [S-397] recorded the hard way: a count of
+/// what a capture admits on one estate is a measurement, not a prediction about
+/// the product, and a `>= N` here is how a census figure becomes an acceptance
+/// floor the product then misses. What IS asserted is the invariant — **no
+/// member that recorded broker rows before records none after** — plus the
+/// corpus identity, so a changed capture cannot be mistaken for a changed
+/// corpus.
+///
+/// # Recorded finding
+///
+/// ```text
+/// S-409 / CR-131 §3.2 A2, measured 2026-09-15 against ~/source/pec-services
+/// (87 top-level entries, 84 enrolled members).
+///
+///   members producing any broker row:        23
+///   broker rows (the denominator):           86   ← unchanged by the hop
+///   rows whose operand resolved, before:     16   of 86
+///   rows whose operand resolved, after:      59   of 86
+///
+/// The 43-row move is the accessor hop and nothing else: the two readings are
+/// the same walk of the same bytes on the same build, differing only in whether
+/// the member's `PropertiesIndex` exists. The 27 rows that still refuse are the
+/// operands the chain cannot prove — a qualified constant (`Topics.INPUT_TOPIC`),
+/// a method parameter (S-417's two-frame wrapper hop, out of scope), and the rest
+/// of FR-WS-19's nine named faults.
+///
+/// The per-member breakdown is printed by the run itself (stderr, one line per
+/// member: `MEMBER  before-resolved/rows -> after-resolved/rows`) and reproduced
+/// in the sprint implementation notes. It is deliberately NOT transcribed here:
+/// 23 figures copied into prose beside the assertion that prints them is exactly
+/// the stale-twin failure this module's S-408 sibling keeps an explicit sweep
+/// list for.
+///
+/// WHAT THIS MEASUREMENT IS, AND WHAT IT IS NOT COMPARABLE WITH. This test walks
+/// the estate's **source** through `extract_files`. The estate's coverage
+/// harnesses — `coverage_headline_baseline`, `coverage_intake_split`,
+/// `config_bound_admission` — instead open the ENROLLED `.logos` stores through
+/// `federation::discover` and index nothing, so they report whatever generation
+/// the stores were last written at, which is a different question from this one
+/// and moves for reasons that have nothing to do with the code under test.
+///
+/// That distinction is not theoretical. On 2026-09-15 those three harnesses were
+/// run on this commit and on its merge base and produced **byte-identical**
+/// figures (the HTTP arm's `config-bound` count read 84 in both), which is this
+/// story's AC4 evidence. Re-run a few hours later they read 90 — because a
+/// CONCURRENT sibling dev session was re-enrolling the shared reference
+/// workspace, 8 of the 84 stores rewritten mid-run. Nothing about this branch
+/// changed between the two readings.
+///
+/// The lesson for whoever reads a figure out of those three next: **the reference
+/// estate is a shared mutable resource, and a store-backed figure is only
+/// comparable against another figure taken on the same store generation.** Take
+/// both arms of any comparison back to back, and check whether anything else is
+/// enrolling before believing a delta. A source-backed walk like this one has no
+/// such hazard, which is the reason this measurement is written as one.
+/// ```
+///
+/// [CR-131]: ../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+/// [FR-WS-19]: ../../docs/specs/requirements/FR-WS-19.md
+/// [S-397]: ../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
+#[test]
+fn the_reference_workspace_reports_its_resolved_broker_sites_before_and_after_the_hop() {
+    let Some(root) = corpus_root() else {
+        eprintln!(
+            "SKIPPED: set LOGOS_REF_WORKSPACE=<path to the reference workspace> to run the \
+             S-409 broker accessor-hop corpus measurement (this test's docs carry the \
+             recorded finding it reproduces)."
+        );
+        return;
+    };
+
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    let java = registry.for_extension("java").expect("java plugin present");
+    let ctx = SymbolContext::default();
+
+    // Group every admitted Java file by its member — the first path segment, which
+    // is one clone of the estate. The index is member-scoped because that is the
+    // scope the production pass builds it at.
+    let mut by_member: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for entry in corpus_walker(&root).flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("java") {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(&root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().to_string();
+        let Some(member) = rel.split('/').next().map(str::to_string) else {
+            continue;
+        };
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        by_member.entry(member).or_default().push((rel, source));
+    }
+
+    let is_broker = |relation: Option<ArtifactRelation>| {
+        matches!(
+            relation,
+            Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+        )
+    };
+
+    let mut before: BTreeMap<String, MemberBrokerReading> = BTreeMap::new();
+    let mut after: BTreeMap<String, MemberBrokerReading> = BTreeMap::new();
+    // The keyed targets each member publishes and subscribes, AFTER the hop — the
+    // join the bridge itself makes (`PortableKey::broker`, byte equality over the
+    // stored target). Collected so the agreement figure below is read off the same
+    // rows the ledger carries, not off a second derivation of them.
+    let mut published: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut subscribed: BTreeSet<(String, String)> = BTreeSet::new();
+
+    for (member, files) in &by_member {
+        let inputs: Vec<FileInput> = files
+            .iter()
+            .map(|(rel, source)| FileInput::new(rel, source))
+            .collect();
+
+        let mut pre = MemberBrokerReading::default();
+        for input in &inputs {
+            for reference in extract(input, java, &ctx).refs.iter().filter(|r| is_broker(r.relation))
+            {
+                if reference.target.is_empty() {
+                    pre.refused += 1;
+                } else {
+                    pre.resolved += 1;
+                }
+            }
+        }
+
+        let mut post = MemberBrokerReading::default();
+        for facts in extract_files(&inputs, &registry, &ctx) {
+            for reference in facts.refs.iter().filter(|r| is_broker(r.relation)) {
+                if reference.target.is_empty() {
+                    post.refused += 1;
+                } else {
+                    post.resolved += 1;
+                    let side = match reference.relation {
+                        Some(ArtifactRelation::BrokerPublish) => &mut published,
+                        _ => &mut subscribed,
+                    };
+                    side.insert((member.clone(), reference.target.clone()));
+                }
+            }
+        }
+
+        if pre.rows() == 0 && post.rows() == 0 {
+            continue; // this member writes no broker site at all
+        }
+        before.insert(member.clone(), pre);
+        after.insert(member.clone(), post);
+    }
+
+    let sum = |m: &BTreeMap<String, MemberBrokerReading>, f: fn(MemberBrokerReading) -> usize| {
+        m.values().copied().map(f).sum::<usize>()
+    };
+    eprintln!("S-409 corpus: root={}", root.display());
+    eprintln!(
+        "  per member — resolved/rows, before the accessor hop -> after it \
+         (no floor is asserted on any of these):"
+    );
+    for (member, pre) in &before {
+        let post = after[member];
+        eprintln!(
+            "    {member:<44} {:>4}/{:<4} -> {:>4}/{:<4}",
+            pre.resolved,
+            pre.rows(),
+            post.resolved,
+            post.rows(),
+        );
+    }
+    eprintln!(
+        "  TOTAL over {} member(s) writing a broker site: resolved {}/{} -> {}/{}",
+        before.len(),
+        sum(&before, |r| r.resolved),
+        sum(&before, MemberBrokerReading::rows),
+        sum(&after, |r| r.resolved),
+        sum(&after, MemberBrokerReading::rows),
+    );
+
+    // ── CROSS-MEMBER KEY AGREEMENT, reported and not asserted ───────────────
+    //
+    // Resolving an operand is not the same as two members MEETING on it, and the
+    // resolved-row count above cannot tell the two apart. Agreement is what
+    // [CR-131] §3.2 A2 is ultimately about and what S-410 builds on, so it is
+    // measured here rather than left for that story to rediscover.
+    //
+    // Two figures, because they differ and the difference IS the finding:
+    //
+    //   byte-equal    — pairs that bind TODAY. `federation::bridge` joins broker
+    //                   sites on the stored target's exact bytes.
+    //   relaxed-equal — pairs naming the same configuration property under Spring's
+    //                   own relaxed binding (`canonical_key`).
+    //
+    // The gap between them is a spelling gap this story opens and does not close: a
+    // resolved ACCESSOR is stored canonically (`${…archivevolumecounters}`, see
+    // `accessor::placeholder_for`), while a LITERAL is stored exactly as written
+    // (`${…archive-volume-counters}`, unchanged since CR-107 and kept in force by
+    // ADR-64's "a topic literal is keyed by its own text exactly as written").
+    // Nothing canonicalises a broker target downstream —
+    // `federation::coverage::config_bound_keys` resolves placeholders for
+    // `HttpClientCall` only — so two spellings of one property sit in two
+    // namespaces. Deliberately NOT closed here: doing so means either changing the
+    // stored form of the literal rows (an ADR-64 rule change) or canonicalising at
+    // the join (which IS S-410's committed-value topic identity). Both are
+    // decisions above this task, and the figure is what they should be decided on.
+    let byte_equal = published
+        .iter()
+        .filter(|(pm, pk)| subscribed.iter().any(|(sm, sk)| sm != pm && sk == pk))
+        .count();
+    let relaxed = |k: &str| -> String {
+        match placeholder_keys(k) {
+            Some(keys) => keys.iter().map(|k| canonical_key(k)).collect::<Vec<_>>().join("|"),
+            None => canonical_key(k),
+        }
+    };
+    let relaxed_equal = published
+        .iter()
+        .filter(|(pm, pk)| {
+            subscribed
+                .iter()
+                .any(|(sm, sk)| sm != pm && relaxed(sk) == relaxed(pk))
+        })
+        .count();
+    // THE GRAIN, stated because it is the first thing a second measurement
+    // disagrees with: these count distinct PUBLISHING `(member, key)` rows that
+    // meet at least one other member's subscribe — not publish×subscribe pairs. A
+    // pair-grained count of the same estate is larger, because one publish can meet
+    // several members' subscribes. Neither is wrong; they answer different
+    // questions, and a reader reconciling two figures needs to know which is which.
+    eprintln!(
+        "  CROSS-MEMBER AGREEMENT over the resolved rows (reported, never floored;\n  \
+         grain = distinct PUBLISHING (member, key) meeting >=1 other member's subscribe):\n    \
+         distinct (member, key) publishes {} · subscribes {}\n    \
+         …meeting another member's subscribe, byte-equal (what binds today): {byte_equal}\n    \
+         …the same under Spring relaxed binding (canonical_key):             {relaxed_equal}\n    \
+         …lost purely to the accessor/literal spelling difference:           {}",
+        published.len(),
+        subscribed.len(),
+        relaxed_equal.saturating_sub(byte_equal),
+    );
+
+    // (0) The corpus is the one the finding was measured against. Asserted so a
+    //     green run cannot report a measurement that did not happen.
+    assert!(
+        !before.is_empty(),
+        "the reference workspace at {} produced no broker row at all — this is not \
+         the corpus the recorded finding was measured against",
+        root.display(),
+    );
+
+    // (1) THE INVARIANT: the hop resolves operands, it never silences a site.
+    //     Per member, in BOTH directions — the row count cannot fall (a refused row
+    //     becomes a resolved row; two resolved rows with distinct keys can only
+    //     add), and the resolved count cannot fall either. This is the NFR-CC-04
+    //     claim, and it is asserted rather than printed.
+    //
+    //     `>=` rather than `==` on the rows, deliberately: equality happens to hold
+    //     on today's estate (every member's denominator is unchanged) but it is not
+    //     structurally guaranteed — two refusals in one declaration dedup to one
+    //     keyless row, while the same two resolving to DIFFERENT keys are two rows.
+    //     Asserting an equality the mechanism does not promise is how a future
+    //     estate goes red for the wrong reason.
+    let regressed: Vec<String> = before
+        .iter()
+        .filter(|(member, pre)| {
+            let post = after[*member];
+            post.rows() < pre.rows() || post.resolved < pre.resolved
+        })
+        .map(|(member, pre)| {
+            let post = after[member];
+            format!(
+                "{member} {}/{} -> {}/{}",
+                pre.resolved,
+                pre.rows(),
+                post.resolved,
+                post.rows()
+            )
+        })
+        .collect();
+    assert!(
+        regressed.is_empty(),
+        "{} member(s) lost a broker row or a resolved operand across the hop — it \
+         must move a row from refused to resolved, never remove one: {regressed:?}",
+        regressed.len(),
+    );
+
+    // (2) THE HOP ACTUALLY RAN. Strict improvement in the total resolved count,
+    //     and this is NOT a floor: it asserts a DIRECTION, never a number, so it
+    //     cannot become the census-figure-as-acceptance-floor trap [S-397] recorded.
+    //
+    //     It exists because assertion (1) alone is invariant under the hop being
+    //     completely disabled — `rows()` is `resolved + refused`, so a build that
+    //     resolves nothing satisfies it. Demonstrated: with the hop stubbed to
+    //     `None`, this test reported green while printing `resolved 16/86 -> 16/86`.
+    let resolved_before = sum(&before, |r| r.resolved);
+    let resolved_after = sum(&after, |r| r.resolved);
+    assert!(
+        resolved_after > resolved_before,
+        "the accessor hop resolved no additional broker operand on this estate \
+         ({resolved_before} -> {resolved_after} of {} rows). Either the hop \
+         regressed, or this corpus stopped writing accessor operands — the two are \
+         different findings and the per-member table above says which",
+        sum(&after, MemberBrokerReading::rows),
     );
 }

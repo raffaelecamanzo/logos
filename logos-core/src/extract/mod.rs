@@ -85,6 +85,7 @@ pub(crate) mod symbol;
 pub(crate) use symbol::escape_name;
 pub use symbol::SymbolContext;
 
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -723,6 +724,7 @@ fn extract_one(
         &decls,
         &symbols,
         file_module.as_ref(),
+        properties,
         &mut facts,
     );
 
@@ -908,6 +910,33 @@ fn extract_one(
 ///
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// The reading file's configuration-binding view, or [`None`] for a member that
+/// declares no `@ConfigurationProperties` class (S-397, extended to the broker arm
+/// by S-409).
+///
+/// One constructor rather than one per arm. The two arms had a byte-identical
+/// five-field literal 140 lines apart in this file, which is exactly the
+/// hand-mirrored twin `config::refs::record_refusals` was written to avoid — and
+/// the arms differ in *when* they build it, never in *what* they build, so the
+/// difference belongs at the call sites and the construction belongs here.
+///
+/// The `!properties.is_empty()` test is a **cost** guard: an index over no class
+/// resolves nothing, so the answer is the same either way and what it saves is the
+/// per-file [`DeclaredTypes::build`] AST walk.
+fn accessor_binding<'a>(
+    plugin: &'a dyn LanguagePlugin,
+    root: Node<'_>,
+    source: &[u8],
+    properties: &'a PropertiesIndex,
+) -> Option<BindingView<'a>> {
+    (!properties.is_empty()).then(|| BindingView {
+        index: properties,
+        types: DeclaredTypes::build(root, source),
+        language: plugin.name(),
+        module: MEMBER_SCOPE,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn capture_http_client_call_arm(
     plugin: &dyn LanguagePlugin,
@@ -938,12 +967,7 @@ fn capture_http_client_call_arm(
     // whole of what keeps a member with no configuration corpus unaffected —
     // and it is the common case for every language and repository that ships no
     // `properties` capability at all.
-    let binding = (!properties.is_empty()).then(|| BindingView {
-        index: properties,
-        types: DeclaredTypes::build(root, source),
-        language: plugin.name(),
-        module: MEMBER_SCOPE,
-    });
+    let binding = accessor_binding(plugin, root, source, properties);
     let calls = collect_invocation_sites(
         inv_query,
         root,
@@ -1047,7 +1071,44 @@ fn capture_http_client_call_arm(
 /// symbol is its innermost enclosing declaration — the same attribution
 /// `collect_refs` uses.
 ///
+/// # The accessor hop, built once and now reaching both arms (S-409, [FR-WS-19])
+///
+/// The [`BindingView`] below is constructed by the **same function** as
+/// [`capture_http_client_call_arm`]'s ([`accessor_binding`]), deliberately and not
+/// by coincidence: a
+/// topic operand that reads a `@ConfigurationProperties` getter is the identical
+/// shape a request-path operand takes, and the HTTP arm resolved 81 of its 96
+/// such sites while this arm refused every one of them `topic-not-literal`
+/// ([CR-131] §3.2 A2). Nothing about the mechanism is broker-specific, so nothing
+/// about it is restated here — read [`config::accessor::BindingView::placeholder_for`]
+/// for the chain and [`broker::capture_broker_invocations`] for where the answer
+/// is put.
+///
+/// The `!properties.is_empty()` guard is a **cost** guard, not a correctness one,
+/// and the distinction is worth stating because the first draft of this comment
+/// got it wrong. Correctness does not need it: an index over no class resolves
+/// nothing, so `placeholder_for` returns [`None`] and the output is byte-identical
+/// with the guard removed — a mutation confirmed that, which is why no test can
+/// pin this line. What the guard buys is that a member declaring no
+/// configuration-bound class does not pay the per-file `DeclaredTypes` walk, and
+/// that is the common case for every repository shipping no `properties`
+/// capability. "A member with no `@ConfigurationProperties` class is unaffected"
+/// is pinned instead by the negative controls in
+/// `extract::tests::an_accessor_topic_reaches_the_ledger_in_every_captured_broker_form`.
+///
+/// **What this arm does NOT share with its HTTP twin, stated because the two look
+/// alike.** `capture_http_client_call_arm` builds its view *after* the
+/// `is_http_client_file` ledger-detector gate, so only detector-matching files pay
+/// the walk. This arm has no such gate — `brokers.scm` is not detector-gated — so
+/// the view is built lazily instead, on the first refusal slot that needs it (see
+/// [`broker::capture_broker_invocations`]). Without that laziness every file of a
+/// `brokers`-capable language in a properties-bearing member would walk its own
+/// AST to serve the handful that carry a broker site: on the reference estate, the
+/// whole ~2,450-file Java corpus for 86 broker rows.
+///
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
 /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 #[allow(clippy::too_many_arguments)]
 fn capture_broker_invocation_arm(
     plugin: &dyn LanguagePlugin,
@@ -1056,10 +1117,20 @@ fn capture_broker_invocation_arm(
     decls: &[Decl<'_>],
     symbols: &[Option<LogosSymbol>],
     file_module: Option<&LogosSymbol>,
+    properties: &PropertiesIndex,
     facts: &mut Facts,
 ) {
     let Some(broker_query) = plugin.query("brokers") else {
         return;
+    };
+    // Built at most ONCE, and only if a refusal slot actually asks — see this
+    // function's doc comment for why this arm cannot afford the eager
+    // construction its HTTP twin makes after a detector gate.
+    let binding_cell: OnceCell<Option<BindingView<'_>>> = OnceCell::new();
+    let binding = || -> Option<&BindingView<'_>> {
+        binding_cell
+            .get_or_init(|| accessor_binding(plugin, root, source, properties))
+            .as_ref()
     };
     let id_to_idx: HashMap<usize, usize> =
         decls.iter().enumerate().map(|(i, d)| (d.node.id(), i)).collect();
@@ -1075,7 +1146,15 @@ fn capture_broker_invocation_arm(
         }
         file_module.cloned()
     };
-    if broker::capture_broker_invocations(broker_query, root, source, enclosing, facts) > 0 {
+    if broker::capture_broker_invocations(
+        broker_query,
+        root,
+        source,
+        enclosing,
+        binding,
+        facts,
+    ) > 0
+    {
         // Broker refs are appended after the code-reference sort; restore the
         // canonical ledger order + dedup so the output stays byte-stable.
         dedup_sort_refs(&mut facts.refs);

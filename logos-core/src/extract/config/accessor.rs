@@ -124,6 +124,10 @@ const NAME_FIELD: &str = "name";
 const TYPE_FIELD: &str = "type";
 /// The grammar field naming a member call's receiver.
 const OBJECT_FIELD: &str = "object";
+/// The grammar field naming a call's argument list — read by
+/// [`BindingView::placeholder_for`] to refuse a getter-named call that is
+/// invoked with arguments, and so cannot be the property getter it resembles.
+const ARGUMENTS_FIELD: &str = "arguments";
 /// The fields that mark a node as **calling or declaring a callable** rather
 /// than declaring a value. Such a node carries a `name` and can reach a `type`
 /// — its own return type, or its parent's — and binding the two would register
@@ -458,9 +462,14 @@ pub struct BindingView<'a> {
 }
 
 impl BindingView<'_> {
-    /// The request path `operand` names, spelled as the `${…}` placeholder that
-    /// carries its **canonical** configuration key — or [`None`] at the first
-    /// hop the source does not prove.
+    /// The configuration key `operand` names, spelled as the `${…}` placeholder
+    /// that carries its **canonical** form — or [`None`] at the first hop the
+    /// source does not prove.
+    ///
+    /// Arm-neutral, and said that way since S-409: this used to open "the request
+    /// path", which was true while the HTTP arm was the only caller and became a
+    /// shared seam described from one of its two callers. The broker arm asks the
+    /// same question of a topic operand ([`crate::extract::broker`]).
     ///
     /// The chain is [FR-WS-19]'s: *accessor → field → owning class → annotation
     /// prefix → canonical key*. The placeholder spelling is produced here, and
@@ -471,6 +480,20 @@ impl BindingView<'_> {
     /// [FR-WS-19]: ../../../../docs/specs/requirements/FR-WS-19.md
     pub fn placeholder_for(&self, operand: Node<'_>, src: &[u8]) -> Option<String> {
         let (receiver, callee) = member_call(operand)?;
+        // A property getter takes NO arguments, so a call that passes one is not
+        // the accessor its name resembles — `kafkaTopics.getArchiveEvents(suffix)`
+        // computes something, and binding it to the `archiveEvents` property would
+        // fabricate a key the source does not prove ([NFR-RA-05]). Found by the
+        // S-409 review; the shape has 0 occurrences on the reference estate, so
+        // this tightens both arms against a hazard rather than removing a
+        // measured admission. Named children only: the `arguments` node always
+        // exists and its parentheses are anonymous.
+        if operand
+            .child_by_field_name(ARGUMENTS_FIELD)
+            .is_some_and(|args| args.named_child_count() > 0)
+        {
+            return None;
+        }
         let accessor = callee.utf8_text(src).ok()?.trim();
         // The shape question, asked in the READING file's own language, and it
         // is a correctness guard rather than a fast path. `bind` below judges by

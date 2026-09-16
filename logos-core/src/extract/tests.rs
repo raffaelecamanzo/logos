@@ -3090,13 +3090,7 @@ const ACCESSOR_CALLER_SOURCE: &str = "package a;\n\
 /// filter made this fixture assert on `RestClient` beside the target it is about.
 #[cfg(feature = "lang-java")]
 fn client_call_targets(facts: &[Facts], path: &str) -> Vec<String> {
-    facts
-        .iter()
-        .filter(|f| f.path == path)
-        .flat_map(|f| f.refs.iter())
-        .filter(|r| r.relation == Some(ArtifactRelation::HttpClientCall))
-        .map(|r| r.target.clone())
-        .collect()
+    broker_targets(facts, path, ArtifactRelation::HttpClientCall)
 }
 
 /// **S-397 AC1.** The extract pass builds the member's properties index, and the
@@ -3549,5 +3543,491 @@ fn a_cast_elsewhere_in_the_file_gives_an_undeclared_receiver_no_key() {
         "`api` is declared nowhere in this file; a cast of an unrelated call's \
          result is not a declaration of it, and the site must stay the keyless \
          refusal row",
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S-409 — the accessor hop reaches the BROKER arm ([FR-WS-19], [CR-131] §3.2 A2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The topic-bearing `@ConfigurationProperties` class the broker fixtures below
+/// read, and the member that reads it.
+///
+/// A second properties class rather than a reuse of [`ACCESSOR_PROPS_SOURCE`]:
+/// the HTTP fixtures' class carries a *URI* property, and a topic fixture
+/// keyed on `mailserver.api.uri-get-archive` would read as though the two arms
+/// shared a key space. They share a **mechanism**, which is what the fixtures
+/// are about; two prefixes keep that distinction visible in the assertions.
+#[cfg(feature = "lang-java")]
+const TOPIC_PROPS_FILE: &str = "src/main/java/KafkaTopics.java";
+#[cfg(feature = "lang-java")]
+const TOPIC_PROPS_SOURCE: &str = "package a;\n\
+    @ConfigurationProperties(prefix = \"kafka.topics\")\n\
+    public class KafkaTopics {\n\
+    \x20   private String archiveEvents;\n\
+    \x20   private String archiveReporting;\n\
+    }\n";
+#[cfg(feature = "lang-java")]
+const TOPIC_CALLER_FILE: &str = "src/main/java/TopologyService.java";
+
+/// The canonical placeholder `kafkaTopics.getArchiveEvents()` resolves to —
+/// relaxed binding applied, exactly as the HTTP arm stores it.
+#[cfg(feature = "lang-java")]
+const ARCHIVE_EVENTS_KEY: &str = "${kafka.topics.archiveevents}";
+
+/// Every reference `extract_files` emitted for `path` under one artifact
+/// relation, by target.
+///
+/// Filtered on the **relation**, never on `RefForm` alone: a Java import lands as
+/// a `Path`-form reference too, and reading an arm's output through the wider
+/// filter once made a fixture assert on `RestClient` beside the target it was
+/// about. [`client_call_targets`] is this function with the HTTP relation applied,
+/// rather than a second copy of the same filter chain.
+#[cfg(feature = "lang-java")]
+fn broker_targets(facts: &[Facts], path: &str, relation: ArtifactRelation) -> Vec<String> {
+    facts
+        .iter()
+        .filter(|f| f.path == path)
+        .flat_map(|f| f.refs.iter())
+        .filter(|r| r.relation == Some(relation))
+        .map(|r| r.target.clone())
+        .collect()
+}
+
+/// Every reference `extract_files` emitted for `path` under one broker relation,
+/// as `(target, line)`.
+///
+/// The line is projected because the resolved path sets it from a DIFFERENT node
+/// than the literal path does (the refusal slot's operand, not the topic node),
+/// and a row's line is ledger-visible. Without it a constant offset in the
+/// resolved arm passes every assertion — demonstrated by mutation during the
+/// S-409 review, where `+ 1` became `+ 77` with the whole suite green.
+#[cfg(feature = "lang-java")]
+fn broker_rows(facts: &[Facts], path: &str, relation: ArtifactRelation) -> Vec<(String, u32)> {
+    facts
+        .iter()
+        .filter(|f| f.path == path)
+        .flat_map(|f| f.refs.iter())
+        .filter(|r| r.relation == Some(relation))
+        .map(|r| (r.target.clone(), r.line))
+        .collect()
+}
+
+/// **S-409 AC1.** Each of the three broker forms the arm captures — the
+/// annotation subscribe, the `setHeader(KafkaHeaders.TOPIC, …)` publish, and
+/// S-408's Kafka Streams topology link — stores a `@ConfigurationProperties`
+/// accessor operand as the canonical `${prefix.key}` placeholder.
+///
+/// All three forms are asserted rather than one standing for the others,
+/// because the three reach the interpreter by **different capture shapes**: an
+/// `element_value_pair` site, an `argument_list` site behind two positional
+/// anchors, and a receiver-gated `argument_list` site. Only the last is reached
+/// at all on a build where S-408's gate rejects the chain, so a single-form
+/// fixture would pass while two thirds of the estate's sites stayed refused.
+///
+/// Both receiver spellings are exercised across the table — the bare
+/// `kafkaTopics.…` and the self-qualified `this.kafkaTopics.…` — because S-398
+/// answers them from two different `DeclaredTypes` arms.
+///
+/// Each row carries its own negative control: with the properties class removed
+/// and nothing else changed, the same site records the keyless
+/// `topic-not-literal` row it recorded before this story. That is what makes the
+/// positive assertion about the **hop** rather than about the fixture.
+///
+/// [CR-131]: ../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+/// [FR-WS-19]: ../../docs/specs/requirements/FR-WS-19.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn an_accessor_topic_reaches_the_ledger_in_every_captured_broker_form() {
+    let reg = registry();
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+
+    // (form, source, expected subscribe targets, expected publish targets)
+    let annotation = "package a;\n\
+        public class TopologyService {\n\
+        \x20   private final KafkaTopics kafkaTopics;\n\
+        \x20   @KafkaListener(topics = kafkaTopics.getArchiveEvents())\n\
+        \x20   void onEvent(String m) {}\n\
+        }\n";
+    let header = "package a;\n\
+        public class TopologyService {\n\
+        \x20   private final KafkaTopics kafkaTopics;\n\
+        \x20   void publish(String payload) {\n\
+        \x20     MessageBuilder.withPayload(payload)\n\
+        \x20       .setHeader(KafkaHeaders.TOPIC, this.kafkaTopics.getArchiveEvents())\n\
+        \x20       .build();\n\
+        \x20   }\n\
+        }\n";
+    let streams = "package a;\n\
+        public class TopologyService {\n\
+        \x20   private final KafkaTopics kafkaTopics;\n\
+        \x20   public void kStream(StreamsBuilder streamsBuilder) {\n\
+        \x20     streamsBuilder\n\
+        \x20       .stream(kafkaTopics.getArchiveEvents())\n\
+        \x20       .to(this.kafkaTopics.getArchiveReporting());\n\
+        \x20   }\n\
+        }\n";
+
+    let cases: [(&str, &str, Vec<String>, Vec<String>); 3] = [
+        (
+            "annotation form",
+            annotation,
+            vec![ARCHIVE_EVENTS_KEY.to_string()],
+            Vec::new(),
+        ),
+        (
+            "header form",
+            header,
+            Vec::new(),
+            vec![ARCHIVE_EVENTS_KEY.to_string()],
+        ),
+        (
+            "Streams topology form",
+            streams,
+            vec![ARCHIVE_EVENTS_KEY.to_string()],
+            vec!["${kafka.topics.archivereporting}".to_string()],
+        ),
+    ];
+
+    for (form, src, want_sub, want_pub) in cases {
+        let facts = extract_files(
+            &[
+                FileInput::new(TOPIC_PROPS_FILE, TOPIC_PROPS_SOURCE),
+                FileInput::new(TOPIC_CALLER_FILE, src),
+            ],
+            &reg,
+            &ctx,
+        );
+        assert_eq!(
+            broker_targets(&facts, TOPIC_CALLER_FILE, ArtifactRelation::BrokerSubscribe),
+            want_sub,
+            "{form}: the subscribe side stores the canonical placeholder, and \
+             leaves no refusal row beside it — an uncancelled candidate reads as \
+             an extra empty string, which exact equality is what catches",
+        );
+        assert_eq!(
+            broker_targets(&facts, TOPIC_CALLER_FILE, ArtifactRelation::BrokerPublish),
+            want_pub,
+            "{form}: the publish side stores the canonical placeholder",
+        );
+
+        // Each resolved row reports at its OWN operand's line. Asserted against the
+        // line the fixture literally writes the operand on — found by searching the
+        // source, so the expectation cannot drift when a line is added above it —
+        // because the resolved path takes its line from the refusal slot's operand
+        // while the literal path takes it from the topic node, and nothing else
+        // here would notice a constant offset. The Streams case carries two rows on
+        // two different lines, which is what makes a uniform offset unable to pass.
+        let line_of = |needle: &str| -> u32 {
+            src.lines()
+                .position(|l| l.contains(needle))
+                .map(|i| i as u32 + 1)
+                .unwrap_or_else(|| panic!("{form}: the fixture writes {needle:?}"))
+        };
+        for (relation, want, needle) in [
+            (ArtifactRelation::BrokerSubscribe, &want_sub, ".stream(kafkaTopics"),
+            (ArtifactRelation::BrokerPublish, &want_pub, ".to(this.kafkaTopics"),
+        ] {
+            if form != "Streams topology form" || want.is_empty() {
+                continue;
+            }
+            assert_eq!(
+                broker_rows(&facts, TOPIC_CALLER_FILE, relation),
+                vec![(want[0].clone(), line_of(needle))],
+                "{form}: the resolved row reports at its own operand's line",
+            );
+        }
+
+        // The negative control, on the SAME fixture: remove the properties class
+        // and the identical site is the keyless `topic-not-literal` row again.
+        let without = extract_files(&[FileInput::new(TOPIC_CALLER_FILE, src)], &reg, &ctx);
+        assert_eq!(
+            broker_targets(&without, TOPIC_CALLER_FILE, ArtifactRelation::BrokerSubscribe),
+            vec![String::new(); want_sub.len()],
+            "{form}: with no properties class the subscribe site refuses, so the \
+             hop is what resolved it",
+        );
+        assert_eq!(
+            broker_targets(&without, TOPIC_CALLER_FILE, ArtifactRelation::BrokerPublish),
+            vec![String::new(); want_pub.len()],
+            "{form}: …and so does the publish site",
+        );
+    }
+}
+
+/// **S-409 AC2.** Every one of [FR-WS-19]'s nine named accessor faults leaves
+/// the broker arm's own keyless refusal row — the **same** row, on the same
+/// build and the same operand, that the HTTP arm leaves.
+///
+/// Read what this asserts and what it does not. The nine are a **census**
+/// vocabulary ([`crate::resolve::binding::Refusal`]), produced by the
+/// operand-resolvability harness; no invocation arm has ever carried them to the
+/// ledger. What each arm carries is one keyless row, which the [FR-WS-05]
+/// coverage tier labels from the row's **relation** —
+/// `base-url-runtime` for the HTTP arm, `topic-not-literal` for this one. So
+/// "the same wire tokens as the HTTP arm" is the claim that the broker arm
+/// collapses the nine exactly as the HTTP arm does, into the arm's own existing
+/// word, and that is what the side-by-side assertion below pins: both arms read
+/// the identical operand in the identical file, and both record exactly one
+/// keyless row for it. A story that gave one arm a finer reason than the other
+/// fails here.
+///
+/// The `methodParameter` row is the one the story is required to leave refused:
+/// the operand's value arrives one call frame away, and the two-frame wrapper
+/// hop is S-417's, out of scope here.
+///
+/// **What the row LABELS are, and are not.** They name the census vocabulary so
+/// the criterion is auditable against it, but four of the nine — `methodParameter`,
+/// `unboundName`, `ambiguousBinding`, `unrecognisedAccessor` — are operands that
+/// are not member calls at all, so they are refused at `placeholder_for`'s first
+/// line and never enter the accessor chain. That is not a weakness of the fixture:
+/// this arm has no concept of the nine, and the claim under test is exactly the one
+/// asserted — each shape leaves the arm's own keyless row, on both arms. Read the
+/// labels as naming the SHAPES the census counts, not as evidence that nine
+/// distinct code paths ran.
+///
+/// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
+/// [FR-WS-19]: ../../docs/specs/requirements/FR-WS-19.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn each_named_accessor_fault_leaves_the_brokers_own_refusal_row() {
+    let reg = registry();
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+
+    // One operand per fault, spelled so the fault is the ONLY thing wrong with
+    // it — the properties class is present in every run, so a row that refuses
+    // for the wrong reason would have to refuse a resolvable neighbour too.
+    let cases: [(&str, &str); 9] = [
+        ("nestedAccessor", "kafkaTopics.getNested().getArchiveEvents()"),
+        ("methodParameter", "topic"),
+        ("unboundName", "undeclaredTopic"),
+        ("ambiguousBinding", "ambiguousTopic"),
+        ("notAGetter", "kafkaTopics.computeArchiveEvents()"),
+        ("receiverTypeUnknown", "unknownTopics.getArchiveEvents()"),
+        ("noPropertiesClass", "otherTopics.getArchiveEvents()"),
+        ("propertyNotDeclared", "kafkaTopics.getMissingTopic()"),
+        ("unrecognisedAccessor", "Topics.ARCHIVE_EVENTS"),
+    ];
+
+    for (fault, operand) in cases {
+        // Both arms read the SAME operand in the SAME file: the header-form
+        // publish and a `RestClient` call one method apart. The import is what
+        // admits the file to the HTTP arm's ledger gate.
+        let src = format!(
+            "package a;\n\
+             import org.springframework.web.client.RestClient;\n\
+             public class TopologyService {{\n\
+             \x20   private RestClient restClient;\n\
+             \x20   private final KafkaTopics kafkaTopics;\n\
+             \x20   private OtherTopics otherTopics;\n\
+             \x20   private String ambiguousTopic = kafkaTopics.getArchiveEvents();\n\
+             \x20   void rebind() {{ ambiguousTopic = kafkaTopics.getArchiveReporting(); }}\n\
+             \x20   void publish(String payload, String topic) {{\n\
+             \x20     MessageBuilder.withPayload(payload)\n\
+             \x20       .setHeader(KafkaHeaders.TOPIC, {operand})\n\
+             \x20       .build();\n\
+             \x20   }}\n\
+             \x20   String read(String topic) {{\n\
+             \x20     return restClient.get().uri({operand}).retrieve().body(String.class);\n\
+             \x20   }}\n\
+             }}\n"
+        );
+        let facts = extract_files(
+            &[
+                FileInput::new(TOPIC_PROPS_FILE, TOPIC_PROPS_SOURCE),
+                FileInput::new(TOPIC_CALLER_FILE, &src),
+            ],
+            &reg,
+            &ctx,
+        );
+        assert_eq!(
+            broker_targets(&facts, TOPIC_CALLER_FILE, ArtifactRelation::BrokerPublish),
+            vec![String::new()],
+            "{fault}: the broker arm records exactly its one keyless row — the \
+             row the FR-WS-05 tier reports `topic-not-literal`, no key \
+             fabricated from an operand the source does not prove",
+        );
+        assert_eq!(
+            client_call_targets(&facts, TOPIC_CALLER_FILE),
+            vec![String::new()],
+            "{fault}: …and the HTTP arm records exactly its one keyless row for \
+             the identical operand, so neither arm resolves what the other \
+             refuses",
+        );
+    }
+
+    // The discriminating control: the identical file, with an operand that IS a
+    // resolvable accessor, binds on BOTH arms. Without it every assertion above
+    // would also be produced by a build in which the hop never ran.
+    let resolvable = format!(
+        "package a;\n\
+         import org.springframework.web.client.RestClient;\n\
+         public class TopologyService {{\n\
+         \x20   private RestClient restClient;\n\
+         \x20   private final KafkaTopics kafkaTopics;\n\
+         \x20   void publish(String payload) {{\n\
+         \x20     MessageBuilder.withPayload(payload)\n\
+         \x20       .setHeader(KafkaHeaders.TOPIC, {operand})\n\
+         \x20       .build();\n\
+         \x20   }}\n\
+         \x20   String read() {{\n\
+         \x20     return restClient.get().uri({operand}).retrieve().body(String.class);\n\
+         \x20   }}\n\
+         }}\n",
+        operand = "kafkaTopics.getArchiveEvents()"
+    );
+    let facts = extract_files(
+        &[
+            FileInput::new(TOPIC_PROPS_FILE, TOPIC_PROPS_SOURCE),
+            FileInput::new(TOPIC_CALLER_FILE, &resolvable),
+        ],
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        broker_targets(&facts, TOPIC_CALLER_FILE, ArtifactRelation::BrokerPublish),
+        vec![ARCHIVE_EVENTS_KEY.to_string()],
+        "the control binds on the broker arm",
+    );
+    assert_eq!(
+        client_call_targets(&facts, TOPIC_CALLER_FILE),
+        vec![format!("GET {ARCHIVE_EVENTS_KEY}")],
+        "…and on the HTTP arm, from the same operand in the same file",
+    );
+}
+
+/// **S-409 review finding.** A getter-NAMED call invoked **with an argument** is
+/// not the property getter it resembles, and must not bind that property's key.
+///
+/// A generated `@ConfigurationProperties` getter is zero-arity, so
+/// `kafkaTopics.getArchiveEvents(suffix)` computes something the source does not
+/// prove is the `archiveEvents` property — binding it would fabricate a key
+/// ([NFR-RA-05]). The refusal-slot enumeration admits `(method_invocation)`
+/// whatever its arity, so nothing upstream filtered this out.
+///
+/// Asserted on **both arms**, because the guard lives in the shared
+/// `BindingView::placeholder_for` and tightening it must tighten both identically.
+/// The zero-argument spelling of the same call is the control, so what this pins
+/// is the ARITY and not the fixture: the estate writes 0 sites of this shape, so a
+/// test is the only evidence the guard can have.
+///
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_getter_named_call_that_takes_an_argument_binds_nothing_on_either_arm() {
+    let reg = registry();
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let caller = |operand: &str| {
+        format!(
+            "package a;\n             import org.springframework.web.client.RestClient;\n             public class TopologyService {{\n             \x20   private RestClient restClient;\n             \x20   private final KafkaTopics kafkaTopics;\n             \x20   void publish(String payload, String suffix) {{\n             \x20     MessageBuilder.withPayload(payload)\n             \x20       .setHeader(KafkaHeaders.TOPIC, {operand})\n             \x20       .build();\n             \x20   }}\n             \x20   String read(String suffix) {{\n             \x20     return restClient.get().uri({operand}).retrieve().body(String.class);\n             \x20   }}\n             }}\n"
+        )
+    };
+    let run = |operand: &str| {
+        extract_files(
+            &[
+                FileInput::new(TOPIC_PROPS_FILE, TOPIC_PROPS_SOURCE),
+                FileInput::new(TOPIC_CALLER_FILE, caller(operand)),
+            ],
+            &reg,
+            &ctx,
+        )
+    };
+
+    // The control: the same call, zero-arity, binds on both arms. Without it this
+    // test would also pass on a build where the hop never ran at all.
+    let zero_arity = run("kafkaTopics.getArchiveEvents()");
+    assert_eq!(
+        broker_targets(&zero_arity, TOPIC_CALLER_FILE, ArtifactRelation::BrokerPublish),
+        vec![ARCHIVE_EVENTS_KEY.to_string()],
+        "the control binds on the broker arm",
+    );
+    assert_eq!(
+        client_call_targets(&zero_arity, TOPIC_CALLER_FILE),
+        vec![format!("GET {ARCHIVE_EVENTS_KEY}")],
+        "…and on the HTTP arm",
+    );
+
+    // One argument away, and both arms refuse.
+    let with_argument = run("kafkaTopics.getArchiveEvents(suffix)");
+    assert_eq!(
+        broker_targets(&with_argument, TOPIC_CALLER_FILE, ArtifactRelation::BrokerPublish),
+        vec![String::new()],
+        "a getter-named call with an argument is not that getter — the broker arm \
+         records its keyless row rather than the property's key",
+    );
+    assert_eq!(
+        client_call_targets(&with_argument, TOPIC_CALLER_FILE),
+        vec![String::new()],
+        "…and the HTTP arm refuses the identical operand, so the guard tightened \
+         both arms and not one",
+    );
+}
+
+/// **S-409 AC4, the byte-for-byte half.** The hop changes the broker row and
+/// nothing else: extract the identical caller file in a member that declares the
+/// properties class and in one that does not, and every other fact is equal.
+///
+/// Scoped exactly as its HTTP sibling
+/// [`the_hop_changes_the_client_call_row_and_nothing_else`] is, and for the same
+/// stated reason: this is a differential between two arms of ONE build, so it
+/// constrains only what the `!properties.is_empty()` branch does. "A member with
+/// no `@ConfigurationProperties` class is byte-for-byte unaffected" is pinned by
+/// the exact rows the `without` arm emits, asserted here and in every negative
+/// control of
+/// [`an_accessor_topic_reaches_the_ledger_in_every_captured_broker_form`].
+#[test]
+#[cfg(feature = "lang-java")]
+fn the_broker_hop_changes_the_broker_row_and_nothing_else() {
+    let reg = registry();
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let src = "package a;\n\
+        public class TopologyService {\n\
+        \x20   private final KafkaTopics kafkaTopics;\n\
+        \x20   void publish(String payload) {\n\
+        \x20     MessageBuilder.withPayload(payload)\n\
+        \x20       .setHeader(KafkaHeaders.TOPIC, this.kafkaTopics.getArchiveEvents())\n\
+        \x20       .build();\n\
+        \x20   }\n\
+        }\n";
+    let caller = FileInput::new(TOPIC_CALLER_FILE, src);
+
+    let with_class = extract_files(
+        &[
+            FileInput::new(TOPIC_PROPS_FILE, TOPIC_PROPS_SOURCE),
+            caller.clone(),
+        ],
+        &reg,
+        &ctx,
+    );
+    let without = extract_files(std::slice::from_ref(&caller), &reg, &ctx);
+
+    let bound = with_class
+        .iter()
+        .find(|f| f.path == TOPIC_CALLER_FILE)
+        .expect("the caller was extracted in both arms");
+    let plain = &without[0];
+
+    assert_eq!(bound.nodes, plain.nodes, "the hop emits no node");
+    assert_eq!(bound.edges, plain.edges, "…no edge");
+    assert_eq!(bound.warnings, plain.warnings, "…no warning");
+    assert_eq!(bound.config_source, plain.config_source, "…and no corpus fact");
+    assert_eq!(bound.partial, plain.partial);
+
+    let others = |f: &Facts| -> Vec<RefFact> {
+        f.refs
+            .iter()
+            .filter(|r| r.relation != Some(ArtifactRelation::BrokerPublish))
+            .cloned()
+            .collect()
+    };
+    assert_eq!(others(bound), others(plain), "no other reference moves");
+    assert_eq!(
+        broker_targets(&with_class, TOPIC_CALLER_FILE, ArtifactRelation::BrokerPublish),
+        vec![ARCHIVE_EVENTS_KEY.to_string()],
+    );
+    assert_eq!(
+        broker_targets(&without, TOPIC_CALLER_FILE, ArtifactRelation::BrokerPublish),
+        vec![String::new()],
+        "without the class, the same site is the keyless refusal row it always was",
     );
 }

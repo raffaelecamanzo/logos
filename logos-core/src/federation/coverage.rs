@@ -138,6 +138,21 @@ pub enum UnboundReason {
     /// misreading: it is the estate's own configuration style, reported rather than
     /// hidden.
     ///
+    /// **Amended 2026-09-15 (S-409, [FR-WS-19]).** The sentence above is S-370's
+    /// reading and the accessor hop moved part of it. Those **35 getter** operands
+    /// now resolve to their canonical `${prefix.key}` placeholder and no longer
+    /// reach this reason; the 16 method parameters and the remaining identifier do.
+    /// "Non-literal" is still true of all 54 — it simply no longer implies
+    /// unkeyable. The conclusion survives for what is left, and the current figure
+    /// is deliberately not restated here: it is printed per member, with its
+    /// denominator and its date, by
+    /// `the_reference_workspace_reports_its_resolved_broker_sites_before_and_after_the_hop`
+    /// in `logos-core/tests/broker_topic_corpus.rs`. This doc comment and
+    /// `extract::broker`'s module header carried the same figure and only one of
+    /// them was amended first; naming the single home is what stops that recurring.
+    ///
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    ///
     /// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
     /// [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
     /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
