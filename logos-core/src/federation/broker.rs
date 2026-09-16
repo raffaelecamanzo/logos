@@ -328,7 +328,24 @@ pub(super) fn broker_edges(
         }
     }
 
-    match_indexed(providers, consumers)
+    // **De-duplicate the emitted edges, not just the endpoints.**
+    //
+    // The endpoint collapse above is per `(key, role, member, symbol)`, which was
+    // the whole of it while a site had exactly one key. Since [S-410] a site can
+    // carry one key **per overlay**, and when the publish and the subscribe commit
+    // the *same* key under the *same* overlays they meet under each of them —
+    // `match_indexed` then emits one edge per meeting, and those edges are
+    // identical in every field, provenance included (the `ConfigBound` evidence
+    // already names every overlay's value). Two rows for one coupling is a
+    // fabricated count: `resolved_cross_service_edges` reconciles the bridge's
+    // edge total against the coverage tier's bound rows, and the coverage tier
+    // emits ONE row per site by construction ([NFR-RA-05], [CR-118]).
+    //
+    // `match_indexed` returns its edges sorted, so `dedup` removes exactly the
+    // adjacent duplicates and nothing else.
+    let mut edges = match_indexed(providers, consumers);
+    edges.dedup();
+    edges
 }
 
 #[cfg(test)]
@@ -696,6 +713,57 @@ mod tests {
         assert!(
             pairs.contains(&("api", "hub")),
             "the relay's SUBSCRIBE side survives too: {pairs:?}"
+        );
+    }
+
+    /// One coupling is **one** edge, however many overlays the two sides meet
+    /// under ([NFR-RA-05], [CR-118]).
+    ///
+    /// Reachable only since [S-410]: a publish and a subscribe that commit the
+    /// same key under the same two overlays are each keyed twice, so the fan-out
+    /// loop meets them twice and emits two edges identical in every field —
+    /// provenance included, because the `ConfigBound` evidence already names both
+    /// overlay values. Two rows for one coupling would inflate
+    /// `resolved_cross_service_edges` against a coverage tier that emits one row
+    /// per site by construction.
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn two_sides_meeting_under_two_overlays_are_one_edge_not_two() {
+        let mut corpora = BTreeMap::new();
+        for member in ["api", "worker"] {
+            commits(
+                &mut corpora,
+                member,
+                "spring.kafka.topics.orders",
+                &[(Some("prod"), "orders-prod"), (Some("staging"), "orders-staging")],
+            );
+        }
+
+        let edges = broker_edges(
+            [
+                pubc("${spring.kafka.topics.orders}", "api", "local emit"),
+                subc("${spring.kafka.topics.orders}", "worker", "local on_order"),
+            ],
+            &corpora,
+        );
+
+        assert_eq!(
+            edges.len(),
+            1,
+            "one publish and one subscribe are one coupling, even meeting under \
+             both overlays: {edges:#?}"
+        );
+        // …and the surviving edge still names BOTH overlay values, so collapsing
+        // the pair loses no evidence.
+        let Provenance::ConfigBound { bound } = &edges[0].from_value else {
+            panic!("the publish was admitted: {:?}", edges[0].from_value);
+        };
+        assert_eq!(
+            bound[0].values.iter().map(|v| v.value.as_str()).collect::<Vec<_>>(),
+            ["orders-prod", "orders-staging"],
+            "the one surviving edge carries every overlay's value"
         );
     }
 
