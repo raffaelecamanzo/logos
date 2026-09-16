@@ -113,11 +113,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use logos_core::extract::config::corpus::canonical_key;
+use logos_core::extract::config::corpus::{canonical_key, source_facts};
 use logos_core::extract::{extract, extract_files, FileInput, SymbolContext};
-use logos_core::resolve::binding::placeholder_keys;
+use logos_core::federation::broker::{topic_identity, TopicIdentity};
+use logos_core::graph_store::ConfigDefinition;
 use logos_core::model::ArtifactRelation;
 use logos_core::plugin::LanguageRegistry;
+use logos_core::resolve::binding::placeholder_keys;
 
 /// The reference workspace, or `None` when none is configured — the same
 /// `LOGOS_REF_WORKSPACE` contract the S-355/S-365 measurements read.
@@ -1370,5 +1372,609 @@ fn the_reference_workspace_reports_its_resolved_broker_sites_before_and_after_th
          regressed, or this corpus stopped writing accessor operands — the two are \
          different findings and the per-member table above says which",
         sum(&after, MemberBrokerReading::rows),
+    );
+}
+
+// ── S-410: topic identity is the committed configured value ──────────────────
+
+/// One member's committed configuration, in the shape the shipped resolver reads
+/// it through — canonical key → every definition of it.
+///
+/// Built here from the member's own config files rather than from an indexed
+/// store, for the same reason the rest of this module runs `extract` directly:
+/// it measures the capture-and-join path without standing up an 84-member index.
+/// The flattener is the **shipped** one
+/// ([`source_facts`](logos_core::extract::config::corpus::source_facts)), so the
+/// keys and values here are the ones an index would write.
+///
+/// A plain alias and **not** a newtype, because this is the same concrete type as
+/// `federation::bridge::MemberCorpus` and logos-core already ships
+/// `impl ConfigLookup for` it. A wrapper here would have re-derived that impl by
+/// hand — a hand-mirrored twin of shipped behaviour, which is exactly the drift
+/// this harness exists to avoid. (The sibling newtypes in
+/// `operand_resolvability/configuration_agreement.rs` and `perf_envelope.rs` wrap
+/// `ConfigCorpus` and `Runtime`, foreign shapes with no such impl, so they
+/// genuinely need one.)
+type HarnessCorpus = BTreeMap<String, Vec<ConfigDefinition>>;
+
+/// One captured broker site, with the topic identity (or identities) the shipped
+/// rule gives it against its own member's committed configuration.
+struct SiteIdentity {
+    /// `true` for a publish (`Producer`), `false` for a subscribe (`Consumer`).
+    is_publish: bool,
+    /// The enclosing declaration's symbol — the endpoint a bridge edge starts or
+    /// ends at, and the grain the promotion pass counts a node at.
+    declaration: String,
+    /// The operand exactly as the ledger stores it: the BEFORE key.
+    operand: String,
+    /// The AFTER key(s): the committed value(s), or the operand again when
+    /// nothing was admitted. More than one is an overlay disagreement.
+    topics: Vec<String>,
+    /// Whether the committed sources proved a value at all.
+    admitted: bool,
+}
+
+/// One cross-member fan-out edge, at the grain `broker_edges` emits.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Edge {
+    topic: String,
+    from_member: String,
+    from: String,
+    to_member: String,
+    to: String,
+}
+
+/// Flatten every configuration source under `member_dir` into one corpus.
+///
+/// Mirrors [`ConfigCorpus::discover`]'s admission (basename decides, per
+/// [`config_profile`]) by handing every walked file to the shipped
+/// [`source_facts`]; a file that is not a configuration source answers `None`
+/// and contributes nothing.
+fn member_corpus(root: &std::path::Path, member: &str) -> HarnessCorpus {
+    let mut corpus: HarnessCorpus = BTreeMap::new();
+    for entry in corpus_walker(&root.join(member)).flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().to_string();
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Some(facts) = source_facts(&rel, &text) else {
+            continue;
+        };
+        for value in facts.values {
+            corpus.entry(value.key).or_default().push(ConfigDefinition {
+                path: rel.clone(),
+                profile: facts.profile.clone(),
+                value: value.value,
+            });
+        }
+    }
+    corpus
+}
+
+/// Print the whole S-410 estate report — the per-member and per-topic tables and
+/// the edge deltas — and hand back the `(gained, lost)` edge sets the assertions
+/// then judge.
+///
+/// A separate function because the report is genuinely long and the test that
+/// owns it is subject to `max_fn_lines`; printing and asserting are also two
+/// different jobs, and keeping the assertions in the test keeps them visible at
+/// the end of it rather than buried in the middle of a wall of `eprintln!`.
+fn report_topic_identities<'a>(
+    root: &std::path::Path,
+    identities: &BTreeMap<String, Vec<SiteIdentity>>,
+    refused_rows: &BTreeMap<String, usize>,
+    corpus_keys: &BTreeMap<String, usize>,
+    before: &'a BTreeSet<Edge>,
+    after: &'a BTreeSet<Edge>,
+) -> (Vec<&'a Edge>, Vec<&'a Edge>) {
+    eprintln!("S-410 corpus (measured 2026-09-16): root={}", root.display());
+    eprintln!(
+        "  Producer/Consumer nodes per member, BEFORE (keyed on the stored operand) \
+         and AFTER (keyed on the committed value), at the promotion pass's own \
+         grain — one per (declaration, role, topic). The two columns are computed \
+         from the two key sets independently rather than asserted equal, because \
+         'this story does not move them' is a claim a report should EVIDENCE and \
+         not merely state. `keys` is the size of the member's committed corpus.\n    \
+         {:<40} {:>13} {:>13} {:>8} {:>6}",
+        "member", "producers b/a", "consumers b/a", "refused", "keys"
+    );
+    // A node's identity at this grain is `(declaration, role, topic)`, so the
+    // count is over the DISTINCT triples each key set produces — not over sites.
+    // A site resolving to two overlay values is two topics and therefore two
+    // nodes AFTER, and one BEFORE; counting sites would hide exactly that.
+    let node_count = |rows: &[SiteIdentity], publish: bool, committed: bool| -> usize {
+        rows.iter()
+            .filter(|s| s.is_publish == publish)
+            .flat_map(|s| {
+                let keys: &[String] = if committed {
+                    &s.topics
+                } else {
+                    std::slice::from_ref(&s.operand)
+                };
+                keys.iter().map(move |k| (s.declaration.as_str(), k.as_str()))
+            })
+            .collect::<BTreeSet<_>>()
+            .len()
+    };
+    let mut producers_total = (0usize, 0usize);
+    let mut consumers_total = (0usize, 0usize);
+    let mut node_counts_moved: Vec<String> = Vec::new();
+    for (member, rows) in identities {
+        let p = (node_count(rows, true, false), node_count(rows, true, true));
+        let c = (node_count(rows, false, false), node_count(rows, false, true));
+        producers_total = (producers_total.0 + p.0, producers_total.1 + p.1);
+        consumers_total = (consumers_total.0 + c.0, consumers_total.1 + c.1);
+        if p.0 != p.1 || c.0 != c.1 {
+            node_counts_moved.push(format!(
+                "{member} producers {}->{} consumers {}->{}",
+                p.0, p.1, c.0, c.1
+            ));
+        }
+        eprintln!(
+            "    {member:<40} {:>6}/{:<6} {:>6}/{:<6} {:>8} {:>6}",
+            p.0,
+            p.1,
+            c.0,
+            c.1,
+            refused_rows.get(member).copied().unwrap_or(0),
+            corpus_keys.get(member).copied().unwrap_or(0),
+        );
+    }
+    eprintln!(
+        "    (members whose node count MOVED across the two key sets: {})",
+        if node_counts_moved.is_empty() {
+            "none".to_string()
+        } else {
+            node_counts_moved.join(" · ")
+        }
+    );
+    let sites_total: usize = identities.values().map(Vec::len).sum();
+    let refused_total: usize = refused_rows.values().sum();
+    // The member denominator is stated precisely, because the obvious reading of
+    // it disagrees with the one ADR-64's amendment and
+    // `…_before_and_after_the_hop` carry. Those count members writing a broker
+    // ROW (23 on this estate, refusal-only members included); this table lists
+    // only members with at least one KEYED site, because a member whose every row
+    // is refused has no identity to resolve. The two are different populations,
+    // not a moved figure.
+    let refusal_only = refused_rows.keys().filter(|m| !identities.contains_key(*m)).count();
+    eprintln!(
+        "  TOTAL over {} member(s) writing a KEYED broker site (+{refusal_only} more \
+         writing only refusals = {} writing any broker row, the denominator ADR-64's \
+         amendment and the S-409 hop table use): producers {}->{}, consumers \
+         {}->{}, over {sites_total} keyed site(s) of {} row(s) ({refused_total} \
+         refused)",
+        identities.len(),
+        identities.len() + refusal_only,
+        producers_total.0,
+        producers_total.1,
+        consumers_total.0,
+        consumers_total.1,
+        sites_total + refused_total,
+    );
+
+    let admitted: usize = identities.values().flatten().filter(|s| s.admitted).count();
+    eprintln!(
+        "  TOPIC IDENTITY, of the {sites_total} keyed site(s):\n    \
+         …admitted a committed value (config-bound):        {admitted}\n    \
+         …kept the operand as written (literal / unresolved): {}",
+        sites_total - admitted,
+    );
+
+    eprintln!(
+        "  CROSS-MEMBER BRIDGE EDGES (publish endpoint -> subscribe endpoint, \
+         cross-member only — the grain `broker_edges` emits):\n    \
+         BEFORE, keyed on the stored operand's exact bytes: {}\n    \
+         AFTER,  keyed on the committed value where one is committed: {}",
+        before.len(),
+        after.len(),
+    );
+    let gained: Vec<&Edge> = after.difference(before).collect();
+    let lost: Vec<&Edge> = before.difference(after).collect();
+    eprintln!(
+        "    gained {} · lost {} · per topic:",
+        gained.len(),
+        lost.len()
+    );
+    let mut per_topic: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for e in &gained {
+        per_topic.entry(e.topic.as_str()).or_default().0 += 1;
+    }
+    for e in &lost {
+        per_topic.entry(e.topic.as_str()).or_default().1 += 1;
+    }
+    for (topic, (up, down)) in &per_topic {
+        eprintln!("      {topic:<64} +{up} -{down}");
+    }
+
+    // PER TOPIC, the other half of the same criterion: how many producers and
+    // consumers each identity carries, on both sides of the re-keying. A BEFORE
+    // topic is an operand as stored; an AFTER topic is a committed value. They
+    // are deliberately listed in ONE table keyed by topic string, so the
+    // `${…archiveevents}` row and the `archive-events` row sit together and a
+    // reader can see the re-keying rather than infer it from two tables.
+    let mut topic_nodes: BTreeMap<&str, [usize; 4]> = BTreeMap::new();
+    for rows in identities.values() {
+        for site in rows {
+            let slot = usize::from(!site.is_publish);
+            topic_nodes.entry(site.operand.as_str()).or_default()[slot] += 1;
+            for topic in &site.topics {
+                topic_nodes.entry(topic.as_str()).or_default()[2 + slot] += 1;
+            }
+        }
+    }
+    eprintln!(
+        "  PER TOPIC — producers/consumers, BEFORE (the stored operand) then AFTER \
+         (the committed value); a topic with a figure on only one side is one the \
+         re-keying moved:\n      {:<64} {:>13} {:>13}",
+        "topic", "producers b/a", "consumers b/a"
+    );
+    for (topic, [pb, cb, pa, ca]) in &topic_nodes {
+        eprintln!("      {topic:<64} {pb:>6}/{pa:<6} {cb:>6}/{ca:<6}");
+    }
+    for (label, set) in [("GAINED", &gained), ("LOST  ", &lost)] {
+        for e in set.iter().take(20) {
+            eprintln!(
+                "      {label} {} : {}/{} -> {}/{}",
+                e.topic, e.from_member, e.from, e.to_member, e.to
+            );
+        }
+    }
+
+    (gained, lost)
+}
+
+/// **S-410's estate measurement**, reported and never floored: what the
+/// committed-value topic identity does to `Producer` nodes, `Consumer` nodes and
+/// cross-member bridge edges, per member and per topic, with denominators.
+///
+/// # What BEFORE and AFTER mean here
+///
+/// Both halves run over the **same** captured rows — the arm is not changed by
+/// [S-410], only the key those rows meet on:
+///
+///   - **BEFORE** — a site is keyed by its stored operand's exact bytes, which is
+///     what `federation::bridge` joined on until this story. A publish spelled
+///     `${…archivevolumecounters}` (the canonical form [S-409] stores a resolved
+///     accessor as) and a subscribe spelled `${…archive-volume-counters}` are two
+///     keys.
+///   - **AFTER** — a site whose operand resolves against its **own** member's
+///     committed configuration is keyed by that committed **value**; one whose
+///     keys the corpus proves nothing for keeps its operand as written
+///     ([FR-WS-10]'s rule in force). Both are decided by the shipped
+///     [`topic_identity`], so the *identity* half cannot drift from the product.
+///
+/// # The edge counts are harness-derived, and that is a real limitation
+///
+/// The identity half runs through shipped code; the **fan-out join** does not.
+/// `federation::broker::broker_edges` is `pub(super)`, so the cross-member pairing
+/// below is re-implemented here: same direction (publish → subscribe), same
+/// cross-member exclusion, same `#`-guard behaviour (the guard rides inside the
+/// key string), and de-duplication equivalent because [`Edge`] carries the topic.
+/// No behavioural difference between the two is known — but nothing *prevents*
+/// one, and this project has been bitten by exactly that shape before: [S-397]'s
+/// harness proved 79 sites where the product admitted 44. So read the edge
+/// figures as **"what the shipped identity rule implies under a faithful join"**,
+/// not as "what `ContractBridge::edges` returned". The per-member and per-topic
+/// node counts above have no such caveat — they are pure `topic_identity`.
+///
+/// **That risk is not hypothetical, and this story hit it.** The harness collects
+/// into a [`BTreeSet`], so a pair meeting under two overlays de-duplicates here
+/// by construction — while the product's `match_indexed` emitted one edge per
+/// meeting and had to be taught to `dedup`. The two joins disagreed by exactly
+/// that, the harness read green, and the defect was found by reasoning about the
+/// product rather than by this measurement. Keep the caveat above in mind
+/// whenever these figures are quoted.
+///
+/// Closing it properly means widening `broker_edges`' visibility to drive it from
+/// here, which is a change to the federation module's surface that no S-410
+/// criterion asks for; recorded rather than taken.
+///
+/// `Producer`/`Consumer` are counted at the grain the promotion pass promotes
+/// them — one per `(declaration symbol, role, topic)` — and that grain is
+/// **unchanged** by this story, because the promotion pass is per-repo and keys
+/// on the stored operand. They are reported all the same, because the acceptance
+/// criterion asks for them and "unchanged" is a finding a reader should be able
+/// to see rather than take on trust.
+///
+/// **No floor is asserted on any figure.** The two assertions are a direction and
+/// an anti-fabrication invariant, never a number — the
+/// census-figure-as-acceptance-floor trap [S-397] recorded.
+///
+/// # Recorded finding
+///
+/// ```text
+/// S-410 / CR-131 §3.2 A3, measured 2026-09-16 against ~/source/pec-services
+/// (84 enrolled members; 23 write a broker ROW, of which 21 write at least one
+/// KEYED site — the other 2 write only refusals. 23 is the denominator ADR-64's
+/// amendment and `…_before_and_after_the_hop` use; 21 is this table's, because a
+/// member whose every row is refused has no identity to resolve).
+///
+///   broker rows:                                   86   ← reconciles with S-409's
+///     …keyed (a literal or a resolved accessor):   59   ←   `resolved 16/86 -> 59/86`
+///     …refused (`topic-not-literal`):              27   ← 36 publish + 23 subscribe keyed
+///
+///   TOPIC IDENTITY over the 59 keyed sites:
+///     …admitted a committed value:                 59   ← every one of them
+///     …kept the operand as written:                 0
+///
+///   CROSS-MEMBER BRIDGE EDGES (publish endpoint -> subscribe endpoint):
+///     BEFORE, on the stored operand's exact bytes: 13
+///     AFTER,  on the committed value:              33
+/// ```
+///
+/// **The 13 "lost" edges are not losses; they are the same couplings re-keyed.**
+/// Every one of them is re-expressed under its committed value, exactly one for
+/// one: `${…archiveevents}` -4 / `archive-events` +4, `${…mailboxevents}` -4 /
+/// `mailbox-events` +4, `${…notifications}` -3 / `notifications` +3,
+/// `${…archivereporting}` -1 / `archive-reporting` +1, `${…officiallogevents}`
+/// -1 / `official-log-events` +1. So of the 33 gained, **13 are re-keyed and 20
+/// are genuinely new** — couplings the product could not see at all before this
+/// story, because the two ends spelled one property differently.
+///
+/// Among the 20 is the pair [ADR-64]'s 2026-09-15 amendment named as the
+/// reproduction of the spelling gap: `reporting-archive-data-downsampler`'s
+/// `DownsamplerStream#createTopology` publishes `archive-volume-counters` and
+/// `reporting-archive-data-projector`'s `ArchiveVolumeCountersConsumer#consume`
+/// subscribes to it. It did not bind before this story; it does now.
+///
+/// **That every one of the 59 admitted is a fact about this estate, not a
+/// property of the rule.** The estate externalises every topic it names, so the
+/// placeholder-as-written fallback has **no producer here** — its evidence is the
+/// fixture suite in `federation::broker` and `federation::coverage`, not this
+/// corpus. A reader should not conclude the fallback is dead code from a `0` that
+/// describes one workspace's configuration habits.
+///
+/// [ADR-64]: ../../docs/specs/architecture/decisions/ADR-64.md
+/// [FR-WS-10]: ../../docs/specs/requirements/FR-WS-10.md
+/// [S-397]: ../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
+/// [S-409]: ../../docs/planning/journal.md#s-409-the-accessor-hop-reaches-the-broker-arm
+/// [S-410]: ../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+#[test]
+fn the_reference_workspace_reports_its_topic_identities_before_and_after_the_committed_value_when_one_is_configured(
+) {
+    let Some(root) = corpus_root() else {
+        eprintln!(
+            "SKIPPED: set LOGOS_REF_WORKSPACE=<path to the reference workspace> to run the \
+             S-410 committed-value topic-identity corpus measurement."
+        );
+        return;
+    };
+
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    let ctx = SymbolContext::default();
+
+    // Java sources, grouped by member — the scope the production pass resolves at.
+    let mut by_member: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for entry in corpus_walker(&root).flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("java") {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(&root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().to_string();
+        let Some(member) = rel.split('/').next().map(str::to_string) else {
+            continue;
+        };
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        by_member.entry(member).or_default().push((rel, source));
+    }
+
+    /// One member's broker sites: `(role is publish, declaration symbol, stored
+    /// operand)`, de-duplicated at the promotion pass's own grain.
+    type Sites = BTreeSet<(bool, String, String)>;
+
+    let mut sites: BTreeMap<String, Sites> = BTreeMap::new();
+    let mut refused_rows: BTreeMap<String, usize> = BTreeMap::new();
+    for (member, files) in &by_member {
+        let inputs: Vec<FileInput> = files
+            .iter()
+            .map(|(rel, source)| FileInput::new(rel, source))
+            .collect();
+        for facts in extract_files(&inputs, &registry, &ctx) {
+            for reference in facts.refs.iter() {
+                let is_publish = match reference.relation {
+                    Some(ArtifactRelation::BrokerPublish) => true,
+                    Some(ArtifactRelation::BrokerSubscribe) => false,
+                    _ => continue,
+                };
+                if reference.target.trim().is_empty() {
+                    *refused_rows.entry(member.clone()).or_default() += 1;
+                    continue;
+                }
+                sites.entry(member.clone()).or_default().insert((
+                    is_publish,
+                    reference.source.as_str().to_string(),
+                    reference.target.clone(),
+                ));
+            }
+        }
+    }
+
+    // Resolve every site's identities through the SHIPPED rule, once per member.
+    let mut identities: BTreeMap<String, Vec<SiteIdentity>> = BTreeMap::new();
+    let mut corpus_keys: BTreeMap<String, usize> = BTreeMap::new();
+    for (member, member_sites) in &sites {
+        let corpus = member_corpus(&root, member);
+        corpus_keys.insert(member.clone(), corpus.len());
+        for (is_publish, symbol, operand) in member_sites {
+            let (topics, admitted) = match topic_identity(operand, &corpus) {
+                TopicIdentity::Committed { topics, .. } => (topics, true),
+                // A literal keys as written, and so does an operand the corpus
+                // proves nothing for — [FR-WS-10]'s rule in force, preserved by
+                // its re-proposed criterion.
+                TopicIdentity::Literal | TopicIdentity::Unresolved { .. } => {
+                    (vec![operand.clone()], false)
+                }
+            };
+            identities.entry(member.clone()).or_default().push(SiteIdentity {
+                is_publish: *is_publish,
+                declaration: symbol.clone(),
+                operand: operand.clone(),
+                topics,
+                admitted,
+            });
+        }
+    }
+
+    // The cross-member fan-out, both ways round. A `(member, key)` publish binds
+    // every OTHER member's subscribe on the same key; the edge set is the set of
+    // such (publish endpoint, subscribe endpoint) pairs, which is the grain
+    // `broker_edges` emits one edge at.
+    let edges = |committed: bool| -> BTreeSet<Edge> {
+        let mut eps: Vec<(&str, &SiteIdentity, &str)> = Vec::new();
+        for (member, rows) in &identities {
+            for site in rows {
+                let keys: &[String] = if committed {
+                    &site.topics
+                } else {
+                    std::slice::from_ref(&site.operand)
+                };
+                for key in keys {
+                    eps.push((member.as_str(), site, key.as_str()));
+                }
+            }
+        }
+        let mut out = BTreeSet::new();
+        for (pm, publish, pk) in eps.iter().filter(|(_, s, _)| s.is_publish) {
+            for (sm, subscribe, sk) in eps.iter().filter(|(_, s, _)| !s.is_publish) {
+                if sm != pm && sk == pk {
+                    out.insert(Edge {
+                        topic: (*pk).to_string(),
+                        from_member: (*pm).to_string(),
+                        from: publish.declaration.clone(),
+                        to_member: (*sm).to_string(),
+                        to: subscribe.declaration.clone(),
+                    });
+                }
+            }
+        }
+        out
+    };
+
+    let before = edges(false);
+    let after = edges(true);
+
+    let (gained, lost) = report_topic_identities(
+        &root,
+        &identities,
+        &refused_rows,
+        &corpus_keys,
+        &before,
+        &after,
+    );
+
+    // (0) The corpus is the one the finding was measured against. Asserted so a
+    //     green run cannot report a measurement that did not happen.
+    assert!(
+        !identities.is_empty(),
+        "the reference workspace at {} produced no keyed broker site at all — this \
+         is not the corpus this measurement is about",
+        root.display(),
+    );
+
+    // (0b) THE CAPABILITY ACTUALLY RAN, asserted as a DIRECTION and never as a
+    //      number — the census-figure-as-acceptance-floor trap [S-397] recorded.
+    //
+    //      It exists because every other assertion here is invariant under the
+    //      whole story being switched off: with `topic_identity` stubbed to
+    //      `Literal`, `after == before`, `gained` and `lost` are empty, nothing is
+    //      admitted and therefore nothing can be fabricated — and this test
+    //      reported green while printing `13 -> 13`. Demonstrated, not supposed.
+    assert!(
+        !gained.is_empty(),
+        "the committed-value identity bound no cross-member pair this estate's \
+         stored operands did not already bind ({} -> {} edges over {} keyed \
+         site(s)). Either the capability regressed, or this corpus stopped \
+         committing its topic keys — the per-topic table above says which",
+        before.len(),
+        after.len(),
+        identities.values().map(Vec::len).sum::<usize>(),
+    );
+
+    // (0c) The QUALITATIVE claim [ADR-64]'s 2026-09-15 amendment makes, which is
+    //      the reason this story exists: the pair it names as reproducing the
+    //      spelling gap meets AFTER and did not meet BEFORE. A property of the
+    //      rule rather than of this estate's size, so it is an assertion and not
+    //      a floor — though it is still estate-shaped, which is why it names the
+    //      members rather than counting them.
+    let names = |set: &BTreeSet<Edge>, topic: &str, from: &str, to: &str| {
+        set.iter().any(|e| {
+            e.topic == topic && e.from_member == from && e.to_member == to
+        })
+    };
+    const GAP_TOPIC: &str = "archive-volume-counters";
+    const GAP_FROM: &str = "reporting-archive-data-downsampler";
+    const GAP_TO: &str = "reporting-archive-data-projector";
+    if by_member.contains_key(GAP_FROM) && by_member.contains_key(GAP_TO) {
+        assert!(
+            names(&after, GAP_TOPIC, GAP_FROM, GAP_TO),
+            "the pair ADR-64's 2026-09-15 amendment names as the reproduction of \
+             the canonical/verbatim spelling gap does not meet on `{GAP_TOPIC}` \
+             even after the committed value is read"
+        );
+        assert!(
+            !names(&before, GAP_TOPIC, GAP_FROM, GAP_TO),
+            "that pair meets on the stored operand's exact bytes, so this corpus no \
+             longer reproduces the gap the amendment recorded — re-record the \
+             finding rather than relaxing this assertion"
+        );
+    }
+
+    // (1) NEVER FABRICATE ([NFR-RA-05]): no admitted identity is itself a
+    //     placeholder, and none is blank. A `${…}` identity on the AFTER side
+    //     would mean an indirection was admitted as a topic.
+    let fabricated: Vec<String> = identities
+        .values()
+        .flatten()
+        .filter(|site| site.admitted)
+        .flat_map(|site| site.topics.iter())
+        .filter(|topic| topic.trim().is_empty() || topic.contains("${"))
+        .cloned()
+        .collect();
+    assert!(
+        fabricated.is_empty(),
+        "an admitted topic identity is a committed value, never an indirection or a \
+         blank: {fabricated:?}",
+    );
+
+    // (2) A DIRECTION, not a number: every BEFORE edge that survives does so
+    //     because the two ends agree on a committed value, and no edge is lost
+    //     to a *spelling* the committed value would have reconciled. Stated as
+    //     the reported `lost` set being explainable — asserted only where it is
+    //     structural: a lost edge must have had at least one end that admitted a
+    //     committed value, because two ends that both kept their operand as
+    //     written key exactly as they did before.
+    let admitted_at = |member: &str, declaration: &str| {
+        identities[member]
+            .iter()
+            .any(|site| site.declaration == declaration && site.admitted)
+    };
+    let unexplained: Vec<&Edge> = lost
+        .iter()
+        .copied()
+        .filter(|e| {
+            !admitted_at(&e.from_member, &e.from) && !admitted_at(&e.to_member, &e.to)
+        })
+        .collect();
+    assert!(
+        unexplained.is_empty(),
+        "an edge was lost although NEITHER end admitted a committed value — two \
+         operands kept as written key exactly as they did before, so this can \
+         only be a defect in the join: {unexplained:?}",
     );
 }

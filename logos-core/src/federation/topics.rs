@@ -17,7 +17,44 @@
 //! The cross-member bind is then *implied* by the inventory itself — a topic with
 //! producers in one member and consumers in another **is** the coupling — and is
 //! proven independently by the bridge ([`super::broker`]). The two are projections
-//! of one captured fact, keyed on the same topic identity, so they cannot disagree.
+//! of one captured fact.
+//!
+//! # They are no longer keyed on the same topic identity, and CAN disagree ([S-410])
+//!
+//! This paragraph read *"keyed on the same topic identity, so they cannot
+//! disagree"* until 2026-09-16, and it was true when written. [S-410] moved the
+//! **bridge's** topic identity to the committed configured value for an operand
+//! that resolves to one; this inventory's identity did not move, because the
+//! promotion pass it reads is repo-scoped and runs *before* federation, where no
+//! other member's corpus is in scope. [FR-WS-11]'s topic identity is still the
+//! operand as the ledger stored it.
+//!
+//! So for a **configuration-bound** site the two genuinely differ, and on the
+//! reference estate they differ for every keyed site (59 of 59, 2026-09-16). The
+//! visible shape: the service map draws one
+//! `reporting-archive-data-downsampler → reporting-archive-data-projector`
+//! coupling on `archive-volume-counters`, while this inventory lists
+//! `${spring.kafka.topics.archivevolumecounters}` (a producer, no consumer) and
+//! `${spring.kafka.topics.archive-volume-counters}` (a consumer, no producer) as
+//! two uncoupled topics.
+//!
+//! **Which is authoritative for what.** The bridge is authoritative for *coupling*
+//! — it is the only one of the two that reads committed configuration, so it is
+//! the only one that can tell that those two spellings are one topic. This
+//! inventory stays authoritative for *per-repo visibility*, which is the promise
+//! [FR-WS-11] makes and the reason it reads promoted nodes rather than binds: an
+//! unbound topic must still be drawn. Neither is wrong; they answer different
+//! questions, and a reader reconciling a coupling count against a topic count
+//! needs to know which is which.
+//!
+//! Reconciling the two identities is a change to [FR-WS-11]'s repo-scoped topic
+//! identity — it would rename `Topic`/`Producer`/`Consumer` nodes on every indexed
+//! project — and needs its own acceptance criterion. It is deliberately not
+//! [S-410]'s, and is recorded here rather than left for a reader to discover from
+//! a service map that disagrees with the board beside it ([NFR-CC-04]).
+//!
+//! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+//! [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
 //!
 //! # Advisory only ([ADR-53])
 //! Like every workspace read-model, this is reachable only through an

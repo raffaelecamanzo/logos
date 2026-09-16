@@ -124,7 +124,7 @@ const PLACEHOLDER_DEFAULT: char = ':';
 /// repository proved it ([ADR-64]).
 ///
 /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum KeySource {
     /// A getter on a configuration-bound (`@ConfigurationProperties`) bean,
@@ -315,7 +315,7 @@ impl ValueRefusal {
 ///
 /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
 /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct ProfiledValue {
     /// The committed literal, exactly as the source proves it.
     pub value: String,
@@ -439,7 +439,7 @@ impl Agreement {
 /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct ConfigBound {
     /// The canonical key the value was read from ([`canonical_key`]).
     pub key: String,
@@ -486,7 +486,7 @@ impl ConfigBound {
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
 /// [BR-52]: ../../../docs/specs/software-spec.md#327-workspace-federation
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(tag = "provenance", rename_all = "kebab-case")]
 pub enum Provenance {
     /// Written at the call site and read verbatim — the pre-S-382 case, and
