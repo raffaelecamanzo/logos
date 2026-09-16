@@ -1665,6 +1665,14 @@ fn report_topic_identities<'a>(
 /// not as "what `ContractBridge::edges` returned". The per-member and per-topic
 /// node counts above have no such caveat — they are pure `topic_identity`.
 ///
+/// **That risk is not hypothetical, and this story hit it.** The harness collects
+/// into a [`BTreeSet`], so a pair meeting under two overlays de-duplicates here
+/// by construction — while the product's `match_indexed` emitted one edge per
+/// meeting and had to be taught to `dedup`. The two joins disagreed by exactly
+/// that, the harness read green, and the defect was found by reasoning about the
+/// product rather than by this measurement. Keep the caveat above in mind
+/// whenever these figures are quoted.
+///
 /// Closing it properly means widening `broker_edges`' visibility to drive it from
 /// here, which is a change to the federation module's surface that no S-410
 /// criterion asks for; recorded rather than taken.
