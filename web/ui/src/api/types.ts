@@ -204,7 +204,9 @@ export interface QueryResponse {
 // `logos-core/src/models/navigation.rs`, `models/quality.rs`, `history.rs`,
 // `wiki/*`). `Option<T>` is `T | null`; enums serialize to snake_case tokens.
 
-/** Index health + freshness (mirrors `StatusInfo`). */
+/** Index health + freshness (mirrors `StatusInfo`). Carried inside the Dashboard /
+ *  Health / Architecture / Gaps / Files / Coverage bundles, and served verbatim by
+ *  `GET /api/v1/status` — the app header's graph-state readout (S-315, FR-UI-34). */
 export interface StatusInfo {
   /** Whether the project has an index at all — the Dashboard/Health empty gate. */
   indexed: boolean;

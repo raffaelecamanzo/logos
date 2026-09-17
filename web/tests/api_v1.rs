@@ -136,6 +136,7 @@ const V1_ENDPOINTS: &[&str] = &[
     "/api/v1/wiki/search?q=f",
     "/api/v1/config",
     "/api/v1/statistics",
+    "/api/v1/status",
 ];
 
 async fn body_string(resp: Response<Body>) -> (StatusCode, String, axum::http::HeaderMap) {
@@ -310,6 +311,12 @@ async fn single_read_endpoints_serialize_their_read_model_fields() {
         ("/api/v1/node?symbol=f", &["\"query\"", "\"warnings\"", "\"suggestions\""]),
         // WikiStatus — the dual-axis freshness read-model.
         ("/api/v1/wiki", &["\"page_count\"", "\"freshness_fraction\"", "\"current_revision\""]),
+        // StatusInfo — the FR-NV-07 index-health read-model the app header's
+        // graph-state readout renders (S-315, [FR-UI-34], [CR-097]).
+        (
+            "/api/v1/status",
+            &["\"indexed\"", "\"graph_revision\"", "\"node_count\"", "\"edge_count\""],
+        ),
     ];
     for (path, keys) in cases {
         let resp = router.clone().oneshot(get(path)).await.unwrap();
@@ -327,6 +334,44 @@ async fn single_read_endpoints_serialize_their_read_model_fields() {
     assert_eq!(status, StatusCode::OK, "wiki/search answers 200");
     assert_json_self_only_csp(&headers, "/api/v1/wiki/search?q=f");
     assert!(body.starts_with('['), "wiki/search serializes a JSON array: {body}");
+}
+
+/// `GET /api/v1/status` carries **only** the [FR-NV-07] status projection (S-315,
+/// [FR-UI-34], [CR-097]) — the point of adding it. The header used to set one
+/// boolean by pulling the ~1 MB [FR-UI-04] Health bundle and discarding all of it,
+/// so this asserts both halves: the status fields ARE there, and the Health
+/// bundle's sibling blocks (`gate`, `scan`, `evolution`) are NOT. It also probes
+/// the near miss: `/api/v1/statistics` shares this path's first twelve characters
+/// and is a different read-model, so the two must answer distinguishable bodies.
+#[tokio::test]
+async fn status_endpoint_carries_only_the_status_projection() {
+    let (_tmp, engine) = scanned_engine();
+    let router = web::router(engine);
+
+    let resp = router.clone().oneshot(get("/api/v1/status")).await.expect("route responds");
+    let (code, body, headers) = body_string(resp).await;
+    assert_eq!(code, StatusCode::OK, "/api/v1/status answers 200");
+    assert_json_self_only_csp(&headers, "/api/v1/status");
+    for key in ["\"indexed\"", "\"graph_revision\"", "\"node_count\"", "\"edge_count\""] {
+        assert!(body.contains(key), "/api/v1/status carries {key}: {body}");
+    }
+    for absent in ["\"gate\"", "\"scan\"", "\"evolution\""] {
+        assert!(
+            !body.contains(absent),
+            "/api/v1/status is the status projection alone — it must not carry {absent}: {body}",
+        );
+    }
+
+    // The near miss: `/api/v1/statistics` is NOT this route. It answers the
+    // telemetry read-model, whose `calls_by_tool` channel the status projection has
+    // no field for — so a prefix match that swallowed it would be caught here.
+    let resp = router.oneshot(get("/api/v1/statistics")).await.expect("route responds");
+    let (code, stats_body, _) = body_string(resp).await;
+    assert_eq!(code, StatusCode::OK, "/api/v1/statistics still answers 200");
+    assert!(
+        stats_body.contains("\"calls_by_tool\"") && !body.contains("\"calls_by_tool\""),
+        "/api/v1/statistics and /api/v1/status are distinct read-models",
+    );
 }
 
 /// The Decisions-panel impact endpoint (S-186, [FR-NV-10], [FR-DG-02]) serializes

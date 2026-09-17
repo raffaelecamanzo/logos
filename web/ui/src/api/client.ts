@@ -29,6 +29,7 @@ import type {
   NodeInfo,
   OverviewModel,
   QueryResponse,
+  StatusInfo,
   WikiHit,
   WikiNav,
   WikiPageView,
@@ -150,6 +151,16 @@ export function fetchOverview(): Promise<OverviewModel> {
 /** `GET /api/v1/health` — the Health gate/metrics/evolution bundle (FR-UI-04). */
 export function fetchHealth(): Promise<HealthModel> {
   return apiFetch<HealthModel>("health");
+}
+
+/** `GET /api/v1/status` — the FR-NV-07 index-health read-model behind the app
+ *  header's graph-state readout (S-315, FR-UI-34, CR-097). The right-sized read
+ *  the shell makes on every navigation: the status projection alone (~1 KB),
+ *  where it formerly pulled the ~1 MB {@link fetchHealth} bundle to set one
+ *  boolean and discarded the rest. `fetchHealth` is unchanged and remains the
+ *  Health view's own read. */
+export function fetchStatus(): Promise<StatusInfo> {
+  return apiFetch<StatusInfo>("status");
 }
 
 // ── Files & Risk / Coverage (S-188, FR-UI-11) ──
