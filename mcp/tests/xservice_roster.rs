@@ -161,3 +161,37 @@ fn workspace_check_is_federated_only_and_never_a_gate_tool() {
         "the tool description states it cannot move a member's gate: {description}",
     );
 }
+
+/// The `xservice_route_providers` description names the [FR-WS-10] relation
+/// set, states the `broker-topic` fan-out (never a sole provider), and names
+/// the [S-410]-era `intake`/`from_value`/`to_value` fields — the payload the
+/// pre-S-410 wording no longer described.
+///
+/// [FR-WS-10]: ../../docs/specs/requirements/FR-WS-10.md
+/// [S-410]: ../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+#[test]
+fn xservice_route_providers_description_names_relations_fan_out_and_provenance_fields() {
+    let federated = federated_tools();
+    let tool = federated
+        .iter()
+        .find(|t| t.name == "xservice_route_providers")
+        .expect("the federated backing registers xservice_route_providers");
+    let description = tool.description.as_deref().unwrap_or_default();
+
+    for relation in ["route", "grpc-call", "broker-topic"] {
+        assert!(
+            description.contains(relation),
+            "the description names the {relation} relation: {description}",
+        );
+    }
+    assert!(
+        description.contains("FANS OUT"),
+        "the description states the broker relation fans out rather than binding a sole provider: {description}",
+    );
+    for field in ["intake", "from_value", "to_value"] {
+        assert!(
+            description.contains(field),
+            "the description names the {field} field: {description}",
+        );
+    }
+}
