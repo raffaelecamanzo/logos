@@ -119,14 +119,26 @@ pub(crate) struct TelemetryLayer {
     ///
     /// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
     origin: String,
+    /// The opaque per-process session stamp ([FR-OB-12]): computed once at
+    /// [`super::init`] and copied onto every record, orthogonal to both
+    /// `origin` and the per-event `surface` override.
+    ///
+    /// [FR-OB-12]: ../../../docs/specs/requirements/FR-OB-12.md
+    session_id: String,
     sink: TelemetrySink,
 }
 
 impl TelemetryLayer {
-    pub(crate) fn new(surface: Surface, origin: String, sink: TelemetrySink) -> Self {
+    pub(crate) fn new(
+        surface: Surface,
+        origin: String,
+        session_id: String,
+        sink: TelemetrySink,
+    ) -> Self {
         Self {
             surface,
             origin,
+            session_id,
             sink,
         }
     }
@@ -139,7 +151,7 @@ impl<S: Subscriber> Layer<S> for TelemetryLayer {
         }
         let mut visitor = TelemetryVisitor::default();
         event.record(&mut visitor);
-        if let Some(record) = visitor.into_record(self.surface, &self.origin) {
+        if let Some(record) = visitor.into_record(self.surface, &self.origin, &self.session_id) {
             self.sink.record(record);
         }
     }
@@ -199,9 +211,9 @@ impl TelemetryVisitor {
     /// A record only if the emission helper's full shape was present —
     /// a malformed event is dropped, never half-recorded.
     ///
-    /// `origin` is the process-wide increment stamp ([FR-OB-08]); the
-    /// per-event surface override is applied independently, so the two never
-    /// interfere.
+    /// `origin` and `session_id` are the process-wide stamps ([FR-OB-08],
+    /// [FR-OB-12]); the per-event surface override is applied independently,
+    /// so none of the three interferes with the others.
     ///
     /// Override precedence, narrowest first: a `surface` field named **on the
     /// event** (the watcher, S-022) wins over the **ambient** scope an adapter
@@ -209,7 +221,9 @@ impl TelemetryVisitor {
     /// which in turn wins over the per-process stamp ([FR-OB-03]). The event's
     /// own field is the most specific statement available, so it is honoured
     /// even inside a scope.
-    fn into_record(self, surface: Surface, origin: &str) -> Option<EventRecord> {
+    ///
+    /// [FR-OB-12]: ../../../docs/specs/requirements/FR-OB-12.md
+    fn into_record(self, surface: Surface, origin: &str, session_id: &str) -> Option<EventRecord> {
         let attributed = self
             .surface_override
             .or_else(super::ambient_surface)
@@ -221,6 +235,7 @@ impl TelemetryVisitor {
             duration_ms: self.duration_ms?,
             ok: self.ok?,
             origin: origin.to_string(),
+            session_id: session_id.to_string(),
         })
     }
 }

@@ -16,8 +16,8 @@ use super::tool::{
     class_of_wire, self_referential_tools, EventClass, Tool, ToolClass, UNREGISTERED_CLASS,
 };
 use super::{
-    db, in_surface, telemetry_logos_dir, telemetry_origin, traced, EventRecord, Surface,
-    TELEMETRY_TARGET,
+    db, generate_session_id, in_surface, telemetry_logos_dir, telemetry_origin, traced,
+    EventRecord, Surface, TELEMETRY_TARGET,
 };
 
 /// An event record `secs_ago` seconds before the fixed "now" used in tests.
@@ -31,6 +31,7 @@ fn record(tool: &str, duration_ms: u64, ok: bool, at: i64) -> EventRecord {
         duration_ms,
         ok,
         origin: "main".to_string(),
+        session_id: "test-session".to_string(),
     }
 }
 
@@ -62,7 +63,7 @@ fn telemetry_schema_migrates_and_is_idempotent() {
     let versions: i64 = conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(versions, 2, "each ledger migration recorded exactly once");
+    assert_eq!(versions, 3, "each ledger migration recorded exactly once");
     // The v2 `origin` column is present on the events table.
     let has_origin: i64 = conn
         .query_row(
@@ -72,6 +73,15 @@ fn telemetry_schema_migrates_and_is_idempotent() {
         )
         .unwrap();
     assert_eq!(has_origin, 1, "v2 added the nullable origin column");
+    // The v3 `session_id` column is present on the events table.
+    let has_session_id: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('events') WHERE name = 'session_id'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(has_session_id, 1, "v3 added the nullable session_id column");
 }
 
 /// A batch lands atomically with every field intact.
@@ -87,16 +97,30 @@ fn write_batch_persists_event_fields() {
     )
     .expect("batch commits");
 
-    let (tool, duration_ms, ok, surface, origin): (String, i64, i64, String, String) = conn
+    let (tool, duration_ms, ok, surface, origin, session_id): (
+        String,
+        i64,
+        i64,
+        String,
+        String,
+        String,
+    ) = conn
         .query_row(
-            "SELECT tool, duration_ms, ok, surface, origin FROM events WHERE tool = 'index'",
+            "SELECT tool, duration_ms, ok, surface, origin, session_id FROM events WHERE tool = 'index'",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .unwrap();
     assert_eq!(
-        (tool.as_str(), duration_ms, ok, surface.as_str(), origin.as_str()),
-        ("index", 900, 0, "cli", "main")
+        (
+            tool.as_str(),
+            duration_ms,
+            ok,
+            surface.as_str(),
+            origin.as_str(),
+            session_id.as_str(),
+        ),
+        ("index", 900, 0, "cli", "main", "test-session")
     );
     let n: i64 = conn
         .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
@@ -118,6 +142,7 @@ fn write_batch_persists_the_origin_stamp() {
             duration_ms: 5,
             ok: true,
             origin: "sprint-40-I2-S1".to_string(),
+            session_id: "test-session".to_string(),
         }],
     )
     .expect("batch commits");
@@ -150,11 +175,13 @@ fn v2_migration_over_a_v1_store_reads_legacy_rows_as_main() {
     assert_eq!(version, 1, "the seeded store is at v1");
 
     // Apply the forward ledger — the exact production path `db::open` runs.
-    db::migrate(&mut conn).expect("v2 migration applies over a v1 store");
+    // `migrate` applies every pending migration, so a v1 seed now lands on the
+    // current head (v3) in one call, not just v2.
+    db::migrate(&mut conn).expect("the forward ledger applies over a v1 store");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2, "the store advanced to v2");
+    assert_eq!(version, 3, "the store advanced to the ledger head");
 
     // The legacy row is intact and its NULL origin reads as 'main'.
     let (legacy_origin, coalesced): (Option<String>, String) = conn
@@ -177,6 +204,7 @@ fn v2_migration_over_a_v1_store_reads_legacy_rows_as_main() {
             duration_ms: 3,
             ok: true,
             origin: "feature".to_string(),
+            session_id: "test-session".to_string(),
         }],
     )
     .expect("post-migration write");
@@ -186,6 +214,113 @@ fn v2_migration_over_a_v1_store_reads_legacy_rows_as_main() {
         })
         .unwrap();
     assert_eq!(new_origin, "feature");
+}
+
+/// `write_batch` persists the per-event `session_id` verbatim (FR-OB-12) —
+/// an opaque per-process stamp survives the round-trip alongside `origin` and
+/// `surface`, each independently.
+#[test]
+fn write_batch_persists_the_session_id_stamp() {
+    let mut conn = db::open_in_memory();
+    db::write_batch(
+        &mut conn,
+        &[EventRecord {
+            at: NOW,
+            surface: "mcp",
+            tool: "context".to_string(),
+            duration_ms: 5,
+            ok: true,
+            origin: "sprint-40-I2-S1".to_string(),
+            session_id: "a1b2c3d4e5f60718".to_string(),
+        }],
+    )
+    .expect("batch commits");
+
+    let session_id: String = conn
+        .query_row(
+            "SELECT session_id FROM events WHERE tool = 'context'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        session_id, "a1b2c3d4e5f60718",
+        "the opaque per-process stamp is stored as-is"
+    );
+}
+
+/// The v3 forward migration applies cleanly over a seeded **v2** store: the
+/// pre-`session_id` row survives and reads back as `'unattributed'` — never
+/// folded into a real session, unlike `origin`'s `'main'` fallback — while a
+/// post-migration write carries its own stamp (FR-OB-12). This is the
+/// migration-ledger discipline the story requires, over the exact predecessor
+/// version the story names.
+#[test]
+fn v3_migration_over_a_v2_store_reads_legacy_rows_as_unattributed() {
+    let mut conn = db::open_in_memory_v2();
+    // A legacy row written under the v2 schema (events has `origin` but no
+    // `session_id` column), already carrying a real origin stamp.
+    conn.execute(
+        "INSERT INTO events (at, surface, tool, duration_ms, ok, origin)
+         VALUES (?1, 'cli', 'search', 12, 1, 'main')",
+        [NOW],
+    )
+    .expect("legacy v2 insert");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 2, "the seeded store is at v2");
+
+    // Apply the forward ledger — the exact production path `db::open` runs.
+    db::migrate(&mut conn).expect("v3 migration applies over a v2 store");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 3, "the store advanced to v3");
+
+    // The legacy row is intact, its NULL session_id is never coalesced into a
+    // real session, and `COALESCE(session_id, 'unattributed')` is how a reader
+    // is expected to name that: a sentinel no real session id can collide with.
+    let (legacy_session, coalesced, origin): (Option<String>, String, String) = conn
+        .query_row(
+            "SELECT session_id, COALESCE(session_id, 'unattributed'), origin
+             FROM events WHERE tool = 'search'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(legacy_session, None, "the legacy row's session_id is NULL");
+    assert_eq!(
+        coalesced, "unattributed",
+        "a legacy NULL session_id reads as unattributed, never a real session"
+    );
+    assert_eq!(
+        origin, "main",
+        "the pre-existing origin stamp is untouched by the v3 migration"
+    );
+
+    // A post-migration write stamps its session_id normally.
+    db::write_batch(
+        &mut conn,
+        &[EventRecord {
+            at: NOW,
+            surface: "cli",
+            tool: "impact".to_string(),
+            duration_ms: 3,
+            ok: true,
+            origin: "main".to_string(),
+            session_id: "freshly-generated".to_string(),
+        }],
+    )
+    .expect("post-migration write");
+    let new_session_id: String = conn
+        .query_row(
+            "SELECT session_id FROM events WHERE tool = 'impact'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(new_session_id, "freshly-generated");
 }
 
 /// Events older than the retention window fold into `daily_rollup` and are
@@ -260,7 +395,7 @@ fn a_full_queue_drops_instead_of_blocking() {
 fn traced_emits_one_record_through_the_layer() {
     let (sink, rx) = TelemetrySink::with_capacity(16);
     let subscriber = tracing_subscriber::registry()
-        .with(TelemetryLayer::new(Surface::Mcp, "feature".to_string(), sink));
+        .with(TelemetryLayer::new(Surface::Mcp, "feature".to_string(), "test-session".to_string(), sink));
 
     tracing::subscriber::with_default(subscriber, || {
         let ok = traced(Tool::Callers, || Ok(42)).unwrap();
@@ -293,7 +428,7 @@ fn traced_emits_one_record_through_the_layer() {
 fn watcher_surface_override_is_honoured_and_bounded() {
     let (sink, rx) = TelemetrySink::with_capacity(4);
     let subscriber = tracing_subscriber::registry()
-        .with(TelemetryLayer::new(Surface::Mcp, "feature".to_string(), sink));
+        .with(TelemetryLayer::new(Surface::Mcp, "feature".to_string(), "test-session".to_string(), sink));
     tracing::subscriber::with_default(subscriber, || {
         tracing::info!(
             target: TELEMETRY_TARGET,
@@ -329,7 +464,7 @@ fn watcher_surface_override_is_honoured_and_bounded() {
 fn a_malformed_telemetry_event_is_dropped() {
     let (sink, rx) = TelemetrySink::with_capacity(4);
     let subscriber = tracing_subscriber::registry()
-        .with(TelemetryLayer::new(Surface::Cli, "main".to_string(), sink));
+        .with(TelemetryLayer::new(Surface::Cli, "main".to_string(), "test-session".to_string(), sink));
     tracing::subscriber::with_default(subscriber, || {
         tracing::info!(target: TELEMETRY_TARGET, tool = "search", "no duration, no ok");
     });
@@ -720,6 +855,7 @@ fn spa_navigation_counts_while_self_referential_reads_do_not() {
         duration_ms: 10,
         ok: true,
         origin: "main".to_string(),
+        session_id: "test-session".to_string(),
     };
     db::write_batch(
         &mut conn,
@@ -826,6 +962,7 @@ fn the_exclusion_applies_to_every_stats_query() {
             duration_ms: 5_000,
             ok: true,
             origin: "some-worktree-branch".to_string(),
+            session_id: "test-session".to_string(),
         })
         .collect();
     db::write_batch(&mut conn, &noise).unwrap();
@@ -913,6 +1050,7 @@ fn a_historical_window_reports_the_navigation_the_store_holds() {
                 duration_ms: 8,
                 ok: true,
                 origin: "main".to_string(),
+                session_id: "test-session".to_string(),
             })
             .collect()
     };
@@ -979,7 +1117,7 @@ fn an_unregistered_historical_tool_is_still_counted() {
 fn the_surface_scope_attributes_only_what_it_wraps() {
     let (sink, rx) = TelemetrySink::with_capacity(8);
     let subscriber = tracing_subscriber::registry()
-        .with(TelemetryLayer::new(Surface::Web, "main".to_string(), sink));
+        .with(TelemetryLayer::new(Surface::Web, "main".to_string(), "test-session".to_string(), sink));
 
     tracing::subscriber::with_default(subscriber, || {
         traced(Tool::Search, || Ok::<_, anyhow::Error>(())).unwrap();
@@ -1015,7 +1153,7 @@ fn the_surface_scope_attributes_only_what_it_wraps() {
 fn a_nested_surface_scope_restores_the_outer_one() {
     let (sink, rx) = TelemetrySink::with_capacity(8);
     let subscriber = tracing_subscriber::registry()
-        .with(TelemetryLayer::new(Surface::Mcp, "main".to_string(), sink));
+        .with(TelemetryLayer::new(Surface::Mcp, "main".to_string(), "test-session".to_string(), sink));
 
     tracing::subscriber::with_default(subscriber, || {
         in_surface(Surface::Web, || {
@@ -1052,7 +1190,7 @@ fn a_nested_surface_scope_restores_the_outer_one() {
 fn the_surface_scope_is_restored_after_a_panic() {
     let (sink, rx) = TelemetrySink::with_capacity(4);
     let subscriber = tracing_subscriber::registry()
-        .with(TelemetryLayer::new(Surface::Mcp, "main".to_string(), sink));
+        .with(TelemetryLayer::new(Surface::Mcp, "main".to_string(), "test-session".to_string(), sink));
 
     tracing::subscriber::with_default(subscriber, || {
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1086,7 +1224,7 @@ fn the_watcher_records_both_outcomes_with_a_full_field_shape() {
     let (sink, rx) = TelemetrySink::with_capacity(8);
     let subscriber = tracing_subscriber::registry()
         // The watcher runs inside `serve --mcp`, whose process surface is mcp.
-        .with(TelemetryLayer::new(Surface::Mcp, "main".to_string(), sink));
+        .with(TelemetryLayer::new(Surface::Mcp, "main".to_string(), "test-session".to_string(), sink));
 
     tracing::subscriber::with_default(subscriber, || {
         // Mirrors the success arm of watch/mod.rs's coverage-ingest loop.
@@ -1144,7 +1282,7 @@ fn the_watcher_records_both_outcomes_with_a_full_field_shape() {
 fn an_event_field_override_wins_over_the_ambient_scope() {
     let (sink, rx) = TelemetrySink::with_capacity(4);
     let subscriber = tracing_subscriber::registry()
-        .with(TelemetryLayer::new(Surface::Web, "main".to_string(), sink));
+        .with(TelemetryLayer::new(Surface::Web, "main".to_string(), "test-session".to_string(), sink));
 
     tracing::subscriber::with_default(subscriber, || {
         in_surface(Surface::Web, || {
@@ -1178,7 +1316,7 @@ fn chat_agent_calls_are_separable_from_web_and_mcp() {
     let (sink, rx) = TelemetrySink::with_capacity(8);
     let subscriber = tracing_subscriber::registry()
         // The chat agent runs *inside* `serve --ui`, whose process surface is web.
-        .with(TelemetryLayer::new(Surface::Web, "main".to_string(), sink));
+        .with(TelemetryLayer::new(Surface::Web, "main".to_string(), "test-session".to_string(), sink));
     tracing::subscriber::with_default(subscriber, || {
         in_surface(Surface::Chat, || {
             traced(Tool::Impact, || Ok::<_, anyhow::Error>(())).unwrap();
@@ -1208,6 +1346,7 @@ fn chat_agent_calls_are_separable_from_web_and_mcp() {
         duration_ms: 3,
         ok: true,
         origin: "main".to_string(),
+        session_id: "test-session".to_string(),
     });
     db::write_batch(&mut conn, &rows).unwrap();
     let info = stats_from(&conn, 7, NOW).unwrap();
@@ -1257,6 +1396,7 @@ fn stats_respects_the_window() {
                 duration_ms: 9_999,
                 ok: true,
                 origin: "feature".to_string(),
+                session_id: "test-session".to_string(),
             },
         ],
     )
@@ -1350,6 +1490,7 @@ fn stats_reports_daily_activity_and_origin_breakdown() {
         duration_ms: 5,
         ok: true,
         origin: "feature".to_string(),
+        session_id: "test-session".to_string(),
     };
     db::write_batch(
         &mut conn,
@@ -1441,7 +1582,7 @@ fn origin_breakdown_folds_legacy_null_into_main() {
         [NOW - 60],
     )
     .unwrap();
-    db::migrate(&mut conn).expect("v2 migration");
+    db::migrate(&mut conn).expect("the forward ledger applies");
     // A post-migration row explicitly stamped "main".
     db::write_batch(&mut conn, &[record("impact", 3, true, NOW - 60)]).unwrap();
 
@@ -1468,6 +1609,7 @@ fn origin_breakdown_collapses_all_branches_into_dev() {
         duration_ms: 5,
         ok,
         origin: branch.to_string(),
+        session_id: "test-session".to_string(),
     };
     db::write_batch(
         &mut conn,
@@ -1687,6 +1829,190 @@ fn telemetry_origin_from_a_detached_worktree_is_main() {
     );
 }
 
+// ── Per-process session id (FR-OB-12) ──────────────────────────────────────
+//
+// `generate_session_id` decides the per-process stamp once at init — unlike
+// `telemetry_origin`, it needs no root or git resolution at all, since it
+// carries no environment identity by design (NFR-CC-03).
+
+/// Two separate processes get two distinct ids. There is no shared process
+/// state to derive it from — each call represents one process's own
+/// [`init`](super::init) — so this asserts what makes the value usable as a
+/// session key at all: no collision between independently-generated stamps.
+#[test]
+fn distinct_processes_get_distinct_session_ids() {
+    let a = generate_session_id();
+    let b = generate_session_id();
+    assert_ne!(a, b, "each process draws its own random stamp");
+    assert!(!a.is_empty() && !b.is_empty());
+}
+
+/// The value carries no user, machine or account identity (NFR-CC-03): calling
+/// it many times never reproduces a previous value (it is not seeded from
+/// anything stable like a hostname or username) and it is plain hex — never a
+/// path, an email-shaped string, or anything else that could leak identity by
+/// accident.
+#[test]
+fn the_session_id_is_opaque_and_never_repeats() {
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..64 {
+        let id = generate_session_id();
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit()),
+            "{id} is not plain hex"
+        );
+        assert!(seen.insert(id), "a session id repeated across 64 draws");
+    }
+}
+
+/// Two events emitted through the same process's layer share a `session_id` —
+/// the per-process stamp is computed once and copied onto every record, not
+/// redrawn per event ([NFR-OO-02]: no hot-path cost).
+#[test]
+fn events_from_one_process_share_a_session_id() {
+    let (sink, rx) = TelemetrySink::with_capacity(8);
+    let session_id = generate_session_id();
+    let subscriber = tracing_subscriber::registry().with(TelemetryLayer::new(
+        Surface::Mcp,
+        "main".to_string(),
+        session_id.clone(),
+        sink,
+    ));
+
+    tracing::subscriber::with_default(subscriber, || {
+        traced(Tool::Search, || Ok::<_, anyhow::Error>(())).unwrap();
+        traced(Tool::Node, || Ok::<_, anyhow::Error>(())).unwrap();
+    });
+
+    let records: Vec<EventRecord> = rx.try_iter().collect();
+    assert_eq!(records.len(), 2);
+    assert!(
+        records.iter().all(|r| r.session_id == session_id),
+        "both events from this process share the one stamp: {records:?}"
+    );
+}
+
+/// `session_id` is orthogonal to both `surface` and `origin` (FR-OB-12): it
+/// stays fixed while a surface override changes the attributed surface for
+/// one call, and it is independent of whatever `origin` string the layer
+/// carries — none of the three tracks the others.
+#[test]
+fn the_session_id_is_orthogonal_to_surface_and_origin() {
+    let (sink, rx) = TelemetrySink::with_capacity(8);
+    let subscriber = tracing_subscriber::registry().with(TelemetryLayer::new(
+        Surface::Mcp,
+        "feature-branch".to_string(),
+        "fixed-session".to_string(),
+        sink,
+    ));
+
+    tracing::subscriber::with_default(subscriber, || {
+        traced(Tool::Search, || Ok::<_, anyhow::Error>(())).unwrap();
+        in_surface(Surface::Watcher, || {
+            traced(Tool::Sync, || Ok::<_, anyhow::Error>(())).unwrap();
+        });
+    });
+
+    let records: Vec<EventRecord> = rx.try_iter().collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].surface, "mcp");
+    assert_eq!(records[1].surface, "watcher", "the surface override took effect");
+    assert!(
+        records.iter().all(|r| r.session_id == "fixed-session"),
+        "session_id is unaffected by the surface override: {records:?}"
+    );
+    assert!(
+        records.iter().all(|r| r.origin == "feature-branch"),
+        "origin is unaffected by the surface override too: {records:?}"
+    );
+}
+
+/// The store can answer *"what fraction of sessions made at least one
+/// navigation call?"* — the question `origin` alone could not, because every
+/// process in a worktree collapses into one branch bucket. Two sessions issue
+/// a navigation call each, a third issues only bookkeeping calls, and a
+/// pre-migration (legacy `NULL`) row contributes to neither the numerator nor
+/// a fabricated denominator: it reads as its own `'unattributed'` bucket, one
+/// query, `COALESCE(session_id, 'unattributed')` grouping.
+#[test]
+fn fraction_of_sessions_with_a_navigation_call_is_derivable() {
+    let mut conn = db::open_in_memory();
+    let on = |session: &str, tool: &str| EventRecord {
+        at: NOW - 60,
+        surface: "mcp",
+        tool: tool.to_string(),
+        duration_ms: 5,
+        ok: true,
+        origin: "main".to_string(),
+        session_id: session.to_string(),
+    };
+    db::write_batch(
+        &mut conn,
+        &[
+            on("session-a", "search"),   // navigation
+            on("session-a", "sync"),     // bookkeeping, same session
+            on("session-b", "context"),  // navigation, distinct session
+            on("session-c", "sync"),     // bookkeeping only — no navigation
+        ],
+    )
+    .unwrap();
+    // A pre-migration row: NULL session_id, must not be folded into any of the
+    // three sessions above nor silently counted as a fourth real one.
+    conn.execute(
+        "INSERT INTO events (at, surface, tool, duration_ms, ok, origin)
+         VALUES (?1, 'cli', 'search', 12, 1, 'main')",
+        [NOW - 60],
+    )
+    .unwrap();
+
+    let navigation_tools: Vec<&str> = Tool::ALL
+        .iter()
+        .filter(|t| t.tool_class() == ToolClass::Navigation)
+        .map(|t| t.as_str())
+        .collect();
+    let placeholders = navigation_tools
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let total_sessions: i64 = conn
+        .query_row(
+            "SELECT count(DISTINCT COALESCE(session_id, 'unattributed')) FROM events",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        total_sessions, 4,
+        "3 real sessions + the unattributed bucket, never folded together"
+    );
+
+    let sessions_with_nav: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT count(DISTINCT session_id) FROM events
+                 WHERE session_id IS NOT NULL AND tool IN ({placeholders})"
+            ),
+            rusqlite::params_from_iter(navigation_tools.iter()),
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        sessions_with_nav, 2,
+        "session-a and session-b each made a navigation call"
+    );
+
+    // The fraction itself: real sessions only — an unattributed legacy row is
+    // not a session that could have made a navigation call.
+    let real_sessions = total_sessions - 1;
+    assert_eq!(
+        (sessions_with_nav as f64) / (real_sessions as f64),
+        2.0 / 3.0,
+        "2 of the 3 real sessions made at least one navigation call"
+    );
+}
+
 // ── The tool × origin cross-tab and the tool class (FR-OB-11) ──────────────
 
 /// **The headline [FR-OB-11] criterion.** `logos stats --json` reports per-tool
@@ -1708,6 +2034,7 @@ fn the_cross_tab_splits_each_tool_by_dev_and_main_origin() {
         duration_ms: 5,
         ok,
         origin: branch.to_string(),
+        session_id: "test-session".to_string(),
     };
     db::write_batch(
         &mut conn,
@@ -1835,6 +2162,7 @@ fn the_class_breakdown_is_the_dogfood_table() {
         duration_ms: 5,
         ok,
         origin: branch.to_string(),
+        session_id: "test-session".to_string(),
     };
     db::write_batch(
         &mut conn,
@@ -1984,7 +2312,7 @@ fn the_cross_tab_folds_legacy_null_origins_into_main() {
         [NOW - 60],
     )
     .unwrap();
-    db::migrate(&mut conn).expect("v2 migration");
+    db::migrate(&mut conn).expect("the forward ledger applies");
     // A post-migration row explicitly stamped "main".
     db::write_batch(&mut conn, &[record("search", 10, true, NOW - 60)]).unwrap();
 
@@ -2065,6 +2393,7 @@ fn the_exclusion_reaches_the_cross_tab_and_the_class_breakdown() {
         ok: true,
         // A distinct origin, so a leak would add a whole `dev` column.
         origin: "some-worktree-branch".to_string(),
+        session_id: "test-session".to_string(),
     };
     db::write_batch(
         &mut conn,
