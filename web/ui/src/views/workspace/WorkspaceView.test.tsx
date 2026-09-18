@@ -175,6 +175,25 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     expect(screen.getByText(/HTTP \(OpenAPI ↔ route\)/)).toBeInTheDocument();
   });
 
+  /* CR-132 AC6 / FR-UI-29: a workspace with NO admitted binding must render
+     byte-for-byte as it did before the provenance channel existed.
+
+     The recorded file was written from the tree as it stood BEFORE that channel
+     was added, and is never re-recorded: `-u` on this spec would silently turn
+     the criterion into "renders however it renders today", which is the one thing
+     it exists to prevent. The subtree is the service-map panel itself (the mocked
+     canvas's parent), so a change anywhere in the map's own DOM — a legend
+     section, a table column, an evidence list — fails it. */
+  it("renders a literal-only service map identically to the DOM recorded before provenance", async () => {
+    stubApi({ providers: [BINDING] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    const panel = screen.getByTestId("canvas").parentElement!;
+    await expect(panel.innerHTML).toMatchFileSnapshot(
+      "./__snapshots__/service-map.literal-only.html",
+    );
+  });
+
   it("clicking a service focuses its member — the shell selector follows the canvas", async () => {
     stubApi({ providers: [BINDING] });
     mount();
