@@ -998,9 +998,15 @@ pub struct Forwarded {
     /// two spellings of one topic), or the literal's own text when the caller
     /// wrote one.
     pub topic: String,
-    /// The hop chain, innermost frame first: one `name/arity` per frame, the
-    /// wrapper itself and then each method whose callers were read. Two entries
-    /// means two frames were taken.
+    /// The hop chain, innermost frame first: the wrapper itself, and then every
+    /// method whose callers the second frame read.
+    ///
+    /// **Length is not a frame count.** One entry means one frame, but two
+    /// admitted call sites can forward into two DIFFERENT methods and both
+    /// resolve at the second frame, which lists three entries for a two-frame
+    /// resolution. The bound is enforced by not taking a third frame (see
+    /// [`ForwardingRefusal::ThreeOrMoreFrames`]), never by this length, and a
+    /// reader must not treat it as the depth.
     ///
     /// This is the provenance [NFR-CC-04] asks for on an admitted value: a topic
     /// on this path was *proved from another file*, and a surface that cannot
@@ -1020,9 +1026,9 @@ pub enum ForwardingRefusal {
     /// correspondence between a parameter slot and an argument slot does not
     /// hold, so there is no arithmetic to do.
     UnsupportedSignature,
-    /// Nothing the ledger names calls it — including a wrapper reached only by a
-    /// method reference, which supplies no argument and therefore proves
-    /// nothing.
+    /// Nothing this reading admits calls it: no call site at all, or none left
+    /// after the module and `src/main` rules, or none whose receiver is the type
+    /// declaring it.
     NoCallSite,
     /// It is called, and every caller is outside the wrapper's build module.
     OutOfModule,
@@ -1031,6 +1037,13 @@ pub enum ForwardingRefusal {
     /// An admitted caller passes something this pass cannot prove — a bare
     /// variable, a constant, a runtime expression, a `Mockito.any()` stub in a
     /// file the test-tree rule did not exclude.
+    ///
+    /// A wrapper reached only by a **method reference** lands here rather than on
+    /// [`NoCallSite`](Self::NoCallSite), and the distinction is the point: a
+    /// `Foo::bar` IS an observed call site, it simply supplies no argument, so it
+    /// vetoes the agreement instead of being absent from it. Pinned by the
+    /// method-reference row of
+    /// `each_named_forwarding_refusal_is_pinned_on_its_own_tree`.
     UnresolvableOperand,
     /// The chain is longer than the bound: an admitted caller forwards a
     /// parameter of its own, whose own callers forward again.
@@ -1065,7 +1078,32 @@ impl ForwardingRefusal {
 /// skipping it would let a module containing one report the wrapper resolved off
 /// its other call sites alone.
 ///
+/// # This half of the hop is Java-only today — stated, not implied
+///
+/// `method_invocation` and `method_reference` are Java's spellings. Go and Rust
+/// spell a call `call_expression`, so [`Query::new`] fails for both and
+/// [`observe_calls`] returns immediately: **no Go or Rust file can ever supply a
+/// caller**, and the whole cross-file half of the hop is Java-only in practice
+/// rather than merely "absent until a grammar ships the capture".
+///
+/// The capture half is not query-gated and walks node kinds directly, and Go
+/// happens to spell `method_declaration` the same way — so a Go wrapper IS
+/// recorded as a [`ForwardingCandidate`] and then always refuses
+/// [`ForwardingRefusal::NoCallSite`]. That is wasted work, not a wrong answer,
+/// and [NFR-RA-05] holds either way; it is written down because the module
+/// header's "no per-language branching" claim ([NFR-MA-01]) is about the
+/// *receiver gate* above and must not be read as covering this.
+///
+/// Two latent correspondence gaps sit behind that dead path and would matter the
+/// moment a grammar made it live: Go's varargs node is
+/// `variadic_parameter_declaration`, which [`unsupported_signature`] does not
+/// name, and Go's comma-grouped `func f(a, b int)` puts two names in one
+/// parameter node, which [`parameter_slots`] counts as one slot. Both are
+/// recorded here rather than guessed at, because the safety net that makes them
+/// inert today is the query gate above and nothing stronger.
+///
 /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 const FORWARDING_CALL_QUERY: &str = r"
 [
   (method_invocation
@@ -1891,7 +1929,13 @@ fn decide(
 /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 /// [FR-WS-26]: ../../../docs/specs/requirements/FR-WS-26.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-pub(super) fn resolve_forwarded_topics(
+/// Public for one reason and one caller: the reference-workspace harness measures
+/// this pass's cost **apart from** the extraction it rides on
+/// ([FR-WS-26](../../../docs/specs/requirements/FR-WS-26.md) AC7,
+/// [NFR-PE-02](../../../docs/specs/requirements/NFR-PE-02.md)). Timing
+/// `extract_files` as a whole cannot answer "what did the hop add"; timing this
+/// can, without a second build of the estate to compare against.
+pub fn resolve_forwarded_topics(
     facts: &mut [Facts],
     inputs: &[FileInput],
     registry: &LanguageRegistry,

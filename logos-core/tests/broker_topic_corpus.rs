@@ -114,7 +114,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use logos_core::extract::config::corpus::{canonical_key, source_facts};
-use logos_core::extract::broker::ForwardingOutcome;
+use logos_core::extract::broker::{resolve_forwarded_topics, ForwardingOutcome};
+use logos_core::extract::config::binding::PropertiesIndex;
 use logos_core::extract::{extract, extract_files, FileInput, SymbolContext};
 use logos_core::federation::broker::{topic_identity, TopicIdentity};
 use logos_core::graph_store::ConfigDefinition;
@@ -2061,7 +2062,7 @@ fn the_reference_workspace_reports_its_two_frame_wrapper_resolutions() {
     // Per member: candidates, resolved, and the elapsed cost of the whole
     // `extract_files` pass. The cost denominator is the member's file count, so a
     // per-file figure is derivable rather than asserted.
-    let mut rows: Vec<(String, usize, usize, usize, u128)> = Vec::new();
+    let mut rows: Vec<(String, usize, usize, usize, u128, u128)> = Vec::new();
     let mut census: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut chains: BTreeMap<usize, usize> = BTreeMap::new();
     let mut topics: BTreeSet<(String, String)> = BTreeSet::new();
@@ -2072,8 +2073,23 @@ fn the_reference_workspace_reports_its_two_frame_wrapper_resolutions() {
             .map(|(rel, source)| FileInput::new(rel, source))
             .collect();
         let started = std::time::Instant::now();
-        let facts = extract_files(&inputs, &registry, &ctx);
-        let elapsed = started.elapsed().as_millis();
+        let mut facts = extract_files(&inputs, &registry, &ctx);
+        let elapsed = started.elapsed().as_micros();
+
+        // The hop's OWN cost, measured apart from the extraction it rides on, so
+        // "before and after" is a decomposition of one run rather than a
+        // comparison against a second build of the estate. The pass is
+        // idempotent over the same inputs — it re-reads the same caller files and
+        // re-decides the same candidates — so re-running it on the facts
+        // `extract_files` just produced times exactly the work the first run did.
+        // Its emissions land in a fact set the assertion below never reads.
+        let properties = PropertiesIndex::from_sources(
+            &registry,
+            inputs.iter().map(|i| (i.path.as_str(), i.source.as_str())),
+        );
+        let hop_started = std::time::Instant::now();
+        resolve_forwarded_topics(&mut facts, &inputs, &registry, &properties);
+        let hop = hop_started.elapsed().as_micros();
 
         let (mut candidates, mut resolved) = (0usize, 0usize);
         for candidate in facts.iter().flat_map(|f| f.forwarding.iter()) {
@@ -2091,22 +2107,43 @@ fn the_reference_workspace_reports_its_two_frame_wrapper_resolutions() {
             }
         }
         if candidates > 0 {
-            rows.push((member.clone(), candidates, resolved, inputs.len(), elapsed));
+            rows.push((member.clone(), candidates, resolved, inputs.len(), elapsed, hop));
         }
     }
 
     eprintln!("S-417 corpus: root={}", root.display());
     eprintln!(
         "  per member — resolved/candidates, over the member's Java file count, \
-         with the whole extract_files pass's wall time (no floor is asserted on \
-         any of these):"
+         with the sync cost BEFORE this hop (the extraction alone) and AFTER it \
+         (extraction + hop), in microseconds. No floor is asserted on any of \
+         these:"
     );
-    for (member, candidates, resolved, files, elapsed) in &rows {
+    eprintln!(
+        "    {:<40} {:>7} {:>7} {:>10} {:>10} {:>8}",
+        "member", "res/cand", "files", "before_us", "after_us", "hop_%"
+    );
+    for (member, candidates, resolved, files, elapsed, hop) in &rows {
+        let after = *elapsed;
+        let before = after.saturating_sub(*hop);
+        let share = if after == 0 { 0.0 } else { (*hop as f64) * 100.0 / (after as f64) };
         eprintln!(
-            "    {member:<44} {resolved:>3}/{candidates:<3}  files={files:<5} \
-             extract_files={elapsed}ms"
+            "    {member:<40} {:>7} {files:>7} {before:>10} {after:>10} {share:>7.2}%",
+            format!("{resolved}/{candidates}"),
         );
     }
+    let before_total: u128 = rows.iter().map(|r| r.4.saturating_sub(r.5)).sum();
+    let after_total: u128 = rows.iter().map(|r| r.4).sum();
+    let files_total: usize = rows.iter().map(|r| r.3).sum();
+    eprintln!(
+        "  SYNC COST over {files_total} Java file(s) in {} member(s): before {before_total}us \
+         -> after {after_total}us ({:+.2}%)",
+        rows.len(),
+        if before_total == 0 {
+            0.0
+        } else {
+            ((after_total as f64) - (before_total as f64)) * 100.0 / (before_total as f64)
+        },
+    );
     let candidates: usize = rows.iter().map(|r| r.1).sum();
     let resolved: usize = rows.iter().map(|r| r.2).sum();
     eprintln!(
