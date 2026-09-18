@@ -828,8 +828,15 @@ working, not a defect.
   ambiguous, no edge). As of Sprint 56 the consumer side includes not just
   declared cross-service contracts but **static HTTP client calls** — an outbound
   `"METHOD /template"` call in one member binds a matching `Route` in another
-  through the same `route_key` (a base-URL-composed or non-static path stays
-  unbound with a reason, never approximately matched). `--repo X` scopes to
+  through the same `route_key`. Since logos 1.4.13 a path **composed from a
+  committed configuration key** binds through that key's committed value too
+  (S-420, CR-133) — the same admission the coverage tier already made, so the
+  two tiers no longer classify one call site two ways; a path composed from a
+  value resolved only at runtime (`base-url-runtime`), and a genuinely
+  non-static path, still stay unbound with a reason, never approximately
+  matched. An edge admitted this way carries `from_value: config-bound` and is
+  never reported as though it had been observed at the call site (ADR-64); see
+  the config-bound section below for the estate reading. `--repo X` scopes to
   routes *provided by* member `X`.
 - **`search`** — full-text search fanned across every member, each hit tagged
   with its member. `--repo X` scopes the fan to member `X`.

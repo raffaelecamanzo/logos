@@ -1933,3 +1933,50 @@ fn repo_scopes_the_residue_to_the_named_members_egress() {
         "`web` has no captured egress, so nothing is added: {elsewhere}"
     );
 }
+
+/// The CLI half of the [ADR-64] no-unmarked-admission contract, at the grain the
+/// surfaces actually disagree on: the **help text**, not the payload.
+///
+/// `xservice route-providers` is a registered MCP twin (`cli/src/main.rs`'s
+/// `Twin("xservice route-providers")`), but that registry pins the twin's
+/// *existence*, never its wording — so the two descriptions can drift silently,
+/// and they did. [S-420] T1 made a `route` target that committed overlays compose
+/// several ways key on EVERY composition, each binding its own sole provider;
+/// [S-419] T2 corrected the MCP description and its own review corrected the
+/// retired *"bind to exactly one provider"* clause there, while this surface kept
+/// the same claim in the older spelling *"its sole cross-member provider route"*.
+/// An agent or a user reading it is licensed to de-duplicate a call site's
+/// providers, which silently drops admitted edges — the one failure mode the two
+/// stories shipped together to prevent.
+///
+/// The **absence** assertion is the load-bearing one: it survives a reword of the
+/// replacement sentence, which a presence-only assertion does not. Mirrors
+/// `mcp/tests/xservice_roster.rs`'s guard for the twin.
+#[test]
+fn the_route_providers_help_does_not_promise_one_provider_per_consumer_endpoint() {
+    let tmp = TempDir::new().expect("temp root");
+    let help = logos(tmp.path(), &["xservice", "route-providers", "--help"]);
+    assert!(help.status.success(), "`--help` exits 0");
+    let text = String::from_utf8_lossy(&help.stdout).to_string();
+
+    for retired in [
+        "sole cross-member provider route",
+        "bind to exactly one provider",
+        "its sole cross-member provider",
+    ] {
+        assert!(
+            !text.contains(retired),
+            "the CLI help still carries the retired pre-S-420 cardinality claim \
+             {retired:?} — one consumer endpoint can carry several route edges \
+             naming different providers:\n{text}"
+        );
+    }
+    assert!(
+        text.contains("never be de-duplicated"),
+        "the help must state the de-duplication prohibition the MCP twin states:\n{text}"
+    );
+    assert!(
+        text.contains("fans out"),
+        "the help must state the broker-topic fan-out:\n{text}"
+    );
+}

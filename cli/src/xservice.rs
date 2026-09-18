@@ -28,8 +28,21 @@ use crate::Output;
 /// query surface. Each carries an optional `--repo` member filter.
 #[derive(Subcommand)]
 pub(crate) enum XserviceCommands {
-    /// Resolved cross-service route bindings: each consumer endpoint → its sole
-    /// cross-member provider route. `--repo` scopes to routes that member provides.
+    /// Resolved cross-service route bindings: each consumer endpoint's binding
+    /// across the `route`, `grpc-call` and `broker-topic` relations.
+    ///
+    /// This is **not** one edge per consumer endpoint, so a call site's
+    /// providers must never be de-duplicated: since S-420 a `route` target
+    /// that committed overlays compose several ways is keyed on EVERY
+    /// composition, each composition binding its own sole provider and carrying
+    /// its own profile set, and a `broker-topic` binding fans out — one publish
+    /// binds every subscriber. (`grpc-call` reads its target verbatim and is
+    /// unaffected.) Each edge carries `intake` plus `from_value`/`to_value`
+    /// provenance (`literal`, `config-bound`, `config-unresolved`) naming the
+    /// consumer's and the provider's evidence, so an admitted binding is never
+    /// emitted as though it had been observed (ADR-64). Worded to match the
+    /// `xservice_route_providers` MCP twin, which states the same fact.
+    /// `--repo` scopes to routes that member provides.
     #[command(name = "route-providers", alias = "route_providers")]
     RouteProviders {
         /// Scope to routes provided by this workspace member.

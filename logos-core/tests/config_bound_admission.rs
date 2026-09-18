@@ -1048,10 +1048,15 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
          and `spec_conformance_measured` field docs), mcp/src/server.rs (both tool \
          descriptions), web/src/api_v1.rs (the workspace-status doc) and \
          web/ui/src/api/types.ts (the `resolved_edges_summary` example, the \
-         `IntakeSplit` doc's 81/0 split, and the `resolved_cross_service_edges` doc's \
-         claim that a config-bound row 'seeds no cross-service reachability root' — \
-         which S-420 made false and which that file still carries, because another \
-         task owns it this sprint).",
+         `IntakeSplit` doc's split, and the `resolved_cross_service_edges` doc — all \
+         three DISCHARGED by S-420's story review, which re-recorded them on merged \
+         main; the site stays on this roster because a future re-index moves it \
+         again, not because anything is outstanding there). One further site is on \
+         no prose roster because it is not prose: logos-core/tests/\
+         coverage_intake_split.rs pins the same split as a constant and is \
+         estate-gated, so it runs in NEITHER `gate.sh` NOR CI — it was red and \
+         invisible on the 2026-09-17 re-enrolment. Run it beside this file whenever \
+         these figures move.",
     );
 
     // ── CR-133: the bridge half, per member pair ────────────────────────
