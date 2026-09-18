@@ -85,6 +85,83 @@
 //! Netting the two would report 63 fewer refusals as though they were one
 //! improvement. They are not, and the two halves are never summed here.
 //!
+//! # Re-measured 2026-09-18 ([S-420] T2, [CR-133]) — the re-index arrived, and the
+//! bridge half moved
+//!
+//! The estate was re-enrolled at logos 1.4.12 on 2026-09-17, which is the re-index
+//! every note above says this pin was waiting for. Everything below is that run,
+//! taken through the same surface, `~/source/pec-services`, 84 of 84 members read,
+//! `covers_all = true`. **No floor is asserted on any figure here.**
+//!
+//! ```text
+//! rows carrying `config-bound` provenance, HTTP arm   90      (was 81)
+//!   of which bound                                    18      (was 15)
+//!   of which ambiguous                                29      (was 23)
+//!   of which no-provider-in-workspace                 42      (was 42)
+//!   of which path-not-composed                         1      (was  1)
+//! rows carrying `config-bound` provenance, broker arm 29      (was  0)
+//!   of which bound                                    27      (was  0)
+//!   of which no-provider-in-workspace                  2      (was  0)
+//! rows carrying `config-unresolved` provenance         0      (was  0)
+//! reference rows in the payload                     1036      (was 1034)
+//! the accessor denominator (S-382 reading)            96      (unchanged)
+//! the harness's upper bound (88 agreed + 2 divergent) 90      (was 81)
+//! ```
+//!
+//! So the expectation these docs recorded three times is met exactly: **90 of 96**,
+//! and the agreement with the harness returns at **90 of 90**. The +9 is [S-399]'s
+//! three sites plus [S-405]'s six, arriving with the index rather than with a rule
+//! change. The broker column is a **different arm**, not a movement in this one: it
+//! is [S-409]/[S-410]'s committed-topic-value work, whose own denominator lives in
+//! `broker_topic_corpus.rs`. The two are never summed.
+//!
+//! ## The [CR-133] before/after, which is this section's subject
+//!
+//! The same estate, read **twice on 2026-09-18** over the same member stores: once
+//! with the released 1.4.12 binary and once with [S-420] T1's bridge arm merged.
+//!
+//! ```text
+//!                                              before    after
+//! coverage: resolved_cross_service_edges           51       51
+//! rider:    bridge_invocation_edges                33       51
+//!   of which relation `broker-topic`               33       33
+//!   of which relation `route`                       0       18
+//! xservice route-providers, all edges             114      132
+//!   of which `contract-surface`                    81       81
+//! ```
+//!
+//! **The coverage tier is byte-identical across the pair** — every counter, every
+//! row. What moved is the bridge, and only on the `route` arm. The 18 that arrive
+//! are exactly the 18 bound HTTP rows, over exactly their 8 member pairs:
+//!
+//! ```text
+//! consumer                  provider                 rows   edges before   after
+//! funnel-aggregator-api  -> filters-api                 2               0       2
+//! funnel-aggregator-api  -> notification-api            2               0       2
+//! mailbox-aggregator-api -> filters-api                 2               0       2
+//! mailbox-aggregator-api -> mailbox-api                 4               0       4
+//! mailbox-aggregator-api -> notification-api            2               0       2
+//! mailbox-aggregator-api -> pecserver-facade            4               0       4
+//! mailbox-aggregator-api -> reporting-api               1               0       1
+//! notification-adapter   -> notification-api            1               0       1
+//! ```
+//!
+//! [CR-133]'s hypothesis — *18 rows over 8 member pairs become edges* — is
+//! **confirmed to the pair and to the row**, and it is recorded as an outcome, not
+//! re-armed as a criterion. [`RECORDED_HTTP_PAIRS`] and
+//! [`RECORDED_BRIDGE_INVOCATION_EDGES`] pin both halves and assert their equality,
+//! which is the estate-scale instance of the cross-tier no-drift walk
+//! `federation::coverage`'s unit tests run over fixtures.
+//!
+//! **One predicted movement did NOT occur, and its absence is the finding.** [S-420]
+//! T1's notes warned that a configuration-bound HTTP row now joins the ledger
+//! walk's de-duplication, so `by_intake.invocation.bound` *could* fall where one
+//! site was captured twice — a drop that would otherwise read as a violation of
+//! [CR-133] AC9. On this estate it did not fall: the counter reads 45 in both runs
+//! and no pair lost a row. The mechanism stands and is untested by this estate; the
+//! fixture `coverage::tests::one_target_captured_twice_at_one_endpoint_is_one_row`
+//! is its only evidence.
+//!
 //! # The `base-url-runtime` residue, with its own denominator
 //!
 //! ```text
@@ -134,19 +211,28 @@
 //! # What a reader should NOT conclude
 //!
 //! * Not "the pipeline resolves 81 of the estate's couplings". It admits 81 rows
-//!   carrying a resolved, committed value; 15 of them bind a provider, and none
-//!   of them draws a cross-service edge. Those 15 ARE what
-//!   `resolved_cross_service_edges` reads — this measurement was taken while that
-//!   headline still read 0, and the clause that stood here explained the 0 by
-//!   saying a `config-bound` row is excluded from it by construction. [S-403] T1
-//!   ([CR-127]), later in the same sprint, removed that exclusion, so on this same
-//!   index the headline is **15**. The measurement above is left as recorded and
-//!   is not restated. The bridge half is unchanged and is a different quantity: no
-//!   `BridgeEdge` is drawn for such a row, published in its own right as
-//!   `coverage.bridge_invocation_edges`, which is 0.
+//!   carrying a resolved, committed value; 15 of them bind a provider. Those 15
+//!   ARE what `resolved_cross_service_edges` reads — this measurement was taken
+//!   while that headline still read 0, and the clause that stood here explained
+//!   the 0 by saying a `config-bound` row is excluded from it by construction.
+//!   [S-403] T1 ([CR-127]), later in the same sprint, removed that exclusion, so
+//!   on this same index the headline is **15**. The measurement above is left as
+//!   recorded and is not restated.
+//!
+//!   The clause that followed — *"and none of them draws a cross-service edge"* —
+//!   was true of every generation of this file until 2026-09-18 and is **no longer
+//!   true**. [S-420] ([CR-133]) gave the bridge the same committed-value keying,
+//!   so a bound `config-bound` HTTP row now draws a `BridgeEdge` too; on the
+//!   re-enrolled index that is 18 edges over 8 member pairs where there were none.
+//!   `coverage.bridge_invocation_edges`, which read 0 for the HTTP arm and 33 for
+//!   the broker arm, reads **51**. See the 2026-09-18 section above for the paired
+//!   before/after, and do not read the 2026-09-13 tables as describing the bridge
+//!   today.
 //! * Not "egress resolution quadrupled". It reads 0.128 (15 of 117) against 0.032
 //!   (5 of 155), and the denominator moved underneath it for a reason that is not
-//!   a coverage change.
+//!   a coverage change. (On the 2026-09-18 index it reads 0.385 (45 of 117), and
+//!   most of that further move is the broker arm — a second population, not a
+//!   fourfold improvement in this one.)
 //! * Not "79 was wrong". 79 is a correct census figure, and it remains one.
 //!
 //! # VOID is not zero ([NFR-CC-04])
@@ -235,10 +321,16 @@
 //! [S-401]: ../../docs/planning/journal.md#s-401-a-cross-service-reachability-answer-carries-its-unresolved-residue
 //! [S-402]: ../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
 //! [S-403]: ../../docs/planning/journal.md#s-403-the-resolved-edge-headline-agrees-with-its-payload
+//! [S-409]: ../../docs/planning/journal.md#s-409-the-accessor-hop-reaches-the-broker-arm
+//! [S-410]: ../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+//! [S-420]: ../../docs/planning/journal.md#s-420-the-bridge-keys-an-http-consumer-on-its-committed-target
+//! [CR-133]: ../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
 
 use std::path::PathBuf;
 
-use logos_core::federation::{discover, workspace_status, EngineRegistry, RegistryMode};
+use logos_core::federation::{
+    discover, workspace_status, BridgeIntake, ContractBridge, EngineRegistry, RegistryMode,
+};
 use logos_core::Engine;
 
 /// The recorded verdict: printed beside the live run, and pinned on its headline
@@ -307,24 +399,37 @@ fn the_recorded_artifact_states_the_figures_this_file_pins() {
 /// artifact by [`the_recorded_artifact_states_the_figures_this_file_pins`].
 const CRITERION_FLOOR: usize = 79;
 
-/// What the shipped pipeline actually admits, re-measured 2026-09-13 over the
-/// estate re-indexed with merged Iteration-1 state (was 44 before [S-398] T1).
+/// What the shipped pipeline actually admits on the **HTTP arm**, re-measured
+/// 2026-09-18 over the estate re-enrolled at logos 1.4.12 on 2026-09-17 (it read
+/// 81 on the 2026-09-13 index, and 44 before [S-398] T1).
 ///
 /// Pinned exactly, in both directions. That is a reproduction claim, not a floor:
 /// a run that reads a different number has changed the rule, the binary or the
 /// corpus, and all three need a human.
 ///
-/// **One such change is already known and is NOT a mystery to investigate.**
-/// [S-399] merged later in Sprint 69 than the reading this pin records, and admits
-/// three further sites on this estate (`UriBuilder`-lambda-nested accessors);
-/// [S-405] then admitted six more in Sprint 70, by widening that same pattern to
-/// any chain whose every other link provably cannot alter the path template
-/// ([CR-129]). This pin still reads 81 only because it reads each member's INDEXED
-/// store and the reference estate's index predates both. On the next re-index from
-/// merged `main` this is expected to read **~90** (81 + 3 + 6); record the new
-/// figure, as the assertion message below instructs, rather than treating it as a
-/// regression.
-const RECORDED_ADMITTED: usize = 81;
+/// **The move from 81 was predicted here and arrived exactly.** [S-399] merged
+/// later in Sprint 69 than the 81 and admits three further sites on this estate
+/// (`UriBuilder`-lambda-nested accessors); [S-405] then admitted six more in
+/// Sprint 70, by widening that same pattern to any chain whose every other link
+/// provably cannot alter the path template ([CR-129]). The pin read 81 only
+/// because it reads each member's INDEXED store and the estate's index predated
+/// both; the note recorded the expectation as **~90** (81 + 3 + 6), the 2026-09-17
+/// re-enrolment supplied the index, and 90 is what the product emits. Nothing in
+/// [S-420] moved it — that story moves the BRIDGE's edge count, and the coverage
+/// payload is byte-identical across it (see this file's docs).
+const RECORDED_ADMITTED: usize = 90;
+
+/// What the same payload admits on the **broker arm**, measured in the same run.
+///
+/// A second population with its own denominator, and deliberately not summed with
+/// the figure above: [S-409] / [S-410] gave the broker arm the committed-value
+/// resolution the HTTP arm had had since [S-382], so a `config-bound` row is no
+/// longer an HTTP client call by construction. Pinned exactly for the same reason
+/// the HTTP figure is, and **no floor is asserted on it either**. Its denominator
+/// is the broker arm's own keyed-site population, which lives in
+/// `logos-core/tests/broker_topic_corpus.rs` — the single home for the broker
+/// figures — not in the accessor denominator below.
+const RECORDED_ADMITTED_BROKER: usize = 29;
 
 /// The accessor denominator the figure is stated over — the S-382 reading's
 /// production client-call population.
@@ -351,9 +456,9 @@ const RECORDED_ADMITTED: usize = 81;
 /// it.
 const ACCESSOR_DENOMINATOR: usize = 96;
 
-/// The four `(bucket, reason)` pairs the 81 admitted rows fall into, in the order
-/// [`admission`] tallies them — a `BTreeMap`, so ascending by the pair rather than
-/// by count.
+/// The six `(arm, bucket, reason)` triples the 119 admitted rows fall into, in the
+/// order [`admission`] tallies them — a `BTreeMap`, so ascending by the triple
+/// rather than by count.
 ///
 /// **Keyed on the reason as well as the bucket, and that is what makes it a
 /// diagnosis.** `CoverageState::bucket` folds every non-ambiguous unbound reason —
@@ -364,8 +469,15 @@ const ACCESSOR_DENOMINATOR: usize = 96;
 /// `config-key-missing` refusals would have passed with an unchanged split. A bound
 /// row names no reason, so its slot is `None`.
 ///
-/// The fourth pair is new since [S-397] T2: one admitted row now refuses under
-/// `path-not-composed`, where before every admitted row keyed.
+/// **The arm leads the key since 2026-09-18**, and the two `broker-topic` rows are
+/// the second population [`RECORDED_ADMITTED_BROKER`] counts. Pooled on
+/// `(bucket, reason)` alone, a move of rows from one arm to the other would be
+/// invisible here — and the two arms have different denominators, different
+/// capture queries and different owning stories, so a pooled split would be a
+/// figure with no owner.
+///
+/// The `path-not-composed` row is new since [S-397] T2: one admitted row refuses
+/// under it, where before every admitted row keyed.
 ///
 /// **That word arrives by the composed-template path, not by the arm's
 /// stored-target convention, and the difference is worth stating because the
@@ -381,12 +493,56 @@ const ACCESSOR_DENOMINATOR: usize = 96;
 /// rather than for what it is.
 ///
 /// One row is not a trend and is recorded rather than chased.
-const RECORDED_BUCKETS: [(&str, Option<&str>, usize); 4] = [
-    ("ambiguous", Some("ambiguous"), 23),
-    ("bound", None, 15),
-    ("unbound", Some("no-provider-in-workspace"), 42),
-    ("unbound", Some("path-not-composed"), 1),
+const RECORDED_BUCKETS: [(&str, &str, Option<&str>, usize); 6] = [
+    ("broker-topic", "bound", None, 27),
+    ("broker-topic", "unbound", Some("no-provider-in-workspace"), 2),
+    ("route", "ambiguous", Some("ambiguous"), 29),
+    ("route", "bound", None, 18),
+    ("route", "unbound", Some("no-provider-in-workspace"), 42),
+    ("route", "unbound", Some("path-not-composed"), 1),
 ];
+
+/// **The [CR-133] before/after, per member pair — this file is its single home**
+/// ([ADR-64]'s CR-133 amendment says so).
+///
+/// The `(consumer, provider, rows)` triples the 18 BOUND HTTP-arm rows fall into,
+/// and — since [S-420] — the `route` invocation `BridgeEdge`s the bridge draws
+/// over the same estate, pair for pair and count for count. **Before S-420 the
+/// bridge drew 0 of them**: it keyed a consumer on its raw ledger target and a
+/// `${…}` placeholder reduces to no portable key there, so the coverage tier
+/// reported 18 bound rows over these 8 pairs against 0 edges — the drift
+/// [ADR-52]'s one-classifier contract forbids.
+///
+/// The coverage half of this table is unchanged by [S-420] and was 18-over-8
+/// before it; what moved is the bridge half, and the assertion below is that the
+/// two now agree. **No floor is asserted on any of these figures.**
+///
+/// [ADR-52]: ../../docs/specs/architecture/decisions/ADR-52.md
+/// [ADR-64]: ../../docs/specs/architecture/decisions/ADR-64.md
+/// [CR-133]: ../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
+/// [S-409]: ../../docs/planning/journal.md#s-409-the-accessor-hop-reaches-the-broker-arm
+/// [S-410]: ../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+/// [S-420]: ../../docs/planning/journal.md#s-420-the-bridge-keys-an-http-consumer-on-its-committed-target
+const RECORDED_HTTP_PAIRS: [(&str, &str, usize); 8] = [
+    ("funnel-aggregator-api", "filters-api", 2),
+    ("funnel-aggregator-api", "notification-api", 2),
+    ("mailbox-aggregator-api", "filters-api", 2),
+    ("mailbox-aggregator-api", "mailbox-api", 4),
+    ("mailbox-aggregator-api", "notification-api", 2),
+    ("mailbox-aggregator-api", "pecserver-facade", 4),
+    ("mailbox-aggregator-api", "reporting-api", 1),
+    ("notification-adapter", "notification-api", 1),
+];
+
+/// The invocation-intake `BridgeEdge`s the bridge draws over this estate, by
+/// relation — the `bridge_invocation_edges` figure decomposed.
+///
+/// `33 + 18 = 51`, against **33** before [S-420] (the whole of it broker-topic).
+/// The broker half is [S-410]'s and does not move here; the `route` half is this
+/// story's, and the two are listed apart so a later move can be attributed to an
+/// arm rather than to the total. **No floor is asserted on either.**
+const RECORDED_BRIDGE_INVOCATION_EDGES: [(&str, usize); 2] =
+    [("broker-topic", 33), ("route", 18)];
 
 /// The reference workspace, or `None` when none is configured — the same
 /// `LOGOS_REF_WORKSPACE` contract the S-355/S-365/S-374/S-377 measurements read.
@@ -441,14 +597,39 @@ struct Row {
 struct Admission {
     /// Every reference row in the payload.
     references: usize,
-    /// Rows carrying `config-bound` provenance — **the figure**.
+    /// Rows carrying `config-bound` provenance on the **HTTP arm**
+    /// (`relation: route`) — **the figure**, and the one stated over the accessor
+    /// denominator below.
     config_bound: usize,
+    /// The same on the **broker arm** (`relation: broker-topic`) — a second
+    /// population, counted apart.
+    ///
+    /// It did not exist when this file was written: until logos 1.4.12 a
+    /// `config-bound` row was an HTTP client call by construction, and this file
+    /// asserted exactly that per row. S-409/S-410 gave the broker arm the same
+    /// committed-value resolution, so the provenance now spans two arms with two
+    /// denominators, and pooling them would state the HTTP figure over a
+    /// population it is not taken from.
+    config_bound_broker: usize,
     /// Rows carrying `config-unresolved` provenance: an accessor whose key the
     /// committed sources do not admit. Counted because zero of them is itself a
     /// finding — the shortfall is not keys going missing.
     config_unresolved: usize,
-    /// The `config-bound` rows split by display bucket **and unbound reason**.
-    by_bucket: Vec<(String, Option<String>, usize)>,
+    /// The `config-bound` rows split by **arm**, display bucket **and** unbound
+    /// reason. The arm leads the key because the two arms answer to different
+    /// denominators and a pooled split would hide a move in either.
+    by_bucket: Vec<(String, String, Option<String>, usize)>,
+    /// The `(consumer member, provider member)` pairs of the **bound HTTP-arm**
+    /// rows, with how many rows each carries.
+    ///
+    /// [ADR-64]'s CR-133 amendment names this file as the single home for the
+    /// before/after-per-member-pair figure, and this is it. It is read off the
+    /// coverage payload; the bridge's own edges are counted beside it and the two
+    /// are asserted equal, which is the estate-scale instance of the cross-tier
+    /// no-drift walk `federation::coverage`'s unit tests run over fixtures.
+    bound_http_pairs: Vec<(String, String, usize)>,
+    /// Invocation-intake `BridgeEdge`s the bridge drew, by relation.
+    bridge_invocation_edges: Vec<(String, usize)>,
     /// Rows carrying no `provenance` key at all. Must be zero: the field is not
     /// optional ([FR-WS-19] AC6).
     missing_provenance: usize,
@@ -469,7 +650,9 @@ fn admission(payload: &serde_json::Value) -> Admission {
         covers_all: coverage["covers_all_members"].as_bool().expect("`covers_all_members` is a bool"),
         ..Admission::default()
     };
-    let mut buckets: std::collections::BTreeMap<(String, Option<String>), usize> =
+    let mut buckets: std::collections::BTreeMap<(String, String, Option<String>), usize> =
+        std::collections::BTreeMap::new();
+    let mut pairs: std::collections::BTreeMap<(String, String), usize> =
         std::collections::BTreeMap::new();
     for reference in references {
         let row = Row {
@@ -482,24 +665,57 @@ fn admission(payload: &serde_json::Value) -> Admission {
         match row.provenance.as_deref() {
             None => out.missing_provenance += 1,
             Some("config-bound") => {
-                out.config_bound += 1;
-                *buckets.entry((row.bucket.clone(), row.reason.clone())).or_default() += 1;
-                // Every admitted row is a captured call site on the HTTP key.
-                // Asserted per row rather than in aggregate, so a payload that
-                // admitted a contract-surface row under this provenance names
-                // the row that did it.
+                *buckets
+                    .entry((row.relation.clone(), row.bucket.clone(), row.reason.clone()))
+                    .or_default() += 1;
+                // Every admitted row is a captured CALL SITE — never a declared
+                // endpoint. Asserted per row rather than in aggregate, so a
+                // payload that admitted a contract-surface row under this
+                // provenance names the row that did it.
+                //
+                // The arm is no longer part of that assertion, and the widening is
+                // recorded rather than silent: it read `("invocation", "route")`
+                // until 2026-09-18, when the re-enrolled estate produced 29
+                // broker-arm rows and this harness panicked on the first of them.
+                // What is durable is the intake; the arm set is what S-409/S-410
+                // widened and what a further arm would widen again, so the arms
+                // are enumerated here and COUNTED separately below rather than
+                // pooled.
                 assert_eq!(
-                    (row.intake.as_str(), row.relation.as_str()),
-                    ("invocation", "route"),
-                    "a `config-bound` row must be a captured HTTP client call; this one is \
-                     {row:?}",
+                    row.intake, "invocation",
+                    "a `config-bound` row must be a captured call site, never a declared \
+                     endpoint; this one is {row:?}",
                 );
+                match row.relation.as_str() {
+                    "route" => {
+                        out.config_bound += 1;
+                        if row.bucket == "bound" {
+                            let from = reference["from"]["member"]
+                                .as_str()
+                                .expect("a reference row names its consumer member")
+                                .to_string();
+                            let to = reference["to"]["member"]
+                                .as_str()
+                                .expect("a BOUND reference row names its provider member")
+                                .to_string();
+                            *pairs.entry((from, to)).or_default() += 1;
+                        }
+                    }
+                    "broker-topic" => out.config_bound_broker += 1,
+                    other => panic!(
+                        "a `config-bound` row must be on an arm this file states a \
+                         denominator for (`route` or `broker-topic`); this one is on \
+                         `{other}`: {row:?}. A new arm is a new population — record it \
+                         with its own denominator rather than folding it into either."
+                    ),
+                }
             }
             Some("config-unresolved") => out.config_unresolved += 1,
             Some(_) => {}
         }
     }
-    out.by_bucket = buckets.into_iter().map(|((b, r), n)| (b, r, n)).collect();
+    out.by_bucket = buckets.into_iter().map(|((a, b, r), n)| (a, b, r, n)).collect();
+    out.bound_http_pairs = pairs.into_iter().map(|((f, t), n)| (f, t, n)).collect();
     out
 }
 
@@ -547,30 +763,63 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
     // `logos workspace status --json` (cli/src/main.rs): `serde_json` over the
     // value `federation::query::workspace_status` returns.
     let payload = serde_json::to_value(workspace_status(&registry)).expect("the payload serializes");
-    let a = admission(&payload);
+    let mut a = admission(&payload);
+
+    // The bridge's own edges, over the SAME registry, so the two tiers are read
+    // off one estate state rather than two runs. `ContractBridge::edges` is the
+    // call `xservice route-providers` and the reachability view both make.
+    let mut drawn: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut drawn_pairs: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
+    for edge in ContractBridge::new().edges(&registry).iter() {
+        if edge.intake != BridgeIntake::Invocation {
+            continue;
+        }
+        *drawn.entry(edge.relation.to_string()).or_default() += 1;
+        if edge.relation == "route" {
+            *drawn_pairs
+                .entry((edge.from.member.clone(), edge.to.member.clone()))
+                .or_default() += 1;
+        }
+    }
+    a.bridge_invocation_edges = drawn.into_iter().collect();
+    let drawn_pairs: Vec<(String, String, usize)> =
+        drawn_pairs.into_iter().map(|((f, t), n)| (f, t, n)).collect();
 
     println!(
-        "S-398 T2 — `config-bound` admission over {} ({} of {} members read, covers_all={}):\n\
-         \x20 references                          {:>5}   (1060 before S-402)\n\
-         \x20 carrying `config-bound`             {:>5}   <- the figure (44 before S-398 T1)\n\
+        "S-398 T2 / S-420 T2 — `config-bound` admission over {} ({} of {} members read, \
+         covers_all={}):\n\
+         \x20 references                          {:>5}   (1034 on the 2026-09-13 index)\n\
+         \x20 `config-bound`, HTTP arm            {:>5}   <- the figure (81 on 2026-09-13, \
+         44 before S-398 T1)\n\
+         \x20 `config-bound`, broker arm          {:>5}   (0 before S-409/S-410)\n\
          \x20 carrying `config-unresolved`        {:>5}\n\
          \x20 rows with NO provenance             {:>5}\n\
-         \x20 by bucket                           {:?}\n\
+         \x20 by (arm, bucket, reason)            {:?}\n\
          \x20 S-397's historical floor            {:>5}   (exceeded; not a criterion here)\n\
          \x20 accessor denominator (S-382)        {:>5}   (108 before S-402)\n\
-         \x20 same payload, pre-hop index gen         0   (two generations back, \
-         before the accessor hop existed at all)",
+         \x20 same payload, pre-hop index gen         0   (three generations back, \
+         before the accessor hop existed at all)\n\
+         CR-133 — the bridge half of the same estate, THIS run:\n\
+         \x20 invocation BridgeEdges by relation  {:?}   (33, all broker-topic, before \
+         S-420)\n\
+         \x20 bound HTTP rows, per member pair    {:?}\n\
+         \x20 route BridgeEdges, per member pair  {:?}   (none at all before S-420)",
         root.display(),
         a.members_read,
         a.members_total,
         a.covers_all,
         a.references,
         a.config_bound,
+        a.config_bound_broker,
         a.config_unresolved,
         a.missing_provenance,
         a.by_bucket,
         CRITERION_FLOOR,
         ACCESSOR_DENOMINATOR,
+        a.bridge_invocation_edges,
+        a.bound_http_pairs,
+        drawn_pairs,
     );
     println!("\n--- recorded finding ---\n{RECORDED_FINDING}");
 
@@ -617,8 +866,9 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
     // bucket split and the unresolved count all held exactly.
     assert!(
         a.members_read >= 40 && a.references >= 900,
-        "the recorded finding measured 1034 references over 84 members (it was 1060 \
-         before S-402 corrected the Go client-call gate); this run saw {} over {}. A \
+        "the recorded finding measured 1036 references over 84 members (it was 1034 on \
+         the 2026-09-13 index and 1060 before S-402 corrected the Go client-call gate); \
+         this run saw {} over {}. A \
          collapsed corpus is a broken harness, not a new finding: do NOT record the \
          figures below as a new measurement — find out why the estate shrank first.",
         a.references,
@@ -654,8 +904,9 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
     // both directions, and its message carries the reading.
     assert_eq!(
         a.config_bound, RECORDED_ADMITTED,
-        "S-398 T2's recorded finding is that the shipped pipeline admits \
-         {RECORDED_ADMITTED} `config-bound` client-call rows on the reference estate \
+        "S-398 T2's recorded finding, as re-recorded by S-420 T2 on 2026-09-18, is that \
+         the shipped pipeline admits {RECORDED_ADMITTED} `config-bound` HTTP client-call \
+         rows on the reference estate \
          (of an accessor denominator of {ACCESSOR_DENOMINATOR}; S-397's historical floor \
          of {CRITERION_FLOOR} is exceeded and is not a criterion here). This run read \
          {}. If the corpus has been re-indexed or re-enrolled, or the accessor hop has \
@@ -668,9 +919,20 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
         a.config_bound,
     );
     assert_eq!(
+        a.config_bound_broker, RECORDED_ADMITTED_BROKER,
+        "the broker arm's `config-bound` population moved. It is a SECOND population with \
+         its own denominator (see `broker_topic_corpus.rs`), not part of the HTTP figure \
+         above, and the two are never summed: a move here says the committed-topic-value \
+         resolution changed, which is a different finding from a move in the HTTP arm. \
+         This run read {}.",
+        a.config_bound_broker,
+    );
+    assert_eq!(
         a.by_bucket,
         RECORDED_BUCKETS
-            .map(|(bucket, reason, n)| (bucket.to_string(), reason.map(str::to_string), n))
+            .map(|(arm, bucket, reason, n)| {
+                (arm.to_string(), bucket.to_string(), reason.map(str::to_string), n)
+            })
             .to_vec(),
         "the admitted rows' (bucket, reason) split moved. The headline can hold while the \
          split moves, and the split is the more informative half — it is what carries \
@@ -690,7 +952,53 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
          logos-core/src/federation/reach.rs (the `resolved_cross_service_edges` \
          and `spec_conformance_measured` field docs), mcp/src/server.rs (both tool \
          descriptions), web/src/api_v1.rs (the workspace-status doc) and \
-         web/ui/src/api/types.ts (the `resolved_edges_summary` example).",
+         web/ui/src/api/types.ts (the `resolved_edges_summary` example, the \
+         `IntakeSplit` doc's 81/0 split, and the `resolved_cross_service_edges` doc's \
+         claim that a config-bound row 'seeds no cross-service reachability root' — \
+         which S-420 made false and which that file still carries, because another \
+         task owns it this sprint).",
+    );
+
+    // ── CR-133: the bridge half, per member pair ────────────────────────
+    //
+    // The coverage tier's BOUND HTTP rows and the bridge's `route` invocation
+    // edges are the same couplings counted by the two tiers ADR-52 requires to
+    // classify through ONE function. Before S-420 the second set was EMPTY over a
+    // non-empty first — the drift this story closed. Asserted as an equality
+    // rather than as two independent pins, because equality is the property: two
+    // pins can both be re-recorded to a state that still drifts.
+    let recorded_pairs: Vec<(String, String, usize)> = RECORDED_HTTP_PAIRS
+        .map(|(from, to, n)| (from.to_string(), to.to_string(), n))
+        .to_vec();
+    assert_eq!(
+        a.bound_http_pairs, recorded_pairs,
+        "the BOUND HTTP-arm rows' member pairs moved. This is the coverage half of the \
+         CR-133 figure and this file is its single home (ADR-64's CR-133 amendment says \
+         so): re-record it here, in the artifact beside this file, and in ADR-64 — and \
+         say what moved, because a pair appearing or disappearing is a change in the \
+         estate's own topology, not in this rule. No floor is asserted on it.",
+    );
+    assert_eq!(
+        drawn_pairs, recorded_pairs,
+        "the bridge and the coverage tier disagree over which member pairs a \
+         configuration-bound HTTP call couples. That is the exact drift CR-133 closed \
+         and ADR-52's one-classifier contract forbids — the two tiers resolve such a \
+         target through ONE function, so a difference here is a regression in that \
+         function's callers, NOT a figure to re-record. Before S-420 the bridge's side \
+         of this was empty.",
+    );
+    assert_eq!(
+        a.bridge_invocation_edges,
+        RECORDED_BRIDGE_INVOCATION_EDGES
+            .map(|(relation, n)| (relation.to_string(), n))
+            .to_vec(),
+        "the invocation edges the bridge draws moved. Read it BY ARM: the `route` half \
+         is S-420's and was 0 before it; the `broker-topic` half is S-410's and does not \
+         move here. Their sum is `coverage.bridge_invocation_edges` on the reachability \
+         rider — 51 on this run against 33 before S-420 — and it is the figure a \
+         `live-via-cross-service` promotion rests on, so a move in it changes what the \
+         union view was seeded from. Re-record it here and in ADR-64; no floor is \
+         asserted on it.",
     );
     assert_eq!(
         a.config_unresolved, 0,

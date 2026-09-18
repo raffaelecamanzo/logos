@@ -165,11 +165,23 @@ pub struct BridgeEdge {
     /// admitted from that member's committed configuration ([S-410],
     /// [FR-WS-19] AC6, [NFR-CC-04]).
     ///
-    /// `Literal` for every arm that reads its target verbatim — which is every
-    /// arm but the broker one today. A broker publish whose operand resolves to
-    /// a committed key carries `ConfigBound`, naming the key, its defining
-    /// sources and its profile set; one whose keys the corpus refuses carries
+    /// `Literal` for every arm that reads its target verbatim, which since
+    /// S-420 ([CR-133]) is every arm but the broker and HTTP ones. A broker
+    /// publish, or an HTTP client call, whose operand resolves to a committed
+    /// key carries `ConfigBound`, naming the key, its defining sources and its
+    /// profile set; one whose keys the corpus refuses carries
     /// `ConfigUnresolved`, naming the key and the refusal.
+    ///
+    /// Read as a count rather than as a rule, on the 84-member reference estate
+    /// (2026-09-18, `~/source/pec-services`, 84 of 84 members read): of the 51
+    /// invocation-intake edges the bridge draws, 33 are broker-topic and 18 are
+    /// `route`, and every one of the 18 carries `ConfigBound` here. Before
+    /// S-420 that second figure was **0** — the arm read its target verbatim
+    /// and a `${…}` reduced to no portable key. **No floor is asserted on any of
+    /// these figures**; the single home for them is
+    /// `logos-core/tests/config_bound_admission.rs`.
+    ///
+    /// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
     ///
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub from_value: Provenance,

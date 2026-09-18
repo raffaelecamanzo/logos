@@ -209,12 +209,18 @@ pub struct CoverageRider {
     /// [CR-133]). Until then the coverage tier composed a target from committed
     /// configuration ([FR-WS-19]) and the bridge did not, so the bridge drew no
     /// [`BridgeEdge`](super::bridge::BridgeEdge) for such a row and the union view
-    /// was seeded from nothing: the 84-member reference estate read **15** here
-    /// over **0** seeded invocation edges (the 1.4.12 reading of 2026-09-17, which
-    /// S-420 T2 re-records from a fresh run — no figure here is a floor). Both
-    /// tiers now classify such a target through one function, so a
-    /// configuration-bound HTTP resolution is counted here **and** drawn as an
-    /// edge.
+    /// was seeded from nothing. Both tiers now classify such a target through one
+    /// function, so a configuration-bound HTTP resolution is counted here **and**
+    /// drawn as an edge.
+    ///
+    /// **Re-measured 2026-09-18** on the 84-member reference estate
+    /// (`~/source/pec-services`, 84 of 84 members read), the same estate read
+    /// twice — once with the 1.4.12 binary and once with S-420's: this field reads
+    /// **51** on both, while [`bridge_invocation_edges`](Self::bridge_invocation_edges)
+    /// moves **33 → 51**. The 18 that arrive are `route` edges over 8 member
+    /// pairs, where the divergence was 18-over-0 on that arm. **No floor is
+    /// asserted on any of these figures**; their single home is
+    /// `logos-core/tests/config_bound_admission.rs`.
     ///
     /// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
     ///
@@ -333,10 +339,12 @@ pub struct CoverageRider {
     /// [`CrossServiceCoverage::by_intake`](super::coverage::CrossServiceCoverage::by_intake).
     /// The four counts on this rider are still the **pooled** ones, and on the
     /// 84-member reference estate that pool is 81 declared-contract matches and
-    /// 15 resolved call sites (2026-09-13). So a reader who concludes anything
-    /// about outbound coupling from `bound` alone will conclude it wrongly — it
-    /// read 81 and **0** for as long as no call site in the estate resolved, and
-    /// `bound` did not move when that changed.
+    /// **45** resolved call sites (2026-09-18; it was 81 and 15 on 2026-09-13,
+    /// before the broker arm admitted committed values). So a reader who concludes
+    /// anything about outbound coupling from `bound` alone will conclude it
+    /// wrongly — it read 81 and **0** for as long as no call site in the estate
+    /// resolved, and `bound` moved only by the invocation half when that changed.
+    /// **No floor is asserted on either figure.**
     ///
     /// S-377 left the placement of the split on this rider to S-376. **Decided:
     /// the eight-way split stays off the rider, and the three-figure headline

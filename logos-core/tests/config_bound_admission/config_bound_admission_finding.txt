@@ -357,3 +357,169 @@ WHAT A READER SHOULD NOT CONCLUDE
   estate on one date, pinned exactly so a move in either direction is seen.
 * Not "the .properties gap is closed". It is open, unowned, and currently free.
 * Not "79 was wrong". 79 is a correct census figure and remains one.
+
+
+===================================================================
+APPENDED 2026-09-18 — S-420 T2 / CR-133.  THE RE-INDEX ARRIVED, AND
+THE BRIDGE HALF MOVED.
+===================================================================
+
+Everything above is the 2026-09-13 record and is NOT restated: it was correct at
+its date, and the two [SUPERSEDED IN PART] notes inside it stand as written.
+
+THIS APPENDS WHERE THE HEADER SAYS THIS FILE REPLACES, AND THE DEPARTURE IS
+DELIBERATE.  The header's convention — replace the headline, keep the previous
+reading as a BEFORE column — exists because this artifact alone is include_str!'d
+and printed in full on every run, so growth has a cost the sibling artifacts do
+not pay.  It is departed from here for one reason: the CR-133 figure below is a
+PAIRED before/after taken with two binaries on one day, and folding it into a
+BEFORE column would merge it with the 2026-09-13 index generation, which is a
+different comparison entirely.  Two axes moved between those dates — the index
+(the admission figure) and the binary (the bridge figure) — and a single BEFORE
+column cannot carry both without implying they are one movement.  The next story
+with business in this file should collapse (a) into the header's convention and
+leave (b) as a section; this one had no business rewriting a delivered record.
+
+Measured  2026-09-18
+Corpus    ~/source/pec-services — 84 members declared, 84 read, covers_all = true,
+          re-enrolled at logos 1.4.12 on 2026-09-17 (NOT by this harness)
+Binary    two of them, over the SAME member stores, which is what makes the
+          before/after below a paired measurement rather than two runs:
+            BEFORE  ~/.local/bin/logos 1.4.12, the released binary
+            AFTER   debug build of sprint-71-I2-S1 at 18eff24f — main with the
+                    whole of Sprint 71 Iteration 1 merged, including S-420 T1
+Surface   BEFORE/AFTER coverage + rider: `logos workspace status --json`,
+          `logos workspace reachability --json`, `logos xservice route-providers
+          --json`.  The pinned figures: this harness, through
+          federation::discover -> EngineRegistry<Engine>(RegistryMode::Lazy) ->
+          query::workspace_status -> serde_json, plus ContractBridge::edges over
+          the same registry.
+Harness   logos-core/tests/config_bound_admission.rs
+          (LOGOS_REF_WORKSPACE=~/source/pec-services)
+
+NO FLOOR IS ASSERTED ON ANY FIGURE BELOW.  Every one is pinned exactly, in both
+directions, which is a reproduction claim.
+
+
+(a) THE ADMISSION FIGURE — THE RE-INDEX THIS FILE WAS WAITING FOR
+------------------------------------------------------------------
+
+                                                 2026-09-18   2026-09-13
+  `config-bound` rows, HTTP arm (relation route)         90           81
+    of which bucket `bound`                              18           15
+    of which bucket `ambiguous`                          29           23
+    of which `unbound` / no-provider-in-workspace        42           42
+    of which `unbound` / path-not-composed                1            1
+  `config-bound` rows, broker arm (broker-topic)         29            0
+    of which bucket `bound`                              27            0
+    of which `unbound` / no-provider-in-workspace         2            0
+  rows carrying `config-unresolved` provenance            0            0
+  rows carrying no `provenance` key at all                0            0
+  reference rows in the payload                        1036         1034
+
+  Denominators:
+
+    90 of  96   the accessor denominator — UNCHANGED for the fifth consecutive
+                re-record.  Owned by
+                operand_resolvability/configuration_agreement.rs.
+    90 of  90   what the measurement harness proves resolvable on that
+                denominator (88 agreed-key + 2 overlay-divergent).  The
+                agreement SUSPENDED on 2026-09-14 is restored, at the value the
+                2026-09-15 note predicted.
+    90 of 162   the whole invocation-intake reference population
+    90 of 1036  every cross-boundary reference the payload classifies
+
+  The +9 on the HTTP arm is S-399's three sites plus S-405's six, arriving with
+  the 2026-09-17 re-enrolment rather than with a rule change: this harness reads
+  each member's INDEXED store, and both stories predate the new index.  The
+  prediction recorded here on 2026-09-14 and again on 2026-09-15 is met exactly.
+
+  THE BROKER COLUMN IS A DIFFERENT ARM, NOT A MOVEMENT IN THIS ONE.  S-409 and
+  S-410 gave the broker arm the committed-value resolution the HTTP arm has had
+  since S-382, so `config-bound` provenance now spans two arms with two
+  denominators.  They are counted apart and never summed; the broker arm's own
+  denominator lives in logos-core/tests/broker_topic_corpus.rs.
+
+
+(b) THE CR-133 BEFORE/AFTER — THE BRIDGE HALF
+----------------------------------------------
+
+  The same estate, the same member stores, read twice on the same day:
+
+                                                     before     after
+  coverage: resolved_cross_service_edges                 51        51
+  rider:    bridge_invocation_edges                      33        51
+    of which relation `broker-topic`                     33        33
+    of which relation `route`                             0        18
+  `xservice route-providers`, all edges                 114       132
+    of which intake `contract-surface`                    81        81
+
+  THE COVERAGE TIER IS BYTE-IDENTICAL ACROSS THE PAIR.  Every counter, every
+  bucket, every row: bound 126, ambiguous 175, unbound 44,
+  no-provider-in-workspace 691, by_intake invocation 45/29/43/45, contract
+  surface 81/146/1/646, egress_resolution 0.385 (45 of 117), spec_conformance
+  0.365 (126 of 345).  What moved is the bridge, and only on the `route` arm.
+  That isolation is what attributes the movement to S-420 T1 rather than to the
+  rest of Iteration 1: S-417's change is at INDEX time on the broker arm, and
+  the broker column above does not move.
+
+  Per member pair — 18 bound HTTP rows, 18 `route` edges, pair for pair:
+
+    consumer                  provider              rows   edges before  after
+    funnel-aggregator-api  -> filters-api              2               0      2
+    funnel-aggregator-api  -> notification-api         2               0      2
+    mailbox-aggregator-api -> filters-api              2               0      2
+    mailbox-aggregator-api -> mailbox-api              4               0      4
+    mailbox-aggregator-api -> notification-api         2               0      2
+    mailbox-aggregator-api -> pecserver-facade         4               0      4
+    mailbox-aggregator-api -> reporting-api            1               0      1
+    notification-adapter   -> notification-api         1               0      1
+                                                      --              --     --
+                                              8 pairs 18               0     18
+
+  CR-133's hypothesis — "18 config-bound HTTP coverage rows over 8 member pairs
+  become bridge edges" — is confirmed to the pair and to the row.  It is recorded
+  as an outcome.  It is NOT re-armed as a criterion, for the reason the section
+  above this one gives at length.
+
+  ONE PREDICTED MOVEMENT DID NOT OCCUR, AND THE ABSENCE IS THE FINDING.  S-420
+  T1's implementation notes warned that a configuration-bound HTTP row now joins
+  the ledger walk's de-duplication, so `by_intake.invocation.bound` could fall
+  where one site was captured twice — a drop that would read as a CR-133 AC9
+  violation when it is a required consequence of AC5.  On this estate it did not
+  fall: 45 in both runs, and no member pair lost a row.  The mechanism stands,
+  untested by this estate; its only evidence is the fixture
+  coverage::tests::one_target_captured_twice_at_one_endpoint_is_one_row.
+
+
+(c) THE RE-INDEX, AND WHAT THIS HARNESS DID NOT DO
+---------------------------------------------------
+
+  This harness still indexes nothing and enrols nothing.  The 2026-09-17
+  re-enrolment at 1.4.12 was a separate, human-gated operation and is the reason
+  the admission figure moved.
+
+  Stated because it would otherwise be discovered as a surprise: running
+  `logos workspace status` with the AFTER binary re-synced every member store
+  (last_sync_at and db_size_bytes both moved), because the binary's index
+  generation differs from the enrolled one.  That sync changed NO figure — the
+  BEFORE and AFTER coverage payloads are byte-identical on every counter — but it
+  means the estate's stores now carry a sprint-71 sync stamp, and a later reader
+  comparing stamps should not read that as a re-index of content.
+
+
+WHAT A READER SHOULD NOT CONCLUDE FROM THIS SECTION
+----------------------------------------------------
+
+* Not "the bridge now draws every coupling the coverage tier resolves".  It draws
+  every one the exactly-one rule binds.  29 ambiguous HTTP rows and 42 with no
+  provider in this workspace resolve to no edge, correctly, and that is 71 of the
+  90.
+* Not "51 is a floor".  It is what two binaries read over one estate on one date.
+* Not "the two figures are now the same quantity".  They coincide on this estate;
+  a fan-out publish makes one resolution several edges, and an ambiguous
+  composition makes it none.  They are published under separate names for that
+  reason and neither is folded into the other.
+* Not "90 is a ceiling reached".  The Kotlin use site and the chained accessor
+  named in the 2026-09-13 record still resolve to nothing, and the `.properties`
+  gap is still open at a cost of 0 on this corpus.

@@ -29,7 +29,39 @@
 //! and its claim is now cross-checked against the measurement rather than merely
 //! stated.
 //!
-//! # Recorded finding (2026-09-13, `~/source/pec-services`, 84 members)
+//! # Recorded finding (2026-09-18, `~/source/pec-services`, 84 members)
+//!
+//! ```text
+//! resolved_cross_service_edges   51
+//! egress_resolution              0.385 (45 of 117 egress sites resolved)
+//! spec_conformance_ratio         0.365 (126 of 345 measured; 691 excluded)
+//! ```
+//!
+//! **Re-recorded 2026-09-18 by [S-420] T2, and none of the move is [S-420]'s.**
+//! The estate was re-enrolled at logos 1.4.12 on 2026-09-17 and the whole delta
+//! arrives with that index. Attributed, because a single `15 -> 51` reads as one
+//! improvement and is three things:
+//!
+//! * **+27 invocation `bound` rows on the BROKER arm** — [S-409] / [S-410]'s
+//!   committed-topic-value resolution, a population that did not exist in the
+//!   payload before. They contribute **33** edges, not 27, because a broker
+//!   publish fans out to every cross-member subscriber.
+//! * **+3 invocation `bound` rows on the HTTP arm** (15 -> 18) — [S-399]'s and
+//!   [S-405]'s accessor widenings, which needed the re-index to reach the product.
+//! * **-36 invocation `unbound`** (79 -> 43) — the rows the two movements above
+//!   moved out of the refusal bucket. The egress denominator is unchanged at 117,
+//!   so `egress_resolution` moved on its numerator alone this time.
+//!
+//! **[S-420] itself moves no cell in this file.** It changes what the BRIDGE draws,
+//! not what the coverage tier resolves; the same estate read with and without its
+//! arm on 2026-09-18 produced a byte-identical payload here, while
+//! `coverage.bridge_invocation_edges` moved 33 -> 51. That paired reading, with the
+//! per-member-pair breakdown, lives in `logos-core/tests/config_bound_admission.rs`
+//! and its artifact — the single home for it. **No floor is asserted on any figure
+//! in this file.**
+//!
+//! The 2026-09-13 reading below, and every attribution stated against it, is left
+//! as the dated record it is.
 //!
 //! ```text
 //! resolved_cross_service_edges   15
@@ -60,13 +92,26 @@
 //! 282)` over 929. Every cell that has ever moved here is in the invocation
 //! column; the contract-surface column is byte-identical across all three.
 //!
-//! **What the 15 is not.** It is not the count of edges the *bridge* drew. The
-//! coverage tier composes a target from committed configuration and the bridge
-//! keys a consumer on its raw ledger target, so all 15 are `config-bound` rows for
-//! which no `BridgeEdge` exists: `logos xservice route-providers` over the same
-//! store returns 81 edges, every one `contract-surface` intake. That quantity is
-//! published under its own name, `coverage.bridge_invocation_edges`, on the
-//! `workspace reachability` rider whose claims rest on it ([CR-127] §3.2).
+//! **What the 15 was not** — true as written on 2026-09-13, and no longer true of
+//! this estate. It was not the count of edges the *bridge* drew: the coverage tier
+//! composed a target from committed configuration and the bridge keyed a consumer
+//! on its raw ledger target, so all 15 were `config-bound` rows for which no
+//! `BridgeEdge` existed, and `logos xservice route-providers` over the same store
+//! returned 81 edges, every one `contract-surface` intake. [S-420] ([CR-133]) gave
+//! the bridge the same committed-value keying, so those rows now draw edges too;
+//! on the 2026-09-18 index the same command returns 132 edges, 51 of them
+//! `invocation`. The quantity is still published under its own name,
+//! `coverage.bridge_invocation_edges`, on the `workspace reachability` rider whose
+//! claims rest on it ([CR-127] §3.2), and the two still answer different questions
+//! — a fan-out publish is one resolution and many edges, an ambiguous composition
+//! is one resolution and none.
+//!
+//! [S-399]: ../../docs/planning/journal.md#s-399-the-accessor-hop-reaches-through-a-uribuilder-lambda
+//! [S-405]: ../../docs/planning/journal.md#s-405-a-path-neutral-composer-link-resolves-on-its-path-operand
+//! [S-409]: ../../docs/planning/journal.md#s-409-the-accessor-hop-reaches-the-broker-arm
+//! [S-410]: ../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+//! [S-420]: ../../docs/planning/journal.md#s-420-the-bridge-keys-an-http-consumer-on-its-committed-target
+//! [CR-133]: ../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
 //!
 //! [CR-127]: ../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
 //! [S-398]: ../../docs/planning/journal.md#s-398-the-accessor-hop-reaches-a-qualified-receiver
@@ -211,21 +256,20 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
     // It is labelled — and the label is the load-bearing part.
     let gen = &a["generation"];
     assert!(
-        gen["index_built_by"]
-            .as_str()
-            .is_some_and(|s| s.starts_with("logos 1.4.10 + sprint-69 Iteration 1 merged")),
+        gen["index_built_by"].as_str().is_some_and(|s| s.starts_with("logos 1.4.12")),
         "the artifact must name the binary that INDEXED the store, not the one that \
-         read it. The store was re-indexed on 2026-09-13 a second time, by a binary \
-         carrying sprint-69 Iteration 1 (S-398 T1's qualified-receiver hop and S-402 \
-         T1's receiver-grained Go gate); before that it read `logos 1.4.9 + S-397 T1`, \
-         and before that `logos 1.4.7`: {gen}"
+         read it. The estate was re-enrolled on 2026-09-17 at logos 1.4.12, which is \
+         the generation the block below was measured over; before that it read \
+         `logos 1.4.10 + sprint-69 Iteration 1 merged`, before that \
+         `logos 1.4.9 + S-397 T1`, and before that `logos 1.4.7`: {gen}"
     );
     assert_eq!(gen["payload_shape"], "post-CR-120 (S-376)", "{gen}");
     assert_eq!(
         gen["contains_s374_refusal_rows"], true,
         "the store now POSTdates S-374, so the artifact must say so — a reader who took \
          this for a pre-S-374 measurement would attribute the invocation arm's \
-         `base-url-runtime` rows — 24 on this generation — to the wrong cause: {gen}"
+         `base-url-runtime` rows — 15 on this generation, 24 on the 2026-09-13 one — to \
+         the wrong cause: {gen}"
     );
     assert!(
         gen["refresh_procedure"].as_str().is_some_and(|s| s.contains("logos init --workspace")),
@@ -345,17 +389,35 @@ fn the_durable_baseline_is_committed_and_states_its_index_generation() {
         .unwrap_or_else(|| panic!("`contains_s374_refusal_rows` must be a bool: {gen}"));
     assert_eq!(
         claims_s374,
-        inv_num("unbound") > 54,
+        num("egress_resolution_measured") > 54,
         "the generation label and the measurement disagree: the artifact says \
-         contains_s374_refusal_rows = {claims_s374} while the invocation population's \
-         unbound bucket holds {}. The 54 is the broker `topic-not-literal` refusals, \
-         which every generation of this store carries — so a store holding S-374's \
-         client-call refusals reads well above it. It is a FLOOR, not an equality: a \
-         store without those refusals reads 54 PLUS any non-client-call unbound row, \
-         which is 55 on this generation (the one config-bound `path-not-composed` row \
-         S-398 T2 recorded). The discrimination survives that — 79 is well clear of \
-         both — but do not re-derive the pre-S-374 reading as exactly 54.",
-        inv_num("unbound"),
+         contains_s374_refusal_rows = {claims_s374} while the egress denominator — the \
+         invocation population's bound + ambiguous + unbound — reads {}. S-374's \
+         client-call refusal rows ENTER that denominator, and a pre-S-374 store reads \
+         54 there (the 1.4.7 generation, all of it broker). It is a FLOOR, not an \
+         equality.",
+        num("egress_resolution_measured"),
+    );
+    // **This check is the SECOND discriminator this label has had, and the first
+    // one's death is recorded rather than quietly patched.** It read
+    // `inv_num("unbound") > 54` — the 54 being the broker `topic-not-literal`
+    // refusals "every generation of this store carries". That premise was true
+    // when it was written and was falsified on 2026-09-18: S-409/S-410 gave the
+    // broker arm committed-value topic resolution, the estate was re-enrolled on
+    // it, and those 54 refusals became 27. The invocation `unbound` bucket then
+    // read 43 — BELOW the floor — so the check would have demanded
+    // `contains_s374_refusal_rows: false` over a store that plainly contains them.
+    //
+    // The replacement is invariant to exactly the movement that killed its
+    // predecessor: resolving a refusal moves a row from `unbound` to `bound`
+    // WITHIN the egress denominator, so the denominator does not move. A store
+    // gains rows there only by CAPTURING more sites, which is what S-374 did. A
+    // floor over a bucket that a later arm can drain is not a discriminator; a
+    // floor over the population that contains both sides of the move is.
+    assert!(
+        inv_num("bound") + inv_num("ambiguous") + inv_num("unbound") > 0,
+        "…and the denominator above must be a real population, not a zero that the \
+         comparison would read as a pre-S-374 store: {m}"
     );
 
     let line = m["resolved_edges_summary"].as_str().expect("the composed line");

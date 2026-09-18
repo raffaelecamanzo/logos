@@ -1,27 +1,28 @@
 {
   "artifact": "S-376 / CR-120 post-change coverage baseline for the reference workspace",
   "workspace": "~/source/pec-services (84 members, all read; covers_all_members: true)",
-  "measured_on": "2026-09-14 (the S-403 T1 re-read of the 2026-09-13 Iteration-1 index; supersedes the same-day pre-Iteration-1 reading and the 2026-09-13 S-398 T2 read of the same index)",
+  "measured_on": "2026-09-18 (S-420 T2, over the estate re-enrolled at logos 1.4.12 on 2026-09-17; supersedes the 2026-09-14 S-403 T1 re-read of the 2026-09-13 Iteration-1 index, which is kept in `generations` and in the `deltas` stated against it)",
   "generations": [
     "2026-09-09 — first, over a 1.4.7 index (the CR-120 acceptance baseline)",
     "2026-09-13 — second, S-397 T2, over logos 1.4.9 + S-397 T1",
     "2026-09-13 — third, S-398 T2, over logos 1.4.10 + Sprint 69 Iteration 1",
-    "2026-09-14 — fourth (this one), S-403 T1, re-measured over the same Iteration-1 index; the headline counter moves 0 -> 15 and no classification or resolution changes"
+    "2026-09-14 — fourth (this one), S-403 T1, re-measured over the same Iteration-1 index; the headline counter moves 0 -> 15 and no classification or resolution changes",
+    "2026-09-18 — fifth (this one), S-420 T2, over the 2026-09-17 re-enrolment at logos 1.4.12; the invocation column moves for two reasons that are never summed — the broker arm's committed-topic-value rows arrive (S-409/S-410, +27 bound) and the HTTP arm's accessor widenings reach the product at last (S-399/S-405, +3 bound). S-420's own effect on THIS file is nil: it moves the bridge, not the coverage tier"
   ],
   "measured_by": "logos-core/tests/coverage_headline_baseline.rs, through the same discover -> EngineRegistry(Lazy) -> cross_service_coverage construction `logos workspace status` uses",
   "reconciled_against": "logos-docs/ws-status-2026-09-08-v1.4.7.json — the pre-change capture sprint 66 §7 names for this purpose — for the CONTRACT-SURFACE half only, which reproduces from it cell for cell (81 bound / 146 ambiguous / 1 unbound / 646 no-provider) and is byte-identical across every generation recorded here. The invocation half no longer reproduces and must not be expected to: the store was re-indexed on 2026-09-13 with S-397 T1's accessor hop, and re-indexed AGAIN the same day on sprint-69 Iteration 1 (S-398 T1's qualified-receiver hop and S-402 T1's receiver-grained Go client-call gate). Those two, plus S-403 T1's read-model correction, are the whole of the delta below.",
-  "read_only_proof": "This HARNESS is read-only — it opens each member's existing store and reads it. The store it read was re-indexed by hand immediately before the run (see generation.index_built_on): all 84 members, `logos index` per member from a binary built on this worktree's branch point (merged sprint-69 Iteration 1), exit 0 on every one, 0 failures. 25 member stores were rewritten and 59 were already current, which is what an incremental re-index over an already-warm estate does. It is stated here rather than implied, because a figure whose index generation is unattributable is the defect this artifact exists to prevent. Two readings of this generation were taken by two sessions: S-398 T2 re-indexed all 84 members (exit 0 on every one; 7,895 files / 93,838 nodes / 102,427 edges in 67 s) and read the estate twice, 34 minutes apart, with all 1034 reference rows byte-identical between them; S-403 T1 then re-read the same store. The two agree on every figure except `resolved_cross_service_edges`, which is the defect S-403 T1 fixed and is recorded in `generations`.",
+  "read_only_proof": "This HARNESS is read-only — it opens each member's existing store and reads it. The store it read was re-indexed by hand immediately before the run (see generation.index_built_on): all 84 members, `logos index` per member from a binary built on this worktree's branch point (merged sprint-69 Iteration 1), exit 0 on every one, 0 failures. 25 member stores were rewritten and 59 were already current, which is what an incremental re-index over an already-warm estate does. It is stated here rather than implied, because a figure whose index generation is unattributable is the defect this artifact exists to prevent. Two readings of this generation were taken by two sessions: S-398 T2 re-indexed all 84 members (exit 0 on every one; 7,895 files / 93,838 nodes / 102,427 edges in 67 s) and read the estate twice, 34 minutes apart, with all 1034 reference rows byte-identical between them; S-403 T1 then re-read the same store. The two agree on every figure except `resolved_cross_service_edges`, which is the defect S-403 T1 fixed and is recorded in `generations`. [APPENDED 2026-09-18, S-420 T2.] This harness is still read-only and still indexes nothing. The generation it now reads was written by a separate, human-gated re-enrolment of the 84 members at logos 1.4.12 on 2026-09-17. One side effect is recorded so a later reader does not discover it as a surprise: reading the estate with a binary whose index generation differs from the enrolled one re-syncs every member store (last_sync_at and db_size_bytes both move). That sync changed no figure — the same estate read with the 1.4.12 binary and with the sprint-71 one gave byte-identical coverage payloads — but the stores now carry a sprint-71 sync stamp, which is not a re-index of content.",
   "generation": {
-    "index_built_by": "logos 1.4.10 + sprint-69 Iteration 1 merged (S-398 T1, S-400 T1, S-401 T1, S-402 T1; worktree sprint-69-I2-S3, merge base 3eebf933)",
-    "index_built_on": "2026-09-13",
-    "read_by": "sprint-69-I2-S3 (S-403 T1) working tree",
+    "index_built_by": "logos 1.4.12 (the 2026-09-17 re-enrolment of ~/source/pec-services; previously logos 1.4.10 + sprint-69 Iteration 1 merged, before that logos 1.4.9 + S-397 T1, before that logos 1.4.7)",
+    "index_built_on": "2026-09-17",
+    "read_by": "sprint-71-I2-S1 (S-420 T2) working tree, at 18eff24f",
     "payload_shape": "post-CR-120 (S-376)",
     "contains_s374_refusal_rows": true,
-    "why": "Refusal rows and configuration-bound targets are both written at INDEX time, and so are the tree-sitter invocation queries S-402 T1 narrowed. This store was re-indexed on 2026-09-13 from a binary carrying S-374, S-397 T1, S-398 T1 and S-402 T1, so it holds all four. The previous generation of this artifact was read from a store carrying S-374 and S-397 T1 only; the contract-surface half is unchanged across every generation, which is what makes the comparison sound.",
+    "why": "Refusal rows, configuration-bound targets and committed topic values are all written at INDEX time, as are the tree-sitter invocation queries S-402 T1 narrowed. This store was re-enrolled on 2026-09-17 from a 1.4.12 binary, so it holds S-374, S-397 T1, S-398 T1, S-402 T1, S-399, S-405, S-409 and S-410. The contract-surface half is unchanged across every generation recorded here, which is what makes the comparison sound. NOTE for a reader of `contains_s374_refusal_rows`: it is still true, but the invocation `unbound` bucket is no longer a way to check it — the 54 broker `topic-not-literal` refusals every earlier generation carried are 27 on this one, because S-410 resolves most of them. The harness's cross-check moved to the egress DENOMINATOR, which a resolution does not move.",
     "refresh_procedure": "At the sprint-review human gate, on a binary built from this sprint's merged main: (1) `logos init --workspace --yes` at ~/source/pec-services if the estate is not enrolled — this re-enrols the root and spawns the detached warm supervisor that indexes the 84 members (~43 s to return; a root `logos index` covers the ROOT ONLY, 3 files, and that is correct). On an already-enrolled estate a per-member `logos index` sweep is enough and is what the reading above used. (2) Wait for `.logos.workspace.warm.json` to report every member warm. (3) Re-run this harness with `LOGOS_REF_WORKSPACE=~/source/pec-services LOGOS_BASELINE_WRITE=1 cargo test -p logos-core --test coverage_headline_baseline -- --nocapture`, which rewrites the `measurement` block below. (4) Restate the `deltas` entries whose status is `pending-reindex` as `observed`, with the figures the run produced. (5) Re-record the estate figures restated in prose OUTSIDE this artifact — nothing tests them, so they rot silently: docs/howto/commands.md (worked examples + the config-bound paragraph), logos-core/src/federation/coverage.rs (`by_intake` and `resolved_cross_service_edges` field docs), logos-core/src/federation/reach.rs (`resolved_cross_service_edges` and `spec_conformance_measured` field docs), mcp/src/server.rs (both tool descriptions), web/src/api_v1.rs, web/ui/src/api/types.ts. (6) Commit the artifact and the finding beside it.",
-    "figures_the_refresh_would_change": "DISCHARGED — every figure below is observed rather than predicted. Two successive refreshes are now on the record. The first (S-397 T2) verified its own prediction: 131 = 87 `base-url-runtime` refusals + 44 `config-bound` rows, with `resolved_cross_service_edges` staying 0 and `egress_resolution` moving off 0.000 to 0.032 (5 of 155). The second (this one) carries sprint-69 Iteration 1: the egress denominator FELL 155 -> 117 because S-402 T1 removed 26 captured Go non-calls, and the bound egress count ROSE 5 -> 15 because S-398 T1's qualified-receiver hop resolved ten more targets. Neither of those is S-403 T1's doing; S-403 T1's own effect is the headline moving 0 -> 15 over that same index, and it changes no classification and no resolution. The denominator's -38 decomposes as -26 (S-402 T1's smaller captured population, all 26 in hermodr-mirror, the estate's one Go member, whose captured client-call sites went 37 -> 11) and -12 (rows S-398 T1 admitted whose resolved template names a service with no provider in this workspace, which ADR-53 holds outside the denominator). The two movements are NOT summed anywhere."
+    "figures_the_refresh_would_change": "DISCHARGED — every figure below is observed rather than predicted, and three successive refreshes are now on the record. The third (this one) is the re-enrolment the S-399 delta was waiting for. Its movement decomposes and is NEVER netted: by_intake.invocation.bound 15 -> 45 is +27 broker rows (S-409/S-410, a population that did not exist in this payload) and +3 HTTP rows (S-399's three sites and S-405's six, of which three land in `bound` and six in `ambiguous`); invocation `unbound` 79 -> 43 is the other side of the same two movements plus the broker arm's own `topic-not-literal` residue falling 54 -> 27; the egress denominator is UNCHANGED at 117, so egress_resolution moved on its numerator alone this time (0.128 -> 0.385). S-420 T1 is in the reading binary and changes NOTHING here: the same estate read with and without its bridge arm on 2026-09-18 produced a byte-identical payload, while coverage.bridge_invocation_edges moved 33 -> 51. That paired reading lives in config_bound_admission.rs and its artifact, the single home for it."
   },
-  "headline_reading": "FIFTEEN cross-service edges in this estate are resolved from a captured call site, over 117 captured egress sites (0.128) — while the retired bound_ratio reads 0.278 on the same data and the pooled `bound` reads 96. 81 of those 96 are contract-surface matches (an OpenAPI operation matched to a controller route) and the other 15 are the configuration-bound client calls. Until S-403 T1 this same payload published the headline as 0 beside `5 of 155 egress sites resolved` in ONE sentence: the edge count carried a `config-bound` exclusion that the rate's numerator did not (CR-127). NOTE what the 15 is not: the bridge draws NO invocation `BridgeEdge` for any of them — `logos xservice route-providers` returns 81 edges, all contract-surface — because the bridge keys a consumer on its RAW ledger target and the coverage tier resolves the placeholder. That second quantity rides on the reachability payload as `coverage.bridge_invocation_edges`, and it is 0.",
+  "headline_reading": "FIFTY-ONE cross-service edges in this estate are resolved from a captured call site, over 117 captured egress sites (0.385) — while spec_conformance_ratio reads 0.365 on the same data and the pooled `bound` reads 126. 81 of those 126 are contract-surface matches (an OpenAPI operation matched to a controller route); the other 45 are captured call sites, 18 configuration-bound HTTP client calls and 27 broker publishes. The 45 sites yield 51 edges because a broker publish fans out to every cross-member subscriber. READ THE 51 WITH ITS DATE: it was 15 on the 2026-09-13 index and 0 before S-397 T1, and the whole of the move is index-time capture arriving, not a change in this tier's rule. WHAT THE 51 IS NOT, restated because the previous generation of this line said the opposite: it is no longer true that the bridge draws no invocation edge for these rows. Until S-420 (CR-133) the bridge keyed an HTTP consumer on its RAW ledger target, so `logos xservice route-providers` returned 81 edges, all contract-surface, and `coverage.bridge_invocation_edges` read 0 for that arm. Both arms now key on the committed value: the same command returns 132 edges, 51 of them invocation (33 broker-topic, 18 route), and the rider reads 51. The two figures still answer different questions — a fan-out publish is one resolution and many edges, an ambiguous composition is one resolution and none — and neither is folded into the other. NO FLOOR IS ASSERTED ON ANY OF THESE FIGURES.",
   "deltas": {
     "S-374": {
       "story": "The HTTP client-call arm records its refusals",
@@ -67,22 +68,41 @@
     },
     "S-399": {
       "story": "The accessor hop reaches through a UriBuilder lambda",
-      "status": "pending-reindex",
-      "effect": "PENDING THE RE-INDEX, and the only entry here that is. S-399 merged into Sprint 69 AFTER the 2026-09-13 Iteration-1 index these figures were measured on, so none of its contribution is in the measurement block above. Expected direction and magnitude on the next re-index: THREE further egress sites resolve (by_intake.invocation bound or ambiguous +3, with the no-key residue -3), because its invocations.scm pattern 5 re-points the capture at the operand INSIDE a UriBuilder lambda and three estate sites then present a configuration accessor that resolves. The captured population does NOT move, so the egress denominator is expected to hold at 117: this is a resolution, not a new capture, and it must not be netted with S-398 T1's admission or S-402 T1's population correction. Measured independently by the sprint review on 2026-09-14: the source-derived harness operand_resolvability::configuration_agreement moved 79 -> 82 resolved (no-key 15 -> 12) on merged main and names the same three sites (funnel-aggregator-api MailboxApiRestClient.java:268, mailbox-aggregator-api ReportingApiRestClient.java:110 and :122). The index-derived pin RECORDED_ADMITTED in config_bound_admission.rs still reads 81 and is expected to read ~84 after the re-index."
+      "status": "observed",
+      "effect": "OBSERVED at last on the 2026-09-17 re-enrolment, and it landed where the pending entry predicted. This entry was the only `pending-reindex` one in this artifact for four generations. Its prediction was THREE further egress sites resolving with the captured population unmoved, and the egress denominator holding at 117: both hold. The three sites the sprint review named on 2026-09-14 (funnel-aggregator-api MailboxApiRestClient.java:268, mailbox-aggregator-api ReportingApiRestClient.java:110 and :122) are among the +3 HTTP bound rows. RECORDED_ADMITTED in config_bound_admission.rs, which the pending entry said was expected to read ~84 and then ~90, reads 90. Not netted with the S-405 or broker-arm entries below.",
+      "evidence": "logos-core/tests/config_bound_admission/config_bound_admission_finding.txt, the 2026-09-18 appendix"
     },
     "S-403": {
       "story": "The resolved-edge headline agrees with its payload (this story)",
       "status": "observed",
       "effect": "`resolved_cross_service_edges` 0 -> 15 and `resolved_edges_summary` \"0 resolved cross-service edges; egress resolution 0.032 (5 of 155 …)\" -> \"15 resolved cross-service edges; egress resolution 0.128 (15 of 117 egress sites resolved)\". A REPORTING CORRECTION ONLY: no classification, no capture and no resolution changed, and every other cell of the measurement block is identical with and without it — verified by reading the same store with and without the change. The superseded counter excluded `config-bound` rows so that it would stand in for the count of edges the BRIDGE drew; that is a real quantity under the wrong name, and it is now published as `coverage.bridge_invocation_edges` on the reachability rider, where it reads 0. This delta must not be mined as a capability gain.",
       "evidence": "logos-core/tests/coverage_headline_baseline/headline_baseline_finding.txt; federation::coverage::tests::both_halves_of_the_resolved_edge_summary_are_derived_from_one_population"
+    },
+    "S-405": {
+      "story": "A path-neutral composer link resolves on its path operand",
+      "status": "observed",
+      "effect": "SIX further HTTP accessor sites present their configuration key on this generation — the `queryParam`-family residue S-399 left — which is why the HTTP arm's `config-bound` rows read 90 rather than 84. Of the nine S-399 and S-405 add between them, three land in `bound` and six in `ambiguous`, so the contribution to this file's headline is +3, not +9. Like S-399 it is a RESOLUTION, not a capture: the egress denominator does not move.",
+      "evidence": "logos-core/tests/operand_resolvability/configuration_agreement.rs; sprint-impl-70.md, S-405"
+    },
+    "S-409/S-410": {
+      "story": "The accessor hop reaches the broker arm; topic identity is the committed configured value",
+      "status": "observed",
+      "effect": "THE LARGEST SINGLE MOVEMENT IN THIS FILE'S HISTORY, and it is a new POPULATION rather than a better result on the old one. The broker arm gained committed-value topic resolution, so 27 broker publishes now bind where the payload previously carried none with `config-bound` provenance: by_intake.invocation.bound +27, and the arm's own `topic-not-literal` refusals fall 54 -> 27 inside the unchanged egress denominator. They contribute 33 EDGES, not 27, because one publish binds every cross-member subscriber. Any reading of `15 -> 45` as an improvement in HTTP egress resolution is wrong by 27 of the 30.",
+      "evidence": "logos-core/tests/broker_topic_corpus.rs; ADR-64's 2026-09-15 and 2026-09-16 amendments"
+    },
+    "S-420": {
+      "story": "The bridge keys an HTTP consumer on its committed target",
+      "status": "observed",
+      "effect": "ZERO change to every figure in this artifact, and the zero is a MEASURED result rather than an absence: the same estate was read on 2026-09-18 with and without the bridge arm and the two coverage payloads are byte-identical on every counter. It is recorded here because this file's headline sentence used to end with a claim S-420 falsified — that the bridge draws no invocation edge for these rows — and a delta table with no entry for the story that falsified it would leave the correction unattributed. What the story DOES move is coverage.bridge_invocation_edges, 33 -> 51, on the reachability rider; that figure is not in this artifact and its single home is config_bound_admission.rs. No floor is asserted on it.",
+      "evidence": "logos-core/tests/config_bound_admission/config_bound_admission_finding.txt, section (b); docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md"
     }
   },
   "measurement": {
-    "references": 1034,
-    "bound": 96,
-    "ambiguous": 169,
-    "unbound": 80,
-    "no_provider_in_workspace": 689,
+    "references": 1036,
+    "bound": 126,
+    "ambiguous": 175,
+    "unbound": 44,
+    "no_provider_in_workspace": 691,
     "by_intake": {
       "contract_surface": {
         "bound": 81,
@@ -91,19 +111,19 @@
         "no_provider_in_workspace": 646
       },
       "invocation": {
-        "bound": 15,
-        "ambiguous": 23,
-        "unbound": 79,
-        "no_provider_in_workspace": 43
+        "bound": 45,
+        "ambiguous": 29,
+        "unbound": 43,
+        "no_provider_in_workspace": 45
       }
     },
-    "resolved_cross_service_edges": 15,
-    "egress_resolution": 0.1282051282051282,
+    "resolved_cross_service_edges": 51,
+    "egress_resolution": 0.38461538461538464,
     "egress_resolution_measured": 117,
-    "resolved_edges_summary": "15 resolved cross-service edges; egress resolution 0.128 (15 of 117 egress sites resolved)",
-    "spec_conformance_ratio": 0.2782608695652174,
+    "resolved_edges_summary": "51 resolved cross-service edges; egress resolution 0.385 (45 of 117 egress sites resolved)",
+    "spec_conformance_ratio": 0.3652173913043478,
     "spec_conformance_measured": 345,
-    "spec_conformance_summary": "0.278 (96 of 345 measured; 689 excluded as no-provider-in-workspace)",
+    "spec_conformance_summary": "0.365 (126 of 345 measured; 691 excluded as no-provider-in-workspace)",
     "members_read": 84,
     "members_total": 84,
     "covers_all_members": true
