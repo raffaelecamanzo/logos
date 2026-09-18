@@ -172,14 +172,17 @@ pub struct BridgeEdge {
     /// profile set; one whose keys the corpus refuses carries
     /// `ConfigUnresolved`, naming the key and the refusal.
     ///
-    /// Read as a count rather than as a rule, on the 84-member reference estate
-    /// (2026-09-18, `~/source/pec-services`, 84 of 84 members read): of the 51
-    /// invocation-intake edges the bridge draws, 33 are broker-topic and 18 are
-    /// `route`, and every one of the 18 carries `ConfigBound` here. Before
-    /// S-420 that second figure was **0** — the arm read its target verbatim
-    /// and a `${…}` reduced to no portable key. **No floor is asserted on any of
-    /// these figures**; the single home for them is
-    /// `logos-core/tests/config_bound_admission.rs`.
+    /// Before S-420 the HTTP arm read its target verbatim and a `${…}` reduced to
+    /// no portable key, so it drew no edge at all and this field was never
+    /// `ConfigBound` on it. **No estate count is restated here on purpose**: this
+    /// file is not on either of the two rosters that enumerate the prose sites a
+    /// re-index must sweep (the one in `config_bound_admission.rs`'s `by_bucket`
+    /// assertion message and the `refresh_procedure` step in
+    /// `coverage_headline_baseline`'s artifact), so a figure recorded here would
+    /// be outside the procedure that keeps figures current — which is precisely
+    /// how a measurement goes quietly stale. The counts, their denominators and
+    /// their dates live in `logos-core/tests/config_bound_admission.rs`, the
+    /// single home for them.
     ///
     /// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
     ///
