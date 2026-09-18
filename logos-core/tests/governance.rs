@@ -2497,3 +2497,55 @@ fn an_interrupted_run_leaves_neither_the_marker_nor_the_rows() {
         "and left the previous marker untouched — never a marker without its rows"
     );
 }
+
+/// `scan` replaces the violations wholesale too, so it records the marker as
+/// well — and the marker must describe **its own** run, not the last `check`.
+///
+/// This is the invariant that forbids scoping the marker write to `check_rules`
+/// alone. `scan` has shared `persist_violations` with `check_rules` since long
+/// before the marker existed ([FR-GV-09] persists a snapshot, then the same
+/// violation set is rewritten). Had the marker been special-cased to skip
+/// `scan`, the sequence below would leave a marker dated at the `check` while
+/// the rows on disk belonged to the `scan` — the exact disagreement FR-GV-21's
+/// "one run, one time" forbids, and CR-096 §7's top-listed risk.
+///
+/// [FR-GV-09]: ../../../docs/specs/requirements/FR-GV-09.md
+#[test]
+fn scan_records_a_marker_describing_its_own_run_not_the_last_check() {
+    let tmp = layered_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    // A `check` first, so the store carries a marker from a DIFFERENT run.
+    engine.check_rules(None, true).expect("check_rules runs");
+    let after_check = check_run(&engine).expect("the check recorded a marker");
+
+    // Now a `scan`, which rewrites the same violations table.
+    engine.scan(true).expect("scan runs");
+    let after_scan = check_run(&engine).expect("scan records a marker too");
+    let rows = persisted_violations(&engine);
+
+    // A real run time, not a sentinel: a marker stamped with a constant would
+    // satisfy "some marker exists" while dating every finding to 1970.
+    assert!(
+        after_scan.ran_at > 1_600_000_000,
+        "the marker carries a real unix-seconds run time: {}",
+        after_scan.ran_at
+    );
+    assert!(
+        after_scan.ran_at >= after_check.ran_at,
+        "the scan's marker is its own run, never the earlier check's ({} < {})",
+        after_scan.ran_at,
+        after_check.ran_at
+    );
+    // The load-bearing half: the marker agrees with the rows THAT ARE THERE.
+    assert!(!rows.is_empty(), "the fixture violates its contract");
+    assert_eq!(
+        after_scan.violation_count,
+        rows.len() as i64,
+        "the marker counts the rows the scan left behind"
+    );
+    assert!(
+        rows.iter().all(|r| r.created_at == after_scan.ran_at),
+        "every row on disk carries the scan's own time, not the check's"
+    );
+}
