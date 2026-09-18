@@ -659,8 +659,6 @@ struct Admission {
     /// are asserted equal, which is the estate-scale instance of the cross-tier
     /// no-drift walk `federation::coverage`'s unit tests run over fixtures.
     bound_http_pairs: Vec<(String, String, usize)>,
-    /// Invocation-intake `BridgeEdge`s the bridge drew, by relation.
-    bridge_invocation_edges: Vec<(String, usize)>,
     /// Rows carrying no `provenance` key at all. Must be zero: the field is not
     /// optional ([FR-WS-19] AC6).
     missing_provenance: usize,
@@ -840,7 +838,7 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
     // `logos workspace status --json` (cli/src/main.rs): `serde_json` over the
     // value `federation::query::workspace_status` returns.
     let payload = serde_json::to_value(workspace_status(&registry)).expect("the payload serializes");
-    let mut a = admission(&payload);
+    let a = admission(&payload);
 
     // The bridge's own edges, over the SAME registry, so the two tiers are read
     // off one estate state rather than two runs. `ContractBridge::edges` is the
@@ -859,7 +857,12 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
                 .or_default() += 1;
         }
     }
-    a.bridge_invocation_edges = drawn.into_iter().collect();
+    // Locals, not fields on `Admission`: that struct is documented as what the
+    // `--json` PAYLOAD says, and every other field on it is derived inside
+    // `admission(payload)`. These two are bridge-derived, so keeping them beside it
+    // is what stops the struct's contract from quietly becoming "the payload, plus
+    // whatever the test body computed".
+    let drawn_by_relation: Vec<(String, usize)> = drawn.into_iter().collect();
     let drawn_pairs: Vec<(String, String, usize)> =
         drawn_pairs.into_iter().map(|((f, t), n)| (f, t, n)).collect();
 
@@ -894,7 +897,7 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
         a.by_bucket,
         CRITERION_FLOOR,
         ACCESSOR_DENOMINATOR,
-        a.bridge_invocation_edges,
+        drawn_by_relation,
         a.bound_http_pairs,
         drawn_pairs,
     );
@@ -1065,7 +1068,7 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
          of this was empty.",
     );
     assert_eq!(
-        a.bridge_invocation_edges,
+        drawn_by_relation,
         RECORDED_BRIDGE_INVOCATION_EDGES
             .map(|(relation, n)| (relation.to_string(), n))
             .to_vec(),
