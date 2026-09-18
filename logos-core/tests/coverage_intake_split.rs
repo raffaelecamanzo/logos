@@ -55,20 +55,39 @@
 //! almost nothing, and it is **accepted debt** until a story has legitimate
 //! business in those files. No count is armed here any more.
 //!
-//! # Recorded finding (2026-09-13, `~/source/pec-services`, 84 members)
+//! # Recorded finding (2026-09-18, `~/source/pec-services`, 84 members)
 //!
-//! Re-recorded by [S-398] T2 over the estate re-indexed with merged Sprint 69
-//! Iteration-1 state. The previous generation's figures are kept beside it,
-//! because the movement is the finding:
+//! Re-recorded by S-420 T2 over the estate **re-enrolled at logos 1.4.12 on
+//! 2026-09-17**. The two previous generations are kept beside it, because the
+//! movement is the finding:
 //!
 //! ```text
-//! references           1034                       (was 1060)
+//! references           1036                       (was 1034, and 1060 before that)
 //!                       bound  ambiguous  unbound  no-provider
-//! contract-surface         81        146        1          646   (unchanged)
-//! invocation               15         23       79           43   (was 5/9/141/31)
-//! headline                 96        169       80          689   (was 86/155/142/677)
-//! 0.278 (96 of 345 measured; 689 excluded as no-provider-in-workspace)
+//! contract-surface         81        146        1          646   (unchanged, all three)
+//! invocation               45         29       43           45   (was 15/23/79/43)
+//! headline                126        175       44          691   (was 96/169/80/689)
+//! 0.365 (126 of 345 measured; 691 excluded as no-provider-in-workspace)
 //! ```
+//!
+//! **The invocation column's `bound` 15 → 45 is two movements and is never
+//! summed.** **+27** are broker publishes, a population this payload did not carry
+//! at all before: the committed-topic-value resolution of S-409 / S-410 reaching a
+//! store-backed readout for the first time. **+3** are HTTP client calls, S-399's
+//! and S-405's accessor widenings arriving with the re-enrolment. Read as one
+//! figure it says outbound HTTP resolution tripled; it did not — that arm moved
+//! 15 → 18.
+//!
+//! **S-420 moves nothing in this file, and that is measured rather than assumed.**
+//! The same estate was read on 2026-09-18 with and without its bridge arm and the
+//! two coverage payloads are byte-identical on every counter here. What it moves
+//! is `coverage.bridge_invocation_edges` (33 → 51), which is not a figure this
+//! harness takes; its single home is `config_bound_admission.rs`.
+//!
+//! **No floor is asserted on any figure in this file.**
+//!
+//! The 2026-09-13 reading, and every attribution stated against it below, is left
+//! as the dated record it is.
 //!
 //! **[CR-120] §6's criterion was met, on the generation it was written over: 81
 //! contract-surface / 0 invocation bound rows, measured 2026-09-09 over a store
@@ -82,7 +101,7 @@
 //! retraction of that. [S-397] T2 re-indexed all 84 members on 2026-09-13 from a
 //! binary carrying [S-374] and [S-397] T1, and [S-398] T2 re-indexed them again
 //! the same day from a binary carrying the whole of Sprint 69 Iteration 1. The
-//! contract-surface column is byte-identical across **all three** generations;
+//! contract-surface column is byte-identical across **all four** generations;
 //! every cell that has ever moved is in the invocation column.
 //!
 //! Against the 1.4.7 generation it moved for two reasons worth keeping apart:
@@ -179,7 +198,7 @@ fn corpus_root() -> Option<PathBuf> {
 /// 3. the two populations sum to the headline counters, so the split cannot
 ///    under-report what it sits beside.
 ///
-/// **The 81/15 pair is asserted, and a moved corpus fails this harness
+/// **The 81/45 pair is asserted, and a moved corpus fails this harness
 /// deliberately.** Its failure message prints the measured figure and the split
 /// beside it, because the criterion's number is a recorded measurement of a
 /// specific workspace at a specific commit: the remedy for a red run here is to
@@ -279,16 +298,20 @@ fn measure_the_intake_split_over_the_reference_workspace_when_one_is_configured(
     // message, so a moved corpus reads as a moved corpus.
     assert_eq!(
         (cs.bound, inv.bound),
-        (81, 15),
-        "the recorded split is 81 contract-surface / 15 invocation bound rows, measured \
-         2026-09-13 by S-398 T2 over the merged-Iteration-1 index (it was 81 / 5 over the \
-         S-397 generation, and 81 / 0 over the 1.4.7 one). Measured {} / {} over {} \
+        (81, 45),
+        "the recorded split is 81 contract-surface / 45 invocation bound rows, measured \
+         2026-09-18 by S-420 T2 over the estate re-enrolled at logos 1.4.12 (it was \
+         81 / 15 over the merged-Sprint-69-Iteration-1 index, 81 / 5 over the S-397 \
+         generation, and 81 / 0 over the 1.4.7 one). Measured {} / {} over {} \
          references. If the corpus has been re-indexed or re-enrolled again, RECORD the \
          measured figure — here, and in the `by_intake` block in docs/howto/commands.md, \
          which restates this split in prose no test reads — do not bend the classifier to \
-         reproduce this one. CR-120's own criterion was 81 / 0 and it was met on the 1.4.7 \
-         generation; the invocation column is the accessor hop (S-397 T1, then S-398 T1) \
-         and is not a retraction of it.",
+         reproduce this one. AND DECOMPOSE IT BY ARM before calling it a gain: the 45 is \
+         18 HTTP client calls and 27 broker publishes, and the 15 it succeeds was HTTP \
+         alone, so a reader who takes 15 -> 45 for outbound HTTP resolution tripling is \
+         wrong by 27 of the 30. CR-120's own criterion was 81 / 0 and it was met on the \
+         1.4.7 generation; the invocation column is the accessor hop (S-397 T1, then \
+         S-398 T1, then S-399/S-405 and S-409/S-410) and is not a retraction of it.",
         cs.bound,
         inv.bound,
         cov.references.len()

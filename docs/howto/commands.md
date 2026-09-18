@@ -939,16 +939,16 @@ all**:
 
 ```bash
 logos workspace status            # human
-#   15 resolved cross-service edges; egress resolution 0.128 (15 of 117 egress sites resolved)
+#   51 resolved cross-service edges; egress resolution 0.385 (45 of 117 egress sites resolved)
 ```
 
 ```jsonc
 // logos workspace status --json
 "coverage": {
-  "resolved_cross_service_edges": 15,   // edges resolved from a captured invocation
-  "egress_resolution": 0.128,           // absent (null) when no egress site was captured
+  "resolved_cross_service_edges": 51,   // edges resolved from a captured invocation
+  "egress_resolution": 0.385,           // absent (null) when no egress site was captured
   "egress_resolution_measured": 117,    // the rate's denominator, explicit
-  "resolved_edges_summary": "15 resolved cross-service edges; egress resolution 0.128 (15 of 117 egress sites resolved)"
+  "resolved_edges_summary": "51 resolved cross-service edges; egress resolution 0.385 (45 of 117 egress sites resolved)"
 }
 ```
 
@@ -1004,23 +1004,23 @@ So every rendering carries the **denominator and the excluded count** beside it:
 
 ```bash
 logos workspace status            # human
-#   0.278 (96 of 345 measured; 689 excluded as no-provider-in-workspace)
+#   0.365 (126 of 345 measured; 691 excluded as no-provider-in-workspace)
 ```
 
 ```jsonc
 // logos workspace status --json
 "coverage": {
-  "bound": 96,
-  "ambiguous": 169,
-  "unbound": 80,
-  "no_provider_in_workspace": 689,          // the excluded bucket
-  "spec_conformance_ratio": 0.278,
+  "bound": 126,
+  "ambiguous": 175,
+  "unbound": 44,
+  "no_provider_in_workspace": 691,          // the excluded bucket
+  "spec_conformance_ratio": 0.365,
   "spec_conformance_measured": 345,         // the denominator, explicit
-  "spec_conformance_summary": "0.278 (96 of 345 measured; 689 excluded as no-provider-in-workspace)"
+  "spec_conformance_summary": "0.365 (126 of 345 measured; 691 excluded as no-provider-in-workspace)"
 }
 ```
 
-Those are real figures from an 84-member Spring estate, measured 2026-09-13.
+Those are real figures from an 84-member Spring estate, measured 2026-09-18.
 
 `spec_conformance_measured` and `no_provider_in_workspace` are explicit fields, so
 a machine consumer never re-implements the denominator rule. The same figures ride
@@ -1107,23 +1107,27 @@ Five things worth knowing about these fields:
   that prove it, never averaged and never refused.
 
 - **What this emits on a real estate today, measured rather than estimated
-  (2026-09-13).** The accessor capture hop is wired and now reaches a *qualified*
+  (2026-09-18).** The accessor capture hop is wired and reaches a *qualified*
   receiver: an `@ConfigurationProperties` accessor expression — whether written
   bare or as `this.mailboxApiProperties.getUriGetMailbox()` — resolves to its
   canonical key at index time and reaches the same resolution a `${...}`
-  placeholder already took. On the 84-member reference estate,
-  `logos workspace status --json` emits **81** rows carrying `config-bound`
-  provenance — 15 `bound`, 23 `ambiguous`, 42 `no-provider-in-workspace` and 1
-  `path-not-composed` — against the **44** the same command emitted before the
-  qualified receiver was admitted, and the **0** it emitted before the hop existed
-  at all. Read that figure with its denominators, because it is **not** full
-  coverage:
+  placeholder already took. On the 84-member reference estate re-enrolled at
+  1.4.12, `logos workspace status --json` emits **119** rows carrying
+  `config-bound` provenance, and they are now **two populations, not one**: **90**
+  on the HTTP arm (`relation: route` — 18 `bound`, 29 `ambiguous`, 42
+  `no-provider-in-workspace`, 1 `path-not-composed`) and **29** on the broker arm
+  (`relation: broker-topic` — 27 `bound`, 2 `no-provider-in-workspace`), the second
+  admitted by the committed-topic-value work of logos 1.4.12. The HTTP figure was
+  81 on the 2026-09-13 index, **44** before the qualified receiver was admitted,
+  and **0** before the hop existed at all. Read it with its denominators, because
+  it is **not** full coverage:
 
   | | |
   |---|---|
-  | rows carrying `config-bound` provenance | **81** (was 44) |
-  | the accessor denominator (production client-call sites the arm refuses without configuration) | 96 (was 108) |
-  | what the measurement harness proves resolvable on that denominator | 81 on 2026-09-13; 84 on merged `main` 2026-09-14; **90 on merged `main` 2026-09-15** — see the note below |
+  | rows carrying `config-bound` provenance, HTTP arm | **90** (was 81 on 2026-09-13, 44 before that) |
+  | rows carrying `config-bound` provenance, broker arm | **29** (was 0 — the arm admitted none before 1.4.12) |
+  | the accessor denominator (production client-call sites the HTTP arm refuses without configuration) | 96 (was 108) |
+  | what the measurement harness proves resolvable on that denominator | 81 on 2026-09-13; 84 on merged `main` 2026-09-14; **90 on merged `main` 2026-09-15**, which the 2026-09-18 product reading now matches — see the notes below |
   | rows carrying `config-unresolved` provenance | 0 |
 
   (The 96 and the 81 are measured and pinned by
@@ -1152,6 +1156,15 @@ Five things worth knowing about these fields:
   ones that chain a `queryParam`-family link. The paragraph above is the
   2026-09-14 reading and is left standing as the dated record it is. The product
   half still reads 81 for the unchanged reason, and the denominator is still 96.
+
+  **The re-index arrived, and the agreement returned at 90-of-90 (2026-09-18).**
+  The estate was re-enrolled at logos 1.4.12 on 2026-09-17, so the product half
+  now reads what the harness half has read since 2026-09-15: **90** of the same
+  denominator of **96**. The two paragraphs above are the dated records they were
+  and are not restated. The same re-enrolment is what brought the broker arm's 29
+  `config-bound` rows into the payload, which is why the table above reports two
+  populations where it previously reported one — and it is a *different* arm, not
+  a movement in this one.
 
   **No floor is asserted on either figure, and none should be read into them.**
   The 81-of-81 agreement is what one estate produced on one date, not a property
@@ -1185,29 +1198,46 @@ Five things worth knowing about these fields:
   by that: the provenance, the key, the defining sources and the profile set are
   all correct.
 
-  Note finally what a `config-bound` row **does and does not** reach. It is
-  counted in `resolved_cross_service_edges`, because it resolved: the coverage
-  tier composed its target from committed configuration and found exactly one
-  provider in another member. It draws **no bridge edge**, because the bridge
-  still keys a consumer on its *raw* ledger target and a `${…}` placeholder
-  reduces to no portable key there — so it appears in no `xservice
-  route-providers` answer and seeds no cross-service reachability root. On the
-  reference estate every one of the 15 resolved edges is of this kind:
-  `resolved_cross_service_edges` reads **15** and `logos xservice route-providers`
-  returns **81** edges, all of them `contract-surface` intake and none
-  `invocation`. The second figure is published in its own right — as
-  `coverage.bridge_invocation_edges` on `logos workspace reachability`, the
-  surface whose `live-via-cross-service` promotions rest on it. Read that one, not
-  the headline, when the question is what the union view was seeded from.
+  Note finally what a `config-bound` row reaches, and that this changed in logos
+  1.4.13. It is counted in `resolved_cross_service_edges`, because it resolved:
+  the coverage tier composed its target from committed configuration and found
+  exactly one provider in another member. It now **also draws a bridge edge** —
+  the bridge keys the same consumer through the same committed value, so the row
+  appears in `xservice route-providers` and seeds a cross-service reachability
+  root. Before logos 1.4.13 it did not: the bridge keyed a consumer on its *raw*
+  ledger target and a `${…}` placeholder reduced to no portable key there, so the
+  two tiers classified one fact two ways.
+
+  The same 84-member estate, read twice on **2026-09-18** — once with the 1.4.12
+  binary and once with the arm merged, over the same stores:
+
+  | | before | after |
+  |---|---|---|
+  | `resolved_cross_service_edges` | 51 | 51 |
+  | `bridge_invocation_edges` | 33 | **51** |
+  | invocation edges `xservice route-providers` returns, `relation: route` | **0** | **18**, over 8 member pairs |
+  | …`relation: broker-topic` | 33 | 33 |
+  | `contract-surface` edges | 81 | 81 |
+
+  The coverage tier is byte-identical across the pair; only the bridge moved.
+  **No floor is asserted on any of these figures** — the single home for them is
+  `logos-core/tests/config_bound_admission.rs`. `bridge_invocation_edges` is still
+  published in its own right on `logos workspace reachability`, the surface whose
+  `live-via-cross-service` promotions rest on it, and it is still the figure to
+  read when the question is what the union view was seeded from: it and the
+  headline agree on this estate today, but they answer different questions and a
+  fan-out publish or an ambiguous composition separates them again.
 
   Both terms of `egress_resolution` moved between generations, so it is quoted here
   with its denominator and should never be quoted without one: `0.032 (5 of 155)`
-  became `0.128 (15 of 117)`. The denominator's `-38` has two causes and they are
-  never summed — `-26` sites left the captured population entirely when the Go
-  client-call gate became receiver-grained (they were never outbound calls), and
-  `-12` moved into `no_provider_in_workspace`, which sits outside the denominator,
-  because the newly resolved templates name services this workspace does not serve.
-  Only the first is a coverage change.
+  became `0.128 (15 of 117)`, and `0.385 (45 of 117)` on the 2026-09-18 re-enrolled
+  index once the broker arm admitted committed values. The `-38` in the first
+  denominator move has two causes and they are never summed — `-26` sites left the
+  captured population entirely when the Go client-call gate became receiver-grained
+  (they were never outbound calls), and `-12` moved into
+  `no_provider_in_workspace`, which sits outside the denominator, because the newly
+  resolved templates name services this workspace does not serve. Only the first is
+  a coverage change.
 
 ##### The counts are two populations: read the split
 
@@ -1224,24 +1254,25 @@ Every row carries its `intake`, and the four counters are reported split by it:
 ```jsonc
 // logos workspace status --json
 "coverage": {
-  "bound": 96, "ambiguous": 169, "unbound": 80, "no_provider_in_workspace": 689,
+  "bound": 126, "ambiguous": 175, "unbound": 44, "no_provider_in_workspace": 691,
   "by_intake": {
     "contract_surface": { "bound": 81, "ambiguous": 146,
                           "unbound": 1, "no_provider_in_workspace": 646 },
-    "invocation":       { "bound": 15, "ambiguous":  23,
-                          "unbound": 79, "no_provider_in_workspace": 43 }
+    "invocation":       { "bound": 45, "ambiguous":  29,
+                          "unbound": 43, "no_provider_in_workspace": 45 }
   }
 }
 ```
 
-Those are the real figures from an 84-member Spring estate, measured 2026-09-13.
-`bound: 96` looks like a workspace that binds; `by_intake.invocation.bound: 15`
-says that of its 160 captured outbound call sites, fifteen resolve. That is what
-the split is for — and on the generation of this estate indexed before the
-accessor capture hop existed, the same field read **0** beside a `bound` of 81,
-which is the starker form of the same point. The `contract_surface` row has not
-moved across any of the three generations of this estate; every cell that has ever
-moved is in the `invocation` row.
+Those are the real figures from an 84-member Spring estate, measured 2026-09-18.
+`bound: 126` looks like a workspace that binds; `by_intake.invocation.bound: 45`
+says that of its 162 captured outbound call sites, forty-five resolve — 18 HTTP
+client calls and 27 broker publishes. That is what the split is for — and on the
+generation of this estate indexed before the accessor capture hop existed, the same
+field read **0** beside a `bound` of 81, which is the starker form of the same
+point. The `contract_surface` row has not moved across any generation of this
+estate; every cell that has ever moved is in the `invocation` row. No floor is
+asserted on any of these figures.
 
 The two populations always **sum** to the four counters above them — the headline
 is computed from the split, so the two cannot disagree — and because every row
@@ -1430,12 +1461,17 @@ carries the same headline `workspace status` reports —
 It also carries one figure `workspace status` does not:
 **`bridge_invocation_edges`**, the number of invocation edges the bridge actually
 drew — which is what a `live-via-cross-service` promotion rests on, and it is
-**not** the headline. The coverage tier composes a call target from committed
-configuration and the bridge does not, so a `config-bound` row resolves in the
-headline and seeds no root. On the reference estate the rider reads
-`resolved_cross_service_edges: 15` beside `bridge_invocation_edges: 0`: fifteen
-outbound call sites resolve, and the union view was seeded from none of them.
-Read the second when the question is what the view could reach.
+**not** the headline. The two count different things: a fan-out publish resolves
+once and draws one edge per subscriber, and an ambiguous composition resolves
+nothing drawable. Until logos 1.4.13 the HTTP arm added a third difference — the
+coverage tier composed a call target from committed configuration and the bridge
+did not, so a `config-bound` row resolved in the headline and seeded no root — and
+on the reference estate the rider read `resolved_cross_service_edges: 15` beside
+`bridge_invocation_edges: 0` (2026-09-13): fifteen outbound call sites resolved,
+and the union view was seeded from none of them. Both arms now key on the
+committed value, and on the same estate re-measured 2026-09-18 the rider reads
+**51** beside **51**. Read the second anyway when the question is what the view
+could reach — the reasons they can diverge are unchanged.
 
 The rider deliberately does **not** carry `by_intake`: the
 split is a decomposition a reader consults once, beside the summary, not eight

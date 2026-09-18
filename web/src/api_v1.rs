@@ -688,12 +688,19 @@ pub(crate) async fn workspace_roster(
 /// now one walk of one population, and this surface's job is to publish them, not
 /// to reconstruct them.
 ///
-/// A resolved edge is not necessarily an edge the **bridge drew**: the coverage
-/// tier composes a target from committed configuration and the bridge does not, so
-/// a `config-bound` row resolves here and seeds no cross-service reachability root.
-/// That second quantity is published under its own name — `coverage.bridge_invocation_edges`
-/// on the `workspace/reachability` rider — and is deliberately NOT folded into this
-/// count ([CR-127] §3.2).
+/// A resolved edge is not necessarily an edge the **bridge drew**, and the two are
+/// published under separate names for that reason — `coverage.bridge_invocation_edges`
+/// on the `workspace/reachability` rider, deliberately NOT folded into this count
+/// ([CR-127] §3.2). They diverge wherever a resolution draws several edges (a
+/// fan-out topic) or none (an ambiguous composition). Until S-420 ([CR-133]) they
+/// also diverged on the HTTP arm, where the coverage tier composed a target from
+/// committed configuration and the bridge did not, so a `config-bound` row resolved
+/// here and seeded no cross-service reachability root. Both arms now key on the
+/// committed value: on the 84-member reference estate, read twice on 2026-09-18
+/// with and without that arm, this count holds at **51** while the seeded count
+/// moves **33 → 51**. **No floor is asserted on either figure.**
+///
+/// [CR-133]: ../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
 ///
 /// [CR-127]: ../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
 ///
@@ -714,11 +721,12 @@ pub(crate) async fn workspace_roster(
 ///
 /// A consumer that renders `bound` without the split renders two different things
 /// as one: on the 84-member reference workspace the split is 81 `contract-surface`
-/// and **15** `invocation` bound rows (2026-09-13, sprint-69 Iteration 1 merged),
-/// so a bare `bound: 96` says nothing about whether any outbound call site
-/// resolves — and it read `81` and **0** for as long as none did. This surface
-/// carries the split because the CLI and MCP do; the parity is the requirement,
-/// not a convenience ([FR-WS-05]).
+/// and **45** `invocation` bound rows (2026-09-18; it was 81 and 15 on 2026-09-13,
+/// before the broker arm admitted committed values), so a bare `bound: 126` says
+/// nothing about whether any outbound call site resolves — and it read `81` and
+/// **0** for as long as none did. **No floor is asserted on either figure.** This
+/// surface carries the split because the CLI and MCP do; the parity is the
+/// requirement, not a convenience ([FR-WS-05]).
 ///
 /// [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 /// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md

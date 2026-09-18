@@ -165,11 +165,26 @@ pub struct BridgeEdge {
     /// admitted from that member's committed configuration ([S-410],
     /// [FR-WS-19] AC6, [NFR-CC-04]).
     ///
-    /// `Literal` for every arm that reads its target verbatim — which is every
-    /// arm but the broker one today. A broker publish whose operand resolves to
-    /// a committed key carries `ConfigBound`, naming the key, its defining
-    /// sources and its profile set; one whose keys the corpus refuses carries
+    /// `Literal` for every arm that reads its target verbatim, which since
+    /// S-420 ([CR-133]) is every arm but the broker and HTTP ones. A broker
+    /// publish, or an HTTP client call, whose operand resolves to a committed
+    /// key carries `ConfigBound`, naming the key, its defining sources and its
+    /// profile set; one whose keys the corpus refuses carries
     /// `ConfigUnresolved`, naming the key and the refusal.
+    ///
+    /// Before S-420 the HTTP arm read its target verbatim and a `${…}` reduced to
+    /// no portable key, so it drew no edge at all and this field was never
+    /// `ConfigBound` on it. **No estate count is restated here on purpose**: this
+    /// file is not on either of the two rosters that enumerate the prose sites a
+    /// re-index must sweep (the one in `config_bound_admission.rs`'s `by_bucket`
+    /// assertion message and the `refresh_procedure` step in
+    /// `coverage_headline_baseline`'s artifact), so a figure recorded here would
+    /// be outside the procedure that keeps figures current — which is precisely
+    /// how a measurement goes quietly stale. The counts, their denominators and
+    /// their dates live in `logos-core/tests/config_bound_admission.rs`, the
+    /// single home for them.
+    ///
+    /// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
     ///
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub from_value: Provenance,

@@ -1028,12 +1028,16 @@ pub struct CrossServiceCoverage {
     /// question no earlier payload could answer: on the reference workspace it
     /// read **0** against a headline `bound` of 81 ([CR-120] §3.1, [NFR-CC-04]),
     /// and since S-397 T1's accessor capture hop reached that estate's index it
-    /// reads **15** against a headline of 96 — fifteen configuration-bound client
-    /// calls, and since S-403 T1 that is also what
-    /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges)
-    /// reports, because a `config-bound` row resolved and the headline counts
-    /// resolutions ([CR-127]). It reported **0** against those same rows until
-    /// then.
+    /// read **15** against a headline of 96 (2026-09-13). Re-measured
+    /// **2026-09-18** on the estate re-enrolled at 1.4.12 it reads **45** against
+    /// a headline of **126** — 18 configuration-bound HTTP client calls and 27
+    /// broker publishes, the second population admitted by S-409 / S-410 and the
+    /// HTTP one widened from 15 by S-399 / S-405. Since S-403 T1 the same rows are
+    /// what [`resolved_cross_service_edges`](Self::resolved_cross_service_edges)
+    /// counts, because a `config-bound` row resolved and the headline counts
+    /// resolutions ([CR-127]); it reported **0** against those same rows until
+    /// then. **No floor is asserted on any of these figures**, whose single home
+    /// is `logos-core/tests/coverage_headline_baseline.rs`.
     ///
     /// Every row carries the discriminator these counts group on
     /// ([`ReferenceCoverage::intake`]), so the split is auditable from
@@ -1080,19 +1084,33 @@ pub struct CrossServiceCoverage {
     /// independently is how this field came to publish `0` beside *"5 of 155
     /// egress sites resolved"* in the same sentence ([CR-127]).
     ///
-    /// # What it does NOT count: the edges the bridge drew
+    /// # What it counts that the bridge did not draw — a gap that is now closed
     /// A `config-bound` row — one whose target was composed from committed
-    /// configuration ([FR-WS-19]) — **resolved**, so it is counted here. The
-    /// bridge draws no [`BridgeEdge`](super::bridge::BridgeEdge) for it, because
-    /// `compute_edges` keys a consumer on its RAW ledger target and a `${…}`
-    /// placeholder reduces to no portable key there. On the 84-member reference
-    /// estate that is the whole difference: this field reads **15** and the
-    /// bridge holds **0** invocation edges. The quantity a reachability promotion
-    /// rests on is therefore published under its own name, on the surface that
-    /// rests on it —
+    /// configuration ([FR-WS-19]) — **resolved**, so it is counted here. Until
+    /// S-420 ([CR-133]) the bridge drew no
+    /// [`BridgeEdge`](super::bridge::BridgeEdge) for it on the HTTP arm, because
+    /// `compute_edges` keyed a consumer on its RAW ledger target and a `${…}`
+    /// placeholder reduces to no portable key there. The two tiers therefore
+    /// classified one fact two ways, which is what [ADR-52]'s one-classifier
+    /// contract forbids: on the 84-member reference estate (2026-09-13) this
+    /// field read **15** against **0** invocation edges.
+    ///
+    /// **Both arms now key on the committed value, and the gap is measured shut.**
+    /// S-410 closed the broker arm and S-420 the HTTP one, through one shared
+    /// identify function. Re-measured 2026-09-18 on the same estate, the same run
+    /// before and after S-420's bridge arm: this field reads **51** either way,
+    /// while
     /// [`CoverageRider::bridge_invocation_edges`](super::reach::CoverageRider::bridge_invocation_edges)
-    /// — rather than being smuggled in here under a name that says *resolved*
-    /// ([CR-127] §3.2).
+    /// moves **33 → 51** — 18 `route` edges over 8 member pairs where there were
+    /// none. **No floor is asserted on any of those figures**; the single home for
+    /// them is `logos-core/tests/config_bound_admission.rs`.
+    ///
+    /// The two remain **separate fields** under names that say which is which, and
+    /// that does not change now they agree on this estate: they answer different
+    /// questions — *what resolved* against *what was drawn, and therefore what
+    /// seeded a reachability root* — and a workspace whose compositions are
+    /// ambiguous can still resolve nothing while the coverage tier reports the
+    /// refusal. Neither is smuggled into the other ([CR-127] §3.2).
     ///
     /// Never published without the rate beside it ([BR-51]) — the structural form
     /// of that duty is
@@ -1104,6 +1122,7 @@ pub struct CrossServiceCoverage {
     /// [CR-117]: ../../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
     /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
     /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
+    /// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
     /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
@@ -5283,7 +5302,10 @@ mod tests {
     /// through committed configuration and reported it bound, the bridge keyed the
     /// same target on its raw ledger text and drew nothing, and on the reference
     /// estate that was 18 bound rows over 8 member pairs against 0 edges
-    /// ([ADR-52]'s one-classifier contract, [CR-133] §2.1).
+    /// ([ADR-52]'s one-classifier contract, [CR-133] §2.1). Re-measured on that
+    /// estate 2026-09-18, after the change this walk guards, the bridge draws 18
+    /// edges over those same 8 pairs — the estate-scale instance of this walk,
+    /// asserted in `logos-core/tests/config_bound_admission.rs`.
     ///
     /// The fan-out namespace is excluded from the comparison **by discipline, not
     /// by name**: one publish is one row and many edges there, so set equality is

@@ -223,3 +223,50 @@ After the run, across all 84 members:
                       any member.
 
 Nothing was indexed and nothing was enrolled.
+
+
+SUPERSEDED IN PART — 2026-09-18 (S-420 T2), THE CURRENT GENERATION
+===================================================================
+
+Measured  2026-09-18
+Corpus    ~/source/pec-services — 84 members declared, 84 read, covers_all = true,
+          re-enrolled at logos 1.4.12 on 2026-09-17 (a separate, human-gated
+          operation; this harness still indexes nothing)
+Harness   unchanged, and the path is unchanged
+
+                      bound  ambiguous  unbound  no-provider
+  contract-surface        81        146        1          646
+  invocation              45         29       43           45
+  headline               126        175       44          691
+  references            1036
+  0.365 (126 of 345 measured; 691 excluded as no-provider-in-workspace)
+
+The contract-surface row is byte-identical for the FOURTH consecutive generation.
+Every cell that has ever moved is in the invocation row.
+
+THE INVOCATION `bound` 15 -> 45 IS TWO MOVEMENTS AND THEY ARE NEVER SUMMED.
+
+  +27  broker publishes — a population this payload did not carry at all before.
+       S-409 and S-410 gave the broker arm committed-value topic resolution, and
+       this is the first store-backed readout taken on an estate enrolled with
+       it. Their own denominator lives in broker_topic_corpus.rs.
+  +3   HTTP client calls (15 -> 18) — S-399's three UriBuilder-lambda sites and
+       S-405's six path-neutral-composer ones, of which three land in `bound` and
+       six in `ambiguous`. Both are RESOLUTIONS, not new captures, which is why
+       the egress denominator does not move.
+
+  Read as one figure, `15 -> 45` says outbound HTTP resolution tripled. It did
+  not. The HTTP arm moved 15 -> 18, and 27 of the 30 are a different arm.
+
+  The invocation `unbound` fall 79 -> 43 is the other side of those two, plus the
+  broker arm's own `topic-not-literal` residue falling 54 -> 27.
+
+S-420 MOVES NOTHING HERE, AND THAT IS MEASURED RATHER THAN ASSUMED.  The same
+estate was read twice on 2026-09-18 over the same member stores — once with the
+released 1.4.12 binary and once with S-420 T1's bridge arm merged — and the two
+coverage payloads are byte-identical on every counter in the table above. What
+that story moves is coverage.bridge_invocation_edges, 33 -> 51, which is not a
+figure this harness takes. Its single home is config_bound_admission.rs and the
+artifact beside it.
+
+NO FLOOR IS ASSERTED ON ANY FIGURE IN THIS SECTION.
