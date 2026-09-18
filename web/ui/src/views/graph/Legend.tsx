@@ -46,8 +46,26 @@ function dashFor(type: string): string {
 
 /** One legend row: the edge's hue + line style beside its name. Exported so the
  *  app-level service map (S-250) documents its cross-service relation arms in the
- *  SAME legend grammar, from the same palette, rather than inventing a second one. */
-export function EdgeRow({ type }: { type: string }) {
+ *  SAME legend grammar, from the same palette, rather than inventing a second one.
+ *
+ *  `dash` and `label` are overrides for a row that documents a channel OTHER than
+ *  the edge type — the service map's provenance section (S-419, CR-132 AC3),
+ *  whose two rows share one arm's hue and differ only in stroke. They are
+ *  overrides on this component rather than a second row component next to it
+ *  because a hand-mirrored twin is exactly how two legends drift apart: the swatch
+ *  geometry, the hue lookup and the `aria-hidden` treatment must stay one
+ *  definition, or the provenance swatch stops matching the arm swatch beside it. */
+export function EdgeRow({
+  type,
+  dash,
+  label,
+}: {
+  type: string;
+  /** An explicit SVG `stroke-dasharray`, replacing the type's own line style. */
+  dash?: string;
+  /** Row text, replacing the prettified type token. */
+  label?: string;
+}) {
   return (
     <li className={styles.legendRow}>
       <svg width="22" height="8" aria-hidden="true" className={styles.legendLine}>
@@ -58,10 +76,10 @@ export function EdgeRow({ type }: { type: string }) {
           y2="4"
           stroke={EDGE_COLOR[type] ?? "#9ca3af"}
           strokeWidth="2"
-          strokeDasharray={dashFor(type)}
+          strokeDasharray={dash ?? dashFor(type)}
         />
       </svg>
-      <span>{prettify(type)}</span>
+      <span>{label ?? prettify(type)}</span>
     </li>
   );
 }

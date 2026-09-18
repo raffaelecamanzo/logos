@@ -1022,15 +1022,24 @@ export interface BridgeEdge {
   intake?: BridgeIntake;
   /** What proved the CONSUMER end's key: read verbatim at the call site, or
    *  admitted from that member's committed configuration (S-410, FR-WS-19 AC6).
-   *  Optional for the same reason `intake` is — additive, and no view reads it
-   *  yet. `literal` for every arm but the broker one today. */
-  from_value?: ValueProvenance;
+   *
+   *  **Required** (S-419, CR-132). The server has serialized it unconditionally
+   *  since S-410; the optional declaration only ever said that no view read it,
+   *  and the service map now does. Declaring it optional while the wire always
+   *  carries it invites a view to treat absence as "an ordinary literal", which
+   *  is exactly the indistinguishability ADR-64 forbids — the same reason
+   *  {@link ReferenceCoverage} flattens a NON-optional {@link ValueProvenance}.
+   *
+   *  Required in the TYPE is not validated at RUNTIME: nothing checks this
+   *  payload on arrival, so a view must still treat a missing value as
+   *  `unstated`, never as `literal` (CR-132 AC2). */
+  from_value: ValueProvenance;
   /** The same, for the PROVIDER end. Two fields rather than one merged list:
    *  on a broker fan-out edge each end names its own configuration key, and the
    *  two members routinely spell one property differently — which is exactly why
    *  they could not meet before S-410. A merged list would carry both keys with
    *  nothing saying which member proved which. */
-  to_value?: ValueProvenance;
+  to_value: ValueProvenance;
 }
 
 /** Why a cross-boundary reference did not bind (mirrors `UnboundReason`, ADR-53). */

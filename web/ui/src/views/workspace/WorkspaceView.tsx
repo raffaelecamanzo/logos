@@ -58,6 +58,7 @@ import {
 } from "../../components/index.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { GraphCanvas } from "../graph/GraphCanvas.tsx";
+import { ADMITTED_DASH } from "../graph/graphModel.ts";
 import { EdgeRow } from "../graph/Legend.tsx";
 import {
   ARM_LABEL,
@@ -71,8 +72,14 @@ import {
 } from "./coverageModel.ts";
 import {
   buildServiceMap,
+  CONFIG_REFUSAL_LABEL,
+  hasNonLiteralBinding,
+  LINK_PROVENANCE_KINDS,
+  LINK_PROVENANCE_LABEL,
+  linkEvidence,
   memberOfServiceId,
   serviceMembers,
+  type EvidenceRow,
   type ServiceLink,
   type ServiceMember,
 } from "./serviceMapModel.ts";
@@ -225,6 +232,141 @@ const LINK_COLUMNS: Column<ServiceLink>[] = [
   },
 ];
 
+/** The Provenance column (S-419, CR-132 AC4) — the accessible twin of the canvas's
+ *  stroke channel, so the distinction ADR-64 requires survives for a reader who
+ *  never sees the canvas at all.
+ *
+ *  Always a per-kind BREAKDOWN, one row per kind actually present, never one
+ *  label for the line: a link aggregating an observed binding and an admitted one
+ *  is neither, and a single word there is false about half of it. Kinds at zero
+ *  are omitted from the cell (a column of "literal 2 · config-bound 0 · …" is
+ *  noise) but every kind is still carried in the model, which is where a caller
+ *  reads a zero from. */
+const PROVENANCE_COLUMN: Column<ServiceLink> = {
+  key: "provenance",
+  header: "Provenance",
+  cell: (l) => (
+    <ul className={styles.reasons}>
+      {LINK_PROVENANCE_KINDS.filter((k) => l.provenance[k] > 0).map((k) => (
+        <li key={k}>
+          {LINK_PROVENANCE_LABEL[k]} <Badge tone="muted">{l.provenance[k]}</Badge>
+        </li>
+      ))}
+    </ul>
+  ),
+  // Sorted by how many of the line's bindings are NOT observed: the rows a reader
+  // opened this column for come to the top.
+  sortValue: (l) => l.count - l.provenance.literal,
+};
+
+/** The columns the bindings table renders.
+ *
+ *  A function, not a constant, because the Provenance column appears only when
+ *  the workspace HAS a non-literal binding. FR-UI-29 keeps a literal-only
+ *  workspace rendering byte-for-byte as it did before this story (CR-132 AC6),
+ *  and an always-present column of "Written at the call site" on every row would
+ *  break that while telling a reader nothing. */
+function linkColumns(withProvenance: boolean): Column<ServiceLink>[] {
+  return withProvenance ? [...LINK_COLUMNS, PROVENANCE_COLUMN] : LINK_COLUMNS;
+}
+
+/** The evidence detail's columns (S-419, CR-132 AC4; FR-WS-19 AC2/AC6). */
+const EVIDENCE_COLUMNS: Column<EvidenceRow>[] = [
+  {
+    key: "end",
+    header: "End",
+    cell: (r) => `${r.end === "consumer" ? "Consumer" : "Provider"} · ${r.member}`,
+    sortValue: (r) => `${r.end}:${r.member}`,
+  },
+  { key: "key", header: "Key", mono: true, cell: (r) => r.key, sortValue: (r) => r.key },
+  {
+    key: "value",
+    header: "Committed value",
+    mono: true,
+    // A refusal has NO value, and an empty cell would read as an empty string the
+    // sources proved. It states the refusal instead (NFR-CC-04).
+    cell: (r) =>
+      r.value === null ? (
+        <span className="muted">
+          {r.refusal === null ? "—" : CONFIG_REFUSAL_LABEL[r.refusal]}
+        </span>
+      ) : (
+        r.value
+      ),
+    sortValue: (r) => r.value ?? "",
+  },
+  {
+    key: "profiles",
+    header: "Profiles",
+    // `unprofiled` is stated in words rather than left to an empty profile list:
+    // an estate that genuinely declares a `default` profile must stay
+    // distinguishable from one that declares none (the `ProfiledValue` contract).
+    cell: (r) => {
+      const parts = [...r.profiles];
+      if (r.unprofiled) parts.push("unprofiled source");
+      return parts.length > 0 ? parts.join(", ") : <span className="muted">—</span>;
+    },
+    sortValue: (r) => r.profiles.join(","),
+  },
+  {
+    key: "sources",
+    header: "Defining sources",
+    mono: true,
+    cell: (r) =>
+      r.sources.length > 0 ? r.sources.join(", ") : <span className="muted">—</span>,
+    sortValue: (r) => r.sources.join(","),
+  },
+];
+
+/** The evidence behind every non-literal link (S-419, CR-132 AC4).
+ *
+ *  Rendered only for the links that HAVE something to evidence, and the whole
+ *  card only when at least one does — the same gate as the legend section and the
+ *  table column, so a literal-only workspace renders exactly as before. */
+function BindingEvidence({ links }: { links: ServiceLink[] }) {
+  const admitted = links.filter(hasNonLiteralBinding);
+  if (admitted.length === 0) return null;
+  return (
+    <Card title="Binding evidence">
+      <p className="muted">
+        What admitted each coupling below, per end: the configuration key, the committed value,
+        and the files that prove it. One row per overlay — a key its overlays spell differently
+        proves several values, and every one of them is carried rather than one shown as though
+        it were the value.
+      </p>
+      {admitted.map((l) => {
+        const rows = linkEvidence(l);
+        return (
+          <details key={`${l.from}->${l.to}:${l.relation}`}>
+            <summary>
+              <span className="mono">
+                {l.from} → {l.to}
+              </span>{" "}
+              · {armLabel(l.relation)}
+            </summary>
+            {rows.length === 0 ? (
+              // Reachable: a link is non-literal when any binding is `unstated`,
+              // and an unstated end names no key. Saying so beats an empty box.
+              <p className="muted">
+                No configuration key is named for this coupling — its provenance was not stated
+                on the wire, so nothing here is evidence either way.
+              </p>
+            ) : (
+              <DataTable
+                caption={`Configuration evidence for ${l.from} → ${l.to} (${armLabel(l.relation)})`}
+                columns={EVIDENCE_COLUMNS}
+                rows={rows}
+                rowKey={(r, i) => `${r.end}:${r.key}:${i}`}
+                pageSize={DEFAULT_TABLE_PAGE_SIZE}
+              />
+            )}
+          </details>
+        );
+      })}
+    </Card>
+  );
+}
+
 function ServiceMap({
   services,
   providers,
@@ -236,6 +378,11 @@ function ServiceMap({
 }) {
   const { selectMember } = useWorkspace();
   const map = buildServiceMap(services, providers.providers, topics);
+  /* The one gate on every rendering the provenance channel adds (S-419,
+     CR-132 AC3/AC6). A workspace whose bindings were all observed at call sites
+     has nothing to distinguish, so it renders exactly the DOM it rendered before
+     this story — no legend section, no table column, no evidence card. */
+  const anyAdmitted = map.links.some(hasNonLiteralBinding);
 
   return (
     <div className={styles.panel}>
@@ -278,6 +425,28 @@ function ServiceMap({
               </ul>
             </>
           )}
+          {/* Provenance is a SECOND channel over the arm hue, so both rows are
+              drawn in one arm's colour and differ only in stroke — the same
+              distinction the canvas makes. Rendered only when the workspace has
+              something to distinguish (CR-132 AC3). */}
+          {anyAdmitted && (
+            <>
+              <span className={graphStyles.legendHeading}>Provenance</span>
+              <ul className={graphStyles.legendList}>
+                <EdgeRow type="route" dash="0" label="Written at the call site" />
+                <EdgeRow
+                  type="route"
+                  dash={ADMITTED_DASH.join(" ")}
+                  label="Admitted from committed configuration"
+                />
+              </ul>
+              <p className={graphStyles.legendNote}>
+                The stroke says where a coupling came from; the hue still says which arm it
+                crosses. An admitted line was proved by a committed configuration value, not
+                observed at a call site — the table below states the split per coupling.
+              </p>
+            </>
+          )}
         </div>
       </details>
 
@@ -308,13 +477,15 @@ function ServiceMap({
         <Card title="Cross-service bindings">
           <DataTable
             caption="Cross-service bindings (the accessible twin of the service map)"
-            columns={LINK_COLUMNS}
+            columns={linkColumns(anyAdmitted)}
             rows={map.links}
             rowKey={(l) => `${l.from}->${l.to}:${l.relation}`}
             pageSize={DEFAULT_TABLE_PAGE_SIZE}
           />
         </Card>
       )}
+
+      <BindingEvidence links={map.links} />
     </div>
   );
 }

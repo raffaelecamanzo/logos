@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import type { BridgeEdge, MemberTopics, WorkspaceStatus } from "../../api/types.ts";
+import type {
+  BridgeEdge,
+  ConfigBoundKey,
+  MemberTopics,
+  ValueProvenance,
+  WorkspaceStatus,
+} from "../../api/types.ts";
 import {
   buildServiceMap,
+  edgeProvenanceKind,
+  hasNonLiteralBinding,
+  LINK_PROVENANCE_KINDS,
+  LINK_PROVENANCE_LABEL,
+  linkEvidence,
   memberOfServiceId,
   serviceId,
   serviceMembers,
@@ -19,12 +30,65 @@ function member(name: string, indexed = true): ServiceMember {
   return { name, indexed, error: null, warmState: indexed ? "warm" : "deferred" };
 }
 
+/** A LITERAL binding — both ends observed at the call site.
+ *
+ *  `from_value` / `to_value` are stated rather than omitted because S-419 made
+ *  them required: the server has emitted them unconditionally since S-410, and a
+ *  fixture that leaves them out describes a payload the server cannot produce —
+ *  while quietly exercising the `unstated` path in every test that only meant to
+ *  say "an ordinary binding". */
 function binding(from: string, to: string, relation = "route", symbol = "sym"): BridgeEdge {
   return {
     relation,
     from: { member: from, symbol: `${from}/${symbol}` },
     to: { member: to, symbol: `${to}/${symbol}` },
+    from_value: { provenance: "literal" },
+    to_value: { provenance: "literal" },
   };
+}
+
+/** The whole expected shape of a link every one of whose bindings is literal —
+ *  identity, weight, breakdown and retained bindings. Spelled out rather than
+ *  matched loosely: `toMatchObject` here would stop noticing a breakdown that
+ *  silently drifted away from the count beside it. */
+function literalLink(from: string, to: string, relation: string, bindings: BridgeEdge[]) {
+  return {
+    from,
+    to,
+    relation,
+    count: bindings.length,
+    provenance: {
+      literal: bindings.length,
+      "config-bound": 0,
+      "config-unresolved": 0,
+      unstated: 0,
+    },
+    bindings,
+  };
+}
+
+/** One committed configuration key, with one value proved by one overlay. */
+function boundKey(
+  key: string,
+  value: string,
+  profiles: string[] = ["docker"],
+  sources: string[] = ["src/main/resources/application-docker.yml"],
+): ConfigBoundKey {
+  return { key, source: "properties", values: [{ value, profiles, unprofiled: false, sources }] };
+}
+
+/** A binding with an explicit provenance on either end. */
+function bindingWith(
+  from: string,
+  to: string,
+  ends: { from_value?: ValueProvenance; to_value?: ValueProvenance },
+  relation = "route",
+  symbol = "sym",
+): BridgeEdge {
+  return {
+    ...binding(from, to, relation, symbol),
+    ...ends,
+  } as BridgeEdge;
 }
 
 describe("buildServiceMap (S-250, FR-UI-29)", () => {
@@ -42,7 +106,12 @@ describe("buildServiceMap (S-250, FR-UI-29)", () => {
       [member("api"), member("web")],
       [binding("api", "web", "route", "a"), binding("api", "web", "route", "b")],
     );
-    expect(map.links).toEqual([{ from: "api", to: "web", relation: "route", count: 2 }]);
+    expect(map.links).toEqual([
+      literalLink("api", "web", "route", [
+        binding("api", "web", "route", "a"),
+        binding("api", "web", "route", "b"),
+      ]),
+    ]);
     expect(map.loaded.edges).toEqual([
       { source: "service:api", target: "service:web", edge_type: "route" },
     ]);
@@ -256,7 +325,7 @@ describe("buildServiceMap with topics (S-256, FR-WS-11)", () => {
     expect(map.loaded.edges.some((e) => e.edge_type === "broker-topic")).toBe(false);
     // …but the binding is still reported as a resolved coupling.
     expect(map.links).toEqual([
-      { from: "api", to: "billing", relation: "broker-topic", count: 1 },
+      literalLink("api", "billing", "broker-topic", [binding("api", "billing", "broker-topic")]),
     ]);
   });
 
@@ -309,7 +378,7 @@ describe("buildServiceMap — the broker line is suppressed only when a topic ca
       { source: serviceId("api"), target: serviceId("billing"), edge_type: "broker-topic" },
     ]);
     expect(map.links).toEqual([
-      { from: "api", to: "billing", relation: "broker-topic", count: 1 },
+      literalLink("api", "billing", "broker-topic", [binding("api", "billing", "broker-topic")]),
     ]);
   });
 
@@ -336,5 +405,217 @@ describe("buildServiceMap — the broker line is suppressed only when a topic ca
     );
     expect(map.loaded.edges.some((e) => e.edge_type === "broker-topic")).toBe(false);
     expect(map.loaded.edges.map((e) => e.edge_type).sort()).toEqual(["publishes", "subscribes"]);
+  });
+});
+
+describe("edge provenance (S-419, CR-132, ADR-64, FR-WS-19 AC6)", () => {
+  const ADMITTED: ValueProvenance = {
+    provenance: "config-bound",
+    bound: [boundKey("spring.kafka.topics.archivecommands", "archive-commands")],
+  };
+  const REFUSED: ValueProvenance = {
+    provenance: "config-unresolved",
+    keys: ["orders.topic"],
+    refusal: "missing-key",
+  };
+
+  it("counts one binding under the WEAKER of its two ends, never the better one", () => {
+    // The whole defect: an edge with one observed end and one admitted end is an
+    // ADMITTED edge. Reading the literal end would restore the indistinguishability.
+    expect(edgeProvenanceKind(binding("api", "web"))).toBe("literal");
+    expect(
+      edgeProvenanceKind(bindingWith("api", "web", { to_value: ADMITTED })),
+    ).toBe("config-bound");
+    expect(
+      edgeProvenanceKind(bindingWith("api", "web", { from_value: ADMITTED })),
+    ).toBe("config-bound");
+    // A refusal outranks an admission: the coupling rests on a key nothing proved.
+    expect(
+      edgeProvenanceKind(bindingWith("api", "web", { from_value: ADMITTED, to_value: REFUSED })),
+    ).toBe("config-unresolved");
+  });
+
+  it("counts an ABSENT value as `unstated`, never as `literal` (CR-132 AC2)", () => {
+    // The type says required; the wire is not runtime-validated, so this shape
+    // reaches the model in practice — from an older server, or a proxy that
+    // dropped a field. Defaulting it to `literal` would report an unread field as
+    // observed evidence.
+    const missingFrom = { ...binding("api", "web") } as Partial<BridgeEdge>;
+    delete missingFrom.from_value;
+    expect(edgeProvenanceKind(missingFrom as BridgeEdge)).toBe("unstated");
+
+    // …and an end whose token this build does not know is `unstated` too, not
+    // silently the best case.
+    const unknown = bindingWith("api", "web", {
+      to_value: { provenance: "some-later-arm" } as unknown as ValueProvenance,
+    });
+    expect(edgeProvenanceKind(unknown)).toBe("unstated");
+  });
+
+  it("states a mixed link as a BREAKDOWN, never as one kind (CR-132 AC1)", () => {
+    const map = buildServiceMap(
+      [member("api"), member("web")],
+      [
+        binding("api", "web", "route", "a"),
+        bindingWith("api", "web", { to_value: ADMITTED }, "route", "b"),
+      ],
+    );
+    expect(map.links).toHaveLength(1);
+    expect(map.links[0].count).toBe(2);
+    expect(map.links[0].provenance).toEqual({
+      literal: 1,
+      "config-bound": 1,
+      "config-unresolved": 0,
+      unstated: 0,
+    });
+    // The four kinds always sum to the weight, so neither can drift from the other.
+    const p = map.links[0].provenance;
+    expect(p.literal + p["config-bound"] + p["config-unresolved"] + p.unstated).toBe(
+      map.links[0].count,
+    );
+    expect(hasNonLiteralBinding(map.links[0])).toBe(true);
+  });
+
+  it("marks the flat canvas line as admitted, keeping `edge_type` the relation arm", () => {
+    const map = buildServiceMap(
+      [member("api"), member("web")],
+      [bindingWith("api", "web", { from_value: ADMITTED })],
+    );
+    expect(map.loaded.edges).toEqual([
+      { source: "service:api", target: "service:web", edge_type: "route", admitted: true },
+    ]);
+  });
+
+  it("leaves a literal-only line's canvas edge object untouched (CR-132 AC6)", () => {
+    // Not `admitted: false` — an ABSENT slot, so the object is byte-identical to
+    // the one the pre-S-419 model produced.
+    const map = buildServiceMap([member("api"), member("web")], [binding("api", "web")]);
+    expect(map.loaded.edges).toEqual([
+      { source: "service:api", target: "service:web", edge_type: "route" },
+    ]);
+    expect("admitted" in map.loaded.edges[0]).toBe(false);
+    expect(hasNonLiteralBinding(map.links[0])).toBe(false);
+  });
+
+  it("carries the marker onto the TOPIC HOPS that replace a flat broker line (AC5)", () => {
+    const map = buildServiceMap(
+      [member("api"), member("billing")],
+      [bindingWith("api", "billing", { from_value: ADMITTED }, "broker-topic")],
+      [topics("api", ["orders", 1, 0]), topics("billing", ["orders", 0, 1])],
+    );
+    // The flat line is suppressed — the hops are what is drawn…
+    expect(map.loaded.edges.map((e) => e.edge_type).sort()).toEqual(["publishes", "subscribes"]);
+    // …so both of them must carry the provenance the flat line would have had.
+    expect(map.loaded.edges.every((e) => e.admitted === true)).toBe(true);
+  });
+
+  it("does NOT mark a topic hop whose backing binding was observed in code", () => {
+    const map = buildServiceMap(
+      [member("api"), member("billing")],
+      [binding("api", "billing", "broker-topic")],
+      [topics("api", ["orders", 1, 0]), topics("billing", ["orders", 0, 1])],
+    );
+    expect(map.loaded.edges.some((e) => "admitted" in e)).toBe(false);
+  });
+
+  it("does NOT mark a topic hop from a broker binding pointing the OTHER way", () => {
+    // The pair key is ORDERED. `billing → api` is a different coupling from
+    // `api → billing`, and marking the api→orders→billing hops from it would
+    // attribute one coupling's provenance to another — the near miss a
+    // direction-blind membership test admits.
+    const map = buildServiceMap(
+      [member("api"), member("billing")],
+      [bindingWith("billing", "api", { from_value: ADMITTED }, "broker-topic")],
+      [topics("api", ["orders", 1, 0]), topics("billing", ["orders", 0, 1])],
+    );
+    expect(map.loaded.edges.map((e) => e.edge_type).sort()).toEqual([
+      "broker-topic",
+      "publishes",
+      "subscribes",
+    ]);
+    // The hops carry no marker; only the flat billing → api line it really is.
+    const hops = map.loaded.edges.filter((e) => e.edge_type !== "broker-topic");
+    expect(hops.some((e) => "admitted" in e)).toBe(false);
+  });
+
+  it("keeps the kind roster and the label map in step", () => {
+    // Three declarations name the four kinds (the roster, the label map, the
+    // zeroed breakdown). The compiler catches a MISSING one; nothing catches a
+    // roster that has drifted out of order or dropped an entry, and a kind
+    // missing from the roster renders as nothing at all in the table cell.
+    expect([...LINK_PROVENANCE_KINDS].sort()).toEqual(
+      Object.keys(LINK_PROVENANCE_LABEL).sort(),
+    );
+    const map = buildServiceMap([member("api"), member("web")], [binding("api", "web")]);
+    expect(Object.keys(map.links[0].provenance).sort()).toEqual([...LINK_PROVENANCE_KINDS].sort());
+  });
+
+  it("lists one evidence row PER OVERLAY, per end, naming key, sources and profiles", () => {
+    const twoOverlays: ValueProvenance = {
+      provenance: "config-bound",
+      bound: [
+        {
+          key: "orders.topic",
+          source: "properties",
+          values: [
+            { value: "orders-v1", profiles: ["docker"], unprofiled: false, sources: ["a.yml"] },
+            { value: "orders-v2", profiles: ["k8s"], unprofiled: true, sources: ["b.yml"] },
+          ],
+        },
+      ],
+    };
+    const map = buildServiceMap(
+      [member("api"), member("web")],
+      [bindingWith("api", "web", { from_value: twoOverlays, to_value: REFUSED })],
+    );
+    expect(linkEvidence(map.links[0])).toEqual([
+      {
+        end: "consumer",
+        member: "api",
+        key: "orders.topic",
+        value: "orders-v1",
+        profiles: ["docker"],
+        unprofiled: false,
+        sources: ["a.yml"],
+        refusal: null,
+      },
+      {
+        end: "consumer",
+        member: "api",
+        key: "orders.topic",
+        value: "orders-v2",
+        profiles: ["k8s"],
+        unprofiled: true,
+        sources: ["b.yml"],
+        refusal: null,
+      },
+      {
+        end: "provider",
+        member: "web",
+        key: "orders.topic",
+        value: null,
+        profiles: [],
+        unprofiled: false,
+        sources: [],
+        refusal: "missing-key",
+      },
+    ]);
+  });
+
+  it("yields every key's evidence when one target names several (never only the first)", () => {
+    const twoKeys: ValueProvenance = {
+      provenance: "config-bound",
+      bound: [boundKey("svc.host", "http://billing"), boundKey("svc.path", "/orders")],
+    };
+    const map = buildServiceMap(
+      [member("api"), member("web")],
+      [bindingWith("api", "web", { from_value: twoKeys })],
+    );
+    expect(linkEvidence(map.links[0]).map((r) => r.key)).toEqual(["svc.host", "svc.path"]);
+  });
+
+  it("yields NO evidence rows for a literal or unstated end — absence is not a claim", () => {
+    const map = buildServiceMap([member("api"), member("web")], [binding("api", "web")]);
+    expect(linkEvidence(map.links[0])).toEqual([]);
   });
 });
