@@ -376,9 +376,7 @@ PAIRED before/after taken with two binaries on one day, and folding it into a
 BEFORE column would merge it with the 2026-09-13 index generation, which is a
 different comparison entirely.  Two axes moved between those dates — the index
 (the admission figure) and the binary (the bridge figure) — and a single BEFORE
-column cannot carry both without implying they are one movement.  The next story
-with business in this file should collapse (a) into the header's convention and
-leave (b) as a section; this one had no business rewriting a delivered record.
+column cannot carry both without implying they are one movement.
 
 Measured  2026-09-18
 Corpus    ~/source/pec-services — 84 members declared, 84 read, covers_all = true,
@@ -515,15 +513,17 @@ pin below was already written to avoid; it is generalised here.
 
   This harness still indexes nothing and enrols nothing.  The 2026-09-17
   re-enrolment at 1.4.12 was a separate, human-gated operation and is the reason
-  the admission figure moved.
+  the admission figure in (a) moved.
 
-  Stated because it would otherwise be discovered as a surprise: running
-  `logos workspace status` with the AFTER binary re-synced every member store
-  (last_sync_at and db_size_bytes both moved), because the binary's index
-  generation differs from the enrolled one.  That sync changed NO figure — the
-  BEFORE and AFTER coverage payloads are byte-identical on every counter — but it
-  means the estate's stores now carry a sprint-71 sync stamp, and a later reader
-  comparing stamps should not read that as a re-index of content.
+  One side effect of the measurement is recorded once, and not here: reading the
+  estate with a binary whose index generation differs from the enrolled one
+  re-syncs every member store without changing any figure.  That is a fact about
+  the ESTATE rather than about either harness, so it lives in the block that owns
+  the estate's generation —  the `read_only_proof` field of
+  coverage_headline_baseline/ws-coverage-2026-09-09-post-cr120.json, under its
+  [APPENDED 2026-09-18] note.  Recorded in one place on purpose: a fact about the
+  estate copied into two harnesses' artifacts is a fact that will rot in one of
+  them.
 
 
 WHAT A READER SHOULD NOT CONCLUDE FROM THIS SECTION
