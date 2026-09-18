@@ -544,7 +544,11 @@ impl ProviderCandidates {
     ///
     /// `total` is read **before** the truncation, so the remainder is the real
     /// one and not a count of what happened to survive.
-    fn new(disposition: ProviderDisposition, mut providers: Vec<BridgeEndpoint>) -> Self {
+    fn new(
+        disposition: ProviderDisposition,
+        discipline: MatchDiscipline,
+        mut providers: Vec<BridgeEndpoint>,
+    ) -> Self {
         let total = providers.len() as u64;
         providers.truncate(CANDIDATE_LIMIT);
         let omitted = total - providers.len() as u64;
@@ -553,7 +557,7 @@ impl ProviderCandidates {
             providers,
             total,
             omitted,
-            summary: summarize_candidates(disposition, total, omitted),
+            summary: summarize_candidates(disposition, discipline, total, omitted),
         }
     }
 }
@@ -566,7 +570,12 @@ impl ProviderCandidates {
 ///
 /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-fn summarize_candidates(disposition: ProviderDisposition, total: u64, omitted: u64) -> String {
+fn summarize_candidates(
+    disposition: ProviderDisposition,
+    discipline: MatchDiscipline,
+    total: u64,
+    omitted: u64,
+) -> String {
     // `listed` is not a third independent fact — it is `total - omitted`, and taking
     // it as a parameter would create a consistency obligation nothing enforces.
     let extent = if omitted == 0 {
@@ -579,8 +588,18 @@ fn summarize_candidates(disposition: ProviderDisposition, total: u64, omitted: u
     // arity 1 — the idiom the rest of the codebase uses for the same reason.
     let plural = if total == 1 { "" } else { "s" };
     match disposition {
+        // **Why** several providers are all bound is the discipline's answer,
+        // not the disposition's. Under fan-out one publish reaches every listed
+        // subscriber. Under exactly-one — reachable since S-420, when a target's
+        // committed overlays each bind their own sole provider — there is no
+        // fan-out at all, and saying so on a `route` row would describe the
+        // wrong mechanism to the reader the line exists for ([NFR-CC-04]).
         ProviderDisposition::BoundTo => {
-            format!("{total} bound provider{plural} (fan-out), {extent}")
+            let breadth = match discipline {
+                MatchDiscipline::FanOut => "fan-out",
+                MatchDiscipline::ExactlyOne => "one per committed composition",
+            };
+            format!("{total} bound provider{plural} ({breadth}), {extent}")
         }
         // A tie is 2-or-more by construction (the sole-candidate and empty-bucket
         // cases are intercepted before it), so this arm never renders arity 1 —
@@ -608,9 +627,17 @@ enum ProviderEvidence {
     /// [`to`](ReferenceCoverage::to), and the identical `(member, symbol)` pair
     /// `xservice route-providers` reports for this reference.
     Sole(BridgeEndpoint),
-    /// Several providers, all bound (fan-out) or all tied (ambiguous) — the row's
+    /// Several providers, all bound or all tied (ambiguous) — the row's
     /// [`candidates`](ReferenceCoverage::candidates).
-    Several(ProviderDisposition, Vec<BridgeEndpoint>),
+    ///
+    /// The [`MatchDiscipline`] is carried because it is what a bound set
+    /// **means**: under fan-out one publish reaches every listed subscriber,
+    /// under exactly-one each listed provider was bound by its own committed
+    /// composition. Only the summary prose reads it — the wire's
+    /// [`ProviderDisposition`] is unchanged — but reading it off the row's
+    /// relation string instead would be a reverse lookup where the producer
+    /// already had the fact.
+    Several(ProviderDisposition, MatchDiscipline, Vec<BridgeEndpoint>),
 }
 
 impl ProviderEvidence {
@@ -624,7 +651,7 @@ impl ProviderEvidence {
         match self {
             Self::Unnamed => &[],
             Self::Sole(endpoint) => std::slice::from_ref(endpoint),
-            Self::Several(_, endpoints) => endpoints,
+            Self::Several(_, _, endpoints) => endpoints,
         }
     }
 }
@@ -786,8 +813,8 @@ impl ReferenceCoverage {
         let (to, candidates) = match provenance.providers {
             ProviderEvidence::Unnamed => (None, None),
             ProviderEvidence::Sole(endpoint) => (Some(endpoint), None),
-            ProviderEvidence::Several(disposition, endpoints) => {
-                (None, Some(ProviderCandidates::new(disposition, endpoints)))
+            ProviderEvidence::Several(disposition, discipline, endpoints) => {
+                (None, Some(ProviderCandidates::new(disposition, discipline, endpoints)))
             }
         };
         // The three row invariants, at the one place all three are decidable:
@@ -1791,7 +1818,15 @@ fn decide_over_candidates(
         return (
             Some((
                 CoverageState::Bound,
-                ProviderEvidence::Several(ProviderDisposition::BoundTo, endpoints),
+                ProviderEvidence::Several(
+                    ProviderDisposition::BoundTo,
+                    if fan_out {
+                        MatchDiscipline::FanOut
+                    } else {
+                        MatchDiscipline::ExactlyOne
+                    },
+                    endpoints,
+                ),
             )),
             keyed,
         );
@@ -2768,6 +2803,7 @@ fn tier(
                 },
                 ProviderEvidence::Several(
                     ProviderDisposition::TiedBetween,
+                    MatchDiscipline::ExactlyOne,
                     candidates.iter().map(|c| c.endpoint.clone()).collect(),
                 ),
             )),
@@ -2789,7 +2825,11 @@ fn tier(
                 .collect();
             (!bound.is_empty()).then_some((
                 CoverageState::Bound,
-                ProviderEvidence::Several(ProviderDisposition::BoundTo, bound),
+                ProviderEvidence::Several(
+                    ProviderDisposition::BoundTo,
+                    MatchDiscipline::FanOut,
+                    bound,
+                ),
             ))
         }
     }
@@ -5010,6 +5050,11 @@ mod tests {
         let named = row.candidates.as_ref().expect("a bound set is named");
         assert_eq!(named.disposition, ProviderDisposition::BoundTo);
         assert_eq!(
+            named.summary, "2 bound providers (one per committed composition), all listed",
+            "an exactly-one row's bound set is NOT a fan-out, and the line a reader \
+             sees must not say it is"
+        );
+        assert_eq!(
             named
                 .providers
                 .iter()
@@ -5034,6 +5079,44 @@ mod tests {
             vec!["local show_a".to_string(), "local show_b".to_string()],
             "the set of edge targets equals the row's endpoints"
         );
+    }
+
+    /// **The other half of the union rule: one bound provider keeps the `Sole`
+    /// shape.** Review found the `endpoints.len() > 1` gate undefended — a
+    /// mutation to `!endpoints.is_empty()` moved `to` into `candidates` on every
+    /// configuration-bound row in the workspace and no test in the suite
+    /// noticed, because the no-drift walk reads `to` and `candidates` through
+    /// one chained iterator and cannot tell the two shapes apart.
+    #[test]
+    fn one_bound_provider_stays_a_sole_to_not_a_one_element_set() {
+        reset();
+        set_member("web", vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
+        commit_config(
+            "web",
+            "orders.base",
+            &[
+                ("application.yml", None, "/orders"),
+                ("application-p.yml", Some("p"), "/orders-legacy"),
+            ],
+        );
+        // Only ONE of the two compositions has a provider, so the row is bound to
+        // exactly one — the shape that must not become a candidate set.
+        set_member("orders", vec![route("GET /orders/{oid}", "local show")]);
+
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
+        let row = &cov.references[0];
+        assert_eq!(row.state, CoverageState::Bound);
+        assert_eq!(
+            row.to.as_ref().map(|e| e.symbol.as_str()),
+            Some("local show"),
+            "a sole bound provider is the row's `to`: {row:?}"
+        );
+        assert!(
+            row.candidates.is_none(),
+            "…and it is NOT also a one-element candidate set: {row:?}"
+        );
+        assert_eq!(cov.resolved_cross_service_edges, 1);
     }
 
     /// [CR-133] AC4 / [FR-WS-08] AC4, restated against the union above: **within**
@@ -8269,6 +8352,7 @@ mod tests {
         };
         let tied = ProviderCandidates::new(
             ProviderDisposition::TiedBetween,
+            MatchDiscipline::ExactlyOne,
             vec![endpoint("a", "local a"), endpoint("b", "local b")],
         );
         assert_eq!(tied.total, 2, "the fixture must carry a set worth over-counting");
