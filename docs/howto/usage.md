@@ -506,6 +506,21 @@ The **Dashboard is served at the root `/`**; the legacy `/overview` path that
 older bookmarks point at **redirects to `/`** (a history `replaceState`, so it
 leaves no extra back-button entry). The browser tab carries the Logos **favicon**,
 an embedded same-origin SVG served from the bundle root.
+
+**The app header reports graph state, on every view.** It renders
+`rev <graph_revision> · <node_count> nodes · <edge_count> edges`, thousands-separated,
+read from `GET /api/v1/status` — a thin projection of the same `status` read-model
+`logos status` prints, so the figures agree with the CLI for the same project. This
+replaced a green "Read-model connected" badge that was decided by a loopback request to
+the process answering it, and so could only ever display success; it also cost ~993 KB per
+navigation to set one boolean, against the ~831-byte block actually worth rendering.
+**Refresh is navigation-driven and nothing else** — there is no timer and no polling, so
+editing a file and letting the watcher sync leaves the figures unchanged until you next
+navigate, which then shows the advanced `graph_revision`. A read fault renders a red
+"API unavailable" badge *instead of* the figures, and an unindexed project renders an
+honest not-indexed state — never a zero, never a blank, and never the last-read figures
+presented as current. In workspace mode the figures describe the **selected** member and
+re-read on member switch.
 Each read view's figures trace to a read-model, and an empty store renders an
 honest empty state naming the producing command:
 
@@ -521,7 +536,17 @@ exposes the cross-service surfaces: an **app-level service map** — the ECharts
 graph canvas drawing services as nodes and cross-service bindings as edges,
 including first-class **topic hops** (`A → topic → B`) once broker coupling is
 promoted — a **cross-service coverage dashboard** (bound / ambiguous /
-unbound-with-reasons), and a cross-service impact view. In a plain single repo
+unbound-with-reasons), and a cross-service impact view. Since logos 1.4.13 every
+service-map link also carries its **provenance**, so an edge admitted from committed
+configuration is never drawn as though it had been observed at the call site: a link with
+any non-literal binding renders a distinct stroke while its relation colour stays the
+relation arm, the accessible table gains a **Provenance** column giving the per-kind
+breakdown (`literal` / `config-bound` / `config-unresolved` / `unstated`) rather than
+labelling an aggregated link as a single kind, and the edge detail names the evidence —
+for each `config-bound` end the key, its defining source paths and the profile set, one row
+per overlay; for a `config-unresolved` end its keys and the refusal. The legend's
+provenance section renders only when at least one link is non-literal, so a workspace with
+no admitted binding looks exactly as it did before (S-419, CR-132). In a plain single repo
 (no manifest) **no selector is rendered and the UI is byte-for-byte unchanged**;
 `--standalone` forces single-repo focus even under a workspace parent. Workspace
 read-models are served under `/api/v1/workspace/*`; the single-root `/api/v1/*`
@@ -574,7 +599,8 @@ optional `depth`), `/api/v1/precedent` (`target=<symbol|path>`, optional
 `limit`), `/api/v1/branch-overlap` (repeatable `ref=<git-ref>`, optional `base`
 and `merge`), `/api/v1/node`,
 `/api/v1/search`, `/api/v1/architecture`, `/api/v1/gaps`, `/api/v1/files`,
-`/api/v1/coverage`, `/api/v1/wiki`, `/api/v1/wiki/nav`,
+`/api/v1/coverage`, `/api/v1/status` (the index-health projection the app
+header reads — see below), `/api/v1/wiki`, `/api/v1/wiki/nav`,
 `/api/v1/wiki/search`, `/api/v1/wiki/page/*slug`, `/api/v1/wiki/asset/*path`
 (same-origin, read-only, path-sandboxed doc-image serving — CR-064), and
 `/api/v1/config`.

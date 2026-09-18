@@ -657,7 +657,19 @@ Aggregated local telemetry: calls per tool split by surface (`cli`/`mcp`/`web`/
 estimates. `--json` also carries `activity_by_day` (a per-UTC-day activity series
 over the window, oldest-first) and `calls_by_origin` (a per-`origin` usage
 breakdown, where `origin` is a worktree's branch name or `"main"`). Reads only
-`telemetry.db` — works without an index. **Self-referential reads are excluded
+`telemetry.db` — works without an index.
+
+Since logos 1.4.13 every event also carries an opaque **per-process
+`session_id`**, recorded independently of `surface` and `origin` and computed
+once at init, never on the hot path. It exists because `origin` is a *branch*
+name: without it the store can count calls but not sessions — every process in
+one worktree collapses into a single bucket and all primary-checkout work
+collapses into `main`, which is why a question as basic as "what fraction of
+sessions made at least one navigation call?" was previously unanswerable. The
+value carries **no user, machine or account identity**. It arrives via a
+forward-only v3 schema migration that applies cleanly over an existing v2
+`telemetry.db`; rows written before the migration read as **unattributed**
+rather than being folded into an arbitrary session (S-307, CR-091). **Self-referential reads are excluded
 from every figure** — totals, per-tool, daily series, origin split, latency, and
 the estimate — because a request whose subject is Logos's own state (`stats`
 reading the telemetry store, the shell's `status` readout) measures the
@@ -913,10 +925,17 @@ HTTP client-call arm uses, and the resolved topic is keyed by its **committed
 configured value** rather than the placeholder as written — so a subscribe
 declared `${spring.kafka.topics.x}` and a Streams publish resolving to the same
 committed value bind across members even though their source text differs.
-Where no committed source defines the key, or the operand does not resolve,
-the site carries the existing refusal vocabulary (`topic-not-literal`,
-`config-key-missing`, `config-placeholder-value`) rather than a fabricated
-topic. **Migration
+Since logos 1.4.13 a topic operand that is a **parameter of its enclosing
+method** also resolves, through that method's callers — name-, arity- and
+receiver-aware, positionally, within the build module, over `src/main` call
+sites, up to **two frames**, carrying provenance that names the hop chain. It
+**refuses** rather than guesses on a third frame, an out-of-module caller, two
+callers passing different keys, a bare variable, or a varargs/explicit-receiver
+signature; a test-tree call site (a Mockito `any()`) neither admits nor vetoes
+(S-417, FR-WS-26). Where no committed source defines the key, or the operand
+does not resolve, the site carries the existing refusal vocabulary
+(`topic-not-literal`, `config-key-missing`, `config-placeholder-value`) rather
+than a fabricated topic. **Migration
 17 is forward-only and irreversible** — a store opened by a Sprint-57-or-later
 binary advances `PRAGMA user_version` 16 → 17 and cannot be reopened by an older
 binary.
@@ -1578,6 +1597,26 @@ and the exit is **1**, not 4. Only the genuinely empty case reports 4.
 
 Pass `--allow-no-rules` to restore exit 0 for callers that have deliberately
 authored no contract yet.
+
+**Since logos 1.4.13 a `check` run leaves a record that it happened.** Before
+that the only trace a run left was its violation rows, which are replaced
+wholesale each run — so a run that found **nothing** left nothing, and a clean
+project was byte-for-byte indistinguishable from one that had never been
+checked. `check` now records a **singleton marker** (`ran_at`, `commit_sha`
+nullable, `violation_count`) in the *same transaction* that replaces the
+violations, so the two can never disagree about which run they describe: a run
+that is interrupted leaves neither a marker without its rows nor rows without a
+marker. A store that has never been checked has **no** marker at all, and N runs
+leave exactly one row — the singleton is enforced by the schema, not by
+convention.
+
+`commit_sha` records `HEAD` **at write time** and means nothing more — it
+answers "has the tree moved since this ran", **not** "which commit introduced
+these findings"; a tree with no resolvable `HEAD` stores it NULL rather than a
+placeholder. Alongside the marker, `check --json` now carries `created_at` on
+each violation row — the per-row timestamp that has been stored since the
+governance engine was built but was never read back — added additively, with no
+existing field renamed or removed, and exit codes unchanged (S-313, CR-096).
 
 ### `gate [--save] [--threshold <N>] [--label <L>]`
 
