@@ -36,11 +36,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{BridgeNamespace, BridgeRole, MatchDiscipline, NodeKind};
-use crate::resolve::binding::{Provenance, Resolver, ValueRefusal};
+use crate::resolve::binding::{Provenance, ValueRefusal};
 use crate::resolve::http_client_call::ClientCallRefusal;
 
 use super::bridge::{
-    bucket_candidates, classify, config_bound_keys, consumer_portable_key, index_provider,
+    bucket_candidates, classify, consumer_portable_key, index_provider,
     member_corpora, read_members, sort_buckets, BridgeEndpoint, BridgeIntake, MemberContracts,
     MemberCorpus, PortableKey, ProviderIndex, Role,
 };
@@ -468,11 +468,22 @@ const CANDIDATE_LIMIT: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderDisposition {
-    /// **Every** listed provider is bound — the fan-out discipline's shape
-    /// ([FR-WS-10]): one publish reaches every cross-member subscriber, so a
-    /// bound broker row names a *set* rather than a single
-    /// [`to`](ReferenceCoverage::to).
+    /// **Every** listed provider is bound, and the bridge holds an edge to each
+    /// of them.
     ///
+    /// The fan-out discipline's shape ([FR-WS-10]): one publish reaches every
+    /// cross-member subscriber, so a bound broker row names a *set* rather than a
+    /// single [`to`](ReferenceCoverage::to).
+    ///
+    /// **Not the fan-out discipline's alone, since S-420** ([CR-133]): an
+    /// exactly-one row whose overlays compose its target several ways names every
+    /// provider those compositions bound — one each, unambiguously — because the
+    /// bridge draws one edge per composition and a row naming the first would sit
+    /// beside two edges. The union is across compositions, never within one: a
+    /// single composition matching two providers is
+    /// [`TiedBetween`](Self::TiedBetween) and binds nothing.
+    ///
+    /// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
     /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
     BoundTo,
     /// The listed providers **tied** at the exactly-one test: not one of them is
@@ -533,7 +544,11 @@ impl ProviderCandidates {
     ///
     /// `total` is read **before** the truncation, so the remainder is the real
     /// one and not a count of what happened to survive.
-    fn new(disposition: ProviderDisposition, mut providers: Vec<BridgeEndpoint>) -> Self {
+    fn new(
+        disposition: ProviderDisposition,
+        discipline: MatchDiscipline,
+        mut providers: Vec<BridgeEndpoint>,
+    ) -> Self {
         let total = providers.len() as u64;
         providers.truncate(CANDIDATE_LIMIT);
         let omitted = total - providers.len() as u64;
@@ -542,7 +557,7 @@ impl ProviderCandidates {
             providers,
             total,
             omitted,
-            summary: summarize_candidates(disposition, total, omitted),
+            summary: summarize_candidates(disposition, discipline, total, omitted),
         }
     }
 }
@@ -555,7 +570,12 @@ impl ProviderCandidates {
 ///
 /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-fn summarize_candidates(disposition: ProviderDisposition, total: u64, omitted: u64) -> String {
+fn summarize_candidates(
+    disposition: ProviderDisposition,
+    discipline: MatchDiscipline,
+    total: u64,
+    omitted: u64,
+) -> String {
     // `listed` is not a third independent fact — it is `total - omitted`, and taking
     // it as a parameter would create a consistency obligation nothing enforces.
     let extent = if omitted == 0 {
@@ -568,8 +588,18 @@ fn summarize_candidates(disposition: ProviderDisposition, total: u64, omitted: u
     // arity 1 — the idiom the rest of the codebase uses for the same reason.
     let plural = if total == 1 { "" } else { "s" };
     match disposition {
+        // **Why** several providers are all bound is the discipline's answer,
+        // not the disposition's. Under fan-out one publish reaches every listed
+        // subscriber. Under exactly-one — reachable since S-420, when a target's
+        // committed overlays each bind their own sole provider — there is no
+        // fan-out at all, and saying so on a `route` row would describe the
+        // wrong mechanism to the reader the line exists for ([NFR-CC-04]).
         ProviderDisposition::BoundTo => {
-            format!("{total} bound provider{plural} (fan-out), {extent}")
+            let breadth = match discipline {
+                MatchDiscipline::FanOut => "fan-out",
+                MatchDiscipline::ExactlyOne => "one per committed composition",
+            };
+            format!("{total} bound provider{plural} ({breadth}), {extent}")
         }
         // A tie is 2-or-more by construction (the sole-candidate and empty-bucket
         // cases are intercepted before it), so this arm never renders arity 1 —
@@ -597,9 +627,17 @@ enum ProviderEvidence {
     /// [`to`](ReferenceCoverage::to), and the identical `(member, symbol)` pair
     /// `xservice route-providers` reports for this reference.
     Sole(BridgeEndpoint),
-    /// Several providers, all bound (fan-out) or all tied (ambiguous) — the row's
+    /// Several providers, all bound or all tied (ambiguous) — the row's
     /// [`candidates`](ReferenceCoverage::candidates).
-    Several(ProviderDisposition, Vec<BridgeEndpoint>),
+    ///
+    /// The [`MatchDiscipline`] is carried because it is what a bound set
+    /// **means**: under fan-out one publish reaches every listed subscriber,
+    /// under exactly-one each listed provider was bound by its own committed
+    /// composition. Only the summary prose reads it — the wire's
+    /// [`ProviderDisposition`] is unchanged — but reading it off the row's
+    /// relation string instead would be a reverse lookup where the producer
+    /// already had the fact.
+    Several(ProviderDisposition, MatchDiscipline, Vec<BridgeEndpoint>),
 }
 
 impl ProviderEvidence {
@@ -613,7 +651,7 @@ impl ProviderEvidence {
         match self {
             Self::Unnamed => &[],
             Self::Sole(endpoint) => std::slice::from_ref(endpoint),
-            Self::Several(_, endpoints) => endpoints,
+            Self::Several(_, _, endpoints) => endpoints,
         }
     }
 }
@@ -775,8 +813,8 @@ impl ReferenceCoverage {
         let (to, candidates) = match provenance.providers {
             ProviderEvidence::Unnamed => (None, None),
             ProviderEvidence::Sole(endpoint) => (Some(endpoint), None),
-            ProviderEvidence::Several(disposition, endpoints) => {
-                (None, Some(ProviderCandidates::new(disposition, endpoints)))
+            ProviderEvidence::Several(disposition, discipline, endpoints) => {
+                (None, Some(ProviderCandidates::new(disposition, discipline, endpoints)))
             }
         };
         // The three row invariants, at the one place all three are decidable:
@@ -1359,9 +1397,7 @@ where
     let LedgerSplit {
         consumers: inv_consumers,
         unkeyable_providers,
-        corpora,
     } = split_ledger_refs(answer, &mut providers);
-    let no_corpus = MemberCorpus::new();
 
     sort_buckets(&mut providers);
 
@@ -1424,7 +1460,6 @@ where
     // it under `path-not-composed` — a reason that means *the template would not
     // normalize*, which is exactly what is not yet known about it.
     for (member, consumer, identity) in inv_consumers {
-        let corpus = corpora.get(&member).unwrap_or(&no_corpus);
         // Built once for all three branches below — the endpoint is the same
         // `(member, symbol)` pair whichever one the row takes.
         let from = BridgeEndpoint { member: member.clone(), symbol: consumer.symbol.clone() };
@@ -1445,15 +1480,26 @@ where
         // recorder rather than a flag on the HTTP one — the two reach the same
         // `tier` over the same provider index, and differ only where the
         // requirements differ.
-        if let Some(identity) = identity {
-            record_broker(&mut tally, &providers, from, &consumer, identity);
-            continue;
-        }
-        // A configuration-bound target: resolve it, then classify every
-        // composition its committed profiles prove.
-        if let Some(keys) = config_bound_keys(&consumer) {
-            record_config_bound(&mut tally, &providers, from, &consumer, &keys, corpus);
-            continue;
+        //
+        // Both carried identities are the walk's own resolution, handed on rather
+        // than recomputed: one operand, one resolution, across the function
+        // boundary too ([`arm_identity`]'s contract).
+        match identity {
+            Some(ArmIdentity::Broker { keys, value }) => {
+                record_broker(&mut tally, &providers, from, &consumer, (keys, value));
+                continue;
+            }
+            // A configuration-bound HTTP target, resolved in the walk through the
+            // same [`super::bridge::identify`] the bridge keys its consumers with
+            // (S-420, [CR-133]) — so a target the bridge draws an edge for is a
+            // row this tier reports bound, and neither tier can classify it alone.
+            Some(ArmIdentity::Http(identity)) => {
+                record_config_bound(&mut tally, &providers, from, &consumer, identity);
+                continue;
+            }
+            // Every other arm keys on its stored target, which the branch below
+            // re-derives for free.
+            Some(ArmIdentity::Verbatim { .. }) | None => {}
         }
 
         let relation = arm_relation(consumer.relation);
@@ -1539,11 +1585,18 @@ where
 /// provider; it carries `config-bound` provenance either way, so a reader can
 /// always name the keys, the defining sources and the profile sets behind it.
 ///
-/// Takes the member's `corpus` and owns its own resolution: this arm resolves the
-/// operand exactly once, here, and nothing upstream has resolved it. (The broker
-/// arm is the opposite case — the ledger walk must resolve *its* operands to
-/// de-duplicate them, so [`record_broker`] is handed the result instead of the
-/// corpus. The asymmetry is the two walks', not a style choice.)
+/// Takes the [`HttpIdentity`](super::bridge::HttpIdentity) the ledger walk
+/// already resolved for this row — the same value
+/// [`super::bridge::compute_edges`] keys its consumer on — rather than the
+/// member's corpus. Until S-420 this function owned the arm's only resolution,
+/// and the bridge keyed the same target on its raw ledger text; taking the
+/// walk's result is what makes the two tiers one classifier ([ADR-52],
+/// [CR-133]), and it keeps one operand to one resolution, which is
+/// [`arm_identity`]'s stated contract. The broker arm has always arrived this
+/// way, for the narrower reason that its walk had to resolve the operand to
+/// de-duplicate it.
+///
+/// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
 ///
 /// **One row per reference, not one per profile.** A call site is one site
 /// however many overlays its key has, and emitting a row per profile would
@@ -1588,67 +1641,55 @@ fn record_config_bound(
     providers: &ProviderIndex,
     from: BridgeEndpoint,
     consumer: &super::bridge::InvocationRef,
-    keys: &[String],
-    corpus: &MemberCorpus,
+    identity: super::bridge::HttpIdentity,
 ) {
     let relation = arm_relation(consumer.relation);
-    let resolved = Resolver { corpus, module: "" }
-        .resolve_template(&consumer.target)
-        // `config_bound_keys` already said the target carries a placeholder, so
-        // `None` here is unreachable; it is mapped to the same refusal the empty
-        // corpus produces rather than unwrapped, because a panic in a read-model
-        // is never the right answer to a disagreement between two scans.
-        .unwrap_or(Err(ValueRefusal::MissingKey));
-    let resolved = match resolved {
-        Ok(resolved) => resolved,
-        Err(refusal) => {
-            tally.record(
-                relation,
-                from,
-                CoverageState::Unbound {
-                    reason: UnboundReason::from(refusal),
-                },
-                RowProvenance {
-                    // Nothing was admitted, so there is no provider to name.
-                    providers: ProviderEvidence::Unnamed,
-                    intake: BridgeIntake::Invocation,
-                    value: Provenance::ConfigUnresolved {
-                        keys: keys.to_vec(),
-                        refusal,
-                    },
-                },
-            );
-            return;
-        }
-    };
+    let super::bridge::HttpIdentity {
+        keyed: candidates,
+        composed,
+        value,
+        named_keys: _,
+    } = identity;
+
+    // The committed sources proved nothing. No key is admitted and none is
+    // fabricated ([NFR-RA-05]); the refusal rides on the row, naming the keys and
+    // the existing reason, so it never reads as an ordinary literal. The keys and
+    // the reason both come off the provenance [`super::bridge::identify`] built,
+    // rather than being re-derived here from a second resolution.
+    if let Provenance::ConfigUnresolved { refusal, .. } = value {
+        tally.record(
+            relation,
+            from,
+            CoverageState::Unbound {
+                reason: UnboundReason::from(refusal),
+            },
+            RowProvenance {
+                // Nothing was admitted, so there is no provider to name.
+                providers: ProviderEvidence::Unnamed,
+                intake: BridgeIntake::Invocation,
+                value,
+            },
+        );
+        return;
+    }
 
     // EVERY key the target names travels with the row, not just the first.
-    // `ResolvedTemplate::bound` holds one entry per placeholder, and a
+    // [`Provenance::ConfigBound`] holds one entry per placeholder, and a
     // two-placeholder site has two keys, two source sets and two profile sets —
     // dropping the tail would leave the second key's evidence nameable from no
     // surface at all, which is the provenance [FR-WS-19] AC6 makes mandatory.
+    //
+    // The ROW carries the site's whole evidence, where an EDGE carries only the
+    // composition that produced it ([`super::bridge::HttpIdentity::value`] versus
+    // its `keyed`): one row per reference, however many overlays.
     let provenance = |providers| RowProvenance {
         providers,
         intake: BridgeIntake::Invocation,
-        value: Provenance::ConfigBound { bound: resolved.bound.clone() },
+        value: value.clone(),
     };
 
-    // Every committed composition is classified, and a **bound** one decides the
-    // row wherever it sits in the order. Taking the first composition that merely
-    // *classifies* would make a profile-divergent site bind or not bind by which
-    // overlay happened to sort first — the default-profile guess [ADR-64]
-    // refuses, wearing a different hat — and on the estate this targets the
-    // profiled overlays are the ones that vary hosts, so that ordering is
-    // arbitrary in exactly the cases that matter.
-    //
-    // Failing a bound one, the first classification stands, and "first" is
-    // deterministic because `candidates` is ordered by the composed template
-    // ([NFR-RA-06]).
     let (decided, keyed) = decide_over_candidates(
-        resolved
-            .candidates
-            .iter()
-            .map(|candidate| consumer_portable_key(consumer.relation, &candidate.template)),
+        candidates.iter().map(|(key, _)| Some(key.clone())),
         &from.member,
         providers,
     );
@@ -1661,10 +1702,9 @@ fn record_config_bound(
     // stored and wrong for a template composed afterwards — an absolute-URL
     // composition is `base-url-runtime`, the same word the arm gives an
     // absolute-URL literal.
-    let nothing_keyed = resolved
-        .candidates
+    let nothing_keyed = composed
         .first()
-        .and_then(|c| crate::resolve::http_client_call::composed_refusal(&c.template))
+        .and_then(|template| crate::resolve::http_client_call::composed_refusal(template))
         .map_or(UnboundReason::PathNotComposed, UnboundReason::from);
     record_decision(tally, relation, from, decided, keyed, nothing_keyed, provenance);
 }
@@ -1691,6 +1731,21 @@ fn record_config_bound(
 ///
 /// Failing a bound one, the first classification stands, and "first" is
 /// deterministic because every caller's candidate order is ([NFR-RA-06]).
+///
+/// # Several bound candidates name several providers, on either discipline
+///
+/// Until S-420 only a fan-out row unioned its bound providers, and an exactly-one
+/// row took the first bound composition alone. That was the drift the bridge's
+/// new HTTP arm would have reintroduced from the other side: two overlays
+/// composing one target two ways bind two sole providers and the bridge draws
+/// **two** edges, so a row naming one of them would sit beside two edges
+/// ([CR-133] AC3). The union is across compositions, never within one — a single
+/// composition matching two providers is ambiguous and binds nothing ([FR-WS-08]
+/// AC4) — so what is merged is always two unambiguous answers, never two halves
+/// of one ambiguity.
+///
+/// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
+/// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
 ///
 /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
@@ -1724,34 +1779,54 @@ fn decide_over_candidates(
         return (classified.into_iter().next(), keyed);
     };
 
-    // **A fan-out key unions its bound providers across every overlay.** One
-    // publish under two overlays reaches the subscribers of BOTH committed
-    // values, and the bridge emits an edge for each of them — so naming only the
-    // first overlay's subscribers would put a row claiming one bound provider
-    // beside two service-map edges, the tier drift [ADR-52] exists to prevent
-    // and the reconciliation `resolved_cross_service_edges` publishes.
+    // **A bound row names every provider its overlays bind, across compositions.**
+    // One publish under two overlays reaches the subscribers of BOTH committed
+    // values, and one HTTP target composed two ways under two profiles binds the
+    // sole provider of each — and the bridge emits an edge for every one of them.
+    // Naming only the first overlay's providers would put a row claiming one
+    // bound provider beside two service-map edges: the tier drift [ADR-52] exists
+    // to prevent, and the reconciliation `resolved_cross_service_edges` publishes.
     //
-    // **Exactly-one keys are NOT unioned**, and must not be: there each overlay
-    // has its own sole provider, and merging them would manufacture an ambiguity
-    // out of two unambiguous answers.
-    if fan_out {
-        let mut endpoints: Vec<BridgeEndpoint> = classified
-            .iter()
-            .filter(|(state, _)| matches!(state, CoverageState::Bound))
-            .flat_map(|(_, evidence)| evidence.endpoints())
-            .cloned()
-            .collect();
-        endpoints.sort();
-        endpoints.dedup();
-        if !endpoints.is_empty() {
-            return (
-                Some((
-                    CoverageState::Bound,
-                    ProviderEvidence::Several(ProviderDisposition::BoundTo, endpoints),
-                )),
-                keyed,
-            );
-        }
+    // Each entry of `classified` is one composition, and `tier` returns `Bound`
+    // for an exactly-one key only on a *sole* provider — so the merge below
+    // cannot manufacture a bind out of an ambiguity (the union rule in the doc
+    // above states why that matters).
+    let mut endpoints: Vec<BridgeEndpoint> = classified
+        .iter()
+        .filter(|(state, _)| matches!(state, CoverageState::Bound))
+        .flat_map(|(_, evidence)| evidence.endpoints())
+        .cloned()
+        .collect();
+    endpoints.sort();
+    endpoints.dedup();
+    // A fan-out row names its set whatever its size, which is that discipline's
+    // own shape: one publish reaching one subscriber is still "every subscriber
+    // on this topic". An exactly-one row keeps the `Sole` shape its
+    // classification produced unless the overlays genuinely disagree — promoting
+    // every single-provider row to a one-element candidate set would move `to` to
+    // `candidates` on every configuration-bound row in the workspace, changing
+    // what every reader of an unchanged binding sees.
+    let unions = if fan_out {
+        !endpoints.is_empty()
+    } else {
+        endpoints.len() > 1
+    };
+    if unions {
+        return (
+            Some((
+                CoverageState::Bound,
+                ProviderEvidence::Several(
+                    ProviderDisposition::BoundTo,
+                    if fan_out {
+                        MatchDiscipline::FanOut
+                    } else {
+                        MatchDiscipline::ExactlyOne
+                    },
+                    endpoints,
+                ),
+            )),
+            keyed,
+        );
     }
     (classified.into_iter().nth(bound_at), keyed)
 }
@@ -1765,30 +1840,28 @@ fn decide_over_candidates(
 /// contract-surface providers are already in it, and a broker subscribe has to
 /// land in the *same* index for a publish to find it.
 /// The consumer worklist [`split_ledger_refs`] hands back: the reference, the
-/// member it came from, and — for the broker arm only — the identity the walk
-/// already resolved for it.
-type ConsumerRows =
-    Vec<(String, super::bridge::InvocationRef, Option<(Vec<PortableKey>, Provenance)>)>;
+/// member it came from, and — for the arms the walk resolved — the identity it
+/// resolved for them.
+type ConsumerRows = Vec<(String, super::bridge::InvocationRef, Option<ArmIdentity>)>;
 
 struct LedgerSplit {
     /// `(member, consumer, identity)` rows, classified by the caller against the
     /// provider index the walk just finished extending.
     ///
-    /// `identity` is the walk's own [`arm_identity`] result — `Some` for a
-    /// **broker** consumer, whose operand the walk had to resolve anyway to build
-    /// its dedup key, and `None` for every other arm, which the walk does not
-    /// resolve at all. Carried rather than recomputed because [`arm_identity`]'s
-    /// contract is one resolution per operand: recomputing it in the recorder
-    /// would be the second walk that contract exists to prevent, and would leave
-    /// room for the two to disagree.
+    /// `identity` is the walk's own [`arm_identity`] result, for the arms it
+    /// carries ([`ArmIdentity::carried`]): a **broker** consumer, whose operand
+    /// the walk had to resolve anyway to build its dedup key, and a
+    /// configuration-bound **HTTP** consumer, whose committed compositions are
+    /// what the walk keys and de-duplicates it under since S-420. `None` for
+    /// every arm that reads its stored target verbatim. Carried rather than
+    /// recomputed because [`arm_identity`]'s contract is one resolution per
+    /// operand: recomputing it in the recorder would be the second walk that
+    /// contract exists to prevent, and would leave room for the two to disagree.
     consumers: ConsumerRows,
     /// Provider-role rows that do not reduce to a portable key. They index no
     /// provider, but they are captured sites and are reported — the broker arm's
     /// recorded `topic-not-literal` refusals arrive here ([CR-107], [NFR-CC-04]).
     unkeyable_providers: Vec<(String, super::bridge::InvocationRef)>,
-    /// Each member's committed configuration, read once, over the keys its own
-    /// references name. The caller needs it again to classify the consumers.
-    corpora: std::collections::BTreeMap<String, MemberCorpus>,
 }
 
 /// Walk every member's `unresolved_refs` ledger once and split it by arm role,
@@ -1827,6 +1900,11 @@ where
     // states ([NFR-RA-05], [CR-118]). The comment below already claimed this tier
     // applied "the SAME collapse"; it now does.
     let mut ledger_endpoints: std::collections::HashSet<(PortableKey, bool, String, String)> =
+        std::collections::HashSet::new();
+    // The HTTP arm's own repeat set, keyed on `(target, member, symbol)` — the
+    // SITE, not its composed keys. See the consumer branch for why the two arms
+    // judge a repeat differently.
+    let mut http_sites: std::collections::HashSet<(String, String, String)> =
         std::collections::HashSet::new();
     // Arm-tagged ledger refs from each member (HTTP client calls, gRPC stub calls,
     // broker publishes **and subscribes**) — degrade-don't-abort via the same
@@ -1878,36 +1956,67 @@ where
                 // would lose the refusal the broker arm files.
                 //
                 // A broker consumer can reduce to **more than one** key, when
-                // its key's overlays commit different values ([S-410]); it is
-                // a repeat only when every one of them has been seen before.
-                let (keys, value) = arm_identity(&reference, corpus);
-                // Only the broker arm resolved anything; every other arm's keys
-                // are its stored target read verbatim, which the recorder can
-                // re-derive for free. Carrying `None` for them keeps the
-                // `Some` genuinely meaningful.
-                let identity = (reference.relation.bridge_namespace()
-                    == Some(BridgeNamespace::BrokerTopic))
-                    .then(|| (keys.clone(), value));
-                if !keys.is_empty() {
-                    // `|=`, and a loop rather than `any`: EVERY key is
-                    // inserted. A short-circuiting reduction would leave a
-                    // site that resolves under two overlays filed under only
-                    // the first, and the second overlay would then admit a
-                    // duplicate row the next time the same endpoint appeared.
-                    let mut fresh = false;
-                    for key in keys {
-                        fresh |= ledger_endpoints.insert((
-                            key,
-                            false,
-                            member.clone(),
-                            reference.symbol.as_str().to_string(),
-                        ));
+                // its key's overlays commit different values ([S-410]).
+                let identity = arm_identity(&reference, corpus);
+                let keys = identity.keys();
+                // **What counts as a repeat is the arm's own question, and the
+                // answer is whatever the BRIDGE collapses** — otherwise this tier
+                // reports a population the service map does not draw, which is
+                // the drift [ADR-52] forbids.
+                //
+                // The broker arm collapses endpoints **per resolved topic key**
+                // (`broker_edges`'s own dedup, which this mirrors including the
+                // role), so its repeat test is per key. The HTTP arm collapses
+                // whole **edges** (`collapse_by_coupling`), and two of its edges
+                // are identical only when one endpoint captured the same target
+                // twice — so its repeat test is the SITE.
+                //
+                // S-420's review found the difference the hard way. Filing an
+                // HTTP consumer per composed key dropped a second, genuinely
+                // distinct call site in the same enclosing symbol whenever its
+                // composed keys were a subset of the first site's: two refs
+                // `GET ${a.base}/{id}` and `GET ${b.base}/{id}` on one method,
+                // where `a.base`'s overlays already composed `b.base`'s value,
+                // produced ONE row where the literal arm produces two — and the
+                // second site's key and committed value then appeared on no
+                // surface at all ([FR-WS-19] AC6).
+                let repeat = match &identity {
+                    ArmIdentity::Http(_) if !keys.is_empty() => !http_sites.insert((
+                        reference.target.clone(),
+                        member.clone(),
+                        reference.symbol.as_str().to_string(),
+                    )),
+                    _ if !keys.is_empty() => {
+                        // `|=`, and a loop rather than `any`: EVERY key is
+                        // inserted. A short-circuiting reduction would leave a
+                        // site that resolves under two overlays filed under only
+                        // the first, and the second overlay would then admit a
+                        // duplicate row the next time the same endpoint appeared.
+                        let mut fresh = false;
+                        for key in keys {
+                            fresh |= ledger_endpoints.insert((
+                                key,
+                                false,
+                                member.clone(),
+                                reference.symbol.as_str().to_string(),
+                            ));
+                        }
+                        !fresh
                     }
-                    if !fresh {
-                        continue; // a repeat of this exact endpoint on these keys
-                    }
+                    // A consumer row that does not reduce to a portable key is
+                    // still a captured site and is reported (the tier classifies
+                    // it below), so an unkeyable row bypasses the dedup rather
+                    // than being dropped here — dropping it would lose the
+                    // refusal the broker arm files.
+                    _ => false,
+                };
+                if repeat {
+                    continue;
                 }
-                consumers.push((member, reference, identity));
+                // Only the arms this walk resolved are carried on; the rest are
+                // re-derived for free by the recorder, and carrying `None` for
+                // them keeps the `Some` genuinely meaningful.
+                consumers.push((member, reference, identity.carried()));
             }
             Some(BridgeRole::Provider) => {
                 // A ledger-only provider (a broker subscribe) keys on exactly the
@@ -1915,7 +2024,8 @@ where
                 // the same way they meet in the bridge's — including, since
                 // [S-410], when that string is a **committed value** the two
                 // sides reached from differently-spelled configuration keys.
-                let (keys, value) = arm_identity(&reference, corpus);
+                let identity = arm_identity(&reference, corpus);
+                let (keys, value) = (identity.keys(), identity.value());
                 if keys.is_empty() {
                     // An unkeyable provider contributes no provider — but it is a
                     // captured site, so it is *reported* rather than dropped. This
@@ -1973,7 +2083,6 @@ where
     LedgerSplit {
         consumers,
         unkeyable_providers,
-        corpora,
     }
 }
 
@@ -2013,43 +2122,111 @@ fn record_decision(
     }
 }
 
-/// Every portable key one **arm-tagged invocation reference** meets on, under
-/// this tier's own committed-value rules, and what proved them — an empty key
-/// list when the reference does not key at all.
+/// What one **arm-tagged invocation reference** resolved to: every portable key
+/// it meets a provider on, under that arm's own committed-value rule, and what
+/// proved them.
+///
+/// One variant per rule, rather than a pair of vectors, because the two
+/// resolving arms differ in what a *recorder* needs afterwards and a shapeless
+/// pair could not say which arm it came from.
+enum ArmIdentity {
+    /// A broker site's committed-value topic identity ([S-410]): one key per
+    /// profile-distinct committed value, or the placeholder-as-written key when
+    /// the corpus refuses.
+    ///
+    /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+    Broker {
+        keys: Vec<PortableKey>,
+        value: Provenance,
+    },
+    /// An HTTP site's committed-value target identity (S-420, [CR-133]) — the
+    /// whole of [`super::bridge::identify`]'s answer, because the recorder needs
+    /// the compositions as well as the keys.
+    ///
+    /// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
+    Http(super::bridge::HttpIdentity),
+    /// Every remaining arm: the stored target, read verbatim, exactly as it
+    /// always has been and with `Literal` provenance.
+    Verbatim { keys: Vec<PortableKey> },
+}
+
+impl ArmIdentity {
+    /// Every portable key the site meets a provider on — empty when it keys on
+    /// nothing at all.
+    fn keys(&self) -> Vec<PortableKey> {
+        match self {
+            Self::Broker { keys, .. } | Self::Verbatim { keys } => keys.clone(),
+            Self::Http(identity) => identity.keyed.iter().map(|(key, _)| key.clone()).collect(),
+        }
+    }
+
+    /// The provenance of the **site** — what a row carries, and what a
+    /// ledger-side provider is indexed under.
+    fn value(&self) -> Provenance {
+        match self {
+            Self::Broker { value, .. } => value.clone(),
+            Self::Http(identity) => identity.value.clone(),
+            Self::Verbatim { .. } => Provenance::Literal,
+        }
+    }
+
+    /// The identity the walk **carries** to a recorder, or [`None`] for a row
+    /// whose keys the recorder re-derives for free.
+    ///
+    /// Carried for the two arms the walk actually resolved — a broker site, and
+    /// an HTTP site whose target names a configuration key. A verbatim arm, and
+    /// an HTTP target naming no key, are handed on as `None` so that a `Some`
+    /// stays genuinely meaningful: it says *this operand has been resolved
+    /// already, do not resolve it again*.
+    fn carried(self) -> Option<Self> {
+        match self {
+            Self::Broker { keys, value } => Some(Self::Broker { keys, value }),
+            Self::Http(identity) if !identity.named_keys.is_empty() => Some(Self::Http(identity)),
+            Self::Http(_) | Self::Verbatim { .. } => None,
+        }
+    }
+}
+
+/// Resolve one **arm-tagged invocation reference** to its [`ArmIdentity`].
 ///
 /// The broker arm resolves its operand against the member's committed
-/// configuration ([S-410]); every other arm keys its stored target verbatim, as
-/// it always has and with `Literal` provenance. Both the provider index and the
-/// consumer de-duplication read this one function, so the index a publish is
-/// looked up in and the set a subscribe was filed under are built from the same
-/// rule ([ADR-52]).
+/// configuration ([S-410]) and the HTTP arm does too (S-420, [CR-133]), through
+/// the very function the bridge keys its own consumers with — so a target the
+/// bridge draws an edge for is a row this tier reports bound, and neither tier
+/// can classify it alone ([ADR-52]). Every remaining arm keys its stored target
+/// verbatim, as it always has. Both the provider index and the consumer
+/// de-duplication read this one function, so the index a publish is looked up in
+/// and the set a subscribe was filed under are built from the same rule.
 ///
 /// Keys and provenance come back **together** rather than from two functions,
 /// because they are two halves of one resolution: asking for them separately
 /// resolved the same operand twice and left room for the pair to disagree. The
-/// same reason is why the broker consumer's result is *carried* to
-/// [`record_broker`] in [`LedgerSplit::consumers`] instead of being recomputed
-/// there — one operand, one resolution, across the function boundary too.
+/// same reason is why a resolved consumer's result is *carried* to its recorder
+/// in [`LedgerSplit::consumers`] instead of being recomputed there — one
+/// operand, one resolution, across the function boundary too.
 ///
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+/// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
 /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
-fn arm_identity(
-    reference: &super::bridge::InvocationRef,
-    corpus: &MemberCorpus,
-) -> (Vec<PortableKey>, Provenance) {
-    if reference.relation.bridge_namespace() == Some(BridgeNamespace::BrokerTopic) {
-        return super::broker::identify(reference.relation, &reference.target, corpus)
-            .map_or((Vec::new(), Provenance::Literal), |(keys, _role, value)| {
-                (keys, value)
-            });
+fn arm_identity(reference: &super::bridge::InvocationRef, corpus: &MemberCorpus) -> ArmIdentity {
+    if let Some(identity) = super::bridge::identify(reference.relation, &reference.target, corpus) {
+        return ArmIdentity::Http(identity);
     }
-    (
-        consumer_portable_key(reference.relation, &reference.target)
+    if reference.relation.bridge_namespace() == Some(BridgeNamespace::BrokerTopic) {
+        return super::broker::identify(reference.relation, &reference.target, corpus).map_or(
+            ArmIdentity::Broker {
+                keys: Vec::new(),
+                value: Provenance::Literal,
+            },
+            |(keys, _role, value)| ArmIdentity::Broker { keys, value },
+        );
+    }
+    ArmIdentity::Verbatim {
+        keys: consumer_portable_key(reference.relation, &reference.target)
             .into_iter()
             .collect(),
-        Provenance::Literal,
-    )
+    }
 }
 
 /// Classify one **broker** invocation consumer — a publish — under the
@@ -2425,10 +2602,12 @@ impl EgressHeadline {
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 fn edge_multiplicity(row: &ReferenceCoverage) -> u64 {
     match (&row.to, &row.candidates) {
-        // An exactly-one discipline: one provider, one edge.
+        // A sole named provider: one edge.
         (Some(_), _) => 1,
-        // Fan-out: the bridge emits one edge per cross-member subscriber, and
-        // the row names that whole set.
+        // A named bound SET: the bridge emits one edge per member of it — every
+        // cross-member subscriber of a fan-out topic, and since S-420 every
+        // provider an exactly-one row's committed compositions each bound
+        // ([CR-133] AC3). The row names that whole set either way.
         //
         // **The disposition is read, not the bucket.** That is this module's own
         // published rule ([`ProviderDisposition`], and the MCP tool description
@@ -2621,6 +2800,7 @@ fn tier(
                 },
                 ProviderEvidence::Several(
                     ProviderDisposition::TiedBetween,
+                    MatchDiscipline::ExactlyOne,
                     candidates.iter().map(|c| c.endpoint.clone()).collect(),
                 ),
             )),
@@ -2642,7 +2822,11 @@ fn tier(
                 .collect();
             (!bound.is_empty()).then_some((
                 CoverageState::Bound,
-                ProviderEvidence::Several(ProviderDisposition::BoundTo, bound),
+                ProviderEvidence::Several(
+                    ProviderDisposition::BoundTo,
+                    MatchDiscipline::FanOut,
+                    bound,
+                ),
             ))
         }
     }
@@ -4816,6 +5000,497 @@ mod tests {
              (1 of 1 egress site resolved)",
             "and the composed line cannot open with a count its own tail contradicts"
         );
+    }
+
+    // ── S-420 / CR-133: the two tiers classify an HTTP target through one
+    //    function, so a row the coverage tier binds is an edge the bridge draws ──
+
+    /// [CR-133] AC3, the coverage half: two overlays composing one target two
+    /// ways bind two sole providers, and the row names **both** — so the set of
+    /// the bridge's edge targets equals the row's endpoints, and the
+    /// `resolved_cross_service_edges` term counts the two edges that exist.
+    ///
+    /// Before S-420 an exactly-one row took the first bound composition alone.
+    /// That was sound while the bridge drew no edge for such a target; with the
+    /// bridge drawing one per composition, a row naming one provider would sit
+    /// beside two edges — the drift from the other side.
+    ///
+    /// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
+    #[test]
+    fn an_exactly_one_row_names_every_provider_its_overlays_bind() {
+        reset();
+        set_member("web", vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
+        commit_config(
+            "web",
+            "orders.base",
+            &[
+                ("application-a.yml", Some("a"), "/orders-a"),
+                ("application-b.yml", Some("b"), "/orders-b"),
+            ],
+        );
+        set_member(
+            "orders",
+            vec![
+                route("GET /orders-a/{oid}", "local show_a"),
+                route("GET /orders-b/{oid}", "local show_b"),
+            ],
+        );
+
+        let reg = registry(&["orders", "web"]);
+        let cov = cross_service_coverage(&reg.answer());
+
+        assert_eq!(cov.references.len(), 1, "one site is one row, however many overlays");
+        let row = &cov.references[0];
+        assert_eq!(row.state, CoverageState::Bound);
+        assert_eq!(row.to, None, "two bound providers are a named set, not a sole `to`");
+        let named = row.candidates.as_ref().expect("a bound set is named");
+        assert_eq!(named.disposition, ProviderDisposition::BoundTo);
+        assert_eq!(
+            named.summary, "2 bound providers (one per committed composition), all listed",
+            "an exactly-one row's bound set is NOT a fan-out, and the line a reader \
+             sees must not say it is"
+        );
+        assert_eq!(
+            named
+                .providers
+                .iter()
+                .map(|e| e.symbol.as_str().to_string())
+                .collect::<Vec<_>>(),
+            vec!["local show_a".to_string(), "local show_b".to_string()],
+        );
+        assert_eq!(
+            cov.resolved_cross_service_edges, 2,
+            "the headline counts the two edges the bridge actually draws"
+        );
+
+        // …and it does draw exactly those two.
+        let edges = super::super::bridge::ContractBridge::new().edges(&reg);
+        let mut targets: Vec<String> = edges
+            .iter()
+            .map(|e| e.to.symbol.as_str().to_string())
+            .collect();
+        targets.sort();
+        assert_eq!(
+            targets,
+            vec!["local show_a".to_string(), "local show_b".to_string()],
+            "the set of edge targets equals the row's endpoints"
+        );
+    }
+
+    /// **The other half of the union rule: one bound provider keeps the `Sole`
+    /// shape.** Review found the `endpoints.len() > 1` gate undefended — a
+    /// mutation to `!endpoints.is_empty()` moved `to` into `candidates` on every
+    /// configuration-bound row in the workspace and no test in the suite
+    /// noticed, because the no-drift walk reads `to` and `candidates` through
+    /// one chained iterator and cannot tell the two shapes apart.
+    #[test]
+    fn one_bound_provider_stays_a_sole_to_not_a_one_element_set() {
+        reset();
+        set_member("web", vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
+        commit_config(
+            "web",
+            "orders.base",
+            &[
+                ("application.yml", None, "/orders"),
+                ("application-p.yml", Some("p"), "/orders-legacy"),
+            ],
+        );
+        // Only ONE of the two compositions has a provider, so the row is bound to
+        // exactly one — the shape that must not become a candidate set.
+        set_member("orders", vec![route("GET /orders/{oid}", "local show")]);
+
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
+        let row = &cov.references[0];
+        assert_eq!(row.state, CoverageState::Bound);
+        assert_eq!(
+            row.to.as_ref().map(|e| e.symbol.as_str()),
+            Some("local show"),
+            "a sole bound provider is the row's `to`: {row:?}"
+        );
+        assert!(
+            row.candidates.is_none(),
+            "…and it is NOT also a one-element candidate set: {row:?}"
+        );
+        assert_eq!(cov.resolved_cross_service_edges, 1);
+    }
+
+    /// [CR-133] AC4 / [FR-WS-08] AC4, restated against the union above: **within**
+    /// one composition nothing is merged. A single committed value matching two
+    /// providers is ambiguous, names its candidates as *tied*, and binds nothing
+    /// — the union is across compositions, never within one.
+    ///
+    /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
+    #[test]
+    fn one_composition_matching_two_providers_is_tied_not_unioned() {
+        reset();
+        set_member("web", vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
+        commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
+        set_member("orders", vec![route("GET /orders/{oid}", "local show")]);
+        set_member("legacy", vec![route("GET /orders/{id}", "local legacy_show")]);
+
+        let reg = registry(&["legacy", "orders", "web"]);
+        let cov = cross_service_coverage(&reg.answer());
+
+        let row = &cov.references[0];
+        assert_eq!(
+            row.state,
+            CoverageState::Unbound {
+                reason: UnboundReason::Ambiguous
+            },
+            "one composition, two providers: ambiguous"
+        );
+        assert_eq!(
+            row.candidates.as_ref().map(|c| c.disposition),
+            Some(ProviderDisposition::TiedBetween),
+            "named as tied, which claims NONE of them is reached"
+        );
+        assert_eq!(cov.resolved_cross_service_edges, 0);
+        assert!(
+            super::super::bridge::ContractBridge::new()
+                .edges(&reg)
+                .is_empty(),
+            "and the bridge fabricates no edge for it"
+        );
+    }
+
+    /// **Two distinct call sites in one method are two rows, however their
+    /// composed keys overlap.**
+    ///
+    /// Review found S-420's first version filing a configuration-bound HTTP
+    /// consumer under each of its **composed keys**, which is the broker arm's
+    /// rule. A second site whose composed key the first site had already named —
+    /// here `${b.base}` composing to a value one of `${a.base}`'s overlays also
+    /// composes — was then read as a repeat and dropped, so its key and its
+    /// committed value appeared on no surface at all ([FR-WS-19] AC6). The
+    /// literal HTTP arm has always produced two rows for this shape.
+    #[test]
+    fn two_call_sites_in_one_symbol_are_two_rows_however_their_keys_overlap() {
+        reset();
+        set_member("web", vec![]);
+        set_consumers(
+            "web",
+            vec![
+                http_call("GET ${a.base}/{id}", "local fetch_order"),
+                http_call("GET ${b.base}/{id}", "local fetch_order"),
+            ],
+        );
+        commit_config(
+            "web",
+            "a.base",
+            &[
+                ("application.yml", None, "/orders-a"),
+                ("application-p.yml", Some("p"), "/orders-b"),
+            ],
+        );
+        commit_config("web", "b.base", &[("application.yml", None, "/orders-b")]);
+        set_member(
+            "orders",
+            vec![
+                route("GET /orders-a/{oid}", "local show_a"),
+                route("GET /orders-b/{oid}", "local show_b"),
+            ],
+        );
+
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
+
+        assert_eq!(
+            cov.references.len(),
+            2,
+            "two captured sites are two rows: {:?}",
+            cov.references
+        );
+        let mut keys: Vec<String> = cov
+            .references
+            .iter()
+            .flat_map(|r| match &r.provenance {
+                Provenance::ConfigBound { bound } => {
+                    bound.iter().map(|b| b.key.clone()).collect::<Vec<_>>()
+                }
+                other => panic!("both rows are config-bound, not {other:?}"),
+            })
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["a.base".to_string(), "b.base".to_string()],
+            "each site's own key reaches a surface"
+        );
+    }
+
+    /// The other half of the same rule: a **true** ledger duplicate — one
+    /// endpoint, one target, captured twice (two rows differing only in `form`)
+    /// — is still one row, matching the single edge the bridge collapses to.
+    #[test]
+    fn one_target_captured_twice_at_one_endpoint_is_one_row() {
+        reset();
+        set_member("web", vec![]);
+        set_consumers(
+            "web",
+            vec![
+                http_call("GET ${orders.base}/{id}", "local fetch_order"),
+                http_call("GET ${orders.base}/{id}", "local fetch_order"),
+            ],
+        );
+        commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
+        set_member("orders", vec![route("GET /orders/{oid}", "local show")]);
+
+        let reg = registry(&["orders", "web"]);
+        let cov = cross_service_coverage(&reg.answer());
+        assert_eq!(
+            cov.references.len(),
+            1,
+            "one site captured twice is one row: {:?}",
+            cov.references
+        );
+        assert_eq!(
+            super::super::bridge::ContractBridge::new().edges(&reg).len(),
+            1,
+            "…and the bridge draws one edge for it, so the two tiers reconcile"
+        );
+    }
+
+    /// One federation fixture, named, for the cross-tier walk below.
+    struct DriftFixture {
+        /// What the fixture is, for a failure message that says which one broke.
+        what: &'static str,
+        /// The members to build the registry over.
+        members: &'static [&'static str],
+        /// Builds the member surfaces, ledger rows and committed configuration.
+        build: fn(),
+        /// How many `(from, to)` pairs BOTH tiers must show for this fixture.
+        ///
+        /// Set equality alone is satisfied by two empty sets, so a fixture whose
+        /// builder silently produced nothing would pass this walk while proving
+        /// nothing — the exact vacuity a cross-tier equality test is prone to.
+        /// Stating the count per fixture makes each case fail on its own if its
+        /// fixture stops exercising what it was written for, and the zero-valued
+        /// ones are then a deliberate claim (*neither tier binds anything here*)
+        /// rather than an accident.
+        pairs: usize,
+    }
+
+    /// **[CR-133] AC5 — the no-drift walk.** Over every federation fixture below,
+    /// the set of `(from, to)` pairs of **invocation-intake** bridge edges in
+    /// **exactly-one** namespaces equals the set of `(consumer, provider)` pairs
+    /// of **bound invocation-intake** coverage rows there.
+    ///
+    /// One test walking both tiers, rather than two suites asserting compatible
+    /// things, because the defect it exists to catch is precisely that the two
+    /// tiers each looked right alone: the coverage tier resolved a `${…}` target
+    /// through committed configuration and reported it bound, the bridge keyed the
+    /// same target on its raw ledger text and drew nothing, and on the reference
+    /// estate that was 18 bound rows over 8 member pairs against 0 edges
+    /// ([ADR-52]'s one-classifier contract, [CR-133] §2.1).
+    ///
+    /// The fan-out namespace is excluded from the comparison **by discipline, not
+    /// by name**: one publish is one row and many edges there, so set equality is
+    /// the wrong relation for it. Its fixtures are still walked, which is what
+    /// proves the filter does not quietly drop an exactly-one row it should have
+    /// compared.
+    ///
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    #[test]
+    fn the_two_tiers_agree_over_every_federation_fixture() {
+        // Derived from the discipline, so a namespace registered later joins this
+        // walk without anyone remembering to add it.
+        let exactly_one: Vec<&'static str> = [
+            BridgeNamespace::Http,
+            BridgeNamespace::Grpc,
+            BridgeNamespace::BrokerTopic,
+        ]
+        .into_iter()
+        .filter(|ns| ns.match_discipline() == MatchDiscipline::ExactlyOne)
+        .map(|ns| ns.relation())
+        .collect();
+
+        let fixtures = [
+            DriftFixture {
+                what: "a literal HTTP call binding its sole cross-member route",
+                pairs: 1,
+                members: &["orders", "web"],
+                build: || {
+                    set_member("orders", vec![route("GET /orders/{id}", "local show")]);
+                    set_consumers("web", vec![http_call("GET /orders/{id}", "local fetch")]);
+                },
+            },
+            DriftFixture {
+                what: "a configuration-bound HTTP call — the S-420 case",
+                pairs: 1,
+                members: &["orders", "web"],
+                build: || {
+                    set_member("orders", vec![route("GET /orders/{id}", "local show")]);
+                    set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch")]);
+                    commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
+                },
+            },
+            DriftFixture {
+                what: "the same call with the key undefined everywhere",
+                pairs: 0,
+                members: &["orders", "web"],
+                build: || {
+                    set_member("orders", vec![route("GET /orders/{id}", "local show")]);
+                    set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch")]);
+                },
+            },
+            DriftFixture {
+                what: "two overlays composing two targets, each with a sole provider",
+                pairs: 2,
+                members: &["orders", "web"],
+                build: || {
+                    set_member(
+                        "orders",
+                        vec![
+                            route("GET /orders-a/{id}", "local show_a"),
+                            route("GET /orders-b/{id}", "local show_b"),
+                        ],
+                    );
+                    set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch")]);
+                    commit_config(
+                        "web",
+                        "orders.base",
+                        &[
+                            ("application-a.yml", Some("a"), "/orders-a"),
+                            ("application-b.yml", Some("b"), "/orders-b"),
+                        ],
+                    );
+                },
+            },
+            DriftFixture {
+                what: "one composition matching two providers — ambiguous",
+                pairs: 0,
+                members: &["legacy", "orders", "web"],
+                build: || {
+                    set_member("orders", vec![route("GET /orders/{id}", "local show")]);
+                    set_member("legacy", vec![route("GET /orders/{oid}", "local legacy")]);
+                    set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch")]);
+                    commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
+                },
+            },
+            DriftFixture {
+                what: "a composition that keys nothing — an absolute URL",
+                pairs: 0,
+                members: &["orders", "web"],
+                build: || {
+                    set_member("orders", vec![route("GET /orders", "local show")]);
+                    set_consumers("web", vec![http_call("GET ${orders.base}", "local fetch")]);
+                    commit_config(
+                        "web",
+                        "orders.base",
+                        &[("application.yml", None, "https://orders:8080")],
+                    );
+                },
+            },
+            DriftFixture {
+                what: "a composition whose value is itself a placeholder",
+                pairs: 0,
+                members: &["orders", "web"],
+                build: || {
+                    set_member("orders", vec![route("GET /orders/{id}", "local show")]);
+                    set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch")]);
+                    commit_config(
+                        "web",
+                        "orders.base",
+                        &[("application.yml", None, "${ORDERS_BASE}")],
+                    );
+                },
+            },
+            DriftFixture {
+                what: "a gRPC stub call binding its sole proto-service provider",
+                pairs: 1,
+                members: &["orders", "web"],
+                build: || {
+                    set_member(
+                        "orders",
+                        vec![proto_service("shop.v1.Orders/Get", "local grpc_impl")],
+                    );
+                    set_consumers("web", vec![grpc_consumer("shop.v1.Orders/Get", "local stub")]);
+                },
+            },
+            DriftFixture {
+                what: "a broker publish fanning out to two subscribers (fan-out, excluded)",
+                pairs: 0,
+                members: &["a", "b", "web"],
+                build: || {
+                    set_member("web", vec![]);
+                    set_consumers("web", vec![broker_publish("orders", "local emit")]);
+                    set_consumers("a", vec![broker_subscribe("orders", "local on_a")]);
+                    set_consumers("b", vec![broker_subscribe("orders", "local on_b")]);
+                },
+            },
+            DriftFixture {
+                what: "a contract-surface operation matching a route (never invocation intake)",
+                pairs: 0,
+                members: &["orders", "web"],
+                build: || {
+                    set_member("orders", vec![route("GET /orders/{id}", "local show")]);
+                    set_member("web", vec![op("GET /orders/{oid}", "local declared")]);
+                },
+            },
+        ];
+
+        for fixture in fixtures {
+            reset();
+            (fixture.build)();
+            let reg = registry(fixture.members);
+
+            let mut drawn: Vec<(String, String)> = super::super::bridge::ContractBridge::new()
+                .edges(&reg)
+                .iter()
+                .filter(|e| {
+                    e.intake == BridgeIntake::Invocation
+                        && exactly_one.contains(&e.relation.as_str())
+                })
+                .map(|e| (endpoint_id(&e.from), endpoint_id(&e.to)))
+                .collect();
+            drawn.sort();
+            drawn.dedup();
+
+            let mut bound: Vec<(String, String)> = cross_service_coverage(&reg.answer())
+                .references
+                .iter()
+                .filter(|r| {
+                    r.intake == BridgeIntake::Invocation
+                        && r.state == CoverageState::Bound
+                        && exactly_one.contains(&r.relation.as_str())
+                })
+                .flat_map(|r| {
+                    let providers: Vec<&BridgeEndpoint> = r
+                        .to
+                        .iter()
+                        .chain(r.candidates.iter().flat_map(|c| c.providers.iter()))
+                        .collect();
+                    providers
+                        .into_iter()
+                        .map(|to| (endpoint_id(&r.from), endpoint_id(to)))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            bound.sort();
+            bound.dedup();
+
+            assert_eq!(
+                drawn, bound,
+                "the two tiers disagree over `{}`: the bridge drew {drawn:?} and \
+                 the coverage tier bound {bound:?}",
+                fixture.what
+            );
+            // …and the agreement is over the population the fixture was written
+            // for, not over two empty sets.
+            assert_eq!(
+                drawn.len(),
+                fixture.pairs,
+                "`{}` no longer exercises what it was written for: {drawn:?}",
+                fixture.what
+            );
+        }
+    }
+
+    /// A bridge endpoint as one comparable string, for the walk above.
+    fn endpoint_id(endpoint: &BridgeEndpoint) -> String {
+        format!("{}::{}", endpoint.member, endpoint.symbol.as_str())
     }
 
     // ── S-410: topic identity is the committed configured value ──────────────
@@ -7674,6 +8349,7 @@ mod tests {
         };
         let tied = ProviderCandidates::new(
             ProviderDisposition::TiedBetween,
+            MatchDiscipline::ExactlyOne,
             vec![endpoint("a", "local a"), endpoint("b", "local b")],
         );
         assert_eq!(tied.total, 2, "the fixture must carry a set worth over-counting");

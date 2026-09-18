@@ -695,6 +695,19 @@ pub struct ProfiledTemplate {
     /// The template with every placeholder replaced by the value that profile
     /// commits.
     pub template: String,
+    /// The value substituted for each key, in the order
+    /// [`ResolvedTemplate::bound`] names them — **which value produced this
+    /// composition**, not which values the key admits.
+    ///
+    /// Recorded rather than re-derived, because it is not derivable from the
+    /// composed string: two values a profile does not discriminate (a key two
+    /// unprofiled sources commit differently) compose two templates from which
+    /// no reader can say which value made which, and one value that is a
+    /// substring of another (`/orders` and `/orders-v2`) defeats a textual
+    /// test. A consumer that attributes a composition to the wrong committed
+    /// value publishes evidence the corpus does not support — the over-read
+    /// [ADR-64] forbids — so the composer, which knows, says so.
+    pub used: Vec<String>,
     /// The profiles proving this composition, sorted.
     pub profiles: Vec<String>,
     /// Whether the **unprofiled** sources alone prove it.
@@ -742,10 +755,15 @@ fn profile_candidates(template: &str, bound: &[ConfigBound]) -> Vec<ProfiledTemp
         bound.iter().flat_map(|b| b.values.iter()).flat_map(|v| v.profiles.iter().map(String::as_str)).collect();
     // Composition → the profiles proving it. A BTreeMap because two profiles
     // that agree on every key produce ONE candidate, not two identical ones.
-    let mut by_composition: BTreeMap<String, (BTreeSet<&str>, bool)> = BTreeMap::new();
+    let mut by_composition: BTreeMap<String, (BTreeSet<&str>, bool, Vec<String>)> = BTreeMap::new();
     for profile in profiles.iter().copied().map(Some).chain(std::iter::once(None)) {
-        for composition in substitutions(template, bound, profile) {
+        for (composition, used) in substitutions(template, bound, profile) {
             let entry = by_composition.entry(composition).or_default();
+            // One composition is one substitution: `replace_key` is
+            // deterministic, so two profiles reaching the same composed string
+            // reached it through the same values. Assigning rather than
+            // asserting keeps this a read-model.
+            entry.2 = used;
             match profile {
                 Some(p) => {
                     entry.0.insert(p);
@@ -756,8 +774,9 @@ fn profile_candidates(template: &str, bound: &[ConfigBound]) -> Vec<ProfiledTemp
     }
     by_composition
         .into_iter()
-        .map(|(template, (profiles, unprofiled))| ProfiledTemplate {
+        .map(|(template, (profiles, unprofiled, used))| ProfiledTemplate {
             template,
+            used,
             profiles: profiles.into_iter().map(str::to_string).collect(),
             unprofiled,
         })
@@ -788,8 +807,11 @@ fn substitutions(
     template: &str,
     bound: &[ConfigBound],
     profile: Option<&str>,
-) -> Vec<String> {
-    let mut out = vec![template.to_string()];
+) -> Vec<(String, Vec<String>)> {
+    // Each partial composition carries the values it has substituted so far, in
+    // `bound`'s own key order, so a caller can say which committed value
+    // produced it ([`ProfiledTemplate::used`]).
+    let mut out = vec![(template.to_string(), Vec::new())];
     for entry in bound {
         let values = values_under(entry, profile);
         if values.is_empty() {
@@ -802,8 +824,12 @@ fn substitutions(
         }
         out = out
             .iter()
-            .flat_map(|partial| {
-                values.iter().map(move |value| replace_key(partial, &entry.key, value))
+            .flat_map(|(partial, used)| {
+                values.iter().map(move |value| {
+                    let mut used = used.clone();
+                    used.push((*value).to_string());
+                    (replace_key(partial, &entry.key, value), used)
+                })
             })
             .collect();
     }

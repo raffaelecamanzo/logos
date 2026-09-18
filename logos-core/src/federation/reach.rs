@@ -198,15 +198,25 @@ pub struct CoverageRider {
     /// # It is NOT the count of roots this view was seeded from ([CR-127])
     /// The sentence this doc carried until S-403 T1 — *"a promotion to
     /// `live-via-cross-service` rests on an edge existing"*, said of **this**
-    /// figure — was true only while the two counts happened to coincide. They no
-    /// longer do. This one counts what the coverage tier **resolved**, and the
-    /// coverage tier composes a target from committed configuration
-    /// ([FR-WS-19]); the bridge does not, so it draws no
-    /// [`BridgeEdge`](super::bridge::BridgeEdge) for such a row and the union
-    /// view is seeded from nothing. On the 84-member reference estate this reads
-    /// **15** over **0** seeded invocation edges. The figure a promotion actually
-    /// rests on is
+    /// figure — was true only while the two counts happened to coincide. They
+    /// still need not: this one counts what the coverage tier **resolved**, and
+    /// the two tiers count different things wherever a resolution draws several
+    /// edges (a fan-out topic) or none (an ambiguous or refused composition). The
+    /// figure a promotion actually rests on is
     /// [`bridge_invocation_edges`](Self::bridge_invocation_edges), beside it.
+    ///
+    /// **The mechanism that made them diverge on the HTTP arm is gone** (S-420,
+    /// [CR-133]). Until then the coverage tier composed a target from committed
+    /// configuration ([FR-WS-19]) and the bridge did not, so the bridge drew no
+    /// [`BridgeEdge`](super::bridge::BridgeEdge) for such a row and the union view
+    /// was seeded from nothing: the 84-member reference estate read **15** here
+    /// over **0** seeded invocation edges (the 1.4.12 reading of 2026-09-17, which
+    /// S-420 T2 re-records from a fresh run — no figure here is a floor). Both
+    /// tiers now classify such a target through one function, so a
+    /// configuration-bound HTTP resolution is counted here **and** drawn as an
+    /// edge.
+    ///
+    /// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
     ///
     /// It is **not** the whole basis of the view. Contract-surface edges (an
     /// OpenAPI operation matched to a controller route) are extra live roots too,
