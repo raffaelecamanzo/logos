@@ -396,6 +396,23 @@ pub struct RulesReport {
     /// cannot, since the CR-005 structural budgets always evaluate (NFR-CC-04).
     pub rules_present: bool,
     pub violations: Vec<Violation>,
+    /// Unix-seconds timestamp of the run marker this run recorded (S-313,
+    /// [FR-GV-21]) — additive on `check --json`, nothing renamed or removed.
+    ///
+    /// It is the same value as the `created_at` stamped on every `violations`
+    /// row the run wrote and as the marker's own `ran_at`: one run, one time.
+    /// `None` on a report that persisted nothing (`Default`), so a consumer
+    /// never reads a fabricated run time.
+    ///
+    /// Note that a persisted run is not the same set as this report's
+    /// `violations`: the always-on structural ([FR-GV-18]) and admission
+    /// ([FR-GV-20]) fold-ins are appended after persistence and deliberately
+    /// never enter the table.
+    ///
+    /// [FR-GV-18]: ../../../docs/specs/requirements/FR-GV-18.md
+    /// [FR-GV-20]: ../../../docs/specs/requirements/FR-GV-20.md
+    /// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+    pub ran_at: Option<i64>,
     /// The FR-RC-03 freshness line.
     pub freshness: String,
     /// Degradations — never an error.

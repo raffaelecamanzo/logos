@@ -104,6 +104,29 @@ fn violation_count(repo: &Path) -> i64 {
         .expect("count violations")
 }
 
+/// The `check_run` marker as `(row count, ran_at, commit_sha, violation_count)`
+/// — content, not just a row count, so "unchanged" means the readout did not
+/// re-stamp a marker over the one the last real run recorded (S-313,
+/// [FR-GV-21]).
+fn check_run_state(repo: &Path) -> (i64, Option<(i64, Option<String>, i64)>) {
+    let conn = Connection::open_with_flags(
+        repo.join(".logos/logos.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open logos.db read-only");
+    let rows: i64 = conn
+        .query_row("SELECT count(*) FROM check_run", [], |r| r.get(0))
+        .expect("count check_run");
+    let marker = conn
+        .query_row(
+            "SELECT ran_at, commit_sha, violation_count FROM check_run WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
+    (rows, marker)
+}
+
 // ── report tier: quality_readout (CR-095) ────────────────────────────────────
 
 /// `quality_readout` computes a **fresh** signal and writes **nothing**
@@ -127,7 +150,9 @@ fn quality_readout_computes_fresh_and_writes_nothing() {
     engine.check_rules(None, true).expect("check runs");
     let snapshots_before = metric_snapshot_count(tmp.path());
     let violations_before = violation_count(tmp.path());
+    let marker_before = check_run_state(tmp.path());
     assert!(snapshots_before > 0, "the fixture has a persisted snapshot");
+    assert_eq!(marker_before.0, 1, "the check recorded its marker (FR-GV-21)");
 
     // Several readouts back to back — the shape a /clear-heavy session produces.
     let first = engine.quality_readout().expect("readout");
@@ -144,6 +169,12 @@ fn quality_readout_computes_fresh_and_writes_nothing() {
         violation_count(tmp.path()),
         violations_before,
         "the readout must not re-persist violations"
+    );
+    assert_eq!(
+        check_run_state(tmp.path()),
+        marker_before,
+        "the readout must not stamp a run marker of its own — reading is not running \
+         (FR-GV-21, ADR-49: the report leg does not write)"
     );
 
     // Fresh computation, not a replay of the last persisted snapshot: the signal
@@ -185,6 +216,11 @@ fn quality_readout_never_fabricates_a_clean_check() {
         violation_count(tmp.path()),
         0,
         "reading the readout recorded no violations of its own"
+    );
+    assert_eq!(
+        check_run_state(tmp.path()),
+        (0, None),
+        "and left the store with no marker — no check has run (FR-GV-21)"
     );
 }
 

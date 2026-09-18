@@ -988,6 +988,57 @@ pub struct ViolationRow {
     ///
     /// [FR-GV-03]: ../../../docs/specs/requirements/FR-GV-03.md
     pub severity: String,
+    /// Unix-seconds timestamp of the run that wrote this row — the same value
+    /// for every row of one run, and the same value as that run's
+    /// [`CheckRunRow::ran_at`] ([FR-GV-21]: one run, one time).
+    ///
+    /// Stored `NOT NULL` since S-020 and, until [CR-096], never selected back:
+    /// exposing it is what lets a store written **before** the marker
+    /// migration still date its existing findings.
+    ///
+    /// [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
+    /// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+    pub created_at: i64,
+}
+
+/// The singleton `check_run` marker ([FR-GV-21], S-313, [CR-096]): the record
+/// that a [`check_rules`](crate::Engine::check_rules) run **happened**.
+///
+/// `violations` is replaced wholesale per run ([FR-GV-02] idempotence), so a
+/// run that finds nothing leaves a table byte-identical to a project that was
+/// never checked. This row is the only place that distinction lives — its
+/// **absence** means no run has happened, never a clean result.
+///
+/// Upserted, never appended (BR-40): it records the last run, not a history.
+/// [FR-GV-06](../../../docs/specs/requirements/FR-GV-06.md) already owns the
+/// quality time series.
+///
+/// [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
+/// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
+/// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CheckRunRow {
+    /// Unix-seconds timestamp the run happened at — identical to the
+    /// `created_at` of every [`ViolationRow`] the same transaction wrote.
+    pub ran_at: i64,
+    /// **What `HEAD` was when this ran, and nothing more.**
+    ///
+    /// It supports "has the tree moved since this ran". It does **not** mean
+    /// "these findings were introduced by that commit": the run scored
+    /// whatever was in the working tree, which may never have been committed
+    /// and is not compared against here. The same field on `metric_snapshots`
+    /// was once read the second way and produced a confidently wrong
+    /// attribution ([CR-095] review, finding 12, retracted), which is why the
+    /// meaning is documented on the field rather than only in the CR.
+    ///
+    /// `None` when `HEAD` does not resolve (no git, no commits). A consumer
+    /// then omits the tree comparison rather than substituting a placeholder.
+    ///
+    /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
+    pub commit_sha: Option<String>,
+    /// How many `violations` rows the same transaction wrote. `0` with no rows
+    /// is a **recorded clean run** — the case the empty table cannot express.
+    pub violation_count: i64,
 }
 
 /// The fields needed to insert a `violations` row (S-020, [FR-GV-02]).
@@ -1008,8 +1059,6 @@ pub struct NewViolation<'a> {
     pub message: &'a str,
     /// `"error"` or `"warning"`.
     pub severity: &'a str,
-    /// Unix-seconds timestamp of the run.
-    pub created_at: i64,
 }
 
 /// A file's committed-configuration contribution, as the store records it
@@ -1463,6 +1512,17 @@ pub trait GraphStore {
     ///
     /// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
     fn violations(&self) -> Result<Vec<ViolationRow>>;
+
+    /// The singleton `check_run` marker, or `None` when no `check_rules` run
+    /// has ever been recorded (S-313, [FR-GV-21]).
+    ///
+    /// `None` means **no run**, never a clean one. A pure read: it never
+    /// creates the row a missing marker would need ([ADR-49]'s report leg must
+    /// not write).
+    ///
+    /// [ADR-49]: ../../../docs/specs/architecture/decisions/ADR-49.md
+    /// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+    fn check_run(&self) -> Result<Option<CheckRunRow>>;
 
     /// The store-integrity slice behind the `health` tool (S-020): schema
     /// version + FTS5 coherence in one read.
@@ -2796,7 +2856,8 @@ impl GraphStore for SqliteGraphStore {
 
     fn violations(&self) -> Result<Vec<ViolationRow>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, snapshot_id, rule_type, rule_key, node_id, file, message, severity \
+            "SELECT id, snapshot_id, rule_type, rule_key, node_id, file, message, severity, \
+                    created_at \
              FROM violations ORDER BY id",
         )?;
         let rows = stmt
@@ -2810,11 +2871,27 @@ impl GraphStore for SqliteGraphStore {
                     file: row.get(5)?,
                     message: row.get(6)?,
                     severity: row.get(7)?,
+                    created_at: row.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting persisted violations")?;
         Ok(rows)
+    }
+
+    fn check_run(&self) -> Result<Option<CheckRunRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT ran_at, commit_sha, violation_count FROM check_run WHERE id = 1",
+        )?;
+        stmt.query_row([], |row| {
+            Ok(CheckRunRow {
+                ran_at: row.get(0)?,
+                commit_sha: row.get(1)?,
+                violation_count: row.get(2)?,
+            })
+        })
+        .optional()
+        .context("querying the check-run marker")
     }
 
     fn store_health(&self) -> Result<StoreHealth> {
@@ -3718,15 +3795,36 @@ impl BatchWriter<'_> {
         Ok(())
     }
 
-    /// Replace the persisted violation set wholesale ([FR-GV-02], SRS §5.1
-    /// "written per check_rules run") — the same clear-then-rematerialise
-    /// idempotence as the derived policy graph (BR-12).
+    /// Replace the persisted violation set wholesale **and** record the run
+    /// marker that describes it ([FR-GV-02], SRS §5.1 "written per check_rules
+    /// run"; [FR-GV-21]) — the same clear-then-rematerialise idempotence as the
+    /// derived policy graph (BR-12).
+    ///
+    /// The two writes are one call, not two, because they must describe the
+    /// **same run**: `ran_at` is stamped on every row as its `created_at` and
+    /// `violation_count` is counted from the rows actually written, so neither
+    /// can drift from the other. A [`BatchWriter`] is already scoped to one
+    /// transaction ([`SqliteGraphStore::write_batch`]), so an interrupted run
+    /// leaves neither a marker without its rows nor rows without a marker
+    /// ([NFR-RA-07]).
+    ///
+    /// `commit_sha` is `HEAD` **at write time** — it answers "has the tree
+    /// moved since", not "which commit introduced these findings". `None` when
+    /// `HEAD` does not resolve; a placeholder would be a lie a consumer cannot
+    /// detect. See [`CheckRunRow::commit_sha`].
     ///
     /// # Errors
     /// Returns an error on a constraint violation or I/O failure.
     ///
     /// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
-    pub fn replace_violations(&self, violations: &[NewViolation<'_>]) -> Result<()> {
+    /// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+    /// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
+    pub fn replace_violations(
+        &self,
+        violations: &[NewViolation<'_>],
+        ran_at: i64,
+        commit_sha: Option<&str>,
+    ) -> Result<()> {
         self.conn
             .execute("DELETE FROM violations", [])
             .context("clearing the previous violation set")?;
@@ -3735,6 +3833,7 @@ impl BatchWriter<'_> {
              (snapshot_id, rule_type, rule_key, node_id, file, message, severity, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
+        let mut written: i64 = 0;
         for v in violations {
             stmt.execute(rusqlite::params![
                 v.snapshot_id,
@@ -3744,10 +3843,22 @@ impl BatchWriter<'_> {
                 v.file,
                 v.message,
                 v.severity,
-                v.created_at,
+                ran_at,
             ])
             .context("inserting a violation row")?;
+            written += 1;
         }
+        // Upserted, never appended (BR-40): the singleton records the last run.
+        // `CHECK (id = 1)` in migration 20 makes that structural — this ON
+        // CONFLICT is how the row is kept current, not how it is kept single.
+        self.conn
+            .execute(
+                "INSERT INTO check_run (id, ran_at, commit_sha, violation_count) \
+                 VALUES (1, ?1, ?2, ?3) \
+                 ON CONFLICT(id) DO UPDATE SET ran_at = ?1, commit_sha = ?2, violation_count = ?3",
+                rusqlite::params![ran_at, commit_sha, written],
+            )
+            .context("recording the check-run marker")?;
         Ok(())
     }
 

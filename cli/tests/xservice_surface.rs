@@ -1559,10 +1559,33 @@ fn declaring_workspace_rules_leaves_the_member_gate_byte_identical() {
         after.status.code(),
         "the member's per-repo exit code is untouched by a workspace rule",
     );
+    // Compared field-by-field with the run timestamp lifted out, not as raw
+    // stdout. `ran_at` (S-313, [FR-GV-21]) is unix-seconds wall clock, so two
+    // runs a second apart differ there by construction — and this invariant is
+    // about *isolation* (declaring a workspace rule must not move the member's
+    // gated signal), never about two runs happening at the same instant. Lifting
+    // it out cannot hide a dropped field, because its presence on BOTH reports is
+    // asserted first; every other key still compares byte-for-byte.
+    let (mut before_json, mut after_json): (Value, Value) = (
+        serde_json::from_slice(&before.stdout).expect("before is a RulesReport"),
+        serde_json::from_slice(&after.stdout).expect("after is a RulesReport"),
+    );
+    for (label, report) in [("before", &before_json), ("after", &after_json)] {
+        assert!(
+            report["ran_at"].is_i64(),
+            "the {label} report must carry its run timestamp: {report}"
+        );
+    }
+    for report in [&mut before_json, &mut after_json] {
+        report
+            .as_object_mut()
+            .expect("a RulesReport is a JSON object")
+            .remove("ran_at");
+    }
     assert_eq!(
-        String::from_utf8_lossy(&before.stdout),
-        String::from_utf8_lossy(&after.stdout),
-        "the member's gated signal is byte-for-byte unchanged (CR-061 invariant)",
+        before_json, after_json,
+        "the member's gated signal is unchanged in every field but the run's own \
+         timestamp (CR-061 invariant)",
     );
 
     // ...and the workspace tier DID fire, so the equality above is a real

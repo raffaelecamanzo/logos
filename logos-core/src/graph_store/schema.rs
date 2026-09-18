@@ -52,6 +52,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (17, MIGRATION_17),
     (18, MIGRATION_18),
     (19, MIGRATION_19),
+    (20, MIGRATION_20),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -1967,12 +1968,61 @@ CREATE TABLE config_values (
 CREATE INDEX idx_config_values_key ON config_values(key);
 ";
 
+/// Migration 20 — the `check_rules` run marker (S-313, [CR-096], [FR-GV-21]).
+///
+/// One singleton table, created and nothing else. `violations` is replaced
+/// wholesale per run ([FR-GV-02], BR-12 idempotence), so a run that finds
+/// nothing leaves a table byte-identical to one a project that was never
+/// checked has: the marker is the only place the *fact of a run* can live.
+///
+/// The singleton shape is the [FR-GV-01] `rules_cache` pattern
+/// (`id INTEGER PRIMARY KEY CHECK (id = 1)`) — enforced by the schema so
+/// BR-40 ("upserted, never appended") cannot be broken by a caller's
+/// convention. A separate table rather than a column on `rules_cache`: that
+/// row is a content-hash parse cache with its own lifetime.
+///
+/// Additive only — `CREATE TABLE` and nothing else. No table is dropped,
+/// rebuilt or copied, so `nodes`, `edges`, `shingles` and the
+/// external-content `nodes_fts` index are byte-for-byte unaffected across the
+/// boundary and an existing store upgrades in place with no re-index
+/// ([FR-DB-04], [NFR-MA-06]) — the same standalone-table shape migrations 15
+/// and 19 used, asserted on a populated store by
+/// `migration_20_adds_the_check_run_marker_preserving_the_graph_byte_for_byte`
+/// in [`super::migrate`].
+///
+/// [CR-096]: ../../../../docs/requests/CR-096-recorded-check-marker.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [FR-GV-01]: ../../../../docs/specs/requirements/FR-GV-01.md
+/// [FR-GV-02]: ../../../../docs/specs/requirements/FR-GV-02.md
+/// [FR-GV-21]: ../../../../docs/specs/requirements/FR-GV-21.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_20: &str = "\
+-- check_run: the FR-GV-21 singleton marker recording the LAST check_rules run
+-- (BR-40 — the last run, never a history; FR-GV-06 owns the quality time
+-- series). Absence of the row means no run has happened, never a clean result.
+--
+-- commit_sha is what `HEAD` was WHEN THE RUN HAPPENED. It answers 'has the tree
+-- moved since', and NOT 'these findings were introduced by that commit' — the
+-- same field on metric_snapshots was once read the second way and produced a
+-- confidently wrong attribution (CR-095 review, finding 12, retracted). NULL
+-- when HEAD does not resolve (no git, no commits); never a placeholder.
+--
+-- violation_count is the number of `violations` rows the same transaction
+-- wrote, so 0 with no rows is a recorded clean run.
+CREATE TABLE check_run (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    ran_at          INTEGER NOT NULL,
+    commit_sha      TEXT,
+    violation_count INTEGER NOT NULL
+) STRICT;
+";
+
 #[cfg(test)]
 mod tests {
     use super::{
         MIGRATION_1, MIGRATION_10, MIGRATION_11, MIGRATION_12, MIGRATION_13, MIGRATION_14,
         MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_18, MIGRATION_19, MIGRATION_2,
-        MIGRATION_3, MIGRATION_4, MIGRATION_8,
+        MIGRATION_20, MIGRATION_3, MIGRATION_4, MIGRATION_8,
     };
     use crate::model::{EdgeKind, NodeKind, RefForm};
 
@@ -2913,6 +2963,69 @@ mod tests {
         assert!(
             MIGRATION_19.contains("profile TEXT\n"),
             "config_sources.profile must be nullable — NULL is the unprofiled source"
+        );
+    }
+
+    /// Migration 20 adds the [FR-GV-21] check-run marker as **one** singleton
+    /// table and nothing else (S-313, [CR-096]).
+    ///
+    /// The load-bearing invariants: the singleton is a schema `CHECK (id = 1)`
+    /// rather than a caller convention (BR-40), `commit_sha` is nullable
+    /// because a tree with no resolvable `HEAD` records NULL rather than a
+    /// placeholder, `ran_at`/`violation_count` are NOT NULL because a marker
+    /// that cannot say when or how many is not a marker, and the migration is
+    /// purely additive so an existing store upgrades with no rebuild.
+    ///
+    /// [CR-096]: ../../../../docs/requests/CR-096-recorded-check-marker.md
+    /// [FR-GV-21]: ../../../../docs/specs/requirements/FR-GV-21.md
+    #[test]
+    fn migration_20_adds_the_check_run_singleton_only() {
+        assert!(
+            MIGRATION_20.contains("CREATE TABLE check_run"),
+            "migration 20 must create check_run (FR-GV-21)"
+        );
+        assert_eq!(
+            MIGRATION_20.matches("CREATE TABLE").count(),
+            1,
+            "migration 20 creates exactly the one marker table"
+        );
+        // The singleton is structural — the same shape rules_cache has carried
+        // since migration 5 (FR-GV-01), not a convention the writer must honour.
+        assert!(
+            MIGRATION_20.contains("id              INTEGER PRIMARY KEY CHECK (id = 1)"),
+            "check_run must be a schema-enforced singleton (BR-40, the FR-GV-01 pattern)"
+        );
+        // ran_at and violation_count are mandatory; commit_sha is not, because
+        // a tree with no resolvable HEAD stores NULL rather than a placeholder.
+        assert!(
+            MIGRATION_20.contains("ran_at          INTEGER NOT NULL")
+                && MIGRATION_20.contains("violation_count INTEGER NOT NULL"),
+            "ran_at and violation_count must be NOT NULL"
+        );
+        assert!(
+            MIGRATION_20.contains("commit_sha      TEXT,\n"),
+            "check_run.commit_sha must be nullable — NULL is 'HEAD did not resolve'"
+        );
+        // Purely additive: no rebuild, so an existing store upgrades in place
+        // with no re-index (FR-DB-04, NFR-MA-06).
+        for forbidden in ["DROP TABLE", "ALTER TABLE", "DROP INDEX", "DROP TRIGGER"] {
+            assert!(
+                !MIGRATION_20.contains(forbidden),
+                "migration 20 must be purely additive — found `{forbidden}` (NFR-MA-06)"
+            );
+        }
+        // The graph tables are not so much as mentioned — the argument for
+        // byte-for-byte preservation across the boundary.
+        for untouched in ["nodes", "edges", "shingles", "nodes_fts", "unresolved_refs"] {
+            assert!(
+                !MIGRATION_20.contains(untouched),
+                "migration 20 must not mention `{untouched}` (additive upgrade in place)"
+            );
+        }
+        assert_eq!(
+            MIGRATION_20.matches(") STRICT;").count(),
+            1,
+            "check_run is STRICT like every table since migration 1 (FR-DB-01)"
         );
     }
 }
