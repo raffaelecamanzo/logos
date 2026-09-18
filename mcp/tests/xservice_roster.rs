@@ -165,8 +165,11 @@ fn workspace_check_is_federated_only_and_never_a_gate_tool() {
 /// The `xservice_route_providers` description names the [FR-WS-10] relation
 /// set, states the `broker-topic` fan-out (never a sole provider), and names
 /// the [S-410]-era `intake`/`from_value`/`to_value` fields — the payload the
-/// pre-S-410 wording no longer described.
+/// pre-S-410 wording no longer described. It also pins out the retired claim
+/// that a `route` consumer endpoint binds exactly one provider, which [S-420]
+/// falsified in the same sprint.
 ///
+/// [S-420]: ../../docs/planning/journal.md#s-420-the-bridge-keys-an-http-consumer-on-its-committed-target
 /// [FR-WS-10]: ../../docs/specs/requirements/FR-WS-10.md
 /// [S-410]: ../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
 #[test]
@@ -198,4 +201,23 @@ fn xservice_route_providers_description_names_relations_fan_out_and_provenance_f
             "the description names the {field} field: {description}",
         );
     }
+
+    // The `route` arm no longer binds one provider per CONSUMER ENDPOINT, and the
+    // description must not say it does. S-420 keys a configuration-composed HTTP
+    // target on EVERY committed composition (`bridge::identify`'s `keyed`), and
+    // `match_indexed` emits one edge per composition that binds its own sole
+    // provider - so one call site can appear several times in `providers`, naming
+    // several members. The pre-S-420 clause told a consumer the opposite, which
+    // reads as a licence to de-duplicate `providers` on the consumer endpoint and
+    // silently drop edges. Asserted as an ABSENCE as well as a presence: the
+    // absence is what actually pins the retired claim out of the payload's
+    // description, and it survives a rewording of the replacement sentence.
+    assert!(
+        !description.contains("bind to exactly one provider"),
+        "the description no longer claims the route/grpc arms bind one provider per consumer endpoint: {description}",
+    );
+    assert!(
+        description.contains("several `route` edges"),
+        "the description states that one call site can carry several route edges, one per committed composition: {description}",
+    );
 }
