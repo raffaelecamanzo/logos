@@ -401,6 +401,24 @@ NO FLOOR IS ASSERTED ON ANY FIGURE BELOW.  Every one is pinned exactly, in both
 directions, which is a reproduction claim.
 
 
+HEADLINE SENTENCES — WHAT THE HARNESS PINS THIS ARTIFACT TO
+------------------------------------------------------------
+
+Each line below is matched VERBATIM by
+`the_recorded_artifact_states_the_figures_this_file_pins`, so a constant and its
+narration here cannot move apart.  They are sentences and not bare numbers on
+purpose: this document is a historical narrative that carries every superseded
+figure, so a bare-number search over it is satisfied by the wrong decade of the
+record — including, before this section existed, by a PREDICTION of the very
+number that was later measured.  That is the same weakness the CRITERION_FLOOR
+pin below was already written to avoid; it is generalised here.
+
+  the HTTP arm admits 90 of an accessor denominator of 96
+  the broker arm admits 29 rows
+  the bridge draws 51 invocation edges, 18 of them on the route arm
+  before this change the route arm drew 0
+
+
 (a) THE ADMISSION FIGURE — THE RE-INDEX THIS FILE WAS WAITING FOR
 ------------------------------------------------------------------
 

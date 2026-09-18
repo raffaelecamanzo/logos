@@ -354,24 +354,51 @@ const RECORDED_FINDING: &str = include_str!("config_bound_admission/config_bound
 /// so `81` cannot be satisfied by `810` or by the `81` inside `1081`.
 #[test]
 fn the_recorded_artifact_states_the_figures_this_file_pins() {
-    // The two MEASURED figures, as whole words. A bare-number search is the right
-    // instrument for them precisely because they are large and estate-specific: a
-    // stale artifact keeps the old numerator, and the old numerator is absent.
-    for (figure, what) in [
-        (RECORDED_ADMITTED, "the admitted `config-bound` count"),
-        (ACCESSOR_DENOMINATOR, "the accessor denominator"),
+    // **Each figure is pinned to its own SENTENCE, never as a bare number, and the
+    // generalisation is the remedy for a measured false green.**
+    //
+    // Until 2026-09-18 the two figures below were searched for as bare whole words,
+    // on the stated reasoning that "a stale artifact keeps the old numerator, and
+    // the old numerator is absent". That premise does not hold for this artifact,
+    // which is a historical narrative carrying every superseded figure: whole-word
+    // `81` occurs 32 times in it, `84` 18 times, `96` 15 times. Worse, the move this
+    // guard existed to police — `RECORDED_ADMITTED` 81 -> 90 — was ALREADY satisfied
+    // before it happened, because the artifact predicted the 90 in prose ("the
+    // expected post-re-index product reading is ~90"). Re-recording the constant and
+    // forgetting the artifact entirely would have passed; so would reverting the
+    // constant to any historical numerator. Both were demonstrated, not supposed.
+    //
+    // The sentence pin is exactly what the `CRITERION_FLOOR` assertion below already
+    // did, for exactly this reason. It is generalised here rather than left as the
+    // one-off it was, and it now covers every figure this file records — including
+    // the three S-420 T2 added, which had no artifact-agreement guard at all.
+    for (phrase, what) in [
+        (
+            format!("the HTTP arm admits {RECORDED_ADMITTED} of an accessor denominator of {ACCESSOR_DENOMINATOR}"),
+            "the admitted `config-bound` count over the accessor denominator",
+        ),
+        (
+            format!("the broker arm admits {RECORDED_ADMITTED_BROKER} rows"),
+            "the broker arm's admitted count",
+        ),
+        (
+            format!(
+                "the bridge draws {} invocation edges, {} of them on the route arm",
+                RECORDED_BRIDGE_INVOCATION_EDGES[0].1 + RECORDED_BRIDGE_INVOCATION_EDGES[1].1,
+                RECORDED_BRIDGE_INVOCATION_EDGES[1].1,
+            ),
+            "the invocation edges the bridge draws, and the route arm's share",
+        ),
     ] {
-        let needle = figure.to_string();
-        let found = RECORDED_FINDING.match_indices(&needle).any(|(at, _)| {
-            let before = RECORDED_FINDING[..at].chars().next_back();
-            let after = RECORDED_FINDING[at + needle.len()..].chars().next();
-            !before.is_some_and(|c| c.is_ascii_digit()) && !after.is_some_and(|c| c.is_ascii_digit())
-        });
         assert!(
-            found,
-            "config_bound_admission_finding.txt does not state {what} ({figure}) that \
-             this file pins. The artifact is the durable dated record of the same \
-             measurement — re-record it in the same change as the constant, never after."
+            RECORDED_FINDING.contains(&phrase),
+            "config_bound_admission_finding.txt does not contain the sentence \
+             \"{phrase}\", so it does not state {what} as this file records it. The \
+             artifact is the durable dated record of the same measurement — re-record \
+             it in the SAME change as the constant, never after. It is matched as a \
+             sentence and not as a bare number because this document carries every \
+             superseded figure, so a bare-number search is satisfied by the wrong \
+             generation of the record."
         );
     }
 
