@@ -81,6 +81,33 @@ describe("buildSeries", () => {
   });
 });
 
+describe("the provenance stroke channel (S-419, CR-132 AC3)", () => {
+  /* The real canvas rasterises these links into a <canvas> bitmap, which has no
+     DOM node to assert against — so the stroke itself is pinned HERE, at the last
+     point it is still data, and its presence on the view is pinned separately in
+     WorkspaceView.test.tsx against rendered DOM. Neither test covers the other:
+     this one would pass on a stroke the view never asks for, and that one would
+     pass on a marker that reached ECharts and changed nothing. */
+
+  it("strokes an admitted edge with the dash-dot pattern, keeping its arm hue and type", () => {
+    const set = loadedFrom(
+      [n("a"), n("b")],
+      [{ source: "a", target: "b", edge_type: "route", admitted: true } as GraphElementEdge],
+    );
+    const link = buildSeries(set, NO_SELECTION, CENTER, 1, 0.5, 5).links[0];
+    expect(link.lineStyle.type).toEqual([9, 3, 2, 3]);
+    // The arm survives on BOTH the channels FR-UI-29 pins to the legend grammar.
+    expect(link.lineStyle.color).toBe("#db2777"); // the `route` hue, unchanged
+    expect(link.edge_type).toBe("route"); // never a synthetic provenance edge type
+  });
+
+  it("leaves an unmarked edge on its arm's own line style", () => {
+    const set = loadedFrom([n("a"), n("b")], [e("a", "b", "route")]);
+    const link = buildSeries(set, NO_SELECTION, CENTER, 1, 0.5, 5).links[0];
+    expect(link.lineStyle.type).toBe("dashed"); // EDGE_STYLE.route, as before S-419
+  });
+});
+
 describe("label level-of-detail", () => {
   it("shows labels for a small set or once zoomed in, hides them for a large zoomed-out set", () => {
     expect(labelsVisible(10, 0.5)).toBe(true); // small set

@@ -19,17 +19,24 @@
  *     genuinely has no couplings.
  *   - a self-binding (a member bound to itself) is not a *cross*-service edge; the
  *     bridge does not emit one, and this model would not draw it if it did.
+ *   - an **admitted** binding — one the repository proved from committed
+ *     configuration rather than one observed at a call site — is never drawn as
+ *     though it were observed (S-419, ADR-64). Every link states its per-kind
+ *     breakdown, and the canvas edge carries an `admitted` marker the styling
+ *     reads as a second channel over the relation arm.
  *
  * No React, no ECharts, no fetch — every function here is pure (NFR-RA-06).
  */
 
 import type {
   BridgeEdge,
+  ConfigValueRefusal,
   MemberTopics,
   MemberWarmStateLabel,
+  ValueProvenance,
   WorkspaceStatus,
 } from "../../api/types.ts";
-import type { LoadedSet } from "../graph/graphModel.ts";
+import type { CanvasEdge, LoadedSet } from "../graph/graphModel.ts";
 
 /** One service as the map knows it — read from the workspace status fan-out, which
  *  is the only source that knows whether a member actually has an index. */
@@ -93,6 +100,111 @@ export function topicOfTopicId(id: string): string | null {
   return id.startsWith(TOPIC_ID_PREFIX) ? id.slice(TOPIC_ID_PREFIX.length) : null;
 }
 
+// ── Edge provenance (S-419, CR-132, ADR-64, FR-WS-19 AC6) ───────────────────
+// Every BridgeEdge has carried `from_value` / `to_value` since S-410; until this
+// story the map read neither, so a coupling the repository ADMITTED from
+// committed configuration drew exactly like one observed at a call site. ADR-64
+// forbids that at every surface, which is what the four kinds below repair.
+
+/** The kind ONE aggregated binding is counted under on a {@link ServiceLink}.
+ *
+ *  `unstated` is the fourth kind and is not on the wire: it is what a binding
+ *  whose value field is absent — or carries a token this build does not know —
+ *  is counted as. Folding it into `literal` would report an unread field as
+ *  observed evidence, the precise failure ADR-64 names (CR-132 AC2). */
+export type LinkProvenanceKind = "literal" | "config-bound" | "config-unresolved" | "unstated";
+
+/** Every kind, in the order a breakdown is stated: best-evidenced first. */
+export const LINK_PROVENANCE_KINDS: readonly LinkProvenanceKind[] = [
+  "literal",
+  "config-bound",
+  "config-unresolved",
+  "unstated",
+];
+
+/** How each kind is worded. `literal` reuses `coverageModel`'s wording VERBATIM:
+ *  the coverage board and the service map sit in one view, and one fact stated
+ *  two ways there reads as two facts. */
+export const LINK_PROVENANCE_LABEL: Record<LinkProvenanceKind, string> = {
+  literal: "Written at the call site",
+  "config-bound": "Admitted from committed configuration",
+  "config-unresolved": "Names a key the committed sources do not admit",
+  unstated: "Provenance not stated",
+};
+
+/** The human label for each refusal a `config-unresolved` end travels with.
+ *
+ *  These MIRROR `ValueRefusal::label()` in `logos-core/src/resolve/binding.rs`,
+ *  which is the vocabulary's one author — only sentence-cased for a table cell.
+ *  The three are not interchangeable and naming them loosely sends an operator
+ *  to the wrong remedy (NFR-CC-04): `uncommitted` means the value arrives at
+ *  runtime from something the repository does not commit — an environment
+ *  variable with no committed default, a config server, a secret store — so
+ *  there is no key to go and define; `missing-key` means the committed sources
+ *  prove no value for the operand, which IS the "go and define it" case. */
+export const CONFIG_REFUSAL_LABEL: Record<ConfigValueRefusal, string> = {
+  uncommitted: "Not committed by the repository",
+  "placeholder-value": "The committed value is itself a placeholder",
+  "missing-key": "No committed source defines it",
+};
+
+/** How many of a link's bindings fall under each kind. Every kind is present even
+ *  at zero, so a reader never has to infer a missing kind's count from an absent
+ *  field (NFR-CC-04) — and so the four always sum to {@link ServiceLink.count}. */
+export type ProvenanceBreakdown = Record<LinkProvenanceKind, number>;
+
+/** A breakdown with every kind at zero. */
+function emptyBreakdown(): ProvenanceBreakdown {
+  return { literal: 0, "config-bound": 0, "config-unresolved": 0, unstated: 0 };
+}
+
+/** The kind ONE end of a binding proves.
+ *
+ *  The `default` arm catches both an ABSENT field (the wire is not runtime
+ *  validated, so a required type does not make one turn up) and a `provenance`
+ *  token a later arm adds that this build does not know. Both are `unstated`
+ *  rather than `literal`, for the reason `provenanceLabel` renders an
+ *  unrecognised token verbatim rather than as an empty string: a target shown
+ *  with no statement of where it came from is the indistinguishability ADR-64
+ *  forbids. */
+function endKind(value: ValueProvenance | undefined): LinkProvenanceKind {
+  switch (value?.provenance) {
+    case "literal":
+      return "literal";
+    case "config-bound":
+      return "config-bound";
+    case "config-unresolved":
+      return "config-unresolved";
+    default:
+      return "unstated";
+  }
+}
+
+/** How well-evidenced a kind is — LOWER is better evidenced. */
+const KIND_RANK: Record<LinkProvenanceKind, number> = {
+  literal: 0,
+  "config-bound": 1,
+  "config-unresolved": 2,
+  unstated: 3,
+};
+
+/**
+ * The kind one whole binding is counted under: the WEAKER of its two ends.
+ *
+ * A binding is only as observed as its least-observed end. An edge whose
+ * consumer end is a literal and whose provider end was admitted from committed
+ * configuration is an admitted edge — counting it as `literal` because one end
+ * happens to be one would restore exactly the indistinguishability this story
+ * removes. This is also what makes CR-132 AC2 hold without a special case: an
+ * absent `from_value` ranks worst, so the binding is `unstated` however well
+ * evidenced its other end is.
+ */
+export function edgeProvenanceKind(edge: BridgeEdge): LinkProvenanceKind {
+  const from = endKind(edge.from_value);
+  const to = endKind(edge.to_value);
+  return KIND_RANK[to] > KIND_RANK[from] ? to : from;
+}
+
 /** One service-to-service coupling: every binding between two members under one
  *  relation arm, collapsed to a single weighted edge. */
 export interface ServiceLink {
@@ -104,6 +216,108 @@ export interface ServiceLink {
   relation: string;
   /** How many individual bindings this one line stands for — never rounded. */
   count: number;
+  /** How those bindings split across the four provenance kinds (S-419).
+   *
+   *  A BREAKDOWN, never a single label: a link aggregating one literal and one
+   *  admitted binding is neither "observed" nor "admitted", and either word
+   *  applied to the whole line is false about half of it (CR-132 §10). */
+  provenance: ProvenanceBreakdown;
+  /** The bindings this line stands for, in payload order — the evidence
+   *  {@link linkEvidence} reads. Retained rather than pre-digested so the detail
+   *  and the breakdown cannot drift: both are derived from this one list. */
+  bindings: BridgeEdge[];
+}
+
+/** Does this link stand for any binding that was NOT observed at a call site?
+ *  The gate on every rendering the provenance channel adds — the canvas stroke,
+ *  the legend section, the table column and the evidence detail all appear only
+ *  when it holds, which is what keeps a literal-only workspace rendering exactly
+ *  as it did before this story (CR-132 AC6). */
+export function hasNonLiteralBinding(link: ServiceLink): boolean {
+  const p = link.provenance;
+  return p["config-bound"] + p["config-unresolved"] + p.unstated > 0;
+}
+
+/** One row of a link's evidence detail: what one end of one binding proves, at
+ *  one overlay (S-419, FR-WS-19 AC2/AC6).
+ *
+ *  ONE ROW PER OVERLAY, not per key: a key whose overlays disagree proves
+ *  several values, and ADR-64 retains every one of them rather than averaging.
+ *  Collapsing them here would show an overlay divergence as though the
+ *  repository proved a single value. */
+export interface EvidenceRow {
+  /** Which end of the binding proved this — the consumer's key and the
+   *  provider's are routinely spelled differently, which is why they are two
+   *  fields on the wire and two rows here. */
+  end: "consumer" | "provider";
+  /** The member at that end. */
+  member: string;
+  /** The configuration key. */
+  key: string;
+  /** The committed value this overlay proves, or `null` on a refusal — where
+   *  there IS no value, and rendering an empty string would read as one. */
+  value: string | null;
+  /** The profiles proving it, sorted as the payload sorted them. */
+  profiles: string[];
+  /** Whether the UNPROFILED source proves it — carried even when `false`, so it
+   *  is never inferred from an empty `profiles` (mirrors `ProfiledValue`). */
+  unprofiled: boolean;
+  /** The project-relative files proving it — the "defining sources" half. */
+  sources: string[];
+  /** The refusal, on a `config-unresolved` end; `null` otherwise. */
+  refusal: ConfigValueRefusal | null;
+}
+
+/** The evidence rows for one end of one binding. A `literal` end yields none —
+ *  there is no configuration to name — and neither does an `unstated` one, which
+ *  is the absence of a claim rather than a claim about absence. */
+function endEvidence(
+  end: EvidenceRow["end"],
+  member: string,
+  value: ValueProvenance | undefined,
+): EvidenceRow[] {
+  if (value?.provenance === "config-bound") {
+    // `bound` is one entry PER KEY the target names and each entry's `values` is
+    // one per distinct committed value: `${svc.host}${svc.path}` is two keys, and
+    // rendering only the first would hide the second key's evidence entirely.
+    return value.bound.flatMap((b) =>
+      b.values.map((v) => ({
+        end,
+        member,
+        key: b.key,
+        value: v.value,
+        profiles: v.profiles,
+        unprofiled: v.unprofiled,
+        sources: v.sources,
+        refusal: null,
+      })),
+    );
+  }
+  if (value?.provenance === "config-unresolved") {
+    // One row per key, each carrying the refusal — the keys are what the target
+    // NAMED, and a refusal stated once beside a joined key list would not say
+    // which of them the sources failed to admit.
+    return value.keys.map((key) => ({
+      end,
+      member,
+      key,
+      value: null,
+      profiles: [],
+      unprofiled: false,
+      sources: [],
+      refusal: value.refusal,
+    }));
+  }
+  return [];
+}
+
+/** Every evidence row behind one link, consumer end before provider end within
+ *  each binding, bindings in payload order. */
+export function linkEvidence(link: ServiceLink): EvidenceRow[] {
+  return link.bindings.flatMap((b) => [
+    ...endEvidence("consumer", b.from.member, b.from_value),
+    ...endEvidence("provider", b.to.member, b.to_value),
+  ]);
 }
 
 /** One topic as the map draws it: the shared identity, and which members produce and
@@ -214,6 +428,32 @@ export function buildServiceMap(
   // service (NFR-RA-05).
   const topics = topicLinks(inventory);
   const topicEdges: LoadedSet["edges"] = [];
+  /* Which ordered member pairs are coupled on the broker arm by at least one
+     binding that was NOT observed at a call site (S-419, CR-132 AC5).
+
+     The topic hops are built from the promoted topic INVENTORY, which carries no
+     provenance; the provenance lives on the BINDINGS, which the flat line is
+     built from. So a hop is marked from the binding it stands for. Today the
+     inventory and the bridge disagree for every config-bound site, so the flat
+     line is what is actually drawn — but FR-WS-11 aligning them later would move
+     those couplings onto the hop, and an unmarked hop would hide the provenance
+     again the day that lands. */
+  const admittedBrokerPairs = new Set<string>();
+  for (const b of bindings) {
+    if (b.relation !== "broker-topic") continue;
+    // ANY non-literal kind, deliberately wider than the criterion's phrase
+    // "backed by a `config-bound` binding". That same criterion requires the
+    // hop to carry "the same marker as the flat line they replace", and the
+    // flat line's marker is `hasNonLiteralBinding` — so gating the hop on
+    // `config-bound` alone would make a refused or unstated coupling lose its
+    // marker precisely by being drawn through its topic, which is the
+    // indistinguishability the story removes.
+    if (edgeProvenanceKind(b) === "literal") continue;
+    admittedBrokerPairs.add(`${b.from.member}\u0000${b.to.member}`);
+  }
+  /** Is this producer→consumer pair carried by an admitted broker binding? */
+  const brokerPairAdmitted = (producer: string, consumer: string): boolean =>
+    admittedBrokerPairs.has(`${producer}\u0000${consumer}`);
   for (const t of topics) {
     nodes[topicId(t.topic)] = {
       id: topicId(t.topic),
@@ -230,14 +470,22 @@ export function buildServiceMap(
     };
     for (const member of t.producers) {
       if (!nodes[serviceId(member)]) continue;
+      // The publish hop stands for this producer's binding to EVERY cross-member
+      // subscriber of the topic (a broker publish fans out, FR-WS-10), so it is
+      // admitted when any one of those bindings is.
+      const admitted = t.consumers.some((c) => brokerPairAdmitted(member, c));
       topicEdges.push({
         source: serviceId(member),
         target: topicId(t.topic),
         edge_type: "publishes",
+        // Set only when true: an absent slot keeps this edge object identical to
+        // the pre-S-419 one, which is what CR-132 AC6 pins.
+        ...(admitted ? { admitted: true } : {}),
       });
     }
     for (const member of t.consumers) {
       if (!nodes[serviceId(member)]) continue;
+      const admitted = t.producers.some((p) => brokerPairAdmitted(p, member));
       topicEdges.push({
         // A subscribe points FROM the topic TO the consuming service — the direction
         // the message actually travels, so the map reads as a flow
@@ -245,6 +493,7 @@ export function buildServiceMap(
         source: topicId(t.topic),
         target: serviceId(member),
         edge_type: "subscribes",
+        ...(admitted ? { admitted: true } : {}),
       });
     }
   }
@@ -263,9 +512,16 @@ export function buildServiceMap(
     // than doubled. It still counts in `links`, which the view states as a figure.
     const link = { from: b.from.member, to: b.to.member, relation: b.relation };
     const key = linkKey(link);
-    const existing = byKey.get(key);
-    if (existing) existing.count += 1;
-    else byKey.set(key, { ...link, count: 1 });
+    let existing = byKey.get(key);
+    if (!existing) {
+      existing = { ...link, count: 0, provenance: emptyBreakdown(), bindings: [] };
+      byKey.set(key, existing);
+    }
+    existing.count += 1;
+    // The breakdown and the retained binding move together, so the four counts
+    // and the evidence detail can never disagree about the same line (S-419).
+    existing.provenance[edgeProvenanceKind(b)] += 1;
+    existing.bindings.push(b);
   }
 
   const links = [...byKey.values()].sort(
@@ -296,13 +552,17 @@ export function buildServiceMap(
           // only where a topic actually carries it; otherwise the direct line stays, so
           // a resolved coupling is never silently un-drawn.
           .filter((l) => l.relation !== "broker-topic" || !drawnThroughATopic(l))
-          .map((l) => ({
+          .map((l): CanvasEdge => ({
             source: serviceId(l.from),
             target: serviceId(l.to),
             // The canvas colours/styles an edge by its wire type; the relation arm IS
             // that type here (`route` / `grpc-call`, or `broker-topic` when no topic
             // hop carries it), so the legend grammar carries straight over.
             edge_type: l.relation,
+            // Provenance rides as a SECOND channel, never as a new `edge_type`:
+            // arm × kind would triple the legend and break the shared grammar
+            // FR-UI-29 requires (CR-132 §7). Set only when true — see above.
+            ...(hasNonLiteralBinding(l) ? { admitted: true } : {}),
           })),
         ...topicEdges,
       ],

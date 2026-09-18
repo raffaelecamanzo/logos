@@ -16,6 +16,7 @@
 import type { GraphLayer } from "../../api/types.ts";
 import {
   adjacencySet,
+  ADMITTED_DASH,
   degreeMap,
   edgeColor,
   edgeStyle,
@@ -24,6 +25,7 @@ import {
   nodeSize,
   SELECTION_RING,
   visibleNodeIds,
+  type CanvasEdge,
   type LoadedSet,
 } from "./graphModel.ts";
 
@@ -157,9 +159,15 @@ function nodeDatum(
   return datum;
 }
 
-/** Build one edge (link) datum (ported from graph.js `linkOption`). */
+/** Build one edge (link) datum (ported from graph.js `linkOption`).
+ *
+ *  `admitted` is the provenance channel (S-419, CR-132 AC3): a line standing for
+ *  a binding the repository ADMITTED from committed configuration is stroked with
+ *  {@link ADMITTED_DASH} instead of its arm's redundant dash repeat. `edge_type`
+ *  and the hue are untouched — the arm still reads off the colour, which is the
+ *  channel FR-UI-29 pins to the shared legend grammar. */
 function linkDatum(
-  edge: { source: string; target: string; edge_type: string | null },
+  edge: CanvasEdge,
   adj: Set<string> | null,
   sel: GraphSelection,
 ) {
@@ -171,7 +179,7 @@ function linkDatum(
     edge_type: edge.edge_type,
     lineStyle: {
       color: edgeColor(edge.edge_type),
-      type: edgeStyle(edge.edge_type),
+      type: edge.admitted ? [...ADMITTED_DASH] : edgeStyle(edge.edge_type),
       width: forbidden ? 2.6 : 2,
       opacity: dimmed ? 0.1 : forbidden ? 0.95 : 0.82,
       curveness: 0.08,

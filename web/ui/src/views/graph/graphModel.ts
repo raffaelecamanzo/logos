@@ -128,12 +128,46 @@ export function prettify(token: string): string {
 // (source,target,edge_type) edge key. Filters/focus/depth derive the rendered
 // view from it without re-fetching, exactly as the legacy canvas does.
 
+/** A canvas edge: the wire edge, plus the OPTIONAL provenance slot the styling
+ *  reads (S-419, CR-132 §4.4).
+ *
+ *  A separate declaration rather than a field on the wire {@link GraphElementEdge}
+ *  because it is NOT on the wire: no endpoint emits it. It is derived by the
+ *  service map from the `from_value` / `to_value` of the bridge edges a line
+ *  stands for, and every other producer of a canvas edge leaves it absent. */
+export interface CanvasEdge extends GraphElementEdge {
+  /** `true` when at least one binding behind this line was admitted from
+   *  committed configuration — or refused there — rather than observed at the
+   *  call site (ADR-64, FR-WS-19 AC6).
+   *
+   *  Deliberately tri-state by ABSENCE rather than a `false`: an edge that
+   *  carries no provenance claim at all (every intra-repo edge, every producer
+   *  but the service map) is not the same statement as "every binding here was
+   *  observed", and a canvas edge object identical to the pre-S-419 one is what
+   *  keeps a literal-only workspace rendering byte-for-byte as before
+   *  (CR-132 AC6). */
+  admitted?: boolean;
+}
+
+/** The dash pattern an ADMITTED edge is stroked with — the provenance channel
+ *  (S-419, CR-132 AC3).
+ *
+ *  It overrides {@link EDGE_STYLE}'s solid/dashed/dotted, which is a *redundant*
+ *  repeat of the arm the hue already carries (see the legend's own note). The hue
+ *  is untouched, so the arm — the channel FR-UI-29 requires to stay the shared
+ *  legend grammar — still reads off the line; what the dash says changes from
+ *  "this is the broker arm, again" to "this line was not observed in code".
+ *
+ *  Dash-DOT, not a longer dash: `EDGE_STYLE` already spends plain dashes and dots
+ *  on arms, and a fourth plain pattern would be told apart only by measuring it. */
+export const ADMITTED_DASH: readonly number[] = [9, 3, 2, 3];
+
 /** The accumulated, deduped element set the canvas renders from. */
 export interface LoadedSet {
   /** id → node. */
   nodes: Record<string, GraphElementNode>;
   /** Deduped edges. */
-  edges: GraphElementEdge[];
+  edges: CanvasEdge[];
 }
 
 /** An empty loaded set. */

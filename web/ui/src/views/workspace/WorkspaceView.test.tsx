@@ -16,11 +16,29 @@ vi.mock("../graph/GraphCanvas.tsx", () => ({
     loaded,
     onNodeClick,
   }: {
-    loaded: { nodes: Record<string, { id: string; label: string }>; edges: unknown[] };
+    loaded: {
+      nodes: Record<string, { id: string; label: string }>;
+      edges: { source: string; target: string; edge_type: string | null; admitted?: boolean }[];
+    };
     onNodeClick: (id: string) => void;
   }) => (
     <div data-testid="canvas">
       <span data-testid="canvas-edges">{loaded.edges.length}</span>
+      {/* The provenance channel, surfaced as DOM (S-419). The real canvas strokes
+          it into a <canvas> bitmap, which has no DOM to assert against at all, so
+          the double states the two things the contract is made of: that the line
+          is marked admitted, and that its `edge_type` is STILL the relation arm
+          (CR-132 AC3 — provenance must never become a new edge type).
+
+          Filtered, not mapped: an edge carrying no marker renders nothing here, so
+          the literal-only DOM this file records stays byte-identical. */}
+      {loaded.edges
+        .filter((e) => e.admitted)
+        .map((e) => (
+          <span key={`${e.source}->${e.target}`} data-testid="canvas-admitted-edge">
+            {`${e.source}->${e.target}:${e.edge_type}`}
+          </span>
+        ))}
       {Object.values(loaded.nodes).map((n) => (
         <button key={n.id} type="button" onClick={() => onNodeClick(n.id)}>
           {n.label}
@@ -125,6 +143,56 @@ const BINDING: BridgeEdge = {
   relation: "route",
   from: { member: "api", symbol: "op" },
   to: { member: "web", symbol: "route" },
+  // Both ends observed at the call site — the baseline this file records the
+  // unchanged DOM for (CR-132 AC6).
+  from_value: { provenance: "literal" },
+  to_value: { provenance: "literal" },
+};
+
+/** The same coupling, but with the PROVIDER end admitted from committed
+ *  configuration — ADR-64's named shape, and the fixture every provenance
+ *  rendering below is asserted against. */
+const ADMITTED_BINDING: BridgeEdge = {
+  relation: "route",
+  from: { member: "api", symbol: "op2" },
+  to: { member: "web", symbol: "route2" },
+  from_value: { provenance: "literal" },
+  to_value: {
+    provenance: "config-bound",
+    bound: [
+      {
+        key: "billing.base-url",
+        source: "properties",
+        values: [
+          {
+            value: "http://billing:8080",
+            profiles: ["docker"],
+            unprofiled: false,
+            sources: ["src/main/resources/application-docker.yml"],
+          },
+          {
+            value: "http://billing.svc:8080",
+            profiles: [],
+            unprofiled: true,
+            sources: ["src/main/resources/application.yml"],
+          },
+        ],
+      },
+    ],
+  },
+};
+
+/** A coupling whose consumer end names a key no committed source admits. */
+const REFUSED_BINDING: BridgeEdge = {
+  relation: "grpc-call",
+  from: { member: "api", symbol: "stub" },
+  to: { member: "web", symbol: "svc" },
+  from_value: {
+    provenance: "config-unresolved",
+    keys: ["billing.grpc.target"],
+    refusal: "missing-key",
+  },
+  to_value: { provenance: "literal" },
 };
 
 function mount() {
@@ -175,6 +243,25 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     expect(screen.getByText(/HTTP \(OpenAPI ↔ route\)/)).toBeInTheDocument();
   });
 
+  /* CR-132 AC6 / FR-UI-29: a workspace with NO admitted binding must render
+     byte-for-byte as it did before the provenance channel existed.
+
+     The recorded file was written from the tree as it stood BEFORE that channel
+     was added, and is never re-recorded: `-u` on this spec would silently turn
+     the criterion into "renders however it renders today", which is the one thing
+     it exists to prevent. The subtree is the service-map panel itself (the mocked
+     canvas's parent), so a change anywhere in the map's own DOM — a legend
+     section, a table column, an evidence list — fails it. */
+  it("renders a literal-only service map identically to the DOM recorded before provenance", async () => {
+    stubApi({ providers: [BINDING] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    const panel = screen.getByTestId("canvas").parentElement!;
+    await expect(panel.innerHTML).toMatchFileSnapshot(
+      "./__snapshots__/service-map.literal-only.html",
+    );
+  });
+
   it("clicking a service focuses its member — the shell selector follows the canvas", async () => {
     stubApi({ providers: [BINDING] });
     mount();
@@ -188,6 +275,161 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     mount();
     expect(await screen.findByText(/no cross-service bindings resolved yet/i)).toBeInTheDocument();
     expect(screen.getByTestId("canvas-edges")).toHaveTextContent("0");
+  });
+
+  // ── S-419 / CR-132 / ADR-64: bridge-edge provenance, asserted on RENDERED DOM ──
+  // Every fixture below reads the DOM the user is shown. Asserting the model
+  // instead would pass for a breakdown the view never renders, which is the
+  // failure mode this project has a standing rule against.
+
+  it("renders the per-kind breakdown in the table — never one label for a mixed link", async () => {
+    stubApi({ providers: [BINDING, ADMITTED_BINDING] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+
+    // The column exists…
+    expect(screen.getByRole("columnheader", { name: /Provenance/ })).toBeInTheDocument();
+    // …and the ONE row both bindings aggregate into states both kinds, with counts.
+    const row = screen.getByRole("cell", { name: "api" }).closest("tr")!;
+    expect(within(row).getByRole("cell", { name: /Written at the call site/ })).toHaveTextContent(
+      /Written at the call site\s*1/,
+    );
+    expect(within(row).getByRole("cell", { name: /Written at the call site/ })).toHaveTextContent(
+      /Admitted from committed configuration\s*1/,
+    );
+    // The weight is still 2 — the breakdown decomposes the line, it does not replace it.
+    expect(within(row).getByRole("cell", { name: "2" })).toBeInTheDocument();
+  });
+
+  it("lists EVERY kind present on one row, not just the first two", async () => {
+    // Three bindings under one (consumer, provider, arm) key, spanning three
+    // kinds. The cell renders per-kind rows; with only ever two kinds present a
+    // renderer that showed the first two would have passed.
+    const third: BridgeEdge = {
+      relation: "route",
+      from: { member: "api", symbol: "op3" },
+      to: { member: "web", symbol: "route3" },
+      from_value: { provenance: "config-unresolved", keys: ["x.y"], refusal: "uncommitted" },
+      to_value: { provenance: "literal" },
+    };
+    stubApi({ providers: [BINDING, ADMITTED_BINDING, third] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+
+    const cell = screen
+      .getByRole("cell", { name: /Written at the call site/ });
+    expect(cell).toHaveTextContent(/Written at the call site\s*1/);
+    expect(cell).toHaveTextContent(/Admitted from committed configuration\s*1/);
+    expect(cell).toHaveTextContent(/Names a key the committed sources do not admit\s*1/);
+    // Three kinds, three rows — the breakdown is complete, not truncated.
+    expect(cell.querySelectorAll("li")).toHaveLength(3);
+  });
+
+  it("marks the canvas line admitted while its edge_type stays the relation arm", async () => {
+    stubApi({ providers: [ADMITTED_BINDING] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    expect(screen.getByTestId("canvas-admitted-edge")).toHaveTextContent(
+      "service:api->service:web:route",
+    );
+  });
+
+  it("renders the legend's provenance section IF AND ONLY IF a link is non-literal", async () => {
+    // Literal only → no section. The legend is unchanged from S-250.
+    stubApi({ providers: [BINDING] });
+    const { unmount } = mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    const legend = screen.getByText("Legend").closest("details")!;
+    expect(within(legend).queryByText("Provenance")).toBeNull();
+    expect(within(legend).queryByText(/Admitted from committed configuration/)).toBeNull();
+    unmount();
+    cleanup();
+
+    // One admitted binding → the section, with both strokes drawn in one arm's hue.
+    stubApi({ providers: [ADMITTED_BINDING] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    // Scoped to the legend: "Provenance" is also the bindings table's column
+    // header, and an unscoped query would pass on the wrong element.
+    const legendAfter = screen.getByText("Legend").closest("details")!;
+    const heading = within(legendAfter).getByText("Provenance");
+    const rows = heading.nextElementSibling!.querySelectorAll("line");
+    expect(rows).toHaveLength(2);
+    // The provenance channel is the STROKE; the hue is still the arm's, identical
+    // on both rows — that is what makes it a second channel rather than a new arm.
+    expect(rows[0].getAttribute("stroke-dasharray")).toBe("0");
+    expect(rows[1].getAttribute("stroke-dasharray")).toBe("9 3 2 3");
+    expect(rows[0].getAttribute("stroke")).toBe(rows[1].getAttribute("stroke"));
+  });
+
+  it("names the evidence behind an ADMITTED end: key, every overlay, and its sources", async () => {
+    stubApi({ providers: [ADMITTED_BINDING] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+
+    const detail = screen.getByText(/Binding evidence/).closest("section")!;
+    // The key appears once per overlay row — that repetition IS the requirement,
+    // so this asserts two, not one.
+    expect(within(detail).getAllByRole("cell", { name: "billing.base-url" })).toHaveLength(2);
+    // ONE ROW PER OVERLAY — a key its overlays spell differently proves several
+    // values, and showing one of them would report a divergence as the value.
+    expect(within(detail).getByRole("cell", { name: "http://billing:8080" })).toBeInTheDocument();
+    expect(
+      within(detail).getByRole("cell", { name: "http://billing.svc:8080" }),
+    ).toBeInTheDocument();
+    expect(within(detail).getByRole("cell", { name: "docker" })).toBeInTheDocument();
+    // `unprofiled` is stated in words, never left to an empty profiles cell.
+    expect(within(detail).getByRole("cell", { name: "unprofiled source" })).toBeInTheDocument();
+    expect(
+      within(detail).getByRole("cell", {
+        name: "src/main/resources/application-docker.yml",
+      }),
+    ).toBeInTheDocument();
+    // Both overlay rows name the same end — it is the same provider end, proved
+    // twice over.
+    expect(within(detail).getAllByText(/Provider · web/)).toHaveLength(2);
+  });
+
+  it("names a REFUSED end's keys and its refusal, never an empty value cell", async () => {
+    stubApi({ providers: [REFUSED_BINDING] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+
+    const detail = screen.getByText(/Binding evidence/).closest("section")!;
+    expect(within(detail).getByRole("cell", { name: "billing.grpc.target" })).toBeInTheDocument();
+    expect(
+      within(detail).getByRole("cell", { name: "No committed source defines it" }),
+    ).toBeInTheDocument();
+    expect(within(detail).getByText(/Consumer · api/)).toBeInTheDocument();
+    // …and the table says so too, rather than calling the coupling observed.
+    expect(
+      screen.getByRole("cell", { name: /Names a key the committed sources do not admit/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("counts a binding whose from_value never arrived as `unstated`, never literal", async () => {
+    // The wire is not runtime-validated, so a payload can reach the view without
+    // the field the type declares required. Rendering it as "Written at the call
+    // site" would report an unread field as observed evidence (CR-132 AC2).
+    const { from_value: _dropped, ...withoutProvenance } = BINDING;
+    stubApi({ providers: [withoutProvenance] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    const cell = screen.getByRole("cell", { name: /Provenance not stated/ });
+    expect(cell).toHaveTextContent(/Provenance not stated\s*1/);
+    // …and the line is NOT also claimed as observed. Scoped to the cell: the
+    // legend's own provenance section names the literal stroke on every
+    // non-literal workspace, and an unscoped query would match that instead.
+    expect(within(cell).queryByText(/Written at the call site/)).toBeNull();
+  });
+
+  it("renders NO evidence card and NO provenance column for a literal-only workspace", async () => {
+    stubApi({ providers: [BINDING] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    expect(screen.queryByText(/Binding evidence/)).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: /Provenance/ })).toBeNull();
+    expect(screen.queryByTestId("canvas-admitted-edge")).toBeNull();
   });
 
   // ── S-256 / FR-WS-11: topics on the map ────────────────────────────────────
