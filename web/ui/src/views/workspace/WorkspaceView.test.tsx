@@ -992,11 +992,20 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
    *
    *  Every other fixture on this surface carries `0`, which is what the server
    *  could send while the count excluded `config-bound` rows — so the rendering of
-   *  the shape the estate now actually produces was untested. Asserted on rendered
+   *  a NON-ZERO line was untested. Asserted on rendered
    *  DOM text, so a view that rebuilt the sentence from the numbers beside it and
    *  drifted from the CLI and MCP renderings fails here — verified by making
    *  `WorkspaceView` recompose the line, which fails this test and its
-   *  absent-rate sibling. */
+   *  absent-rate sibling.
+   *
+   *  **The triple below is illustrative, and deliberately not an estate reading.**
+   *  It was the reference workspace's headline when S-403 wrote this fixture and
+   *  stopped being one when S-420 (CR-133) closed the HTTP arm. This file is on
+   *  neither roster that enumerates the sites a re-measurement sweeps, so a figure
+   *  kept current here goes quietly stale — which is exactly what it did. What the
+   *  test needs is a non-zero count whose composed line the view must not rebuild;
+   *  any triple serves. The estate's figures, dated and with their denominators,
+   *  live in `logos-core/tests/config_bound_admission.rs`. */
   it("renders a NON-ZERO resolved-edge headline as the server composed it", async () => {
     stubApi({
       coverage: {
