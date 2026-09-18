@@ -3546,6 +3546,57 @@ mod tests {
         );
     }
 
+    /// **A two-key target whose collapse re-states one key's value** — the shape
+    /// that reaches [`union_bound`]'s de-duplication.
+    ///
+    /// `svc.base` is committed once; `svc.path` is committed unprofiled and
+    /// again under `p`. Two compositions result, they differ only in `svc.path`,
+    /// and one symbol declares both routes — so they collapse, and the merge
+    /// meets `svc.base`'s single value **twice**. Review found the collapse's
+    /// `sort`/`dedup` undefended: without it the surviving edge names one
+    /// committed value twice, which S-419 renders as two sources for one key.
+    #[test]
+    fn a_collapse_that_meets_one_value_twice_names_it_once() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers(
+            "web",
+            vec![http_call("GET ${svc.base}${svc.path}/{id}", "local fetch_order")],
+        );
+        commit_config("web", "svc.base", &[("application.yml", None, "/x")]);
+        commit_config(
+            "web",
+            "svc.path",
+            &[
+                ("application.yml", None, "/y"),
+                ("application-p.yml", Some("p"), "/z"),
+            ],
+        );
+        set_member(
+            "orders",
+            0,
+            vec![
+                route("GET /x/y/{oid}", "local show"),
+                route("GET /x/z/{oid}", "local show"),
+            ],
+        );
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "orders"]));
+        assert_eq!(edges.len(), 1, "one coupling, two compositions: {edges:?}");
+        assert_eq!(
+            evidence(&edges[0].from_value),
+            vec![
+                ("svc.base".to_string(), Vec::<String>::new(), vec!["/x".to_string()]),
+                (
+                    "svc.path".to_string(),
+                    vec!["p".to_string()],
+                    vec!["/y".to_string(), "/z".to_string()]
+                ),
+            ],
+            "the key both compositions share is named ONCE; the key they differ on names both"
+        );
+    }
+
     /// **The collapse never merges two call sites.** `from` is a `(member,
     /// symbol)` endpoint, so two different targets in one method that bind the
     /// same provider arrive as a collapsible pair. Review found the first
