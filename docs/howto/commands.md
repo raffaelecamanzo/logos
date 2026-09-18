@@ -1204,9 +1204,9 @@ Five things worth knowing about these fields:
   exactly one provider in another member. It now **also draws a bridge edge** —
   the bridge keys the same consumer through the same committed value, so the row
   appears in `xservice route-providers` and seeds a cross-service reachability
-  root. Until S-420 it did not: the bridge keyed a consumer on its *raw* ledger
-  target and a `${…}` placeholder reduced to no portable key there, so the two
-  tiers classified one fact two ways.
+  root. Before logos 1.4.13 it did not: the bridge keyed a consumer on its *raw*
+  ledger target and a `${…}` placeholder reduced to no portable key there, so the
+  two tiers classified one fact two ways.
 
   The same 84-member estate, read twice on **2026-09-18** — once with the 1.4.12
   binary and once with the arm merged, over the same stores:
