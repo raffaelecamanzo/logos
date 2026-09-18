@@ -2549,3 +2549,46 @@ fn scan_records_a_marker_describing_its_own_run_not_the_last_check() {
         "every row on disk carries the scan's own time, not the check's"
     );
 }
+
+/// The marker is **overwritten** per run, never accumulated or maximised
+/// (BR-40). A run that finds fewer violations than its predecessor must lower
+/// the count — otherwise a project that fixed its violations would keep
+/// reporting the worst number it ever scored.
+#[test]
+fn a_run_finding_fewer_violations_lowers_the_marker_count() {
+    let tmp = layered_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    engine.check_rules(None, true).expect("first check_rules runs");
+    let before = check_run(&engine).expect("the first run recorded a marker");
+    assert!(
+        before.violation_count > 0,
+        "the fixture must genuinely fail first, or the drop below proves nothing"
+    );
+
+    // Remove the upward call, so the layer-ordering and boundary rules stop
+    // firing. The contract is unchanged — only the code it judges.
+    write(tmp.path(), "src/domain_core.rs", "pub fn compute() {}\n");
+
+    let report = engine.check_rules(None, true).expect("second check_rules runs");
+    let rows = persisted_violations(&engine);
+    let after = check_run(&engine).expect("the second run recorded a marker");
+
+    assert!(
+        report.violations.len() < before.violation_count as usize,
+        "the edit must genuinely reduce the findings: {} then {}",
+        before.violation_count,
+        report.violations.len()
+    );
+    assert_eq!(
+        after.violation_count,
+        rows.len() as i64,
+        "the marker counts the rows now on disk, not the high-water mark"
+    );
+    assert!(
+        after.violation_count < before.violation_count,
+        "a cleaner run lowers the recorded count ({} must be below {})",
+        after.violation_count,
+        before.violation_count
+    );
+}
