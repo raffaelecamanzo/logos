@@ -178,7 +178,11 @@ fn xservice_route_providers_description_names_relations_fan_out_and_provenance_f
         .expect("the federated backing registers xservice_route_providers");
     let description = tool.description.as_deref().unwrap_or_default();
 
-    for relation in ["route", "grpc-call", "broker-topic"] {
+    // Backtick-quoted, not a bare substring: "route" alone also matches the
+    // pre-S-410 wording ("resolved route bindings", "provider route", "scopes
+    // to routes"), so a bare check would not actually prove this relation is
+    // named as one of the three.
+    for relation in ["`route`", "`grpc-call`", "`broker-topic`"] {
         assert!(
             description.contains(relation),
             "the description names the {relation} relation: {description}",
