@@ -505,7 +505,9 @@ const RECORDED_BUCKETS: [(&str, &str, Option<&str>, usize); 6] = [
 /// **The [CR-133] before/after, per member pair — this file is its single home**
 /// ([ADR-64]'s CR-133 amendment says so).
 ///
-/// The `(consumer, provider, rows)` triples the 18 BOUND HTTP-arm rows fall into,
+/// The `(consumer, provider, providers-named)` triples the 18 BOUND HTTP-arm rows
+/// fall into — one count per provider a row names, which on this estate is one per
+/// row because every bound row is sole-provider. The triples the 18 rows fall into,
 /// and — since [S-420] — the `route` invocation `BridgeEdge`s the bridge draws
 /// over the same estate, pair for pair and count for count. **Before S-420 the
 /// bridge drew 0 of them**: it keyed a consumer on its raw ledger target and a
@@ -620,7 +622,9 @@ struct Admission {
     /// denominators and a pooled split would hide a move in either.
     by_bucket: Vec<(String, String, Option<String>, usize)>,
     /// The `(consumer member, provider member)` pairs of the **bound HTTP-arm**
-    /// rows, with how many rows each carries.
+    /// rows, with how many **named providers** each carries — one per provider the
+    /// row names, not one per row, so that the count is the same quantity the
+    /// bridge's edge count is.
     ///
     /// [ADR-64]'s CR-133 amendment names this file as the single home for the
     /// before/after-per-member-pair figure, and this is it. It is read off the
@@ -694,11 +698,57 @@ fn admission(payload: &serde_json::Value) -> Admission {
                                 .as_str()
                                 .expect("a reference row names its consumer member")
                                 .to_string();
-                            let to = reference["to"]["member"]
-                                .as_str()
-                                .expect("a BOUND reference row names its provider member")
-                                .to_string();
-                            *pairs.entry((from, to)).or_default() += 1;
+                            // **Every provider the row names, not just `to`** — and
+                            // the distinction is S-420 T1's own, not a defensive
+                            // flourish. A bound row carries a sole `to` only when
+                            // `ProviderEvidence` is `Sole`; where the consumer's
+                            // overlays compose its target several ways,
+                            // `decide_over_candidates` unions the bound providers
+                            // on the EXACTLY-ONE discipline too and the row carries
+                            // `candidates` with a `bound-to` disposition and NO `to`
+                            // (`coverage.rs`, `ProviderDisposition::BoundTo`'s doc
+                            // says so in as many words). `to` is
+                            // `skip_serializing_if = "Option::is_none"`, so reading
+                            // `reference["to"]["member"]` on such a row yields
+                            // `Null` and any `expect` on it fires — on a payload the
+                            // product emits BY DESIGN as of the very arm this file
+                            // measures. Pinned by
+                            // `coverage::tests::an_exactly_one_row_names_every_provider_its_overlays_bind`.
+                            //
+                            // Counting per NAMED PROVIDER rather than per row is
+                            // also what keeps this tally comparable to the bridge's:
+                            // the bridge draws one edge per bound composition and
+                            // `collapse_by_coupling` merges only those sharing one
+                            // endpoint, so a row naming two providers faces two
+                            // edges. Per-row counting would read 1 against 2 and the
+                            // equality below would misreport a correct payload as a
+                            // one-classifier violation. On the 2026-09-18 estate
+                            // every bound row is sole-provider, so the two
+                            // constructions agree at 18 and the recorded figure is
+                            // unchanged; this is the construction that stays correct
+                            // when they diverge.
+                            let providers: Vec<&serde_json::Value> = match reference["to"].as_object()
+                            {
+                                Some(_) => vec![&reference["to"]],
+                                None => reference["candidates"]["providers"]
+                                    .as_array()
+                                    .map(|providers| providers.iter().collect())
+                                    .unwrap_or_default(),
+                            };
+                            assert!(
+                                !providers.is_empty(),
+                                "a BOUND row names its provider(s) — in `to` when one \
+                                 composition bound it, or in `candidates` under a \
+                                 `bound-to` disposition when several did. This one names \
+                                 neither: {row:?}",
+                            );
+                            for provider in providers {
+                                let to = provider["member"]
+                                    .as_str()
+                                    .expect("a named provider carries its member")
+                                    .to_string();
+                                *pairs.entry((from.clone(), to)).or_default() += 1;
+                            }
                         }
                     }
                     "broker-topic" => out.config_bound_broker += 1,
