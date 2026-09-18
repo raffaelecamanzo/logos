@@ -123,9 +123,16 @@ async fn loading_every_view_repeatedly_writes_no_snapshot() {
     // including `/api/v1/search?q=f` (FTS), `/api/v1/node?symbol=f` and
     // `/api/v1/impact?seed=f` (the folded node-detail path). Each must add no
     // metric/temporal snapshot row on read ([ADR-28], [FR-UI-03]).
+    //
+    // This list is HARDCODED, so an endpoint absent from it is silently unguarded:
+    // a new `/api/v1` read route is added HERE as part of adding the route
+    // ([FR-UI-21] AC). `/api/v1/status` (S-315, [FR-UI-34], [CR-097]) is the app
+    // header's graph-state readout: the one endpoint the shell re-reads on EVERY
+    // navigation, so a write-on-read fault here would compound faster than anywhere
+    // else on the surface.
     for path in [
         "/", "/api/v1/overview", "/api/v1/health", "/api/v1/architecture", "/api/v1/files",
-        "/api/v1/coverage", "/api/v1/config", "/api/v1/graph",
+        "/api/v1/coverage", "/api/v1/config", "/api/v1/graph", "/api/v1/status",
         "/api/v1/search?q=f", "/api/v1/node?symbol=f", "/api/v1/impact?seed=f",
         "/api/v1/impact-intersection?item=S-1=f&item=S-2=f",
         "/api/v1/precedent?target=f",

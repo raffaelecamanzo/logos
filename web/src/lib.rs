@@ -722,6 +722,10 @@ fn build_router(state: WebState) -> Router {
         // were removed at the S-192 decommission; the SPA consumes only this suite.
         .route("/api/v1/overview", get(api_v1::overview))
         .route("/api/v1/health", get(api_v1::health))
+        // The right-sized readout the app header reads on navigation (S-315,
+        // FR-UI-34, CR-097) — the FR-NV-07 status projection alone, beside (not
+        // instead of) the Health bundle above, which the Health view still owns.
+        .route("/api/v1/status", get(api_v1::status))
         .route("/api/v1/architecture", get(api_v1::architecture))
         .route("/api/v1/gaps", get(api_v1::gaps))
         .route("/api/v1/files", get(api_v1::files))

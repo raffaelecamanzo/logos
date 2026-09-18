@@ -50,3 +50,13 @@
   display: inline-flex;
   align-items: center;
 }
+
+/* The graph-state readout (S-315, FR-UI-34): the mono voice the brand subtitle and
+   the analytics figures already use, in the secondary ink so it reports without
+   competing with the brand. Token-driven, so the served CSP is untouched. */
+.readout {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  white-space: nowrap;
+}

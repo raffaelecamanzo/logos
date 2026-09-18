@@ -185,6 +185,31 @@ pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {
     respond(model)
 }
 
+// ── Status (the FR-NV-07 index-health read-model, [FR-UI-34]) ─────────────────
+
+/// `GET /api/v1/status` — the [FR-NV-07] index-health read-model ([FR-UI-21],
+/// [FR-UI-34], [CR-097]), serving the app header's graph-state readout
+/// (`graph_revision`, `node_count`, `edge_count`).
+///
+/// An **ordinary member** of this surface, deliberately: a thin [`bridge`]
+/// projection of [`Engine::status`], member-scoped through the same
+/// [`MemberEngine`] extractor as its siblings, introducing **no new core query**
+/// ([ADR-01], [ADR-43]) and reading through the non-persisting accessor so a load
+/// writes no store ([ADR-28], [FR-UI-03]). It carries the status projection and
+/// nothing else — the header previously set one boolean by fetching the ~1 MB
+/// [FR-UI-04] Health bundle and discarding all but its 831-byte `status` block;
+/// the Health bundle itself is unchanged and remains the Health view's own payload.
+///
+/// [`StatusInfo`] is infallible at the surface, so this pairs `bridge` with `ok`
+/// rather than the fallible `respond`, exactly as [`statistics`] does. An
+/// un-indexed project is reported honestly as `indexed: false` for the client to
+/// render as a not-indexed state — never dressed up as a measurement ([NFR-CC-04],
+/// [NFR-RA-05]).
+pub(crate) async fn status(MemberEngine(engine): MemberEngine) -> Response {
+    let info: StatusInfo = bridge(engine, "api_v1_status", |e| e.status()).await;
+    ok(info)
+}
+
 // ── Statistics (mirrors `logos stats`, [FR-OB-04]/[FR-UI-27]) ─────────────────
 
 /// `GET /api/v1/statistics[?window=<days>]` — the enriched telemetry read-model

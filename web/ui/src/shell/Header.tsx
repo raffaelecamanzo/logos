@@ -1,24 +1,46 @@
 /*
  * The shell header (S-185, re-skinned onto the design system in S-193). Carries
- * the brand, a live read-model connectivity indicator, and the theme toggle. On
- * mount it fetches `/api/v1/health` same-origin, proving the SPA talks to the JSON
- * seam and contacts no external origin (AC: "the shell fetches its data from
- * /api/v1"). The connectivity state renders as a tone-carrying Badge (colour is
- * never the only signal): green when connected, red on a read fault — an honest
- * "unavailable" state, never a fabricated figure (NFR-RA-05, NFR-CC-04).
+ * the brand, the graph-state readout, and the theme toggle.
+ *
+ * The readout (S-315, CR-097, FR-UI-34) reports the state of the graph the user is
+ * looking at — `rev <graph_revision> · <node_count> nodes · <edge_count> edges`,
+ * read verbatim from the FR-NV-07 status read-model over `GET /api/v1/status` and
+ * computed nowhere (NFR-RA-05, ADR-01). It replaces the green "Read-model
+ * connected" badge, which was decided by a loopback request to the very process
+ * answering it — so it could only ever display success — and which paid ~1 MB per
+ * navigation (the FR-UI-04 Health bundle) to set one boolean.
+ *
+ * Degradation stays honest (NFR-RA-05, NFR-CC-04): a read fault renders the
+ * retained red "API unavailable" badge IN PLACE OF the figures — never a zero,
+ * never a blank, never a previously-read figure presented as current — and an
+ * un-indexed project states that rather than reporting `0 nodes · 0 edges`, which
+ * would read as a measurement. Colour is never the only signal: every state carries
+ * text.
+ *
+ * Refresh is navigation-driven and NOTHING else (FR-UI-34): the read re-fires when
+ * the client route changes, and when the workspace member or mode changes, so the
+ * figures always describe the member being presented (FR-UI-29). There is no
+ * interval, no visibility handler, and no other trigger — a background timer would
+ * emit continuous telemetry and load for a figure nobody observes between actions
+ * (BR-42, FR-OB-09).
  */
 
 import { useEffect, useState } from "react";
 
 import { Badge, ThemeToggle } from "../components/index.ts";
-import { apiGet } from "../intent.ts";
-import { apiUrl } from "../api/client.ts";
-import { navigate } from "../router.tsx";
+import { fetchStatus } from "../api/client.ts";
+import type { StatusInfo } from "../api/types.ts";
+import { navigate, usePathname } from "../router.tsx";
 import { useWorkspace } from "../workspace/WorkspaceContext.tsx";
 import { MemberSelector } from "./MemberSelector.tsx";
 import styles from "./Header.module.css";
 
-type ApiState = "loading" | "ok" | "error";
+/** The header's read, as an honest three-state machine. `ready` carries the
+ *  read-model itself, so no state can render a figure the server did not send. */
+type Readout =
+  | { kind: "loading" }
+  | { kind: "ready"; status: StatusInfo }
+  | { kind: "error" };
 
 /** The Dashboard route the brand lockup links to (root since S-194). */
 const DASHBOARD_PATH = "/";
@@ -42,33 +64,54 @@ function BrandMark() {
   );
 }
 
+/**
+ * The readout line for an indexed graph — a presentation projection of three
+ * read-model fields and nothing else. The digits are grouped for legibility
+ * (`12345` → `12,345`), matching the Dashboard's `fmtInt` and the Statistics tab's
+ * `num` so the three surfaces read alike; it is built as ONE string so the figures
+ * are a single text node rather than a run of fragments.
+ */
+function readoutLine(status: StatusInfo): string {
+  const group = (n: number) => n.toLocaleString("en-US");
+  return `rev ${group(status.graph_revision)} · ${group(status.node_count)} nodes · ${group(
+    status.edge_count,
+  )} edges`;
+}
+
 export function Header() {
-  const [state, setState] = useState<ApiState>("loading");
-  // The header sits outside the member-keyed view subtree, so the member is an
-  // explicit dependency: the badge must report the member the shell is CURRENTLY
-  // presenting. Otherwise selecting a member whose engine cannot start would leave a
-  // green "connected" badge sitting inches from that member's name (S-250).
+  const [readout, setReadout] = useState<Readout>({ kind: "loading" });
+  // Three dependencies, and each is load-bearing. The header sits outside the
+  // member-keyed view subtree, so the member (`cacheKey`) and the workspace `mode`
+  // are explicit: the figures must describe the member the shell is CURRENTLY
+  // presenting, or one member's counts would sit inches from another's name (S-250,
+  // FR-UI-29). The `pathname` is what makes the refresh navigation-driven — the
+  // router already tracks it, so joining it here needs no new mechanism and adds no
+  // timer (FR-UI-34).
   const { cacheKey, mode } = useWorkspace();
+  const pathname = usePathname();
 
   useEffect(() => {
     // Until the workspace probe settles we do not know the member, so a request now
     // would go out unscoped and have to be re-issued anyway. Stay honestly "Connecting…".
     if (mode === "loading") return;
     let alive = true;
-    setState("loading");
-    // Through `apiUrl`, so the probe carries the active `?repo=` scope. In single-root
-    // mode no param is appended and the request is byte-for-byte the one it always was.
-    apiGet(apiUrl("health"))
-      .then(() => {
-        if (alive) setState("ok");
+    setReadout({ kind: "loading" });
+    // Through the typed client, so the read carries the active `?repo=` scope. In
+    // single-root mode no param is appended and the request is byte-for-byte the
+    // shape every other read has.
+    fetchStatus()
+      .then((status) => {
+        if (alive) setReadout({ kind: "ready", status });
       })
       .catch(() => {
-        if (alive) setState("error");
+        // The figures are DROPPED, not retained: a stale count presented as current
+        // is the failure mode this badge exists to avoid (NFR-RA-05).
+        if (alive) setReadout({ kind: "error" });
       });
     return () => {
       alive = false;
     };
-  }, [cacheKey, mode]);
+  }, [cacheKey, mode, pathname]);
 
   return (
     <header className={styles.header}>
@@ -91,10 +134,25 @@ export function Header() {
       {/* Workspace mode only — in a single-root serve this renders nothing and the
           header is byte-for-byte unchanged (FR-UI-29). */}
       <MemberSelector />
-      <span className={styles.status} role="status">
-        {state === "loading" && <Badge tone="muted">Connecting…</Badge>}
-        {state === "ok" && <Badge tone="green">Read-model connected</Badge>}
-        {state === "error" && <Badge tone="red">API unavailable</Badge>}
+      <span className={styles.status}>
+        {readout.kind === "loading" && <Badge tone="muted">Connecting…</Badge>}
+        {readout.kind === "error" && (
+          // The fault is the ONE state that carries a live region. The figures change
+          // on every navigation, and announcing them each time would make the shell
+          // the noisiest thing on the page; an unavailable read must be announced
+          // (FR-UI-34).
+          <span role="status">
+            <Badge tone="red">API unavailable</Badge>
+          </span>
+        )}
+        {readout.kind === "ready" &&
+          (readout.status.indexed ? (
+            <span className={styles.readout}>{readoutLine(readout.status)}</span>
+          ) : (
+            // An un-indexed project has no figures to report. Saying so is honest;
+            // `0 nodes · 0 edges` would read as a measurement (NFR-CC-04).
+            <Badge tone="muted">Not indexed</Badge>
+          ))}
       </span>
       <ThemeToggle />
     </header>
