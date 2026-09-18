@@ -1787,13 +1787,10 @@ fn decide_over_candidates(
     // bound provider beside two service-map edges: the tier drift [ADR-52] exists
     // to prevent, and the reconciliation `resolved_cross_service_edges` publishes.
     //
-    // **The union is across compositions, never within one** (S-420, [CR-133]).
-    // Each entry of `classified` is one composition, and an exactly-one
-    // composition reaches `Bound` only when it has a *sole* provider — a single
-    // composition matching two providers is `tier`'s ambiguity and contributes no
-    // endpoint here. So merging cannot manufacture a bind out of an ambiguity; it
-    // reports that two committed compositions each bound, unambiguously, to a
-    // different provider.
+    // Each entry of `classified` is one composition, and `tier` returns `Bound`
+    // for an exactly-one key only on a *sole* provider — so the merge below
+    // cannot manufacture a bind out of an ambiguity (the union rule in the doc
+    // above states why that matters).
     let mut endpoints: Vec<BridgeEndpoint> = classified
         .iter()
         .filter(|(state, _)| matches!(state, CoverageState::Bound))
