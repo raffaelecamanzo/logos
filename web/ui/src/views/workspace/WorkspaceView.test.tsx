@@ -301,6 +301,30 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     expect(within(row).getByRole("cell", { name: "2" })).toBeInTheDocument();
   });
 
+  it("lists EVERY kind present on one row, not just the first two", async () => {
+    // Three bindings under one (consumer, provider, arm) key, spanning three
+    // kinds. The cell renders per-kind rows; with only ever two kinds present a
+    // renderer that showed the first two would have passed.
+    const third: BridgeEdge = {
+      relation: "route",
+      from: { member: "api", symbol: "op3" },
+      to: { member: "web", symbol: "route3" },
+      from_value: { provenance: "config-unresolved", keys: ["x.y"], refusal: "uncommitted" },
+      to_value: { provenance: "literal" },
+    };
+    stubApi({ providers: [BINDING, ADMITTED_BINDING, third] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+
+    const cell = screen
+      .getByRole("cell", { name: /Written at the call site/ });
+    expect(cell).toHaveTextContent(/Written at the call site\s*1/);
+    expect(cell).toHaveTextContent(/Admitted from committed configuration\s*1/);
+    expect(cell).toHaveTextContent(/Names a key the committed sources do not admit\s*1/);
+    // Three kinds, three rows — the breakdown is complete, not truncated.
+    expect(cell.querySelectorAll("li")).toHaveLength(3);
+  });
+
   it("marks the canvas line admitted while its edge_type stays the relation arm", async () => {
     stubApi({ providers: [ADMITTED_BINDING] });
     mount();

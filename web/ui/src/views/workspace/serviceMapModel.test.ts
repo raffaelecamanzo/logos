@@ -648,6 +648,89 @@ describe("edge provenance (S-419, CR-132, ADR-64, FR-WS-19 AC6)", () => {
     expect(linkEvidence(map.links[0]).map((r) => r.key)).toEqual(["svc.host", "svc.path"]);
   });
 
+  it("treats a config-bound end with an EMPTY bound list as admitted, but evidences nothing", () => {
+    // A malformed/empty `bound: []` is `config-bound` on the wire, so the link
+    // is correctly NOT literal — but it names no key, so there is no evidence
+    // to show. The two facts must not be conflated: `coverageModel`'s
+    // `provenanceLabel` has an explicit `keys.length === 0` branch for the same
+    // payload, and the view's empty-evidence wording is worded not to claim the
+    // provenance was unstated (it was stated; it was just empty).
+    const map = buildServiceMap(
+      [member("api"), member("web")],
+      [bindingWith("api", "web", { from_value: { provenance: "config-bound", bound: [] } })],
+    );
+    expect(map.links[0].provenance["config-bound"]).toBe(1);
+    expect(hasNonLiteralBinding(map.links[0])).toBe(true);
+    expect(linkEvidence(map.links[0])).toEqual([]);
+  });
+
+  it("yields one evidence row PER KEY on a config-unresolved end naming several", () => {
+    // AC3 says "its keys" — plural. Only one key was ever proven, so the
+    // per-key `.map` in the refusal branch was untested at plurality, unlike
+    // its config-bound sibling. Each key carries the SHARED refusal.
+    const map = buildServiceMap(
+      [member("api"), member("web")],
+      [
+        bindingWith("api", "web", {
+          from_value: {
+            provenance: "config-unresolved",
+            keys: ["svc.host", "svc.path"],
+            refusal: "placeholder-value",
+          },
+        }),
+      ],
+    );
+    expect(linkEvidence(map.links[0])).toEqual([
+      {
+        end: "consumer",
+        member: "api",
+        key: "svc.host",
+        value: null,
+        profiles: [],
+        unprofiled: false,
+        sources: [],
+        refusal: "placeholder-value",
+      },
+      {
+        end: "consumer",
+        member: "api",
+        key: "svc.path",
+        value: null,
+        profiles: [],
+        unprofiled: false,
+        sources: [],
+        refusal: "placeholder-value",
+      },
+    ]);
+  });
+
+  it("states ALL FOUR kinds on one link when its bindings span every one", () => {
+    // The breakdown was only ever proven across TWO kinds, so a renderer or an
+    // accumulator that handled the first two and dropped the rest would pass.
+    // AC1's claim is that the line is never reduced to one label — this pins it
+    // at full width, and pins the sum against the weight.
+    const map = buildServiceMap(
+      [member("api"), member("web")],
+      [
+        binding("api", "web", "route", "a"),
+        bindingWith("api", "web", { to_value: ADMITTED }, "route", "b"),
+        bindingWith("api", "web", { to_value: REFUSED }, "route", "c"),
+        (() => {
+          const e = { ...binding("api", "web", "route", "d") } as Partial<BridgeEdge>;
+          delete e.to_value;
+          return e as BridgeEdge;
+        })(),
+      ],
+    );
+    expect(map.links[0].provenance).toEqual({
+      literal: 1,
+      "config-bound": 1,
+      "config-unresolved": 1,
+      unstated: 1,
+    });
+    expect(map.links[0].count).toBe(4);
+  });
+
   it("yields NO evidence rows for a literal or unstated end — absence is not a claim", () => {
     const map = buildServiceMap([member("api"), member("web")], [binding("api", "web")]);
     expect(linkEvidence(map.links[0])).toEqual([]);

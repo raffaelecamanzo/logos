@@ -345,11 +345,18 @@ function BindingEvidence({ links }: { links: ServiceLink[] }) {
               · {armLabel(l.relation)}
             </summary>
             {rows.length === 0 ? (
-              // Reachable: a link is non-literal when any binding is `unstated`,
-              // and an unstated end names no key. Saying so beats an empty box.
+              // Reachable two ways, and the wording must not pick one of them:
+              // a link is non-literal when any binding is `unstated` (an end
+              // whose value never arrived — genuinely not stated), and ALSO
+              // when a `config-bound` end arrives with an empty `bound: []`
+              // (stated, but naming no key). Saying "its provenance was not
+              // stated" would be false in the second case — a fabricated
+              // explanation in place of a fabricated value (NFR-CC-04). So it
+              // states what is observable — no key reached this view — and
+              // draws no conclusion about why.
               <p className="muted">
-                No configuration key is named for this coupling — its provenance was not stated
-                on the wire, so nothing here is evidence either way.
+                No configuration key is named for this coupling, so there is nothing here to
+                evidence it either way — its Provenance breakdown above says what is known.
               </p>
             ) : (
               <DataTable
