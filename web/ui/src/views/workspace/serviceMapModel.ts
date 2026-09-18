@@ -441,6 +441,13 @@ export function buildServiceMap(
   const admittedBrokerPairs = new Set<string>();
   for (const b of bindings) {
     if (b.relation !== "broker-topic") continue;
+    // ANY non-literal kind, deliberately wider than the criterion's phrase
+    // "backed by a `config-bound` binding". That same criterion requires the
+    // hop to carry "the same marker as the flat line they replace", and the
+    // flat line's marker is `hasNonLiteralBinding` — so gating the hop on
+    // `config-bound` alone would make a refused or unstated coupling lose its
+    // marker precisely by being drawn through its topic, which is the
+    // indistinguishability the story removes.
     if (edgeProvenanceKind(b) === "literal") continue;
     admittedBrokerPairs.add(`${b.from.member}\u0000${b.to.member}`);
   }
